@@ -64,6 +64,7 @@ const {
   mainPanelCloudTerminalRef,
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
+  refreshLanTasks,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   closeSelectedWorkspaceTask,
@@ -74,6 +75,12 @@ if (import.meta.env.DEV) {
   void cloudSnapshot;
   void lanSnapshot;
 }
+
+defineExpose({
+  cloudSnapshot,
+  lanSnapshot,
+  refreshLanTasks,
+});
 
 const appModals = useAppModals({ isMobile, store, windowWorkspace });
 const {

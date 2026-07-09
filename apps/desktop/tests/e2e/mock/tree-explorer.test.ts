@@ -5,6 +5,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers/keyboard";
 import { WebDriverClient } from "../helpers/webdriver";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
+import { cleanupWorktrees, importTestRepoDirect, resetDatabase } from "../helpers/reset";
 
 const REPO_NAME = "task-switch-minimal";
 const IGNORED_FILE = "ignored-output.log";
@@ -40,16 +41,6 @@ async function textContent(client: WebDriverClient, selector: string): Promise<s
   return await client.executeSync<string>(
     `return document.querySelector(${JSON.stringify(selector)})?.textContent ?? "";`,
   );
-}
-
-async function importRepoThroughUi(client: WebDriverClient, repoPath: string): Promise<void> {
-  await pressKey(client, "I", { meta: true, shift: true });
-  const input = await client.waitForElement(".modal .text-input", 5_000);
-  await client.sendKeys(input, repoPath);
-  await client.waitForText(".modal", "Git repo", 10_000);
-  const submit = await client.waitForElement(".modal-footer .btn-primary", 5_000);
-  await client.click(submit);
-  await client.waitForText(".repo-header", REPO_NAME, 10_000);
 }
 
 async function waitForExplorerText(
@@ -116,16 +107,19 @@ describe("tree explorer", () => {
     await writeFile(join(fixtureRepoPath, ".gitignore"), "*.log\n", "utf8");
     await writeFile(join(fixtureRepoPath, IGNORED_FILE), "ignored\n", "utf8");
     await client.createSession();
+    await resetDatabase(client);
   });
 
   afterAll(async () => {
+    if (fixtureRepoPath) await cleanupWorktrees(client, fixtureRepoPath);
     await cleanupFixtureRepos(fixtureRepoPath ? [fixtureRepoPath] : []);
     await client.deleteSession();
   });
 
   async function ensureRepoImported(): Promise<void> {
     if (repoImported) return;
-    await importRepoThroughUi(client, fixtureRepoPath);
+    await importTestRepoDirect(client, fixtureRepoPath, REPO_NAME);
+    await client.waitForText(".repo-header", REPO_NAME, 10_000);
     repoImported = true;
   }
 

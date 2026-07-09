@@ -420,11 +420,12 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const runtimeSystemPrompt = buildKannaRuntimeSystemPrompt({
       ...runtimeContext,
     });
+    const visiblePrompt = options?.displayPrompt ?? prompt;
     const runtimeUserPrompt = buildKannaRuntimeUserPrompt(prompt, runtimeContext);
     const permissionFlags = getAgentPermissionFlags(provider, options?.permissionMode);
     const { agentCmd, agentCmdPreamble, agentSessionId } = await buildAgentCommand(provider, {
       taskId: sessionId,
-      prompt,
+      prompt: visiblePrompt,
       runtimeSystemPrompt,
       runtimeUserPrompt,
       permissionFlags,

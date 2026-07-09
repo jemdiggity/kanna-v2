@@ -357,7 +357,6 @@ export function useAppTaskNavigation({
 
         resolvedTask = {
           ...task,
-          prompt: task.prompt || agent.prompt,
           model: task.model ?? agent.model,
           permissionMode: task.permissionMode ?? agent.permission_mode,
           allowedTools: task.allowedTools ?? agent.allowed_tools,
@@ -459,7 +458,7 @@ export function useAppTaskNavigation({
           customTask: {
             name: "Create Config",
             agent: "config-factory",
-            prompt: agent.prompt,
+            prompt: "Help me create or update the .kanna/config.json for this repository.",
             model: agent.model,
             permissionMode: agent.permission_mode,
             allowedTools: agent.allowed_tools,
@@ -469,6 +468,42 @@ export function useAppTaskNavigation({
     } catch (e: unknown) {
       console.error("[App] create config task failed:", e);
       alert(`Failed to create config task: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  async function handleSetupRepo() {
+    if (!store.selectedRepoId) {
+      if (store.repos.length === 1) {
+        store.selectedRepoId = store.repos[0].id;
+      } else {
+        alert(t('app.selectRepoFirst'));
+        return;
+      }
+    }
+    const repo = store.repos.find((r) => r.id === store.selectedRepoId);
+    if (!repo) return;
+    try {
+      const agent = await store.loadAgent(repo.path, "setup");
+      await store.createItem(
+        store.selectedRepoId,
+        repo.path,
+        "Set up Kanna for this repository.",
+        "pty",
+        {
+          agentProvider: firstSupportedAgentProvider(agent.agent_provider),
+          customTask: {
+            name: "Set Up Repository",
+            agent: "setup",
+            prompt: "Set up Kanna for this repository.",
+            model: agent.model,
+            permissionMode: agent.permission_mode,
+            allowedTools: agent.allowed_tools,
+          },
+        },
+      );
+    } catch (e: unknown) {
+      console.error("[App] setup repo task failed:", e);
+      alert(`Failed to create setup task: ${e instanceof Error ? e.message : e}`);
     }
   }
 
@@ -506,6 +541,12 @@ export function useAppTaskNavigation({
       label: t('commandPalette.createPipeline'),
       description: t('commandPalette.createPipelineDesc'),
       execute: () => { handleCreatePipeline().catch((e) => console.error("[App] create pipeline failed:", e)); },
+    });
+    cmds.push({
+      id: "setup-repo",
+      label: t('commandPalette.setupRepo'),
+      description: t('commandPalette.setupRepoDesc'),
+      execute: () => { handleSetupRepo().catch((e) => console.error("[App] setup repo failed:", e)); },
     });
     cmds.push({
       id: "create-config",

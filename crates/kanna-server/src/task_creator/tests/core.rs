@@ -177,6 +177,295 @@ fn builtin_merge_agent_accepts_natural_language_open_pr_requests() {
 }
 
 #[test]
+fn read_agent_definition_loads_builtin_setup_agent() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-builtin-setup-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(&repo_root).unwrap();
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "setup")
+            .unwrap();
+
+    assert!(definition.prompt.contains("GitHub flow"));
+    assert!(definition
+        .prompt
+        .contains("Do not author new agents from scratch"));
+    assert!(definition.prompt.contains("kanna_complete_stage"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_uses_explicit_builtin_flavor() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-explicit-flavor-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(&repo_root).unwrap();
+
+    let definition = super::super::definitions::read_agent_definition(
+        &repo_root.to_string_lossy(),
+        "pr@push-only",
+    )
+    .unwrap();
+
+    assert!(definition
+        .prompt
+        .contains("push the branch without creating a PR"));
+    assert!(!definition.prompt.contains("gh pr create"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_uses_repo_config_flavor_map() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-config-flavor-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"flavors":{"merge":"git"}}"#,
+    )
+    .unwrap();
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "merge")
+            .unwrap();
+
+    assert!(definition.prompt.contains("Git-only merge master"));
+    assert!(!definition.prompt.contains("gh pr merge"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_prefers_repo_override_over_config_flavor() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-repo-over-config-flavor-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let agent_dir = repo_root.join(".kanna/agents/pr");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"flavors":{"pr":"push-only"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nagent_provider: claude\n---\nRepo-owned PR agent.",
+    )
+    .unwrap();
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "pr")
+            .unwrap();
+
+    assert_eq!(definition.prompt, "Repo-owned PR agent.");
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_prefers_repo_override_over_explicit_flavor() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-repo-over-explicit-flavor-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let agent_dir = repo_root.join(".kanna/agents/pr");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nagent_provider: claude\n---\nRepo-owned PR agent.",
+    )
+    .unwrap();
+
+    let definition = super::super::definitions::read_agent_definition(
+        &repo_root.to_string_lossy(),
+        "pr@push-only",
+    )
+    .unwrap();
+
+    assert_eq!(definition.prompt, "Repo-owned PR agent.");
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_layers_role_extension_on_explicit_builtin_flavor() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-explicit-flavor-role-extend-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let agent_dir = repo_root.join(".kanna/agents/pr");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("EXTEND.md"),
+        "Repo rule: publish only after local CI passes.",
+    )
+    .unwrap();
+
+    let definition = super::super::definitions::read_agent_definition(
+        &repo_root.to_string_lossy(),
+        "pr@push-only",
+    )
+    .unwrap();
+
+    assert!(definition
+        .prompt
+        .contains("push the branch without creating a PR"));
+    assert!(definition
+        .prompt
+        .ends_with("Repo rule: publish only after local CI passes."));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_falls_back_to_builtin_default_for_missing_flavor() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-missing-config-flavor-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"flavors":{"pr":"missing-flavor"}}"#,
+    )
+    .unwrap();
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "pr")
+            .unwrap();
+
+    assert!(definition.prompt.contains("create a GitHub pull request"));
+    assert!(definition.prompt.contains("gh pr create"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-config-vars-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let agent_dir = repo_root.join(".kanna/agents/reviewer");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"vars":{"KANNA_TASK_ID":"config-task","MERGE_STRATEGY":"squash","REVIEW_TEAM":"platform"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nagent_provider: claude\n---\nUse $MERGE_STRATEGY for ${REVIEW_TEAM}. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound.",
+    )
+    .unwrap();
+
+    // The agent body is returned raw: config-var substitution happens in the
+    // single build_stage_prompt pass, never at definition-read time.
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
+            .unwrap();
+
+    assert_eq!(
+        definition.prompt,
+        "Use $MERGE_STRATEGY for ${REVIEW_TEAM}. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound."
+    );
+
+    let vars: std::collections::HashMap<String, String> = [
+        ("KANNA_TASK_ID", "config-task"),
+        ("MERGE_STRATEGY", "squash"),
+        ("REVIEW_TEAM", "platform"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let prompt = build_stage_prompt(
+        &definition.prompt,
+        None,
+        &PromptContext {
+            task_prompt: None,
+            prev_result: None,
+            branch: None,
+            base_ref: Some("origin/main"),
+            source_worktree: None,
+            vars: Some(&vars),
+        },
+    );
+
+    // Config vars substitute ($NAME and ${NAME} forms); reserved names bind
+    // to runtime context ($BASE_REF) or stay literal for the session
+    // environment ($KANNA_TASK_ID) — a config var can never shadow them.
+    assert_eq!(
+        prompt,
+        "Use squash for platform. Keep origin/main and $KANNA_TASK_ID runtime-bound."
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn build_stage_prompt_does_not_reexpand_reserved_tokens_in_var_values() {
+    let vars: std::collections::HashMap<String, String> = [(
+        "NOTE".to_string(),
+        "See $TASK_PROMPT for full context.".to_string(),
+    )]
+    .into_iter()
+    .collect();
+    let prompt = build_stage_prompt(
+        "$NOTE\n\nTask: $TASK_PROMPT",
+        None,
+        &PromptContext {
+            task_prompt: Some("actual task prompt"),
+            prev_result: None,
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            vars: Some(&vars),
+        },
+    );
+
+    // The spliced var value is never rescanned: its $TASK_PROMPT stays
+    // literal while the template's own $TASK_PROMPT binds normally.
+    assert_eq!(
+        prompt,
+        "See $TASK_PROMPT for full context.\n\nTask: actual task prompt"
+    );
+}
+
+#[test]
+fn build_stage_prompt_leaves_unknown_vars_literal() {
+    let prompt = build_stage_prompt(
+        "Ping $UNKNOWN_NAME and ${ALSO_UNKNOWN}.",
+        None,
+        &PromptContext {
+            task_prompt: None,
+            prev_result: None,
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            vars: None,
+        },
+    );
+
+    assert_eq!(prompt, "Ping $UNKNOWN_NAME and ${ALSO_UNKNOWN}.");
+}
+
+#[test]
 fn build_stage_prompt_replaces_base_ref() {
     let prompt = build_stage_prompt(
         "Review changes since $BASE_REF.",
@@ -187,6 +476,7 @@ fn build_stage_prompt_replaces_base_ref() {
             branch: Some("task-source"),
             base_ref: Some("origin/main"),
             source_worktree: Some("/tmp/repo/.kanna-worktrees/task-source"),
+            vars: None,
         },
     );
 
@@ -565,6 +855,7 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
                 pipeline_name: None,
                 stage: None,
                 base_ref: None,
+                agent: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: None,
                 model: Some("model-a".to_string()),
@@ -599,6 +890,70 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
 }
 
 #[test]
+fn prepare_task_uses_create_request_agent_selector() {
+    let repo_root = init_git_repo("create-request-agent-selector");
+    let config = test_config("create-request-agent-selector");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let agent_dir = repo_root.join(".kanna/agents/setup");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nagent_provider: codex\nmodel: gpt-5\npermission_mode: dontAsk\nallowed_tools:\n  - Bash\n---\nsetup agent prompt",
+    )
+    .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Set up Kanna for this repository.".to_string(),
+            display_name: Some("Set Up Repository".to_string()),
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: Some("setup".to_string()),
+            agent_provider: None,
+            agent_type: Some("pty".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(prepared.stage_agent.as_deref(), Some("setup"));
+    assert_eq!(prepared.agent_provider, "codex");
+    assert_eq!(prepared.model.as_deref(), Some("gpt-5"));
+    match prepared.session {
+        PreparedSessionSpawn::Pty {
+            args,
+            agent_provider,
+            ..
+        } => {
+            assert_eq!(agent_provider, DaemonAgentProvider::Codex);
+            let command = args.join(" ");
+            assert!(command.contains("setup agent prompt"));
+            assert!(!command.contains("implement agent prompt"));
+        }
+        _ => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_task_persists_create_spawn_options_and_custom_setup() {
     let repo_root = init_git_repo("create-spawn-options");
     let config = test_config("create-spawn-options");
@@ -616,6 +971,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
             model: Some("opus".to_string()),
@@ -685,6 +1041,7 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
             model: None,
@@ -736,6 +1093,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
@@ -787,6 +1145,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -869,6 +1228,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -925,6 +1285,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("copilot".to_string()),
             agent_type: None,
             model: None,
@@ -1004,6 +1365,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("pty".to_string()),
             model: None,
@@ -1070,6 +1432,7 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
@@ -1115,6 +1478,7 @@ fn prepare_task_rejects_missing_parent_task() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
@@ -1239,6 +1603,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -1349,6 +1714,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: None,
             agent_type: None,
             model: None,
@@ -1383,6 +1749,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,

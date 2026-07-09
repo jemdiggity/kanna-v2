@@ -224,11 +224,11 @@ describe("terminal output performance", () => {
   });
 
   it("does not poll daemon sessions or multiply terminal output listeners while warm PTY tasks stream", async () => {
-    const tasks = await Promise.all([
-      createStreamingTask(client, { repoId, repoPath: testRepoPath, prompt: "Output Perf A" }),
-      createStreamingTask(client, { repoId, repoPath: testRepoPath, prompt: "Output Perf B" }),
-      createStreamingTask(client, { repoId, repoPath: testRepoPath, prompt: "Output Perf C" }),
-    ]);
+    const tasks = [
+      await createStreamingTask(client, { repoId, repoPath: testRepoPath, prompt: "Output Perf A" }),
+      await createStreamingTask(client, { repoId, repoPath: testRepoPath, prompt: "Output Perf B" }),
+      await createStreamingTask(client, { repoId, repoPath: testRepoPath, prompt: "Output Perf C" }),
+    ];
     taskIds.push(...tasks.map((task) => task.id));
 
     await waitForSessions(client, taskIds);

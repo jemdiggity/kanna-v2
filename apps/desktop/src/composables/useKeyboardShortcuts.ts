@@ -9,6 +9,7 @@ export type ActionName =
   | "openFile"
   | "toggleFilePreview"
   | "advanceStage"
+  | "requestChanges"
   | "closeTask"
   | "undoClose"
   | "navigateUp"
@@ -79,7 +80,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "importRepo",   labelKey: "shortcuts.importClone",    groupKey: "shortcuts.groupCreateOrganize", key: ["I", "i"],                     meta: true, shift: true,  display: "⇧⌘I",     context: ["main"] },
   { action: "newTask",    labelKey: "shortcuts.newTask",       groupKey: "shortcuts.groupCreateOrganize", key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N",     context: ["main"] },
   { action: "focusSearch", labelKey: "shortcuts.focusSearch", groupKey: "shortcuts.groupCreateOrganize", key: "f", meta: true, display: "⌘F", context: ["main"] },
-  { action: "advanceStage", labelKey: "shortcuts.advanceStage", groupKey: "shortcuts.groupCreateOrganize", key: "s",                            meta: true, display: "⌘S",                       context: ["main"] },
+  { action: "advanceStage", labelKey: "shortcuts.advanceStage", groupKey: "shortcuts.groupCreateOrganize", key: "s",                            meta: true, display: "⌘S",                       context: ["main", "diff"] },
+  { action: "requestChanges", labelKey: "shortcuts.requestChanges", groupKey: "shortcuts.groupCreateOrganize", key: "s", meta: true, shift: true, display: "⇧⌘S", context: ["diff"] },
   { action: "closeTask",  labelKey: "shortcuts.closeReject",   groupKey: "shortcuts.groupCreateOrganize", key: ["Backspace", "Delete"],        meta: true, shift: true,  display: "⇧⌘⌫",     context: ["main"] },
   { action: "undoClose",  labelKey: "shortcuts.undoClose",     groupKey: "shortcuts.groupCreateOrganize", key: ["Z", "z"],                     meta: true,               display: "⌘Z",       context: ["main"] },
   // Navigation — move between tasks, repos, and history

@@ -9,6 +9,8 @@ pub(super) struct RepoConfig {
     pub(super) setup: Option<Vec<String>>,
     pub(super) teardown: Option<Vec<String>>,
     pub(super) ports: Option<HashMap<String, u16>>,
+    pub(super) flavors: Option<HashMap<String, String>>,
+    pub(super) vars: Option<HashMap<String, String>>,
     #[serde(default)]
     pub(super) reserved_ports: Vec<i64>,
     #[serde(default)]
@@ -263,16 +265,24 @@ pub(super) fn read_agent_definition(
     repo_path: &str,
     agent_name: &str,
 ) -> Result<AgentDefinition, String> {
-    let path = Path::new(repo_path).join(format!(".kanna/agents/{agent_name}/AGENT.md"));
+    let config = read_repo_config(repo_path)?;
+    let selector = AgentSelector::resolve(agent_name, config.flavors.as_ref());
+    let path = Path::new(repo_path).join(format!(
+        ".kanna/agents/{}/AGENT.md",
+        selector.repo_agent_dir()
+    ));
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
-        Err(_) => read_builtin_resource(&format!(".kanna/agents/{agent_name}/AGENT.md"))?,
+        Err(_) => read_builtin_agent_resource(&selector)?,
     };
     let mut definition = parse_agent_definition(&content)?;
 
     // Repo-local extension: layered onto the resolved agent (repo override or
     // built-in) so a repo can customize a default agent without rewriting it.
-    let extend_path = Path::new(repo_path).join(format!(".kanna/agents/{agent_name}/EXTEND.md"));
+    let extend_path = Path::new(repo_path).join(format!(
+        ".kanna/agents/{}/EXTEND.md",
+        selector.repo_agent_dir()
+    ));
     match std::fs::read_to_string(&extend_path) {
         Ok(extension) => {
             apply_agent_extension(&mut definition, &extension)
@@ -287,8 +297,62 @@ pub(super) fn read_agent_definition(
             ))
         }
     }
-
     Ok(definition)
+}
+
+struct AgentSelector {
+    role: String,
+    explicit_flavor: Option<String>,
+    configured_flavor: Option<String>,
+}
+
+impl AgentSelector {
+    fn resolve(agent_name: &str, flavors: Option<&HashMap<String, String>>) -> Self {
+        let (role, explicit_flavor) = split_agent_selector(agent_name);
+        let configured_flavor = explicit_flavor
+            .is_none()
+            .then(|| flavors.and_then(|map| map.get(&role).cloned()))
+            .flatten();
+        Self {
+            role,
+            explicit_flavor,
+            configured_flavor,
+        }
+    }
+
+    fn selected_flavor(&self) -> Option<&str> {
+        self.explicit_flavor
+            .as_deref()
+            .or(self.configured_flavor.as_deref())
+    }
+
+    fn repo_agent_dir(&self) -> String {
+        self.role.clone()
+    }
+}
+
+fn split_agent_selector(agent_name: &str) -> (String, Option<String>) {
+    let Some((role, flavor)) = agent_name.split_once('@') else {
+        return (agent_name.to_string(), None);
+    };
+    if role.is_empty() || flavor.is_empty() || flavor.contains('@') {
+        return (agent_name.to_string(), None);
+    }
+    (role.to_string(), Some(flavor.to_string()))
+}
+
+fn read_builtin_agent_resource(selector: &AgentSelector) -> Result<String, String> {
+    if let Some(flavor) = selector.selected_flavor() {
+        let flavor_path = format!(
+            ".kanna/agents/{}/flavors/{}/AGENT.md",
+            selector.role, flavor
+        );
+        if let Ok(content) = read_builtin_resource(&flavor_path) {
+            return Ok(content);
+        }
+    }
+
+    read_builtin_resource(&format!(".kanna/agents/{}/AGENT.md", selector.role))
 }
 
 fn read_builtin_resource(relative_path: &str) -> Result<String, String> {
@@ -334,12 +398,27 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         ".kanna/agents/merge/AGENT.md" => {
             Some(include_str!("../../../../.kanna/agents/merge/AGENT.md"))
         }
+        ".kanna/agents/merge/flavors/git/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/merge/flavors/git/AGENT.md"
+        )),
+        ".kanna/agents/merge/flavors/github/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/merge/flavors/github/AGENT.md"
+        )),
         ".kanna/agents/pipeline-factory/AGENT.md" => Some(include_str!(
             "../../../../.kanna/agents/pipeline-factory/AGENT.md"
         )),
         ".kanna/agents/pr/AGENT.md" => Some(include_str!("../../../../.kanna/agents/pr/AGENT.md")),
+        ".kanna/agents/pr/flavors/draft-pr/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/pr/flavors/draft-pr/AGENT.md"
+        )),
+        ".kanna/agents/pr/flavors/push-only/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/pr/flavors/push-only/AGENT.md"
+        )),
         ".kanna/agents/review/AGENT.md" => {
             Some(include_str!("../../../../.kanna/agents/review/AGENT.md"))
+        }
+        ".kanna/agents/setup/AGENT.md" => {
+            Some(include_str!("../../../../.kanna/agents/setup/AGENT.md"))
         }
         _ => None,
     }

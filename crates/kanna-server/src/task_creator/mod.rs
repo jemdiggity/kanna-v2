@@ -48,7 +48,7 @@ pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
     rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
     spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_diagnostics,
-    spawn_prepared_task_for_api_with_rollback, spawn_prepared_workspace_teardown_best_effort,
+    spawn_prepared_workspace_teardown_best_effort,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
@@ -147,6 +147,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .filter(|base_ref| base_ref.starts_with("task-"))
         .map(|base_ref| format!("{}/.kanna-worktrees/{base_ref}", repo.path));
     let prev_result = stages::previous_stage_result(db, task_id, &source_task)?;
+    let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
     let prompt = build_stage_prompt(
         agent
             .as_ref()
@@ -159,6 +160,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
             branch: Some(branch),
             base_ref: source_task.base_ref.as_deref(),
             source_worktree: source_worktree.as_deref(),
+            vars: repo_vars.as_ref(),
         },
     );
     let provider = resolve_agent_provider(
@@ -679,6 +681,7 @@ pub(crate) fn prepare_task_for_api(
             base_ref: request.base_ref,
             stored_base_ref: None,
             stage_override: request.stage,
+            agent: request.agent,
             explicit_provider,
             default_provider,
             agent_type: request.agent_type,
@@ -744,6 +747,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             base_ref: None,
             stored_base_ref: None,
             stage_override: None,
+            agent: None,
             explicit_provider: None,
             default_provider,
             agent_type: None,
@@ -832,6 +836,7 @@ completion with status success so Kanna can run the commit post and close this i
             base_ref: Some(base_ref.to_string()),
             stored_base_ref: Some(base_ref.to_string()),
             stage_override: None,
+            agent: None,
             explicit_provider: dependent.agent_provider,
             default_provider: None,
             agent_type: dependent.agent_type,
@@ -996,7 +1001,8 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .iter()
         .find(|stage| stage.name == stage_name)
         .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
-    let agent = if let Some(agent_name) = stage.agent.as_deref() {
+    let stage_agent = stage.agent.clone();
+    let agent = if let Some(agent_name) = stage_agent.as_deref() {
         Some(read_agent_definition(&repo.path, agent_name)?)
     } else {
         None
@@ -1021,6 +1027,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .or_else(|| item.base_ref.clone())
         .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
 
+    let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
     let final_prompt = build_stage_prompt(
         agent
             .as_ref()
@@ -1033,6 +1040,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
             branch: base_ref.as_deref(),
             base_ref: base_ref.as_deref(),
             source_worktree: None,
+            vars: repo_vars.as_ref(),
         },
     );
 
@@ -1352,7 +1360,8 @@ fn resolve_task_spawn(
             .clone()
     };
 
-    let agent = if let Some(agent_name) = stage.agent.as_deref() {
+    let stage_agent = request.agent.clone().or_else(|| stage.agent.clone());
+    let agent = if let Some(agent_name) = stage_agent.as_deref() {
         Some(read_agent_definition(&repo.path, agent_name)?)
     } else {
         None
@@ -1361,6 +1370,7 @@ fn resolve_task_spawn(
     let final_prompt = if request.stage_override.is_some() {
         original_prompt.clone()
     } else {
+        let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
         build_stage_prompt(
             agent
                 .as_ref()
@@ -1376,14 +1386,23 @@ fn resolve_task_spawn(
                     .as_deref()
                     .or(request.base_ref.as_deref()),
                 source_worktree: None,
+                vars: repo_vars.as_ref(),
             },
         )
     };
 
     let provider = resolve_agent_provider(
         request.explicit_provider.as_deref(),
-        request.default_provider.as_deref(),
-        stage.agent_provider.as_deref(),
+        if request.agent.is_some() {
+            None
+        } else {
+            request.default_provider.as_deref()
+        },
+        if request.agent.is_some() {
+            None
+        } else {
+            stage.agent_provider.as_deref()
+        },
         agent.as_ref(),
     )?;
     let model = request
@@ -1421,7 +1440,7 @@ fn resolve_task_spawn(
         pipeline_def_json,
         stage_name,
         stage_transition: stage.policy.transition.as_str(),
-        stage_agent: stage.agent,
+        stage_agent,
         provider,
         agent_type,
         final_prompt,

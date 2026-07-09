@@ -131,6 +131,7 @@ export function createTaskItemActions(
             pipelineName: opts?.pipelineName,
             stage: opts?.stage,
             baseRef,
+            agent: opts?.customTask?.agent,
             agentProvider: effectiveAgentProvider,
             agentType: effectiveAgentType,
             model: resolvedModel,

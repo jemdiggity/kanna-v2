@@ -65,21 +65,29 @@ pub(super) async fn get_repo_by_path(
             format!("db error: {}", e),
         )
     })?;
-    let repo = db
-        .get_snapshot_repo_by_path(&query.path)
-        .map_err(|e| {
+    let mut candidate_paths = vec![query.path.clone()];
+    if let Ok(canonical) = std::fs::canonicalize(&query.path) {
+        let canonical = canonical.to_string_lossy().to_string();
+        if !candidate_paths.iter().any(|path| path == &canonical) {
+            candidate_paths.push(canonical);
+        }
+    }
+
+    for path in &candidate_paths {
+        if let Some(repo) = db.get_snapshot_repo_by_path(path).map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("db error: {e}"),
             )
-        })?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                format!("repo not found for path: {}", query.path),
-            )
-        })?;
-    Ok(Json(repo))
+        })? {
+            return Ok(Json(repo));
+        }
+    }
+
+    Err((
+        axum::http::StatusCode::NOT_FOUND,
+        format!("repo not found for path: {}", query.path),
+    ))
 }
 
 #[derive(Debug, serde::Deserialize)]
