@@ -1,5 +1,5 @@
 import { ref, type Ref } from "vue";
-import type { DbHandle } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
 
 import { isTauri } from "../tauri-mock";
 import { invoke } from "../invoke";
@@ -10,13 +10,12 @@ import {
 } from "../utils/taskTransfer";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
-
-interface PendingIncomingTransferRow {
-  id: string;
-  source_peer_id: string | null;
-  source_task_id: string | null;
-  payload_json: string | null;
-}
+import {
+  claimPendingIncomingTransfer,
+  failPendingIncomingTransfer,
+  fetchPendingIncomingTransfers,
+  type PendingIncomingTransfer,
+} from "../services/desktopServerClient";
 
 interface UseAppTaskTransferOptions {
   db: DbHandle;
@@ -41,7 +40,7 @@ export function useAppTaskTransfer({
   const transferPeerActionPending = ref(false);
   let transferPeerLoadRequestId = 0;
 
-  function validatePendingIncomingTransferRow(row: PendingIncomingTransferRow): string | null {
+  function validatePendingIncomingTransferRow(row: PendingIncomingTransfer): string | null {
     if (!row.source_peer_id) return "missing source_peer_id";
     if (!row.source_task_id) return "missing source_task_id";
     if (!row.payload_json) return "missing payload_json";
@@ -57,29 +56,6 @@ export function useAppTaskTransfer({
     }
 
     return null;
-  }
-
-  async function markPendingIncomingTransferFailed(transferId: string, reason: string): Promise<boolean> {
-    const result = await db.execute(
-      `UPDATE task_transfer
-          SET status = 'failed',
-              completed_at = datetime('now'),
-              error = ?
-        WHERE id = ? AND direction = 'incoming' AND status IN ('pending', 'streaming')`,
-      [reason, transferId],
-    );
-    return result.rowsAffected === 1;
-  }
-
-  async function claimPendingIncomingTransfer(transferId: string): Promise<boolean> {
-    const result = await db.execute(
-      `UPDATE task_transfer
-          SET status = 'streaming',
-              error = NULL
-        WHERE id = ? AND direction = 'incoming' AND status = 'pending'`,
-      [transferId],
-    );
-    return result.rowsAffected === 1;
   }
 
   async function loadTransferPeers() {
@@ -196,17 +172,23 @@ export function useAppTaskTransfer({
   }
 
   async function importPendingIncomingTransfers() {
-    const rows = await db.select<PendingIncomingTransferRow>(
-      `SELECT id, source_peer_id, source_task_id, payload_json
-         FROM task_transfer
-        WHERE direction = 'incoming' AND status = 'pending'
-        ORDER BY started_at ASC`,
-    );
+    void db;
+    let rows: PendingIncomingTransfer[];
+    try {
+      rows = await fetchPendingIncomingTransfers();
+    } catch (error: unknown) {
+      console.warn(
+        "[App] failed to list pending incoming transfers:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return;
+    }
+
     for (const row of rows) {
       const invalidReason = validatePendingIncomingTransferRow(row);
       if (invalidReason) {
         const reason = `pending incoming transfer is malformed: ${invalidReason}`;
-        if (await markPendingIncomingTransferFailed(row.id, reason)) {
+        if (await failPendingIncomingTransfer(row.id, reason)) {
           console.warn("[App] disabled malformed pending incoming transfer:", { transferId: row.id, reason });
         }
         continue;
@@ -221,7 +203,7 @@ export function useAppTaskTransfer({
         await store.approveIncomingTransfer(row.id);
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message : String(error);
-        if (await markPendingIncomingTransferFailed(row.id, reason)) {
+        if (await failPendingIncomingTransfer(row.id, reason)) {
           console.warn("[App] failed to auto-import pending incoming transfer; marked failed:", {
             transferId: row.id,
             reason,

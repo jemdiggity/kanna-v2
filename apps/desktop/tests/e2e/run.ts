@@ -240,12 +240,14 @@ function targetNeedsSecondaryInstance(testTarget: string): boolean {
 function targetNeedsEmulators(testTarget: string): boolean {
   return /real\/cloud-task-sync\.test\.ts$/.test(testTarget) ||
     /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
+    /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget) ||
     /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget);
 }
 
 function targetNeedsRelay(testTarget: string): boolean {
   return /real\/cloud-task-sync\.test\.ts$/.test(testTarget) ||
-    /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget);
+    /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
+    /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget);
 }
 
 function targetNeedsAuthIndexedDbOpenFailure(testTarget: string): boolean {
@@ -378,6 +380,7 @@ async function main(): Promise<void> {
     FIRESTORE_EMULATOR_HOST: `127.0.0.1:${firebaseFirestorePort}`,
     KANNA_E2E_DEVICE_TOKEN: "e2e-token",
     KANNA_E2E_AWAIT_CLOUD_PUBLISH: "1",
+    KANNA_E2E_TEST_SQL: "1",
     RUST_LOG: process.env.RUST_LOG ?? "kanna_server::ksp=warn",
   };
   const relayUrl = `ws://127.0.0.1:${relayPort}`;

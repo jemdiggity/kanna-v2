@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PipelineItem, Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 import { buildWorkspace } from "./buildWorkspace";
 
 function repo(overrides: Partial<Repo> = {}): Repo {

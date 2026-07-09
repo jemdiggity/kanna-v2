@@ -1,5 +1,5 @@
 import { parseAgentMd, type RepoConfig } from "@kanna/core";
-import type { PipelineItem, Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 import { invoke } from "../invoke";
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
 import { buildTaskRuntimeEnv } from "./kannaCliEnv";

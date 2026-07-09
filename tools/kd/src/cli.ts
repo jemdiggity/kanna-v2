@@ -34,7 +34,9 @@ const booleanFlagMap: Record<string, string> = {
   "--device": "device",
   "--remote": "remote",
   "--dev": "dev",
-  "--with-credentials": "withCredentials"
+  "--with-credentials": "withCredentials",
+  "--upload": "upload",
+  "--ota": "ota"
 };
 
 const defaultDevUpInput = {
@@ -53,6 +55,7 @@ const defaultDevRestartInput = {
 };
 
 const restartComponents = new Set(["desktop", "mobile", "backend"]);
+const CREDENTIALS_FLAG_ERROR = "--with-credentials is only supported for dev or staging desktop launch commands";
 
 function parseDevRestartInput(rest: string[]): ParsedCliCommand {
   const [first, ...remaining] = rest;
@@ -67,8 +70,11 @@ function parseDevRestartInput(rest: string[]): ParsedCliCommand {
   if (hasComponent) {
     input.component = first;
   }
-  if (input.withCredentials === true && (input.component !== "desktop" || input.production === true)) {
-    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+  if (input.withCredentials === true && input.production === true) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
+  }
+  if (input.withCredentials === true && input.component && input.component !== "desktop") {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
   }
   return { taskId: "dev.restart", input };
 }
@@ -84,8 +90,8 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
   if (input.production === true && input.staging === true) {
     throw new Error("mobile up accepts only one of --production or --staging");
   }
-  if (input.withCredentials === true && input.staging !== true) {
-    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+  if (input.withCredentials === true && (input.production === true || input.staging === true)) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
   }
   if (input.production === true || input.staging === true) {
     return {
@@ -97,16 +103,29 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
       }
     };
   }
-  return { taskId: "dev.up", input: { ...defaultDevUpInput, mobile: true } };
+  return {
+    taskId: "dev.up",
+    input: {
+      ...defaultDevUpInput,
+      mobile: true,
+      ...(input.withCredentials === true
+        ? { emulators: true, withCredentials: true }
+        : {})
+    }
+  };
 }
 
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
-  const input = parseFlagInput(rest, { device: false, production: false, staging: false });
+  const input = parseFlagInput(
+    rest,
+    { device: false, production: false, staging: false, install: false },
+    { "--install": "install" }
+  );
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["device", "production", "staging", "withCredentials"].includes(key) && value === true)
+    .filter(([key, value]) => !["device", "production", "staging", "withCredentials", "install"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("mobile run only accepts --device, --production, or --staging");
+    throw new Error("mobile run only accepts --device, --production, --staging, or --install");
   }
   if (input.production === true && input.staging === true) {
     throw new Error("mobile run accepts only one of --production or --staging");
@@ -114,8 +133,8 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   if (input.device !== true) {
     throw new Error("mobile run requires --device");
   }
-  if (input.withCredentials === true && input.staging !== true) {
-    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+  if (input.withCredentials === true && (input.production === true || input.staging === true)) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
   }
   return {
     taskId: "mobile.run",
@@ -123,18 +142,89 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
       device: true,
       production: input.production === true,
       staging: input.staging === true,
+      ...(input.install === true ? { install: true } : {}),
       ...(input.withCredentials === true ? { withCredentials: true } : {})
     }
   };
 }
 
-function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
-  const input = parseFlagInput(rest, { dev: false, staging: false });
+function parseMobileDoctorInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(
+    rest,
+    { device: false, production: false, staging: false },
+    { "--install": "install" }
+  );
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["dev", "staging"].includes(key) && value === true)
+    .filter(([key, value]) => !["device", "production", "staging", "withCredentials"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("remote-e2e only accepts --dev or --staging");
+    throw new Error("mobile doctor only accepts --device, --production, or --staging");
+  }
+  if (input.production === true && input.staging === true) {
+    throw new Error("mobile run accepts only one of --production or --staging");
+  }
+  if (input.device !== true) {
+    throw new Error("mobile run requires --device");
+  }
+  if (input.withCredentials === true) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
+  }
+  return { taskId: "mobile.doctor", input };
+}
+
+function parseMobileQaInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, { production: false, ota: false });
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) => !["production", "ota"].includes(key) && value === true)
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("mobile qa only accepts --production and --ota");
+  }
+  if (input.production !== true) {
+    throw new Error("mobile qa requires --production");
+  }
+  return {
+    taskId: "mobile.qa",
+    input: {
+      production: true,
+      ota: input.ota === true
+    }
+  };
+}
+
+function parseMobileArchiveInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, { production: false, dryRun: false, upload: false });
+  const allowedKeys = new Set(["production", "dryRun", "upload", "buildNumber", "version", "outDir"]);
+  const unsupportedKeys = Object.keys(input).filter((key) => !allowedKeys.has(key));
+  if (unsupportedKeys.length > 0) {
+    throw new Error(
+      "mobile archive only accepts --production, --build-number, --version, --out-dir, --upload, or --dry-run"
+    );
+  }
+  return {
+    taskId: "mobile.archive",
+    input
+  };
+}
+
+function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, {
+    dev: false,
+    staging: false,
+    mobileRelay: false,
+    desktopPairing: false
+  }, {
+    "--mobile-relay": "mobileRelay",
+    "--desktop-pairing": "desktopPairing"
+  });
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) =>
+      !["dev", "staging", "mobileRelay", "desktopPairing"].includes(key) &&
+      value === true
+    )
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("remote-e2e only accepts --dev, --staging, --mobile-relay, or --desktop-pairing");
   }
   if (input.dev === true && input.staging === true) {
     throw new Error("remote-e2e accepts only one of --dev or --staging");
@@ -143,7 +233,9 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
     taskId: "test.remote-e2e",
     input: {
       dev: input.staging !== true,
-      staging: input.staging === true
+      staging: input.staging === true,
+      mobileRelay: input.mobileRelay === true,
+      desktopPairing: input.desktopPairing === true
     }
   };
 }
@@ -168,7 +260,11 @@ function parseRemoteDoctorInput(rest: string[]): ParsedCliCommand {
   };
 }
 
-function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Record<string, unknown> {
+function parseFlagInput(
+  rest: string[],
+  defaults: Record<string, unknown>,
+  localBooleanFlagMap: Record<string, string> = {}
+): Record<string, unknown> {
   const input: Record<string, unknown> = { ...defaults };
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
@@ -226,6 +322,24 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       index += 1;
       continue;
     }
+    if (arg === "--build-number") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--build-number requires a value");
+      }
+      input.buildNumber = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--version") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--version requires a value");
+      }
+      input.version = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--rollback-to") {
       const value = rest[index + 1];
       if (!value) {
@@ -248,7 +362,7 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       input.extraArgs = rest.slice(index + 1);
       break;
     }
-    const flagName = booleanFlagMap[arg];
+    const flagName = localBooleanFlagMap[arg] ?? booleanFlagMap[arg];
     if (!flagName) {
       throw new Error(`Unknown flag: ${arg}`);
     }
@@ -265,7 +379,7 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
 
 function rejectUnsupportedCredentialsFlag(input: Record<string, unknown>): void {
   if (input.withCredentials === true) {
-    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+    throw new Error(CREDENTIALS_FLAG_ERROR);
   }
 }
 
@@ -309,12 +423,14 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "mobile" && command === "run") {
     return parseMobileRunInput(rest);
   }
+  if (group === "mobile" && command === "qa") {
+    return parseMobileQaInput(rest);
+  }
+  if (group === "mobile" && command === "archive") {
+    return parseMobileArchiveInput(rest);
+  }
   if (group === "mobile" && command === "doctor") {
-    const parsed = parseMobileRunInput(rest);
-    if (parsed.input.withCredentials === true) {
-      throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
-    }
-    return { taskId: "mobile.doctor", input: parsed.input };
+    return parseMobileDoctorInput(rest);
   }
   if (group === "mobile" && command === "ota") {
     const [subcommand, ...otaRest] = rest;
@@ -469,8 +585,10 @@ const helpTopics: Record<string, string[]> = {
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
     "  mobile up [--production|--staging] [--with-credentials]",
-    "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
+    "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
+    "  mobile qa --production [--ota]",
     "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
     "  mobile ota status --staging|--production",
     "  mobile ota doctor|preflight --staging|--production",
@@ -485,7 +603,7 @@ const helpTopics: Record<string, string[]> = {
     "  clean [--all] [--dry] [--shared-rust-build]",
     "  build desktop",
     "  build sidecars",
-    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
@@ -494,7 +612,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging]",
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]",
     "  doctor [--remote] [--staging]",
     "",
     "Run 'kd <command> --help' for command-specific help."
@@ -592,37 +710,67 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Commands:",
     "  mobile up [--production|--staging] [--with-credentials]",
-    "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
+    "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
+    "  mobile qa --production [--ota]",
     "  mobile ota <command>",
     "  mobile test",
     "  mobile device-smoke"
   ],
   "mobile up": [
-    "Usage: kd mobile up [--production|--staging] [--with-credentials]",
+    "Usage: kd mobile up [--production|--staging]",
     "",
     "Start Kanna mobile against production or staging cloud.",
     "",
     "Options:",
     "  --production        Use the installed production desktop server.",
-    "  --staging           Use staging cloud services.",
-    "  --with-credentials  Use local staging desktop credentials."
+    "  --staging           Use the installed staging desktop server and staging cloud services."
   ],
   "mobile run": [
-    "Usage: kd mobile run --device [--production|--staging] [--with-credentials]",
+    "Usage: kd mobile run --device [--production|--staging] [--install]",
     "",
     "Build, install, and launch Kanna mobile on a physical iOS device.",
     "",
     "Options:",
     "  --device            Required. Target a physical iOS device.",
     "  --production        Launch against production settings.",
-    "  --staging           Launch against staging settings.",
-    "  --with-credentials  Use local staging desktop credentials."
+    "  --staging           Launch against installed staging desktop settings.",
+    "  --install           Build and install a bundled Release app; skips Metro and dev-client hot loading."
+  ],
+  "mobile archive": [
+    "Usage: kd mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
+    "",
+    "Build a production iOS archive and IPA through local Expo CNG and Xcode.",
+    "",
+    "Options:",
+    "  --production              Required. Use the production Kanna mobile identity.",
+    "  --build-number <number>   Required. App Store Connect build number (CFBundleVersion).",
+    "  --version <version>       Marketing version (defaults to VERSION).",
+    "  --out-dir <dir>           Archive output directory (defaults to .build/mobile/ios-production).",
+    "  --upload                  Upload the exported IPA with xcrun iTMSTransporter.",
+    "  --dry-run                 Print the archive/upload plan without building or uploading."
   ],
   "mobile doctor": [
     "Usage: kd mobile doctor --device [--production|--staging]",
     "",
     "Check physical iOS device mobile development readiness."
+  ],
+  "mobile qa": [
+    "Usage: kd mobile qa --production [--ota]",
+    "",
+    "Run the repo-side production mobile QA gate for TestFlight/App Store candidates.",
+    "",
+    "Checks:",
+    "  production config sanity",
+    "  pnpm --dir apps/mobile run typecheck",
+    "  pnpm --dir apps/mobile run test",
+    "  pnpm --dir apps/mobile run test:e2e:preflight",
+    "  pnpm --dir apps/mobile run test:e2e:smoke",
+    "",
+    "Options:",
+    "  --production  Required. Validate the production mobile identity.",
+    "  --ota         Also run production OTA status and doctor checks."
   ],
   "mobile ota": [
     "Usage: kd mobile ota <command>",
@@ -748,12 +896,13 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd release <command>",
     "",
     "Commands:",
-    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]"
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]"
   ],
   "release ship": [
-    "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
+    "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
     "",
-    "Build, sign, notarize, and optionally publish a Kanna release."
+    "Build, sign, notarize, and optionally publish a Kanna release.",
+    "Use --staging --rollback-to <version> to repoint the staging channel manifest without building."
   ],
   cloud: [
     "Usage: kd cloud <command>",
@@ -792,7 +941,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging]"
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]"
   ],
   "test app-update-bundle": [
     "Usage: kd test app-update-bundle",
@@ -820,9 +969,12 @@ const helpTopics: Record<string, string[]> = {
     "Run LAN sync tests against physical Macs over SSH."
   ],
   "test remote-e2e": [
-    "Usage: kd test remote-e2e [--dev|--staging]",
+    "Usage: kd test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]",
     "",
-    "Run remote task interaction E2E tests."
+    "Run remote task interaction E2E tests.",
+    "",
+    "  --mobile-relay     Run Layer C mobile Appium over relay.",
+    "  --desktop-pairing  Run Layer D desktop pairing UI WebDriver test."
   ],
   doctor: [
     "Usage: kd doctor [--remote] [--staging]",

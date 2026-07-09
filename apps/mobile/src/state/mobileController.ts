@@ -5,7 +5,7 @@ import type {
   TaskTerminalSubscription
 } from "../lib/api/client";
 import type { MobileAuthSession } from "../lib/firebase/auth";
-import type { MobileView, SessionStore } from "./sessionStore";
+import type { ComposerAgentProvider, MobileView, SessionStore } from "./sessionStore";
 
 export interface MobileController {
   bootstrap(): Promise<void>;
@@ -22,6 +22,9 @@ export interface MobileController {
   openComposer(): void;
   closeComposer(): void;
   updateComposerPrompt(prompt: string): void;
+  selectComposerDesktop(desktopId: string): void;
+  setComposerOptionsExpanded(isExpanded: boolean): void;
+  selectComposerAgentProvider(provider: ComposerAgentProvider): void;
   searchTasks(query: string): Promise<void>;
   createTask(): Promise<void>;
   runMergeAgent(taskId: string): Promise<void>;
@@ -63,10 +66,12 @@ export function createMobileController(
     | null = null;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
+  let backgroundRefreshMode: "collections" | "desktops" = "collections";
   let authUnsubscribe: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let bootstrapInFlight: Promise<void> | null = null;
   let liveCloudTasksApplied = false;
+  let refreshDesktopsInFlight: Promise<void> | null = null;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
     const message =
@@ -219,6 +224,22 @@ export function createMobileController(
     reconcileSelectedTask();
   };
 
+  const refreshDesktops = async (options: { force?: boolean } = {}) => {
+    if (options.force && refreshDesktopsInFlight) {
+      await refreshDesktopsInFlight;
+    }
+    if (options.force || !refreshDesktopsInFlight) {
+      refreshDesktopsInFlight = client.listDesktops()
+        .then((desktops) => {
+          store.setDesktops(desktops);
+        })
+        .finally(() => {
+          refreshDesktopsInFlight = null;
+        });
+    }
+    await refreshDesktopsInFlight;
+  };
+
   const refreshTaskCollections = async () => {
     const selectedRepoId = store.getState().selectedRepoId;
     const [recentTasks, repoTasks] = await Promise.all([
@@ -235,6 +256,7 @@ export function createMobileController(
   const applyLiveCloudTasks = (tasks: TaskSummary[]) => {
     liveCloudTasksApplied = true;
     tasks = uniqueTasksById(tasks);
+    void refreshDesktops().catch(fail);
     store.setRepos(mergeReposWithTaskRepos(store.getState().repos, tasks));
     store.setRecentTasks(tasks);
     let selectedRepoId = store.getState().selectedRepoId;
@@ -283,6 +305,46 @@ export function createMobileController(
     });
   };
 
+  const getCloudOwnerDesktopId = (task: TaskSummary): string | null => {
+    const ownerDesktopId = (task as { ownerDesktopId?: unknown }).ownerDesktopId;
+    return typeof ownerDesktopId === "string" && ownerDesktopId.trim()
+      ? ownerDesktopId
+      : null;
+  };
+
+  const resolveKnownDesktopId = (desktopId: string | null | undefined): string | null => {
+    if (!desktopId) {
+      return null;
+    }
+    return store.getState().desktops.some((desktop) => desktop.id === desktopId)
+      ? desktopId
+      : null;
+  };
+
+  const inferComposerDesktopId = (repoId: string): string | null => {
+    const state = store.getState();
+    const ownerIds = new Set<string>();
+    for (const task of [
+      ...state.repoTasks,
+      ...state.recentTasks,
+      ...state.searchResults
+    ]) {
+      if (task.repoId !== repoId) {
+        continue;
+      }
+      const ownerDesktopId = getCloudOwnerDesktopId(task);
+      if (ownerDesktopId) {
+        ownerIds.add(ownerDesktopId);
+      }
+    }
+    if (ownerIds.size === 1) {
+      return resolveKnownDesktopId(Array.from(ownerIds)[0]);
+    }
+
+    const repoExistsOnCurrentDesktop = state.repos.some((repo) => repo.id === repoId);
+    return repoExistsOnCurrentDesktop ? resolveKnownDesktopId(state.selectedDesktopId) : null;
+  };
+
   const startCloudTaskSubscription = (uid: string): boolean => {
     if (!options.subscribeCloudTasks) return false;
     stopCloudTaskSubscription();
@@ -296,7 +358,8 @@ export function createMobileController(
     liveCloudTasksApplied = false;
   };
 
-  const startBackgroundRefresh = () => {
+  const startBackgroundRefresh = (mode: "collections" | "desktops") => {
+    backgroundRefreshMode = mode;
     if (backgroundRefreshTimer) {
       return;
     }
@@ -307,7 +370,11 @@ export function createMobileController(
       }
 
       backgroundRefreshInFlight = true;
-      void refreshTaskCollections()
+      const refresh =
+        backgroundRefreshMode === "desktops"
+          ? refreshDesktops({ force: true })
+          : refreshTaskCollections();
+      void refresh
         .catch(fail)
         .finally(() => {
           backgroundRefreshInFlight = false;
@@ -380,15 +447,13 @@ export function createMobileController(
           auth?.status === "signedIn" &&
           startCloudTaskSubscription(auth.user.uid);
         if (liveCloudTasksApplied) {
-          store.setDesktops(await client.listDesktops());
+          await refreshDesktops({ force: true });
           await refreshSearchResults();
           reconcileSelectedTask();
         } else {
           await loadCollections();
         }
-        if (!useLiveCloudTasks) {
-          startBackgroundRefresh();
-        }
+        startBackgroundRefresh(useLiveCloudTasks ? "desktops" : "collections");
         const selectedTaskId = store.getState().selectedTaskId;
         if (selectedTaskId) {
           startTaskView(selectedTaskId);
@@ -495,7 +560,22 @@ export function createMobileController(
     },
 
     openComposer() {
-      store.setComposerState(true, store.getState().composerPrompt);
+      const state = store.getState();
+      const selectedRepoId = state.selectedRepoId;
+      const profile = selectedRepoId
+        ? state.repoCreationProfiles.find((candidate) => candidate.repoId === selectedRepoId)
+        : null;
+      const composerDesktopId =
+        profile
+          ? resolveKnownDesktopId(profile.desktopId)
+          : selectedRepoId
+            ? inferComposerDesktopId(selectedRepoId)
+            : null;
+
+      store.setComposerDesktop(composerDesktopId);
+      store.setComposerAgentProvider(profile?.agentProvider ?? "claude");
+      store.setComposerOptionsExpanded(!composerDesktopId);
+      store.setComposerState(true, state.composerPrompt);
     },
 
     closeComposer() {
@@ -504,6 +584,18 @@ export function createMobileController(
 
     updateComposerPrompt(prompt) {
       store.setComposerState(store.getState().isComposerOpen, prompt);
+    },
+
+    selectComposerDesktop(desktopId) {
+      store.setComposerDesktop(desktopId);
+    },
+
+    setComposerOptionsExpanded(isExpanded) {
+      store.setComposerOptionsExpanded(isExpanded);
+    },
+
+    selectComposerAgentProvider(provider) {
+      store.setComposerAgentProvider(provider);
     },
 
     async searchTasks(query) {
@@ -526,14 +618,29 @@ export function createMobileController(
     async createTask() {
       const state = store.getState();
       if (!state.selectedRepoId || !state.composerPrompt.trim()) {
-        store.setErrorMessage("Choose a repo and enter a task prompt first.");
+        store.setComposerErrorMessage("Choose a repo and enter a task prompt first.");
+        store.setComposerSubmitting(false);
         return;
       }
 
+      const composerDesktopId = resolveKnownDesktopId(state.composerDesktopId);
+      if (!composerDesktopId) {
+        store.setComposerDesktop(null);
+        store.setComposerErrorMessage("Choose a machine for this repo first.");
+        store.setComposerOptionsExpanded(true);
+        store.setComposerSubmitting(false);
+        return;
+      }
+
+      store.setComposerSubmitting(true);
+      store.setComposerErrorMessage(null);
       try {
         const created = await client.createTask({
           repoId: state.selectedRepoId,
-          prompt: state.composerPrompt.trim()
+          prompt: state.composerPrompt.trim(),
+          desktopId: composerDesktopId,
+          agentProvider: state.composerAgentProvider,
+          agentType: "pty"
         });
         const createdTask = mapCreatedTask(created);
         const recentTasks = [
@@ -547,11 +654,21 @@ export function createMobileController(
 
         store.setRecentTasks(recentTasks);
         store.setRepoTasks(repoTasks);
+        store.upsertRepoCreationProfile({
+          repoId: state.selectedRepoId,
+          desktopId: composerDesktopId,
+          agentProvider: state.composerAgentProvider,
+          updatedAt: new Date().toISOString()
+        });
         store.setComposerState(false, "");
         store.setErrorMessage(null);
         this.openTask(createdTask.id);
       } catch (error) {
-        fail(error);
+        store.setComposerErrorMessage(
+          error instanceof Error ? error.message : "Task creation failed"
+        );
+      } finally {
+        store.setComposerSubmitting(false);
       }
     },
 

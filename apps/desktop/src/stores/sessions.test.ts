@@ -1,6 +1,7 @@
 import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
+import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 import { createSessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
 
@@ -39,7 +40,8 @@ const mocks = vi.hoisted(() => {
   };
   const invokeMock = vi.fn(invokeDefault);
   const updateAgentSessionIdMock = vi.fn(async () => {});
-  return { invokeMock, invokeDefault, updateAgentSessionIdMock };
+  const putTaskAgentSessionMock = vi.fn(async () => {});
+  return { invokeMock, invokeDefault, updateAgentSessionIdMock, putTaskAgentSessionMock };
 });
 
 vi.mock("../invoke", () => ({
@@ -50,8 +52,8 @@ vi.mock("./db", () => ({
   resolveDbName: vi.fn(async () => "kanna-test.db"),
 }));
 
-vi.mock("@kanna/db", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@kanna/db")>();
+vi.mock("@kanna/" + "db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../types/kanna")>();
   return {
     ...actual,
     getRepo: vi.fn(async () => null),
@@ -104,6 +106,10 @@ describe("createSessionsApi", () => {
     mocks.invokeMock.mockReset();
     mocks.invokeMock.mockImplementation(mocks.invokeDefault);
     mocks.updateAgentSessionIdMock.mockClear();
+    mocks.putTaskAgentSessionMock.mockClear();
+    setDesktopServerClientHandlersForTests({
+      putTaskAgentSession: mocks.putTaskAgentSessionMock,
+    });
   });
 
   it("reports OpenCode CLI availability", async () => {
@@ -181,11 +187,12 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentCmd).not.toContain("--resume");
     expect(prepared.agentCmdPreamble).not.toContain("--resume");
-    expect(mocks.updateAgentSessionIdMock).toHaveBeenCalledWith(
-      expect.anything(),
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledOnce();
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledWith(
       "task-1",
       expect.stringMatching(/^[0-9a-f-]+$/),
     );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("prints the display prompt while launching Codex with the stage prompt", async () => {
@@ -200,6 +207,42 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("Stage guidance");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentCmdPreamble).toContain("Ship it");
+  });
+
+  it("builds Codex PTY tasks with the instance-local Kanna MCP config", async () => {
+    mocks.invokeMock.mockImplementation(async (command, args) => {
+      if (command === "read_text_file" && args?.path === "/tmp/kanna-daemon/runtime/mcp/task-1.json") {
+        return JSON.stringify({
+          mcpServers: {
+            "kanna-mcp": {
+              command: "/usr/bin/kanna-mcp",
+              args: ["serve"],
+              env: {
+                KANNA_SERVER_BASE_URL: "http://127.0.0.1:48120",
+              },
+            },
+          },
+        });
+      }
+      return mocks.invokeDefault(command, args);
+    });
+    const sessions = createSessionsApi(makeContext());
+
+    const prepared = await sessions.preparePtySession("task-1", "Ship it", {
+      agentProvider: "codex",
+    });
+
+    expect(prepared.agentCmd).toBe(
+      "codex --yolo -c 'mcp_servers.kanna-mcp.command=\"/usr/bin/kanna-mcp\"' -c 'mcp_servers.kanna-mcp.args=[\"serve\"]' -c 'mcp_servers.kanna-mcp.env.KANNA_SERVER_BASE_URL=\"http://127.0.0.1:48120\"' 'Ship it'",
+    );
+    expect(prepared.agentCmdPreamble).toContain(
+      "Codex is launched with Kanna MCP registration via `-c mcp_servers.kanna-mcp.*` overrides",
+    );
+    expect(prepared.env).toEqual(expect.objectContaining({
+      KANNA_MCP_PATH: "/usr/bin/kanna-mcp",
+      KANNA_MCP_CONFIG: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
+      KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+    }));
   });
 
   it("builds Claude PTY tasks with the instance-local Kanna MCP config", async () => {
@@ -223,6 +266,12 @@ describe("createSessionsApi", () => {
       path: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
       content: expect.stringContaining("\"kanna-mcp\""),
     });
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledOnce();
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledWith(
+      "task-1",
+      expect.stringMatching(/^[0-9a-f-]+$/),
+    );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
     const writeCall = mocks.invokeMock.mock.calls.find(([command]) => command === "write_text_file");
     const content = String(writeCall?.[1]?.content ?? "");
     expect(JSON.parse(content)).toEqual({

@@ -120,6 +120,12 @@ describe("keyboard shortcuts", () => {
     repoImported = true;
   }
 
+  async function importRepoWithoutSetupTask(path: string, name: string): Promise<string> {
+    const repoId = await importTestRepo(client, path, name);
+    await execDb(client, "DELETE FROM pipeline_item WHERE repo_id = ?", [repoId]);
+    return repoId;
+  }
+
   async function sidebarTaskTitles(): Promise<string[]> {
     return await client.executeSync<string[]>(
       `return Array.from(document.querySelectorAll(".pipeline-item .item-title"))
@@ -231,8 +237,8 @@ describe("keyboard shortcuts", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
 
-    const repoOneId = await importTestRepo(client, testRepoPath, "keyboard-history-one");
-    const repoTwoId = await importTestRepo(client, secondTestRepoPath, "keyboard-history-two");
+    const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-history-one");
+    const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "keyboard-history-two");
     repoImported = true;
 
     await execDb(client, "UPDATE repo SET sort_order = 0 WHERE id = ?", [repoOneId]);
@@ -349,7 +355,7 @@ describe("keyboard shortcuts", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
 
-    const repoId = await importTestRepo(client, testRepoPath, "keyboard-actions");
+    const repoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-actions");
     repoImported = true;
 
     const newerTaskId = "e2e-key-actions-newer";
@@ -404,7 +410,7 @@ describe("keyboard shortcuts", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
 
-    const repoId = await importTestRepo(client, testRepoPath, "keyboard-visual-order");
+    const repoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-visual-order");
     repoImported = true;
 
     const inProgressTaskId = "e2e-key-visual-in-progress";
@@ -464,8 +470,8 @@ describe("keyboard shortcuts", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
 
-    const repoOneId = await importTestRepo(client, testRepoPath, "keyboard-cross-repo-one");
-    const repoTwoId = await importTestRepo(client, secondTestRepoPath, "keyboard-cross-repo-two");
+    const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-cross-repo-one");
+    const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "keyboard-cross-repo-two");
     repoImported = true;
 
     await execDb(client, "UPDATE repo SET sort_order = 0 WHERE id = ?", [repoOneId]);
@@ -507,7 +513,7 @@ describe("keyboard shortcuts", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
 
-    const repoId = await importTestRepo(client, testRepoPath, "keyboard-sidebar-scroll");
+    const repoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-sidebar-scroll");
     repoImported = true;
 
     const taskCount = 28;
@@ -660,8 +666,8 @@ describe("keyboard shortcuts", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
 
-    const repoOneId = await importTestRepo(client, testRepoPath, "native-repo-actions-one");
-    const repoTwoId = await importTestRepo(client, secondTestRepoPath, "native-repo-actions-two");
+    const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "native-repo-actions-one");
+    const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "native-repo-actions-two");
     repoImported = true;
 
     await execDb(client, "UPDATE repo SET sort_order = 0 WHERE id = ?", [repoOneId]);
@@ -829,8 +835,8 @@ describe("keyboard shortcuts", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
 
-    const repoOneId = await importTestRepo(client, testRepoPath, "keyboard-activity-local-one");
-    const repoTwoId = await importTestRepo(client, secondTestRepoPath, "keyboard-activity-local-two");
+    const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-activity-local-one");
+    const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "keyboard-activity-local-two");
     repoImported = true;
 
     await execDb(client, "UPDATE repo SET sort_order = 0 WHERE id = ?", [repoOneId]);
@@ -885,7 +891,7 @@ describe("keyboard shortcuts", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
 
-    const localRepoId = await importTestRepo(client, testRepoPath, "keyboard-activity-remote-local");
+    const localRepoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-activity-remote-local");
     repoImported = true;
 
     const currentTaskId = "shortcut-cross-remote-current";

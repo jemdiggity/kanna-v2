@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  closePipelineItemAndClearCachedTerminalState,
   getTaskIdFromTeardownSessionId,
   isTeardownSessionId,
   isMissingDaemonSessionError,
@@ -41,41 +40,6 @@ describe("kannaCleanup", () => {
     expect(shouldAutoCloseTaskAfterTeardownExit({ exitCode: 0, lingerEnabled: false })).toBe(true);
     expect(shouldAutoCloseTaskAfterTeardownExit({ exitCode: 1, lingerEnabled: false })).toBe(false);
     expect(shouldAutoCloseTaskAfterTeardownExit({ exitCode: 0, lingerEnabled: true })).toBe(false);
-  });
-
-  it("clears cached state only after a successful close", async () => {
-    const calls: string[] = [];
-
-    await closePipelineItemAndClearCachedTerminalState(
-      "task-2",
-      async (itemId) => {
-        calls.push(`close:${itemId}`);
-      },
-      (sessionId) => {
-        calls.push(`clear:${sessionId}`);
-      },
-    );
-
-    expect(calls).toEqual(["close:task-2", "clear:task-2"]);
-  });
-
-  it("does not clear cached state when close fails", async () => {
-    const calls: string[] = [];
-
-    await expect(
-      closePipelineItemAndClearCachedTerminalState(
-        "task-3",
-        async (itemId) => {
-          calls.push(`close:${itemId}`);
-          throw new Error("boom");
-        },
-        (sessionId) => {
-          calls.push(`clear:${sessionId}`);
-        },
-      ),
-    ).rejects.toThrow("boom");
-
-    expect(calls).toEqual(["close:task-3"]);
   });
 
   it("treats missing daemon sessions as idempotent close errors", () => {

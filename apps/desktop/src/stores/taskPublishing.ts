@@ -1,21 +1,27 @@
-import type { PipelineItem, Repo } from "@kanna/db";
-import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
+import type { PipelineItem, Repo } from "../types/kanna";
+import {
+  deleteDesktopTaskSnapshotForLocalTask,
+  publishDesktopTaskSnapshot,
+} from "../services/desktopCloudPublisher";
 import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
+import { fetchDesktopSnapshot } from "../services/desktopServerClient";
 import type { StoreContext } from "./state";
 
 export async function publishTaskSnapshotBestEffort(context: StoreContext, itemId: string, repo: Repo): Promise<void> {
-  const rows = await context.requireDb().select<PipelineItem>(
-    "SELECT * FROM pipeline_item WHERE id = ?",
-    [itemId],
-  );
-  const refreshedItem = rows[0];
-  if (!refreshedItem) return;
+  const snapshot = await fetchDesktopSnapshot();
+  const refreshedItem = snapshot.entries
+    .flatMap((entry) => entry.items)
+    .find((candidate): candidate is PipelineItem => candidate.id === itemId);
 
-  await publishDesktopTaskSnapshot(context.requireDb(), refreshedItem, repo).catch((error) => {
+  const cloudPublish = refreshedItem
+    ? publishDesktopTaskSnapshot(null, refreshedItem, repo)
+    : deleteDesktopTaskSnapshotForLocalTask(repo.id, itemId);
+
+  await cloudPublish.catch((error) => {
     console.warn("[cloud] failed to publish task snapshot:", error);
     showCloudPublishErrorToast(context, error);
   });
-  void publishDesktopLanTaskSnapshot(context.requireDb());
+  void publishDesktopLanTaskSnapshot();
 }
 
 export function showCloudPublishErrorToast(context: StoreContext, error: unknown) {

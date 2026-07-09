@@ -37,6 +37,19 @@ describe("mobile app config", () => {
     });
   });
 
+  it("applies explicit App Store version and iOS build number when provided", () => {
+    const config = createExpoConfig({
+      KANNA_APP_ENV: "prod",
+      KANNA_APP_VERSION: "1.2.3",
+      KANNA_IOS_BUILD_NUMBER: "45"
+    });
+
+    expect(config.version).toBe("1.2.3");
+    expect(config.ios?.buildNumber).toBe("45");
+    expect(config.ios?.bundleIdentifier).toBe("build.kanna.app");
+    expect(config.ios?.appleTeamId).toBe("GY3LFAA59P");
+  });
+
   it("produces the dev identity from KANNA_APP_ENV", () => {
     const config = createExpoConfig({ KANNA_APP_ENV: "dev" });
 

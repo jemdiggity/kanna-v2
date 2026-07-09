@@ -8,6 +8,7 @@ interface InvokeCall {
 const testState = {
   invokeCalls: [] as InvokeCall[],
   invokeResults: {} as Record<string, unknown>,
+  desktopBackupCalls: 0,
 };
 
 // Mock the invoke module
@@ -29,6 +30,13 @@ vi.mock("../tauri-mock", () => ({
   isTauri: true,
 }));
 
+vi.mock("../services/desktopServerClient", () => ({
+  createDesktopBackup: async () => {
+    testState.desktopBackupCalls += 1;
+    return { backupPath: "/mock/data/dir/kanna-v2.db.backup-2026-07-07T00-00-00" };
+  },
+}));
+
 // Import after mocks are set up
 const {
   parseBackupTimestamp,
@@ -44,6 +52,7 @@ describe("useBackup", () => {
   beforeEach(() => {
     vi.useRealTimers();
     testState.invokeCalls = [];
+    testState.desktopBackupCalls = 0;
     testState.invokeResults = {
       get_app_data_dir: "/mock/data/dir",
       file_exists: true,
@@ -95,12 +104,10 @@ describe("useBackup", () => {
   });
 
   describe("createBackup", () => {
-    it("creates the backup through the SQLite backup command", async () => {
+    it("creates the backup through kanna-server", async () => {
       await createBackup("kanna-v2.db");
 
-      const backupCall = testState.invokeCalls.find((c) => c.cmd === "backup_sqlite_database");
-      expect(backupCall).toBeTruthy();
-      expect(backupCall!.args).toEqual({ dbName: "kanna-v2.db" });
+      expect(testState.desktopBackupCalls).toBe(1);
     });
 
     it("does not copy WAL and SHM sidecars from a live database", async () => {
@@ -116,8 +123,7 @@ describe("useBackup", () => {
       testState.invokeResults.file_exists = false;
       await createBackup("kanna-v2.db");
 
-      const backupCall = testState.invokeCalls.find((c) => c.cmd === "backup_sqlite_database");
-      expect(backupCall).toBeUndefined();
+      expect(testState.desktopBackupCalls).toBe(0);
     });
 
     it("does not truncate WAL while an independent server writer may be active", async () => {
@@ -259,8 +265,7 @@ describe("useBackup", () => {
     it("calls createBackup", async () => {
       await backupOnStartup("kanna-v2.db");
 
-      const backupCall = testState.invokeCalls.find((c) => c.cmd === "backup_sqlite_database");
-      expect(backupCall).toBeTruthy();
+      expect(testState.desktopBackupCalls).toBe(1);
     });
 
     it("does not throw on failure", async () => {
@@ -286,18 +291,12 @@ describe("useBackup", () => {
       scheduleStartupBackup("kanna-v2-scheduled.db");
       scheduleStartupBackup("kanna-v2-scheduled.db");
 
-      expect(testState.invokeCalls.find((c) => c.cmd === "backup_sqlite_database")).toBeUndefined();
+      expect(testState.desktopBackupCalls).toBe(0);
 
-      for (let attempt = 0; attempt < 10; attempt++) {
-        await vi.runOnlyPendingTimersAsync();
-        await Promise.resolve();
-        await Promise.resolve();
-        if (testState.invokeCalls.some((c) => c.cmd === "backup_sqlite_database")) break;
-      }
-
-      const backupCalls = testState.invokeCalls.filter((c) => c.cmd === "backup_sqlite_database");
-      expect(backupCalls).toHaveLength(1);
-      expect(backupCalls[0]!.args).toEqual({ dbName: "kanna-v2-scheduled.db" });
+      await vi.runOnlyPendingTimersAsync();
+      await vi.waitFor(() => {
+        expect(testState.desktopBackupCalls).toBe(1);
+      });
 
       requestAnimationFrameSpy.mockRestore();
     });

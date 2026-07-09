@@ -13,6 +13,7 @@ mod relay_client;
 mod session_replacements;
 mod task_creator;
 mod terminal_watcher;
+mod worktree_cleanup;
 
 use config::Config;
 use std::sync::Arc;
@@ -20,6 +21,14 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    match worktree_cleanup::run_cleanup_cli(&args[1..]) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Worktree cleanup failed: {error}");
+            std::process::exit(1);
+        }
+    }
     if args.get(1).map(|s| s.as_str()) == Some("register") {
         let relay_url = args
             .get(2)
@@ -81,7 +90,7 @@ async fn main() {
         }
     });
 
-    let db = match db::Db::open(&config.db_path) {
+    let db = match db::Db::open_migrated(&config.db_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Failed to open database at {}: {}", config.db_path, e);
@@ -105,6 +114,17 @@ async fn main() {
     // Capture the login-shell PATH before the first stage action needs it —
     // loading zshrc costs seconds and must never sit on a request path.
     tokio::task::spawn_blocking(task_creator::warm_login_shell_path);
+    let reconciliation_db_path = config.db_path.clone();
+    tokio::task::spawn_blocking(move || match db::Db::open(&reconciliation_db_path) {
+        Ok(db) => {
+            if let Err(error) = worktree_cleanup::reconcile_leftover_worktrees(&db) {
+                log::warn!("startup worktree cleanup reconciliation failed: {error}");
+            }
+        }
+        Err(error) => {
+            log::warn!("startup worktree cleanup could not open database: {error}");
+        }
+    });
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
     let session_replacements = http_state.session_replacements();

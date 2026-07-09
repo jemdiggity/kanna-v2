@@ -15,19 +15,18 @@ import {
   type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import {
-  getRepo,
-  listBlockersForItem,
-  listPipelineItems,
-  listRepos,
   type PipelineItem,
   type Repo,
-} from "@kanna/db";
-import type { DbHandle } from "@kanna/db";
+  type DbHandle,
+} from "../types/kanna";
 import { invoke } from "../invoke";
 import { buildCloudTaskSnapshot } from "../utils/cloudTaskSnapshot";
 import { getConfiguredDesktopFirestore } from "./desktopCloudTaskIndex";
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
+import { fetchDesktopSnapshot } from "./desktopServerClient";
 import { getCachedRepoRemoteUrl, __resetRepoRemoteUrlCacheForTests } from "./repoRemoteUrl";
+
+const GENERIC_DESKTOP_NAME = "Kanna Desktop";
 
 export interface RemoteTaskSnapshotIdentity {
   ownerDesktopId: string;
@@ -54,11 +53,15 @@ type TaskSnapshotDocument = Record<string, unknown> & {
 };
 
 export async function publishDesktopTaskSnapshot(
-  db: DbHandle,
+  db: DbHandle | null | undefined,
   item: PipelineItem,
   repo: Repo | null = null,
 ): Promise<void> {
-  const targetRepo = repo ?? await getRepo(db, item.repo_id);
+  void db;
+  const snapshotState = await fetchDesktopSnapshot();
+  const targetRepo = repo
+    ?? snapshotState.entries.find((entry) => entry.repo.id === item.repo_id)?.repo
+    ?? null;
   if (!targetRepo) return;
 
   const context = await getCloudWriteContext();
@@ -75,7 +78,12 @@ export async function publishDesktopTaskSnapshot(
     return;
   }
 
-  const snapshot = await buildSnapshot(db, item, targetRepo, context.desktopId);
+  const snapshot = await buildSnapshot(
+    item,
+    targetRepo,
+    context.desktopId,
+    blockedByTaskIds(snapshotState.taskBlockers, item.id),
+  );
   await upsertTaskSnapshots(context, [snapshot], { deleteStale: false });
 }
 
@@ -85,18 +93,36 @@ export async function deleteRemoteTaskSnapshots(identity: RemoteTaskSnapshotIden
   await deleteTaskSnapshotByIdentity(context, identity, { createDesktopDoc: false });
 }
 
-export async function reconcileDesktopTaskSnapshots(db: DbHandle): Promise<void> {
+export async function deleteDesktopTaskSnapshotForLocalTask(
+  localRepoId: string,
+  ownerLocalTaskId: string,
+): Promise<void> {
+  const context = await getCloudWriteContext();
+  if (!context) return;
+  await deleteTaskSnapshotByIdentity(context, {
+    ownerDesktopId: context.desktopId,
+    localRepoId,
+    ownerLocalTaskId,
+  }, { createDesktopDoc: false });
+}
+
+export async function reconcileDesktopTaskSnapshots(db: DbHandle | null | undefined): Promise<void> {
+  void db;
   const context = await getCloudWriteContext();
   if (!context) return;
 
   const snapshots: TaskSnapshotDocument[] = [];
-  const repos = await listRepos(db);
-  for (const repo of repos) {
-    const items = await listPipelineItems(db, repo.id);
+  const snapshotState = await fetchDesktopSnapshot();
+  for (const { repo, items } of snapshotState.entries) {
     for (const item of items) {
       if (item.closed_at !== null) continue;
       try {
-        snapshots.push(await buildSnapshot(db, item, repo, context.desktopId));
+        snapshots.push(await buildSnapshot(
+          item,
+          repo,
+          context.desktopId,
+          blockedByTaskIds(snapshotState.taskBlockers, item.id),
+        ));
       } catch (error) {
         console.warn(`[cloud] failed to build task snapshot for ${item.id}:`, error);
       }
@@ -107,7 +133,7 @@ export async function reconcileDesktopTaskSnapshots(db: DbHandle): Promise<void>
 }
 
 export async function publishDesktopTaskSnapshots(
-  db: DbHandle,
+  db: DbHandle | null | undefined,
   _options: PublishDesktopTaskSnapshotsOptions = {},
 ): Promise<void> {
   await reconcileDesktopTaskSnapshots(db);
@@ -118,22 +144,28 @@ export function __resetDesktopCloudPublisherCachesForTests(): void {
 }
 
 async function buildSnapshot(
-  db: DbHandle,
   item: PipelineItem,
   repo: Repo,
   desktopId: string,
+  blockedByTaskIds: string[],
 ): Promise<TaskSnapshotDocument> {
-  const [blockers, remoteUrl] = await Promise.all([
-    listBlockersForItem(db, item.id),
-    getCachedRepoRemoteUrl(db, repo),
-  ]);
+  const remoteUrl = await getCachedRepoRemoteUrl(repo);
 
   return await buildCloudTaskSnapshot({
     desktopId,
     item,
     repo: { ...repo, remote_url: remoteUrl },
-    blockedByTaskIds: blockers.map((blocker) => blocker.id),
+    blockedByTaskIds,
   }) as TaskSnapshotDocument;
+}
+
+function blockedByTaskIds(
+  blockers: Array<{ blocked_item_id: string; blocker_item_id: string }>,
+  itemId: string,
+): string[] {
+  return blockers
+    .filter((blocker) => blocker.blocked_item_id === itemId)
+    .map((blocker) => blocker.blocker_item_id);
 }
 
 async function getCloudWriteContext(): Promise<CloudWriteContext | null> {
@@ -346,7 +378,7 @@ async function resolveDesktopIdentity(): Promise<DesktopIdentity> {
     invoke<DesktopCloudCredentialPayload>("desktop_cloud_credential").catch(() => null),
     invoke<{ desktopId?: string; desktopName?: string }>("mobile_server_status").catch(() => null),
   ]);
-  const desktopName = mobileStatus?.desktopName?.trim();
+  const desktopName = normalizeDesktopDisplayName(mobileStatus?.desktopName);
   const desktopSecretHash =
     typeof credential?.desktopSecretHash === "string" && credential.desktopSecretHash.trim()
       ? credential.desktopSecretHash.trim()
@@ -389,7 +421,13 @@ async function resolveFallbackDesktopDisplayName(): Promise<string> {
   if (hostName.trim()) return hostName.trim();
   const computerName = await readEnvString("COMPUTERNAME");
   if (computerName.trim()) return computerName.trim();
-  return "Kanna Desktop";
+  return GENERIC_DESKTOP_NAME;
+}
+
+function normalizeDesktopDisplayName(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return trimmed === GENERIC_DESKTOP_NAME ? "" : trimmed;
 }
 
 async function readEnvString(name: string): Promise<string> {

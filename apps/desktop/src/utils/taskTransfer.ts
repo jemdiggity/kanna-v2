@@ -1,4 +1,4 @@
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
 export type RepoAcquisitionMode = "reuse-local" | "clone-remote" | "bundle-repo";

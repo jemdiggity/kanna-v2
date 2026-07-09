@@ -14,7 +14,7 @@ mod worktree;
 mod tests;
 
 use crate::config::Config;
-use crate::db::{Db, NewPipelineItem, Repo};
+use crate::db::{Db, NewPipelineItem, NewStageRun, Repo};
 use commands::{
     build_agent_command, build_kanna_preamble, build_task_shell_command,
     build_teardown_shell_command,
@@ -40,13 +40,14 @@ pub(crate) use types::{
 };
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
+    remove_prepared_worktree, MergeBranchesError,
 };
 
 pub(crate) use environment::warm_login_shell_path;
 pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
     rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
-    spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_rollback,
+    spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_diagnostics,
     spawn_prepared_workspace_teardown_best_effort,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
@@ -56,6 +57,35 @@ pub(crate) use stages::{
     resolve_stage_transition,
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
+
+#[derive(Debug)]
+pub(crate) struct DormantMergeConflict {
+    pub(crate) base_branch: String,
+    pub(crate) remaining_branches: Vec<String>,
+    pub(crate) conflicting_branch: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug)]
+pub(crate) enum DormantStartError {
+    MergeConflict(DormantMergeConflict),
+    Other(String),
+}
+
+impl From<String> for DormantStartError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+
+impl std::fmt::Display for DormantStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MergeConflict(conflict) => write!(f, "{}", conflict.message),
+            Self::Other(message) => write!(f, "{message}"),
+        }
+    }
+}
 
 pub(crate) fn prepare_rerun_stage_for_api(
     db: &Db,
@@ -147,9 +177,27 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .unwrap_or_default();
     let agent_type = resolve_agent_type(source_task.agent_type.as_deref(), provider)?;
     let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+    if !std::path::Path::new(&worktree_path).is_dir() {
+        let start_point = source_task
+            .base_ref
+            .clone()
+            .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
+        create_worktree(&repo.path, branch, &worktree_path, start_point.as_deref())?;
+        db.upsert_worktree(&format!("wt-{task_id}"), task_id, &worktree_path, branch)
+            .map_err(|e| format!("db error: {}", e))?;
+        db.upsert_terminal_session(
+            &format!("agent-{task_id}"),
+            &repo.id,
+            Some(task_id),
+            Some("agent"),
+            Some(&worktree_path),
+            Some(task_id),
+        )
+        .map_err(|e| format!("db error: {}", e))?;
+    }
     let repo_config = read_repo_config(&repo.path)?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
-    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
+    let port_env = claim_task_ports(db, task_id, &repo_config)?;
     let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
@@ -171,6 +219,9 @@ pub(crate) fn prepare_rerun_stage_for_api(
         model,
         permission_mode,
         allowed_tools,
+        Vec::new(),
+        None,
+        None,
         mcp_config_path,
         &spawn_env,
         &worktree_path,
@@ -285,7 +336,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
 
     let repo_config = read_repo_config(&repo.path)?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
-    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
+    let port_env = claim_task_ports(db, task_id, &repo_config)?;
     let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
@@ -316,6 +367,9 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         model,
         permission_mode,
         allowed_tools,
+        Vec::new(),
+        None,
+        None,
         mcp_config_path,
         &spawn_env,
         &worktree_path,
@@ -366,7 +420,10 @@ pub(crate) fn prepare_workspace_teardown_for_close(
         source_task.pipeline_def.as_deref(),
     )
     .ok()?;
-    prepare_workspace_teardown(db, config, &repo, task_id, &pipeline, stage_name, branch)
+    let mut teardown =
+        prepare_workspace_teardown(db, config, &repo, task_id, &pipeline, stage_name, branch)?;
+    append_close_cleanup_to_teardown(&mut teardown, &config.db_path, &repo.path, task_id);
+    Some(teardown)
 }
 
 pub(in crate::task_creator) fn prepare_workspace_teardown(
@@ -394,7 +451,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
         return None;
     }
 
-    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref()).ok()?;
+    let port_env = claim_task_ports(db, task_id, &repo_config).ok()?;
     let mut spawn_env = build_spawn_env(config, task_id, &port_env).ok()?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let session_id = format!("td-{branch}");
@@ -416,6 +473,24 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
             agent_provider: AgentProvider::Claude.to_daemon_provider(),
         },
     })
+}
+
+fn append_close_cleanup_to_teardown(
+    teardown: &mut PreparedWorkspaceTeardown,
+    db_path: &str,
+    repo_path: &str,
+    task_id: &str,
+) {
+    let cleanup = crate::worktree_cleanup::cleanup_closed_task_worktrees_shell_command(
+        db_path, repo_path, task_id,
+    );
+    if let PreparedSessionSpawn::Pty { args, .. } = &mut teardown.session {
+        if let Some(command) = args.last_mut() {
+            command
+                .push_str(" ; printf '\\033[33mCleaning closed task worktrees...\\033[0m\\n' ; ");
+            command.push_str(&cleanup);
+        }
+    }
 }
 
 fn stage_environment_teardown(
@@ -454,6 +529,9 @@ fn build_prepared_session(
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
+    disallowed_tools: Vec<String>,
+    max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
     mcp_config_path: Option<String>,
     spawn_env: &HashMap<String, String>,
     worktree_path: &str,
@@ -489,6 +567,9 @@ fn build_prepared_session(
                 model.as_deref(),
                 permission_mode.as_deref(),
                 &allowed_tools,
+                &disallowed_tools,
+                max_turns,
+                max_budget_usd,
                 Some(&preamble),
                 mcp_config_path.as_deref(),
                 Some(worktree_path),
@@ -537,6 +618,9 @@ fn build_prepared_session(
                     model,
                     permission_mode,
                     allowed_tools,
+                    disallowed_tools,
+                    max_turns,
+                    max_budget_usd,
                     system_prompt,
                     mcp_config_path,
                     executable: headless_executable,
@@ -594,13 +678,19 @@ pub(crate) fn prepare_task_for_api(
             pipeline_def: None,
             base_ref: request.base_ref,
             stored_base_ref: None,
-            stage_override: None,
+            stage_override: request.stage,
+            agent: request.agent,
             explicit_provider,
             default_provider,
             agent_type: request.agent_type,
             model: request.model,
             permission_mode: request.permission_mode,
             allowed_tools: request.allowed_tools.unwrap_or_default(),
+            disallowed_tools: request.disallowed_tools.unwrap_or_default(),
+            max_turns: request.max_turns,
+            max_budget_usd: request.max_budget_usd,
+            setup_cmds: request.setup_cmds.unwrap_or_default(),
+            resume_session_id: request.resume_session_id,
             notify_task_id: request.notify_task_id,
             parent_task_id,
         },
@@ -655,14 +745,109 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             base_ref: None,
             stored_base_ref: None,
             stage_override: None,
+            agent: None,
             explicit_provider: None,
             default_provider,
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: Vec::new(),
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
+        },
+    )
+}
+
+pub(crate) fn prepare_integration_task_for_api(
+    db: &Db,
+    config: &Config,
+    dependent_task_id: &str,
+    base_ref: &str,
+    branches_to_merge: &[String],
+) -> Result<PreparedTaskSpawn, String> {
+    let dependent = db
+        .get_pipeline_item(dependent_task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("task not found: {}", dependent_task_id))?;
+    let repo = db
+        .get_repo(&dependent.repo_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("repo not found for task: {}", dependent_task_id))?;
+    let dependent_name = dependent
+        .display_name
+        .clone()
+        .or_else(|| dependent.prompt.clone())
+        .unwrap_or_else(|| dependent_task_id.to_string());
+    let branch_list = branches_to_merge
+        .iter()
+        .map(|branch| format!("- `{branch}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "Integrate blocker branches for dependent task `{dependent_task_id}`.\n\n\
+Start from base branch `{base_ref}`. Merge these blocker branches in order:\n\n\
+{branch_list}\n\n\
+Resolve any conflicts preserving both sides' intent. Run the repo's relevant checks. \
+Commit the reconciled result. Do not push or open a PR. When complete, record stage \
+completion with status success so Kanna can run the commit post and close this integration task."
+    );
+    let pipeline_name = "integration".to_string();
+    let pipeline = definitions::PipelineDefinition {
+        name: Some(pipeline_name.clone()),
+        stages: vec![PipelineStage {
+            name: "in progress".to_string(),
+            agent: None,
+            prompt: Some("$TASK_PROMPT".to_string()),
+            agent_provider: None,
+            environment: None,
+            policy: PipelineStagePolicy {
+                transition: PipelineStageTransition::Auto,
+            },
+            post: Some(definitions::PipelinePost {
+                name: "commit".to_string(),
+                agent: Some("commit".to_string()),
+                prompt: Some(format!(
+                    "Commit the reconciled blocker integration for dependent task {dependent_task_id}."
+                )),
+                agent_provider: None,
+            }),
+        }],
+        environments: None,
+    };
+    let pipeline_def =
+        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+
+    prepare_task_spawn(
+        db,
+        config,
+        &repo,
+        TaskCreationRequest {
+            task_prompt: prompt,
+            display_name: Some(format!("Integrate: {dependent_name}")),
+            pipeline_name: Some(pipeline_name),
+            pipeline_def: Some(pipeline_def),
+            base_ref: Some(base_ref.to_string()),
+            stored_base_ref: Some(base_ref.to_string()),
+            stage_override: None,
+            agent: None,
+            explicit_provider: dependent.agent_provider,
+            default_provider: None,
+            agent_type: dependent.agent_type,
+            model: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: Vec::new(),
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: Some(dependent_task_id.to_string()),
         },
     )
 }
@@ -710,10 +895,18 @@ pub(crate) fn create_dormant_task_for_api(
     let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
     let pipeline_def_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
-    let stage = pipeline
-        .stages
-        .first()
-        .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?;
+    let stage = if let Some(stage_name) = request.stage.as_deref() {
+        pipeline
+            .stages
+            .iter()
+            .find(|stage| stage.name == stage_name)
+            .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?
+    } else {
+        pipeline
+            .stages
+            .first()
+            .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?
+    };
     let agent = if let Some(agent_name) = stage.agent.as_deref() {
         Some(read_agent_definition(&repo.path, agent_name)?)
     } else {
@@ -744,6 +937,7 @@ pub(crate) fn create_dormant_task_for_api(
         activity: "idle",
         port_offset: None,
         port_env_json: None,
+        agent_spawn_options_json: None,
         base_ref: None,
         notify_task_id: request.notify_task_id.as_deref(),
         parent_task_id: parent_task_id.as_deref(),
@@ -765,7 +959,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     config: &Config,
     task_id: &str,
     blocker_branches: Vec<String>,
-) -> Result<Option<PreparedTaskSpawn>, String> {
+) -> Result<Option<PreparedTaskSpawn>, DormantStartError> {
     if db
         .get_task_worktree_path(task_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -805,7 +999,8 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .iter()
         .find(|stage| stage.name == stage_name)
         .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
-    let agent = if let Some(agent_name) = stage.agent.as_deref() {
+    let stage_agent = stage.agent.clone();
+    let agent = if let Some(agent_name) = stage_agent.as_deref() {
         Some(read_agent_definition(&repo.path, agent_name)?)
     } else {
         None
@@ -822,6 +1017,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .clone()
         .filter(|branch| !branch.trim().is_empty())
         .unwrap_or_else(|| format!("task-{}", task_id));
+    let previous_base_ref = item.base_ref.clone();
     let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
     let base_ref = blocker_branches
         .first()
@@ -854,32 +1050,84 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .unwrap_or_default();
 
     create_worktree(&repo.path, &branch, &worktree_path, base_ref.as_deref())?;
+
+    let rollback_start = |error: DormantStartError| -> DormantStartError {
+        let db_result = db
+            .delete_dormant_task_start_artifacts(task_id, previous_base_ref.as_deref())
+            .map_err(|e| format!("db rollback error: {}", e));
+        let worktree_result = remove_prepared_worktree(&worktree_path, &branch);
+        if let Err(rollback_error) = db_result.and(worktree_result) {
+            return DormantStartError::Other(format!("{error}; rollback failed: {rollback_error}"));
+        }
+        error
+    };
+
     if blocker_branches.len() > 1 {
-        merge_branches_into_worktree(&worktree_path, &blocker_branches[1..])?;
+        if let Err(error) = merge_branches_into_worktree(&worktree_path, &blocker_branches[1..]) {
+            let dormant_error = match error {
+                MergeBranchesError::Conflict(conflict) => {
+                    DormantStartError::MergeConflict(DormantMergeConflict {
+                        base_branch: blocker_branches[0].clone(),
+                        remaining_branches: blocker_branches[1..].to_vec(),
+                        conflicting_branch: conflict.branch,
+                        message: conflict.message,
+                    })
+                }
+                MergeBranchesError::Other(message) => DormantStartError::Other(message),
+            };
+            return Err(rollback_start(dormant_error));
+        }
     }
-    db.upsert_worktree(&format!("wt-{task_id}"), task_id, &worktree_path, &branch)
-        .map_err(|e| format!("db error: {}", e))?;
-    db.upsert_terminal_session(
-        &format!("agent-{task_id}"),
-        &repo.id,
-        Some(task_id),
-        Some("agent"),
-        Some(&worktree_path),
-        Some(task_id),
-    )
-    .map_err(|e| format!("db error: {}", e))?;
+    if let Err(error) = db
+        .upsert_worktree(&format!("wt-{task_id}"), task_id, &worktree_path, &branch)
+        .map_err(|e| format!("db error: {}", e))
+    {
+        return Err(rollback_start(error.into()));
+    }
+    if let Err(error) = db
+        .upsert_terminal_session(
+            &format!("agent-{task_id}"),
+            &repo.id,
+            Some(task_id),
+            Some("agent"),
+            Some(&worktree_path),
+            Some(task_id),
+        )
+        .map_err(|e| format!("db error: {}", e))
+    {
+        return Err(rollback_start(error.into()));
+    }
 
-    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
-    persist_task_ports(db, task_id, &port_env)?;
-    db.update_pipeline_item_base_ref_and_activity(task_id, base_ref.as_deref(), "working")
-        .map_err(|e| format!("db error: {}", e))?;
+    let port_env = match claim_task_ports(db, task_id, &repo_config) {
+        Ok(port_env) => port_env,
+        Err(error) => return Err(rollback_start(error.into())),
+    };
+    if let Err(error) = persist_task_ports(db, task_id, &port_env) {
+        return Err(rollback_start(error.into()));
+    }
+    if let Err(error) = db
+        .update_pipeline_item_base_ref_and_activity(task_id, base_ref.as_deref(), "working")
+        .map_err(|e| format!("db error: {}", e))
+    {
+        return Err(rollback_start(error.into()));
+    }
 
-    let worktree_repo_config = read_repo_config(&worktree_path)?;
-    let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
+    let worktree_repo_config = match read_repo_config(&worktree_path) {
+        Ok(repo_config) => repo_config,
+        Err(error) => return Err(rollback_start(error.into())),
+    };
+    let mut spawn_env = match build_spawn_env(config, task_id, &port_env) {
+        Ok(spawn_env) => spawn_env,
+        Err(error) => return Err(rollback_start(error.into())),
+    };
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
-    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+    let mcp_config_path = match write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)
+    {
+        Ok(path) => path,
+        Err(error) => return Err(rollback_start(error.into())),
+    };
     let stage_run_model = model.clone();
-    let (session, provider_session_id) = build_prepared_session(
+    let (session, provider_session_id) = match build_prepared_session(
         provider,
         agent_type,
         task_id,
@@ -890,12 +1138,18 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         model,
         permission_mode,
         allowed_tools,
+        Vec::new(),
+        None,
+        None,
         mcp_config_path,
         &spawn_env,
         &worktree_path,
         worktree_repo_config.setup.as_deref().unwrap_or(&[]),
         None,
-    )?;
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(rollback_start(error.into())),
+    };
     let title = item
         .display_name
         .clone()
@@ -947,6 +1201,11 @@ struct ResolvedTaskSpawn {
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
+    disallowed_tools: Vec<String>,
+    max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
+    setup_cmds: Vec<String>,
+    resume_session_id: Option<String>,
     base_ref: Option<String>,
     stored_base_ref: Option<String>,
     notify_task_id: Option<String>,
@@ -970,23 +1229,32 @@ pub(in crate::task_creator) fn prepare_task_spawn(
 
     insert_new_task_record(db, repo, &task_id, &branch, &resolved)?;
 
-    let port_env = claim_task_ports(db, &task_id, repo_config.ports.as_ref())?;
-    persist_task_ports(db, &task_id, &port_env)?;
+    let prepared = (|| {
+        let port_env = claim_task_ports(db, &task_id, &repo_config)?;
+        persist_task_ports(db, &task_id, &port_env)?;
 
-    create_new_task_worktree(
-        db,
-        repo,
-        &task_id,
-        &branch,
-        &worktree_path,
-        resolved.base_ref.as_deref(),
-    )?;
+        create_new_task_worktree(
+            db,
+            repo,
+            &task_id,
+            &branch,
+            &worktree_path,
+            resolved.base_ref.as_deref(),
+        )?;
 
+        prepare_new_task_session(config, &task_id, &worktree_path, &port_env, &resolved)
+    })();
     let PreparedNewTaskSession {
         spawn_env,
         session,
         provider_session_id,
-    } = prepare_new_task_session(config, &task_id, &worktree_path, &port_env, &resolved)?;
+    } = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            record_task_prepare_failure(db, &task_id, &worktree_path, &resolved, &err)?;
+            return Err(format!("task {task_id} failed to prepare: {err}"));
+        }
+    };
     let title = resolved
         .display_name
         .clone()
@@ -1011,6 +1279,47 @@ pub(in crate::task_creator) fn prepare_task_spawn(
         provider_session_id,
         session,
     })
+}
+
+fn record_task_prepare_failure(
+    db: &Db,
+    task_id: &str,
+    worktree_path: &str,
+    resolved: &ResolvedTaskSpawn,
+    error: &str,
+) -> Result<(), String> {
+    let result = format!("failed to prepare task {task_id}: {error}");
+    db.cancel_running_stage_runs(task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    db.update_pipeline_item_activity(task_id, "unread")
+        .map_err(|e| format!("db error: {}", e))?;
+    let run_id = generate_failure_run_id(task_id);
+    db.insert_stage_run(NewStageRun {
+        id: &run_id,
+        task_id,
+        stage: &resolved.stage_name,
+        kind: "main",
+        agent: resolved.stage_agent.as_deref(),
+        agent_provider: Some(resolved.provider.as_str()),
+        model: resolved.model.as_deref(),
+        status: "failed",
+        result: Some(&result),
+        feedback: Some("task preparation failed"),
+        session_id: Some(task_id),
+        provider_session_id: None,
+        cwd: Some(worktree_path),
+        resumed_from_run_id: None,
+    })
+    .map_err(|e| format!("db error: {}", e))?;
+    Ok(())
+}
+
+fn generate_failure_run_id(task_id: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("run-{task_id}-{nanos}")
 }
 
 fn resolve_task_spawn(
@@ -1047,7 +1356,8 @@ fn resolve_task_spawn(
             .clone()
     };
 
-    let agent = if let Some(agent_name) = stage.agent.as_deref() {
+    let stage_agent = request.agent.clone().or_else(|| stage.agent.clone());
+    let agent = if let Some(agent_name) = stage_agent.as_deref() {
         Some(read_agent_definition(&repo.path, agent_name)?)
     } else {
         None
@@ -1077,8 +1387,16 @@ fn resolve_task_spawn(
 
     let provider = resolve_agent_provider(
         request.explicit_provider.as_deref(),
-        request.default_provider.as_deref(),
-        stage.agent_provider.as_deref(),
+        if request.agent.is_some() {
+            None
+        } else {
+            request.default_provider.as_deref()
+        },
+        if request.agent.is_some() {
+            None
+        } else {
+            stage.agent_provider.as_deref()
+        },
         agent.as_ref(),
     )?;
     let model = request
@@ -1097,6 +1415,7 @@ fn resolve_task_spawn(
     } else {
         request.allowed_tools
     };
+    let disallowed_tools = request.disallowed_tools;
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
     let stage_name = request
         .stage_override
@@ -1115,13 +1434,18 @@ fn resolve_task_spawn(
         pipeline_def_json,
         stage_name,
         stage_transition: stage.policy.transition.as_str(),
-        stage_agent: stage.agent,
+        stage_agent,
         provider,
         agent_type,
         final_prompt,
         model,
         permission_mode,
         allowed_tools,
+        disallowed_tools,
+        max_turns: request.max_turns,
+        max_budget_usd: request.max_budget_usd,
+        setup_cmds: request.setup_cmds,
+        resume_session_id: request.resume_session_id,
         base_ref: request.base_ref,
         stored_base_ref,
         notify_task_id: request.notify_task_id,
@@ -1136,6 +1460,7 @@ fn insert_new_task_record(
     branch: &str,
     resolved: &ResolvedTaskSpawn,
 ) -> Result<(), String> {
+    let agent_spawn_options_json = agent_spawn_options_json(resolved)?;
     db.insert_pipeline_item(NewPipelineItem {
         id: task_id,
         repo_id: &repo.id,
@@ -1150,11 +1475,24 @@ fn insert_new_task_record(
         activity: "working",
         port_offset: None,
         port_env_json: None,
+        agent_spawn_options_json: Some(&agent_spawn_options_json),
         base_ref: resolved.stored_base_ref.as_deref(),
         notify_task_id: resolved.notify_task_id.as_deref(),
         parent_task_id: resolved.parent_task_id.as_deref(),
     })
     .map_err(|e| format!("db error: {}", e))
+}
+
+fn agent_spawn_options_json(resolved: &ResolvedTaskSpawn) -> Result<String, String> {
+    serde_json::to_string(&serde_json::json!({
+        "model": resolved.model,
+        "permissionMode": resolved.permission_mode,
+        "allowedTools": resolved.allowed_tools,
+        "disallowedTools": resolved.disallowed_tools,
+        "maxTurns": resolved.max_turns,
+        "maxBudgetUsd": resolved.max_budget_usd,
+    }))
+    .map_err(|e| format!("serialize error: {}", e))
 }
 
 fn persist_task_ports(
@@ -1164,15 +1502,44 @@ fn persist_task_ports(
 ) -> Result<(), String> {
     let first_port = port_env
         .values()
-        .next()
-        .and_then(|value| value.parse::<i64>().ok());
+        .filter_map(|value| value.parse::<i64>().ok())
+        .min();
     let port_env_json = if port_env.is_empty() {
         None
     } else {
-        Some(serde_json::to_string(&port_env).map_err(|e| format!("serialize error: {}", e))?)
+        let ordered: std::collections::BTreeMap<&String, &String> = port_env.iter().collect();
+        Some(serde_json::to_string(&ordered).map_err(|e| format!("serialize error: {}", e))?)
     };
     db.update_pipeline_item_ports(task_id, first_port, port_env_json.as_deref())
         .map_err(|e| format!("db error: {}", e))
+}
+
+pub(crate) fn reopen_task_for_api(db: &Db, task_or_branch_id: &str) -> Result<String, String> {
+    let task_id = db
+        .resolve_pipeline_item_id(task_or_branch_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("task not found: {task_or_branch_id}"))?;
+    let item = db
+        .get_pipeline_item(&task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+    let repo = db
+        .get_repo(&item.repo_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("repo not found for task: {task_id}"))?;
+    let config_root = db
+        .get_task_worktree_path(&task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .unwrap_or(repo.path);
+    let repo_config = read_repo_config(&config_root)?;
+
+    db.release_task_ports(&task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    let port_env = claim_task_ports(db, &task_id, &repo_config)?;
+    persist_task_ports(db, &task_id, &port_env)?;
+    db.reopen_pipeline_item(&task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    Ok(task_id)
 }
 
 fn create_new_task_worktree(
@@ -1228,15 +1595,24 @@ fn prepare_new_task_session(
         resolved.model.clone(),
         resolved.permission_mode.clone(),
         resolved.allowed_tools.clone(),
+        resolved.disallowed_tools.clone(),
+        resolved.max_turns,
+        resolved.max_budget_usd,
         mcp_config_path,
         &spawn_env,
         worktree_path,
-        worktree_repo_config.setup.as_deref().unwrap_or(&[]),
-        None,
+        &new_task_setup_cmds(&worktree_repo_config, &resolved.setup_cmds),
+        resolved.resume_session_id.as_deref(),
     )?;
     Ok(PreparedNewTaskSession {
         spawn_env,
         session,
         provider_session_id,
     })
+}
+
+fn new_task_setup_cmds(repo_config: &RepoConfig, request_setup_cmds: &[String]) -> Vec<String> {
+    let mut setup = repo_config.setup.clone().unwrap_or_default();
+    setup.extend(request_setup_cmds.iter().cloned());
+    setup
 }

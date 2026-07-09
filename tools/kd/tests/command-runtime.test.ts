@@ -1,10 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkRequiredCommands } from "../src/runtime/doctor";
+import { findWorkspaceDesktopDevProcesses, killWorkspaceDesktopDevProcesses } from "../src/runtime/daemon";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../src/runtime/mobile-commands";
+import {
+  buildProductionMobileQaCommands,
+  executeProductionMobileQa,
+  validateProductionMobileConfig
+} from "../src/runtime/mobile-qa";
 import { getPortStatuses } from "../src/runtime/port-status";
 import { respawnTmuxWindow, startTmuxSession, stopTmuxWindow } from "../src/runtime/tmux";
 import { nodeCommandRunner, type CommandRunner } from "../src/runtime/process";
@@ -61,6 +67,137 @@ describe("command runtime helpers", () => {
     });
   });
 
+  it("builds the automated production mobile QA command sequence", () => {
+    expect(buildProductionMobileQaCommands("/repo")).toEqual([
+      {
+        name: "typecheck",
+        command: "pnpm",
+        args: ["--dir", "/repo/apps/mobile", "run", "typecheck"]
+      },
+      {
+        name: "unit",
+        command: "pnpm",
+        args: ["--dir", "/repo/apps/mobile", "run", "test"]
+      },
+      {
+        name: "simulator-preflight",
+        command: "pnpm",
+        args: ["--dir", "/repo/apps/mobile", "run", "test:e2e:preflight"]
+      },
+      {
+        name: "simulator-smoke",
+        command: "pnpm",
+        args: ["--dir", "/repo/apps/mobile", "run", "test:e2e:smoke"]
+      }
+    ]);
+  });
+
+  it("validates production mobile config against kd production identity", () => {
+    const checks = validateProductionMobileConfig({
+      prod: {
+        runtimeVersion: "1.0.0",
+        name: "prod",
+        displayName: "Kanna",
+        scheme: "kanna",
+        iosBundleId: "build.kanna.app",
+        iosGoogleServicesFile: "./firebase/GoogleService-Info.production.plist",
+        firebase: {
+          apiKey: "real-key",
+          authDomain: "kanna-build.firebaseapp.com",
+          projectId: "kanna-build",
+          storageBucket: "kanna-build.firebasestorage.app",
+          messagingSenderId: "402613185450",
+          appId: "1:402613185450:ios:adcedeadcd241285d859d3"
+        },
+        relayUrl: "wss://relay.kanna.build",
+        otaChannel: "production"
+      }
+    });
+
+    expect(checks.every((check) => check.ok)).toBe(true);
+  });
+
+  it("reports production mobile config drift", () => {
+    const checks = validateProductionMobileConfig({
+      prod: {
+        runtimeVersion: "",
+        name: "prod",
+        displayName: "Kanna Dev",
+        scheme: "kanna-dev",
+        iosBundleId: "build.kanna.app.dev",
+        iosGoogleServicesFile: "./firebase/GoogleService-Info.staging.plist",
+        firebase: {
+          apiKey: "kanna-local",
+          projectId: "kanna-local",
+          appId: ""
+        },
+        relayUrl: "ws://127.0.0.1:9080",
+        otaChannel: "staging"
+      }
+    });
+
+    expect(checks.filter((check) => !check.ok).map((check) => check.name)).toEqual([
+      "displayName",
+      "scheme",
+      "iosBundleId",
+      "iosGoogleServicesFile",
+      "runtimeVersion",
+      "firebase.projectId",
+      "firebase.storageBucket",
+      "firebase.apiKey",
+      "firebase.appId",
+      "relayUrl",
+      "otaChannel"
+    ]);
+  });
+
+  it("runs production mobile QA commands with production E2E environment defaults", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "mobile-qa-"));
+    await mkdir(join(repoRoot, "apps/mobile/src"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "apps/mobile/src/mobileEnvironments.json"),
+      JSON.stringify({
+        prod: {
+          runtimeVersion: "1.0.0",
+          name: "prod",
+          displayName: "Kanna",
+          scheme: "kanna",
+          iosBundleId: "build.kanna.app",
+          iosGoogleServicesFile: "./firebase/GoogleService-Info.production.plist",
+          firebase: {
+            apiKey: "real-key",
+            projectId: "kanna-build",
+            storageBucket: "kanna-build.firebasestorage.app",
+            appId: "1:402613185450:ios:adcedeadcd241285d859d3"
+          },
+          relayUrl: "wss://relay.kanna.build",
+          otaChannel: "production"
+        }
+      })
+    );
+    const envs: Array<NodeJS.ProcessEnv | undefined> = [];
+    const runner: CommandRunner = {
+      async run(_command, _args, options) {
+        envs.push(options?.env);
+        return { exitCode: 0, stdout: "ok", stderr: "" };
+      }
+    };
+
+    try {
+      const result = await executeProductionMobileQa({
+        repoRoot,
+        env: { KANNA_APPIUM_PORT: "4723", KANNA_MOBILE_PORT: "8081" },
+        runner
+      });
+
+      expect(result.commands).toHaveLength(4);
+      expect(envs.every((env) => env?.KANNA_APP_ENV === "prod")).toBe(true);
+      expect(envs.every((env) => env?.KANNA_E2E_DESKTOP_SERVER_URL === "http://127.0.0.1:48120")).toBe(true);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("reports required command availability for doctor", async () => {
     const runner: CommandRunner = {
       async run(_command, args) {
@@ -78,6 +215,46 @@ describe("command runtime helpers", () => {
       { name: "pnpm", found: true, path: "/usr/bin/pnpm" },
       { name: "tmux", found: false }
     ]);
+  });
+
+  it("finds only this worktree's desktop dev processes for restart cleanup", () => {
+    const repoRoot = "/repo/task-abc";
+    const psOutput = [
+      `101 node /repo/task-abc/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
+      `102 node /repo/task-abc/apps/desktop/node_modules/.bin/../@tauri-apps/cli/tauri.js dev --config /repo/task-abc/apps/desktop/src-tauri/tauri.conf.local.json`,
+      `103 /repo/task-abc/.build/debug/kanna-desktop`,
+      `104 /repo/task-abc/.build/debug/kanna-server`,
+      `105 node /repo/other/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
+    ].join("\n");
+
+    expect(findWorkspaceDesktopDevProcesses(repoRoot, psOutput).map((process) => process.pid)).toEqual([101, 102, 103]);
+  });
+
+  it("kills matched desktop dev processes before a component restart", async () => {
+    const killed: number[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        expect(command).toBe("ps");
+        expect(args).toEqual(["-axo", "pid=,command="]);
+        return {
+          exitCode: 0,
+          stdout: [
+            `101 node /repo/task-abc/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
+            `102 /repo/task-abc/.build/debug/kanna-desktop`,
+          ].join("\n"),
+          stderr: ""
+        };
+      }
+    };
+
+    const result = await killWorkspaceDesktopDevProcesses({
+      repoRoot: "/repo/task-abc",
+      runner,
+      killProcess: (pid) => killed.push(pid)
+    });
+
+    expect(result.map((process) => process.pid)).toEqual([101, 102]);
+    expect(killed).toEqual([101, 102]);
   });
 
   it("stops a single tmux window without killing the dev session", async () => {
@@ -137,6 +314,11 @@ describe("command runtime helpers", () => {
       },
       {
         command: "tmux",
+        args: ["-L", "kanna-task", "set-option", "-t", "kanna-task", "remain-on-exit", "on"],
+        env: undefined
+      },
+      {
+        command: "tmux",
         args: [
           "-L",
           "kanna-task",
@@ -149,6 +331,11 @@ describe("command runtime helpers", () => {
         },
         stdin:
           "respawn-window '-k' '-t' 'kanna-task:desktop' '-c' '/repo/apps/desktop' '-e' 'KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL=dev@example.com' 'pnpm exec tauri dev'\n"
+      },
+      {
+        command: "tmux",
+        args: ["-L", "kanna-task", "list-windows", "-t", "kanna-task", "-F", "#{window_name}"],
+        env: undefined
       }
     ]);
     expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("dev@example.com");
@@ -182,6 +369,7 @@ describe("command runtime helpers", () => {
     expect(calls).toEqual([
       "tmux -L kanna-task new-session -d -s kanna-task -n desktop -c /repo/apps/desktop desktop",
       "tmux -L kanna-task list-windows -t kanna-task -F #{window_name}",
+      "tmux -L kanna-task set-option -t kanna-task remain-on-exit on",
       "tmux -L kanna-task new-window -t kanna-task -n mobile -c /repo/apps/mobile mobile",
       "tmux -L kanna-task new-window -t kanna-task -n emulators -c /repo emulators"
     ]);

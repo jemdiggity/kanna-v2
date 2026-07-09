@@ -1,5 +1,41 @@
 use super::*;
 
+#[test]
+fn claim_task_ports_skips_reserved_ports_and_offsets() {
+    let config = test_config("reserved-port-claim");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Use reserved ports",
+        Some("Reserved ports"),
+        "in progress",
+        "2026-04-18 10:00:00",
+    )
+    .unwrap();
+    let repo_config = super::super::definitions::RepoConfig {
+        ports: Some(HashMap::from([
+            ("KANNA_DEV_PORT".to_string(), 1420),
+            ("API_PORT".to_string(), 3000),
+        ])),
+        reserved_ports: vec![1421],
+        reserved_port_offsets: vec![1],
+        ..Default::default()
+    };
+
+    let port_env =
+        super::super::environment::claim_task_ports(&db, "task-1", &repo_config).unwrap();
+
+    assert_eq!(
+        port_env,
+        HashMap::from([
+            ("KANNA_DEV_PORT".to_string(), "1422".to_string()),
+            ("API_PORT".to_string(), "3002".to_string()),
+        ])
+    );
+}
+
 fn write_agent_repo(label: &str, agent_md: &str, extend_md: Option<&str>) -> std::path::PathBuf {
     let repo_root =
         std::env::temp_dir().join(format!("kanna-agent-def-{label}-{}", std::process::id()));
@@ -424,6 +460,9 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some(&preamble),
         None,
         None,
@@ -514,6 +553,9 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some(&preamble),
         None,
         Some("/tmp/repo/.kanna-worktrees/task-123"),
@@ -562,6 +604,9 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
         None,
@@ -589,6 +634,9 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
         None,
@@ -613,6 +661,9 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
         None,
@@ -723,12 +774,19 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
                 prompt: format!("Use {provider}"),
                 display_name: None,
                 pipeline_name: None,
+                stage: None,
                 base_ref: None,
+                agent: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: None,
                 model: Some("model-a".to_string()),
                 permission_mode: Some("dontAsk".to_string()),
                 allowed_tools: Some(vec!["Bash".to_string()]),
+                disallowed_tools: None,
+                max_turns: None,
+                max_budget_usd: None,
+                setup_cmds: None,
+                resume_session_id: None,
                 notify_task_id: None,
                 parent_task_id: None,
                 blocker_task_ids: None,
@@ -753,6 +811,192 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
 }
 
 #[test]
+fn prepare_task_uses_create_request_agent_selector() {
+    let repo_root = init_git_repo("create-request-agent-selector");
+    let config = test_config("create-request-agent-selector");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let agent_dir = repo_root.join(".kanna/agents/setup");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nagent_provider: codex\nmodel: gpt-5\npermission_mode: dontAsk\nallowed_tools:\n  - Bash\n---\nsetup agent prompt",
+    )
+    .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Set up Kanna for this repository.".to_string(),
+            display_name: Some("Set Up Repository".to_string()),
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: Some("setup".to_string()),
+            agent_provider: None,
+            agent_type: Some("pty".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(prepared.stage_agent.as_deref(), Some("setup"));
+    assert_eq!(prepared.agent_provider, "codex");
+    assert_eq!(prepared.model.as_deref(), Some("gpt-5"));
+    match prepared.session {
+        PreparedSessionSpawn::Pty {
+            args,
+            agent_provider,
+            ..
+        } => {
+            assert_eq!(agent_provider, DaemonAgentProvider::Codex);
+            let command = args.join(" ");
+            assert!(command.contains("setup agent prompt"));
+            assert!(!command.contains("implement agent prompt"));
+        }
+        _ => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_persists_create_spawn_options_and_custom_setup() {
+    let repo_root = init_git_repo("create-spawn-options");
+    let config = test_config("create-spawn-options");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Run with custom options".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            model: Some("opus".to_string()),
+            permission_mode: Some("acceptEdits".to_string()),
+            allowed_tools: Some(vec!["Bash".to_string()]),
+            disallowed_tools: Some(vec!["WebFetch".to_string()]),
+            max_turns: Some(7),
+            max_budget_usd: Some(1.5),
+            setup_cmds: Some(vec!["echo custom setup".to_string()]),
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    let spawn_options: serde_json::Value = serde_json::from_str(
+        &db.get_test_pipeline_item_spawn_options(&prepared.created_task.task_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(spawn_options["model"], "opus");
+    assert_eq!(spawn_options["permissionMode"], "acceptEdits");
+    assert_eq!(spawn_options["allowedTools"], serde_json::json!(["Bash"]));
+    assert_eq!(
+        spawn_options["disallowedTools"],
+        serde_json::json!(["WebFetch"])
+    );
+    assert_eq!(spawn_options["maxTurns"], 7);
+    assert_eq!(spawn_options["maxBudgetUsd"], 1.5);
+
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(command.contains("echo custom setup"));
+            assert!(command.contains("--model opus"));
+            assert!(command.contains("--permission-mode acceptEdits"));
+            assert!(command.contains("--allowedTools Bash"));
+            assert!(command.contains("--disallowedTools WebFetch"));
+            assert!(command.contains("--max-turns 7"));
+            assert!(command.contains("--max-budget-usd 1.5"));
+        }
+        _ => panic!("expected pty spawn"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_for_api_resumes_requested_claude_session() {
+    let repo_root = init_git_repo("create-resume-claude");
+    let config = test_config("create-resume-claude");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let resume_session_id = "364643cc-5e6d-48fc-86ca-ca7764380900";
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Resume imported work".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: Some(resume_session_id.to_string()),
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        prepared.provider_session_id.as_deref(),
+        Some(resume_session_id)
+    );
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(command.contains(&format!("--resume '{resume_session_id}'")));
+            assert!(!command.contains("--session-id"));
+        }
+        _ => panic!("expected pty spawn"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_task_for_api_creates_worktree_without_cargo_config() {
     let repo_root = init_git_repo("no-cargo-config");
     let config = test_config("no-cargo-config");
@@ -768,12 +1012,19 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             prompt: "Create a task worktree".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -813,12 +1064,19 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             prompt: "Use codex".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -889,12 +1147,19 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             prompt: "Use codex".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -939,12 +1204,19 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             prompt: "Use copilot".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("copilot".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -1012,12 +1284,19 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             prompt: "Use codex".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("pty".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -1072,12 +1351,19 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             prompt: "Child prompt".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: Some("parent-1".to_string()),
@@ -1111,12 +1397,19 @@ fn prepare_task_rejects_missing_parent_task() {
             prompt: "Child prompt".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: Some("missing-parent".to_string()),
@@ -1229,12 +1522,19 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             prompt: "Implement the fallback".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -1333,12 +1633,19 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             prompt: "Use the configured default provider".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: None,
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -1361,12 +1668,19 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             prompt: "Use the explicit provider".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 

@@ -1,4 +1,5 @@
 use super::{configure_shared_database_connection, database_create_flags, Db};
+use crate::db::CURRENT_SCHEMA_MIGRATIONS;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
@@ -19,6 +20,30 @@ impl Db {
         let db = Self { conn };
         db.init_test_schema()?;
         Ok(db)
+    }
+
+    #[cfg(test)]
+    pub fn get_test_pipeline_item_ports(
+        &self,
+        id: &str,
+    ) -> Result<(Option<i64>, Option<String>), rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT port_offset, port_env FROM pipeline_item WHERE id = ?",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn get_test_pipeline_item_spawn_options(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT agent_spawn_options FROM pipeline_item WHERE id = ?",
+            [id],
+            |row| row.get(0),
+        )
     }
 
     #[cfg(test)]
@@ -112,6 +137,11 @@ impl Db {
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE schema_migrations (
+                id TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE terminal_session (
                 id TEXT PRIMARY KEY,
                 repo_id TEXT NOT NULL,
@@ -126,8 +156,43 @@ impl Db {
                 blocker_item_id TEXT NOT NULL,
                 PRIMARY KEY (blocked_item_id, blocker_item_id)
             );
+
+            CREATE TABLE operator_event (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                pipeline_item_id TEXT,
+                repo_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE activity_log (
+                pipeline_item_id TEXT NOT NULL,
+                activity TEXT NOT NULL,
+                seconds INTEGER NOT NULL,
+                PRIMARY KEY (pipeline_item_id, activity)
+            );
+
+            CREATE TABLE task_transfer (
+                id TEXT PRIMARY KEY,
+                direction TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_peer_id TEXT,
+                target_peer_id TEXT,
+                source_task_id TEXT,
+                local_task_id TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT,
+                error TEXT,
+                payload_json TEXT
+            );
             "#,
         )?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO schema_migrations (id) VALUES (?1)")?;
+        for id in CURRENT_SCHEMA_MIGRATIONS {
+            stmt.execute([id])?;
+        }
         Ok(())
     }
 
@@ -256,6 +321,67 @@ impl Db {
         self.conn.execute(
             "UPDATE pipeline_item SET last_output_preview = ? WHERE id = ?",
             (preview, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn set_test_pipeline_item_closed_at(
+        &self,
+        id: &str,
+        closed_at: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET closed_at = ?, updated_at = ? WHERE id = ?",
+            (closed_at, closed_at, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_activity_log(
+        &self,
+        pipeline_item_id: &str,
+        activity: &str,
+        seconds: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO activity_log (pipeline_item_id, activity, seconds)
+             VALUES (?, ?, ?)",
+            (pipeline_item_id, activity, seconds),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_operator_event(
+        &self,
+        event_type: &str,
+        pipeline_item_id: Option<&str>,
+        repo_id: Option<&str>,
+        created_at: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO operator_event (event_type, pipeline_item_id, repo_id, created_at)
+             VALUES (?, ?, ?, ?)",
+            (event_type, pipeline_item_id, repo_id, created_at),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_task_transfer(
+        &self,
+        id: &str,
+        direction: &str,
+        status: &str,
+        payload_json: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO task_transfer (
+                id, direction, status, source_peer_id, source_task_id, payload_json
+             ) VALUES (?, ?, ?, 'peer-1', 'source-task-1', ?)",
+            (id, direction, status, payload_json),
         )?;
         Ok(())
     }

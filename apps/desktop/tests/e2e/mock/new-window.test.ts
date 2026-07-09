@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
-import { importTestRepo, resetDatabase } from "../helpers/reset";
+import { resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, getVueState, queryDb } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
@@ -99,6 +99,41 @@ async function waitForWindowCount(
 
 async function setSelectedItem(client: WebDriverClient, itemId: string): Promise<void> {
   await callVueMethod(client, "store.selectItem", itemId);
+}
+
+async function importWindowTestRepo(
+  client: WebDriverClient,
+  repoPath: string,
+  name: string,
+): Promise<string> {
+  const existing = await queryDb(
+    client,
+    "SELECT id FROM repo WHERE path = ? LIMIT 1",
+    [repoPath],
+  ) as Array<{ id?: string | null }>;
+  const repoId = existing[0]?.id ?? `repo-${randomUUID()}`;
+
+  if (existing[0]?.id) {
+    await execDb(
+      client,
+      "UPDATE repo SET name = ?, hidden = 0, last_opened_at = datetime('now') WHERE id = ?",
+      [name, repoId],
+    );
+  } else {
+    await execDb(
+      client,
+      `INSERT INTO repo (id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at)
+       VALUES (?, ?, ?, ?, 0, 0, datetime('now'), datetime('now'))`,
+      [repoId, repoPath, name, "main"],
+    );
+  }
+
+  const refreshResult = await callVueMethod(client, "refreshRepos");
+  if (refreshResult && typeof refreshResult === "object" && "__error" in refreshResult) {
+    throw new Error(String((refreshResult as { __error: unknown }).__error));
+  }
+  await callVueMethod(client, "store.selectRepo", repoId);
+  return repoId;
 }
 
 async function waitForCurrentItemId(
@@ -213,7 +248,7 @@ describe("new window", () => {
   });
 
   it("opens a second window with the same repo data but independent task selection", async () => {
-    const repoId = await importTestRepo(client, testRepoPath, "new-window-test");
+    const repoId = await importWindowTestRepo(client, testRepoPath, "new-window-test");
     const taskAId = randomUUID();
     const taskBId = randomUUID();
 
@@ -285,7 +320,7 @@ describe("new window", () => {
   });
 
   it("syncs unread-to-read changes across open windows", async () => {
-    const repoId = await importTestRepo(client, testRepoPath, "new-window-read-sync-test");
+    const repoId = await importWindowTestRepo(client, testRepoPath, "new-window-read-sync-test");
     const idleTaskId = randomUUID();
     const unreadTaskId = randomUUID();
 
@@ -347,7 +382,7 @@ describe("new window", () => {
   });
 
   it("closes the focused secondary window without changing the remaining window selection", async () => {
-    const repoId = await importTestRepo(client, testRepoPath, "new-window-close-test");
+    const repoId = await importWindowTestRepo(client, testRepoPath, "new-window-close-test");
     const taskAId = randomUUID();
     const taskBId = randomUUID();
 
@@ -412,7 +447,7 @@ describe("new window", () => {
   });
 
   it("prunes stale saved secondary windows when the only live main window closes", async () => {
-    const repoId = await importTestRepo(client, testRepoPath, "new-window-close-stale-snapshot-test");
+    const repoId = await importWindowTestRepo(client, testRepoPath, "new-window-close-stale-snapshot-test");
     const taskId = randomUUID();
 
     await execDb(
@@ -475,7 +510,7 @@ describe("new window", () => {
   });
 
   it("closes the source window while keeping the secondary window alive", async () => {
-    const repoId = await importTestRepo(client, testRepoPath, "new-window-close-source-test");
+    const repoId = await importWindowTestRepo(client, testRepoPath, "new-window-close-source-test");
     const taskAId = randomUUID();
     const taskBId = randomUUID();
 

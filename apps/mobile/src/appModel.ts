@@ -8,6 +8,7 @@ import type { MobileAuthSession } from "./lib/firebase/auth";
 import { createConfiguredMobileAuthSession } from "./lib/firebase/sdk";
 import {
   createFirestoreTaskIndex,
+  type CloudDesktopRecord,
   type CloudTaskIndex
 } from "./lib/firebase/taskIndex";
 import { createLanTransport, type FetchLike } from "./lib/transports/lanTransport";
@@ -15,7 +16,10 @@ import {
   createRelayDesktopClient,
   type RelayDesktopClient
 } from "./lib/transports/relayClient";
-import { createRemoteTransport } from "./lib/transports/remoteTransport";
+import {
+  createRemoteTransport,
+  type RemoteDesktopRecord
+} from "./lib/transports/remoteTransport";
 import { readExpoConfig } from "./lib/expoConfig";
 import { createRootNavigator } from "./navigation/RootNavigator";
 import { installE2eTrustSeedHandler } from "./e2eTrustSeed";
@@ -265,17 +269,26 @@ function createClientForMode({
     });
     const resolvedTaskIndex = taskIndex ?? createFirestoreTaskIndex();
     const listCloudTasksForRouting = async () => {
+      const activeDesktopIds = await relayClient.listActiveDesktopIds().catch(() => null);
       const liveTasks = getLiveCloudTasks();
       if (liveTasks.length > 0 || hasLiveCloudTasks()) {
-        return liveTasks;
+        return preferActiveCloudTaskRoutes(liveTasks, activeDesktopIds);
       }
-      return resolvedTaskIndex.listRecentTasks(authState.user.uid);
+      return preferActiveCloudTaskRoutes(
+        await resolvedTaskIndex.listRecentTasks(authState.user.uid),
+        activeDesktopIds
+      );
+    };
+    const listCloudDesktopRecords = async () => {
+      const activeDesktopIds = await relayClient.listActiveDesktopIds().catch(() => null);
+      const records = await resolvedTaskIndex.listDesktops(authState.user.uid);
+      return records.map((record) =>
+        mapCloudDesktopRecord(record, activeDesktopIds)
+      );
     };
     const cloudClient = createKannaClient(
       createRemoteTransport({
-        async listDesktopRecords() {
-          return getTrustedDesktops().map(mapTrustedDesktopRecord);
-        },
+        listDesktopRecords: listCloudDesktopRecords,
         getSelectedDesktopId,
         invokeDesktop: relayClient.invokeDesktop,
         observeTaskTerminal: relayClient.observeTaskTerminal,
@@ -452,7 +465,7 @@ export function createCloudWithLanFallbackClient(
     searchTasks: (query) =>
       useLanFallback() ? lanClient.searchTasks(query) : cloudClient.searchTasks(query),
     createTask: (input) =>
-      useLanFallback() ? lanClient.createTask(input) : cloudClient.createTask(input),
+      lanFallbackEnabled() ? lanClient.createTask(input) : cloudClient.createTask(input),
     runMergeAgent: (taskId) =>
       useLanFallback()
         ? lanClient.runMergeAgent(taskId)
@@ -545,14 +558,81 @@ function reposFromTasks(tasks: readonly TaskSummary[]): RepoSummary[] {
   return Array.from(reposById, ([id, name]) => ({ id, name }));
 }
 
-function mapTrustedDesktopRecord(desktop: TrustedDesktopRecord) {
+function preferActiveCloudTaskRoutes<T extends TaskSummary>(
+  tasks: T[],
+  activeDesktopIds: Set<string> | null
+): T[] {
+  if (!activeDesktopIds || activeDesktopIds.size === 0) {
+    return tasks;
+  }
+
+  const tasksById = new Map<string, T>();
+  for (const task of tasks) {
+    const candidate = markCloudTaskOwnerOnline(task, activeDesktopIds);
+    const existing = tasksById.get(task.id);
+    if (!existing) {
+      tasksById.set(task.id, candidate);
+      continue;
+    }
+
+    if (
+      !isOwnedByActiveDesktop(existing, activeDesktopIds) &&
+      isOwnedByActiveDesktop(candidate, activeDesktopIds)
+    ) {
+      tasksById.set(task.id, candidate);
+    }
+  }
+
+  return Array.from(tasksById.values());
+}
+
+function markCloudTaskOwnerOnline<T extends TaskSummary>(
+  task: T,
+  activeDesktopIds: Set<string>
+): T {
+  const ownerDesktopId = getCloudTaskOwnerDesktopId(task);
+  if (!ownerDesktopId) {
+    return task;
+  }
+
+  const ownerOnline = activeDesktopIds.has(ownerDesktopId);
+  if ((task as { ownerOnline?: unknown }).ownerOnline === ownerOnline) {
+    return task;
+  }
+
+  return {
+    ...task,
+    ownerOnline
+  };
+}
+
+function isOwnedByActiveDesktop(
+  task: TaskSummary,
+  activeDesktopIds: Set<string>
+): boolean {
+  const ownerDesktopId = getCloudTaskOwnerDesktopId(task);
+  return ownerDesktopId ? activeDesktopIds.has(ownerDesktopId) : false;
+}
+
+function getCloudTaskOwnerDesktopId(task: TaskSummary): string | null {
+  const ownerDesktopId = (task as { ownerDesktopId?: unknown }).ownerDesktopId;
+  return typeof ownerDesktopId === "string" && ownerDesktopId.length > 0
+    ? ownerDesktopId
+    : null;
+}
+
+function mapCloudDesktopRecord(
+  desktop: CloudDesktopRecord,
+  activeDesktopIds: Set<string> | null
+): RemoteDesktopRecord {
+  const online = activeDesktopIds?.has(desktop.desktopId) ?? false;
   return {
     desktopId: desktop.desktopId,
     displayName: desktop.displayName,
-    online: true,
-    reachableViaRelay: false,
-    connectionMode: "lan" as const,
-    lastSeenAt: desktop.lastSeenAt
+    online,
+    reachableViaRelay: online,
+    connectionMode: "internet",
+    lastSeenAt: desktop.updatedAt
   };
 }
 

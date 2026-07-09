@@ -315,7 +315,7 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
 }
 
 #[tokio::test]
-async fn create_task_route_ignores_stage_override_and_starts_pipeline_first_stage() {
+async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -381,10 +381,10 @@ async fn create_task_route_ignores_stage_override_and_starts_pipeline_first_stag
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         let session_id = match command {
             DaemonCommand::SpawnAgent { session_id, params } => {
-                assert_eq!(params.prompt, "Implement this first: Ship safely");
+                assert_eq!(params.prompt, "Ship safely");
                 let system_prompt = params.system_prompt.expect("system prompt");
-                assert!(system_prompt.contains("stage `in progress`"));
-                assert!(!system_prompt.contains("stage `pr`"));
+                assert!(system_prompt.contains("stage `pr`"));
+                assert!(!system_prompt.contains("stage `in progress`"));
                 session_id
             }
             other => panic!("expected SpawnAgent command, got {:?}", other),
@@ -449,11 +449,11 @@ async fn create_task_route_ignores_stage_override_and_starts_pipeline_first_stag
         .await
         .unwrap();
     let created: CreateTaskResponse = from_slice(&body).unwrap();
-    assert_eq!(created.stage, "in progress");
+    assert_eq!(created.stage, "pr");
 
     let db = Db::open(&config.db_path).unwrap();
     let created_source = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
-    assert_eq!(created_source.stage.as_deref(), Some("in progress"));
+    assert_eq!(created_source.stage.as_deref(), Some("pr"));
 
     daemon_server.await.unwrap();
     let _ = std::fs::remove_file(&socket_path);
@@ -702,6 +702,105 @@ async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawn
     );
 
     let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn create_task_route_preserves_failed_prepare_diagnostics() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-bad-base-{unique}"));
+    init_test_git_repo(&repo_root);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: std::env::temp_dir()
+            .join(format!("kanna-http-create-bad-base-daemon-{unique}"))
+            .to_string_lossy()
+            .to_string(),
+        db_path: Db::test_db_path(&format!("http-api-create-bad-base-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-create-bad-base-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Keep diagnostics for this failed task",
+                        "baseRef": "refs/heads/does-not-exist"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("task "));
+    assert!(body.contains("failed to prepare"));
+
+    let db = Db::open(&config.db_path).unwrap();
+    let items = db.list_recent_pipeline_items().unwrap();
+    assert_eq!(items.len(), 1);
+    let task_id = items[0].id.clone();
+    assert_eq!(items[0].activity.as_deref(), Some("unread"));
+    let runs = db.list_stage_runs_for_task(&task_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "failed");
+    assert!(runs[0]
+        .result
+        .as_deref()
+        .unwrap_or_default()
+        .contains("failed to prepare task"));
+    drop(db);
+
+    let logs_response = app
+        .oneshot(
+            Request::get(format!("/v1/tasks/{task_id}/logs"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let logs = axum::body::to_bytes(logs_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let logs = String::from_utf8_lossy(&logs);
+    assert!(logs.contains("failed to prepare task"));
+    assert!(logs.contains("refs/heads/does-not-exist"));
+
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
@@ -967,7 +1066,7 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
 }
 
 #[tokio::test]
-async fn create_task_route_rolls_back_prepared_task_when_daemon_spawn_fails() {
+async fn create_task_route_preserves_failed_spawn_diagnostics() {
     use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -1045,6 +1144,7 @@ async fn create_task_route_rolls_back_prepared_task_when_daemon_spawn_fails() {
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
     let response = app
+        .clone()
         .oneshot(
             Request::post("/v1/tasks")
                 .header("content-type", "application/json")
@@ -1062,24 +1162,61 @@ async fn create_task_route_rolls_back_prepared_task_when_daemon_spawn_fails() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("task "));
+    assert!(body.contains("failed to spawn"));
     let (task_id, worktree_path) = daemon_server.await.unwrap();
     let db = Db::open(&config.db_path).unwrap();
-    assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 0);
-    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+    assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
     assert_eq!(
         db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
-        0
+        1
     );
     assert!(
-        !std::path::Path::new(&worktree_path).exists(),
-        "failed spawn should remove prepared worktree {worktree_path}"
+        std::path::Path::new(&worktree_path).exists(),
+        "failed spawn should preserve prepared worktree {worktree_path}"
     );
-    assert!(
-        db.get_task_stage_source(&task_id).unwrap().is_none(),
-        "failed spawn should remove task row"
-    );
+    let created_item = db.get_pipeline_item(&task_id).unwrap().unwrap();
+    assert_eq!(created_item.activity.as_deref(), Some("unread"));
+    let runs = db.list_stage_runs_for_task(&task_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "failed");
+    assert!(runs[0]
+        .result
+        .as_deref()
+        .unwrap_or_default()
+        .contains("failed to spawn task"));
+    drop(db);
+
+    let logs_response = app
+        .oneshot(
+            Request::get(format!("/v1/tasks/{task_id}/logs"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let logs = axum::body::to_bytes(logs_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let logs = String::from_utf8_lossy(&logs);
+    assert!(logs.contains("failed to spawn task"));
+    assert!(logs.contains("No such file or directory"));
 
     let _ = std::fs::remove_file(&socket_path);
+    let _ = std::process::Command::new("git")
+        .args(["worktree", "remove", "--force", &worktree_path])
+        .current_dir(&repo_root)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["branch", "-D", &format!("task-{task_id}")])
+        .current_dir(&repo_root)
+        .status();
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
 }

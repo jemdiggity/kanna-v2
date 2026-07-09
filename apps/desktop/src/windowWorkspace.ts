@@ -1,7 +1,8 @@
-import { getSetting, setSetting, type DbHandle } from "@kanna/db";
+import type { DbHandle } from "./types/kanna";
 
 import { emit } from "./emit";
 import { listen } from "./listen";
+import { getDesktopSetting, putDesktopSetting } from "./services/desktopServerClient";
 import { isTauri } from "./tauri-mock";
 
 export interface WindowBootstrap {
@@ -156,7 +157,8 @@ async function readOpenWorkspaceWindowIds(): Promise<Set<string> | null> {
 }
 
 export async function readWorkspaceSnapshot(db: DbHandle): Promise<WorkspaceSnapshot> {
-  const raw = await getSetting(db, WINDOW_WORKSPACE_SETTINGS_KEY);
+  void db;
+  const raw = await getDesktopSetting(WINDOW_WORKSPACE_SETTINGS_KEY);
   if (!raw) return { windows: [] };
 
   try {
@@ -178,7 +180,8 @@ export async function readWorkspaceSnapshot(db: DbHandle): Promise<WorkspaceSnap
 }
 
 export async function writeWorkspaceSnapshot(db: DbHandle, snapshot: WorkspaceSnapshot): Promise<void> {
-  await setSetting(db, WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(normalizeWorkspaceSnapshot(snapshot)));
+  void db;
+  await putDesktopSetting(WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(normalizeWorkspaceSnapshot(snapshot)));
 }
 
 export async function resolveWindowBootstrap(

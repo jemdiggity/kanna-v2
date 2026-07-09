@@ -11,6 +11,10 @@ pub(super) struct RepoConfig {
     pub(super) ports: Option<HashMap<String, u16>>,
     pub(super) flavors: Option<HashMap<String, String>>,
     pub(super) vars: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub(super) reserved_ports: Vec<i64>,
+    #[serde(default)]
+    pub(super) reserved_port_offsets: Vec<i64>,
     pub(super) workspace: Option<RepoWorkspaceConfig>,
 }
 
@@ -293,10 +297,6 @@ pub(super) fn read_agent_definition(
             ))
         }
     }
-    if let Some(vars) = config.vars.as_ref() {
-        definition.prompt = substitute_repo_config_vars(&definition.prompt, vars);
-    }
-
     Ok(definition)
 }
 
@@ -452,91 +452,6 @@ fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Res
     }
 
     Ok(())
-}
-
-const RESERVED_PROMPT_VARS: &[&str] = &[
-    "BASE_REF",
-    "BRANCH",
-    "KANNA_TASK_ID",
-    "PREV_RESULT",
-    "SOURCE_WORKTREE",
-    "TASK_PROMPT",
-];
-
-fn substitute_repo_config_vars(prompt: &str, vars: &HashMap<String, String>) -> String {
-    let chars: Vec<char> = prompt.chars().collect();
-    let mut rendered = String::with_capacity(prompt.len());
-    let mut index = 0;
-
-    while index < chars.len() {
-        if chars[index] != '$' {
-            rendered.push(chars[index]);
-            index += 1;
-            continue;
-        }
-
-        if chars.get(index + 1) == Some(&'{') {
-            if let Some(end_offset) = chars[index + 2..].iter().position(|ch| *ch == '}') {
-                let name: String = chars[index + 2..index + 2 + end_offset].iter().collect();
-                if is_config_var_name(&name) {
-                    if let Some(value) = config_var_value(vars, &name) {
-                        rendered.push_str(value);
-                    } else {
-                        rendered.push('$');
-                        rendered.push('{');
-                        rendered.push_str(&name);
-                        rendered.push('}');
-                    }
-                    index += end_offset + 3;
-                    continue;
-                }
-            }
-        }
-
-        if chars
-            .get(index + 1)
-            .is_some_and(|ch| ch.is_ascii_uppercase())
-        {
-            let start = index + 1;
-            let mut end = start;
-            while chars
-                .get(end)
-                .is_some_and(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || *ch == '_')
-            {
-                end += 1;
-            }
-            let name: String = chars[start..end].iter().collect();
-            if let Some(value) = config_var_value(vars, &name) {
-                rendered.push_str(value);
-            } else {
-                rendered.push('$');
-                rendered.push_str(&name);
-            }
-            index = end;
-            continue;
-        }
-
-        rendered.push('$');
-        index += 1;
-    }
-
-    rendered
-}
-
-fn config_var_value<'a>(vars: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
-    if RESERVED_PROMPT_VARS.contains(&name) {
-        return None;
-    }
-    vars.get(name).map(String::as_str)
-}
-
-fn is_config_var_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    first.is_ascii_uppercase()
-        && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {

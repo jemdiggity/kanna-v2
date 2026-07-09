@@ -27,13 +27,6 @@ interface SetupTaskDetailRow {
   stage_cwd: string | null;
 }
 
-interface SpawnSessionArgs {
-  sessionId?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  agentProvider?: string;
-}
-
 const FIRST_REPO_NAME = "import-repo-primary";
 const SECOND_REPO_NAME = "import-repo-secondary";
 const INVALID_CREATE_REPO_NAME = "repo with spaces";
@@ -83,28 +76,6 @@ async function repoRows(client: WebDriverClient): Promise<RepoOrderRow[]> {
     client,
     "SELECT id, name, sort_order FROM repo WHERE hidden = 0 ORDER BY sort_order ASC, created_at ASC",
   ) as RepoOrderRow[];
-}
-
-async function waitForE2EInvoke<T>(
-  client: WebDriverClient,
-  predicateSource: string,
-  timeoutMs = 5_000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let calls: unknown[] = [];
-
-  while (Date.now() < deadline) {
-    const result = await client.executeSync<{ match: T | null; calls: unknown[] }>(
-      `const calls = window.__KANNA_E2E__.invokes.getAll();
-       const match = calls.find(${predicateSource});
-       return { match: match ? JSON.parse(JSON.stringify(match.args)) : null, calls };`
-    );
-    calls = result.calls;
-    if (result.match) return result.match;
-    await sleep(100);
-  }
-
-  throw new Error(`Timed out waiting for E2E invoke; calls were ${JSON.stringify(calls)}`);
 }
 
 async function clickCommandPaletteCommand(client: WebDriverClient, label: string): Promise<void> {
@@ -274,29 +245,19 @@ describe("import repo", () => {
     expect(details.worktree_path).toBeTruthy();
     expect(details.terminal_cwd).toBe(details.worktree_path);
     expect(details.stage_cwd).toBe(details.worktree_path);
-
-    const spawnCall = await waitForE2EInvoke<SpawnSessionArgs>(
-      client,
-      `(call) => call.cmd === "spawn_session" && call.args?.sessionId === ${JSON.stringify(task.id)}`,
-    );
-    const command = spawnCall.args?.join(" ") ?? "";
-    expect(spawnCall.agentProvider).toBe(task.agent_provider);
-    expect(spawnCall.env?.KANNA_TASK_ID).toBe(task.id);
-    expect(command).toContain("You are the Kanna setup agent.");
-    expect(command).toContain(SETUP_TASK_PROMPT);
-    expect(command).not.toContain("Default task agent that implements work and returns control to Kanna");
+    // Server-backed task creation spawns the daemon from Rust, so the browser
+    // E2E invoke log cannot observe the final shell command. The matching Rust
+    // task_creator/http_api tests assert that agent="setup" expands to the
+    // setup AGENT.md prompt and not the default implement prompt.
   });
 
-  it("shows task count badge as 1", async () => {
-    // The repo header shows the count
-    const text = await client.executeSync<string>(
-      `const headers = document.querySelectorAll(".repo-header");
-       for (const h of headers) {
-         if (h.textContent.includes(${JSON.stringify(FIRST_REPO_NAME)})) return h.textContent;
-       }
-       return "";`
-    );
-    expect(text).toContain("1");
+  it("records one open setup task for the imported repo", async () => {
+    const rows = await queryDb(
+      client,
+      "SELECT COUNT(*) AS count FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL",
+      [firstRepoId],
+    ) as Array<{ count: number }>;
+    expect(rows[0]?.count).toBe(1);
   });
 
   it("shows the setup task under the imported repo", async () => {
@@ -321,16 +282,27 @@ describe("import repo", () => {
     expect(latest.daemon_session_id).toBe(latest.id);
     expect(latest.terminal_cwd).toBe(latest.worktree_path);
     expect(latest.stage_cwd).toBe(latest.worktree_path);
+  });
 
-    const spawnCall = await waitForE2EInvoke<SpawnSessionArgs>(
-      client,
-      `(call) => call.cmd === "spawn_session" && call.args?.sessionId === ${JSON.stringify(latest.id)}`,
+  it("does not launch another setup task when re-importing an already tracked repo", async () => {
+    const beforeRows = await waitForSetupTaskCount(client, 2);
+    const beforeIds = beforeRows.map((row) => row.id).sort();
+    await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
+    const importResult = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__?.setupState;
+       Promise.resolve(ctx?.appTaskCreation?.handleImportRepo?.(
+         ${JSON.stringify(firstRepoPath)},
+         ${JSON.stringify(FIRST_REPO_NAME)},
+         "main"
+       ))
+         .then(() => cb("ok"))
+         .catch((e) => cb("err:" + (e?.message || String(e))));`,
     );
-    const command = spawnCall.args?.join(" ") ?? "";
-    expect(spawnCall.agentProvider).toBe(latest.agent_provider);
-    expect(spawnCall.env?.KANNA_TASK_ID).toBe(latest.id);
-    expect(command).toContain("You are the Kanna setup agent.");
-    expect(command).not.toContain("Default task agent that implements work and returns control to Kanna");
+    expect(importResult).toBe("ok");
+
+    const rows = await waitForSetupTaskCount(client, 2, 1_000);
+    expect(rows.map((row) => row.id).sort()).toEqual(beforeIds);
   });
 
   it("can import a second repo", async () => {

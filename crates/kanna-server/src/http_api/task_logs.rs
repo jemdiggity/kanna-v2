@@ -53,10 +53,21 @@ pub(super) async fn task_logs(
             format!("task not found: {task_id}"),
         ));
     };
+    let persisted = render_persisted_stage_run_logs(&db, &pipeline_item_id, tail).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
     let text = if item.agent_type.as_deref() == Some("agent") {
         render_agent_journal_logs(&state.config.daemon_dir, &pipeline_item_id, tail)?
     } else {
         render_pty_snapshot_logs(&state.config.daemon_dir, &pipeline_item_id).await
+    };
+    let text = if is_missing_live_log_response(&text) {
+        persisted.unwrap_or(text)
+    } else {
+        text
     };
     Ok((
         [(
@@ -66,6 +77,51 @@ pub(super) async fn task_logs(
         text,
     )
         .into_response())
+}
+
+fn render_persisted_stage_run_logs(
+    db: &Db,
+    task_id: &str,
+    tail: usize,
+) -> Result<Option<String>, rusqlite::Error> {
+    let runs = db.list_stage_runs_for_task(task_id)?;
+    let mut rendered = runs
+        .into_iter()
+        .filter_map(|run| {
+            let mut lines = vec![format!(
+                "stage run {} ({}) {}",
+                run.stage, run.kind, run.status
+            )];
+            if let Some(result) = run.result {
+                lines.push(format!("result: {result}"));
+            }
+            if let Some(feedback) = run.feedback {
+                lines.push(format!("feedback: {feedback}"));
+            }
+            if let Some(cwd) = run.cwd {
+                lines.push(format!("cwd: {cwd}"));
+            }
+            if lines.len() == 1 {
+                None
+            } else {
+                Some(lines.join("\n"))
+            }
+        })
+        .collect::<Vec<_>>();
+    if rendered.len() > tail {
+        rendered = rendered.split_off(rendered.len() - tail);
+    }
+    if rendered.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(rendered.join("\n\n")))
+    }
+}
+
+fn is_missing_live_log_response(text: &str) -> bool {
+    text.starts_with("no logs for agent session")
+        || text.starts_with("no relevant agent logs")
+        || text.starts_with("no logs for pty session")
 }
 
 fn render_agent_journal_logs(

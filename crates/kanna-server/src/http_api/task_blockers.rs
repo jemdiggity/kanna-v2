@@ -39,6 +39,8 @@ pub(super) fn persist_resolved_task_blockers(
     task_id: &str,
     resolved_blocker_ids: &[String],
 ) -> Result<(), (axum::http::StatusCode, String)> {
+    db.remove_all_task_blockers(task_id)
+        .map_err(|e| db_write_error("db error", e))?;
     persist_task_blocker_rows(db, task_id, resolved_blocker_ids)?;
     db.update_pipeline_item_activity(task_id, "idle")
         .map_err(|e| db_write_error("db error", e))
@@ -151,9 +153,10 @@ pub(super) async fn start_dormant_task_if_ready(
     task_id: &str,
     blocker_branches: Vec<String>,
 ) -> Result<bool, (axum::http::StatusCode, String)> {
-    let Some(prepared) = prepare_dormant_task(state, task_id, blocker_branches)? else {
+    let prepared = prepare_dormant_task(state, task_id, blocker_branches);
+    if matches!(prepared, Ok(None)) {
         return Ok(false);
-    };
+    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {
@@ -162,8 +165,20 @@ pub(super) async fn start_dormant_task_if_ready(
                 format!("daemon error: {}", e),
             )
         })?;
-    spawn_prepared_dormant_task(state, &mut daemon, prepared).await?;
-    Ok(true)
+    match prepared {
+        Ok(Some(prepared)) => {
+            spawn_prepared_dormant_task(state, &mut daemon, prepared).await?;
+            Ok(true)
+        }
+        Ok(None) => Ok(false),
+        Err(crate::task_creator::DormantStartError::MergeConflict(conflict)) => {
+            create_integration_task_for_conflict(state, &mut daemon, task_id, conflict).await?;
+            Ok(true)
+        }
+        Err(crate::task_creator::DormantStartError::Other(error)) => {
+            Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))
+        }
+    }
 }
 
 async fn start_dormant_task_if_ready_with_daemon(
@@ -172,31 +187,36 @@ async fn start_dormant_task_if_ready_with_daemon(
     task_id: &str,
     blocker_branches: Vec<String>,
 ) -> Result<bool, (axum::http::StatusCode, String)> {
-    let Some(prepared) = prepare_dormant_task(state, task_id, blocker_branches)? else {
-        return Ok(false);
-    };
-    spawn_prepared_dormant_task(state, daemon, prepared).await?;
-    Ok(true)
+    match prepare_dormant_task(state, task_id, blocker_branches) {
+        Ok(Some(prepared)) => {
+            spawn_prepared_dormant_task(state, daemon, prepared).await?;
+            Ok(true)
+        }
+        Ok(None) => Ok(false),
+        Err(crate::task_creator::DormantStartError::MergeConflict(conflict)) => {
+            create_integration_task_for_conflict(state, daemon, task_id, conflict).await?;
+            Ok(true)
+        }
+        Err(crate::task_creator::DormantStartError::Other(error)) => {
+            Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))
+        }
+    }
 }
 
 fn prepare_dormant_task(
     state: &Arc<AppState>,
     task_id: &str,
     blocker_branches: Vec<String>,
-) -> Result<Option<crate::task_creator::PreparedTaskSpawn>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
+) -> Result<Option<crate::task_creator::PreparedTaskSpawn>, crate::task_creator::DormantStartError>
+{
+    let db = Db::open(&state.config.db_path)
+        .map_err(|e| crate::task_creator::DormantStartError::Other(format!("db error: {}", e)))?;
     crate::task_creator::prepare_start_dormant_task_for_api(
         &db,
         &state.config,
         task_id,
         blocker_branches,
     )
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 async fn spawn_prepared_dormant_task(
@@ -212,6 +232,66 @@ async fn spawn_prepared_dormant_task(
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(())
+}
+
+async fn create_integration_task_for_conflict(
+    state: &Arc<AppState>,
+    daemon: &mut DaemonClient,
+    dependent_task_id: &str,
+    conflict: crate::task_creator::DormantMergeConflict,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    let (prepared, previous_blockers) = {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        let previous_blockers = db
+            .list_task_blocker_ids(dependent_task_id)
+            .map_err(|e| db_write_error("db error", e))?;
+        let prepared = crate::task_creator::prepare_integration_task_for_api(
+            &db,
+            &state.config,
+            dependent_task_id,
+            &conflict.base_branch,
+            &conflict.remaining_branches,
+        )
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let integration_task_id = prepared.task_id().to_string();
+        db.replace_task_blockers(
+            dependent_task_id,
+            std::slice::from_ref(&integration_task_id),
+        )
+        .map_err(|e| db_write_error("db error", e))?;
+        log::info!(
+            "inserted integration task {integration_task_id} for dependent {dependent_task_id} after blocker branch merge conflict on {}",
+            conflict.conflicting_branch
+        );
+        (prepared, previous_blockers)
+    };
+
+    match crate::task_creator::spawn_prepared_task_for_api_with_diagnostics(
+        &state.config.db_path,
+        daemon,
+        prepared.clone(),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if let Ok(db) = Db::open(&state.config.db_path) {
+                if let Err(restore_error) =
+                    db.replace_task_blockers(dependent_task_id, &previous_blockers)
+                {
+                    log::error!(
+                        "failed to restore blockers for {dependent_task_id} after integration spawn failure: {restore_error}"
+                    );
+                }
+            }
+            Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))
+        }
+    }
 }
 
 /// Start every dormant dependent whose last blocker just closed. Runs after

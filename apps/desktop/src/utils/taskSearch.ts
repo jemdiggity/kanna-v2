@@ -1,4 +1,4 @@
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
 
 export interface TaskSearchResult {
   score: number;

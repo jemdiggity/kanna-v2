@@ -60,6 +60,137 @@ fn open_applies_desktop_compatible_pragmas() {
 }
 
 #[test]
+fn open_does_not_create_or_migrate_schema() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open temp db");
+    conn.execute_batch("CREATE TABLE probe (id INTEGER PRIMARY KEY);")
+        .expect("seed db");
+    drop(conn);
+
+    let db = Db::open(path.to_str().expect("utf8 path")).expect("open db");
+
+    let schema_migrations_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("schema migration table probe");
+    assert_eq!(schema_migrations_count, 0);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn open_creates_and_migrates_fresh_profile_database() {
+    let path = temp_db_path();
+    let _ = std::fs::remove_file(&path);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open fresh db");
+
+    let setting_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key IN ('suspendAfterMinutes', 'killAfterMinutes', 'ideCommand', 'locale')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("default settings");
+    assert_eq!(setting_count, 4);
+
+    let latest_migration: String = db
+        .conn
+        .query_row(
+            "SELECT id FROM schema_migrations ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("latest migration");
+    assert_eq!(latest_migration, "026_stage_run_resume");
+
+    let stage_run_sql: String = db
+        .conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stage_run'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stage_run schema");
+    assert!(stage_run_sql.contains("provider_session_id"));
+    assert!(stage_run_sql.contains("resumed_from_run_id"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn open_migrates_legacy_frontend_schema_with_backfills() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open legacy db");
+    conn.execute_batch(
+        r#"
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE repo (
+              id TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              name TEXT NOT NULL,
+              default_branch TEXT NOT NULL DEFAULT 'main',
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              last_opened_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE pipeline_item (
+              id TEXT PRIMARY KEY,
+              repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+              issue_number INTEGER,
+              issue_title TEXT,
+              prompt TEXT,
+              stage TEXT NOT NULL DEFAULT 'in_progress',
+              pr_number INTEGER,
+              pr_url TEXT,
+              branch TEXT,
+              agent_type TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO repo (id, path, name, created_at) VALUES ('repo-1', '/tmp/repo-1', 'Repo One', '2026-01-01 00:00:00');
+            INSERT INTO pipeline_item (id, repo_id, prompt, stage, branch, agent_type, created_at, updated_at)
+            VALUES
+              ('task-merge', 'repo-1', 'merge prompt', 'merge', 'task-merge', 'pty', '2026-01-02 00:00:00', '2026-01-02 00:00:00'),
+              ('task-port', 'repo-1', 'port prompt', 'in_progress', 'task-port', 'pty', '2026-01-03 00:00:00', '2026-01-03 00:00:00');
+        "#,
+    )
+    .expect("seed legacy db");
+    drop(conn);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("migrate legacy db");
+
+    let (stage, pipeline, provider): (String, String, String) = db
+        .conn
+        .query_row(
+            "SELECT stage, pipeline, agent_provider FROM pipeline_item WHERE id = 'task-merge'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("migrated pipeline item");
+    assert_eq!(stage, "in progress");
+    assert_eq!(pipeline, "default");
+    assert_eq!(provider, "claude");
+
+    let stage_run_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM stage_run WHERE task_id IN ('task-merge', 'task-port')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stage run backfill");
+    assert_eq!(stage_run_count, 2);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn server_connection_opens_with_desktop_like_wal_client_active() {
     let path = temp_db_path();
     let desktop_conn = Connection::open(&path).expect("open desktop-like db");
@@ -77,6 +208,11 @@ fn server_connection_opens_with_desktop_like_wal_client_active() {
                   stage TEXT NOT NULL,
                   closed_at TEXT,
                   updated_at TEXT
+                );
+                CREATE TABLE task_port (
+                  port INTEGER PRIMARY KEY,
+                  pipeline_item_id TEXT NOT NULL,
+                  env_name TEXT NOT NULL
                 );
                 INSERT INTO pipeline_item (id, stage) VALUES ('task-1', 'in progress');
                 "#,
@@ -105,7 +241,8 @@ fn open_fails_with_clear_error_when_quick_check_cannot_read_database() {
     let path = temp_db_path();
     std::fs::write(&path, b"this is not a sqlite database").expect("write corrupt db");
 
-    let err = Db::open(path.to_str().expect("utf8 path")).expect_err("corrupt db should fail");
+    let err =
+        Db::open_migrated(path.to_str().expect("utf8 path")).expect_err("corrupt db should fail");
     let message = err.to_string();
 
     assert!(
@@ -129,6 +266,11 @@ fn close_pipeline_item_sets_closed_at_without_changing_stage() {
               stage TEXT NOT NULL,
               closed_at TEXT,
               updated_at TEXT
+            );
+            CREATE TABLE task_port (
+              port INTEGER PRIMARY KEY,
+              pipeline_item_id TEXT NOT NULL,
+              env_name TEXT NOT NULL
             );
             INSERT INTO pipeline_item (id, stage) VALUES ('task-1', 'in progress');
             "#,
@@ -559,6 +701,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
               activity_changed_at TEXT,
               port_offset INTEGER,
               port_env TEXT,
+              agent_spawn_options TEXT,
               base_ref TEXT,
               notify_task_id TEXT,
               notified_at TEXT,
@@ -586,6 +729,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
         activity: "working",
         port_offset: Some(1422),
         port_env_json: Some("{\"KANNA_DEV_PORT\":\"1422\"}"),
+        agent_spawn_options_json: None,
         base_ref: None,
         display_name: Some("Merge queue"),
         notify_task_id: None,

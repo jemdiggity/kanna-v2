@@ -23,6 +23,9 @@ pub(super) fn build_agent_command(
     model: Option<&str>,
     permission_mode: Option<&str>,
     allowed_tools: &[String],
+    disallowed_tools: &[String],
+    max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
     kanna_preamble: Option<&str>,
     mcp_config_path: Option<&str>,
     worktree_path: Option<&str>,
@@ -49,6 +52,15 @@ pub(super) fn build_agent_command(
             }
             if !allowed_tools.is_empty() {
                 flags.push(format!("--allowedTools {}", allowed_tools.join(",")));
+            }
+            if !disallowed_tools.is_empty() {
+                flags.push(format!("--disallowedTools {}", disallowed_tools.join(",")));
+            }
+            if let Some(max_turns) = max_turns {
+                flags.push(format!("--max-turns {}", max_turns));
+            }
+            if let Some(max_budget_usd) = max_budget_usd {
+                flags.push(format!("--max-budget-usd {}", max_budget_usd));
             }
             if let Some(preamble) = kanna_preamble {
                 flags.push(format!(
@@ -91,6 +103,11 @@ pub(super) fn build_agent_command(
             if !allowed_tools.is_empty() {
                 for tool in allowed_tools {
                     flags.push(format!("--allow-tool={}", tool));
+                }
+            }
+            if !disallowed_tools.is_empty() {
+                for tool in disallowed_tools {
+                    flags.push(format!("--deny-tool={}", tool));
                 }
             }
             format!("copilot {} -i '{}'", flags.join(" "), escaped_prompt)
@@ -254,7 +271,7 @@ pub(super) fn build_task_shell_command(
 
 pub(super) fn build_teardown_shell_command(teardown_cmds: &[String]) -> String {
     if teardown_cmds.is_empty() {
-        return "exit 0".to_string();
+        return "true".to_string();
     }
 
     let teardown_parts = teardown_cmds
@@ -269,7 +286,7 @@ pub(super) fn build_teardown_shell_command(teardown_cmds: &[String]) -> String {
         .join(" ; ");
 
     format!(
-        "printf '\\033[33mRunning teardown...\\033[0m\\n' ; {} ; printf '\\n' ; exit 0",
+        "printf '\\033[33mRunning teardown...\\033[0m\\n' ; {} ; printf '\\n'",
         teardown_parts
     )
 }
@@ -284,8 +301,8 @@ const KANNA_TASK_ENVIRONMENT_TEMPLATE: &str =
 // stages advance when the agent records a successful result; `manual` stages
 // wait for the user to review and advance. Mirrors COMPLETION_GUIDANCE in
 // prompt-builder.ts — keep the texts in sync.
-const COMPLETION_AUTO: &str = "This stage's transition is `auto`: when this stage's goal is achieved, record completion so Kanna can advance the pipeline: prefer MCP `kanna_complete_stage` with status `success` and a short summary; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently.";
-const COMPLETION_MANUAL: &str = "This stage's transition is `manual`: recording a successful result does not advance the pipeline — the user reviews your work and advances the stage themselves. When this stage's goal is achieved, finish with a clear summary of what you did; record completion only if this stage's prompt asks for it. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status failure --summary \"...\"`.";
+const COMPLETION_AUTO: &str = "This stage's transition is `auto`: when this stage's goal is achieved, record completion so Kanna can advance the pipeline: call MCP `kanna_complete_stage {\"task_id\": \"$KANNA_TASK_ID\", \"status\": \"success\", \"summary\": \"...\"}` (`task_id` is the value of the `KANNA_TASK_ID` env var); only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently.";
+const COMPLETION_MANUAL: &str = "This stage's transition is `manual`: recording a successful result does not advance the pipeline — the user reviews your work and advances the stage themselves. When this stage's goal is achieved, finish with a clear summary of what you did; record completion only if this stage's prompt asks for it. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently: call MCP `kanna_complete_stage {\"task_id\": \"$KANNA_TASK_ID\", \"status\": \"failure\", \"summary\": \"...\"}` (`task_id` is the value of the `KANNA_TASK_ID` env var); only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status failure --summary \"...\"`.";
 
 pub(super) fn build_kanna_preamble(
     provider: &AgentProvider,

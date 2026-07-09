@@ -15,4 +15,4 @@ Post-merge human device verification remains:
 ./kd mobile run --device --staging
 ```
 
-Then confirm the staging app fetches and applies the update, change a visible JS string, republish, and confirm the replacement update applies on foreground or restart.
+Use `./kd mobile run --device --staging --install` instead when verifying a bundled staging Release install without Metro/hot loading. Then confirm the staging app fetches and applies the update, change a visible JS string, republish, and confirm the replacement update applies on foreground or restart.

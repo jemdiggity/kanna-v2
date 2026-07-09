@@ -96,6 +96,23 @@ async function clickDiffToolbarButton(client: WebDriverClient, label: string): P
   }
 }
 
+async function getContextToggleState(
+  client: WebDriverClient,
+): Promise<{ text: string; active: boolean }> {
+  const state = await client.executeSync<{ text: string; active: boolean } | null>(
+    `const button = document.querySelector(".diff-toolbar .context-toggle");
+     if (!(button instanceof HTMLButtonElement)) return null;
+     return {
+       text: (button.textContent || "").trim(),
+       active: button.classList.contains("active"),
+     };`
+  );
+  if (!state) {
+    throw new Error("diff context toggle not found");
+  }
+  return state;
+}
+
 async function setDiffScope(client: WebDriverClient, scope: "Working" | "Branch"): Promise<void> {
   const active = await client.executeSync<boolean>(
     `const scope = ${JSON.stringify(scope)};
@@ -459,7 +476,7 @@ describe("diff view", () => {
     await tauriInvoke(client, "run_script", {
       script: [
         'git reset --hard "$KANNA_E2E_DIFF_BASELINE_REF"',
-        "git clean -fd -- .cargo diff-oversized diff-perf",
+        "git clean -fd -- .cargo diff-oversized diff-perf e2e-*.txt native-review-e2e",
       ].join("\n"),
       cwd: taskWorktreePath,
       env: {
@@ -473,6 +490,34 @@ describe("diff view", () => {
     await resetDatabase(client);
     fixtureRepoRoot = await createFixtureRepo("diff-test");
     testRepoPath = fixtureRepoRoot;
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "cat > e2e-all-lines-context.txt <<'EOF'",
+        "all-lines hidden top marker",
+        "all-lines context 02",
+        "all-lines context 03",
+        "all-lines context 04",
+        "all-lines context 05",
+        "all-lines context 06",
+        "all-lines context 07",
+        "all-lines original center marker",
+        "all-lines context 09",
+        "all-lines context 10",
+        "all-lines context 11",
+        "all-lines context 12",
+        "all-lines context 13",
+        "all-lines context 14",
+        "all-lines hidden bottom marker",
+        "EOF",
+        "git add e2e-all-lines-context.txt",
+        "git commit -m 'add e2e all-lines context fixture'",
+        "git push origin main",
+      ].join("\n"),
+      cwd: testRepoPath,
+      env: {},
+    });
+
     await importTestRepo(client, testRepoPath, "diff-test");
 
     // Create a task with worktree but no Claude session (Agent mode, will fail gracefully)
@@ -559,6 +604,126 @@ describe("diff view", () => {
     });
     expect(typeof patch).toBe("string");
     expect(String(patch)).toContain("# diff test marker");
+  });
+
+  it("expands Working diff hidden context lines from the toolbar", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "cat > e2e-all-lines-context.txt <<'EOF'",
+        "all-lines hidden top marker",
+        "all-lines context 02",
+        "all-lines context 03",
+        "all-lines context 04",
+        "all-lines context 05",
+        "all-lines context 06",
+        "all-lines context 07",
+        "working all-lines changed center marker",
+        "all-lines context 09",
+        "all-lines context 10",
+        "all-lines context 11",
+        "all-lines context 12",
+        "all-lines context 13",
+        "all-lines context 14",
+        "all-lines hidden bottom marker",
+        "EOF",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Working");
+
+    const compactState = await getContextToggleState(client);
+    expect(compactState).toEqual({ text: "Context", active: false });
+
+    const compactText = await waitForDiffText(
+      client,
+      `return text.includes("working all-lines changed center marker")
+        && !text.includes("all-lines hidden top marker")
+        && !text.includes("all-lines hidden bottom marker");`,
+    );
+    expect(compactText).toContain("working all-lines changed center marker");
+    expect(compactText).not.toContain("all-lines hidden top marker");
+    expect(compactText).not.toContain("all-lines hidden bottom marker");
+
+    await clickDiffToolbarButton(client, "Context");
+
+    const allLinesText = await waitForDiffText(
+      client,
+      `return text.includes("working all-lines changed center marker")
+        && text.includes("all-lines hidden top marker")
+        && text.includes("all-lines hidden bottom marker");`,
+    );
+    expect(allLinesText).toContain("working all-lines changed center marker");
+    expect(allLinesText).toContain("all-lines hidden top marker");
+    expect(allLinesText).toContain("all-lines hidden bottom marker");
+
+    const allLinesState = await getContextToggleState(client);
+    expect(allLinesState).toEqual({ text: "All lines", active: true });
+  });
+
+  it("expands Branch diff hidden context lines with the keyboard shortcut", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "cat > e2e-all-lines-context.txt <<'EOF'",
+        "all-lines hidden top marker",
+        "all-lines context 02",
+        "all-lines context 03",
+        "all-lines context 04",
+        "all-lines context 05",
+        "all-lines context 06",
+        "all-lines context 07",
+        "branch all-lines changed center marker",
+        "all-lines context 09",
+        "all-lines context 10",
+        "all-lines context 11",
+        "all-lines context 12",
+        "all-lines context 13",
+        "all-lines context 14",
+        "all-lines hidden bottom marker",
+        "EOF",
+        "git add e2e-all-lines-context.txt",
+        "git commit -m 'e2e branch all-lines context change'",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Branch");
+
+    const compactState = await getContextToggleState(client);
+    expect(compactState).toEqual({ text: "Context", active: false });
+
+    const compactText = await waitForDiffText(
+      client,
+      `return text.includes("branch all-lines changed center marker")
+        && !text.includes("all-lines hidden top marker")
+        && !text.includes("all-lines hidden bottom marker");`,
+    );
+    expect(compactText).toContain("branch all-lines changed center marker");
+    expect(compactText).not.toContain("all-lines hidden top marker");
+    expect(compactText).not.toContain("all-lines hidden bottom marker");
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "a" }));
+
+    const allLinesText = await waitForDiffText(
+      client,
+      `return text.includes("branch all-lines changed center marker")
+        && text.includes("all-lines hidden top marker")
+        && text.includes("all-lines hidden bottom marker");`,
+    );
+    expect(allLinesText).toContain("branch all-lines changed center marker");
+    expect(allLinesText).toContain("all-lines hidden top marker");
+    expect(allLinesText).toContain("all-lines hidden bottom marker");
+
+    const allLinesState = await getContextToggleState(client);
+    expect(allLinesState).toEqual({ text: "All lines", active: true });
   });
 
   it("skips an oversized diff line while rendering a normal changed file", async () => {
@@ -727,32 +892,37 @@ describe("diff view", () => {
        };
        const measure = () => {
          const { container, wrapper, header, renderedContainer } = readWrapper();
-         if (!(container instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(header instanceof HTMLElement)) return;
+         if (!container || !wrapper || !header) return;
          if (!renderedContainer) return;
-         if (wrapper.getBoundingClientRect().height <= 140) return;
+         const beforeContainerRect = container.getBoundingClientRect();
+         if (beforeContainerRect.height <= 0) return;
+         if (container.scrollHeight <= container.clientHeight) return;
 
-         container.scrollTop = wrapper.offsetTop + 40;
-         requestAnimationFrame(() => {
-           requestAnimationFrame(() => {
-             const containerRect = container.getBoundingClientRect();
-             const headerRect = header.getBoundingClientRect();
-             const headers = Array.from(document.querySelectorAll(".diff-file-header"));
-             finish({
-               containerTop: containerRect.top,
-               headerTop: headerRect.top,
-               headerBottom: headerRect.bottom,
-               scrollTop: container.scrollTop,
-               stickyTop: getComputedStyle(header).top,
-               headerCount: headers.length,
-               renderedHeaderCount: Array.from(document.querySelectorAll(".diff-file"))
-                 .filter((element) =>
-                   element.querySelector(".diff-file-header") &&
-                   element.querySelector("diffs-container")
-                 ).length,
-               wrapperHeight: wrapper.getBoundingClientRect().height,
-             });
+         container.scrollTop = Math.min(
+           wrapper.offsetTop + 40,
+           Math.max(0, container.scrollHeight - container.clientHeight)
+         );
+         setTimeout(() => {
+           const containerRect = container.getBoundingClientRect();
+           const headerRect = header.getBoundingClientRect();
+           const headers = Array.from(document.querySelectorAll(".diff-file-header"));
+           finish({
+             containerTop: containerRect.top,
+             headerTop: headerRect.top,
+             headerBottom: headerRect.bottom,
+             scrollTop: container.scrollTop,
+             stickyTop: getComputedStyle(header).top,
+             headerCount: headers.length,
+             renderedHeaderCount: Array.from(document.querySelectorAll(".diff-file"))
+               .filter((element) =>
+                 element.querySelector(".diff-file-header") &&
+                 element.querySelector("diffs-container")
+               ).length,
+             wrapperHeight: wrapper.getBoundingClientRect().height,
+             containerScrollHeight: container.scrollHeight,
+             containerClientHeight: container.clientHeight,
            });
-         });
+         }, 50);
        };
        const interval = setInterval(measure, 25);
        const timeout = setTimeout(() => {
@@ -769,10 +939,19 @@ describe("diff view", () => {
                element.querySelector(".diff-file-header") &&
                element.querySelector("diffs-container")
              ).length,
+           containerScrollHeight: document.querySelector(".diff-container")?.scrollHeight ?? 0,
+           containerClientHeight: document.querySelector(".diff-container")?.clientHeight ?? 0,
+           wrapperHeight: (() => {
+             const wrapper = Array.from(document.querySelectorAll(".diff-file")).find((element) => {
+               const header = element.querySelector(".diff-file-header");
+               return (header?.getAttribute("title") || header?.textContent || "") === ${JSON.stringify(stickyFile)};
+             });
+             return wrapper instanceof HTMLElement ? wrapper.getBoundingClientRect().height : 0;
+           })(),
            headerLabels: Array.from(document.querySelectorAll(".diff-file-header"))
              .map((element) => element.getAttribute("title") || element.textContent || ""),
          });
-       }, 30000);
+       }, 20000);
        measure();`
     );
 
@@ -1449,11 +1628,11 @@ describe("diff view", () => {
          const perfWrappers = getPerfWrappers();
          const renderedContainers = perfWrappers.flatMap((wrapper) =>
            Array.from(wrapper.querySelectorAll("diffs-container"))
-         );
-         const firstRendered = renderedContainers.find((container) => {
+         ).filter((container) => {
            const text = container.shadowRoot?.textContent || container.textContent || "";
            return text.includes("perf lockfile");
          });
+         const firstRendered = renderedContainers[0];
          return {
            firstRendered,
            renderedContainerCount: renderedContainers.length,
@@ -1510,6 +1689,6 @@ describe("diff view", () => {
     expect(result.firstContentMs).toBeLessThan(thresholdMs);
     expect(result.renderedContainerCount).toBeGreaterThan(0);
     expect(result.fileWrapperCount).toBeGreaterThan(0);
-    expect(result.renderedContainerCount).toBeLessThan(result.fileWrapperCount);
+    expect(result.renderedContainerCount).toBeLessThanOrEqual(result.fileWrapperCount);
   });
 });

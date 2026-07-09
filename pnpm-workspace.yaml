@@ -70,3 +70,8 @@ packageExtensions:
   "expo@53.0.27":
     dependencies:
       "@babel/runtime": 7.29.2
+  "expo-updates@0.28.18":
+    dependencies:
+      "@expo/cli": 0.24.24
+      debug: 4.4.3
+      getenv: 2.0.0

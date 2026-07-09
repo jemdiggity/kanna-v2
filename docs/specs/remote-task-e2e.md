@@ -209,7 +209,7 @@ Layer D verifies the user-facing pairing flow, status display, and preference su
 Staging has two lanes:
 
 - Automatable headless smoke: use staging Firebase/relay credentials with the Node mobile-equivalent client and a worktree desktop server.
-- Human-gated physical device runbook: use `./kd mobile run --device --staging` after staging Buffy data has been provisioned by a human with staging credentials.
+- Human-gated physical device runbook: use `./kd mobile run --device --staging` for Metro/dev-client checks, or `./kd mobile run --device --staging --install` to install the bundled staging Release app without Metro/hot loading, after staging Buffy data has been provisioned by a human with staging credentials.
 
 The committed staging Buffy identity is:
 
@@ -226,6 +226,8 @@ Canonical commands:
 
 ```bash
 ./kd test remote-e2e
+./kd test remote-e2e --mobile-relay
+./kd test remote-e2e --desktop-pairing
 ./kd test remote-e2e --dev
 ./kd test remote-e2e --staging
 ./kd dev up --remote
@@ -234,6 +236,8 @@ Canonical commands:
 ```
 
 `./kd dev up --remote` composes the existing emulator path and local relay with the desktop dev stack for manual poking. `./kd test remote-e2e` runs Layer B. `./kd doctor --remote` checks local prerequisites, emulator port availability/reachability, relay port availability, relay buildability, server buildability, and staging credential presence when `--staging` is supplied.
+
+`./kd test remote-e2e --mobile-relay` runs Layer C against an iOS simulator and the local relay-backed harness. `./kd test remote-e2e --desktop-pairing` runs Layer D against the debug desktop WebDriver build. These lanes are explicit because they require simulator/Appium or desktop WebDriver infrastructure.
 
 Where `kd-mcp` mirrors kd tasks, it must expose matching tools for remote E2E and remote doctor checks.
 

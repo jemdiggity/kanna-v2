@@ -1,11 +1,8 @@
-use super::{Db, NewRepo, Repo};
+use super::{Db, NewRepo, Repo, SnapshotRepo};
 
 impl Db {
-    pub fn list_repos(&self) -> Result<Vec<Repo>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
-             FROM repo WHERE hidden = 0 OR hidden IS NULL ORDER BY last_opened_at DESC",
-        )?;
+    fn collect_repos(&self, sql: &str) -> Result<Vec<Repo>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
             Ok(Repo {
                 id: row.get(0)?,
@@ -19,6 +16,20 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    pub fn list_repos(&self) -> Result<Vec<Repo>, rusqlite::Error> {
+        self.collect_repos(
+            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
+             FROM repo WHERE hidden = 0 OR hidden IS NULL ORDER BY last_opened_at DESC",
+        )
+    }
+
+    pub fn list_repos_for_maintenance(&self) -> Result<Vec<Repo>, rusqlite::Error> {
+        self.collect_repos(
+            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
+             FROM repo ORDER BY last_opened_at DESC",
+        )
     }
 
     pub fn get_repo(&self, id: &str) -> Result<Option<Repo>, rusqlite::Error> {
@@ -71,5 +82,75 @@ impl Db {
                     row.get(0)
                 })?;
         Ok(count > 0)
+    }
+
+    pub fn get_snapshot_repo_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<SnapshotRepo>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, name, default_branch, remote_url, remote_url_hash,
+                    hidden, sort_order, created_at, last_opened_at
+             FROM repo WHERE path = ?",
+        )?;
+        let mut rows = stmt.query_map([path], |row| {
+            Ok(SnapshotRepo {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                name: row.get(2)?,
+                default_branch: row.get(3)?,
+                remote_url: row.get(4)?,
+                remote_url_hash: row.get(5)?,
+                hidden: row.get(6)?,
+                sort_order: row.get(7)?,
+                created_at: row.get(8)?,
+                last_opened_at: row.get(9)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn patch_repo(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        remote_url: Option<Option<&str>>,
+        remote_url_hash: Option<Option<&str>>,
+        hidden: Option<bool>,
+    ) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE repo
+             SET name = COALESCE(?, name),
+                 remote_url = CASE WHEN ? THEN ? ELSE remote_url END,
+                 remote_url_hash = CASE WHEN ? THEN ? ELSE remote_url_hash END,
+                 hidden = COALESCE(?, hidden)
+             WHERE id = ?",
+            (
+                name,
+                remote_url.is_some(),
+                remote_url.flatten(),
+                remote_url_hash.is_some(),
+                remote_url_hash.flatten(),
+                hidden.map(|value| if value { 1_i64 } else { 0_i64 }),
+                id,
+            ),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    pub fn reorder_repos(&self, ordered_ids: &[String]) -> Result<(), rusqlite::Error> {
+        for (index, id) in ordered_ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE repo SET sort_order = ? WHERE id = ?",
+                (index as i64, id),
+            )?;
+        }
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use super::definitions::{read_agent_definition, PipelineStage};
+use super::definitions::{read_agent_definition, PipelineStage, PipelineStageTransition};
 
 pub(super) fn build_target_stage_prompt(
     repo_path: &str,
@@ -60,16 +60,27 @@ pub(super) fn build_revision_task_prompt(original_task_prompt: &str, feedback: &
 /// carries its agent/stage instructions, so only the revision context is
 /// sent — restating the original task prompt re-anchors the turn even if the
 /// session has compacted it away — plus a completion reminder in case the
-/// standing instructions were compacted too.
+/// standing instructions were compacted too. The reminder follows the target
+/// stage's transition policy: only `auto` stages advance on a recorded
+/// success; `manual` stages park for the user, so recording success there
+/// would just contradict the agent's standing instructions.
 pub(super) fn build_revision_resume_message(
     original_task_prompt: &str,
     feedback: &str,
     task_id: &str,
+    transition: PipelineStageTransition,
 ) -> String {
+    let completion = match transition {
+        PipelineStageTransition::Auto => format!(
+            "Address the feedback in this worktree, then record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline."
+        ),
+        PipelineStageTransition::Manual => format!(
+            "Address the feedback in this worktree, then finish with a clear summary of what you changed — do not record stage completion; this stage advances manually, so the user reviews the revision and advances the task themselves. If you cannot address the feedback, record failure instead of stopping silently: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"failure\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status failure --summary \"...\"`."
+        ),
+    };
     format!(
-        "{}\n\nAddress the feedback in this worktree, then record stage completion: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"{}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline.",
-        build_revision_task_prompt(original_task_prompt, feedback),
-        task_id
+        "{}\n\n{completion}",
+        build_revision_task_prompt(original_task_prompt, feedback)
     )
 }
 

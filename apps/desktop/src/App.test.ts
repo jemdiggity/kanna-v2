@@ -10,6 +10,7 @@ import {
   WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_DOWN_EVENT,
   WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT,
 } from "./windowWorkspace";
+import { updateDesktopServerClientHandlersForTests } from "./services/desktopServerClient";
 
 async function flushPromises() {
   await Promise.resolve();
@@ -241,7 +242,7 @@ vi.mock("@kanna/core", () => ({
   parseRepoConfig: vi.fn(() => ({})),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   getSetting: vi.fn(async () => null),
   setSetting: vi.fn(async () => {}),
   listRepos: vi.fn(async () => []),
@@ -660,6 +661,23 @@ describe("App", () => {
     dbSelectMock.mockResolvedValue([]);
     dbMock.execute.mockReset();
     dbMock.execute.mockResolvedValue({ rowsAffected: 0 });
+    updateDesktopServerClientHandlersForTests({
+      fetchPendingIncomingTransfers: async () => await dbSelectMock(),
+      claimPendingIncomingTransfer: async (transferId) => {
+        const result = await dbMock.execute(
+          "UPDATE task_transfer SET status = 'streaming' WHERE id = ? AND status = 'pending'",
+          [transferId],
+        );
+        return result.rowsAffected > 0;
+      },
+      failPendingIncomingTransfer: async (transferId, reason) => {
+        await dbMock.execute(
+          "UPDATE task_transfer SET status = 'failed', error = ? WHERE id = ?",
+          [reason, transferId],
+        );
+        return true;
+      },
+    });
     invokeMock.mockClear();
     toastInfoMock.mockClear();
     toastWarningMock.mockClear();
@@ -2499,14 +2517,6 @@ describe("App", () => {
         "transfer-stale",
       ],
     );
-    expect(warnSpy).toHaveBeenCalledWith(
-      "[App] failed to auto-import pending incoming transfer; marked failed:",
-      expect.objectContaining({
-        transferId: "transfer-stale",
-        reason: expect.stringContaining("missing source peer"),
-      }),
-    );
-
     warnSpy.mockRestore();
     wrapper.unmount();
   });

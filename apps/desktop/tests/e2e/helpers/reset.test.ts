@@ -69,7 +69,6 @@ describe("reset helpers", () => {
       ])
       .mockResolvedValue(undefined);
     mocks.queryDb
-      .mockResolvedValueOnce([{ id: "repo-1", name: "test-repo" }])
       .mockResolvedValueOnce([
         { id: "task-created-by-test" },
         { id: "task-created-externally" },
@@ -109,7 +108,6 @@ describe("reset helpers", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValue(undefined);
     mocks.queryDb
-      .mockResolvedValueOnce([{ id: "repo-1", name: "test-repo" }])
       .mockResolvedValueOnce([
         { id: "sdk-task", agent_type: "agent" },
         { id: "pty-task", agent_type: "pty" },
@@ -180,7 +178,6 @@ describe("reset helpers", () => {
     ]);
 
     mocks.tauriInvoke.mockResolvedValueOnce([]);
-    mocks.queryDb.mockResolvedValueOnce([{ id: "repo-1", name: "test-repo" }]);
 
     const { importTestRepo } = await import("./reset");
 
@@ -192,6 +189,18 @@ describe("reset helpers", () => {
     expect(client.click).toHaveBeenCalledWith(".modal-overlay .btn-primary:not(:disabled)");
     expect(client.waitForNoElement).toHaveBeenCalledWith(".modal-overlay", 30_000);
     expect(client.executeSync).toHaveBeenCalled();
+  });
+
+  it("does not require server-backed repo imports to be visible through the stale DB handle", async () => {
+    const client = createImportClient([{ selectedRepoId: "repo-1", selectedRepoPath: "/repo" }]);
+
+    mocks.tauriInvoke.mockResolvedValueOnce([]);
+    mocks.queryDb.mockResolvedValue([]);
+
+    const { importTestRepo } = await import("./reset");
+
+    await expect(importTestRepo(client as never, "/repo", "test-repo")).resolves.toBe("repo-1");
+    expect(mocks.queryDb).not.toHaveBeenCalled();
   });
 
   it("closes open tasks through the app before wiping the database", async () => {

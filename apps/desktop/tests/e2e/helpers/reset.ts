@@ -2,7 +2,7 @@
  * Test reset helpers — clean DB state and worktrees between test files.
  */
 import { join } from "path";
-import { copyFile, access } from "fs/promises";
+import { copyFile, access, realpath } from "fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { WebDriverClient } from "./webdriver";
 import { execDb, callVueMethod, getVueState, queryDb, tauriInvoke } from "./vue";
@@ -21,6 +21,8 @@ interface OpenCleanupTask {
 const worktreeCleanupBaselines = new Map<string, Set<string>>();
 const IMPORT_REPO_SELECTION_TIMEOUT_MS = 10_000;
 const IMPORT_REPO_SELECTION_POLL_MS = 100;
+const IMPORT_REPO_STORE_TIMEOUT_MS = 10_000;
+const IMPORT_REPO_STORE_POLL_MS = 100;
 const IMPORT_REPO_MODAL_DISMISS_TIMEOUT_MS = 30_000;
 const TASK_CLOSE_TIMEOUT_MS = 20_000;
 const IMPORT_REPO_MODAL_SELECTOR = ".modal-overlay";
@@ -157,9 +159,60 @@ async function importRepoThroughUi(
   }
   await client.clear(nameInput);
   await client.sendKeys(nameInput, name);
-  const submit = await client.waitForElement(IMPORT_REPO_SUBMIT_SELECTOR, 2_000);
+  const submit = await client.waitForElement(IMPORT_REPO_SUBMIT_SELECTOR, 5_000);
   await client.click(submit);
-  await client.waitForNoElement(IMPORT_REPO_MODAL_SELECTOR, IMPORT_REPO_MODAL_DISMISS_TIMEOUT_MS);
+  try {
+    await client.waitForNoElement(IMPORT_REPO_MODAL_SELECTOR, IMPORT_REPO_MODAL_DISMISS_TIMEOUT_MS);
+  } catch (error) {
+    const modalText = await client.executeSync<string>(
+      `return document.querySelector(${JSON.stringify(IMPORT_REPO_MODAL_SELECTOR)})?.textContent || "";`,
+    ).catch(() => "");
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; modal text: ${modalText}`);
+  }
+}
+
+async function waitForImportedRepoInStore(
+  client: WebDriverClient,
+  repoPath: string,
+  name: string,
+): Promise<{ id: string; name: string }> {
+  const deadline = Date.now() + IMPORT_REPO_STORE_TIMEOUT_MS;
+  const canonicalRepoPath = await realpath(repoPath).catch(() => repoPath);
+  const repoPaths = new Set([repoPath, canonicalRepoPath]);
+  let lastState: unknown = null;
+
+  while (Date.now() < deadline) {
+    const state = await client.executeSync<{
+      selectedRepoId: string | null;
+      selectedRepoPath: string | null;
+      repos: Array<{ id: string; name: string; path: string }>;
+    }>(`const ctx = window.__KANNA_E2E__.setupState;
+      const reposRef = ctx.store?.repos ?? ctx.repos ?? [];
+      const repos = reposRef?.value ?? reposRef ?? [];
+      const selectedRepo = ctx.store?.selectedRepo ?? null;
+      const selectedRepoValue = selectedRepo?.value ?? selectedRepo;
+      const selectedRepoId = ctx.store?.selectedRepoId?.value ?? ctx.store?.selectedRepoId ?? null;
+      return {
+        selectedRepoId,
+        selectedRepoPath: selectedRepoValue?.path ?? ctx.store?.selectedRepo?.path ?? null,
+        repos: Array.from(repos).map((repo) => ({ id: repo.id, name: repo.name, path: repo.path })),
+      };`);
+    lastState = state;
+    const repos = Array.isArray(state.repos) ? state.repos : [];
+    const repo = repos.find((entry) => repoPaths.has(entry.path) && entry.name === name)
+      ?? repos.find((entry) => repoPaths.has(entry.path))
+      ?? (
+        state.selectedRepoId && state.selectedRepoPath && repoPaths.has(state.selectedRepoPath)
+          ? { id: state.selectedRepoId, name }
+          : null
+      );
+    if (repo) return repo;
+    await sleep(IMPORT_REPO_STORE_POLL_MS);
+  }
+
+  throw new Error(
+    `Repo "${name}" not found in store after import; last state: ${JSON.stringify(lastState)}`,
+  );
 }
 
 function shouldPreKillTaskSession(task: OpenCleanupTask): boolean {
@@ -170,15 +223,18 @@ async function listOpenTasksForRepo(
   client: WebDriverClient,
   repoPath: string
 ): Promise<OpenCleanupTask[]> {
+  const canonicalRepoPath = await realpath(repoPath).catch(() => repoPath);
+  const repoPaths = [...new Set([repoPath, canonicalRepoPath])];
+  const placeholders = repoPaths.map(() => "?").join(", ");
   const rows = await queryDb(
     client,
     `SELECT p.id, p.agent_type
        FROM pipeline_item p
        JOIN repo r ON r.id = p.repo_id
-      WHERE r.path = ?
+      WHERE r.path IN (${placeholders})
         AND p.closed_at IS NULL
       ORDER BY p.created_at DESC`,
-    [repoPath],
+    repoPaths,
   ) as Array<{ id?: string | null; agent_type?: string | null }>;
 
   return rows
@@ -297,19 +353,15 @@ export async function importTestRepo(
   assertSafeE2eRepoPath(repoPath);
   await recordWorktreeCleanupBaseline(client, repoPath);
   await importRepoThroughUi(client, repoPath, name);
-  const rows = (await queryDb(
-    client,
-    "SELECT id, name FROM repo WHERE path = ?",
-    [repoPath],
-  )) as Array<{ id: string; name: string }>;
-  const repo = rows.find((entry) => entry.name === name) ?? rows[0];
-  if (!repo) throw new Error(`Repo "${name}" not found after import`);
+  const repo = await waitForImportedRepoInStore(client, repoPath, name);
 
   const selectResult = await callVueMethod(client, "store.selectRepo", repo.id);
   if (isVueCallError(selectResult)) {
     throw new Error(selectResult.__error);
   }
   const deadline = Date.now() + IMPORT_REPO_SELECTION_TIMEOUT_MS;
+  const canonicalRepoPath = await realpath(repoPath).catch(() => repoPath);
+  const repoPaths = new Set([repoPath, canonicalRepoPath]);
   while (Date.now() < deadline) {
     const selected = await client.executeSync<{
       selectedRepoId: string | null;
@@ -320,7 +372,7 @@ export async function importTestRepo(
         selectedRepoId,
         selectedRepoPath: ctx.store?.selectedRepo?.path ?? null,
       };`);
-    if (selected.selectedRepoId === repo.id && selected.selectedRepoPath === repoPath) {
+    if (selected.selectedRepoId === repo.id && selected.selectedRepoPath && repoPaths.has(selected.selectedRepoPath)) {
       return repo.id;
     }
     await sleep(IMPORT_REPO_SELECTION_POLL_MS);
@@ -343,13 +395,7 @@ export async function importTestRepoDirect(
     throw new Error(importResult.__error);
   }
 
-  const rows = (await queryDb(
-    client,
-    "SELECT id, name FROM repo WHERE path = ?",
-    [repoPath],
-  )) as Array<{ id: string; name: string }>;
-  const repo = rows.find((entry) => entry.name === name) ?? rows[0];
-  if (!repo) throw new Error(`Repo "${name}" not found after direct import`);
+  const repo = await waitForImportedRepoInStore(client, repoPath, name);
 
   const selectResult = await callVueMethod(client, "store.selectRepo", repo.id);
   if (isVueCallError(selectResult)) {

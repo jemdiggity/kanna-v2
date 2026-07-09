@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildSelectorKeydownScript } from "../helpers/keyboard";
@@ -80,7 +81,7 @@ describe("repo rename", () => {
       "SELECT id, name, path FROM repo WHERE id = ?",
       [repoId],
     ) as RepoRow[];
-    expect(rows).toEqual([{ id: repoId, name: RENAMED_NAME, path: repoRoot }]);
+    expect(rows).toEqual([{ id: repoId, name: RENAMED_NAME, path: await realpath(repoRoot) }]);
 
     await client.executeSync("location.reload()");
     await client.waitForAppReady();

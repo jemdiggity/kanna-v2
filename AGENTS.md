@@ -13,7 +13,7 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 ### Core concepts
 
 - **Task** — A unit of work. Has a prompt, a git worktree, a Claude agent session, and a lifecycle stage. One task = one branch = one PR.
-- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr`. Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new branch + worktree named `task-{id}-{n}` (the durable task id plus a workspace counter; the creation workspace is plain `task-{id}`) cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A workspace is an ephemeral manifestation of the task. A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; when the task leaves a workspace, the workspace's repo-config `teardown` commands run best-effort in a detached `td-{branch}` daemon session, but the old worktree itself stays on disk until cleanup. Advancing past the final stage closes the task.
+- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr`. Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new branch + worktree named `task-{id}-{n}` (the durable task id plus a workspace counter; the creation workspace is plain `task-{id}`) cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A workspace is an ephemeral manifestation of the task. A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; when the task leaves a workspace, the workspace's repo-config `teardown` commands run best-effort in a detached `td-{branch}` daemon session, and open-task worktrees stay available for revision resume until the task closes. Advancing past the final stage closes the task; close snapshots dirty workspace state into local WIP commits, removes the task's worktrees, and keeps the branches.
 - **Daemon** — Standalone process that manages PTY sessions. Survives app restarts. Handles seamless upgrades via fd handoff.
 
 ### Workflows
@@ -43,10 +43,14 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 ### Closing a task (Cmd+Delete)
 
 1. Kills the agent PTY session and shell session in the daemon
-2. Sets `closed_at` in the DB
-3. Selects the next task in the sidebar
-4. Tasks with `closed_at` are hidden from the sidebar. The sidebar shows tasks whose `closed_at` is null.
-5. Closed tasks remain in the database and on disk until a future explicit cleanup workflow removes them.
+2. Runs workspace teardown commands best-effort when configured
+3. Sets `closed_at` in the DB
+4. Snapshots dirty state in each of the task's worktrees with a local `WIP at task close` commit, then removes those worktrees with `git worktree remove --force --force` and prunes worktree registrations
+5. Deletes the task's `worktree` table rows but keeps the task row and all branches. Branches are never deleted by close.
+6. Selects the next task in the sidebar
+7. Tasks with `closed_at` are hidden from the sidebar. The sidebar shows tasks whose `closed_at` is null.
+
+On server startup, Kanna reconciles leftovers across all repos, including hidden repos: closed-task worktrees are snapshotted and removed, stale registrations are pruned, and young orphan `task-*` directories without a task row are spared. This bounds registered worktrees by construction to roughly the number of open tasks. The bound matters because each registered git worktree expands sandboxed agent shell spawn profiles; unbounded worktrees can overflow macOS `ARG_MAX` and cause sandboxed shell launches to fail with `E2BIG`.
 
 ### Task activity
 
@@ -189,7 +193,7 @@ Mobile OTA runtime compatibility is keyed by the `runtimeVersion` value in `apps
 
 When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production.
 
-When asked to launch mobile against staging on a physical iPhone, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then use `./kd mobile run --device --staging` from a worktree. This is the canonical physical-device staging flow: it starts the worktree desktop with `KANNA_CLOUD_ENV=staging`, resolves Firebase to `kanna-staging` and relay to `wss://relay-staging.kanna.build`, starts staging dev-client Metro with `KANNA_APP_ENV=staging`, prebuilds the staging native identity, and runs `expo run:ios` with both `--port <KANNA_MOBILE_PORT>` and `RCT_METRO_PORT=<KANNA_MOBILE_PORT>` so the installed app bakes the correct script URL. Use `./kd mobile up --staging` only when the staging app is already installed and you only need desktop + Metro running; it does not install or relaunch a physical iPhone app. To use the committed persistent Buffy the Bug Slayer test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
+When asked to launch mobile against staging on a physical iPhone, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then use `./kd mobile run --device --staging` from a worktree. Staging means the installed `/Applications/Kanna Staging.app` desktop/server is the desktop owner; only dev launches should start a worktree desktop. The staging physical-device flow starts only staging dev-client Metro with `KANNA_APP_ENV=staging`, uses staging Firebase/relay defaults (`kanna-staging`, `wss://relay-staging.kanna.build`), prebuilds the staging native identity, and runs `expo run:ios` with both `--port <KANNA_MOBILE_PORT>` and `RCT_METRO_PORT=<KANNA_MOBILE_PORT>` so the installed app bakes the correct script URL. Use `./kd mobile up --staging` only when the staging app is already installed and you only need staging Metro running; it does not install or relaunch a physical iPhone app and does not start a worktree desktop. To use the committed persistent Buffy the Bug Slayer test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
 
 ```bash
 gcloud auth application-default login
@@ -212,10 +216,10 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd dev log                 # print recent desktop tmux output
 ./kd dev log mobile          # print recent mobile tmux output
 ./kd mobile run --device     # start dev stack + install/launch on a physical iPhone
-./kd mobile run --device --staging # start staging stack + install/launch staging build on a physical iPhone
+./kd mobile run --device --staging # start staging Metro + install/launch staging build against installed Kanna Staging
 ./kd mobile doctor --device  # check physical iPhone Metro reachability, install state, and Local Network guidance
 ./kd mobile up --production  # start mobile with installed /Applications/Kanna.app production status/relay defaults
-./kd mobile up --staging     # start worktree desktop + staging Metro only; does not install/launch a physical iPhone
+./kd mobile up --staging     # start staging Metro only against installed Kanna Staging; does not install/launch a physical iPhone
 ./kd mobile ota publish --staging     # publish a signed staging JS/asset OTA update
 ./kd mobile ota publish --production  # publish a signed production JS/asset OTA update
 ./kd mobile ota status --staging      # inspect the staging OTA channel pointer
@@ -234,6 +238,8 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 # Release
 ./kd release ship --dry-run  # build/sign release artifacts without publishing
 ./kd release ship --release  # tag, publish, and upload updater manifest
+./kd release ship --staging --release  # publish immutable staging prerelease and repoint desktop-staging/latest-staging.json
+./kd release ship --staging --rollback-to 1.2.4-staging.3  # repoint staging channel to an existing prerelease manifest
 
 # Cloud deploy
 ./kd cloud deploy --staging     # deploy Firebase cloud services to staging
@@ -602,7 +608,7 @@ Current E2E status: notify has server boundary coverage with a fake daemon asser
 
 ## Versioning
 
-Single `VERSION` file is the source of truth for packaged app versioning. `kd release ship` updates `VERSION`, `tauri.conf.json`, and Rust package metadata for releases. Development builds may include separate branch/worktree metadata in the UI, but that metadata is not the packaged version. Package.json versions are all `0.0.0` (meaningless). The desktop app reads `VERSION` at compile time via `build.rs`.
+Single `VERSION` file is the source of truth for packaged app versioning. Production `kd release ship --release` updates `VERSION`, `tauri.conf.json`, and Rust package metadata, commits them, tags `vX.Y.Z`, and publishes a per-version GitHub release. Staging ships do not persist version bumps: each `--staging` ship builds with `X.Y.Z-staging.N`, publishes an immutable prerelease tagged `vX.Y.Z-staging.N`, uploads a manifest copy there, and then clobbers only `latest-staging.json` on the pointer release tagged `desktop-staging`. Development builds may include separate branch/worktree metadata in the UI, but that metadata is not the packaged version. Package.json versions are all `0.0.0` (meaningless). The desktop app reads `VERSION` at compile time via `build.rs`.
 
 ## Common Pitfalls
 

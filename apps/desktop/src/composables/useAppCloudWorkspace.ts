@@ -1,6 +1,6 @@
 import { computed, ref, watch, type ComputedRef } from "vue";
 import { computedAsync } from "@vueuse/core";
-import type { DbHandle, PipelineItem } from "@kanna/db";
+import type { DbHandle, PipelineItem } from "../types/kanna";
 
 import { getConfiguredDesktopAuthSession } from "../services/desktopAuthSdk";
 import { runDesktopAutoSignIn } from "../services/desktopAutoSignIn";
@@ -16,6 +16,7 @@ import { deleteRemoteTaskSnapshots, reconcileDesktopTaskSnapshots } from "../ser
 import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import { createConfiguredDesktopRelayTerminalClient } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
+import { fetchClosedTaskIdentities } from "../services/desktopServerClient";
 import { computeTaskSnapshotFingerprint } from "../utils/cloudTaskFingerprint";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
 import { buildWorkspace } from "../workspace/buildWorkspace";
@@ -56,7 +57,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
 
   const localReposForCloudMatching = computedAsync(async () => {
     return Promise.all(store.repos.map(async (repo) => {
-      const metadata = await getCachedRepoRemoteMetadata(db, repo);
+      const metadata = await getCachedRepoRemoteMetadata(repo);
       return {
         repo,
         remoteUrl: metadata.remoteUrl,
@@ -76,13 +77,16 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
       .join("\n");
     void openTaskMarker;
 
-    const rows = await Promise.all(repos.map((repo) =>
-      db.select<ClosedLocalTaskIdentity>(
-        "SELECT id, repo_id FROM pipeline_item WHERE repo_id = ? AND closed_at IS NOT NULL",
-        [repo.id],
-      )
-    ));
-    return rows.flat();
+    void db;
+    const repoIds = new Set(repos.map((repo) => repo.id));
+    const tasks = await fetchClosedTaskIdentities().catch((error: unknown) => {
+      console.warn(
+        "[App] failed to list closed task identities:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return [];
+    });
+    return tasks.filter((task) => repoIds.has(task.repo_id));
   }, []);
 
   const localTaskIdentitiesForRemoteFiltering = computed<LocalTaskIdentity[]>(() => [

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 import AgentMessageView from "./AgentMessageView.vue";
 import TerminalView from "./TerminalView.vue";
 import { shouldEnableKittyKeyboard } from "../composables/terminalSessionRecovery";

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import type { PipelineItem, Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../../types/kanna";
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -274,6 +274,73 @@ describe("Sidebar", () => {
     ]);
 
     await wrapper.get('[data-testid="detach-subtask-task-2"]').trigger("click");
+
+    expect(wrapper.emitted("set-parent")).toEqual([["task-2", null]]);
+  });
+
+  it("does not reparent a parent when a subtask drag is dropped on the same subtask row", () => {
+    const wrapper = mountSidebar([
+      item("task-1", { display_name: "Parent task", stage: "in progress" }),
+      item("task-2", {
+        display_name: "Child task",
+        stage: "pr",
+        parent_task_id: "task-1",
+        created_at: "2026-01-01T00:00:05.000Z",
+      }),
+    ]);
+    const vm = wrapper.vm as {
+      onTaskDragStart(evt: { item?: HTMLElement; originalEvent?: Event }): void;
+      onTaskDragEnd(evt: { originalEvent?: Event }): void;
+    };
+    const draggedSubtree = wrapper.find(".task-subtree").element as HTMLElement;
+    const childRow = wrapper.find('[data-task-id="task-2"]').element as HTMLElement;
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(childRow);
+    const startEvent = new MouseEvent("mousedown", { clientX: 12, clientY: 34 });
+    Object.defineProperty(startEvent, "target", { value: childRow });
+
+    try {
+      vm.onTaskDragStart({
+        item: draggedSubtree,
+        originalEvent: startEvent,
+      });
+      vm.onTaskDragEnd({ originalEvent: new MouseEvent("mouseup", { clientX: 12, clientY: 34 }) });
+    } finally {
+      elementFromPoint.mockRestore();
+    }
+
+    expect(wrapper.emitted("set-parent")).toBeUndefined();
+  });
+
+  it("emits a null parent when dragging a subtask into a top-level list area", () => {
+    const wrapper = mountSidebar([
+      item("task-1", { display_name: "Parent task", stage: "in progress" }),
+      item("task-2", {
+        display_name: "Child task",
+        stage: "pr",
+        parent_task_id: "task-1",
+        created_at: "2026-01-01T00:00:05.000Z",
+      }),
+    ]);
+    const vm = wrapper.vm as {
+      onTaskDragStart(evt: { item?: HTMLElement; originalEvent?: Event }): void;
+      onTaskDragEnd(evt: { originalEvent?: Event }): void;
+    };
+    const draggedSubtree = wrapper.find(".task-subtree").element as HTMLElement;
+    const childRow = wrapper.find('[data-task-id="task-2"]').element as HTMLElement;
+    const topLevelDropArea = wrapper.find(".type-zone").element as HTMLElement;
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(topLevelDropArea);
+    const startEvent = new MouseEvent("mousedown", { clientX: 12, clientY: 34 });
+    Object.defineProperty(startEvent, "target", { value: childRow });
+
+    try {
+      vm.onTaskDragStart({
+        item: draggedSubtree,
+        originalEvent: startEvent,
+      });
+      vm.onTaskDragEnd({ originalEvent: new MouseEvent("mouseup", { clientX: 12, clientY: 34 }) });
+    } finally {
+      elementFromPoint.mockRestore();
+    }
 
     expect(wrapper.emitted("set-parent")).toEqual([["task-2", null]]);
   });

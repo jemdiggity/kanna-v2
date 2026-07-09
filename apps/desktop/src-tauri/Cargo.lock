@@ -2679,7 +2679,6 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-shell",
- "tauri-plugin-sql",
  "tauri-plugin-updater",
  "tauri-plugin-webdriver",
  "tokio",
@@ -5677,27 +5676,6 @@ dependencies = [
  "tauri-plugin",
  "thiserror 2.0.18",
  "tokio",
-]
-
-[[package]]
-name = "tauri-plugin-sql"
-version = "2.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbbdb4f17a7984ef0aa425b11e543a44d11f2fddbdee3fc61970091f8adfb914"
-dependencies = [
- "futures-core",
- "indexmap 2.14.0",
- "log",
- "rust_decimal",
- "serde",
- "serde_json",
- "sqlx",
- "tauri",
- "tauri-plugin",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "uuid",
 ]
 
 [[package]]

@@ -20,14 +20,16 @@ import { selectPreferredLanAddress } from "../runtime/lan-address";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
 import { resolveKdEnvironment } from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
-import { killWorkspaceDaemons, killWorkspaceServers } from "../runtime/daemon";
+import { killWorkspaceDaemons, killWorkspaceDesktopDevProcesses, killWorkspaceServers } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
 import { writeCargoConfig } from "../runtime/env-sync";
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
 import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
+import { executeMobileIosArchiveWithContext } from "../runtime/mobile-archive";
 import {
   buildMobileDevicePrebuildCommand,
+  buildMobileDeviceReleaseInstallCommand,
   buildMobileDeviceRelaunchCommand,
   buildMobileDeviceRunCommand,
   checkPhysicalDeviceRunPreflight,
@@ -37,6 +39,11 @@ import {
   type PhysicalDeviceMetroReadinessInput
 } from "../runtime/mobile-device";
 import {
+  executeProductionMobileQa,
+  formatProductionMobileQaResult,
+  isProductionMobileQaOk
+} from "../runtime/mobile-qa";
+import {
   executeMobileOtaDoctorWithContext,
   executeMobileOtaProvisionSecretWithContext,
   executeMobileOtaPublishWithContext,
@@ -44,8 +51,12 @@ import {
 } from "../runtime/mobile-ota";
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
-import { nodeCommandRunner, type CommandRunner } from "../runtime/process";
+import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
 import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
+import {
+  listStagingRelayActiveDesktopIds,
+  type StagingRelayActiveDesktopIdsInput
+} from "../runtime/staging-relay";
 import { shipRelease } from "../runtime/release";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
@@ -55,6 +66,8 @@ import { readDesktopBundleIdentifier, writeTauriLocalConfig } from "../runtime/t
 import type { KdPorts } from "../ports";
 import type { TaskDefinition, TaskResult } from "./types";
 
+export { listStagingRelayActiveDesktopIds } from "../runtime/staging-relay";
+
 export interface DevUpInput {
   mobile: boolean;
   emulators: boolean;
@@ -63,12 +76,12 @@ export interface DevUpInput {
   attach: boolean;
   deleteDb: boolean;
   killDaemon: boolean;
+  withCredentials?: boolean;
   db?: string;
   daemonDir?: string;
   transferRoot?: string;
   firebaseEnvFrom?: string;
   staging?: boolean;
-  withCredentials?: boolean;
 }
 
 export type RestartComponent = "desktop" | "mobile" | "backend";
@@ -94,7 +107,13 @@ export interface MobileRunInput {
   device: boolean;
   production?: boolean;
   staging?: boolean;
+  install?: boolean;
   withCredentials?: boolean;
+}
+
+export interface MobileQaInput {
+  production: boolean;
+  ota: boolean;
 }
 
 export const devUpInputSchema = z.object({
@@ -134,7 +153,22 @@ const mobileRunInputSchema = z.object({
   device: z.boolean().default(false),
   production: z.boolean().default(false),
   staging: z.boolean().default(false),
+  install: z.boolean().default(false),
   withCredentials: z.boolean().default(false)
+});
+
+const mobileQaInputSchema = z.object({
+  production: z.boolean().default(false),
+  ota: z.boolean().default(false)
+});
+
+const mobileArchiveInputSchema = z.object({
+  production: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  upload: z.boolean().default(false),
+  buildNumber: z.string().optional(),
+  version: z.string().optional(),
+  outDir: z.string().optional()
 });
 
 const mobileOtaPublishInputSchema = z.object({
@@ -181,7 +215,9 @@ const lanLabInputSchema = z.object({
 
 const remoteE2eInputSchema = z.object({
   dev: z.boolean().default(true),
-  staging: z.boolean().default(false)
+  staging: z.boolean().default(false),
+  mobileRelay: z.boolean().default(false),
+  desktopPairing: z.boolean().default(false)
 });
 
 const remoteDoctorInputSchema = z.object({
@@ -211,7 +247,8 @@ const releaseShipInputSchema = z.object({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
   release: z.boolean().default(false),
-  dryRun: z.boolean().default(false)
+  dryRun: z.boolean().default(false),
+  rollbackTo: z.string().optional()
 });
 
 const cloudDeployInputSchema = z.object({
@@ -242,6 +279,8 @@ export interface DevDownExecutionOptions {
 export interface MobileDeviceRunExecutionOptions {
   resolveLanAddress?: () => string | undefined;
   metroReadiness?: Pick<PhysicalDeviceMetroReadinessInput, "attempts" | "delayMs">;
+  readInstalledStagingDesktopStatus?: (runner: CommandRunner) => Promise<ProductionDesktopStatus | null>;
+  listStagingRelayActiveDesktopIds?: (input: StagingRelayActiveDesktopIdsInput) => Promise<Set<string> | null>;
 }
 
 async function readGitValue(args: string[], cwd?: string): Promise<string> {
@@ -487,6 +526,12 @@ export async function executeDevRestartWithContext(
     };
   }
 
+  const desktopCleanup = input.component === "desktop"
+    ? await killWorkspaceDesktopDevProcesses({
+        repoRoot: executor.context.repoRoot,
+        runner: executor.runner
+      })
+    : undefined;
   const restarted = await respawnTmuxWindow(executor.runner, executor.context.tmux, window);
   return {
     ok: restarted,
@@ -496,6 +541,7 @@ export async function executeDevRestartWithContext(
     data: {
       component: input.component,
       environment,
+      desktopCleanup,
       ...restart.data
     }
   };
@@ -528,6 +574,72 @@ async function readProductionDesktopStatus(runner: CommandRunner): Promise<Produ
   } catch {
     throw new Error("Production desktop server returned invalid JSON from /v1/status.");
   }
+}
+
+async function readInstalledStagingDesktopStatus(runner: CommandRunner): Promise<ProductionDesktopStatus | null> {
+  const result = await runner.run("curl", [
+    "--fail",
+    "--silent",
+    "--show-error",
+    "http://127.0.0.1:48121/v1/status"
+  ]);
+  if (result.exitCode !== 0) return null;
+
+  try {
+    const parsed = JSON.parse(result.stdout) as ProductionDesktopStatus;
+    return parsed.desktopId ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function checkInstalledStagingDesktopRelayOwner(input: {
+  runner: CommandRunner;
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  readStatus?: (runner: CommandRunner) => Promise<ProductionDesktopStatus | null>;
+  listActiveDesktopIds?: (input: StagingRelayActiveDesktopIdsInput) => Promise<Set<string> | null>;
+}): Promise<TaskResult | null> {
+  const staging = resolveKdEnvironment("staging");
+  const status = await (input.readStatus ?? readInstalledStagingDesktopStatus)(input.runner);
+  const desktopId = status?.desktopId?.trim();
+  if (!desktopId) return null;
+
+  let activeDesktopIds: Set<string> | null;
+  try {
+    activeDesktopIds = await (input.listActiveDesktopIds ?? listStagingRelayActiveDesktopIds)({
+      repoRoot: input.repoRoot,
+      env: input.env,
+      relayUrl: staging.relayUrl
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      message:
+        "Could not verify installed staging desktop relay status: " +
+        `${error instanceof Error ? error.message : String(error)}`,
+      data: {
+        desktopId,
+        relayUrl: staging.relayUrl
+      }
+    };
+  }
+
+  if (!activeDesktopIds) return null;
+  if (activeDesktopIds.has(desktopId)) return null;
+
+  return {
+    ok: false,
+    message:
+      `Installed staging desktop ${desktopId} is not active in staging relay. ` +
+      "Restart the installed Kanna Staging desktop/server before launching the staging mobile app; " +
+      "otherwise task terminals owned by that desktop will report Desktop offline.",
+    data: {
+      desktopId,
+      relayUrl: staging.relayUrl,
+      activeDesktopIds: Array.from(activeDesktopIds)
+    }
+  };
 }
 
 async function assertProductionServerConfig(runner: CommandRunner, env: NodeJS.ProcessEnv): Promise<string> {
@@ -565,31 +677,26 @@ export async function executeProductionMobileUpWithContext(
       KANNA_CLOUD_ENV: "staging",
       KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
     };
-    writeTauriLocalConfig(executor.context.repoRoot, requireNumberPort(executor.context.ports, "KANNA_DEV_PORT"));
-    const desktopPlan = buildDevPlan({
-      repoRoot: executor.context.repoRoot,
-      env,
-      desktopSecretEnv: desktopCredentialEnv(input, env, "staging"),
-      mobile: false,
-      emulators: false,
-      firebaseConfigPath: "",
-      mobileServerUrl: resolveMobileServerUrl(env)
-    });
     const mobilePlan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
       env,
       environment: "staging"
     });
-    const plan = { windows: [...desktopPlan.windows, ...mobilePlan.windows] };
 
-    await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+    await startTmuxSession(executor.runner, executor.context.tmux, mobilePlan.windows);
+    const ownerCheck = await checkInstalledStagingDesktopRelayOwner({
+      runner: executor.runner,
+      repoRoot: executor.context.repoRoot,
+      env
+    });
+    if (ownerCheck) return ownerCheck;
 
     return {
       ok: true,
       message: "Started mobile against staging cloud environment.",
       data: {
         relayUrl: staging.relayUrl,
-        windows: plan.windows.map((window) => window.name)
+        windows: mobilePlan.windows.map((window) => window.name)
       }
     };
   }
@@ -735,6 +842,37 @@ function formatPhysicalDeviceRunFailure(input: {
   ].join("\n");
 }
 
+function formatPhysicalDeviceInstallSuccess(input: {
+  bundleId: string;
+  deviceName: string;
+  environment: string;
+}): string {
+  return [
+    `Installed Kanna mobile on ${input.deviceName}.`,
+    `Bundle ID: ${input.bundleId}`,
+    `Environment: ${input.environment}`,
+    "Metro is not required for this Release install because JavaScript is bundled into the app."
+  ].join("\n");
+}
+
+function formatPhysicalDeviceInstallFailure(input: {
+  bundleId: string;
+  deviceName: string;
+  environment: string;
+  phase: "prebuild" | "install";
+  result: CommandResult;
+}): string {
+  const output = [input.result.stderr.trim(), input.result.stdout.trim()].filter(Boolean).join("\n");
+  const action = input.phase === "prebuild" ? "prebuild" : "install";
+  return [
+    `Failed to ${action} Kanna mobile on ${input.deviceName}.`,
+    `Bundle ID: ${input.bundleId}`,
+    `Environment: ${input.environment}`,
+    `Exit code: ${input.result.exitCode}`,
+    output ? `Command output:\n${output}` : "Command output: <empty>"
+  ].join("\n");
+}
+
 function physicalDeviceChecksWithMetroReadiness(input: {
   checks: Awaited<ReturnType<typeof checkPhysicalDeviceRunPreflight>>["checks"];
   metroMessage: string;
@@ -759,14 +897,28 @@ export async function executeMobileDeviceRunWithContext(
     throw new Error("mobile.run accepts only one of --production or --staging.");
   }
 
-  const lanHost = requireMobileDeviceLanHost(options);
   const device = await resolvePhysicalDevice(executor.runner, {
     requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
     requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
   });
+  if (input.install) {
+    return executeMobileDeviceReleaseInstall(input, executor, device);
+  }
+
+  const lanHost = requireMobileDeviceLanHost(options);
   const launch = prepareMobileDeviceLaunch(input, executor, lanHost, device.udid);
   await launch.resetTmux();
   await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows);
+  if (input.staging) {
+    const ownerCheck = await checkInstalledStagingDesktopRelayOwner({
+      runner: executor.runner,
+      repoRoot: executor.context.repoRoot,
+      env: launch.env,
+      readStatus: options.readInstalledStagingDesktopStatus,
+      listActiveDesktopIds: options.listStagingRelayActiveDesktopIds
+    });
+    if (ownerCheck) return ownerCheck;
+  }
 
   const metroPort = Number.parseInt(launch.env.KANNA_MOBILE_PORT ?? "8081", 10);
   if (Number.isNaN(metroPort)) {
@@ -973,6 +1125,115 @@ export async function executeMobileDeviceRunWithContext(
   };
 }
 
+function mobileDeviceInstallEnv(
+  input: MobileRunInput,
+  executor: ExecutorInput,
+  deviceUdid: string
+): NodeJS.ProcessEnv {
+  if (input.staging) {
+    return {
+      ...executor.context.env,
+      KANNA_CLOUD_ENV: "staging",
+      KANNA_APP_ENV: "staging",
+      KANNA_IOS_DEVICE_UDID: deviceUdid
+    };
+  }
+
+  if (input.production) {
+    const production = resolveKdEnvironment("prod");
+    return {
+      ...executor.context.env,
+      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "prod",
+      KANNA_IOS_DEVICE_UDID: deviceUdid,
+      EXPO_PUBLIC_KANNA_RELAY_URL:
+        executor.context.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? production.relayUrl
+    };
+  }
+
+  return {
+    ...executor.context.env,
+    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev",
+    KANNA_IOS_DEVICE_UDID: deviceUdid
+  };
+}
+
+async function executeMobileDeviceReleaseInstall(
+  input: MobileRunInput,
+  executor: ExecutorInput,
+  device: Awaited<ReturnType<typeof resolvePhysicalDevice>>
+): Promise<TaskResult> {
+  const env = mobileDeviceInstallEnv(input, executor, device.udid);
+  const nativeIdentity = resolveMobileNativeIdentity(env);
+  const prebuildCommand = buildMobileDevicePrebuildCommand({
+    repoRoot: executor.context.repoRoot,
+    nativeIdentity
+  });
+  const prebuildResult = await executor.runner.run(prebuildCommand.command, prebuildCommand.args, {
+    cwd: prebuildCommand.cwd,
+    env: { ...env, ...prebuildCommand.env },
+    streamOutput: true
+  });
+  if (prebuildResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatPhysicalDeviceInstallFailure({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        environment: nativeIdentity.appEnv,
+        phase: "prebuild",
+        result: prebuildResult
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        environment: nativeIdentity.appEnv,
+        device
+      }
+    };
+  }
+
+  const installCommand = buildMobileDeviceReleaseInstallCommand({
+    repoRoot: executor.context.repoRoot,
+    deviceUdid: device.udid,
+    nativeIdentity
+  });
+  const installResult = await executor.runner.run(installCommand.command, installCommand.args, {
+    cwd: installCommand.cwd,
+    env: { ...env, ...installCommand.env },
+    streamOutput: true
+  });
+  if (installResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatPhysicalDeviceInstallFailure({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        environment: nativeIdentity.appEnv,
+        phase: "install",
+        result: installResult
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        environment: nativeIdentity.appEnv,
+        device
+      }
+    };
+  }
+
+  return {
+    ok: true,
+    message: formatPhysicalDeviceInstallSuccess({
+      bundleId: nativeIdentity.bundleId,
+      deviceName: device.name,
+      environment: nativeIdentity.appEnv
+    }),
+    data: {
+      bundleId: nativeIdentity.bundleId,
+      environment: nativeIdentity.appEnv,
+      device
+    }
+  };
+}
+
 function prepareMobileDeviceLaunch(
   input: MobileRunInput,
   executor: ExecutorInput,
@@ -990,16 +1251,6 @@ function prepareMobileDeviceLaunch(
       KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging",
       KANNA_IOS_DEVICE_UDID: deviceUdid
     };
-    writeTauriLocalConfig(executor.context.repoRoot, requireNumberPort(executor.context.ports, "KANNA_DEV_PORT"));
-    const desktopPlan = buildDevPlan({
-      repoRoot: executor.context.repoRoot,
-      env,
-      desktopSecretEnv: desktopCredentialEnv(input, env, "staging"),
-      mobile: false,
-      emulators: false,
-      firebaseConfigPath: "",
-      mobileServerUrl: resolveMobileServerUrl(env)
-    });
     const mobilePlan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
       env,
@@ -1007,8 +1258,8 @@ function prepareMobileDeviceLaunch(
     });
     return {
       env,
-      plan: { windows: [...desktopPlan.windows, ...mobilePlan.windows] },
-      resetTmux: () => stopTmuxSession(executor.runner, executor.context.tmux)
+      plan: mobilePlan,
+      resetTmux: () => stopTmuxWindow(executor.runner, executor.context.tmux, "mobile")
         .then(() => undefined)
     };
   }
@@ -1046,6 +1297,7 @@ function prepareMobileDeviceLaunch(
   const plan = buildDevPlan({
     repoRoot: executor.context.repoRoot,
     env,
+    desktopSecretEnv: desktopCredentialEnv(input, env, "dev"),
     mobile: true,
     emulators: true,
     firebaseConfigPath,
@@ -1127,6 +1379,49 @@ async function executeMobileDeviceDoctor(input: MobileRunInput): Promise<TaskRes
       env: context.env
     }
   });
+}
+
+async function executeMobileQa(input: MobileQaInput): Promise<TaskResult> {
+  if (!input.production) {
+    return { ok: false, message: "mobile.qa requires --production." };
+  }
+
+  const context = await resolveDefaultContext(process.env);
+  const qa = await executeProductionMobileQa({
+    repoRoot: context.repoRoot,
+    env: context.env,
+    runner: nodeCommandRunner
+  });
+  const localOk = isProductionMobileQaOk(qa);
+  const messages = [formatProductionMobileQaResult(qa)];
+  const otaResults: TaskResult[] = [];
+
+  if (localOk && input.ota) {
+    const otaContext = {
+      repoRoot: context.repoRoot,
+      env: context.env,
+      runner: nodeCommandRunner
+    };
+    const status = await executeMobileOtaStatusWithContext({ production: true, staging: false }, otaContext);
+    otaResults.push(status);
+    messages.push("", status.message);
+    if (status.ok) {
+      const doctor = await executeMobileOtaDoctorWithContext({ production: true, staging: false }, otaContext);
+      otaResults.push(doctor);
+      messages.push("", doctor.message);
+    }
+  } else if (localOk) {
+    messages.push(
+      "",
+      "OTA production checks are not part of this run. For OTA-affecting releases, run `./kd mobile qa --production --ota` or `./kd mobile ota status --production` and `./kd mobile ota doctor --production`."
+    );
+  }
+
+  return {
+    ok: localOk && otaResults.every((result) => result.ok),
+    message: messages.join("\n"),
+    data: { qa, otaResults }
+  };
 }
 
 export async function executeDevDownWithContext(
@@ -1220,7 +1515,9 @@ async function runBuiltCommand(command: string, args: string[], cwd: string, env
   const result = await nodeCommandRunner.run(command, args, { cwd, env });
   return {
     ok: result.exitCode === 0,
-    message: result.exitCode === 0 ? result.stdout || `${command} ${args.join(" ")} completed.` : result.stderr,
+    message: result.exitCode === 0
+      ? result.stdout || `${command} ${args.join(" ")} completed.`
+      : result.stderr || result.stdout,
     data: { command, args, exitCode: result.exitCode }
   };
 }
@@ -1327,10 +1624,29 @@ export const taskDefinitions = [
     execute: async (_context, input) => executeMobileDeviceRun(mobileRunInputSchema.parse(input))
   },
   {
+    id: "mobile.archive",
+    description: "Build and optionally upload a production iOS archive for App Store Connect.",
+    inputSchema: mobileArchiveInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobileIosArchiveWithContext(mobileArchiveInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
+  },
+  {
     id: "mobile.doctor",
     description: "Check physical iOS device mobile development readiness.",
     inputSchema: mobileRunInputSchema,
     execute: async (_context, input) => executeMobileDeviceDoctor(mobileRunInputSchema.parse(input))
+  },
+  {
+    id: "mobile.qa",
+    description: "Run the repo-side production mobile QA gate.",
+    inputSchema: mobileQaInputSchema,
+    execute: async (_context, input) => executeMobileQa(mobileQaInputSchema.parse(input))
   },
   {
     id: "mobile.ota.publish",
@@ -1589,6 +1905,9 @@ export const taskDefinitions = [
       if (parsed.staging && parsed.production) {
         return { ok: false, message: "release ship accepts only one of --staging or --production." };
       }
+      if (parsed.rollbackTo && !parsed.staging) {
+        return { ok: false, message: "release ship --rollback-to requires --staging." };
+      }
       const bump = parsed.major ? "major" : parsed.minor ? "minor" : "patch";
       const archLabels = [
         ...(parsed.arm64 ? ["arm64" as const] : []),
@@ -1603,6 +1922,7 @@ export const taskDefinitions = [
         environment,
         release: parsed.release,
         dryRun: parsed.dryRun,
+        rollbackTo: parsed.rollbackTo,
         env: context.env,
         runner: nodeCommandRunner
       });
@@ -1798,10 +2118,19 @@ export const taskDefinitions = [
       if (parsed.dev && parsed.staging) {
         return { ok: false, message: "remote-e2e accepts only one of --dev or --staging." };
       }
+      if (parsed.staging && (parsed.mobileRelay || parsed.desktopPairing)) {
+        return {
+          ok: false,
+          message: "remote-e2e staging is only supported for the headless Layer B lane."
+        };
+      }
       const context = await resolveDefaultContext(process.env);
+      const args = ["--dir", "tests/remote-e2e", "exec", "tsx", "src/run.ts", parsed.staging ? "--staging" : "--dev"];
+      if (parsed.mobileRelay) args.push("--mobile-relay");
+      if (parsed.desktopPairing) args.push("--desktop-pairing");
       return runBuiltCommand(
         "pnpm",
-        ["--dir", "tests/remote-e2e", "exec", "tsx", "src/run.ts", parsed.staging ? "--staging" : "--dev"],
+        args,
         context.repoRoot,
         context.env
       );

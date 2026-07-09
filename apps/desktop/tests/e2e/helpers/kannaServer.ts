@@ -15,6 +15,10 @@ export interface TestKannaServer {
   child: ChildProcessWithoutNullStreams;
 }
 
+export interface AppKannaServer {
+  baseUrl: string;
+}
+
 async function findFreePort(): Promise<number> {
   return await new Promise<number>((resolvePort, reject) => {
     const server = createServer();
@@ -152,4 +156,17 @@ export async function startTestKannaServer(
 
   child.kill();
   throw new Error(`timed out waiting for kanna-server at ${baseUrl}: ${stderr}`);
+}
+
+export async function resolveAppKannaServer(client: WebDriverClient): Promise<AppKannaServer> {
+  await tauriInvoke(client, "ensure_mobile_server");
+  const status = await tauriInvoke(client, "mobile_server_status") as {
+    lanPort?: number | string | null;
+    lan_port?: number | string | null;
+  };
+  const port = status.lanPort ?? status.lan_port ??
+    (await tauriInvoke(client, "read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" })
+      .catch(() => "48120"));
+  const normalizedPort = String(port ?? "").trim() || "48120";
+  return { baseUrl: `http://127.0.0.1:${normalizedPort}` };
 }

@@ -157,6 +157,78 @@ enum BlockerResolution {
     PrCreated,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PinTaskRequest {
+    position: i64,
+}
+
+pub(super) async fn pin_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<PinTaskRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = resolve_existing_task_id(&db, &task_id)?;
+    db.pin_pipeline_item(&task_id, payload.position)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+pub(super) async fn unpin_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = resolve_existing_task_id(&db, &task_id)?;
+    db.unpin_pipeline_item(&task_id)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReorderPinnedTasksRequest {
+    repo_id: String,
+    ordered_ids: Vec<String>,
+}
+
+pub(super) async fn reorder_pinned_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ReorderPinnedTasksRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    db.reorder_pinned_items(&payload.repo_id, &payload.ordered_ids)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(
+        serde_json::json!({ "updated": payload.ordered_ids.len() }),
+    ))
+}
+
 /// Build per-dependent session messages announcing that a blocker at the
 /// `pr` stage has resolved — either its PR was just created (optimistic
 /// resolution: work committed, reviewed, and pushed, awaiting human merge)
@@ -293,6 +365,7 @@ pub(super) async fn close_task(
         &state.config,
         &pipeline_item_id,
     );
+    let has_workspace_teardown = workspace_teardown.is_some();
 
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
@@ -336,18 +409,22 @@ pub(super) async fn close_task(
     {
         log::warn!("failed to replace workspace teardown session {teardown_session_id}: {error}");
     }
-    crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
-        &mut daemon,
-        workspace_teardown,
-    )
-    .await;
-
     db.close_pipeline_item(&pipeline_item_id).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("db error: {}", e),
         )
     })?;
+    if has_workspace_teardown {
+        crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
+            &mut daemon,
+            workspace_teardown,
+        )
+        .await;
+    } else {
+        crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(&db, &pipeline_item_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
     notify_task_completion(state.as_ref(), &pipeline_item_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -356,6 +433,25 @@ pub(super) async fn close_task(
     state.publish_state_changed(StateChangeScope::Blockers);
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub(super) async fn reopen_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = crate::task_creator::reopen_task_for_api(&db, &task_id)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
 }
 
 /// Close a task that advanced past its final pipeline stage. Shared by
@@ -368,6 +464,7 @@ async fn close_task_after_final_stage(
     task_id: String,
     workspace_teardown: Option<crate::task_creator::PreparedWorkspaceTeardown>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let has_workspace_teardown = workspace_teardown.is_some();
     let blocker_close_instructions = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
@@ -406,8 +503,6 @@ async fn close_task_after_final_stage(
     {
         log::warn!("failed to replace workspace teardown session {teardown_session_id}: {error}");
     }
-    crate::task_creator::spawn_prepared_workspace_teardown_best_effort(daemon, workspace_teardown)
-        .await;
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -420,6 +515,16 @@ async fn close_task_after_final_stage(
             format!("db error: {}", e),
         )
     })?;
+    if has_workspace_teardown {
+        crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
+            daemon,
+            workspace_teardown,
+        )
+        .await;
+    } else {
+        crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(&db, &task_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
     notify_task_completion(state.as_ref(), &task_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;

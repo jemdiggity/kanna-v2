@@ -49,6 +49,7 @@ export function resolveMobileAppEnvironment(
 interface ExpoConfig {
   name: string;
   slug: string;
+  version?: string;
   scheme: string;
   icon: string;
   plugins: (string | [string, { displayName: string; iosBundleId: string }])[];
@@ -57,6 +58,7 @@ interface ExpoConfig {
     bundleIdentifier: string;
     appleTeamId: string;
     googleServicesFile: string;
+    buildNumber?: string;
   };
   runtimeVersion: string;
   updates?: {
@@ -90,9 +92,15 @@ const OTA_CODE_SIGNING_CERTIFICATE = "./certs/ota-codesign.pem";
 const OTA_CODE_SIGNING_KEY_ID = "kanna-mobile-ota-v1";
 
 export function createExpoConfig(
-  env: { KANNA_APP_ENV?: string }
+  env: {
+    KANNA_APP_ENV?: string;
+    KANNA_APP_VERSION?: string;
+    KANNA_IOS_BUILD_NUMBER?: string;
+  }
 ): ExpoConfig {
   const appEnvironment = resolveMobileAppEnvironment(env.KANNA_APP_ENV);
+  const version = env.KANNA_APP_VERSION?.trim();
+  const buildNumber = env.KANNA_IOS_BUILD_NUMBER?.trim();
   const otaManifestUrl = resolveOtaManifestUrl(appEnvironment);
   const updates =
     appEnvironment.otaChannel && otaManifestUrl
@@ -113,6 +121,7 @@ export function createExpoConfig(
   return {
     name: appEnvironment.displayName,
     slug: "kanna-mobile",
+    ...(version ? { version } : {}),
     scheme: appEnvironment.scheme,
     icon: "./assets/icon.png",
     plugins: [
@@ -129,7 +138,8 @@ export function createExpoConfig(
     ios: {
       bundleIdentifier: appEnvironment.iosBundleId,
       appleTeamId: "GY3LFAA59P",
-      googleServicesFile: appEnvironment.iosGoogleServicesFile
+      googleServicesFile: appEnvironment.iosGoogleServicesFile,
+      ...(buildNumber ? { buildNumber } : {})
     },
     runtimeVersion: appEnvironment.runtimeVersion,
     ...(updates ? { updates } : {}),

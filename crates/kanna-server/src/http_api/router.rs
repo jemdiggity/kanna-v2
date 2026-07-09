@@ -1,35 +1,66 @@
+use super::analytics::get_repo_analytics;
+use super::backup::create_backup;
 use super::desktop::list_desktops;
+#[cfg(debug_assertions)]
+use super::e2e_sql::execute_e2e_sql;
 use super::ksp::ksp_stream;
+use super::operator_events::post_operator_events;
 use super::pairing::create_pairing_session;
-use super::repos::{add_repo, dependent_tasks_exist, list_repo_tasks, list_repos};
+use super::repos::{
+    add_repo, dependent_tasks_exist, get_repo_by_path, list_repo_tasks, list_repos, patch_repo,
+    reorder_repos,
+};
+use super::settings::{delete_setting, get_setting, put_setting};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse};
 use super::status::status;
 use super::task_actions::{
-    advance_stage, close_task, complete_stage, request_revision, rerun_stage, run_merge_agent,
-    set_task_parent,
+    advance_stage, close_task, complete_stage, pin_task, reopen_task, reorder_pinned_tasks,
+    request_revision, rerun_stage, run_merge_agent, set_task_parent, unpin_task,
 };
+use super::task_activity::{apply_runtime_status, mark_task_read};
+use super::task_agent_session::put_task_agent_session;
 use super::task_blockers::{block_task, unblock_task};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
-use super::tasks::{create_task, get_task, list_recent_tasks, search_tasks, update_task};
+use super::task_ports::{claim_task_ports, release_task_ports};
+use super::tasks::{
+    create_task, get_task, list_closed_task_identities, list_recent_tasks, search_tasks,
+    update_task,
+};
+use super::transfers::{
+    claim_pending_incoming_transfer, complete_task_transfer, fail_pending_incoming_transfer,
+    get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
+    list_pending_incoming_transfers, reject_task_transfer, update_task_transfer_payload,
+};
 use axum::body::Body;
 use axum::http::Request;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/v1/status", get(status))
         .route("/v1/snapshot", get(get_snapshot))
+        .route("/v1/backup", post(create_backup))
+        .route(
+            "/v1/settings/{key}",
+            get(get_setting).put(put_setting).delete(delete_setting),
+        )
+        .route("/v1/operator-events", post(post_operator_events))
+        .route("/v1/analytics/repos/{repo_id}", get(get_repo_analytics))
         .route("/v1/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))
+        .route("/v1/repos/by-path", get(get_repo_by_path))
+        .route("/v1/repos/actions/reorder", post(reorder_repos))
+        .route("/v1/repos/{repo_id}", axum::routing::patch(patch_repo))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
         .route(
             "/v1/repos/{repo_id}/agents/{agent}/signal",
@@ -37,6 +68,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/tasks/recent", get(list_recent_tasks))
         .route("/v1/tasks/search", get(search_tasks))
+        .route(
+            "/v1/tasks/closed-identities",
+            get(list_closed_task_identities),
+        )
         .route("/v1/tasks", post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task).patch(update_task))
         .route(
@@ -47,6 +82,22 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{task_id}/input", post(send_task_input))
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))
         .route("/v1/tasks/{task_id}/actions/unblock", post(unblock_task))
+        .route(
+            "/v1/tasks/{task_id}/actions/runtime-status",
+            post(apply_runtime_status),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/mark-read",
+            post(mark_task_read),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/agent-session",
+            post(put_task_agent_session),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/agent-session-id",
+            post(put_task_agent_session),
+        )
         .route(
             "/v1/tasks/{task_id}/actions/advance-stage",
             post(advance_stage),
@@ -64,12 +115,58 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{task_id}/actions/set-parent",
             post(set_task_parent),
         )
+        .route("/v1/tasks/{task_id}/actions/pin", post(pin_task))
+        .route("/v1/tasks/{task_id}/actions/unpin", post(unpin_task))
+        .route(
+            "/v1/tasks/actions/reorder-pinned",
+            post(reorder_pinned_tasks),
+        )
         .route("/v1/tasks/{task_id}/actions/close", post(close_task))
+        .route("/v1/tasks/{task_id}/actions/reopen", post(reopen_task))
+        .route(
+            "/v1/tasks/{task_id}/ports",
+            post(claim_task_ports).delete(release_task_ports),
+        )
         .route(
             "/v1/tasks/{task_id}/actions/run-merge-agent",
             post(run_merge_agent),
         )
-        .route("/v1/pairing/sessions", post(create_pairing_session))
+        .route(
+            "/v1/transfers/incoming/pending",
+            get(list_pending_incoming_transfers),
+        )
+        .route("/v1/transfers", post(insert_task_transfer))
+        .route(
+            "/v1/transfers/provenance",
+            post(insert_task_transfer_provenance),
+        )
+        .route("/v1/transfers/{transfer_id}", get(get_task_transfer))
+        .route(
+            "/v1/transfers/{transfer_id}/payload",
+            axum::routing::put(update_task_transfer_payload),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/complete",
+            post(complete_task_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/reject",
+            post(reject_task_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/claim",
+            post(claim_pending_incoming_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/fail",
+            post(fail_pending_incoming_transfer),
+        )
+        .route("/v1/pairing/sessions", post(create_pairing_session));
+
+    #[cfg(debug_assertions)]
+    let router = router.route("/v1/e2e/sql", post(execute_e2e_sql));
+
+    router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(log_error_responses))
         .with_state(state)
@@ -150,7 +247,7 @@ pub async fn dispatch_http_invoke(
         }
     };
 
-    let request = match Request::builder()
+    let mut request = match Request::builder()
         .method(method)
         .uri(path)
         .header("content-type", "application/json")
@@ -165,6 +262,12 @@ pub async fn dispatch_http_invoke(
             };
         }
     };
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
 
     match router(state).oneshot(request).await {
         Ok(response) => response_to_http_invoke(response).await,
@@ -221,7 +324,10 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to bind LAN API on {}: {}", bind_addr, e))?;
     log::info!("LAN API listening on {}", bind_addr);
-    axum::serve(listener, router(state))
-        .await
-        .map_err(|e| format!("LAN API server failed: {}", e))
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| format!("LAN API server failed: {}", e))
 }

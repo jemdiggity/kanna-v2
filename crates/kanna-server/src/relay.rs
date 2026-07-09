@@ -5,7 +5,44 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message;
+
+const RELAY_PING_INTERVAL: Duration = Duration::from_secs(30);
+const RELAY_PONG_TIMEOUT: Duration = Duration::from_secs(75);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayKeepaliveAction {
+    SendPing,
+    Reconnect,
+}
+
+struct RelayKeepalive {
+    pending_ping_sent_at: Option<Instant>,
+}
+
+impl RelayKeepalive {
+    fn new() -> Self {
+        Self {
+            pending_ping_sent_at: None,
+        }
+    }
+
+    fn on_inbound_message(&mut self, _now: Instant) {
+        self.pending_ping_sent_at = None;
+    }
+
+    fn on_ping_tick(&mut self, now: Instant) -> RelayKeepaliveAction {
+        if let Some(sent_at) = self.pending_ping_sent_at {
+            if now.duration_since(sent_at) >= RELAY_PONG_TIMEOUT {
+                return RelayKeepaliveAction::Reconnect;
+            }
+        }
+
+        self.pending_ping_sent_at = Some(now);
+        RelayKeepaliveAction::SendPing
+    }
+}
 
 pub(crate) async fn run_relay_loop(
     config: Config,
@@ -33,16 +70,44 @@ pub(crate) async fn run_relay_loop(
 
         // Track observer tasks per session_id
         let mut observe_tasks: HashMap<String, JoinHandle<()>> = HashMap::new();
+        let mut keepalive = RelayKeepalive::new();
+        let mut ping_interval = tokio::time::interval(RELAY_PING_INTERVAL);
+        ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        ping_interval.tick().await;
 
         // Message processing loop
-        while let Some(msg_result) = stream.next().await {
-            let msg = match msg_result {
-                Ok(m) => m,
-                Err(e) => {
-                    log::error!("WebSocket error: {}", e);
-                    break;
+        loop {
+            let msg = tokio::select! {
+                _ = ping_interval.tick() => {
+                    match keepalive.on_ping_tick(Instant::now()) {
+                        RelayKeepaliveAction::SendPing => {
+                            if let Err(e) = sink.lock().await.send(Message::Ping(Vec::new().into())).await {
+                                log::error!("Failed to send relay ping: {}", e);
+                                break;
+                            }
+                        }
+                        RelayKeepaliveAction::Reconnect => {
+                            log::warn!("Relay keepalive timed out; reconnecting");
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                msg_result = stream.next() => {
+                    let Some(msg_result) = msg_result else {
+                        log::info!("Relay WebSocket stream ended");
+                        break;
+                    };
+                    match msg_result {
+                        Ok(m) => m,
+                        Err(e) => {
+                            log::error!("WebSocket error: {}", e);
+                            break;
+                        }
+                    }
                 }
             };
+            keepalive.on_inbound_message(Instant::now());
 
             match msg {
                 Message::Text(text) => {
@@ -326,6 +391,7 @@ pub(crate) async fn run_relay_loop(
                         break;
                     }
                 }
+                Message::Pong(_) => {}
                 Message::Close(_) => {
                     log::info!("Relay closed connection");
                     break;
@@ -650,6 +716,38 @@ mod tests {
         assert_eq!(
             relay_tunnel_ksp_auth_mode(),
             crate::ksp::AuthMode::AllowEmpty
+        );
+    }
+
+    #[test]
+    fn relay_keepalive_reconnects_after_missed_pong_timeout() {
+        let start = tokio::time::Instant::now();
+        let mut keepalive = RelayKeepalive::new();
+
+        assert_eq!(
+            keepalive.on_ping_tick(start),
+            RelayKeepaliveAction::SendPing
+        );
+        assert_eq!(
+            keepalive.on_ping_tick(start + RELAY_PONG_TIMEOUT),
+            RelayKeepaliveAction::Reconnect
+        );
+    }
+
+    #[test]
+    fn relay_keepalive_clears_pending_ping_on_any_inbound_message() {
+        let start = tokio::time::Instant::now();
+        let mut keepalive = RelayKeepalive::new();
+
+        assert_eq!(
+            keepalive.on_ping_tick(start),
+            RelayKeepaliveAction::SendPing
+        );
+        keepalive.on_inbound_message(start + RELAY_PONG_TIMEOUT / 2);
+
+        assert_eq!(
+            keepalive.on_ping_tick(start + RELAY_PONG_TIMEOUT),
+            RelayKeepaliveAction::SendPing
         );
     }
 }

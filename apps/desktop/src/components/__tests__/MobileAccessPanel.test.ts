@@ -17,4 +17,19 @@ describe("MobileAccessPanel", () => {
     expect(wrapper.text()).toContain("Studio Mac");
     expect(wrapper.get('button[type="button"]').text()).toMatch(/start pairing/i);
   });
+
+  it("exposes stable selectors for the desktop pairing E2E", () => {
+    const wrapper = mount(MobileAccessPanel, {
+      props: {
+        desktopName: "Studio Mac",
+        serverStatus: "running",
+        pairingCode: "123456",
+      },
+    });
+
+    expect(wrapper.get('[data-testid="mobile-access-panel"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="mobile-access-status"]').text()).toBe("Online");
+    expect(wrapper.get('[data-testid="mobile-access-pairing-code"]').text()).toBe("123456");
+    expect(wrapper.get('[data-testid="mobile-access-start-pairing"]').text()).toMatch(/start pairing/i);
+  });
 });

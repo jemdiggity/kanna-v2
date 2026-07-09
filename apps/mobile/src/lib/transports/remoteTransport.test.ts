@@ -301,6 +301,46 @@ describe("remote transport", () => {
     expect(invokeDesktop).not.toHaveBeenCalled();
   });
 
+  it("creates tasks on an explicit desktop without forwarding the routing field", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "task-created",
+      repoId: "repo-1",
+      title: "Ship it",
+      stage: "in progress"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => []
+    });
+
+    await expect(
+      transport.createTask({
+        repoId: "repo-1",
+        prompt: "Ship it",
+        desktopId: "desktop-2",
+        agentProvider: "codex"
+      })
+    ).resolves.toEqual({
+      taskId: "task-created",
+      repoId: "repo-1",
+      title: "Ship it",
+      stage: "in progress"
+    });
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-2",
+      method: "POST",
+      path: "/v1/tasks",
+      body: {
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentProvider: "codex"
+      }
+    });
+  });
+
   it("keeps Firestore cloud tasks visible even when the owner desktop recent-task relay is stale", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue([
       {
@@ -361,6 +401,55 @@ describe("remote transport", () => {
       }
     ]);
     expect(invokeDesktop).not.toHaveBeenCalled();
+  });
+
+  it("creates cloud-indexed repo tasks on the repo owner desktop without a selected desktop", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "task-created",
+      repoId: "repo-1",
+      title: "Ship it",
+      stage: "in progress"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud:desktop-owner:repo-1:task-existing",
+          repoId: "repo-1",
+          repoName: "Repo One",
+          title: "Existing task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "task-existing"
+        }
+      ]
+    });
+
+    await expect(
+      transport.createTask({
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentProvider: "claude"
+      })
+    ).resolves.toEqual({
+      taskId: "task-created",
+      repoId: "repo-1",
+      title: "Ship it",
+      stage: "in progress"
+    });
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks",
+      body: {
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentProvider: "claude"
+      }
+    });
   });
 
   it("routes cloud task actions to the owner desktop and local task id", async () => {

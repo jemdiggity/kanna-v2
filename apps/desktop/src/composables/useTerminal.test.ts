@@ -176,6 +176,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+vi.mock("../invoke", () => ({
+  invoke: invokeMock,
+}));
+
 vi.mock("../perf/taskSwitchPerf", () => ({
   markTaskSwitchFirstOutput: (...args: unknown[]) => markTaskSwitchFirstOutputMock(...args),
 }));
@@ -894,9 +898,13 @@ describe("useTerminal", () => {
   it("respawns when the KSP stream reports a missing task session after initial attach", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
-    installKspStreamClient({
+    const client = installKspStreamClient({
       onAttach: (_taskId, handlers) => {
-        handlers.onError?.("session_not_found", "session not found: session-1");
+        if (client.attachTerminal.mock.calls.length === 1) {
+          handlers.onSnapshot?.(80, 24, btoa("initial scrollback"));
+          return;
+        }
+        handlers.onSnapshot?.(80, 24, btoa("fresh session output"));
       },
     });
 
@@ -938,6 +946,7 @@ describe("useTerminal", () => {
     wrapper.vm.init(terminalElement);
 
     await wrapper.vm.startListening();
+    terminalStreamHandlers.get("session-1")?.onError?.("session_not_found", "session not found: session-1");
     await flushAsyncWork();
 
     const terminal = terminals[0];
@@ -1538,6 +1547,300 @@ describe("useTerminal", () => {
     expect(client.attachTerminal).toHaveBeenCalledTimes(2);
   });
 
+  it("reattaches on reselect after the session was killed and respawned while the view was paused", async () => {
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("stage scrollback"));
+      },
+    });
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_sessions") {
+        return [{ session_id: "session-1" }];
+      }
+      return null;
+    });
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening, pause } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn: async () => {},
+          },
+          {
+            agentProvider: "codex",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening, pause };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const startPromise = wrapper.vm.startListening();
+    const terminal = terminals[0];
+    expect(terminal).toBeDefined();
+
+    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+    await startPromise;
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
+
+    // The stage engine kills the session while the view is attached; the
+    // exit frame latches the exit state.
+    terminalStreamHandlers.get("session-1")?.onSessionExit?.(-1);
+
+    // The view pauses (task deselected) before the respawn, so the
+    // session_created rebind for the new PTY is never delivered.
+    wrapper.vm.pause();
+    await flushAsyncWork();
+
+    // Reselect: the resume probe sees the session id live again in the
+    // daemon, clears the stale exit latch, and reattaches.
+    const resumePromise = wrapper.vm.startListening();
+    await flushAsyncWork();
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+    await resumePromise;
+
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
+    expect(warningToastMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the exit latch on resume when the daemon session is gone", async () => {
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("stage scrollback"));
+      },
+    });
+    const spawnFn = vi.fn(async () => {});
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_sessions") {
+        return [];
+      }
+      return null;
+    });
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening, pause } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn,
+          },
+          {
+            agentProvider: "codex",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening, pause };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const startPromise = wrapper.vm.startListening();
+    const terminal = terminals[0];
+    expect(terminal).toBeDefined();
+
+    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+    await startPromise;
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
+
+    terminalStreamHandlers.get("session-1")?.onSessionExit?.(0);
+    wrapper.vm.pause();
+    await flushAsyncWork();
+
+    await wrapper.vm.startListening();
+    await flushAsyncWork();
+
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(warningToastMock).not.toHaveBeenCalled();
+  });
+
+  it("defers a session_created that arrives during an in-flight reconnect", async () => {
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("stage scrollback"));
+      },
+    });
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn: async () => {},
+          },
+          {
+            agentProvider: "codex",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const startPromise = wrapper.vm.startListening();
+    const terminal = terminals[0];
+    expect(terminal).toBeDefined();
+
+    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+    await startPromise;
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
+
+    const createdListeners = eventListeners.get("session_created") ?? [];
+    expect(createdListeners).toHaveLength(1);
+
+    // First created starts a rebind (connecting flips synchronously); the
+    // second lands mid-connect and must be applied after it settles instead
+    // of being dropped.
+    createdListeners[0]({ payload: { session_id: "session-1" } });
+    createdListeners[0]({ payload: { session_id: "session-1" } });
+    await flushAsyncWork();
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+    await flushAsyncWork();
+
+    expect(client.attachTerminal).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not fabricate an attachment when the stream connection returns after the session exited", async () => {
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("stage scrollback"));
+      },
+    });
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn: async () => {},
+          },
+          {
+            agentProvider: "codex",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const startPromise = wrapper.vm.startListening();
+    const terminal = terminals[0];
+    expect(terminal).toBeDefined();
+
+    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+    await startPromise;
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
+
+    terminalStreamHandlers.get("session-1")?.onSessionExit?.(0);
+    const resizeCallsAfterExit = client.sendTermResize.mock.calls.length;
+
+    const connectionListener = streamClientMock.onSharedStreamConnectionChange.mock.calls[0]?.[0] as
+      | ((connected: boolean) => void)
+      | undefined;
+    expect(connectionListener).toBeDefined();
+    connectionListener?.(true);
+    await flushAsyncWork();
+
+    // The exited session has no live attachment to resync: no resize against
+    // a dead session and no new attach while the exit latch holds.
+    expect(client.sendTermResize.mock.calls.length).toBe(resizeCallsAfterExit);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
+  });
+
   it("marks the terminal ended after session_exit so ensureConnected does not reattach", async () => {
     const callOrder: string[] = [];
     const { useTerminal } = await import("./useTerminal");
@@ -1633,9 +1936,13 @@ describe("useTerminal", () => {
 
     await ensurePromise;
 
+    // ensureConnected probes the daemon for a stage-swap respawn before
+    // honoring the exit latch; with the session gone the latch holds and no
+    // reattach happens.
     expect(callOrder).toEqual([
       "attach_session_with_snapshot",
       "resize_session",
+      "list_sessions",
     ]);
   });
 

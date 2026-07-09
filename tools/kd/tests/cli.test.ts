@@ -112,6 +112,12 @@ describe("kd CLI", () => {
     await expect(runCli(["mobile", "run", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile run --device"));
 
+    await expect(runCli(["mobile", "qa", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile qa --production"));
+
+    await expect(runCli(["mobile", "archive", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile archive --production"));
+
     await expect(runCli(["mobile", "ota", "publish", "--staging", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile ota publish"));
 
@@ -217,7 +223,7 @@ describe("kd CLI", () => {
     });
   });
 
-  it("parses opt-in desktop credentials only for supported dev and staging launch commands", () => {
+  it("parses opt-in desktop credentials for supported dev and staging launch commands", () => {
     expect(parseCliArgs(["dev", "up", "--with-credentials"])).toEqual({
       taskId: "dev.up",
       input: {
@@ -281,20 +287,51 @@ describe("kd CLI", () => {
         withCredentials: true
       }
     });
-    expect(parseCliArgs(["mobile", "up", "--staging", "--with-credentials"])).toEqual({
-      taskId: "mobile.up",
+    expect(parseCliArgs(["dev", "up", "--mobile", "--emulators", "--with-credentials"])).toEqual({
+      taskId: "dev.up",
       input: {
-        production: false,
-        staging: true,
+        mobile: true,
+        emulators: true,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
         withCredentials: true
       }
     });
-    expect(parseCliArgs(["mobile", "run", "--device", "--staging", "--with-credentials"])).toEqual({
+    expect(parseCliArgs(["mobile", "up", "--with-credentials"])).toEqual({
+      taskId: "dev.up",
+      input: {
+        mobile: true,
+        emulators: true,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        withCredentials: true
+      }
+    });
+    expect(parseCliArgs(["mobile", "run", "--device", "--with-credentials"])).toEqual({
       taskId: "mobile.run",
       input: {
         device: true,
         production: false,
-        staging: true,
+        staging: false,
+        withCredentials: true
+      }
+    });
+    expect(parseCliArgs(["dev", "restart", "desktop", "--with-credentials"])).toEqual({
+      taskId: "dev.restart",
+      input: {
+        component: "desktop",
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: false,
+        production: false,
         withCredentials: true
       }
     });
@@ -331,7 +368,10 @@ describe("kd CLI", () => {
     expect(() => parseCliArgs(["mobile", "up", "--production", "--with-credentials"])).toThrow(
       "--with-credentials is only supported for dev or staging desktop launch commands"
     );
-    expect(() => parseCliArgs(["mobile", "run", "--device", "--with-credentials"])).toThrow(
+    expect(() => parseCliArgs(["mobile", "up", "--staging", "--with-credentials"])).toThrow(
+      "--with-credentials is only supported for dev or staging desktop launch commands"
+    );
+    expect(() => parseCliArgs(["mobile", "run", "--device", "--staging", "--with-credentials"])).toThrow(
       "--with-credentials is only supported for dev or staging desktop launch commands"
     );
     expect(() => parseCliArgs(["mobile", "doctor", "--device", "--staging", "--with-credentials"])).toThrow(
@@ -416,10 +456,22 @@ describe("kd CLI", () => {
       taskId: "mobile.run",
       input: { device: true, production: false, staging: true }
     });
+    expect(parseCliArgs(["mobile", "run", "--device", "--staging", "--install"])).toEqual({
+      taskId: "mobile.run",
+      input: { device: true, production: false, staging: true, install: true }
+    });
+    expect(() => parseCliArgs(["dev", "up", "--install"])).toThrow("Unknown flag: --install");
+    expect(() => parseCliArgs(["--install"])).toThrow("Unknown flag: --install");
+    expect(() => parseCliArgs(["mobile", "doctor", "--device", "--install"])).toThrow(
+      "mobile doctor only accepts --device, --production, or --staging"
+    );
     expect(parseCliArgs(["mobile", "run", "--device", "--production"])).toEqual({
       taskId: "mobile.run",
       input: { device: true, production: true, staging: false }
     });
+    expect(() => parseCliArgs(["mobile", "run", "--staging", "--install"])).toThrow(
+      "mobile run requires --device"
+    );
     expect(() => parseCliArgs(["mobile", "run", "--device", "--production", "--staging"])).toThrow(
       "mobile run accepts only one of --production or --staging"
     );
@@ -427,6 +479,21 @@ describe("kd CLI", () => {
       taskId: "mobile.doctor",
       input: { device: true, production: false, staging: false }
     });
+  });
+
+  it("parses production mobile QA gate commands", () => {
+    expect(parseCliArgs(["mobile", "qa", "--production"])).toEqual({
+      taskId: "mobile.qa",
+      input: { production: true, ota: false }
+    });
+    expect(parseCliArgs(["mobile", "qa", "--production", "--ota"])).toEqual({
+      taskId: "mobile.qa",
+      input: { production: true, ota: true }
+    });
+    expect(() => parseCliArgs(["mobile", "qa"])).toThrow("mobile qa requires --production");
+    expect(() => parseCliArgs(["mobile", "qa", "--production", "--device"])).toThrow(
+      "mobile qa only accepts --production and --ota"
+    );
   });
 
   it("maps retired wrapper argument shapes to kd tasks", () => {
@@ -521,11 +588,11 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["test", "remote-e2e"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: true, staging: false },
+      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false },
     });
     expect(parseCliArgs(["test", "remote-e2e", "--staging"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: false, staging: true },
+      input: { dev: false, staging: true, mobileRelay: false, desktopPairing: false },
     });
   });
 
@@ -557,6 +624,10 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["release", "ship", "--dry-run", "--minor", "--arm64", "--staging"])).toEqual({
       taskId: "release.ship",
       input: { dryRun: true, minor: true, arm64: true, staging: true }
+    });
+    expect(parseCliArgs(["release", "ship", "--staging", "--rollback-to", "1.2.4-staging.3"])).toEqual({
+      taskId: "release.ship",
+      input: { staging: true, rollbackTo: "1.2.4-staging.3" }
     });
     expect(parseCliArgs(["cloud", "deploy", "--production"])).toEqual({
       taskId: "cloud.deploy",

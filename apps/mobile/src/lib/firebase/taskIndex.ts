@@ -37,7 +37,14 @@ export interface CloudTaskSummary extends TaskSummary {
   ownerOnline: boolean;
 }
 
+export interface CloudDesktopRecord {
+  desktopId: string;
+  displayName: string;
+  updatedAt: string | null;
+}
+
 export interface CloudTaskIndex {
+  listDesktops(uid: string): Promise<CloudDesktopRecord[]>;
   listRecentTasks(uid: string): Promise<CloudTaskSummary[]>;
   // Live subscription: pushes the user's open cloud tasks whenever any peer
   // desktop writes, via onSnapshot. Returns an unsubscribe.
@@ -51,6 +58,11 @@ export function createFirestoreTaskIndex(
   db: Firestore = getConfiguredFirestore(),
 ): CloudTaskIndex {
   return {
+    async listDesktops(uid) {
+      const desktopsRef = collection(db, "users", uid, "desktops");
+      const desktops = await getDocs(desktopsRef);
+      return desktops.docs.map((doc) => mapCloudDesktopRecord(doc.id, doc.data()));
+    },
     async listRecentTasks(uid) {
       const desktopsRef = collection(db, "users", uid, "desktops");
       const desktops = await getDocs(desktopsRef);
@@ -67,24 +79,49 @@ export function createFirestoreTaskIndex(
       let cancelled = false;
       const tasksByDesktop = new Map<string, CloudTaskSnapshot[]>();
       const taskUnsubs = new Map<string, () => void>();
+      const hydratingDesktopIds = new Set<string>();
 
       const emit = () => {
         if (cancelled) return;
         const all = [...tasksByDesktop.values()].flat();
+        if (all.length === 0 && hydratingDesktopIds.size > 0) return;
         onUpdate(sortCloudTasks(all).map(mapCloudTaskSnapshot));
+      };
+
+      const primeTasks = async (
+        desktopId: string,
+        tasksQuery: ReturnType<typeof query>
+      ) => {
+        try {
+          const tasksSnapshot = await getDocs(tasksQuery);
+          if (cancelled) return;
+          tasksByDesktop.set(
+            desktopId,
+            tasksSnapshot.docs.map((doc) => doc.data() as CloudTaskSnapshot),
+          );
+          hydratingDesktopIds.delete(desktopId);
+          emit();
+        } catch (error) {
+          hydratingDesktopIds.delete(desktopId);
+          emit();
+          console.warn("[cloud-task-index] failed to prime desktop tasks", error);
+        }
       };
 
       const desktopsUnsub = onSnapshot(
         collection(db, "users", uid, "desktops"),
         (desktopsSnapshot) => {
           const present = new Set<string>();
+          let removedDesktop = false;
           for (const desktopDoc of desktopsSnapshot.docs) {
             present.add(desktopDoc.id);
             if (taskUnsubs.has(desktopDoc.id)) continue;
+            hydratingDesktopIds.add(desktopDoc.id);
             const tasksQuery = query(
               collection(desktopDoc.ref, "tasks"),
               where("closedAt", "==", null),
             );
+            void primeTasks(desktopDoc.id, tasksQuery);
             taskUnsubs.set(
               desktopDoc.id,
               onSnapshot(tasksQuery, (tasksSnapshot) => {
@@ -92,6 +129,7 @@ export function createFirestoreTaskIndex(
                   desktopDoc.id,
                   tasksSnapshot.docs.map((doc) => doc.data() as CloudTaskSnapshot),
                 );
+                hydratingDesktopIds.delete(desktopDoc.id);
                 emit();
               }),
             );
@@ -101,8 +139,12 @@ export function createFirestoreTaskIndex(
             unsub();
             taskUnsubs.delete(desktopId);
             tasksByDesktop.delete(desktopId);
+            hydratingDesktopIds.delete(desktopId);
+            removedDesktop = true;
           }
-          emit();
+          if (desktopsSnapshot.docs.length === 0 || removedDesktop) {
+            emit();
+          }
         },
       );
 
@@ -112,6 +154,7 @@ export function createFirestoreTaskIndex(
         for (const unsub of taskUnsubs.values()) unsub();
         taskUnsubs.clear();
         tasksByDesktop.clear();
+        hydratingDesktopIds.clear();
       };
     },
   };
@@ -150,6 +193,39 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     ownerLocalTaskId: snapshot.ownerLocalTaskId,
     ownerOnline: false,
   };
+}
+
+function mapCloudDesktopRecord(
+  docId: string,
+  data: Record<string, unknown>
+): CloudDesktopRecord {
+  const desktopId =
+    typeof data.desktopId === "string" && data.desktopId.trim()
+      ? data.desktopId.trim()
+      : docId;
+  const displayName =
+    typeof data.displayName === "string" && data.displayName.trim()
+      ? data.displayName.trim()
+      : desktopId;
+
+  return {
+    desktopId,
+    displayName,
+    updatedAt: normalizeCloudTimestamp(data.updatedAt)
+  };
+}
+
+function normalizeCloudTimestamp(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+  if (value && typeof value === "object" && "toDate" in value) {
+    const date = (value as { toDate?: () => unknown }).toDate?.();
+    if (date instanceof Date && !Number.isNaN(date.getTime())) {
+      return date.toISOString();
+    }
+  }
+  return null;
 }
 
 function normalizeAgentType(type: string | null | undefined): TaskSummary["agentType"] {

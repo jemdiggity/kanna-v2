@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
-import { waitForBuffyIdToken } from "./firebaseAuth";
 import { runCommand } from "./processes";
 import type { RemoteHarness } from "./harness";
 import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../../apps/mobile/src/lib/api/client";
@@ -62,8 +61,8 @@ export interface TerminalEventCollector {
 }
 
 export async function connectRawRelayClient(harness: RemoteHarness): Promise<RawRelayClient> {
-  const token = await waitForBuffyIdToken(harness.ports.auth, 10_000);
-  const socket = new WebSocket(`ws://127.0.0.1:${harness.ports.relay}`);
+  const token = await harness.getIdToken();
+  const socket = new WebSocket(harness.relayUrl);
   const client = new RawRelayClientImpl(socket);
   await client.waitUntilOpen();
   client.send({ type: "auth", id_token: token });

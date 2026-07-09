@@ -1,7 +1,8 @@
 import { invoke } from "../invoke";
+import { createDesktopBackup } from "../services/desktopServerClient";
 import { isTauri } from "../tauri-mock";
 import type { Ref } from "vue";
-import type { DbHandle } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
 
 const RETENTION_DAYS = 7;
 const BACKUP_SUFFIX_REGEX = /\.backup-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})(?:-\d+)?$/;
@@ -69,7 +70,7 @@ export async function createBackup(
   const exists = await invoke<boolean>("file_exists", { path: dbPath });
   if (!exists) return;
 
-  const backupPath = await invoke<string>("backup_sqlite_database", { dbName });
+  const { backupPath } = await createDesktopBackup();
 
   console.info(`[backup] created: ${backupPath}`);
 

@@ -300,6 +300,7 @@ describe("createAppModel", () => {
       notifyAuthExpired: vi.fn()
     };
     const taskIndex = {
+      listDesktops: vi.fn(async () => []),
       listRecentTasks: vi.fn(async () => [
         {
           id: "cloud-task-1",
@@ -350,6 +351,7 @@ describe("createAppModel", () => {
       notifyAuthExpired: vi.fn()
     };
     const taskIndex = {
+      listDesktops: vi.fn(async () => []),
       listRecentTasks: vi.fn(async () => []),
       subscribeRecentTasks: vi.fn(() => () => {})
     };
@@ -428,6 +430,7 @@ describe("createAppModel", () => {
       throw new Error("LAN should not be called for standalone production cloud");
     }) as FetchLike;
     const taskIndex = {
+      listDesktops: vi.fn(async () => []),
       listRecentTasks: vi.fn(async () => []),
       subscribeRecentTasks: vi.fn(() => () => {})
     };
@@ -459,6 +462,7 @@ describe("createAppModel", () => {
   it("falls back to a trusted Bonjour LAN endpoint when signed-in cloud has no tasks", async () => {
     const authSession = createSignedInAuthSession();
     const taskIndex = {
+      listDesktops: vi.fn(async () => []),
       listRecentTasks: vi.fn(async () => []),
       subscribeRecentTasks: vi.fn(() => () => {})
     };
@@ -516,6 +520,7 @@ describe("createAppModel", () => {
   it("uses cloud instead of trusted LAN fallback when force-cloud is enabled", async () => {
     const authSession = createSignedInAuthSession();
     const taskIndex = {
+      listDesktops: vi.fn(async () => []),
       listRecentTasks: vi.fn(async () => []),
       subscribeRecentTasks: vi.fn(() => () => {})
     };
@@ -572,6 +577,7 @@ describe("createAppModel", () => {
   it("skips Bonjour LAN endpoints whose status belongs to a different desktop", async () => {
     const authSession = createSignedInAuthSession();
     const taskIndex = {
+      listDesktops: vi.fn(async () => []),
       listRecentTasks: vi.fn(async () => []),
       subscribeRecentTasks: vi.fn(() => () => {})
     };

@@ -303,16 +303,16 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
           const touch = event.touches[0];
           const deltaX = touchScroll.x - touch.clientX;
           const deltaY = touchScroll.y - touch.clientY;
-          if (Math.abs(deltaX) < 4 && Math.abs(deltaY) < 4) {
+          const absDeltaX = Math.abs(deltaX);
+          const absDeltaY = Math.abs(deltaY);
+          if (absDeltaX < 4 && absDeltaY < 4) {
+            return;
+          }
+          if (absDeltaY > absDeltaX) {
             return;
           }
 
           viewport.scrollLeft = touchScroll.scrollLeft + deltaX;
-          if (terminalViewport) {
-            terminalViewport.scrollTop = touchScroll.terminalScrollTop + deltaY;
-            stickyToBottom = isNearBottom();
-            applyViewportInset();
-          }
           if (event.cancelable) {
             event.preventDefault();
           }

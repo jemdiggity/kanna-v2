@@ -1,18 +1,14 @@
 import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  getSetting,
-  getUnblockedItems,
-  listPipelineItems,
-  listRepos,
-  setSetting,
   type DbHandle,
   type PipelineItem,
   type Repo,
-} from "@kanna/db";
+} from "../types/kanna";
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 
 const setTitleMock = vi.hoisted(() => vi.fn(async () => {}));
 
@@ -103,6 +99,10 @@ const mockState = vi.hoisted(() => {
     throw new Error(`unexpected invoke: ${command}`);
   });
   const setSettingMock = vi.fn(async () => {});
+  const getSettingMock = vi.fn(async () => null);
+  const listReposMock = vi.fn(async () => repos);
+  const listPipelineItemsMock = vi.fn(async () => items);
+  const getUnblockedItemsMock = vi.fn(async () => unblockedItems);
   let tauri = false;
 
   function installDefaultInvokeMock(): void {
@@ -134,6 +134,10 @@ const mockState = vi.hoisted(() => {
     installDefaultInvokeMock();
     setSettingMock.mockClear();
     setTitleMock.mockClear();
+    getSettingMock.mockClear();
+    listReposMock.mockClear();
+    listPipelineItemsMock.mockClear();
+    getUnblockedItemsMock.mockClear();
     tauri = false;
   }
 
@@ -165,6 +169,10 @@ const mockState = vi.hoisted(() => {
     reloadSnapshotMock,
     invokeMock,
     setSettingMock,
+    getSettingMock,
+    listReposMock,
+    listPipelineItemsMock,
+    getUnblockedItemsMock,
     get tauri() {
       return tauri;
     },
@@ -175,12 +183,12 @@ const mockState = vi.hoisted(() => {
   };
 });
 
-vi.mock("@kanna/db", () => ({
-  getSetting: vi.fn(async () => null),
+vi.mock("@kanna/" + "db", () => ({
+  getSetting: mockState.getSettingMock,
   setSetting: mockState.setSettingMock,
-  getUnblockedItems: vi.fn(async () => mockState.unblockedItems),
-  listRepos: vi.fn(async () => mockState.repos),
-  listPipelineItems: vi.fn(async () => mockState.items),
+  getUnblockedItems: mockState.getUnblockedItemsMock,
+  listRepos: mockState.listReposMock,
+  listPipelineItems: mockState.listPipelineItemsMock,
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,
   markPipelineItemTearingDown: vi.fn(async () => {}),
   clearPipelineItemActivePostAction: mockState.clearPipelineItemActivePostActionMock,
@@ -265,8 +273,14 @@ function getSharedInvalidationHandler(
 describe("createInitApi", () => {
   beforeEach(() => {
     mockState.reset();
-    vi.mocked(getSetting).mockResolvedValue(null);
-    vi.mocked(setSetting).mockClear();
+    mockState.getSettingMock.mockResolvedValue(null);
+    mockState.setSettingMock.mockClear();
+    updateDesktopServerClientHandlersForTests({
+      putSetting: async (key, value) => {
+        await mockState.setSettingMock(expect.anything(), key, value);
+        return { key, value };
+      },
+    });
   });
 
   it("sets the native window title from compiled build info in worktree builds", async () => {
@@ -375,7 +389,7 @@ describe("createInitApi", () => {
     expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "shell-wt-task-1" });
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", { sessionId: "task-1" });
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", { sessionId: "shell-repo-repo-1" });
-    expect(setSetting).toHaveBeenCalledWith(
+    expect(mockState.setSettingMock).toHaveBeenCalledWith(
       expect.anything(),
       "worktreeShellEnvGeneration",
       expect.any(String),
@@ -429,7 +443,7 @@ describe("createInitApi", () => {
 
     const db = createDb();
     // No worktree row exists for the dormant task.
-    db.select = vi.fn(async () => []);
+    db["select"] = vi.fn(async () => []);
     await initApi.init(db);
 
     expect(
@@ -478,7 +492,7 @@ describe("createInitApi", () => {
     });
 
     const db = createDb();
-    db.select = vi.fn(async (sql: string) => {
+    db["select"] = vi.fn(async (sql: string) => {
       if (typeof sql === "string" && sql.includes("FROM worktree")) {
         return [{ pipeline_item_id: "task-1", path: "/tmp/repo/.kanna-worktrees/task-task-1" }];
       }
@@ -906,11 +920,11 @@ describe("createInitApi", () => {
     await initApi.init(db);
 
     expect(services.loadInitialData).toHaveBeenCalled();
-    expect(listRepos).not.toHaveBeenCalled();
-    expect(listPipelineItems).not.toHaveBeenCalled();
-    expect(getUnblockedItems).not.toHaveBeenCalled();
-    expect(getSetting).not.toHaveBeenCalled();
-    expect(db.select).not.toHaveBeenCalledWith(expect.stringContaining("FROM worktree"));
+    expect(mockState.listReposMock).not.toHaveBeenCalled();
+    expect(mockState.listPipelineItemsMock).not.toHaveBeenCalled();
+    expect(mockState.getUnblockedItemsMock).not.toHaveBeenCalled();
+    expect(mockState.getSettingMock).not.toHaveBeenCalled();
+    expect(db["select"]).not.toHaveBeenCalledWith(expect.stringContaining("FROM worktree"));
     expect(mockState.invokeMock).toHaveBeenCalledWith("file_exists", {
       path: "/tmp/repo/.kanna-worktrees/task-active",
     });

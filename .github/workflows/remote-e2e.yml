@@ -10,9 +10,13 @@ on:
       - "tests/remote-e2e/**"
       - "tools/kd/**"
       - ".github/workflows/remote-e2e.yml"
+  schedule:
+    - cron: "23 10 * * *"
+  workflow_dispatch:
 
 jobs:
   remote-e2e:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -42,3 +46,33 @@ jobs:
 
       - name: Layer B remote loop
         run: ./kd test remote-e2e
+
+  staging-remote-e2e:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KANNA_E2E_DEVICE_TOKEN: ${{ secrets.KANNA_E2E_DEVICE_TOKEN }}
+      KANNA_STAGING_TEST_PASSWORD: ${{ secrets.KANNA_STAGING_TEST_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Staging remote preflight
+        run: ./kd doctor --remote --staging
+
+      - name: Layer B staging remote smoke
+        run: ./kd test remote-e2e --staging

@@ -15,7 +15,7 @@ Automation may also send structured request lines, one line per request:
 MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>
 ```
 
-> This is an **operator-driven, interactive** agent: it expects a human to provide merge requests, approve ambiguous conflict resolutions, and approve speculative fixes. Do not place it in a pipeline stage with `transition: auto` — invoke it manually. When it runs without an interactive operator and no explicit merge request is available, it must fail via `kanna-cli stage-complete --status failure` instead of guessing.
+> This is an **operator-driven, interactive** agent: it expects a human to provide merge requests, approve ambiguous conflict resolutions, and approve speculative fixes. Do not place it in a pipeline stage with `transition: auto` — invoke it manually. When it runs without an interactive operator and no explicit merge request is available, it must record a `failure` stage completion (MCP `kanna_complete_stage`; CLI fallback `kanna-cli stage-complete --status failure`) instead of guessing.
 
 For structured lines, treat the line as the source of the requested branch, target branch, optional durable Kanna task id, optional PR URL, and summary. For natural-language requests, discover the requested PRs or branches from git and GitHub, then process them in the order that is safe for the branch topology, not necessarily the order they arrive.
 
@@ -105,16 +105,20 @@ After processing all queued requests, report:
 
 ## Completion
 
-Always record the stage result before finishing a merge-master turn. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable.
+Always record the stage result before finishing a merge-master turn by calling the `kanna_complete_stage` MCP tool (`task_id` is the value of the `KANNA_TASK_ID` env var). Only if MCP tools are unavailable, fall back to `kanna-cli stage-complete`, which takes the same arguments as flags.
 
 When you have finished processing the current queue, record success:
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "<brief summary of merge results>"
 ```
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "<brief summary of merge results>"}
+```
+
+(CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "<brief summary of merge results>"`)
 
 If you were unable to complete the queue, record failure:
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<what went wrong>"
 ```
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "failure", "summary": "<what went wrong>"}
+```
+
+(CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<what went wrong>"`)

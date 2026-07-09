@@ -1,7 +1,7 @@
 import { ref, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
 import { parseRepoConfig } from "@kanna/core";
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 import type { AgentExecutionType } from "../stores/agentExecutionType";
 
 import { invoke } from "../invoke";

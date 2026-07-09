@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetDesktopCloudPublisherCachesForTests,
+  deleteDesktopTaskSnapshotForLocalTask,
   deleteRemoteTaskSnapshots,
   publishDesktopTaskSnapshot,
   reconcileDesktopTaskSnapshots,
 } from "./desktopCloudPublisher";
+import { setDesktopSnapshotFetcherForTests } from "./desktopServerClient";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -26,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   serverTimestamp: vi.fn(() => "SERVER_TIMESTAMP"),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   getRepo: vi.fn(async () => repo()),
   listPipelineItems: vi.fn(async () => [openItem("task-open")]),
   listRepos: vi.fn(async () => [repo()]),
@@ -164,6 +166,15 @@ describe("desktop cloud live task index publisher", () => {
     mocks.setDoc.mockResolvedValue(undefined);
     mocks.getDoc.mockResolvedValue(missingDocSnapshot());
     mocks.getDocs.mockResolvedValue({ docs: [] });
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [{
+        repo: repo() as never,
+        items: [openItem("task-open") as never],
+      }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "desktop_cloud_credential") {
         return { desktopId: "desktop-owner", desktopSecretHash: "secret-hash-1" };
@@ -300,6 +311,34 @@ describe("desktop cloud live task index publisher", () => {
         localRepoId: "repo-1",
         ownerLocalTaskId: "task-new",
       }),
+    );
+  });
+
+  it("does not publish the generic desktop name when a host fallback is available", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "desktop_cloud_credential") {
+        return { desktopId: "desktop-owner", desktopSecretHash: "secret-hash-1" };
+      }
+      if (command === "mobile_server_status") return { desktopId: "desktop-owner", desktopName: "Kanna Desktop" };
+      if (command === "read_env_var") {
+        const name = (args as { name?: string } | undefined)?.name;
+        return name === "HOSTNAME" ? "Gus-MacBook-Pro.local" : "";
+      }
+      if (command === "git_remote_url") return "git@github.com:owner/repo.git";
+      return "";
+    });
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-host-name") as never, repo() as never);
+
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      desktopRef,
+      expect.objectContaining({
+        displayName: "Gus-MacBook-Pro.local",
+      }),
+      { merge: true },
     );
   });
 
@@ -474,6 +513,21 @@ describe("desktop cloud live task index publisher", () => {
     });
 
     expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-remote-doc" });
+    expect(mocks.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes current desktop task metadata by local repo and task id", async () => {
+    mocks.getDoc.mockResolvedValue({ exists: () => true });
+    mocks.getDocs.mockResolvedValueOnce({ docs: [
+      docSnapshot("task-local-doc", {
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-local",
+      }),
+    ] });
+
+    await deleteDesktopTaskSnapshotForLocalTask("repo-1", "task-local");
+
+    expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-local-doc" });
     expect(mocks.commit).toHaveBeenCalledTimes(1);
   });
 

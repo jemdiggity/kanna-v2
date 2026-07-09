@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { invoke } from "../invoke";
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { macOsTextInputAttrs } from "../utils/textInput";

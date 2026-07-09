@@ -36,17 +36,20 @@ registerContextShortcuts("diff", [
   { label: t('diffView.shortcutSubmitComment'), display: "⌘Enter", groupKey: "shortcuts.groupActions" },
   { label: t('diffView.shortcutRequestChanges'), display: "⇧⌘S", groupKey: "shortcuts.groupActions" },
   { label: t('diffView.shortcutApprove'), display: "⌘S", groupKey: "shortcuts.groupActions" },
+  { label: t('diffView.shortcutToggleContext'), display: "a", groupKey: "shortcuts.groupViews" },
   { label: t('diffView.shortcutClose'), display: "q", groupKey: "shortcuts.groupActions" },
 ]);
 
 type WorkingFilter = "all" | "unstaged" | "staged";
 type BranchInclude = "none" | "staged" | "all";
 type DiffScope = "branch" | "working";
+type DiffContextMode = "compact" | "all";
 type DiffScrollPositions = Partial<Record<DiffScope, number>>;
 interface DiffContentPaneHandle { getContainerElement: () => HTMLElement | null; }
 
 const workingFilterOrder: WorkingFilter[] = ["all", "unstaged", "staged"];
 const branchIncludeOrder: BranchInclude[] = ["none", "staged", "all"];
+const FULL_DIFF_CONTEXT_LINES = 0xffffffff;
 
 const props = defineProps<{
   repoPath: string;
@@ -84,6 +87,7 @@ const noDiff = ref(false);
 const workingFilter = ref<WorkingFilter>("all");
 const branchInclude = ref<BranchInclude>(normalizeBranchInclude(props.initialBranchInclude));
 const scope = ref<DiffScope>(props.initialScope === "branch" ? "branch" : "working");
+const contextMode = ref<DiffContextMode>("compact");
 const scrollPositions = ref<DiffScrollPositions>(cloneScrollPositions(props.initialScrollPositions));
 const commentDrawerOpen = ref(false);
 const composerNote = ref("");
@@ -107,6 +111,11 @@ const branchIncludeLabel = computed(() => {
   };
   return labels[branchInclude.value];
 });
+
+const allLines = computed(() => contextMode.value === "all");
+const contextLabel = computed(() =>
+  allLines.value ? t('diffView.contextAllLines') : t('diffView.contextCompact')
+);
 
 let nextDiffLoadId = 0;
 let activeDiffLoadId = 0;
@@ -396,7 +405,9 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
   const renderContext: DiffRenderContext = {
     loadId,
     loadStartedAt,
+    allLines: allLines.value,
   };
+  const contextLines = allLines.value ? FULL_DIFF_CONTEXT_LINES : undefined;
   loading.value = true;
   error.value = null;
   noDiff.value = false;
@@ -407,6 +418,7 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
     hasExplicitBaseRef: Boolean(props.baseRef),
     workingFilter: scope.value === "working" ? workingFilter.value : undefined,
     branchInclude: scope.value === "branch" ? branchInclude.value : undefined,
+    contextLines,
   });
 
   try {
@@ -414,10 +426,16 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
 
     if (scope.value === "working") {
       const diffStartedAt = performance.now();
-      patch = await invoke<string>("git_diff", { repoPath: path, mode: workingFilter.value });
+      const args: { repoPath: string; mode: WorkingFilter; contextLines?: number } = {
+        repoPath: path,
+        mode: workingFilter.value,
+      };
+      if (contextLines !== undefined) args.contextLines = contextLines;
+      patch = await invoke<string>("git_diff", args);
       logDiffPerf(loadId, "git_diff:done", {
         durationMs: roundDuration(performance.now() - diffStartedAt),
         mode: workingFilter.value,
+        contextLines,
       });
     } else {
       // "branch" scope — diff from merge base
@@ -442,14 +460,22 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
       });
 
       const diffRangeStartedAt = performance.now();
-      patch = await invoke<string>("git_diff_branch_range", {
+      const args: {
+        repoPath: string;
+        from: string;
+        mode: BranchInclude;
+        contextLines?: number;
+      } = {
         repoPath: path,
         from: mergeBase,
         mode: branchInclude.value,
-      });
+      };
+      if (contextLines !== undefined) args.contextLines = contextLines;
+      patch = await invoke<string>("git_diff_branch_range", args);
       logDiffPerf(loadId, "git_diff_branch_range:done", {
         durationMs: roundDuration(performance.now() - diffRangeStartedAt),
         mode: branchInclude.value,
+        contextLines,
       });
     }
 
@@ -565,6 +591,11 @@ function cycleBranchInclude() {
   void loadDiff();
 }
 
+function toggleContextLines() {
+  contextMode.value = allLines.value ? "compact" : "all";
+  void loadDiff();
+}
+
 function refreshBranchDiffOnWindowFocus() {
   if (scope.value !== "branch" || loading.value) return;
   void loadDiff({ preserveCurrentScroll: true });
@@ -620,6 +651,11 @@ useLessScroll(containerRef, {
         return true;
       }
     }
+    if (e.key === "a" && noMods) {
+      e.preventDefault();
+      toggleContextLines();
+      return true;
+    }
     // Cmd+Shift+] — next scope
     if (e.key === "]" && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
@@ -661,9 +697,12 @@ defineExpose({ refresh: loadDiff, dismissReviewLayer, jumpToReviewAnchor });
       :scope="scope"
       :working-filter-label="workingFilterLabel"
       :branch-include-label="branchIncludeLabel"
+      :context-label="contextLabel"
+      :all-lines="allLines"
       @set-scope="setScope"
       @cycle-working-filter="cycleWorkingFilter()"
       @cycle-branch-include="cycleBranchInclude()"
+      @toggle-context-lines="toggleContextLines()"
     />
     <DiffContentPane
       ref="contentPaneRef"

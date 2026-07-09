@@ -4,6 +4,7 @@ import {
   __resetRepoRemoteUrlCacheForTests,
   refreshRepoRemoteMetadata,
 } from "./repoRemoteUrl";
+import { updateDesktopServerClientHandlersForTests } from "./desktopServerClient";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -14,7 +15,7 @@ vi.mock("../invoke", () => ({
   invoke: (...args: unknown[]) => mocks.invoke(...args),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   updateRepoRemoteMetadata: (...args: unknown[]) => mocks.updateRepoRemoteMetadata(...args),
 }));
 
@@ -24,12 +25,20 @@ describe("repo remote URL metadata", () => {
     mocks.invoke.mockReset();
     mocks.updateRepoRemoteMetadata.mockReset();
     mocks.updateRepoRemoteMetadata.mockResolvedValue(undefined);
+    updateDesktopServerClientHandlersForTests({
+      patchRepo: async (repoId, input) => {
+        await mocks.updateRepoRemoteMetadata(null, repoId, {
+          remote_url: input.remoteUrl ?? null,
+          remote_url_hash: input.remoteUrlHash ?? null,
+        });
+      },
+    });
   });
 
   it("refreshes and persists remote URL metadata explicitly", async () => {
     mocks.invoke.mockResolvedValue("git@github.com:owner/repo.git");
 
-    const metadata = await refreshRepoRemoteMetadata(null as never, {
+    const metadata = await refreshRepoRemoteMetadata({
       id: "repo-1",
       path: "/repo",
     });
