@@ -2,9 +2,9 @@ use super::*;
 use axum::extract::connect_info::ConnectInfo;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
-static E2E_SQL_ENV_LOCK: Mutex<()> = Mutex::new(());
+static E2E_SQL_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 struct E2eSqlEnvGuard(Option<String>);
 
@@ -42,7 +42,7 @@ fn e2e_sql_request(peer: SocketAddr) -> Request<Body> {
 
 #[tokio::test]
 async fn e2e_sql_route_requires_loopback_connect_info() {
-    let _lock = E2E_SQL_ENV_LOCK.lock().unwrap();
+    let _lock = E2E_SQL_ENV_LOCK.lock().await;
     let _env = E2eSqlEnvGuard::enable();
 
     let loopback_response = super::test_router("desktop-e2e-sql-loopback", "Studio Mac")
@@ -69,4 +69,34 @@ async fn e2e_sql_route_requires_loopback_connect_info() {
         .unwrap();
 
     assert_eq!(lan_response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn e2e_sql_route_accepts_in_process_http_invokes_as_loopback() {
+    let _lock = E2E_SQL_ENV_LOCK.lock().await;
+    let _env = E2eSqlEnvGuard::enable();
+    let state = super::test_state_with_seed("desktop-e2e-sql-invoke", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+    });
+
+    let response = super::dispatch_http_invoke(
+        state,
+        "POST",
+        "/v1/e2e/sql",
+        json!({
+            "query": true,
+            "sql": "SELECT name FROM repo WHERE id = ?1",
+            "params": ["repo-1"]
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body,
+        Some(json!({
+            "rows": [{ "name": "Repo One" }],
+            "rowsAffected": 0
+        }))
+    );
 }

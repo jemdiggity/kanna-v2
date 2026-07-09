@@ -249,6 +249,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       env: {
         ...process.env,
         KANNA_SERVER_CONFIG: configPath,
+        KANNA_E2E_TEST_SQL: "1",
         RUST_LOG: process.env.RUST_LOG ?? "info"
       }
     }));
