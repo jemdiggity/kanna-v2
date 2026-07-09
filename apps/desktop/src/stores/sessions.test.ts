@@ -195,7 +195,7 @@ describe("createSessionsApi", () => {
     expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
-  it("launches Codex with the stage prompt", async () => {
+  it("prints the display prompt while launching Codex with the stage prompt", async () => {
     const sessions = createSessionsApi(makeContext());
 
     const prepared = await sessions.preparePtySession("task-1", "Stage guidance\n\nShip it", {
@@ -203,7 +203,7 @@ describe("createSessionsApi", () => {
       displayPrompt: "Ship it",
     });
 
-    expect(prepared.agentCmd).toBe("codex --yolo 'Stage guidance\n\nShip it'");
+    expect(prepared.agentCmd).toBe("codex --yolo 'Ship it'");
     expect(prepared.agentCmdPreamble).toContain("Stage guidance");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentCmdPreamble).toContain("Ship it");

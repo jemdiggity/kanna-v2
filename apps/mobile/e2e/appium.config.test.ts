@@ -44,7 +44,11 @@ describe("mobile Appium config", () => {
       "appium:automationName": "XCUITest",
       "appium:deviceName": "iPhone 15",
       "appium:bundleId": "build.kanna.app",
-      "appium:wdaLocalPort": 4724
+      "appium:wdaLocalPort": 4724,
+      "appium:noReset": false,
+      "appium:autoDismissAlerts": true,
+      "appium:includeSafariInWebviews": true,
+      "appium:webviewConnectTimeout": 15_000
     });
   });
 

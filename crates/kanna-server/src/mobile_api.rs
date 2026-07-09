@@ -101,6 +101,7 @@ pub struct CreateTaskRequest {
     pub pipeline_name: Option<String>,
     pub stage: Option<String>,
     pub base_ref: Option<String>,
+    pub agent: Option<String>,
     pub agent_provider: Option<String>,
     pub agent_type: Option<String>,
     pub model: Option<String>,
@@ -174,7 +175,7 @@ impl MobileApi {
         Ok(vec![DesktopDescriptor {
             id: self.config.desktop_id.clone(),
             name: self.config.desktop_name.clone(),
-            connection_mode: "local".to_string(),
+            connection_mode: "both".to_string(),
         }])
     }
 
@@ -625,6 +626,7 @@ mod tests {
                 "pipelineName": null,
                 "stage": null,
                 "baseRef": null,
+                "agent": null,
                 "agentProvider": "claude",
                 "agentType": "agent",
                 "model": null,
@@ -681,7 +683,7 @@ mod tests {
         assert_eq!(desktops.len(), 1);
         assert_eq!(desktops[0].id, "desktop-1");
         assert_eq!(desktops[0].name, "Studio Mac");
-        assert_eq!(desktops[0].connection_mode, "local");
+        assert_eq!(desktops[0].connection_mode, "both");
     }
 
     #[test]

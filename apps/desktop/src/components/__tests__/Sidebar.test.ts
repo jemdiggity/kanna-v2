@@ -23,6 +23,12 @@ function translate(key: string, params?: Record<string, string>) {
   if (key === "sidebar.remoteTaskTooltip") {
     return "Remote task";
   }
+  if (key === "sidebar.awaitingVerdictShort") {
+    return "Review";
+  }
+  if (key === "sidebar.awaitingVerdictBadge") {
+    return `Awaiting ${params?.stage ?? ""} verdict`;
+  }
   return key;
 }
 
@@ -206,6 +212,30 @@ describe("Sidebar", () => {
     expect(title.attributes("title")).toBe("... Commit generated changes");
   });
 
+  it("renders an awaiting-verdict badge next to parked manual-stage tasks", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        activity: "unread",
+        display_name: "Create the pull request",
+        pipeline_def: JSON.stringify({
+          name: "default",
+          stages: [
+            { name: "in progress", policy: { transition: "manual" } },
+            { name: "review", policy: { transition: "auto" } },
+            { name: "pr", policy: { transition: "manual" } },
+          ],
+        }),
+        stage: "pr",
+      }),
+    ]);
+
+    const badge = wrapper.get('[data-testid="awaiting-verdict-badge-task-1"]');
+    expect(badge.text()).toBe("Review");
+    expect(badge.attributes("aria-label")).toBe("Awaiting pr verdict");
+    expect(badge.attributes("title")).toBe("Awaiting pr verdict");
+    expect(wrapper.get(".pipeline-item .item-title").text()).toBe("Create the pull request");
+  });
+
   it("renders pinned task titles without retired post-action prefixes", () => {
     const wrapper = mountSidebar([
       item("task-1", {
@@ -260,6 +290,28 @@ describe("Sidebar", () => {
     // The child's own "pr" stage must not appear as a separate section header.
     const sectionLabels = wrapper.findAll(".section-label").map((label) => label.text());
     expect(sectionLabels).not.toContain("pr");
+  });
+
+  it("still renders open tasks whose parent links form a cycle", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: "Cycle task A",
+        stage: "in progress",
+        parent_task_id: "task-2",
+      }),
+      item("task-2", {
+        display_name: "Cycle task B",
+        stage: "in progress",
+        parent_task_id: "task-1",
+        created_at: "2026-01-01T00:00:05.000Z",
+      }),
+    ]);
+
+    expect(wrapper.find(".repo-count").text()).toBe("2");
+    expect(wrapper.findAll(".pipeline-item").map((row) => row.get(".item-title").text())).toEqual([
+      "Cycle task A",
+      "Cycle task B",
+    ]);
   });
 
   it("emits a null parent when detaching a subtask from its parent", async () => {
@@ -704,6 +756,44 @@ describe("Sidebar", () => {
     expect(selectedRule?.groups?.body).toContain("inset 0 -1px 0 var(--kn-accent)");
     expect(selectedRule?.groups?.body).not.toContain("background:");
     expect(selectedRule?.groups?.body).not.toContain("outline:");
+  });
+
+  it("uses blue accent for selected task and task drop-target outlines by default", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
+
+    const selectedTaskRule = source.match(/\.pipeline-item\.selected\s*\{(?<body>[^}]*)\}/);
+    const dropTargetRule = source.match(/\.pipeline-item\.drop-target\s*\{(?<body>[^}]*)\}/);
+
+    expect(selectedTaskRule?.groups?.body).toContain("outline: 1px solid var(--kn-accent)");
+    expect(dropTargetRule?.groups?.body).toContain("outline: 1px dashed var(--kn-accent)");
+  });
+
+  it("uses warning yellow instead of the blue accent for active sidebar filtering", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
+
+    const filteringRule = source.match(/\.sidebar\.is-filtering\s*\{(?<body>[^}]*)\}/);
+    const contentRule = source.match(/\.sidebar\.is-filtering \.sidebar-content\s*\{(?<body>[^}]*)\}/);
+    const repoCountRule = source.match(/\.sidebar\.is-filtering \.repo-count\s*\{(?<body>[^}]*)\}/);
+    const searchInputRule = source.match(/\.sidebar\.is-filtering \.search-input\s*\{(?<body>[^}]*)\}/);
+
+    expect(filteringRule?.groups?.body).toContain("border-right-color: var(--kn-warning)");
+    expect(contentRule?.groups?.body).toContain("box-shadow: inset 0 1px 0 var(--kn-warning-bg)");
+    expect(repoCountRule?.groups?.body).toContain("color: var(--kn-warning)");
+    expect(searchInputRule?.groups?.body).toContain("border-color: var(--kn-warning)");
+  });
+
+  it("uses warning yellow for repo and task highlights only while filtering", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
+
+    const selectedRepoRule = source.match(/\.sidebar\.is-filtering \.repo-header\.selected\s*\{(?<body>[^}]*)\}/);
+    const selectedTaskRepoRule = source.match(/\.sidebar\.is-filtering \.repo-header\.contains-selected-task\s*\{(?<body>[^}]*)\}/);
+    const selectedTaskRule = source.match(/\.sidebar\.is-filtering \.pipeline-item\.selected\s*\{(?<body>[^}]*)\}/);
+    const dropTargetRule = source.match(/\.sidebar\.is-filtering \.pipeline-item\.drop-target\s*\{(?<body>[^}]*)\}/);
+
+    expect(selectedRepoRule?.groups?.body).toContain("inset 0 1px 0 var(--kn-warning)");
+    expect(selectedTaskRepoRule?.groups?.body).toContain("inset 0 -1px 0 var(--kn-warning)");
+    expect(selectedTaskRule?.groups?.body).toContain("outline-color: var(--kn-warning)");
+    expect(dropTargetRule?.groups?.body).toContain("outline-color: var(--kn-warning)");
   });
 
   it("does not use grab-hand cursors as the sidebar drag affordance", () => {

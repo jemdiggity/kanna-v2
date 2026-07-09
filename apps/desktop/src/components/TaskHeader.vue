@@ -19,14 +19,19 @@ function taskPromptTooltip(item: PipelineItem): string | undefined {
   return item.prompt || undefined;
 }
 
-const ports = computed<number[]>(() => {
+interface PortBadge {
+  envName: string;
+  port: number;
+}
+
+const ports = computed<PortBadge[]>(() => {
   if (!props.item.port_env) return [];
   try {
     const env = JSON.parse(props.item.port_env) as Record<string, string | number>;
-    return Object.values(env)
-      .map(Number)
-      .filter((n) => !Number.isNaN(n))
-      .sort((a, b) => a - b);
+    return Object.entries(env)
+      .map(([envName, value]) => ({ envName, port: Number(value) }))
+      .filter(({ port }) => !Number.isNaN(port))
+      .sort((a, b) => a.port - b.port || a.envName.localeCompare(b.envName));
   } catch (error) {
     console.debug("[task-header] failed to parse task port_env:", error);
     return [];
@@ -62,14 +67,14 @@ function openLocalhostPort(port: number) {
         <span class="meta-label">{{ $t('taskHeader.branchLabel') }}</span> {{ copied ? $t('taskHeader.copied', 'Copied!') : item.branch }}
       </span>
       <span
-        v-for="port in ports"
-        :key="port"
+        v-for="portInfo in ports"
+        :key="`${portInfo.envName}:${portInfo.port}`"
         class="meta-item port"
-        :title="`Open localhost:${port}`"
+        :title="`${portInfo.envName}=${portInfo.port}`"
         @mousedown.stop
-        @dblclick="openLocalhostPort(port)"
+        @dblclick="openLocalhostPort(portInfo.port)"
       >
-        :{{ port }}
+        :{{ portInfo.port }}
       </span>
       <a
         v-if="item.issue_number"

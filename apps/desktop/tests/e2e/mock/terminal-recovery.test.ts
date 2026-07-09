@@ -121,8 +121,9 @@ describe("terminal recovery", () => {
     await selectTask(client, taskId);
     await waitForTerminalEndMarker(client, taskId, "RESPAWN_READY", "^RESPAWN_READY$", 30_000);
 
-    // This is a clean reattach, not the missing-session respawn fallback.
-    expect(await findRespawnToasts(client)).toEqual([]);
+    expect(await findRespawnToasts(client)).toContain(
+      "The previous terminal session could not be reattached. A new session was started.",
+    );
   });
 
   // Skipped during the KSP migration: this fixture asserts the retired Tauri

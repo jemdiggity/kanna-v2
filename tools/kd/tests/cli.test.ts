@@ -588,11 +588,11 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["test", "remote-e2e"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: true, staging: false },
+      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false },
     });
     expect(parseCliArgs(["test", "remote-e2e", "--staging"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: false, staging: true },
+      input: { dev: false, staging: true, mobileRelay: false, desktopPairing: false },
     });
   });
 

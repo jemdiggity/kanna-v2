@@ -51,7 +51,8 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 - Later: a verdict UI on tasks parked at `pr` (request-changes composer →
   request-revision; approve button → advance). Forge-blind — it fires
   stage actions. Line-anchored diff feedback is a follow-up (needs an
-  @pierre/diffs annotation spike).
+  @pierre/diffs annotation spike) — now specced in
+  [native-review.md](./native-review.md).
 
 ## User-space work (reference implementations, all `.kanna/` files)
 

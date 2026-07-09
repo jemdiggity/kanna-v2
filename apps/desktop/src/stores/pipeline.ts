@@ -3,6 +3,7 @@ import {
   parseAgentDefinition,
   parseAgentExtension,
 } from "../../../../packages/core/src/pipeline/agent-loader";
+import { parseRepoConfig } from "../../../../packages/core/src/config/repo-config";
 import { parsePipelineJson } from "../../../../packages/core/src/pipeline/pipeline-loader";
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import { invoke } from "../invoke";
@@ -19,7 +20,15 @@ export interface PipelineApi {
   loadPipeline: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent: (repoPath: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
+  requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage: (taskId: string) => Promise<void>;
+}
+
+export interface RequestRevisionOptions {
+  targetStage: string;
+  summary: string;
+  prompt: string;
+  metadata?: Record<string, unknown>;
 }
 
 export function createPipelineApi(context: StoreContext): PipelineApi {
@@ -57,7 +66,11 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "kanna-server did not become ready"));
   }
 
-  async function postTaskAction(taskId: string, action: "advance-stage" | "rerun-stage"): Promise<Response> {
+  async function postTaskAction(
+    taskId: string,
+    action: "advance-stage" | "rerun-stage" | "request-revision",
+    body?: unknown,
+  ): Promise<Response> {
     const serverBaseUrl = await resolveLocalServerBaseUrl();
     const url = `${serverBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`;
     const deadline = Date.now() + LOCAL_SERVER_ACTION_TIMEOUT_MS;
@@ -65,7 +78,15 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
 
     while (Date.now() < deadline) {
       try {
-        return await fetch(url, { method: "POST" });
+        return await fetch(url, {
+          method: "POST",
+          ...(body == null
+            ? {}
+            : {
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              }),
+        });
       } catch (error) {
         lastError = error;
         await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
@@ -243,33 +264,86 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     return pipeline;
   }
 
+  async function loadRepoConfigForAgent(repoPath: string): Promise<{
+    flavors?: Record<string, string>;
+    vars?: Record<string, string>;
+  }> {
+    try {
+      const content = await invoke<string>("read_text_file", { path: `${repoPath}/.kanna/config.json` });
+      const config = parseRepoConfig(content);
+      return {
+        flavors: config.flavors,
+        vars: config.vars,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  function resolveAgentSelector(agentName: string, flavors?: Record<string, string>): {
+    role: string;
+    repoAgentDir: string;
+    builtinFlavorPath: string | null;
+  } {
+    const [role, explicitFlavor] = splitAgentSelector(agentName);
+    const selectedFlavor = explicitFlavor ?? flavors?.[role] ?? null;
+    return {
+      role,
+      repoAgentDir: role,
+      builtinFlavorPath: selectedFlavor ? `.kanna/agents/${role}/flavors/${selectedFlavor}/AGENT.md` : null,
+    };
+  }
+
+  function splitAgentSelector(agentName: string): [string, string | null] {
+    const parts = agentName.split("@");
+    if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
+      return [agentName, null];
+    }
+    return [parts[0], parts[1]];
+  }
+
   async function loadAgent(repoPath: string, agentName: string): Promise<AgentDefinition> {
     const cacheKey = `${repoPath}::${agentName}`;
     const cached = context.state.agentCache.get(cacheKey);
     if (cached) return cached;
 
+    const repoConfig = await loadRepoConfigForAgent(repoPath);
+    const selector = resolveAgentSelector(agentName, repoConfig.flavors);
     let agent: AgentDefinition;
     try {
-      const path = `${repoPath}/.kanna/agents/${agentName}/AGENT.md`;
+      const path = `${repoPath}/.kanna/agents/${selector.repoAgentDir}/AGENT.md`;
       const content = await invoke<string>("read_text_file", { path });
       agent = parseAgentDefinition(content);
     } catch (error) {
       console.debug(`[pipeline] failed to load agent "${agentName}" from repo; trying bundled resource:`, error);
       try {
         const content = await invoke<string>("read_builtin_resource", {
-          relativePath: `.kanna/agents/${agentName}/AGENT.md`,
+          relativePath: selector.builtinFlavorPath ?? `.kanna/agents/${selector.role}/AGENT.md`,
         });
         agent = parseAgentDefinition(content);
-      } catch (error) {
-        throw new Error(
-          `Agent "${agentName}" not found on disk or in bundled resources: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
-        );
+      } catch (flavorError) {
+        if (selector.builtinFlavorPath) {
+          try {
+            const content = await invoke<string>("read_builtin_resource", {
+              relativePath: `.kanna/agents/${selector.role}/AGENT.md`,
+            });
+            agent = parseAgentDefinition(content);
+          } catch (defaultError) {
+            throw new Error(
+              `Agent "${agentName}" not found on disk or in bundled resources: ${defaultError instanceof Error ? defaultError.message : JSON.stringify(defaultError)}`,
+            );
+          }
+        } else {
+          throw new Error(
+            `Agent "${agentName}" not found on disk or in bundled resources: ${flavorError instanceof Error ? flavorError.message : JSON.stringify(flavorError)}`,
+          );
+        }
       }
     }
 
     // Repo-local extension: layered onto the resolved agent (repo override or
     // built-in) so a repo can customize a default agent without rewriting it.
-    const extendPath = `${repoPath}/.kanna/agents/${agentName}/EXTEND.md`;
+    const extendPath = `${repoPath}/.kanna/agents/${selector.repoAgentDir}/EXTEND.md`;
     let extendContent: string | null = null;
     try {
       extendContent = await invoke<string>("read_text_file", { path: extendPath });
@@ -285,7 +359,6 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         );
       }
     }
-
     context.state.agentCache.set(cacheKey, agent);
     return agent;
   }
@@ -356,10 +429,35 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     }
   }
 
+  async function requestRevision(taskId: string, options: RequestRevisionOptions): Promise<boolean> {
+    const item = context.state.items.value.find((candidate) => candidate.id === taskId);
+    if (!item) return false;
+    if (item.closed_at != null) return false;
+
+    try {
+      const response = await postTaskAction(taskId, "request-revision", {
+        targetStage: options.targetStage,
+        summary: options.summary,
+        prompt: options.prompt,
+        metadata: options.metadata,
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+      return true;
+    } catch (error) {
+      console.error("[store] requestRevision: server action failed:", error);
+      context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
+      return false;
+    }
+  }
+
   return {
     loadPipeline,
     loadAgent,
     advanceStage,
+    requestRevision,
     rerunStage,
   };
 }

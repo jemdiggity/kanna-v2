@@ -101,6 +101,7 @@ The following agents ship with Kanna and can be referenced in any pipeline:
 - `agent-factory` — creates new agent definitions
 - `pipeline-factory` — creates new pipeline definitions
 - `config-factory` — creates or updates `.kanna/config.json`
+- `setup` — configures a repository's Kanna pipeline and stock agent flavor selections
 
 ## Your Process
 

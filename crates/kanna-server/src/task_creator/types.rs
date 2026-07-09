@@ -9,6 +9,7 @@ pub(super) struct TaskCreationRequest {
     pub(super) base_ref: Option<String>,
     pub(super) stored_base_ref: Option<String>,
     pub(super) stage_override: Option<String>,
+    pub(super) agent: Option<String>,
     pub(super) explicit_provider: Option<String>,
     pub(super) default_provider: Option<String>,
     pub(super) agent_type: Option<String>,

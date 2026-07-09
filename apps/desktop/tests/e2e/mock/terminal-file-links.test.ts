@@ -1,10 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
+
+const execFileAsync = promisify(execFile);
+
+async function git(repoPath: string, args: string[]): Promise<void> {
+  await execFileAsync("git", ["-C", repoPath, ...args]);
+}
 
 describe("terminal file links", () => {
   const client = new WebDriverClient();
@@ -27,6 +35,9 @@ describe("terminal file links", () => {
       }).join("\n"),
       "utf8",
     );
+    await git(fixtureRepoPath, ["add", "apps/desktop/src/App.vue"]);
+    await git(fixtureRepoPath, ["commit", "-m", "test: add terminal file link target"]);
+    await git(fixtureRepoPath, ["push", "origin", "main"]);
 
     await importTestRepo(client, fixtureRepoPath, "terminal-file-links-fixture");
   });

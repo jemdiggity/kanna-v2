@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const EXPO_DEVELOPMENT_CLIENT_SCHEME = "exp+kanna-mobile";
 
 export interface AvailableSimulatorDevice {
   name: string;
@@ -108,4 +109,20 @@ export async function assertSimulatorAppInstalled(
       `Bundle ${bundleId} is not installed on simulator ${device.name}. Install it with: pnpm --dir apps/mobile ios -d "${device.name}" --no-bundler`
     );
   }
+}
+
+export function buildExpoDevelopmentClientUrl(metroUrl: string): string {
+  return `${EXPO_DEVELOPMENT_CLIENT_SCHEME}://expo-development-client/?url=${encodeURIComponent(metroUrl)}`;
+}
+
+export async function openSimulatorDevelopmentClient(input: {
+  device: AvailableSimulatorDevice;
+  metroPort: number;
+}): Promise<void> {
+  await execFileAsync("xcrun", [
+    "simctl",
+    "openurl",
+    input.device.udid,
+    buildExpoDevelopmentClientUrl(`http://127.0.0.1:${input.metroPort}`)
+  ]);
 }

@@ -77,6 +77,7 @@ fn build_merge_task_request(repo_path: &str) -> Result<TaskCreationRequest, Stri
         base_ref: None,
         stored_base_ref: None,
         stage_override: None,
+        agent: None,
         explicit_provider: None,
         default_provider: None,
         agent_type: None,

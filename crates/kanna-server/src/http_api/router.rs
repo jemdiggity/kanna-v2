@@ -247,7 +247,7 @@ pub async fn dispatch_http_invoke(
         }
     };
 
-    let request = match Request::builder()
+    let mut request = match Request::builder()
         .method(method)
         .uri(path)
         .header("content-type", "application/json")
@@ -262,6 +262,12 @@ pub async fn dispatch_http_invoke(
             };
         }
     };
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
 
     match router(state).oneshot(request).await {
         Ok(response) => response_to_http_invoke(response).await,

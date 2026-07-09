@@ -150,8 +150,10 @@ const store = {
   renameItem: vi.fn(async () => {}),
   hideRepo: vi.fn(async () => {}),
   spawnPtySession: vi.fn(async () => {}),
-  loadAgent: vi.fn(async () => ({
-    prompt: "Use https://schemas.kanna.build/config.schema.json when writing .kanna/config.json.",
+  loadAgent: vi.fn(async (_repoPath: string, agentName: string) => ({
+    prompt: agentName === "setup"
+      ? "Configure the GitHub flow by composing stock flavors instead of writing agents from scratch."
+      : "Use https://schemas.kanna.build/config.schema.json when writing .kanna/config.json.",
     agent_provider: ["codex", "claude"],
     model: undefined,
     permission_mode: "default",
@@ -258,6 +260,8 @@ vi.mock("vue-i18n", () => ({
       "commandPalette.createPipelineDesc": "新しいパイプライン定義を作成",
       "commandPalette.createConfig": "設定を作成",
       "commandPalette.createConfigDesc": ".kanna/config.json を作成または更新",
+      "commandPalette.setupRepo": "リポジトリをセットアップ",
+      "commandPalette.setupRepoDesc": ".kanna のパイプラインとエージェントフレーバーを構成",
     }[key] ?? key),
   }),
 }));
@@ -611,6 +615,9 @@ describe("App", () => {
   beforeEach(() => {
     store.init.mockClear();
     store.createItem.mockClear();
+    store.createRepo.mockClear();
+    store.importRepo.mockClear();
+    store.cloneAndImportRepo.mockClear();
     store.recordIncomingTransfer.mockClear();
     store.approveIncomingTransfer.mockClear();
     store.rejectIncomingTransfer.mockClear();
@@ -2831,7 +2838,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="command-palette"]').text()).toContain("taskTransfer.pairPeer");
   });
 
-  it("localizes factory command palette commands and launches a config-factory task", async () => {
+  it("localizes factory command palette commands and launches setup/config factory tasks", async () => {
     store.currentItem = null;
 
     const CommandPaletteModalStub = defineComponent({
@@ -2871,8 +2878,32 @@ describe("App", () => {
     const createConfigButton = wrapper.get('[data-command-id="create-config"]');
     expect(wrapper.get('[data-command-id="create-agent"]').text()).toBe("エージェントを作成");
     expect(wrapper.get('[data-command-id="create-pipeline"]').text()).toBe("パイプラインを作成");
+    expect(wrapper.get('[data-command-id="setup-repo"]').text()).toBe("リポジトリをセットアップ");
+    expect(wrapper.get('[data-command-id="setup-repo"]').attributes("data-command-description")).toBe(".kanna のパイプラインとエージェントフレーバーを構成");
     expect(createConfigButton.text()).toBe("設定を作成");
     expect(createConfigButton.attributes("data-command-description")).toBe(".kanna/config.json を作成または更新");
+
+    await wrapper.get('[data-command-id="setup-repo"]').trigger("click");
+    await flushPromises();
+
+    expect(store.loadAgent).toHaveBeenCalledWith("/tmp/repo", "setup");
+    expect(store.createItem).toHaveBeenCalledWith(
+      "repo-1",
+      "/tmp/repo",
+      "Set up Kanna for this repository.",
+      "pty",
+      expect.objectContaining({
+        agentProvider: "codex",
+        customTask: expect.objectContaining({
+          agent: "setup",
+          name: "Set Up Repository",
+          prompt: "Set up Kanna for this repository.",
+        }),
+      }),
+    );
+
+    store.loadAgent.mockClear();
+    store.createItem.mockClear();
 
     await createConfigButton.trigger("click");
     await flushPromises();
@@ -2888,7 +2919,53 @@ describe("App", () => {
         customTask: expect.objectContaining({
           agent: "config-factory",
           name: "Create Config",
-          prompt: expect.stringContaining("https://schemas.kanna.build/config.schema.json"),
+          prompt: "Help me create or update the .kanna/config.json for this repository.",
+        }),
+      }),
+    );
+  });
+
+  it("launches the setup agent after importing a repository from AddRepoModal", async () => {
+    store.importRepo.mockResolvedValueOnce("repo-imported");
+
+    const AddRepoModalStub = defineComponent({
+      name: "AddRepoModal",
+      emits: ["import"],
+      template: `
+        <button
+          data-testid="import-repo"
+          @click="$emit('import', '/tmp/imported', 'imported', 'main')"
+        >
+          import
+        </button>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      AddRepoModal: AddRepoModalStub,
+    });
+
+    await flushPromises();
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    capturedKeyboardActions?.importRepo();
+    await flushPromises();
+    await wrapper.get('[data-testid="import-repo"]').trigger("click");
+    await flushPromises();
+
+    expect(store.importRepo).toHaveBeenCalledWith("/tmp/imported", "imported", "main");
+    expect(store.loadAgent).toHaveBeenCalledWith("/tmp/imported", "setup");
+    expect(store.createItem).toHaveBeenCalledWith(
+      "repo-imported",
+      "/tmp/imported",
+      "Set up Kanna for this repository.",
+      "pty",
+      expect.objectContaining({
+        agentProvider: "codex",
+        customTask: expect.objectContaining({
+          agent: "setup",
+          name: "Set Up Repository",
+          prompt: "Set up Kanna for this repository.",
         }),
       }),
     );

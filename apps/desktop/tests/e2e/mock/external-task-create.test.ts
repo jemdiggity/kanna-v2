@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
-import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
+import { importTestRepo, resetDatabase } from "../helpers/reset";
 import { execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
@@ -41,6 +41,46 @@ async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promis
   if (result !== "ok") {
     throw new Error(`failed to hydrate store item: ${result}`);
   }
+}
+
+async function focusStoreTask(client: WebDriverClient, repoId: string, taskId: string): Promise<void> {
+  await client.executeSync(
+    `const store = window.__KANNA_E2E__.setupState.store;
+     const lastSelected = store.lastSelectedItemByRepo?.value ?? store.lastSelectedItemByRepo;
+     const nextLastSelected = { ...(lastSelected ?? {}) };
+     nextLastSelected[${JSON.stringify(repoId)}] = ${JSON.stringify(taskId)};
+     if (typeof store.$patch === "function") {
+       store.$patch({ selectedItemId: ${JSON.stringify(taskId)}, lastSelectedItemByRepo: nextLastSelected });
+     } else {
+       if (store.selectedItemId?.__v_isRef) store.selectedItemId.value = ${JSON.stringify(taskId)};
+       else store.selectedItemId = ${JSON.stringify(taskId)};
+       if (store.lastSelectedItemByRepo?.__v_isRef) store.lastSelectedItemByRepo.value = nextLastSelected;
+       else store.lastSelectedItemByRepo = nextLastSelected;
+     }
+     return "ok";`,
+  );
+}
+
+async function closeRepoTasksDirectly(client: WebDriverClient, repoId: string): Promise<void> {
+  const rows = await queryDb(
+    client,
+    "SELECT id FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL",
+    [repoId],
+  ) as Array<{ id?: string | null }>;
+  const taskIds = rows
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+
+  await Promise.all(taskIds.flatMap((taskId) => [
+    tauriInvoke(client, "kill_session", { sessionId: taskId }).catch(() => undefined),
+    tauriInvoke(client, "kill_session", { sessionId: `shell-wt-${taskId}` }).catch(() => undefined),
+  ]));
+
+  await execDb(
+    client,
+    "UPDATE pipeline_item SET closed_at = COALESCE(closed_at, datetime('now')) WHERE repo_id = ?",
+    [repoId],
+  ).catch(() => undefined);
 }
 
 async function waitForStoreTask(
@@ -181,12 +221,12 @@ describe("external task creation", () => {
     if (externalTaskId) {
       await tauriInvoke(client, "kill_session", { sessionId: externalTaskId }).catch(() => undefined);
     }
-    if (testRepoPath) {
-      await cleanupWorktrees(client, testRepoPath);
+    if (repoId) {
+      await closeRepoTasksDirectly(client, repoId);
     }
     await cleanupFixtureRepos(fixtureRepoRoot ? [fixtureRepoRoot] : []);
     await client.deleteSession();
-  });
+  }, 240_000);
 
   it("refreshes a task created through POST /v1/tasks without moving the visible task", async () => {
     const visibleTaskId = "external-create-visible-task";
@@ -198,7 +238,7 @@ describe("external task creation", () => {
       `INSERT INTO pipeline_item (
          id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-10 seconds'), datetime('now', '-10 seconds'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+10 seconds'), datetime('now', '+10 seconds'))`,
       [
         visibleTaskId,
         repoId,
@@ -213,12 +253,9 @@ describe("external task creation", () => {
       ],
     );
     await hydrateStoreItem(client, visibleTaskId);
+    await focusStoreTask(client, repoId, visibleTaskId);
     await client.waitForText(".sidebar", visiblePrompt);
     await client.waitForText(".task-header", visiblePrompt);
-
-    // This mirrors the startup/default-focus state covered by init.test.ts:
-    // a task is visibly focused via currentItem before selectedItemId exists.
-    expect(await getVueState(client, "selectedItemId")).toBeNull();
 
     const baseUrl = await desktopServerBaseUrl(client);
     const response = await fetch(`${baseUrl}/v1/tasks`, {

@@ -114,6 +114,7 @@ const mockState = vi.hoisted(() => {
   });
   const insertWorktreeMock = vi.fn(async () => {});
   const upsertTerminalSessionMock = vi.fn(async () => {});
+  const insertStageRunMock = vi.fn(async () => {});
   const updateAgentSessionIdMock = vi.fn(async () => {});
   const putTaskAgentSessionMock = vi.fn(async () => {});
 
@@ -178,7 +179,7 @@ const mockState = vi.hoisted(() => {
       case "ensure_term_init":
         return "/tmp/kanna-zdotdir";
       case "read_builtin_resource":
-        return "{}";
+        return String(args?.relativePath ?? "{}");
       case "read_text_file":
         if (typeof args?.path === "string" && args.path.endsWith("/.kanna/config.json")) {
           return JSON.stringify({ __mockPath: args.path });
@@ -304,6 +305,7 @@ const mockState = vi.hoisted(() => {
     updatePipelineItemTagsMock.mockClear();
     insertWorktreeMock.mockClear();
     upsertTerminalSessionMock.mockClear();
+    insertStageRunMock.mockClear();
     updateAgentSessionIdMock.mockClear();
     putTaskAgentSessionMock.mockClear();
     listBlockersForItemMock.mockResolvedValue([]);
@@ -410,6 +412,7 @@ const mockState = vi.hoisted(() => {
     updatePipelineItemTagsMock,
     insertWorktreeMock,
     upsertTerminalSessionMock,
+    insertStageRunMock,
     updateAgentSessionIdMock,
     putTaskAgentSessionMock,
     get blockCleanupGate() {
@@ -464,11 +467,15 @@ vi.mock("@kanna/core", () => ({
 }));
 
 vi.mock("../../../../packages/core/src/pipeline/agent-loader", () => ({
-  parseAgentDefinition: vi.fn(() => ({
-    name: "agent",
-    description: "agent",
-    prompt: "Agent prompt",
-  })),
+  parseAgentDefinition: vi.fn((content: string) => {
+    const role = content.match(/\.kanna\/agents\/([^/]+)\/AGENT\.md/)?.[1] ?? "agent";
+    return {
+      name: role,
+      description: role,
+      prompt: `${role} agent prompt`,
+      agent_provider: role === "setup" ? "codex" : "claude",
+    };
+  }),
 }));
 
 vi.mock("../../../../packages/core/src/pipeline/pipeline-loader", () => ({
@@ -476,7 +483,12 @@ vi.mock("../../../../packages/core/src/pipeline/pipeline-loader", () => ({
 }));
 
 vi.mock("../../../../packages/core/src/pipeline/prompt-builder", () => ({
-  buildStagePrompt: vi.fn(() => "Stage prompt"),
+  buildStagePrompt: vi.fn((agentPrompt: string, stagePrompt: string | undefined, context: { taskPrompt?: string }) =>
+    [agentPrompt, stagePrompt]
+      .filter((part): part is string => part !== undefined && part.trim() !== "")
+      .join("\n\n")
+      .replaceAll("$TASK_PROMPT", context.taskPrompt ?? "")
+  ),
   buildKannaRuntimeSystemPrompt: vi.fn(() => "This session was launched by Kanna."),
   buildKannaRuntimeUserPrompt: vi.fn((prompt: string) => `This session was launched by Kanna.\n\n${prompt}`),
 }));
@@ -605,6 +617,7 @@ vi.mock("@kanna/" + "db", () => ({
   ),
   listTaskBlockers: vi.fn(async () => mockState.taskBlockers),
   insertPipelineItem: mockState.insertPipelineItemMock,
+  insertStageRun: mockState.insertStageRunMock,
   insertWorktree: mockState.insertWorktreeMock,
   upsertTerminalSession: mockState.upsertTerminalSessionMock,
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,
@@ -959,6 +972,18 @@ describe("kanna store task base branch integration", () => {
           branch,
           startPoint: request.baseRef ?? repo.default_branch,
         });
+        const requestedAgent = request.agent;
+        const resolvedAgent = requestedAgent
+          ? {
+              name: requestedAgent,
+              prompt: `${requestedAgent} agent prompt`,
+              agentProvider: requestedAgent === "setup" ? "codex" : "claude",
+            }
+          : null;
+        const taskPrompt = resolvedAgent
+          ? `${resolvedAgent.prompt}\n\n${request.prompt}`
+          : request.prompt;
+        const taskProvider = request.agentProvider ?? resolvedAgent?.agentProvider ?? "claude";
         const spawnOptions = {
           model: request.model ?? null,
           permissionMode: request.permissionMode ?? null,
@@ -974,18 +999,29 @@ describe("kanna store task base branch integration", () => {
         await mockState.insertPipelineItemMock({} as DbHandle, {
           id: taskId,
           repo_id: repo.id,
-          prompt: request.prompt,
+          prompt: taskPrompt,
           pipeline: request.pipelineName ?? "default",
           stage: request.stage ?? "in progress",
           tags: [],
           branch,
           agent_type: request.agentType ?? "pty",
-          agent_provider: request.agentProvider ?? "claude",
+          agent_provider: taskProvider,
           activity: "idle",
           display_name: request.displayName ?? null,
           base_ref: request.baseRef ?? null,
           agent_session_id: request.resumeSessionId ?? null,
           agent_spawn_options: agentSpawnOptions,
+        });
+        await mockState.insertStageRunMock({} as DbHandle, {
+          task_id: taskId,
+          stage: request.stage ?? "in progress",
+          kind: "main",
+          agent: requestedAgent ?? null,
+          agent_provider: taskProvider,
+          model: request.model ?? null,
+          status: "running",
+          session_id: taskId,
+          cwd: worktreePath,
         });
         const portEnv = claimPortsForTask(taskId, worktreeConfig);
         await mockState.insertWorktreeMock({} as DbHandle, {
@@ -1176,6 +1212,7 @@ describe("kanna store task base branch integration", () => {
     toastWarningMock.mockClear();
     publishDesktopTaskSnapshotMock.mockReset();
     publishDesktopTaskSnapshotMock.mockResolvedValue(undefined);
+    vi.mocked(buildStagePrompt).mockClear();
   });
 
   it("passes the repo default branch into the merge agent prompt", async () => {
@@ -1937,6 +1974,54 @@ describe("kanna store task base branch integration", () => {
         }),
       );
     });
+  });
+
+  it("spawns a referenced custom task agent instead of wrapping it in the default pipeline agent", async () => {
+    mockState.pipelineDefinition = {
+      name: "default",
+      stages: [
+        {
+          name: "in progress",
+          agent: "implement",
+          prompt: "Implement this request: $TASK_PROMPT",
+        },
+      ],
+    };
+    const store = await createStore();
+
+    await store.createItem("repo-1", "/tmp/repo", "Set up Kanna for this repository.", "agent", {
+      customTask: {
+        name: "Set Up Repository",
+        agent: "setup",
+        prompt: "Set up Kanna for this repository.",
+        executionMode: "agent",
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "spawn_agent_session",
+        expect.objectContaining({
+          agentProvider: "codex",
+          prompt: expect.stringContaining("setup agent prompt"),
+        }),
+      );
+    });
+
+    expect(mockState.invokeMock).toHaveBeenCalledWith(
+      "spawn_agent_session",
+      expect.objectContaining({
+        prompt: expect.not.stringContaining("implement agent prompt"),
+      }),
+    );
+    expect(mockState.insertStageRunMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        stage: "in progress",
+        agent: "setup",
+        agent_provider: "codex",
+      }),
+    );
   });
 
   it("reruns stages through the local kanna-server action endpoint", async () => {

@@ -59,6 +59,7 @@ describe("getShortcutGroups", () => {
       "shortcuts.newTask",
       "shortcuts.focusSearch",
       "shortcuts.advanceStage",
+      "shortcuts.requestChanges",
       "shortcuts.closeReject",
       "shortcuts.undoClose",
     ]);
@@ -177,6 +178,7 @@ describe("useKeyboardShortcuts", () => {
     "openFile",
     "toggleFilePreview",
     "advanceStage",
+    "requestChanges",
     "closeTask",
     "undoClose",
     "navigateUp",
@@ -241,6 +243,29 @@ describe("useKeyboardShortcuts", () => {
     expect(actions.openFile).toHaveBeenCalledTimes(1);
     expect(actions.newTask).not.toHaveBeenCalled();
 
+    wrapper.unmount();
+  });
+
+  it("allows approving and requesting changes from the diff modal context", () => {
+    const actions = buildActions();
+    const wrapper = mountShortcutHarness(actions, () => "diff");
+
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "s",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    }));
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "s",
+      metaKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    }));
+
+    expect(actions.advanceStage).toHaveBeenCalledTimes(1);
+    expect(actions.requestChanges).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 

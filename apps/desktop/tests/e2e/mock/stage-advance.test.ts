@@ -34,12 +34,8 @@
  *   advance": advancing never closes the source mid-pipeline anymore; the
  *   final-stage test covers the one remaining close path.
  * - "Cmd+S with a remote workspace task selected does not close a stale
- *   local fallback": still a real guard in useAppKeyboardActions, but the
- *   old test injected the cloud snapshot through a setupState ref that no
- *   longer exists (`remoteSnapshot` is now a read-only computed and
- *   `cloudSnapshot` is not exposed on App.vue's setupState). Making this
- *   testable again needs a deliberate snapshot-injection hook in
- *   useAppCloudWorkspace; until then the guard has no E2E coverage here.
+ *   local fallback": covered by the keyboard-shortcuts mock suite, which
+ *   injects snapshots through the App.vue setupState refs.
  */
 import { join } from "node:path";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -194,6 +190,22 @@ async function waitForSelectedTaskId(
     await sleep(100);
   }
   throw new Error(`timed out waiting for selected task ${expectedTaskId}; saw ${JSON.stringify(lastSelectedTaskId)}`);
+}
+
+async function waitForSelectedTaskNotId(
+  client: WebDriverClient,
+  taskId: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSelectedTaskId: unknown = undefined;
+  while (Date.now() < deadline) {
+    const selectedTaskId = await getVueState(client, "selectedItemId");
+    lastSelectedTaskId = selectedTaskId;
+    if (selectedTaskId !== taskId) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for selected task to leave ${taskId}; saw ${JSON.stringify(lastSelectedTaskId)}`);
 }
 
 async function selectTask(client: WebDriverClient, taskId: string): Promise<void> {
@@ -434,6 +446,11 @@ describe("stage advance", () => {
         throw new Error(`advance-stage failed: ${response.status} ${await response.text()}`);
       }
       expect(await response.json()).toEqual({ taskId });
+
+      // The SAME pipeline_item transitions: same id, still open, no
+      // next-stage task created — but the workspace forked: a fresh
+      // randomly-named branch cut from the previous branch's committed tip.
+      await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "pr");
     });
 
     // The SAME pipeline_item transitions: same id, still open, no
@@ -510,7 +527,7 @@ describe("stage advance", () => {
     // closed_at is the sole done indicator; the stage keeps its last real value.
     expect(row.stage).toBe("pr");
     await waitForSidebarToExcludeTaskId(client, taskId);
-    expect(await getVueState(client, "selectedItemId")).not.toBe(taskId);
+    await waitForSelectedTaskNotId(client, taskId);
   });
 
   it("rejects advancing a blocked task with a toast and leaves it untouched", async () => {
@@ -587,9 +604,11 @@ describe("stage advance", () => {
         throw new Error(`complete-stage failed: ${response.status} ${await response.text()}`);
       }
       expect((await response.json() as { taskId: string }).taskId).toBe(sourceTaskId);
+
+      await waitForTaskRow(client, sourceTaskId, (candidate) => candidate.stage === "review");
     });
 
-    const row = await waitForTaskRow(client, sourceTaskId, (candidate) => candidate.stage === "review");
+    const row = await getTaskRow(client, sourceTaskId);
     expect(row).toMatchObject({ id: sourceTaskId, closed_at: null });
     expect(row.branch).not.toBe(sourceBranch);
     expect(row.branch).toBe(`task-${sourceTaskId}-2`);
@@ -631,6 +650,12 @@ describe("stage advance", () => {
         throw new Error(`rerun-stage failed: ${response.status} ${await response.text()}`);
       }
       expect(await response.json()).toEqual({ taskId });
+
+      await waitForStageRuns(client, taskId, (runs) => {
+        const seededRun = runs.find((run) => run.id === seedRunId);
+        return seededRun?.status === "cancelled"
+          && runs.some((run) => run.id !== seedRunId && run.stage === "in progress");
+      });
     });
 
     const row = await getTaskRow(client, taskId);
@@ -684,9 +709,11 @@ describe("stage advance", () => {
       }
       // The revision reruns an earlier stage on the SAME durable task.
       expect((await response.json() as { taskId: string }).taskId).toBe(taskId);
+
+      await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "in progress");
     });
 
-    const row = await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "in progress");
+    const row = await getTaskRow(client, taskId);
     expect(row).toMatchObject({
       id: taskId,
       stage: "in progress",
