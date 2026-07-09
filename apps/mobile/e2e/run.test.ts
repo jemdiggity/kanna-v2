@@ -22,4 +22,9 @@ describe("mobile smoke runner", () => {
     expect(supportedSmokeModes).toContain("cloud");
     expect(smokeSpecPaths).toContain("specs/cloud/cloud-task-flow.e2e.ts");
   });
+
+  it("supports a relay-backed Appium mode", () => {
+    expect(supportedSmokeModes).toContain("relay");
+    expect(smokeSpecPaths).toContain("specs/relay/relay-task-flow.e2e.ts");
+  });
 });

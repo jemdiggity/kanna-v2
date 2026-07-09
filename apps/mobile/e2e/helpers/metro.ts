@@ -67,7 +67,7 @@ export function shouldReuseExpoServer(
 }
 
 export function buildExpoStartCommand(port: number): string[] {
-  return ["pnpm", "exec", "expo", "start", "--port", String(port)];
+  return ["pnpm", "exec", "expo", "start", "--port", String(port), "--dev-client"];
 }
 
 export async function ensureExpoServer(
