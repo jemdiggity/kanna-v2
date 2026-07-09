@@ -52,7 +52,6 @@ export interface RemoteHarness {
     server: number;
     ui: number;
   };
-  restartServerWithIdentity(identity: { desktopId: string; desktopSecret?: string | null }): Promise<void>;
   relayUrl: string;
   getIdToken(): Promise<string>;
   restartServerWithIdentity(identity: { desktopId: string; desktopSecret?: string | null }): Promise<void>;
@@ -150,18 +149,6 @@ async function waitForRelayDesktop(input: {
   throw new Error(`timed out waiting for relay desktop ${input.desktopId}: ${lastError}`);
 }
 
-async function waitForHttpUnavailable(url: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const response = await fetch(url, { signal: AbortSignal.timeout(500) }).catch(() => null);
-    if (!response?.ok) {
-      return;
-    }
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for ${url} to stop responding`);
-}
-
 async function buildBinaries(repoRoot: string, environment: RemoteHarnessEnvironment): Promise<void> {
   if (environment === "dev") {
     await runCommand("pnpm", ["--dir", "services/firebase-functions", "build"], {
@@ -208,7 +195,6 @@ async function writeServerConfig(input: {
   daemonDir: string;
   dbPath: string;
   desktopId: string;
-  desktopSecret?: string | null;
   environment: RemoteHarnessEnvironment;
   repoRoot: string;
   stagingCredentials?: StagingBuffyCredentials;
@@ -305,65 +291,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     if (index >= 0) {
       processes.splice(index, 1);
     }
-    processHandle.stop().catch(() => undefined);
-  };
-
-  const startServer = async () => {
-    if (serverProcess?.process.exitCode === null && serverProcess.process.signalCode === null) {
-      return;
-    }
-    serverProcess = startManagedProcess("kanna-server", join(repoRoot, ".build/debug/kanna-server"), [], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        KANNA_SERVER_CONFIG: configPath,
-        ...(environment === "staging"
-          ? {
-              KANNA_CLOUD_ENV: "staging",
-              KANNA_FIREBASE_PROJECT_ID: "kanna-staging",
-              KANNA_RELAY_URL: "wss://relay-staging.kanna.build"
-            }
-          : {}),
-        KANNA_E2E_TEST_SQL: "1",
-        RUST_LOG: process.env.RUST_LOG ?? "info"
-      }
-    });
-    processes.push(serverProcess);
-    await waitForHttpOk(`http://127.0.0.1:${ports.server}/v1/status`, timeoutMs);
-  };
-
-  const stopServer = async () => {
-    const processHandle = serverProcess;
-    if (!processHandle) {
-      return;
-    }
-    serverProcess = null;
-    const index = processes.indexOf(processHandle);
-    if (index >= 0) {
-      processes.splice(index, 1);
-    }
     await processHandle.stop();
-    await waitForHttpUnavailable(`http://127.0.0.1:${ports.server}/v1/status`, timeoutMs);
-  };
-
-  const restartServerWithIdentity = async (identity: {
-    desktopId: string;
-    desktopSecret?: string | null;
-  }) => {
-    currentDesktopId = identity.desktopId;
-    currentDesktopSecret = identity.desktopSecret ?? null;
-    await stopServer();
-    await writeServerConfig({
-      configPath,
-      daemonDir,
-      dbPath,
-      desktopId: currentDesktopId,
-      desktopSecret: currentDesktopSecret,
-      environment,
-      stagingCredentials: staging?.credentials,
-      ports
-    });
-    await startServer();
   };
 
   const startServer = async () => {
@@ -508,7 +436,6 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       repoRoot,
       paths: { configPath, daemonDir, dbPath, fakeAgentBinDir, root, zshStartupDir },
       ports,
-      restartServerWithIdentity,
       relayUrl,
       getIdToken: async () => {
         if (!idToken) {

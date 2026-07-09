@@ -50,7 +50,7 @@ describe("LAN task loop E2E", () => {
       {
         id: harness.desktopId,
         name: "Remote E2E Desktop",
-        connectionMode: "local"
+        connectionMode: "both"
       }
     ]);
 
