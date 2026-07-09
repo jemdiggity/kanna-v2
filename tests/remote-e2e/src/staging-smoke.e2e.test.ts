@@ -11,7 +11,7 @@ describe("staging remote task E2E smoke", () => {
 
   beforeAll(async () => {
     harness = await startRemoteHarness({ environment: "staging" });
-  }, 120_000);
+  }, 240_000);
 
   afterAll(async () => {
     await harness?.stop();

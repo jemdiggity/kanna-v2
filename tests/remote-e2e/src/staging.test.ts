@@ -1,4 +1,11 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import {
+  remoteHarnessKannaCliPath,
+  writeRemoteHarnessZshStartupFiles,
+} from "./harness";
 import {
   buffyStagingCredentialsFromEnv,
   stagingRemoteE2eSkipMessage,
@@ -38,6 +45,7 @@ describe("staging remote E2E configuration", () => {
       dbPath: "/tmp/kanna.sqlite3",
       desktopId: "remote-e2e-staging-test",
       deviceToken: "staging-buffy-device-token",
+      kannaCliPath: "/tmp/repo/.build/debug/kanna-cli",
       lanPort: 48129,
       pairingStorePath: "/tmp/pairings.json"
     });
@@ -45,8 +53,30 @@ describe("staging remote E2E configuration", () => {
     expect(lines).toContain('relay_url = "wss://relay-staging.kanna.build"');
     expect(lines).toContain('device_token = "staging-buffy-device-token"');
     expect(lines).toContain('firebase_project_id = "kanna-staging"');
+    expect(lines).toContain('kanna_cli_path = "/tmp/repo/.build/debug/kanna-cli"');
     expect(lines).toContain('desktop_id = "remote-e2e-staging-test"');
     expect(lines).not.toContain("firebase_auth_emulator_url");
     expect(lines).not.toContain("firebase_firestore_emulator_host");
+  });
+
+  it("uses the harness-built kanna-cli sidecar for remote task creation", () => {
+    expect(remoteHarnessKannaCliPath("/tmp/repo")).toMatch(/\/tmp\/repo\/\.build\/debug\/kanna-cli(?:\.exe)?$/);
+  });
+
+  it("provides zsh startup files so Linux CI does not block on zsh-newuser-install", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-remote-e2e-zsh-"));
+    try {
+      await writeRemoteHarnessZshStartupFiles(root);
+
+      const zshEnv = await readFile(join(root, ".zshenv"), "utf8");
+      expect(zshEnv).toContain("Remote E2E");
+      expect(zshEnv).toContain("skip_global_compinit=1");
+      expect(zshEnv).toContain("unsetopt GLOBAL_RCS");
+      await expect(readFile(join(root, ".zprofile"), "utf8")).resolves.toContain("Remote E2E");
+      await expect(readFile(join(root, ".zshrc"), "utf8")).resolves.toContain("Remote E2E");
+      await expect(readFile(join(root, ".zlogin"), "utf8")).resolves.toContain("Remote E2E");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

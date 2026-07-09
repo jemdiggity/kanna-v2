@@ -1,10 +1,11 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
 import { runCommand } from "./processes";
+import { writeScriptedAgentBinary } from "./scriptedAgent";
 import type { RemoteHarness } from "./harness";
 import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../../apps/mobile/src/lib/api/client";
 
@@ -252,7 +253,7 @@ class RawRelayClientImpl implements RawRelayClient {
         if (index >= 0) {
           this.waiters.splice(index, 1);
         }
-        reject(new Error("timed out waiting for relay message"));
+        reject(new Error(`timed out waiting for relay message; received:\n${this.describeMessages()}`));
       }, timeoutMs);
       this.waiters.push({
         predicate,
@@ -262,6 +263,16 @@ class RawRelayClientImpl implements RawRelayClient {
         }
       });
     });
+  }
+
+  private describeMessages(): string {
+    if (this.messages.length === 0) {
+      return "(none)";
+    }
+    return this.messages
+      .map((message, index) => `${index + 1}. ${describeRelayMessage(message)}`)
+      .join("\n")
+      .slice(0, 4_000);
   }
 }
 
@@ -306,7 +317,9 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
         if (index >= 0) {
           this.outputWaiters.splice(index, 1);
         }
-        reject(new Error(`timed out waiting for terminal output ${marker} from ${this.taskId}`));
+        reject(new Error(
+          `timed out waiting for terminal output ${marker} from ${this.taskId}; output so far:\n${this.outputText() || "(none)"}`
+        ));
       }, timeoutMs);
       this.outputWaiters.push({
         marker,
@@ -393,7 +406,10 @@ async function writeScriptedRepo(repoPath: string): Promise<void> {
   await writeFile(
     join(repoPath, ".kanna", "config.json"),
     JSON.stringify({
-      setup: ["export PATH=\"$PWD/bin:$PATH\""],
+      setup: [
+        "export PATH=\"$PWD/bin:$PATH\"",
+        "codex() { \"$PWD/bin/codex\" \"$@\"; }"
+      ],
       workspace: {
         path: {
           prepend: ["bin"]
@@ -403,48 +419,21 @@ async function writeScriptedRepo(repoPath: string): Promise<void> {
   );
   await writeFile(join(repoPath, "README.md"), "# Remote E2E scripted repo\n");
   const codexPath = join(repoPath, "bin", "codex");
-  await writeFile(codexPath, scriptedAgentSource());
-  await chmod(codexPath, 0o755);
+  await writeScriptedAgentBinary(codexPath);
   await runCommand("git", ["init"], { cwd: repoPath, env: process.env });
+  await runCommand("git", ["config", "user.email", "remote-e2e@example.invalid"], {
+    cwd: repoPath,
+    env: process.env
+  });
+  await runCommand("git", ["config", "user.name", "Remote E2E"], {
+    cwd: repoPath,
+    env: process.env
+  });
   await runCommand("git", ["add", "."], { cwd: repoPath, env: process.env });
-  await runCommand("git", [
-    "-c",
-    "user.email=remote-e2e@example.invalid",
-    "-c",
-    "user.name=Remote E2E",
-    "commit",
-    "-m",
-    "Initial scripted repo"
-  ], { cwd: repoPath, env: process.env });
-}
-
-function scriptedAgentSource(): string {
-  return `#!/bin/sh
-printf 'SCRIPT_READY\\n'
-(
-  i=0
-  while true; do
-    i=$((i + 1))
-    printf 'SCRIPT_HEARTBEAT %s\\n' "$i"
-    sleep 0.25
-  done
-) &
-heartbeat_pid=$!
-trap 'kill "$heartbeat_pid" 2>/dev/null || true' EXIT
-while IFS= read -r line; do
-  printf 'SCRIPT_INPUT:%s\\n' "$line"
-  case "$line" in
-    *exit-zero*)
-      printf 'SCRIPT_EXITING\\n'
-      exit 0
-      ;;
-    *exit-one*)
-      printf 'SCRIPT_FAILING\\n'
-      exit 7
-      ;;
-  esac
-done
-`;
+  await runCommand("git", ["commit", "-m", "Initial scripted repo"], {
+    cwd: repoPath,
+    env: process.env
+  });
 }
 
 function asCreatedRepo(value: unknown): CreatedRepoResponse {
@@ -498,6 +487,19 @@ function isRelayEvent(message: RelayMessage): message is RelayEventMessage {
     typeof message.name === "string" &&
     isRecord(message.payload)
   );
+}
+
+function describeRelayMessage(message: RelayMessage): string {
+  if (isRelayEvent(message)) {
+    const sessionId = typeof message.payload.session_id === "string"
+      ? ` session=${message.payload.session_id}`
+      : "";
+    const data = decodedOutput(message.payload);
+    const output = data ? ` output=${JSON.stringify(data.slice(0, 500))}` : "";
+    return `event ${message.name}${sessionId}${output}`;
+  }
+  const id = typeof message.id === "string" ? ` id=${message.id}` : "";
+  return `${String(message.type ?? "unknown")}${id}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

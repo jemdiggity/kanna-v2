@@ -95,6 +95,11 @@ fn main() {
     }
     if target.contains("darwin") {
         println!("cargo:rustc-link-lib=c++");
+    } else if target.contains("linux") {
+        // Zig builds Ghostty's C++ companion libraries against libc++
+        // (std::__1 symbols), so Linux consumers must link libc++/libc++abi.
+        println!("cargo:rustc-link-lib=c++");
+        println!("cargo:rustc-link-lib=c++abi");
     }
     println!("cargo:include={}", include_dir.display());
 }

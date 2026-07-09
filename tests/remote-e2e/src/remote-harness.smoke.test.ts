@@ -6,7 +6,7 @@ describe("remote task E2E harness", () => {
 
   beforeAll(async () => {
     harness = await startRemoteHarness();
-  }, 120_000);
+  }, 240_000);
 
   afterAll(async () => {
     await harness?.stop();

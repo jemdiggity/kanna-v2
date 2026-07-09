@@ -75,6 +75,7 @@ export function stagingServerTomlLines(input: {
   dbPath: string;
   desktopId: string;
   deviceToken: string;
+  kannaCliPath: string;
   lanPort: number;
   pairingStorePath: string;
 }): string[] {
@@ -84,6 +85,7 @@ export function stagingServerTomlLines(input: {
     `firebase_project_id = "${STAGING_FIREBASE_PROJECT_ID}"`,
     `daemon_dir = "${shellTomlString(input.daemonDir)}"`,
     `db_path = "${shellTomlString(input.dbPath)}"`,
+    `kanna_cli_path = "${shellTomlString(input.kannaCliPath)}"`,
     `desktop_id = "${shellTomlString(input.desktopId)}"`,
     `desktop_name = "${STAGING_DESKTOP_NAME}"`,
     `server_version = "remote-e2e-staging"`,
