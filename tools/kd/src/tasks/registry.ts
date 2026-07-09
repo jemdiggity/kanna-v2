@@ -53,6 +53,10 @@ import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
 import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
 import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
+import {
+  listStagingRelayActiveDesktopIds,
+  type StagingRelayActiveDesktopIdsInput
+} from "../runtime/staging-relay";
 import { shipRelease } from "../runtime/release";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
@@ -61,6 +65,8 @@ import { captureTmuxLog, respawnTmuxWindow, startTmuxSession, stopTmuxSession, s
 import { readDesktopBundleIdentifier, writeTauriLocalConfig } from "../runtime/tauri";
 import type { KdPorts } from "../ports";
 import type { TaskDefinition, TaskResult } from "./types";
+
+export { listStagingRelayActiveDesktopIds } from "../runtime/staging-relay";
 
 export interface DevUpInput {
   mobile: boolean;
@@ -585,159 +591,6 @@ async function readInstalledStagingDesktopStatus(runner: CommandRunner): Promise
   } catch {
     return null;
   }
-}
-
-interface StagingRelayActiveDesktopIdsInput {
-  repoRoot: string;
-  env: NodeJS.ProcessEnv;
-  relayUrl: string;
-}
-
-async function readMobileFirebaseApiKey(repoRoot: string, environment: "staging" | "prod"): Promise<string> {
-  const raw = await readFile(join(repoRoot, "apps", "mobile", "src", "mobileEnvironments.json"), "utf8");
-  const parsed = JSON.parse(raw) as Record<string, { firebase?: { apiKey?: unknown } } | undefined>;
-  const apiKey = parsed[environment]?.firebase?.apiKey;
-  if (typeof apiKey !== "string" || !apiKey.trim()) {
-    throw new Error(`Missing Firebase apiKey for ${environment} in apps/mobile/src/mobileEnvironments.json.`);
-  }
-  return apiKey;
-}
-
-async function fetchFirebaseIdToken(apiKey: string, credentials: { email: string; password: string }): Promise<string> {
-  const fetchFn = (globalThis as unknown as {
-    fetch?: typeof fetch;
-  }).fetch;
-  if (typeof fetchFn !== "function") {
-    throw new Error("Node fetch is not available; cannot verify staging relay active desktops.");
-  }
-
-  const response = await fetchFn(
-    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: credentials.email,
-        password: credentials.password,
-        returnSecureToken: true
-      })
-    }
-  );
-  if (!response.ok) {
-    throw new Error(`Firebase sign-in failed while verifying staging relay active desktops: HTTP ${response.status}`);
-  }
-
-  const body = await response.json() as { idToken?: unknown };
-  if (typeof body.idToken !== "string" || !body.idToken) {
-    throw new Error("Firebase sign-in did not return an idToken.");
-  }
-  return body.idToken;
-}
-
-interface KdWebSocketMessageEvent {
-  data?: unknown;
-}
-
-interface KdWebSocket {
-  onopen: (() => void) | null;
-  onmessage: ((event: KdWebSocketMessageEvent) => void) | null;
-  onerror: ((event: unknown) => void) | null;
-  onclose: (() => void) | null;
-  send(data: string): void;
-  close(): void;
-}
-
-type KdWebSocketCtor = new (url: string) => KdWebSocket;
-
-function parseRelayActiveDesktopIdsResponse(payload: unknown): Set<string> | null {
-  if (!payload || typeof payload !== "object") return null;
-  const record = payload as { data?: unknown };
-  const data = record.data;
-  if (!data || typeof data !== "object") return null;
-  const desktopIds = (data as { desktopIds?: unknown }).desktopIds;
-  if (!Array.isArray(desktopIds)) return null;
-  return new Set(
-    desktopIds.filter((desktopId): desktopId is string => typeof desktopId === "string" && desktopId.length > 0)
-  );
-}
-
-export async function listStagingRelayActiveDesktopIds(input: StagingRelayActiveDesktopIdsInput): Promise<Set<string>> {
-  const credentials = readStagingDesktopAuth(input.env.HOME?.trim() || homedir());
-  const apiKey = await readMobileFirebaseApiKey(input.repoRoot, "staging");
-  const idToken = await fetchFirebaseIdToken(apiKey, credentials);
-  const WebSocketCtor = (globalThis as unknown as { WebSocket?: KdWebSocketCtor }).WebSocket;
-  if (!WebSocketCtor) {
-    throw new Error("Node WebSocket is not available; cannot verify staging relay active desktops.");
-  }
-
-  return new Promise((resolvePromise, reject) => {
-    const ws = new WebSocketCtor(input.relayUrl);
-    let authenticated = false;
-    const timeout = setTimeout(() => {
-      ws.close();
-      reject(new Error("Timed out while verifying staging relay active desktops."));
-    }, 10_000);
-    const finish = (result: Set<string>) => {
-      clearTimeout(timeout);
-      ws.close();
-      resolvePromise(result);
-    };
-    const fail = (error: Error) => {
-      clearTimeout(timeout);
-      ws.close();
-      reject(error);
-    };
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "auth", id_token: idToken }));
-    };
-    ws.onerror = () => {
-      fail(new Error("Relay WebSocket failed while verifying staging relay active desktops."));
-    };
-    ws.onclose = () => {
-      if (!authenticated) {
-        fail(new Error("Relay WebSocket closed before authentication completed."));
-      }
-    };
-    ws.onmessage = (event) => {
-      let payload: unknown;
-      try {
-        payload = JSON.parse(String(event.data ?? ""));
-      } catch {
-        return;
-      }
-
-      const message = payload as { type?: unknown; id?: unknown; error?: unknown; message?: unknown };
-      if (message.type === "auth_ok") {
-        authenticated = true;
-        ws.send(JSON.stringify({
-          type: "invoke",
-          id: "kd-active-desktops",
-          command: "list_active_desktops",
-          args: {}
-        }));
-        return;
-      }
-
-      if (message.type === "error") {
-        fail(new Error(typeof message.message === "string" ? message.message : "Relay returned an error."));
-        return;
-      }
-
-      if (message.type === "response" && message.id === "kd-active-desktops") {
-        if (typeof message.error === "string" && message.error) {
-          fail(new Error(message.error));
-          return;
-        }
-        const ids = parseRelayActiveDesktopIdsResponse(payload);
-        if (!ids) {
-          fail(new Error("Relay list_active_desktops returned invalid data."));
-          return;
-        }
-        finish(ids);
-      }
-    };
-  });
 }
 
 async function checkInstalledStagingDesktopRelayOwner(input: {
@@ -1662,7 +1515,9 @@ async function runBuiltCommand(command: string, args: string[], cwd: string, env
   const result = await nodeCommandRunner.run(command, args, { cwd, env });
   return {
     ok: result.exitCode === 0,
-    message: result.exitCode === 0 ? result.stdout || `${command} ${args.join(" ")} completed.` : result.stderr,
+    message: result.exitCode === 0
+      ? result.stdout || `${command} ${args.join(" ")} completed.`
+      : result.stderr || result.stdout,
     data: { command, args, exitCode: result.exitCode }
   };
 }
