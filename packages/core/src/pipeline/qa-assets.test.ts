@@ -114,6 +114,8 @@ describe("QA pipeline assets", () => {
     expect(mergeAgent).toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
     expect(mergeAgent).toContain("Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id");
     expect(mergeAgent).toContain("If it returns `exists: true`, do not delete the remote branch");
+    expect(mergeAgent).toContain('If MCP is unavailable, use `kanna-cli task dependent-tasks-exist --task-id "<task_id>"`.');
+    expect(mergeAgent).not.toContain("If MCP is unavailable, use `curl ");
     expect(mergeAgent).toContain("A blocker that has reached `pr` can already have dependent tasks stacked on its branch");
     expect(mergeAgent).toContain("After the full detected stack has merged, delete the stack branches that are no longer needed");
     expect(mergeAgent).toContain("gh pr merge <PR> --merge");
