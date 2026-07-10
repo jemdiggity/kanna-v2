@@ -13,6 +13,16 @@ import { updateDesktopServerClientHandlersForTests } from "./services/desktopSer
 
 const settingStore = vi.hoisted(() => new Map<string, string>());
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 vi.mock("@kanna/" + "db", () => ({
   getSetting: vi.fn(async (_db, key: string) => settingStore.get(key) ?? null),
   setSetting: vi.fn(async (_db, key: string, value: string) => {
@@ -268,6 +278,66 @@ describe("windowWorkspace", () => {
         sidebarWidth: 320,
       },
     ]);
+  });
+
+  it("serializes workspace writes so an older selection cannot overwrite a newer one", async () => {
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [{
+          windowId: "main",
+          selectedRepoId: "repo-1",
+          selectedItemId: "task-initial",
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+        }],
+      } satisfies WorkspaceSnapshot),
+    );
+    const firstWriteStarted = createDeferred<void>();
+    const releaseFirstWrite = createDeferred<void>();
+    let writeCount = 0;
+    updateDesktopServerClientHandlersForTests({
+      getSetting: async (key) => settingStore.get(key) ?? null,
+      putSetting: async (key, value) => {
+        writeCount += 1;
+        if (writeCount === 1) {
+          firstWriteStarted.resolve();
+          await releaseFirstWrite.promise;
+        }
+        settingStore.set(key, value);
+        return { key, value };
+      },
+    });
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: {
+        windowId: "main",
+        selectedRepoId: null,
+        selectedItemId: null,
+      },
+    });
+
+    const olderWrite = workspace.persistSelection({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+    await firstWriteStarted.promise;
+    const newerWrite = workspace.persistSelection({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-durable",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(writeCount).toBe(1);
+
+    releaseFirstWrite.resolve();
+    await Promise.all([olderWrite, newerWrite]);
+    const saved = JSON.parse(settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? "") as WorkspaceSnapshot;
+    expect(saved.windows[0]).toMatchObject({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-durable",
+    });
   });
 
   it("persists removal of the current window when closing", async () => {

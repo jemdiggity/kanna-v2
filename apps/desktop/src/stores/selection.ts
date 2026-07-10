@@ -19,6 +19,7 @@ export interface SelectionApi {
   canGoBack: ComputedRef<boolean>;
   canGoForward: ComputedRef<boolean>;
   getStageOrder: (repoId: string) => readonly string[];
+  persistSelection: () => Promise<void>;
   selectRepo: (repoId: string) => Promise<void>;
   selectItem: (itemId: string, options?: SelectItemOptions) => Promise<void>;
   selectReplacementAfterItemRemoval: (
@@ -358,6 +359,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     canGoBack: nav.canGoBack,
     canGoForward: nav.canGoForward,
     getStageOrder,
+    persistSelection: persistWindowSelection,
     selectRepo,
     selectItem,
     selectReplacementAfterItemRemoval,

@@ -24,6 +24,19 @@ import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
 
+export function hasLocalTaskSelectionIdentity(input: {
+  selectedRepoId: string | null;
+  selectedItemId: string | null;
+  items: ReadonlyArray<{ id: string; repo_id: string }>;
+  initializingTaskItems: ReadonlyArray<{ id: string; repo_id: string }>;
+}): boolean {
+  if (!input.selectedRepoId || !input.selectedItemId) return false;
+  return input.initializingTaskItems.some((item) =>
+    item.id === input.selectedItemId && item.repo_id === input.selectedRepoId)
+    || input.items.some((item) =>
+      item.id === input.selectedItemId && item.repo_id === input.selectedRepoId);
+}
+
 export type AppSidebarItem = PipelineItem & {
   remote_task?: boolean;
 };
@@ -153,29 +166,57 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     repo_id: task.repoKey,
     remote_task: task.owner.kind !== "local",
   })));
-  const selectedCloudRepo = computed(() =>
-    remoteSnapshot.value.repos.find((repo) => repo.id === (selectedCloudRepoId.value ?? store.selectedRepoId))
-      ?? sidebarRepos.value.find((repo) => repo.id === (selectedCloudRepoId.value ?? store.selectedRepoId) && repo.path === "cloud")
-      ?? null,
-  );
+  const localTaskSelectionOwnsIdentity = computed(() => hasLocalTaskSelectionIdentity({
+    selectedRepoId: store.selectedRepoId,
+    selectedItemId: store.selectedItemId,
+    items: store.items,
+    initializingTaskItems: store.initializingTaskItems,
+  }));
+  const localInitializingTaskOwnsIdentity = computed(() => Boolean(
+    store.selectedRepoId
+    && store.selectedItemId
+    && store.initializingTaskItems.some((item) =>
+      item.id === store.selectedItemId && item.repo_id === store.selectedRepoId),
+  ));
+  watch(localTaskSelectionOwnsIdentity, (ownsIdentity) => {
+    if (!ownsIdentity) return;
+    selectedCloudRepoId.value = null;
+    selectedCloudItemId.value = null;
+  }, { flush: "sync" });
+  const effectiveWorkspaceRepoId = computed(() => localTaskSelectionOwnsIdentity.value
+    ? store.selectedRepoId
+    : selectedCloudRepoId.value ?? store.selectedRepoId);
+  const effectiveWorkspaceItemId = computed(() => {
+    if (localInitializingTaskOwnsIdentity.value) return null;
+    if (localTaskSelectionOwnsIdentity.value) return store.selectedItemId;
+    return selectedCloudItemId.value ?? store.selectedItemId;
+  });
+  const selectedCloudRepo = computed(() => {
+    if (localTaskSelectionOwnsIdentity.value) return null;
+    return remoteSnapshot.value.repos.find((repo) => repo.id === effectiveWorkspaceRepoId.value)
+      ?? sidebarRepos.value.find((repo) => repo.id === effectiveWorkspaceRepoId.value && repo.path === "cloud")
+      ?? null;
+  });
   const selectedCloudItem = computed(() => {
-    const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
+    if (localTaskSelectionOwnsIdentity.value) return null;
+    const selectedItemId = effectiveWorkspaceItemId.value;
     if (!selectedItemId) return null;
     const task = workspaceTasksByItemId.value.get(selectedItemId);
     if (!task || task.owner.kind === "local") return null;
-    if (task.item.repo_id === (selectedCloudRepoId.value ?? store.selectedRepoId)) return task.item;
-    if (task.repoKey === (selectedCloudRepoId.value ?? store.selectedRepoId)) return task.item;
+    if (task.item.repo_id === effectiveWorkspaceRepoId.value) return task.item;
+    if (task.repoKey === effectiveWorkspaceRepoId.value) return task.item;
     return null;
   });
   const mainPanelRepo = computed(() => selectedCloudRepo.value ?? store.selectedRepo);
   const mainPanelItem = computed(() => selectedCloudItem.value ?? store.currentItem);
   const mainPanelIsCloudTask = computed(() => Boolean(selectedCloudItem.value));
   const selectedWorkspaceTask = computed(() => {
-    const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
+    const selectedItemId = effectiveWorkspaceItemId.value;
     return selectedItemId ? workspaceTasksByItemId.value.get(selectedItemId) ?? null : null;
   });
   const mainPanelCloudTerminalRef = computed(() => {
-    const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
+    if (localTaskSelectionOwnsIdentity.value) return null;
+    const selectedItemId = effectiveWorkspaceItemId.value;
     if (!selectedItemId) return null;
     const task = workspaceTasksByItemId.value.get(selectedItemId);
     return task?.terminal.remoteRef ?? null;

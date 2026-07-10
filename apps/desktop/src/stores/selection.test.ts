@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
 import { createSelectionApi } from "./selection";
+import { createQueriesApi } from "./queries";
 import { createStoreContext, createStoreState } from "./state";
 import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 import { initializeTaskItem, type InitializingTaskItem } from "./taskInitialization";
@@ -46,6 +47,16 @@ function createDb(): DbHandle {
     execute: vi.fn(async () => ({ rowsAffected: 1 })),
     select: vi.fn(async () => []),
   };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function createRepo(overrides: Partial<Repo> = {}): Repo {
@@ -440,5 +451,61 @@ describe("createSelectionApi", () => {
       "task-progress",
       "task-commit",
     ]);
+  });
+});
+
+describe("createQueriesApi snapshot ordering", () => {
+  it("does not let a pre-create reload overwrite a hydrated durable task", async () => {
+    const state = createStoreState();
+    const repo = createRepo();
+    state.stageOrderCache.set(repo.path, []);
+    state.initializingTaskItems.value = [createInitializingItem({
+      id: "create:task",
+      taskId: "task-durable",
+    })];
+    state.selectedRepoId.value = repo.id;
+    state.selectedItemId.value = "create:task";
+    state.lastSelectedItemByRepo.value = { [repo.id]: "create:task" };
+    const olderResponse = createDeferred<{
+      entries: Array<{ repo: Repo; items: PipelineItem[] }>;
+      taskBlockers: [];
+      worktreePaths: Record<string, string>;
+      settings: Record<string, string>;
+    }>();
+    const newerResponse = createDeferred<{
+      entries: Array<{ repo: Repo; items: PipelineItem[] }>;
+      taskBlockers: [];
+      worktreePaths: Record<string, string>;
+      settings: Record<string, string>;
+    }>();
+    const fetchSnapshot = vi.fn()
+      .mockImplementationOnce(async () => olderResponse.promise)
+      .mockImplementationOnce(async () => newerResponse.promise);
+    const queries = createQueriesApi(createStoreContext(
+      state,
+      toastStub(),
+      { fetchSnapshot } as never,
+    ));
+
+    const olderReload = queries.reloadSnapshot();
+    const newerReload = queries.reloadSnapshot();
+    newerResponse.resolve({
+      entries: [{ repo, items: [createItem({ id: "task-durable" })] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    });
+    await newerReload;
+    olderResponse.resolve({
+      entries: [{ repo, items: [] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    });
+    await olderReload;
+
+    expect(state.items.value.map((item) => item.id)).toEqual(["task-durable"]);
+    expect(state.initializingTaskItems.value).toEqual([]);
+    expect(state.selectedItemId.value).toBe("task-durable");
   });
 });

@@ -1949,14 +1949,34 @@ describe("kanna store task base branch integration", () => {
     consoleError.mockRestore();
   });
 
-  it("keeps the initialized row after snapshot failure and hydrates it on a later refresh", async () => {
+  it("persists the durable selection and retries hydration after a transient snapshot failure", async () => {
     const store = await createStore();
-    let failNextSnapshot = true;
+    const persistSelection = vi.fn(async () => {});
+    store.attachWindowWorkspace({
+      bootstrap: { windowId: "test-window", selectedRepoId: null, selectedItemId: null },
+      loadSnapshot: vi.fn(async () => ({ windows: [] })),
+      saveSnapshot: vi.fn(async () => {}),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection,
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData: vi.fn(async () => {}),
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    });
+    let snapshotAttempts = 0;
+    let releaseRetry = () => {};
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
     setDesktopSnapshotFetcherForTests(async () => {
-      if (failNextSnapshot) {
-        failNextSnapshot = false;
+      snapshotAttempts += 1;
+      if (snapshotAttempts === 1) {
         throw new Error("snapshot temporarily unavailable");
       }
+      await retryGate;
       return {
         entries: mockState.repos.map((repo) => ({
           repo,
@@ -1969,7 +1989,7 @@ describe("kanna store task base branch integration", () => {
     });
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const durableTaskId = await store.createItem(
+    const createPromise = store.createItem(
       "repo-1",
       "/tmp/repo",
       "Hydrate after a snapshot retry",
@@ -1977,14 +1997,21 @@ describe("kanna store task base branch integration", () => {
       { agentProvider: "claude" },
     );
 
-    expect(store.currentInitializingItem).toMatchObject({
-      id: expect.stringMatching(/^create:/),
-      taskId: durableTaskId,
+    await vi.waitFor(() => {
+      expect(store.currentInitializingItem?.taskId).toMatch(/^[0-9a-f-]+$/);
+      expect(snapshotAttempts).toBe(2);
     });
-    expect(store.currentItem).toBeNull();
-    expect(store.selectedItemIdForPersistence).toBe(durableTaskId);
+    const durableTaskId = store.currentInitializingItem!.taskId!;
+    expect(persistSelection).toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: durableTaskId,
+    });
+    expect(persistSelection.mock.calls.some(([selection]) =>
+      String(selection.selectedItemId).startsWith("create:")))
+      .toBe(false);
 
-    await store.init(createDb());
+    releaseRetry();
+    await expect(createPromise).resolves.toBe(durableTaskId);
 
     expect(store.initializingTaskItems).toEqual([]);
     expect(store.selectedItemId).toBe(durableTaskId);
@@ -2059,6 +2086,21 @@ describe("kanna store task base branch integration", () => {
   it("selects a UI-only initializing item immediately while creation continues", async () => {
     const baseBranchGate = mockState.defer();
     const store = await createStore();
+    const persistSelection = vi.fn(async () => {});
+    store.attachWindowWorkspace({
+      bootstrap: { windowId: "test-window", selectedRepoId: null, selectedItemId: null },
+      loadSnapshot: vi.fn(async () => ({ windows: [] })),
+      saveSnapshot: vi.fn(async () => {}),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection,
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData: vi.fn(async () => {}),
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    });
     mockState.commandGates = { git_default_branch: baseBranchGate.promise };
 
     const createPromise = store.createItem("repo-1", "/tmp/repo", "Show the new task now", "pty", {
@@ -2080,6 +2122,13 @@ describe("kanna store task base branch integration", () => {
     expect(store.currentItem).toBeNull();
     expect(store.items.some((item) => item.id === store.selectedItemId)).toBe(false);
     expect(store.sortedItemsForCurrentRepo.some((item) => item.id === store.selectedItemId)).toBe(false);
+    expect(persistSelection).toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+    expect(persistSelection.mock.calls.some(([selection]) =>
+      String(selection.selectedItemId).startsWith("create:")))
+      .toBe(false);
 
     baseBranchGate.resolve();
     await createPromise;

@@ -34,20 +34,40 @@ async function captureTaskCreateDiagnostics(client: WebDriverClient) {
   // Diagnostics only: this internal snapshot is used after a failed UI task
   // creation flow to explain what state the visible UI got stuck in.
   const ui = await client.executeSync<{
-    pendingSetupIds: string[];
+    initializingTaskItems: Array<{
+      id: string;
+      taskId: string | null;
+      repo_id: string;
+      state: string;
+      prompt: string;
+    }>;
+    selectedItemId: string | null;
+    selectedItemIdForPersistence: string | null;
     selectedRepoId: string | null;
     selectedRepoPath: string | null;
     showNewTaskModal: boolean;
     toastMessages: string[];
-  }>(`const ctx = window.__KANNA_E2E__.setupState;
+  }>(`const ctx = window.__KANNA_E2E__?.setupState;
+      const store = ctx?.store;
+      const unwrap = (value) => value?.__v_isRef ? value.value : value;
+      const initializingTaskItems = Array.from(unwrap(store?.initializingTaskItems) ?? []);
+      const selectedRepo = unwrap(store?.selectedRepo);
       const toastMessages = Array.from(document.querySelectorAll(".toast-message"))
         .map((node) => node.textContent ?? "")
         .filter((text) => text.length > 0);
       return {
-        pendingSetupIds: ctx.store?.pendingSetupIds?.value ?? [],
-        selectedRepoId: ctx.store?.selectedRepoId?.value ?? null,
-        selectedRepoPath: ctx.store?.selectedRepo?.path ?? null,
-        showNewTaskModal: Boolean(ctx.showNewTaskModal?.value ?? ctx.showNewTaskModal),
+        initializingTaskItems: initializingTaskItems.map((item) => ({
+          id: item.id,
+          taskId: item.taskId ?? null,
+          repo_id: item.repo_id,
+          state: item.state,
+          prompt: item.prompt,
+        })),
+        selectedItemId: unwrap(store?.selectedItemId) ?? null,
+        selectedItemIdForPersistence: unwrap(store?.selectedItemIdForPersistence) ?? null,
+        selectedRepoId: unwrap(store?.selectedRepoId) ?? null,
+        selectedRepoPath: selectedRepo?.path ?? null,
+        showNewTaskModal: Boolean(unwrap(ctx?.showNewTaskModal)),
         toastMessages,
       };`);
   const db = await client.executeAsync<{

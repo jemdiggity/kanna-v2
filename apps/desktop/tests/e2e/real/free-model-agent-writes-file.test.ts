@@ -26,8 +26,16 @@ async function captureOpenCodeDiagnostics(client: WebDriverClient, taskId: strin
   return client.executeAsync<{
     bodyText: string;
     daemonSessions: unknown;
+    initializingTaskItems: Array<{
+      id: string;
+      taskId: string | null;
+      repo_id: string;
+      state: string;
+      prompt: string;
+    }>;
     lastAgentSpawnError: unknown;
-    pendingSetupIds: string[];
+    selectedItemId: string | null;
+    selectedItemIdForPersistence: string | null;
     taskRows: unknown;
     terminalText: string;
     terminalBufferText: string;
@@ -35,7 +43,19 @@ async function captureOpenCodeDiagnostics(client: WebDriverClient, taskId: strin
     toastMessages: string[];
   }>(`const cb = arguments[arguments.length - 1];
       const ctx = window.__KANNA_E2E__?.setupState;
+      const store = ctx?.store;
       const hook = window.__KANNA_E2E__?.terminalBuffers;
+      const unwrap = (value) => value?.__v_isRef ? value.value : value;
+      const initializingTaskItems = Array.from(unwrap(store?.initializingTaskItems) ?? []);
+      const terminalBufferText = (() => {
+        try {
+          return hook?.lines?.(${JSON.stringify(taskId)})?.join("\\n") ?? "";
+        } catch (error) {
+          return "[terminal buffer unavailable: "
+            + (error instanceof Error ? error.message : String(error))
+            + "]";
+        }
+      })();
       const db = ctx?.db?.value || ctx?.db;
       const invoke = window.__TAURI__?.core?.invoke;
       Promise.all([
@@ -44,11 +64,19 @@ async function captureOpenCodeDiagnostics(client: WebDriverClient, taskId: strin
       ]).then(([daemonSessions, taskRows]) => cb({
           bodyText: document.body?.innerText ?? "",
           daemonSessions,
+          initializingTaskItems: initializingTaskItems.map((item) => ({
+            id: item.id,
+            taskId: item.taskId ?? null,
+            repo_id: item.repo_id,
+            state: item.state,
+            prompt: item.prompt,
+          })),
           lastAgentSpawnError: window.__KANNA_E2E_LAST_AGENT_SPAWN_ERROR__ ?? null,
-          pendingSetupIds: ctx?.store?.pendingSetupIds?.value ?? [],
+          selectedItemId: unwrap(store?.selectedItemId) ?? null,
+          selectedItemIdForPersistence: unwrap(store?.selectedItemIdForPersistence) ?? null,
           taskRows,
           terminalText: document.querySelector(".terminal-container")?.textContent ?? "",
-          terminalBufferText: hook?.getText?.(${JSON.stringify(taskId)}) ?? "",
+          terminalBufferText,
           sessionIds: hook?.sessionIds?.() ?? [],
           toastMessages: Array.from(document.querySelectorAll(".toast-message"))
             .map((node) => node.textContent ?? "")

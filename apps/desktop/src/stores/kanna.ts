@@ -39,6 +39,7 @@ export const useKannaStore = defineStore("kanna", () => {
   services.sortedItemsAllRepos = selection.sortedItemsAllRepos;
   services.isItemHidden = selection.isItemHidden;
   services.getStageOrder = selection.getStageOrder;
+  services.persistSelection = selection.persistSelection;
   services.selectRepo = selection.selectRepo;
   services.selectItem = selection.selectItem;
   services.selectReplacementAfterItemRemoval = selection.selectReplacementAfterItemRemoval;
@@ -151,6 +152,7 @@ Use this branch as the default when the user does not specify a target branch. B
 
     init: initApi.init,
     attachWindowWorkspace,
+    persistSelection: selection.persistSelection,
     selectRepo: selection.selectRepo,
     selectItem: selection.selectItem,
     goBack: selection.goBack,

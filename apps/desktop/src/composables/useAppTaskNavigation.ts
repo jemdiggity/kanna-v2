@@ -8,10 +8,12 @@ import Sidebar from "../components/Sidebar.vue";
 import { isBlockerResolved } from "../utils/blockerResolution";
 import { selectTaskByActivity } from "../utils/selectTaskByActivity";
 import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
+import { taskSearchMatch } from "../utils/taskSearch";
 import { isTaskTearingDown } from "../stores/taskStages";
 import type { WorkspaceTask } from "../workspace/types";
 import type { AppSidebarItem } from "./useAppCloudWorkspace";
 import type { useKannaStore } from "../stores/kanna";
+import { claimLocalTaskSelectionOwnership } from "./localTaskSelectionOwnership";
 import type { useToast } from "./useToast";
 import type { WindowWorkspaceController } from "../windowWorkspace";
 import type { ActionName } from "./useKeyboardShortcuts";
@@ -91,6 +93,15 @@ export function useAppTaskNavigation({
   openPeerPicker,
   openPairPeerPicker,
 }: UseAppTaskNavigationOptions) {
+  function claimLocalTaskOwnership(repoId: string) {
+    claimLocalTaskSelectionOwnership({
+      store,
+      repoId,
+      selectedCloudRepoId,
+      selectedCloudItemId,
+    });
+  }
+
   function visibleSidebarItemsForRepo(repoId: string, options: { currentRepoScope?: boolean } = {}) {
     const workspaceItems = sidebarItems.value.filter((item) => item.repo_id === repoId);
     const searchQuery = sidebarRef.value?.searchQuery ?? "";
@@ -113,12 +124,27 @@ export function useAppTaskNavigation({
     return sortSidebarItemsForRepo({ ...sortOptions, items: workspaceItems });
   }
 
+  function visibleInitializingItemsForRepo(repoId: string) {
+    const searchQuery = sidebarRef.value?.searchQuery?.trim() ?? "";
+    return store.initializingTaskItems.filter((item) =>
+      item.repo_id === repoId
+      && (!searchQuery || taskSearchMatch(searchQuery, item) !== null),
+    );
+  }
+
+  function visibleNavigableItemsForRepo(repoId: string, options: { currentRepoScope?: boolean } = {}) {
+    return [
+      ...visibleInitializingItemsForRepo(repoId),
+      ...visibleSidebarItemsForRepo(repoId, options),
+    ];
+  }
+
   function visibleSidebarItemsAllRepos() {
-    const workspaceItems = sidebarRepos.value.flatMap((repo) => visibleSidebarItemsForRepo(repo.id));
+    const workspaceItems = sidebarRepos.value.flatMap((repo) => visibleNavigableItemsForRepo(repo.id));
     if (workspaceItems.length > 0) return workspaceItems;
     if (store.sortedItemsAllRepos.length > 0) return store.sortedItemsAllRepos;
     const repoId = store.selectedRepoId;
-    return repoId ? visibleSidebarItemsForRepo(repoId, { currentRepoScope: true }) : [];
+    return repoId ? visibleNavigableItemsForRepo(repoId, { currentRepoScope: true }) : [];
   }
 
   function visibleSidebarItemsForCurrentRepo() {
@@ -364,6 +390,7 @@ export function useAppTaskNavigation({
         requestedAgentProvider = task.agentProvider ?? firstProvider;
       }
 
+      claimLocalTaskOwnership(repo.id);
       await store.createItem(store.selectedRepoId, repo.path, resolvedTask.prompt, "pty", {
         customTask: resolvedTask,
         stage: task.stage,
@@ -390,6 +417,7 @@ export function useAppTaskNavigation({
     const repo = store.repos.find((r) => r.id === store.selectedRepoId);
     if (!repo) return;
     try {
+      claimLocalTaskOwnership(repo.id);
       await store.createItem(store.selectedRepoId, repo.path, NEW_CUSTOM_TASK_PROMPT);
     } catch (e: unknown) {
       console.error("[App] custom task creation failed:", e);
@@ -409,6 +437,7 @@ export function useAppTaskNavigation({
     const repo = store.repos.find((r) => r.id === store.selectedRepoId);
     if (!repo) return;
     try {
+      claimLocalTaskOwnership(repo.id);
       await store.createItem(store.selectedRepoId, repo.path, "Help me create a new agent definition for this repository.");
     } catch (e: unknown) {
       console.error("[App] create agent task failed:", e);
@@ -428,6 +457,7 @@ export function useAppTaskNavigation({
     const repo = store.repos.find((r) => r.id === store.selectedRepoId);
     if (!repo) return;
     try {
+      claimLocalTaskOwnership(repo.id);
       await store.createItem(store.selectedRepoId, repo.path, "Help me create a new pipeline definition for this repository.");
     } catch (e: unknown) {
       console.error("[App] create pipeline task failed:", e);
@@ -448,6 +478,7 @@ export function useAppTaskNavigation({
     if (!repo) return;
     try {
       const agent = await store.loadAgent(repo.path, "config-factory");
+      claimLocalTaskOwnership(repo.id);
       await store.createItem(
         store.selectedRepoId,
         repo.path,
@@ -484,6 +515,7 @@ export function useAppTaskNavigation({
     if (!repo) return;
     try {
       const agent = await store.loadAgent(repo.path, "setup");
+      claimLocalTaskOwnership(repo.id);
       await store.createItem(
         store.selectedRepoId,
         repo.path,

@@ -788,6 +788,104 @@ describe("createInitApi", () => {
     expect(persistSelection).not.toHaveBeenCalled();
   });
 
+  it("preserves a durable selection handed off during shared snapshot invalidation", async () => {
+    const durableTask = mockState.makeItem({ id: "task-durable" });
+    const initializingTask = buildInitializingTaskItem({
+      id: "create:task",
+      repoId: "repo-1",
+      prompt: "Create task",
+      agentType: "pty",
+    });
+    initializingTask.taskId = durableTask.id;
+
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.initializingTaskItems.value = [initializingTask];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = initializingTask.id;
+    state.lastSelectedItemByRepo.value = { "repo-1": initializingTask.id };
+    const reloadSnapshot = vi.fn(async () => {
+      state.items.value = [durableTask];
+      state.initializingTaskItems.value = [];
+      state.selectedItemId.value = durableTask.id;
+      state.lastSelectedItemByRepo.value = { "repo-1": durableTask.id };
+    });
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      windowWorkspace: { onSharedInvalidation, persistSelection },
+    } as never);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+    await getSharedInvalidationHandler(onSharedInvalidation)();
+
+    expect(state.selectedItemId.value).toBe(durableTask.id);
+    expect(state.lastSelectedItemByRepo.value["repo-1"]).toBe(durableTask.id);
+    expect(persistSelection).not.toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+  });
+
+  it("does not overwrite a newer remote selection after shared snapshot invalidation", async () => {
+    const selectedTask = mockState.makeItem({ id: "task-before-refresh" });
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [selectedTask];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = selectedTask.id;
+    state.lastSelectedItemByRepo.value = { "repo-1": selectedTask.id };
+    const remoteTaskId = "cloud:repo-1:task-remote";
+    const reloadSnapshot = vi.fn(async () => {
+      state.items.value = [];
+      state.selectedItemId.value = remoteTaskId;
+      state.lastSelectedItemByRepo.value = { "repo-1": remoteTaskId };
+    });
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      windowWorkspace: { onSharedInvalidation, persistSelection },
+    } as never);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+    await getSharedInvalidationHandler(onSharedInvalidation)();
+
+    expect(state.selectedItemId.value).toBe(remoteTaskId);
+    expect(state.lastSelectedItemByRepo.value["repo-1"]).toBe(remoteTaskId);
+    expect(persistSelection).not.toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+  });
+
   it("loads valid theme preferences from settings", async () => {
     const state = createStoreState();
     const services = {

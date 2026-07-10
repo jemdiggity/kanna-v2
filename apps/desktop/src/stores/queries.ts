@@ -104,13 +104,14 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   }
 
   async function reloadSnapshot(): Promise<void> {
+    const runId = ++refreshRunId.value;
     snapshotPending.value = true;
     snapshotError.value = null;
     try {
-      const runId = ++refreshRunId.value;
       const refreshStart = performance.now();
 
       const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
+      if (runId !== refreshRunId.value) return;
       const loadedRepos = snapshot.entries.map((entry) => entry.repo);
       const loadedItems = flattenSnapshotItems(snapshot);
 
@@ -123,6 +124,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         if (!context.state.stageOrderCache.has(repo.path)) {
           try {
             const config = await readRepoConfig(repo.path);
+            if (runId !== refreshRunId.value) return;
             if (config.stage_order) {
               context.state.stageOrderCache.set(repo.path, config.stage_order);
             }
@@ -131,6 +133,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
           }
         }
       }
+      if (runId !== refreshRunId.value) return;
 
       debugLog(
         `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
@@ -150,10 +153,14 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         context.state.pendingCreateVisibility.delete(item.id);
       }
     } catch (error) {
-      snapshotError.value = error;
+      if (runId === refreshRunId.value) {
+        snapshotError.value = error;
+      }
       throw error;
     } finally {
-      snapshotPending.value = false;
+      if (runId === refreshRunId.value) {
+        snapshotPending.value = false;
+      }
     }
   }
 

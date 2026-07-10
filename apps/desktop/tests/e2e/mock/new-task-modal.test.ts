@@ -6,12 +6,42 @@ import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
-import { callVueMethod, execDb, queryDb } from "../helpers/vue";
+import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers/keyboard";
 import { waitForTaskCreated } from "../helpers/taskCreation";
 
 const execFileAsync = promisify(execFile);
+const TASK_HANDOFF_SENTINEL = "E2E_INITIALIZATION_DURABLE_HANDOFF";
+
+interface ToastSnapshot {
+  kind: "info" | "warning" | "error" | "unknown";
+  text: string;
+}
+
+interface TaskHandoffSnapshot {
+  selectedItemId: string | null;
+  selectedItemIdForPersistence: string | null;
+  currentItemId: string | null;
+  initializingTaskItems: Array<{
+    id: string;
+    taskId: string | null;
+  }>;
+  terminalIds: string[];
+  observedTerminalIds: string[];
+  invokes: Array<{ cmd: string; args?: unknown }>;
+  terminalAttaches: Array<{
+    type: "attach";
+    kind: "terminal";
+    task_id: string;
+  }>;
+  observedToasts: ToastSnapshot[];
+  toasts: ToastSnapshot[];
+}
+
+interface TaskHandoffResult extends TaskHandoffSnapshot {
+  daemonSessionIds: string[];
+}
 
 async function git(repoPath: string, args: string[]): Promise<void> {
   await execFileAsync("git", ["-C", repoPath, ...args]);
@@ -45,37 +75,255 @@ async function cycleToAgentChoice(
 async function submitTaskFromModal(
   client: WebDriverClient,
   prompt: string,
+  options: { waitForInitialization?: boolean } = {},
 ): Promise<void> {
   const promptInput = await client.waitForElement(".prompt-input", 2_000);
   await client.sendKeys(promptInput, prompt);
-  const selection = await client.executeSync<{
-    agentLabel: string;
-    pipeline: string;
-    baseBranch: string;
-  }>(
-    `return {
-       agentLabel: document.querySelector(".agent-provider")?.textContent?.trim() ?? "",
-       pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
-       baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
+  const createButton = await client.waitForElement(
+    ".modal-overlay .btn-primary:not(:disabled)",
+    2_000,
+  );
+  await client.click(createButton);
+  await client.waitForNoElement(".modal-overlay", 5_000);
+  if (options.waitForInitialization === false) return;
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const initializingCount = await client.executeSync<number>(
+      `const store = window.__KANNA_E2E__?.setupState?.store;
+       const value = store?.initializingTaskItems;
+       const items = value?.__v_isRef ? value.value : value;
+       return Array.from(items ?? []).length;`,
+    );
+    if (initializingCount === 0) {
+      // Let the submit continuation finish recording the recent agent choice
+      // and clear its in-flight guard before another modal submit can start.
+      await sleep(100);
+      return;
+    }
+    await sleep(100);
+  }
+  throw new Error("timed out waiting for modal-created task initialization to finish");
+}
+
+async function captureTaskHandoffSnapshot(
+  client: WebDriverClient,
+): Promise<TaskHandoffSnapshot> {
+  return client.executeSync<TaskHandoffSnapshot>(
+    `const ctx = window.__KANNA_E2E__?.setupState;
+     const store = ctx?.store;
+     const unwrap = (value) => value?.__v_isRef ? value.value : value;
+     const initializingTaskItems = Array.from(unwrap(store?.initializingTaskItems) ?? []);
+     const currentItem = unwrap(store?.currentItem);
+     const trace = window.__KANNA_E2E_TASK_HANDOFF_TRACE__;
+     const toasts = Array.from(document.querySelectorAll(".toast")).map((toast) => ({
+       kind: toast.classList.contains("error")
+         ? "error"
+         : toast.classList.contains("warning")
+           ? "warning"
+           : toast.classList.contains("info")
+             ? "info"
+             : "unknown",
+       text: toast.querySelector(".toast-message")?.textContent ?? "",
+     }));
+     return {
+       selectedItemId: unwrap(store?.selectedItemId) ?? null,
+       selectedItemIdForPersistence: unwrap(store?.selectedItemIdForPersistence) ?? null,
+       currentItemId: currentItem?.id ?? null,
+       initializingTaskItems: initializingTaskItems.map((item) => ({
+         id: item.id,
+         taskId: item.taskId ?? null,
+       })),
+       terminalIds: window.__KANNA_E2E__?.terminalBuffers?.sessionIds?.() ?? [],
+       observedTerminalIds: trace?.observedTerminalIds ?? [],
+       invokes: window.__KANNA_E2E__?.invokes?.getAll?.() ?? [],
+       terminalAttaches: trace?.terminalAttaches ?? [],
+       observedToasts: trace?.observedToasts ?? [],
+       toasts,
      };`,
   );
-  const agentLabel = selection.agentLabel.toLowerCase();
-  const agentProvider = agentLabel.replace(/\s+sdk$/, "");
-  const agentType = agentLabel.endsWith(" sdk") ? "agent" : "pty";
-  const result = await client.executeAsync<string>(
-    `const cb = arguments[arguments.length - 1];
-     const ctx = window.__KANNA_E2E__?.setupState;
-     Promise.resolve(ctx?.appTaskCreation?.handleNewTaskSubmit?.(
-       ${JSON.stringify(prompt)},
-       ${JSON.stringify(agentProvider)},
-       ${JSON.stringify(selection.pipeline)},
-       ${JSON.stringify(selection.baseBranch)},
-       ${JSON.stringify(agentType)}
-     ))
-       .then(() => cb("ok"))
-       .catch((e) => cb("err:" + (e?.message || String(e))));`,
+}
+
+async function installTaskHandoffTrace(
+  client: WebDriverClient,
+): Promise<void> {
+  const result = await client.executeSync<string>(
+    `window.__KANNA_E2E_TASK_HANDOFF_TRACE__?.restore?.();
+     window.__KANNA_E2E__?.invokes?.clear?.();
+     const originalSend = WebSocket.prototype.send;
+     const terminalAttaches = [];
+     const baselineTerminalIds = new Set(window.__KANNA_E2E__?.terminalBuffers?.sessionIds?.() ?? []);
+     const observedTerminalIds = [];
+     const observedTerminalIdSet = new Set();
+     const observedToasts = [];
+     const observedToastNodes = new WeakSet();
+     const sampleTerminalIds = () => {
+       for (const sessionId of window.__KANNA_E2E__?.terminalBuffers?.sessionIds?.() ?? []) {
+         if (baselineTerminalIds.has(sessionId) || observedTerminalIdSet.has(sessionId)) continue;
+         observedTerminalIdSet.add(sessionId);
+         observedTerminalIds.push(sessionId);
+       }
+     };
+     const terminalIdPoller = setInterval(sampleTerminalIds, 10);
+     WebSocket.prototype.send = function(data) {
+       if (typeof data === "string") {
+         try {
+           const frame = JSON.parse(data);
+           if (frame?.type === "attach" && frame?.kind === "terminal") {
+             terminalAttaches.push({
+               type: frame.type,
+               kind: frame.kind,
+               task_id: frame.task_id,
+             });
+           }
+         } catch {
+           // Non-JSON WebSocket traffic is unrelated to KSP attachment frames.
+         }
+       }
+       return originalSend.apply(this, arguments);
+     };
+     const recordToast = (toast) => {
+       if (!(toast instanceof Element) || observedToastNodes.has(toast)) return;
+       observedToastNodes.add(toast);
+       observedToasts.push({
+         kind: toast.classList.contains("error")
+           ? "error"
+           : toast.classList.contains("warning")
+             ? "warning"
+             : toast.classList.contains("info")
+               ? "info"
+               : "unknown",
+         text: toast.querySelector(".toast-message")?.textContent ?? "",
+       });
+     };
+     const toastObserver = new MutationObserver((records) => {
+       for (const record of records) {
+         for (const node of record.addedNodes) {
+           if (!(node instanceof Element)) continue;
+           if (node.matches(".toast")) recordToast(node);
+           for (const toast of node.querySelectorAll?.(".toast") ?? []) recordToast(toast);
+         }
+       }
+     });
+     toastObserver.observe(document.body, { childList: true, subtree: true });
+     window.__KANNA_E2E_TASK_HANDOFF_TRACE__ = {
+       terminalAttaches,
+       observedTerminalIds,
+       observedToasts,
+       restore() {
+         sampleTerminalIds();
+         clearInterval(terminalIdPoller);
+         toastObserver.disconnect();
+         WebSocket.prototype.send = originalSend;
+       },
+     };
+     return "ok";`,
   );
   expect(result).toBe("ok");
+}
+
+async function restoreTaskHandoffTrace(
+  client: WebDriverClient,
+): Promise<void> {
+  await client.executeSync(
+    `window.__KANNA_E2E_TASK_HANDOFF_TRACE__?.restore?.();
+     delete window.__KANNA_E2E_TASK_HANDOFF_TRACE__;`,
+  ).catch(() => undefined);
+}
+
+async function waitForDurableTaskHandoff(
+  client: WebDriverClient,
+  taskId: string,
+  timeoutMs = 30_000,
+): Promise<TaskHandoffResult> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSnapshot: TaskHandoffSnapshot | null = null;
+  let lastDaemonSessions: unknown = null;
+
+  while (Date.now() < deadline) {
+    lastSnapshot = await captureTaskHandoffSnapshot(client);
+    lastDaemonSessions = await tauriInvoke(client, "list_sessions");
+    const terminalText = await client.executeSync<string>(
+      `const buffers = window.__KANNA_E2E__?.terminalBuffers;
+       if (!buffers?.sessionIds?.().includes(${JSON.stringify(taskId)})) return "";
+       try {
+         return buffers.lines(${JSON.stringify(taskId)}).join("\\n");
+       } catch {
+         return "";
+       }`,
+    );
+    const daemonSessionIds = Array.isArray(lastDaemonSessions)
+      ? lastDaemonSessions
+        .map((session) => session?.session_id ?? session?.sessionId)
+        .filter((sessionId): sessionId is string => typeof sessionId === "string")
+      : [];
+    if (
+      lastSnapshot.selectedItemId === taskId
+      && lastSnapshot.currentItemId === taskId
+      && lastSnapshot.initializingTaskItems.length === 0
+      && lastSnapshot.terminalIds.includes(taskId)
+      && lastSnapshot.terminalAttaches.some((frame) => frame.task_id === taskId)
+      && daemonSessionIds.includes(taskId)
+      && terminalText.includes("fake new task modal claude complete")
+    ) {
+      // KSP attachment is asynchronous. Observe the known PTY output first,
+      // then leave time for a late attach failure/toast before taking the
+      // assertion snapshot.
+      await sleep(500);
+      const settledSnapshot = await captureTaskHandoffSnapshot(client);
+      const settledDaemonSessions = await tauriInvoke(client, "list_sessions");
+      const settledDaemonSessionIds = Array.isArray(settledDaemonSessions)
+        ? settledDaemonSessions
+          .map((session) => session?.session_id ?? session?.sessionId)
+          .filter((sessionId): sessionId is string => typeof sessionId === "string")
+        : [];
+      if (
+        settledSnapshot.selectedItemId === taskId
+        && settledSnapshot.currentItemId === taskId
+        && settledSnapshot.initializingTaskItems.length === 0
+        && settledSnapshot.terminalIds.includes(taskId)
+        && settledDaemonSessionIds.includes(taskId)
+      ) {
+        return { ...settledSnapshot, daemonSessionIds: settledDaemonSessionIds };
+      }
+      lastSnapshot = settledSnapshot;
+      lastDaemonSessions = settledDaemonSessions;
+    }
+    await sleep(100);
+  }
+
+  throw new Error(
+    `timed out waiting for durable task handoff ${taskId}; `
+    + `ui=${JSON.stringify(lastSnapshot)} daemon=${JSON.stringify(lastDaemonSessions)}`,
+  );
+}
+
+function isTerminalSessionInvoke(command: string): boolean {
+  return /(^|_)(session|terminal)($|_)/.test(command)
+    || ["send_input", "resize_session", "signal_session", "kill_session"].includes(command);
+}
+
+function toastKey(toast: ToastSnapshot): string {
+  return `${toast.kind}\u0000${toast.text}`;
+}
+
+function withoutBaselineToasts(
+  current: ToastSnapshot[],
+  baseline: ToastSnapshot[],
+): ToastSnapshot[] {
+  const baselineCounts = new Map<string, number>();
+  for (const toast of baseline) {
+    const key = toastKey(toast);
+    baselineCounts.set(key, (baselineCounts.get(key) ?? 0) + 1);
+  }
+
+  return current.filter((toast) => {
+    const key = toastKey(toast);
+    const remaining = baselineCounts.get(key) ?? 0;
+    if (remaining === 0) return true;
+    baselineCounts.set(key, remaining - 1);
+    return false;
+  });
 }
 
 async function resetRecentAgentChoices(client: WebDriverClient): Promise<void> {
@@ -159,6 +407,13 @@ describe("new task modal", () => {
         "mkdir -p .kanna",
         "printf '%s\\n' \"$@\" > .kanna/new-task-modal-claude-args.txt",
         "printf 'fake new task modal claude complete\\n'",
+        "case \"$*\" in",
+        "  *--output-format*) ;;",
+        "  *)",
+        "    trap 'exit 0' HUP INT TERM",
+        "    while :; do sleep 1; done",
+        "    ;;",
+        "esac",
         "",
       ].join("\n"),
     );
@@ -379,4 +634,56 @@ describe("new task modal", () => {
     expect(await agentChoiceLabel(client)).toBe("claude sdk");
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
   });
+
+  it("hands a modal-created PTY task from its initializer to only the durable terminal id", async () => {
+    await resetDefaultAgentPreference(client);
+    await openNewTaskModal(client);
+    await cycleToAgentChoice(client, "claude");
+
+    const baseline = await captureTaskHandoffSnapshot(client);
+    await installTaskHandoffTrace(client);
+    const prompt = `${TASK_HANDOFF_SENTINEL}: keep the fake Claude PTY alive during handoff`;
+
+    try {
+      await submitTaskFromModal(client, prompt, { waitForInitialization: false });
+      const task = await waitForTaskCreated(client, prompt, 20_000);
+      expect(task.id).not.toMatch(/^create:/);
+
+      const handoff = await waitForDurableTaskHandoff(client, task.id, 30_000);
+      expect(handoff.selectedItemId).toBe(task.id);
+      expect(handoff.selectedItemIdForPersistence).toBe(task.id);
+      expect(handoff.currentItemId).toBe(task.id);
+      expect(handoff.initializingTaskItems).toEqual([]);
+
+      const baselineTerminalIds = new Set(baseline.terminalIds);
+      const newTerminalIds = [...new Set([
+        ...handoff.terminalIds.filter((id) => !baselineTerminalIds.has(id)),
+        ...handoff.observedTerminalIds,
+      ])];
+      expect(newTerminalIds).toContain(task.id);
+      expect(newTerminalIds.filter((id) => id.startsWith("create:"))).toEqual([]);
+
+      const terminalSessionInvokes = handoff.invokes.filter((call) => isTerminalSessionInvoke(call.cmd));
+      expect(JSON.stringify(terminalSessionInvokes)).not.toContain("create:");
+      expect(handoff.daemonSessionIds).toContain(task.id);
+      expect(handoff.daemonSessionIds.filter((id) => id.startsWith("create:"))).toEqual([]);
+
+      expect(handoff.terminalAttaches.length).toBeGreaterThan(0);
+      expect(handoff.terminalAttaches.every((frame) => (
+        frame.type === "attach"
+        && frame.kind === "terminal"
+        && frame.task_id === task.id
+      ))).toBe(true);
+
+      const newVisibleToasts = withoutBaselineToasts(handoff.toasts, baseline.toasts);
+      const newToasts = [...handoff.observedToasts, ...newVisibleToasts];
+      expect(newToasts.filter((toast) => (
+        toast.kind === "warning"
+        && toast.text.toLowerCase().includes("terminal session could not be reattached")
+      ))).toEqual([]);
+      expect(newToasts.filter((toast) => toast.kind === "error")).toEqual([]);
+    } finally {
+      await restoreTaskHandoffTrace(client);
+    }
+  }, 90_000);
 });

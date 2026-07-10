@@ -4,6 +4,8 @@ import { computed, defineComponent, h, nextTick, reactive, ref } from "vue";
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyboardActions } from "./composables/useKeyboardShortcuts";
+import type { PipelineItem } from "./types/kanna";
+import type { InitializingTaskItem } from "./stores/taskInitialization";
 import {
   WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
   WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT,
@@ -51,6 +53,43 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+function createPipelineItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
+  return {
+    id: "task-local",
+    repo_id: "repo-1",
+    issue_number: null,
+    issue_title: null,
+    prompt: "Local task",
+    pipeline: "default",
+    stage: "in progress",
+    stage_result: null,
+    active_post_action: null,
+    tags: "[]",
+    pr_number: null,
+    pr_url: null,
+    branch: "task-task-local",
+    closed_at: null,
+    agent_type: "pty",
+    agent_provider: "claude",
+    activity: "idle",
+    activity_changed_at: "2026-05-18T00:00:00.000Z",
+    unread_at: null,
+    port_offset: null,
+    display_name: "Local task",
+    port_env: null,
+    pinned: 0,
+    pin_order: null,
+    base_ref: "origin/main",
+    agent_session_id: null,
+    previous_stage: null,
+    teardown_started_at: null,
+    last_output_preview: null,
+    created_at: "2026-05-18T00:00:00.000Z",
+    updated_at: "2026-05-18T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
@@ -66,6 +105,7 @@ const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
+const relayCloseTaskMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseMock = vi.hoisted(() => vi.fn());
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
@@ -80,6 +120,8 @@ const store = {
   selectedItemId: null,
   selectedItemIdForPersistence: null as string | null,
   selectedRepo: { id: "repo-1", path: "/tmp/repo", name: "repo" } as { id: string; path: string; name: string } | null,
+  initializingTaskItems: [] as InitializingTaskItem[],
+  currentInitializingItem: null as InitializingTaskItem | null,
   currentItem: null,
   sortedItemsForCurrentRepo: [],
   sortedItemsAllRepos: [],
@@ -95,6 +137,7 @@ const store = {
   codeTheme: "match",
   agentMessageAppearance: "chat",
   init: vi.fn(async () => {}),
+  persistSelection: vi.fn(async () => {}),
   createItem: vi.fn(async () => {}),
   recordIncomingTransfer: vi.fn(async () => {}),
   approveIncomingTransfer: vi.fn(async () => "task-imported"),
@@ -161,6 +204,7 @@ const store = {
     allowed_tools: undefined,
   })),
 };
+let activeStore = store;
 const toastInfoMock = vi.fn();
 const toastWarningMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -196,7 +240,7 @@ const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>)
 });
 
 vi.mock("./stores/kanna", () => ({
-  useKannaStore: () => store,
+  useKannaStore: () => activeStore,
 }));
 
 vi.mock("./invoke", () => ({
@@ -357,6 +401,7 @@ vi.mock("./services/desktopCloudPublisher", () => ({
 vi.mock("./services/desktopRelayTerminal", () => ({
   createConfiguredDesktopRelayTerminalClient: vi.fn(async () => ({
     advanceStage: relayAdvanceStageMock,
+    closeTask: relayCloseTaskMock,
     close: relayCloseMock,
   })),
 }));
@@ -364,6 +409,7 @@ vi.mock("./services/desktopRelayTerminal", () => ({
 vi.mock("./services/desktopLanTerminal", () => ({
   createConfiguredDesktopLanTerminalClient: vi.fn(async () => ({
     advanceStage: relayAdvanceStageMock,
+    closeTask: relayCloseTaskMock,
     close: relayCloseMock,
   })),
 }));
@@ -614,7 +660,9 @@ describe("App", () => {
   });
 
   beforeEach(() => {
+    activeStore = store;
     store.init.mockClear();
+    store.persistSelection.mockClear();
     store.createItem.mockClear();
     store.createRepo.mockClear();
     store.importRepo.mockClear();
@@ -628,13 +676,17 @@ describe("App", () => {
     store.selectRepo.mockClear();
     store.selectItem.mockClear();
     store.advanceStage.mockClear();
+    store.closeTask.mockClear();
     relayAdvanceStageMock.mockClear();
+    relayCloseTaskMock.mockClear();
     relayCloseMock.mockClear();
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
     store.selectedRepoId = "repo-1";
     store.selectedItemId = null;
     store.selectedItemIdForPersistence = null;
     store.selectedRepo = { id: "repo-1", path: "/tmp/repo", name: "repo" };
+    store.initializingTaskItems = [];
+    store.currentInitializingItem = null;
     store.currentItem = null;
     store.items = [];
     store.sortedItemsForCurrentRepo = [];
@@ -1496,6 +1548,183 @@ describe("App", () => {
     });
     expect(relayCloseMock).toHaveBeenCalled();
 
+    wrapper.unmount();
+  });
+
+  it("revokes remote action ownership whenever local task creation starts", async () => {
+    const localItem = createPipelineItem({ id: "task-local" });
+    store.items = [localItem];
+    store.currentItem = localItem;
+    store.sortedItemsForCurrentRepo = [localItem];
+    store.sortedItemsAllRepos = [localItem];
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "repo-1",
+        path: "cloud",
+        name: "repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [createPipelineItem({
+        id: "cloud:repo-1:task-remote",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        branch: "task-remote",
+        display_name: "Remote task",
+        agent_provider: "codex",
+      })],
+      terminalRefs: {
+        "cloud:repo-1:task-remote": {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "task-owner",
+          transport: "cloud",
+        },
+      },
+    });
+    const initializingItem: InitializingTaskItem = {
+      id: "create:local-task",
+      state: "initializing",
+      taskId: null,
+      repo_id: "repo-1",
+      prompt: "Create local task",
+      display_name: null,
+      pipeline: "default",
+      stage: "in progress",
+      agent_type: "pty",
+      agent_provider: "claude",
+      created_at: "2026-05-18T00:01:00.000Z",
+    };
+    store.createItem.mockImplementationOnce(async () => {
+      store.selectedRepoId = "repo-1";
+      store.selectedItemId = initializingItem.id;
+      store.selectedItemIdForPersistence = null;
+      store.initializingTaskItems = [initializingItem];
+      store.currentInitializingItem = initializingItem;
+      store.currentItem = null;
+    });
+    activeStore = reactive(store);
+
+    const SidebarMixedCreationStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        pipelineItems: { type: Array, default: () => [] },
+      },
+      emits: ["select-item", "new-task"],
+      template: `
+        <div>
+          <button
+            v-for="item in pipelineItems"
+            v-show="item.remote_task"
+            :key="item.id"
+            :data-testid="\`task-\${item.id}\`"
+            type="button"
+            @click="$emit('select-item', item.id)"
+          >{{ item.display_name }}</button>
+          <button data-testid="new-local-task" type="button" @click="$emit('new-task', 'repo-1')">new</button>
+        </div>
+      `,
+    });
+    const CommandPaletteCreationStub = defineComponent({
+      name: "CommandPaletteModal",
+      props: {
+        dynamicCommands: { type: Array, default: () => [] },
+      },
+      template: `
+        <button
+          v-for="command in dynamicCommands"
+          :key="command.id"
+          type="button"
+          :data-command-id="command.id"
+          @click="command.execute()"
+        >{{ command.label }}</button>
+      `,
+    });
+    const wrapper = await mountAppWithOverrides(SidebarMixedCreationStub, {
+      CommandPaletteModal: CommandPaletteCreationStub,
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-testid="task-cloud:repo-1:task-remote"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+    expect(relayAdvanceStageMock).toHaveBeenCalled();
+    relayAdvanceStageMock.mockClear();
+    relayCloseMock.mockClear();
+
+    await wrapper.get('[data-testid="new-local-task"]').trigger("click");
+    await flushPromises();
+    await flushPromises();
+    await wrapper.get("textarea").setValue("Create local task");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+    await vi.waitFor(() => expect(store.createItem).toHaveBeenCalled());
+    await flushPromises();
+
+    expect(store.selectedItemId).toBe(initializingItem.id);
+    expect(store.persistSelection).toHaveBeenCalled();
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+
+    capturedKeyboardActions?.advanceStage();
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(relayCloseTaskMock).not.toHaveBeenCalled();
+    expect(store.advanceStage).not.toHaveBeenCalled();
+
+    await wrapper.get('[data-testid="task-cloud:repo-1:task-remote"]').trigger("click");
+    await flushPromises();
+    store.createItem.mockClear();
+    capturedKeyboardActions?.commandPalette();
+    await flushPromises();
+    await wrapper.get('[data-command-id="create-agent"]').trigger("click");
+    await vi.waitFor(() => expect(store.createItem).toHaveBeenCalled());
+
+    capturedKeyboardActions?.advanceStage();
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(relayCloseTaskMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("includes initializing rows in visible keyboard navigation order", async () => {
+    const durableItem = createPipelineItem({ id: "task-durable" });
+    const initializingItem: InitializingTaskItem = {
+      id: "create:navigation",
+      state: "initializing",
+      taskId: null,
+      repo_id: "repo-1",
+      prompt: "Initializing first",
+      display_name: null,
+      pipeline: "default",
+      stage: "in progress",
+      agent_type: "pty",
+      agent_provider: "claude",
+      created_at: "2026-05-18T00:01:00.000Z",
+    };
+    store.items = [durableItem];
+    store.currentItem = durableItem;
+    store.selectedItemId = durableItem.id;
+    store.selectedItemIdForPersistence = durableItem.id;
+    store.sortedItemsForCurrentRepo = [durableItem];
+    store.sortedItemsAllRepos = [durableItem];
+    store.initializingTaskItems = [initializingItem];
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    store.selectItem.mockClear();
+
+    await capturedKeyboardActions?.navigateUp();
+
+    expect(store.selectItem).toHaveBeenCalledWith(initializingItem.id, {
+      previousItemId: durableItem.id,
+    });
     wrapper.unmount();
   });
 

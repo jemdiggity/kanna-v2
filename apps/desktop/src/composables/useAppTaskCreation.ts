@@ -11,6 +11,7 @@ import { defaultReposHome } from "../utils/reposHome";
 import { fileExistsSafe } from "../utils/invokeHelpers";
 import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
 import type { useKannaStore } from "../stores/kanna";
+import { claimLocalTaskSelectionOwnership } from "./localTaskSelectionOwnership";
 import type { useToast } from "./useToast";
 
 const SETUP_TASK_PROMPT = "Set up Kanna for this repository.";
@@ -62,6 +63,15 @@ export function useAppTaskCreation({
 }: UseAppTaskCreationOptions) {
   const cloningRepo = ref(false);
   let pendingNewTaskSubmit: Promise<void> | null = null;
+
+  function claimLocalTaskOwnership(repoId: string) {
+    claimLocalTaskSelectionOwnership({
+      store,
+      repoId,
+      selectedCloudRepoId,
+      selectedCloudItemId,
+    });
+  }
 
   async function openNewTaskModal(repoId?: string) {
     await pendingNewTaskSubmit?.catch(() => undefined);
@@ -166,8 +176,6 @@ export function useAppTaskCreation({
         if (!repo) {
           throw new Error("cloned repo was not imported");
         }
-        selectedCloudRepoId.value = null;
-        selectedCloudItemId.value = null;
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error("Cloud repo clone failed:", e);
@@ -176,6 +184,7 @@ export function useAppTaskCreation({
       }
     }
     if (!repo) return;
+    claimLocalTaskOwnership(repo.id);
     showNewTaskModal.value = false;
     const submitPromise = (async () => {
       await store.createItem(store.selectedRepoId ?? repo.id, repo.path, prompt, agentType, {
@@ -247,6 +256,7 @@ export function useAppTaskCreation({
     if (!repoId) return;
     try {
       const agent = await store.loadAgent(repoPath, "setup");
+      claimLocalTaskOwnership(repoId);
       await store.createItem(
         repoId,
         repoPath,

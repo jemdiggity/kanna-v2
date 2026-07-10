@@ -211,6 +211,7 @@ export function createWindowWorkspace(input: {
   bootstrap: WindowBootstrap;
 }): WindowWorkspaceController {
   const { db, bootstrap } = input;
+  let currentWindowUpdateQueue = Promise.resolve();
 
   async function loadSnapshot(): Promise<WorkspaceSnapshot> {
     return reconcileWorkspaceSnapshot(await readWorkspaceSnapshot(db), bootstrap.windowId);
@@ -260,16 +261,20 @@ export function createWindowWorkspace(input: {
     window.close();
   }
 
-  async function updateCurrentWindow(
+  function updateCurrentWindow(
     apply: (entry: WorkspaceWindowState) => WorkspaceWindowState,
   ): Promise<void> {
-    const snapshot = await loadSnapshot();
-    const next = normalizeWorkspaceSnapshot({
-      windows: snapshot.windows.map((entry) =>
-        entry.windowId === bootstrap.windowId ? apply(entry) : entry,
-      ),
+    const update = currentWindowUpdateQueue.catch(() => undefined).then(async () => {
+      const snapshot = await loadSnapshot();
+      const next = normalizeWorkspaceSnapshot({
+        windows: snapshot.windows.map((entry) =>
+          entry.windowId === bootstrap.windowId ? apply(entry) : entry,
+        ),
+      });
+      await saveSnapshot(next);
     });
-    await saveSnapshot(next);
+    currentWindowUpdateQueue = update;
+    return update;
   }
 
   return {

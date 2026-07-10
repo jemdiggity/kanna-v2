@@ -16,10 +16,13 @@ import { requireService, type CreateItemOptions, type StoreContext } from "./sta
 import { showCloudPublishErrorToast } from "./taskPublishing";
 import type { TasksApi } from "./tasks";
 
+const CREATE_SNAPSHOT_RETRY_DELAYS_MS = [50, 150] as const;
+
 export function createTaskItemActions(
   context: StoreContext,
 ): Pick<TasksApi, "createItem"> {
   const reloadSnapshot = () => requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+  const persistSelection = () => requireService(context.services.persistSelection, "persistSelection")();
   const invalidateWindowWorkspace = async (reason: string): Promise<void> => {
     await context.services.windowWorkspace?.invalidateSharedData(reason);
   };
@@ -89,8 +92,11 @@ export function createTaskItemActions(
       );
       context.state.pendingCreateVisibility.delete(initializingItemId);
     };
-    const replaceRememberedInitializingItem = (taskId: string | null) => {
-      if (context.state.lastSelectedItemByRepo.value[repoId] !== initializingItemId) return;
+    const replaceRememberedInitializingItem = (
+      taskId: string | null,
+      expectedItemId = initializingItemId,
+    ) => {
+      if (context.state.lastSelectedItemByRepo.value[repoId] !== expectedItemId) return;
       const next = { ...context.state.lastSelectedItemByRepo.value };
       if (taskId) {
         next[repoId] = taskId;
@@ -117,6 +123,11 @@ export function createTaskItemActions(
     };
 
     selectInitializingItem();
+    if (opts?.selectOnCreate !== false) {
+      void persistSelection().catch((error) => {
+        console.error("[store] failed to persist initializing task selection:", error);
+      });
+    }
 
     let createdTaskId: string;
     try {
@@ -179,22 +190,38 @@ export function createTaskItemActions(
       initializingItemId,
       createdTaskId,
     );
+    replaceRememberedInitializingItem(createdTaskId);
+    if (context.state.selectedItemId.value === initializingItemId) {
+      void persistSelection().catch((error) => {
+        console.error("[store] failed to persist acknowledged task selection:", error);
+      });
+    }
 
     let snapshotReloaded = false;
-    try {
-      await reloadSnapshot();
-      snapshotReloaded = true;
-    } catch (error) {
-      // The create request already committed the durable task and session.
-      // Keep the initialized UI row so a later successful snapshot refresh can
-      // finish the handoff without inviting a duplicate-task retry.
-      console.error("[store] failed to hydrate created task snapshot:", error);
+    for (let attempt = 0; attempt <= CREATE_SNAPSHOT_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        await reloadSnapshot();
+        snapshotReloaded = true;
+        if (context.state.items.value.some((candidate) => candidate.id === createdTaskId)) {
+          break;
+        }
+      } catch (error) {
+        snapshotReloaded = false;
+        // The create request already committed the durable task and session.
+        // Retain the initialized UI row while bounded retries recover a
+        // transient snapshot failure without inviting a duplicate task.
+        console.error("[store] failed to hydrate created task snapshot:", error);
+      }
+
+      const retryDelay = CREATE_SNAPSHOT_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, retryDelay));
     }
 
     const createdItem = context.state.items.value.find((candidate) => candidate.id === createdTaskId);
     if (snapshotReloaded && !createdItem) {
       context.state.pendingCreateVisibility.delete(createdTaskId);
-      replaceRememberedInitializingItem(null);
+      replaceRememberedInitializingItem(null, createdTaskId);
       removeInitializingItem();
       try {
         await selectReplacementAfterInitializationFailure();
@@ -205,7 +232,6 @@ export function createTaskItemActions(
       // Normal snapshot reloads reconcile this handoff in queries.ts. Keep a
       // defensive path for a concurrent refresh (or custom reload service)
       // that hydrated the durable item before this create continuation.
-      replaceRememberedInitializingItem(createdTaskId);
       if (context.state.selectedItemId.value === initializingItemId) {
         const selectItem = context.services.selectItem;
         if (selectItem) {
