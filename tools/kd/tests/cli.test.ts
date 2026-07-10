@@ -127,6 +127,12 @@ describe("kd CLI", () => {
     await expect(runCli(["doctor", "--remote", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd doctor"));
 
+    await expect(runCli(["test", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test rust"));
+
+    await expect(runCli(["test", "rust", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test rust"));
+
     await expect(runCli(["not-a-command", "--help"])).resolves.toBe(1);
     expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
   });
@@ -570,6 +576,13 @@ describe("kd CLI", () => {
   });
 
   it("parses cloud test commands", () => {
+    expect(parseCliArgs(["test", "rust"])).toEqual({
+      taskId: "test.rust",
+      input: {},
+    });
+    expect(getTaskDefinition("test.rust").description).toBe(
+      "Run workspace Rust tests with daemon integration tests serialized.",
+    );
     expect(parseCliArgs(["test", "cloud-emulator"])).toEqual({
       taskId: "test.cloud-emulator",
       input: {},

@@ -245,12 +245,16 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd cloud deploy --staging     # deploy Firebase cloud services to staging
 ./kd cloud deploy --production  # deploy Firebase cloud services to production
 
-# Unit tests
-pnpm test                     # all packages via turborepo
-cd packages/core && pnpm test # core package only
+# Canonical automated verification
+pnpm test
+./kd test rust
 
-# Daemon tests
-cd crates/daemon && cargo test -- --test-threads=1
+# Package-specific unit tests
+cd packages/core && pnpm test
+
+# Explicit process-heavy suites
+pnpm test:remote-e2e
+pnpm test:tui-fidelity
 
 # Rust integration tests (needs claude in PATH)
 cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignored --nocapture
