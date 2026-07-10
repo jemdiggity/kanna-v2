@@ -87,6 +87,12 @@ export function createInitApi(
   ): Promise<void> {
     if (!selectedItemIdBeforeRefresh) return;
 
+    const initializingItem = context.state.initializingTaskItems.value.find((candidate) =>
+      candidate.id === selectedItemIdBeforeRefresh
+      && candidate.repo_id === context.state.selectedRepoId.value,
+    );
+    if (initializingItem) return;
+
     const selectedItem = context.state.items.value.find((candidate) => candidate.id === selectedItemIdBeforeRefresh);
     if (isVisibleItemInSelectedRepo(selectedItem)) return;
 

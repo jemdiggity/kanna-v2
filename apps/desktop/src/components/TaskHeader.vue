@@ -7,15 +7,27 @@ import { isTauri } from "../tauri-mock";
 
 const { t } = useI18n();
 
+type TaskHeaderItem = Pick<PipelineItem, "stage"> & Partial<Pick<
+  PipelineItem,
+  | "display_name"
+  | "issue_title"
+  | "prompt"
+  | "branch"
+  | "port_env"
+  | "issue_number"
+  | "pr_number"
+  | "pr_url"
+>>;
+
 const props = defineProps<{
-  item: PipelineItem;
+  item: TaskHeaderItem;
 }>();
 
-function title(item: PipelineItem): string {
+function title(item: TaskHeaderItem): string {
   return item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
 }
 
-function taskPromptTooltip(item: PipelineItem): string | undefined {
+function taskPromptTooltip(item: TaskHeaderItem): string | undefined {
   return item.prompt || undefined;
 }
 

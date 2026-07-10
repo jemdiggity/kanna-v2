@@ -16,6 +16,7 @@ import {
 } from "../theme/theme";
 import type { AgentExecutionType } from "./agentExecutionType";
 import type { RequestRevisionOptions } from "./pipeline";
+import type { InitializingTaskItem } from "./taskInitialization";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
 
@@ -126,7 +127,7 @@ export interface StoreState {
   codeTheme: Ref<CodeThemePreference>;
   agentMessageAppearance: Ref<AgentMessageAppearance>;
   lastHiddenRepoId: Ref<string | null>;
-  pendingSetupIds: Ref<string[]>;
+  initializingTaskItems: Ref<InitializingTaskItem[]>;
   pipelineCache: Map<string, PipelineDefinition>;
   agentCache: Map<string, AgentDefinition>;
   stageOrderCache: Map<string, string[]>;
@@ -152,7 +153,9 @@ export interface StoreServices {
   getStageOrder?: (repoId: string) => readonly string[];
   selectRepo?: (repoId: string) => Promise<void>;
   selectItem?: (itemId: string, options?: { previousItemId?: string | null }) => Promise<void>;
-  selectReplacementAfterItemRemoval?: (removedItem: PipelineItem) => Promise<string | null>;
+  selectReplacementAfterItemRemoval?: (
+    removedItem: Pick<PipelineItem, "id" | "repo_id">,
+  ) => Promise<string | null>;
   reconcileSelection?: () => void;
   restoreSelection?: (itemId: string) => void;
   goBack?: () => void;
@@ -284,7 +287,7 @@ export function createStoreState(): StoreState {
   const codeTheme = ref<CodeThemePreference>(DEFAULT_CODE_THEME);
   const agentMessageAppearance = ref<AgentMessageAppearance>("chat");
   const lastHiddenRepoId = ref<string | null>(null);
-  const pendingSetupIds = ref<string[]>([]);
+  const initializingTaskItems = ref<InitializingTaskItem[]>([]);
   const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
   const pipelineCache = new Map<string, PipelineDefinition>();
   const agentCache = new Map<string, AgentDefinition>();
@@ -310,7 +313,7 @@ export function createStoreState(): StoreState {
     codeTheme,
     agentMessageAppearance,
     lastHiddenRepoId,
-    pendingSetupIds,
+    initializingTaskItems,
     pipelineCache,
     agentCache,
     stageOrderCache,

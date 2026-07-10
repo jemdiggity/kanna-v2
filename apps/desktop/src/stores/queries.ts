@@ -3,6 +3,7 @@ import { type PipelineItem, type Repo } from "../types/kanna";
 import { readRepoConfig, requireService, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { removeInitializingTaskItem } from "./taskInitialization";
 
 interface OptimisticItemOverlay {
   key: string;
@@ -60,6 +61,48 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     context.state.snapshotSettings.value = { ...mergedSnapshot.value.settings };
   }
 
+  async function reconcileHydratedInitializingItems(loadedItems: readonly PipelineItem[]): Promise<void> {
+    const loadedIds = new Set(loadedItems.map((item) => item.id));
+    const hydratedItems = context.state.initializingTaskItems.value.filter(
+      (item) => item.taskId !== null && loadedIds.has(item.taskId),
+    );
+
+    const selectionPromises: Promise<void>[] = [];
+    for (const initializingItem of hydratedItems) {
+      const taskId = initializingItem.taskId;
+      if (!taskId) continue;
+      const wasSelected = context.state.selectedItemId.value === initializingItem.id;
+      if (context.state.lastSelectedItemByRepo.value[initializingItem.repo_id] === initializingItem.id) {
+        context.state.lastSelectedItemByRepo.value = {
+          ...context.state.lastSelectedItemByRepo.value,
+          [initializingItem.repo_id]: taskId,
+        };
+      }
+      if (wasSelected) {
+        const selectItem = context.services.selectItem;
+        if (selectItem) {
+          selectionPromises.push(selectItem(taskId, { previousItemId: initializingItem.id }));
+        } else {
+          context.state.selectedItemId.value = taskId;
+          context.state.lastSelectedItemByRepo.value[initializingItem.repo_id] = taskId;
+        }
+      }
+
+      context.state.initializingTaskItems.value = removeInitializingTaskItem(
+        context.state.initializingTaskItems.value,
+        initializingItem.id,
+      );
+    }
+
+    for (const selectionPromise of selectionPromises) {
+      try {
+        await selectionPromise;
+      } catch (error) {
+        console.error("[store] failed to persist hydrated task selection:", error);
+      }
+    }
+  }
+
   async function reloadSnapshot(): Promise<void> {
     snapshotPending.value = true;
     snapshotError.value = null;
@@ -96,6 +139,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       baseSnapshot.value = snapshot;
       applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot();
+      await reconcileHydratedInitializingItems(loadedItems);
 
       for (const item of loadedItems) {
         const pending = context.state.pendingCreateVisibility.get(item.id);

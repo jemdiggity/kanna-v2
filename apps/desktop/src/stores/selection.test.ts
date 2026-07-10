@@ -6,6 +6,7 @@ import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 import { createSelectionApi } from "./selection";
 import { createStoreContext, createStoreState } from "./state";
 import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
+import { initializeTaskItem, type InitializingTaskItem } from "./taskInitialization";
 
 const mockState = vi.hoisted(() => {
   const insertOperatorEventMock = vi.fn(async () => {});
@@ -98,6 +99,35 @@ function createItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
   };
 }
 
+function createInitializingItem(
+  overrides: Partial<InitializingTaskItem> = {},
+): InitializingTaskItem {
+  return {
+    id: "create-1",
+    state: "initializing",
+    taskId: null,
+    repo_id: "repo-1",
+    prompt: "Create a task",
+    display_name: null,
+    pipeline: "default",
+    stage: "in progress",
+    agent_type: "pty",
+    agent_provider: "claude",
+    created_at: "2026-07-10T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function toastStub() {
+  return {
+    toasts: ref([]),
+    dismiss: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+  };
+}
+
 describe("createSelectionApi", () => {
   beforeEach(() => {
     mockState.reset();
@@ -113,6 +143,51 @@ describe("createSelectionApi", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("does not resolve an initializing UI item as a persisted task", () => {
+    const state = createStoreState();
+    state.repos.value = [createRepo()];
+    state.items.value = [createItem({ id: "task-existing" })];
+    state.initializingTaskItems.value = [createInitializingItem()];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "create-1";
+
+    const selection = createSelectionApi(createStoreContext(state, toastStub(), {}));
+
+    expect(selection.currentInitializingItem.value?.id).toBe("create-1");
+    expect(selection.currentItem.value).toBeNull();
+  });
+
+  it("persists only the durable id of an initializing selection", async () => {
+    const state = createStoreState();
+    state.repos.value = [createRepo()];
+    state.initializingTaskItems.value = [createInitializingItem()];
+    const persistSelection = vi.fn(async () => {});
+    const selection = createSelectionApi(createStoreContext(
+      state,
+      toastStub(),
+      { windowWorkspace: { persistSelection } } as never,
+    ));
+
+    await selection.selectItem("create-1");
+    expect(selection.selectedItemIdForPersistence.value).toBeNull();
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+
+    state.initializingTaskItems.value = initializeTaskItem(
+      state.initializingTaskItems.value,
+      "create-1",
+      "task-1",
+    );
+    await selection.selectItem("create-1");
+    expect(selection.selectedItemIdForPersistence.value).toBe("task-1");
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+    });
   });
 
   it("persists selection through the window workspace instead of global selected_item_id settings", async () => {
@@ -264,6 +339,21 @@ describe("createSelectionApi", () => {
 
     expect(state.selectedRepoId.value).toBe("repo-1");
     expect(state.selectedItemId.value).toBe("task-1");
+  });
+
+  it("keeps an initializing UI item selected during selection reconciliation", () => {
+    const state = createStoreState();
+    state.repos.value = [createRepo()];
+    state.items.value = [createItem({ id: "task-existing" })];
+    state.initializingTaskItems.value = [createInitializingItem()];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "create-1";
+
+    const api = createSelectionApi(createStoreContext(state, toastStub(), {}));
+    api.reconcileSelection();
+
+    expect(state.selectedItemId.value).toBe("create-1");
+    expect(api.currentInitializingItem.value?.id).toBe("create-1");
   });
 
   it("hides closed tasks even when their stage is not done", () => {

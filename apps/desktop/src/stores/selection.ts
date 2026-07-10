@@ -7,9 +7,12 @@ import { beginTaskSwitch } from "../perf/taskSwitchPerf";
 import { markDesktopTaskRead, postDesktopOperatorEvent, putDesktopSetting } from "../services/desktopServerClient";
 import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
 import { requireService, type StoreContext } from "./state";
+import type { InitializingTaskItem } from "./taskInitialization";
 
 export interface SelectionApi {
   selectedRepo: ComputedRef<Repo | null>;
+  selectedItemIdForPersistence: ComputedRef<string | null>;
+  currentInitializingItem: ComputedRef<InitializingTaskItem | null>;
   currentItem: ComputedRef<PipelineItem | null>;
   sortedItemsForCurrentRepo: ComputedRef<PipelineItem[]>;
   sortedItemsAllRepos: ComputedRef<PipelineItem[]>;
@@ -18,7 +21,9 @@ export interface SelectionApi {
   getStageOrder: (repoId: string) => readonly string[];
   selectRepo: (repoId: string) => Promise<void>;
   selectItem: (itemId: string, options?: SelectItemOptions) => Promise<void>;
-  selectReplacementAfterItemRemoval: (removedItem: PipelineItem) => Promise<string | null>;
+  selectReplacementAfterItemRemoval: (
+    removedItem: Pick<PipelineItem, "id" | "repo_id">,
+  ) => Promise<string | null>;
   reconcileSelection: () => void;
   restoreSelection: (itemId: string) => void;
   goBack: () => void;
@@ -42,10 +47,19 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     });
   }
 
+  const selectedItemIdForPersistence = computed(() => {
+    const initializingItem = context.state.initializingTaskItems.value.find(
+      (candidate) => candidate.id === context.state.selectedItemId.value,
+    );
+    return initializingItem
+      ? initializingItem.taskId
+      : context.state.selectedItemId.value;
+  });
+
   async function persistWindowSelection(): Promise<void> {
     await context.services.windowWorkspace?.persistSelection({
       selectedRepoId: context.state.selectedRepoId.value,
-      selectedItemId: context.state.selectedItemId.value,
+      selectedItemId: selectedItemIdForPersistence.value,
     });
   }
 
@@ -90,15 +104,22 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     context.state.repos.value.flatMap((repo) => sortItemsForRepo(repo.id)),
   );
 
+  const currentInitializingItem = computed(() =>
+    context.state.initializingTaskItems.value.find(
+      (candidate) => candidate.id === context.state.selectedItemId.value
+        && candidate.repo_id === context.state.selectedRepoId.value,
+    ) ?? null,
+  );
+
   const currentItem = computed(() => {
+    if (currentInitializingItem.value) return null;
+
     if (context.state.selectedItemId.value) {
       const item = context.state.items.value.find((candidate) => candidate.id === context.state.selectedItemId.value);
       if (item && !isItemHidden(item) && item.repo_id === context.state.selectedRepoId.value) return item;
     }
 
-    return sortedItemsForCurrentRepo.value.find(
-      (item) => !context.state.pendingSetupIds.value.includes(item.id),
-    ) ?? null;
+    return sortedItemsForCurrentRepo.value[0] ?? null;
   });
 
   watchDebounced(
@@ -132,6 +153,19 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
       : context.state.selectedItemId.value;
     nav.select(itemId, previousItemId);
     context.state.selectedItemId.value = itemId;
+    const initializingItem = context.state.initializingTaskItems.value.find(
+      (candidate) => candidate.id === itemId,
+    );
+    if (initializingItem) {
+      context.state.selectedRepoId.value = initializingItem.repo_id;
+      context.state.lastSelectedItemByRepo.value[initializingItem.repo_id] = itemId;
+      logSelection("selectInitializingItem", previousItemId, itemId, {
+        taskId: initializingItem.taskId,
+      });
+      await persistWindowSelection();
+      return;
+    }
+
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
     if (item) {
       context.state.selectedRepoId.value = item.repo_id;
@@ -150,7 +184,9 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     emitTaskSelected(itemId);
   }
 
-  function findReplacementAfterItemRemoval(removedItem: PipelineItem): PipelineItem | null {
+  function findReplacementAfterItemRemoval(
+    removedItem: Pick<PipelineItem, "id" | "repo_id">,
+  ): PipelineItem | null {
     const sameRepoSorted = sortItemsForRepo(removedItem.repo_id);
     const sameRepoIndex = sameRepoSorted.findIndex((item) => item.id === removedItem.id);
     const sameRepoRemaining = sameRepoSorted.filter((item) => item.id !== removedItem.id);
@@ -172,7 +208,9 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     return globalRemaining[nextIndex] ?? null;
   }
 
-  async function selectReplacementAfterItemRemoval(removedItem: PipelineItem): Promise<string | null> {
+  async function selectReplacementAfterItemRemoval(
+    removedItem: Pick<PipelineItem, "id" | "repo_id">,
+  ): Promise<string | null> {
     const replacement = findReplacementAfterItemRemoval(removedItem);
     if (!replacement) {
       logSelection("selectReplacementAfterItemRemoval:none", context.state.selectedItemId.value, null, {
@@ -232,6 +270,14 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     const selectedItem = context.state.selectedItemId.value
       ? context.state.items.value.find((candidate) => candidate.id === context.state.selectedItemId.value)
       : null;
+    const selectedInitializingItem = context.state.selectedItemId.value
+      ? context.state.initializingTaskItems.value.find((candidate) =>
+        candidate.id === context.state.selectedItemId.value
+        && candidate.repo_id === context.state.selectedRepoId.value)
+      : null;
+    if (selectedInitializingItem) {
+      return;
+    }
     const selectedItemValid = selectedItem
       && !isItemHidden(selectedItem)
       && selectedItem.repo_id === context.state.selectedRepoId.value;
@@ -304,6 +350,8 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
 
   return {
     selectedRepo,
+    selectedItemIdForPersistence,
+    currentInitializingItem,
     currentItem,
     sortedItemsForCurrentRepo,
     sortedItemsAllRepos,

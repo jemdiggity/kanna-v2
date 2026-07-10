@@ -1,14 +1,16 @@
 // @vitest-environment happy-dom
 
 import type { PipelineItem, Repo } from "../../types/kanna";
+import type { InitializingTaskItem } from "../../stores/taskInitialization";
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { h, nextTick } from "vue";
+import { h, nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "../Sidebar.vue";
 
 const getStageOrder = vi.fn();
+const initializingTaskItems = reactive<InitializingTaskItem[]>([]);
 
 function translate(key: string, params?: Record<string, string>) {
   if (key === "sidebar.clearSearch") {
@@ -35,6 +37,8 @@ function translate(key: string, params?: Record<string, string>) {
 vi.mock("../../stores/kanna", () => ({
   useKannaStore: () => ({
     getStageOrder,
+    initializingTaskItems,
+    taskBlockers: [],
   }),
 }));
 
@@ -174,13 +178,44 @@ function mountSidebarWithRepos(
 
 describe("Sidebar", () => {
   beforeEach(() => {
+    initializingTaskItems.splice(0);
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
   });
 
   afterEach(() => {
+    initializingTaskItems.splice(0);
     vi.clearAllMocks();
     getStageOrder.mockReset();
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
+  });
+
+  it("renders a selected, non-draggable initializing UI item", async () => {
+    initializingTaskItems.push({
+      id: "create-1",
+      state: "initializing",
+      taskId: null,
+      repo_id: "repo-1",
+      prompt: "Create the durable task",
+      display_name: "Creating task",
+      pipeline: "default",
+      stage: "in progress",
+      agent_type: "pty",
+      agent_provider: "claude",
+      created_at: "2026-07-10T00:00:00.000Z",
+    });
+
+    const wrapper = mountSidebar([], "create-1");
+    const row = wrapper.get('[data-initializing-item-id="create-1"]');
+
+    expect(row.text()).toContain("Creating task");
+    expect(row.classes()).toContain("selected");
+    expect(row.element.closest(".pinned-zone,.type-zone")).toBeNull();
+    expect(wrapper.get(".repo-count").text()).toBe("1");
+    expect(wrapper.text()).not.toContain("No tasks");
+
+    await row.trigger("click");
+    expect(wrapper.emitted("select-repo")).toContainEqual(["repo-1"]);
+    expect(wrapper.emitted("select-item")).toContainEqual(["create-1"]);
   });
 
   it("renders task titles without retired post-action prefixes", () => {

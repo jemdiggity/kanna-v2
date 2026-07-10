@@ -16,6 +16,7 @@ import { useKannaStore } from "../stores/kanna";
 import { isTaskTearingDown } from "../stores/taskStages";
 import { macOsTextInputAttrs } from "../utils/textInput";
 import { reviewAwaitingVerdictStage } from "../utils/reviewInbox";
+import type { InitializingTaskItem } from "../stores/taskInitialization";
 
 const { t } = useI18n();
 const store = useKannaStore();
@@ -68,12 +69,22 @@ const suppressNextRepoClick = ref(false);
 const trimmedSearchQuery = computed(() => searchQuery.value.trim());
 const hasActiveSearch = computed(() => trimmedSearchQuery.value.length > 0);
 const selectedVisibleTaskId = computed(() => {
+  const initializingItem = props.selectedItemId
+    ? store.initializingTaskItems.find((candidate) => candidate.id === props.selectedItemId)
+    : null;
+  if (initializingItem) return initializingItem.id;
+
   const item = props.selectedItemId
     ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
     : null;
   return item && item.closed_at == null ? item.id : null;
 });
 const selectedTaskRepoId = computed(() => {
+  const initializingItem = props.selectedItemId
+    ? store.initializingTaskItems.find((candidate) => candidate.id === props.selectedItemId)
+    : null;
+  if (initializingItem) return initializingItem.repo_id;
+
   const item = props.selectedItemId
     ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
     : null;
@@ -134,6 +145,17 @@ function itemsForRepo(repoId: string): SidebarPipelineItem[] {
   return sortSidebarItemsForRepo(sidebarOrderingOptions(repoId));
 }
 
+function initializingItemsForRepo(repoId: string): InitializingTaskItem[] {
+  return store.initializingTaskItems.filter((item) =>
+    item.repo_id === repoId
+    && (!hasActiveSearch.value || taskSearchMatch(trimmedSearchQuery.value, item) !== null),
+  );
+}
+
+function visibleItemCountForRepo(repoId: string): number {
+  return itemsForRepo(repoId).length + initializingItemsForRepo(repoId).length;
+}
+
 /** A top-level task plus its nested subtasks, depth-annotated for indented rendering. */
 function subtreeRows(repoId: string, item: SidebarPipelineItem): SidebarTreeRow[] {
   return sidebarSubtreeRows(sidebarOrderingOptions(repoId), item);
@@ -184,11 +206,12 @@ function subtaskIndentStyle(depth: number): Record<string, string> {
 }
 
 function totalItemsForRepo(repoId: string): number {
-  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.closed_at == null).length;
+  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.closed_at == null).length
+    + store.initializingTaskItems.filter((item) => item.repo_id === repoId).length;
 }
 
 function repoCountLabel(repoId: string): string {
-  const visible = itemsForRepo(repoId).length;
+  const visible = visibleItemCountForRepo(repoId);
   if (!hasActiveSearch.value) return String(visible);
   return `${visible}/${totalItemsForRepo(repoId)}`;
 }
@@ -292,7 +315,7 @@ function handleSelectRepo(repoId: string) {
   emit("select-repo", repoId);
 }
 
-function handleSelectItem(item: SidebarPipelineItem) {
+function handleSelectItem(item: Pick<SidebarPipelineItem, "id" | "repo_id">) {
   emit("select-repo", item.repo_id);
   emit("select-item", item.id);
 }
@@ -568,7 +591,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
         <div
           v-for="repo in repos"
           :key="repo.id"
-          v-show="!hasActiveSearch || itemsForRepo(repo.id).length > 0"
+          v-show="!hasActiveSearch || visibleItemCountForRepo(repo.id) > 0"
           class="repo-section"
           :class="{
             'repo-dragging': repoDrag?.repoId === repo.id && repoDrag.active,
@@ -621,6 +644,27 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
           </div>
 
           <div v-if="!collapsedRepos.has(repo.id)" class="pipeline-list">
+          <!-- UI-only tasks waiting for a durable server task id. -->
+          <div
+            v-if="initializingItemsForRepo(repo.id).length > 0"
+            class="initializing-zone"
+          >
+            <div
+              v-for="initializingItem in initializingItemsForRepo(repo.id)"
+              :key="initializingItem.id"
+              class="pipeline-item initializing-item"
+              :class="{ selected: selectedItemId === initializingItem.id }"
+              :data-initializing-item-id="initializingItem.id"
+              aria-busy="true"
+              @click="handleSelectItem(initializingItem)"
+            >
+              <span
+                class="item-title"
+                :title="initializingItem.display_name || initializingItem.prompt"
+              >{{ initializingItem.display_name || initializingItem.prompt || $t('tasks.untitled') }}</span>
+            </div>
+          </div>
+
           <!-- Pinned tasks (draggable, sortable) -->
           <draggable
             :model-value="sortedPinned(repo.id)"
@@ -878,7 +922,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             </div>
           </template>
 
-          <div v-if="itemsForRepo(repo.id).length === 0" class="no-items">
+          <div v-if="visibleItemCountForRepo(repo.id) === 0" class="no-items">
             {{ hasActiveSearch
               ? $t('sidebar.noTasksMatching', { query: trimmedSearchQuery })
               : $t('sidebar.noTasks')
@@ -1167,6 +1211,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .pipeline-item.selected {
   background: var(--kn-bg-selected);
   outline: 1px solid var(--kn-accent);
+}
+
+.initializing-item .item-title {
+  color: var(--kn-text-secondary);
+  font-style: italic;
 }
 
 /* Highlighted while a dragged task hovers over it as a potential parent. */

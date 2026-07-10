@@ -78,6 +78,7 @@ const store = {
   items: [],
   selectedRepoId: "repo-1" as string | null,
   selectedItemId: null,
+  selectedItemIdForPersistence: null as string | null,
   selectedRepo: { id: "repo-1", path: "/tmp/repo", name: "repo" } as { id: string; path: string; name: string } | null,
   currentItem: null,
   sortedItemsForCurrentRepo: [],
@@ -632,6 +633,7 @@ describe("App", () => {
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
     store.selectedRepoId = "repo-1";
     store.selectedItemId = null;
+    store.selectedItemIdForPersistence = null;
     store.selectedRepo = { id: "repo-1", path: "/tmp/repo", name: "repo" };
     store.currentItem = null;
     store.items = [];
@@ -1073,12 +1075,12 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        item: Object,
+        uiItem: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiItem?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1153,12 +1155,12 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        item: Object,
+        uiItem: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiItem?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1234,12 +1236,12 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        item: Object,
+        uiItem: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiItem?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1468,9 +1470,9 @@ describe("App", () => {
     const MainPanelTaskStub = defineComponent({
       name: "MainPanel",
       props: {
-        item: Object,
+        uiItem: Object,
       },
-      template: '<div data-testid="main-item-id">{{ item?.id || "" }}</div>',
+      template: '<div data-testid="main-item-id">{{ uiItem?.id || "" }}</div>',
     });
 
     const wrapper = await mountAppWithOverrides(SidebarMixedStub, {
@@ -1875,6 +1877,7 @@ describe("App", () => {
   it("opens a new window through the workspace controller using the current selection", async () => {
     store.selectedRepoId = "repo-1";
     store.selectedItemId = "task-1";
+    store.selectedItemIdForPersistence = "task-1";
 
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
@@ -1884,6 +1887,20 @@ describe("App", () => {
     expect(mockWindowWorkspace.openWindow).toHaveBeenCalledWith({
       selectedRepoId: "repo-1",
       selectedItemId: "task-1",
+    });
+  });
+
+  it("does not pass a UI-only initializing item id to a new window", async () => {
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "create-1";
+    store.selectedItemIdForPersistence = null;
+
+    await mountApp(SidebarWithRepoStub);
+    await capturedKeyboardActions?.newWindow();
+
+    expect(mockWindowWorkspace.openWindow).toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
     });
   });
 
@@ -1899,6 +1916,7 @@ describe("App", () => {
   it("opens a new window when the native window-open event arrives", async () => {
     store.selectedRepoId = "repo-1";
     store.selectedItemId = "task-1";
+    store.selectedItemIdForPersistence = "task-1";
 
     await mountApp(SidebarWithRepoStub);
     expect(listenHandlers.has(WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT)).toBe(false);

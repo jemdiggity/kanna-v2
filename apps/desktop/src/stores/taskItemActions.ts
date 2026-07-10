@@ -5,10 +5,14 @@ import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
 import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import { debugLog } from "../utils/debugLog";
 import { resolveRealE2eAgentOverride } from "./e2eRealAgentOverride";
-import { buildPendingTaskPlaceholder } from "./taskCreationPlaceholder";
+import {
+  buildInitializingTaskItem,
+  initializeTaskItem,
+  removeInitializingTaskItem,
+} from "./taskInitialization";
 import { resolveInitialBaseRef } from "./taskBaseBranch";
 import { normalizeAgentExecutionType, type AgentExecutionType } from "./agentExecutionType";
-import { requireService, type CreateItemOptions, type KannaSnapshot, type StoreContext } from "./state";
+import { requireService, type CreateItemOptions, type StoreContext } from "./state";
 import { showCloudPublishErrorToast } from "./taskPublishing";
 import type { TasksApi } from "./tasks";
 
@@ -19,8 +23,6 @@ export function createTaskItemActions(
   const invalidateWindowWorkspace = async (reason: string): Promise<void> => {
     await context.services.windowWorkspace?.invalidateSharedData(reason);
   };
-  const withOptimisticItemOverlay = <T>(input: Parameters<NonNullable<StoreContext["services"]["withOptimisticItemOverlay"]>>[0]) =>
-    requireService(context.services.withOptimisticItemOverlay, "withOptimisticItemOverlay")(input) as Promise<T>;
 
   async function resolveCreateBaseRef(repoPath: string, opts?: CreateItemOptions): Promise<string | null> {
     if (opts?.baseRef !== undefined) return opts.baseRef;
@@ -46,7 +48,7 @@ export function createTaskItemActions(
     opts?: CreateItemOptions,
   ): Promise<string> {
     const t0 = performance.now();
-    const placeholderId = crypto.randomUUID().slice(0, 8);
+    const initializingItemId = `create:${crypto.randomUUID()}`;
     const effectivePrompt = opts?.customTask?.prompt ?? prompt;
     const effectiveAgentType = normalizeAgentExecutionType(opts?.customTask?.executionMode ?? agentType);
     const customTaskAgentProvider = opts?.customTask?.agentProvider;
@@ -54,7 +56,7 @@ export function createTaskItemActions(
     const requestedModel = opts?.customTask?.model ?? opts?.model;
     const displayName = opts?.customTask?.name ?? opts?.displayName ?? null;
     debugLog("[tasks:createItem] server create start", {
-      placeholderId,
+      initializingItemId,
       repoId,
       agentType: effectiveAgentType,
       requestedPipeline: opts?.pipelineName,
@@ -62,110 +64,179 @@ export function createTaskItemActions(
       selectedAtStart: context.state.selectedItemId.value,
     });
 
-    const realE2eAgentOverride = await resolveRealE2eAgentOverride({
-      agentType: effectiveAgentType,
-      explicitAgentProvider: requestedAgentProviders,
-      explicitModel: requestedModel,
-    });
-    const effectiveAgentProvider = (customTaskAgentProvider ?? realE2eAgentOverride?.agentProvider ?? requestedAgentProviders) as AgentProvider | undefined;
-    const resolvedModel = opts?.customTask?.model ?? realE2eAgentOverride?.model ?? opts?.model;
-    const baseRef = await resolveCreateBaseRef(repoPath, opts);
-    if (!baseRef) {
-      context.toast.error("No valid base branch selected");
-      throw new Error("No valid base branch selected");
-    }
-
-    const pendingPlaceholder = buildPendingTaskPlaceholder({
-      id: placeholderId,
+    const initializingItem = buildInitializingTaskItem({
+      id: initializingItemId,
       repoId,
       prompt: effectivePrompt,
-      branch: `task-${placeholderId}`,
       agentType: effectiveAgentType,
       requestedAgentProviders,
       pipelineName: opts?.pipelineName,
+      stage: opts?.stage,
       displayName,
     });
-    context.state.pendingSetupIds.value = [...context.state.pendingSetupIds.value, placeholderId];
-    context.state.pendingCreateVisibility.set(placeholderId, { bumpAt: performance.now() });
-
-    const removePendingPlaceholder = () => {
-      context.state.pendingSetupIds.value = context.state.pendingSetupIds.value.filter((pendingId) => pendingId !== placeholderId);
-      context.state.pendingCreateVisibility.delete(placeholderId);
-    };
-    const applyPendingPlaceholderOverlay = (snapshot: KannaSnapshot): KannaSnapshot => ({
-      ...snapshot,
-      entries: snapshot.entries.map((entry) =>
-        entry.repo.id === repoId
-          ? {
-              ...entry,
-              items: [pendingPlaceholder, ...entry.items.filter((item) => item.id !== placeholderId)],
-            }
-          : entry,
+    context.state.initializingTaskItems.value = [
+      initializingItem,
+      ...context.state.initializingTaskItems.value.filter(
+        (candidate) => candidate.id !== initializingItemId,
       ),
-    });
-    const selectPendingPlaceholder = () => {
+    ];
+    context.state.pendingCreateVisibility.set(initializingItemId, { bumpAt: performance.now() });
+
+    const removeInitializingItem = () => {
+      context.state.initializingTaskItems.value = removeInitializingTaskItem(
+        context.state.initializingTaskItems.value,
+        initializingItemId,
+      );
+      context.state.pendingCreateVisibility.delete(initializingItemId);
+    };
+    const replaceRememberedInitializingItem = (taskId: string | null) => {
+      if (context.state.lastSelectedItemByRepo.value[repoId] !== initializingItemId) return;
+      const next = { ...context.state.lastSelectedItemByRepo.value };
+      if (taskId) {
+        next[repoId] = taskId;
+      } else {
+        delete next[repoId];
+      }
+      context.state.lastSelectedItemByRepo.value = next;
+    };
+    const selectInitializingItem = () => {
       if (opts?.selectOnCreate === false) return;
       context.state.selectedRepoId.value = repoId;
-      context.state.selectedItemId.value = placeholderId;
+      context.state.selectedItemId.value = initializingItemId;
       context.state.lastSelectedItemByRepo.value = {
         ...context.state.lastSelectedItemByRepo.value,
-        [repoId]: placeholderId,
+        [repoId]: initializingItemId,
       };
     };
-    const selectReplacementAfterPendingRemoval = async () => {
-      if (context.state.selectedItemId.value !== placeholderId) return;
-      await requireService(context.services.selectReplacementAfterItemRemoval, "selectReplacementAfterItemRemoval")(pendingPlaceholder);
+    const selectReplacementAfterInitializationFailure = async () => {
+      if (context.state.selectedItemId.value !== initializingItemId) return;
+      await requireService(
+        context.services.selectReplacementAfterItemRemoval,
+        "selectReplacementAfterItemRemoval",
+      )(initializingItem);
     };
 
-    let createdTaskId = placeholderId;
+    selectInitializingItem();
+
+    let createdTaskId: string;
     try {
-      await withOptimisticItemOverlay<void>({
-        key: `create:immediate:${placeholderId}`,
-        apply: applyPendingPlaceholderOverlay,
-        run: async () => {
-          selectPendingPlaceholder();
-          const created = await createDesktopTask({
-            repoId,
-            prompt: effectivePrompt,
-            displayName,
-            pipelineName: opts?.pipelineName,
-            stage: opts?.stage,
-            baseRef,
-            agent: opts?.customTask?.agent,
-            agentProvider: effectiveAgentProvider,
-            agentType: effectiveAgentType,
-            model: resolvedModel,
-            permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode,
-            allowedTools: opts?.customTask?.allowedTools ?? opts?.allowedTools,
-            disallowedTools: opts?.customTask?.disallowedTools,
-            maxTurns: opts?.customTask?.maxTurns,
-            maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
-            setupCmds: opts?.customTask?.setup,
-            resumeSessionId: opts?.resumeSessionId,
-            recoverySnapshot: opts?.recoverySnapshot,
-          });
-          createdTaskId = created.taskId;
-          removePendingPlaceholder();
-          await reloadSnapshot();
-          if (opts?.selectOnCreate !== false) {
-            await requireService(context.services.selectItem, "selectItem")(createdTaskId);
-          }
-          const createdItem = context.state.items.value.find((candidate) => candidate.id === createdTaskId);
-          const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
-          if (createdItem) {
-            void publishDesktopLanTaskSnapshot(context.requireDb());
-            publishCreatedTaskSnapshot(createdTaskId, createdItem, createdRepo);
-          }
-          debugLog(`[perf:createItem] server create TOTAL: ${(performance.now() - t0).toFixed(1)}ms`);
-        },
-        reconcile: reloadSnapshot,
+      const realE2eAgentOverride = await resolveRealE2eAgentOverride({
+        agentType: effectiveAgentType,
+        explicitAgentProvider: requestedAgentProviders,
+        explicitModel: requestedModel,
       });
+      const effectiveAgentProvider = (
+        customTaskAgentProvider
+        ?? realE2eAgentOverride?.agentProvider
+        ?? requestedAgentProviders
+      ) as AgentProvider | undefined;
+      const resolvedModel = opts?.customTask?.model ?? realE2eAgentOverride?.model ?? opts?.model;
+      const baseRef = await resolveCreateBaseRef(repoPath, opts);
+      if (!baseRef) {
+        context.toast.error("No valid base branch selected");
+        throw new Error("No valid base branch selected");
+      }
+
+      const created = await createDesktopTask({
+        repoId,
+        prompt: effectivePrompt,
+        displayName,
+        pipelineName: opts?.pipelineName,
+        stage: opts?.stage,
+        baseRef,
+        agent: opts?.customTask?.agent,
+        agentProvider: effectiveAgentProvider,
+        agentType: effectiveAgentType,
+        model: resolvedModel,
+        permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode,
+        allowedTools: opts?.customTask?.allowedTools ?? opts?.allowedTools,
+        disallowedTools: opts?.customTask?.disallowedTools,
+        maxTurns: opts?.customTask?.maxTurns,
+        maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
+        setupCmds: opts?.customTask?.setup,
+        resumeSessionId: opts?.resumeSessionId,
+        recoverySnapshot: opts?.recoverySnapshot,
+      });
+      createdTaskId = created.taskId;
     } catch (error) {
-      removePendingPlaceholder();
-      await selectReplacementAfterPendingRemoval();
+      replaceRememberedInitializingItem(null);
+      removeInitializingItem();
+      try {
+        await selectReplacementAfterInitializationFailure();
+      } catch (cleanupError) {
+        console.error("[store] failed to persist selection after task creation failure:", cleanupError);
+      }
       throw error;
     }
-    await invalidateWindowWorkspace("createItem");
+
+    const visibility = context.state.pendingCreateVisibility.get(initializingItemId);
+    context.state.pendingCreateVisibility.delete(initializingItemId);
+    if (visibility) {
+      context.state.pendingCreateVisibility.set(createdTaskId, visibility);
+    }
+    context.state.initializingTaskItems.value = initializeTaskItem(
+      context.state.initializingTaskItems.value,
+      initializingItemId,
+      createdTaskId,
+    );
+
+    let snapshotReloaded = false;
+    try {
+      await reloadSnapshot();
+      snapshotReloaded = true;
+    } catch (error) {
+      // The create request already committed the durable task and session.
+      // Keep the initialized UI row so a later successful snapshot refresh can
+      // finish the handoff without inviting a duplicate-task retry.
+      console.error("[store] failed to hydrate created task snapshot:", error);
+    }
+
+    const createdItem = context.state.items.value.find((candidate) => candidate.id === createdTaskId);
+    if (snapshotReloaded && !createdItem) {
+      context.state.pendingCreateVisibility.delete(createdTaskId);
+      replaceRememberedInitializingItem(null);
+      removeInitializingItem();
+      try {
+        await selectReplacementAfterInitializationFailure();
+      } catch (cleanupError) {
+        console.error("[store] failed to persist selection for an absent created task:", cleanupError);
+      }
+    } else if (createdItem) {
+      // Normal snapshot reloads reconcile this handoff in queries.ts. Keep a
+      // defensive path for a concurrent refresh (or custom reload service)
+      // that hydrated the durable item before this create continuation.
+      replaceRememberedInitializingItem(createdTaskId);
+      if (context.state.selectedItemId.value === initializingItemId) {
+        const selectItem = context.services.selectItem;
+        if (selectItem) {
+          const selectionPromise = selectItem(createdTaskId, {
+            previousItemId: initializingItemId,
+          });
+          removeInitializingItem();
+          try {
+            await selectionPromise;
+          } catch (error) {
+            console.error("[store] failed to persist created task selection:", error);
+          }
+        } else {
+          context.state.selectedItemId.value = createdTaskId;
+          context.state.lastSelectedItemByRepo.value[repoId] = createdTaskId;
+          removeInitializingItem();
+        }
+      } else {
+        removeInitializingItem();
+      }
+      const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
+      void publishDesktopLanTaskSnapshot(context.requireDb());
+      publishCreatedTaskSnapshot(createdTaskId, createdItem, createdRepo);
+    }
+
+    debugLog(`[perf:createItem] server create TOTAL: ${(performance.now() - t0).toFixed(1)}ms`);
+    try {
+      await invalidateWindowWorkspace("createItem");
+    } catch (error) {
+      console.error("[store] failed to invalidate windows after task creation:", error);
+    }
     return createdTaskId;
   }
 

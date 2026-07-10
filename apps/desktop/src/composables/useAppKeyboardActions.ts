@@ -159,7 +159,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     newWindow: async () => {
       await windowWorkspace.openWindow({
         selectedRepoId: store.selectedRepoId,
-        selectedItemId: store.selectedItemId,
+        selectedItemId: store.selectedItemIdForPersistence,
       });
     },
     closeWindow: async () => {

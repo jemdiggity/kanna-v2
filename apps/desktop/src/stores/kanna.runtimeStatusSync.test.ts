@@ -244,13 +244,11 @@ vi.mock("./kannaCleanup", () => ({
 }));
 
 vi.mock("./agent-provider", () => ({
+  normalizeAgentProviderCandidates: vi.fn((providers?: string | string[]) =>
+    providers == null ? [] : (Array.isArray(providers) ? providers : [providers])),
   getPreferredAgentProviders: vi.fn(() => "claude"),
   requireResolvedAgentProvider: vi.fn((provider?: string) => provider ?? "claude"),
   resolveAgentProvider: vi.fn((provider?: string | string[]) => Array.isArray(provider) ? provider[0] : (provider ?? "claude")),
-}));
-
-vi.mock("./taskCreationPlaceholder", () => ({
-  buildPendingTaskPlaceholder: vi.fn(),
 }));
 
 vi.mock("./portAllocationLog", () => ({

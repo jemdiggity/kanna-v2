@@ -15,7 +15,6 @@ import {
   requireResolvedAgentProvider,
   type AgentProviderAvailability,
 } from "./agent-provider";
-import { shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
@@ -111,10 +110,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
   async function applyTaskRuntimeStatus(item: PipelineItem, status: string) {
     if (item.closed_at !== null) {
-      return;
-    }
-
-    if (shouldIgnoreRuntimeStatusDuringSetup(status, context.state.pendingSetupIds.value.includes(item.id))) {
       return;
     }
 

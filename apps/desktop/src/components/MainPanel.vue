@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { PipelineItem } from "../types/kanna";
+import type { TaskUiItem } from "../stores/taskInitialization";
 import { isBlockerResolved } from "../utils/blockerResolution";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
@@ -8,14 +9,13 @@ import TerminalTabs from "./TerminalTabs.vue";
 import CloudTerminalView from "./CloudTerminalView.vue";
 
 const props = defineProps<{
-  item: PipelineItem | null;
+  uiItem: TaskUiItem | null;
   repoPath?: string;
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
   recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
   maximized?: boolean;
   blockers?: PipelineItem[];
   hasRepos?: boolean;
-  pendingSetup?: boolean;
   cloudTask?: boolean;
   cloudTerminalRef?: {
     ownerDesktopId: string;
@@ -37,6 +37,9 @@ const isBlocked = computed(() => {
 });
 const commandHintDismissed = ref(readCommandHintDismissed());
 const showCommandHint = computed(() => !commandHintDismissed.value);
+const item = computed(() => props.uiItem?.state === "ready" ? props.uiItem.task : null);
+const headerItem = computed(() => props.uiItem?.state === "ready" ? props.uiItem.task : props.uiItem);
+const terminalSessionId = computed(() => props.uiItem?.state === "ready" ? props.uiItem.taskId : null);
 
 // --- Agent CLI detection ---
 
@@ -187,13 +190,18 @@ function dismissCommandHint() {
 
 <template>
   <main class="main-panel">
-    <template v-if="item">
+    <template v-if="uiItem">
       <div v-if="isMobile" class="mobile-back-bar" @click="emit('back')">
         <span class="mobile-back-arrow">&larr;</span>
         <span>Tasks</span>
       </div>
-      <TaskHeader v-if="!maximized" :item="item" />
-      <template v-if="isBlocked">
+      <TaskHeader v-if="!maximized && headerItem" :item="headerItem" />
+      <template v-if="uiItem.state === 'initializing'">
+        <div class="setup-placeholder">
+          <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
+        </div>
+      </template>
+      <template v-else-if="isBlocked">
         <div class="blocked-placeholder">
           <p class="blocked-title">{{ $t('mainPanel.taskBlocked') }}</p>
           <p class="blocked-hint">{{ $t('mainPanel.taskBlockedHint') }}</p>
@@ -207,11 +215,6 @@ function dismissCommandHint() {
               <span class="blocker-name">{{ b.display_name || (b.prompt ? b.prompt.slice(0, 60) : $t('tasks.untitled')) }}</span>
             </div>
           </div>
-        </div>
-      </template>
-      <template v-else-if="pendingSetup">
-        <div class="setup-placeholder">
-          <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
         </div>
       </template>
       <template v-else-if="cloudTask">
@@ -228,7 +231,8 @@ function dismissCommandHint() {
       </template>
       <template v-else>
         <TerminalTabs
-          :session-id="item.id"
+          v-if="item && terminalSessionId"
+          :session-id="terminalSessionId"
           :agent-type="item.agent_type || 'pty'"
           :agent-provider="item.agent_provider"
           :repo-path="repoPath"

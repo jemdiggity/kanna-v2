@@ -83,7 +83,6 @@ function makeContext(): StoreContext {
       hideShortcutsOnStartup: ref(false),
       devLingerTerminals: ref(false),
       lastHiddenRepoId: ref(null),
-      pendingSetupIds: ref([]),
       pipelineCache: new Map(),
       agentCache: new Map(),
       stageOrderCache: new Map(),

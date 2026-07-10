@@ -20,6 +20,7 @@ import { useAppTaskNavigation } from "./composables/useAppTaskNavigation";
 import { useAppTaskCreation } from "./composables/useAppTaskCreation";
 import { useAppKeyboardActions } from "./composables/useAppKeyboardActions";
 import { useKannaStore } from "./stores/kanna";
+import { toReadyTaskUiItem } from "./stores/taskInitialization";
 import { useThemeRuntime } from "./theme/runtime";
 import { type WindowWorkspaceController } from "./windowWorkspace";
 
@@ -75,6 +76,11 @@ if (import.meta.env.DEV) {
   void cloudSnapshot;
   void lanSnapshot;
 }
+
+const mainPanelUiItem = computed(() =>
+  store.currentInitializingItem
+  ?? (mainPanelItem.value ? toReadyTaskUiItem(mainPanelItem.value) : null),
+);
 
 defineExpose({
   cloudSnapshot,
@@ -361,14 +367,13 @@ const modalLayerController = {
     <div v-if="!isMobile || store.selectedItemId" class="main-column">
       <MainPanel
         ref="mainPanelRef"
-        :item="mainPanelItem"
+        :ui-item="mainPanelUiItem"
         :repo-path="mainPanelRepo?.path"
         :spawn-pty-session="store.spawnPtySession"
         :recover-task-session="store.recoverTaskSession"
         :maximized="maximized"
         :blockers="currentBlockers"
         :has-repos="sidebarRepos.length > 0"
-        :pending-setup="store.currentItem ? (store.pendingSetupIds ?? []).includes(store.currentItem.id) : false"
         :cloud-task="mainPanelIsCloudTask"
         :cloud-terminal-ref="mainPanelCloudTerminalRef"
         @close-task="closeSelectedWorkspaceTask"

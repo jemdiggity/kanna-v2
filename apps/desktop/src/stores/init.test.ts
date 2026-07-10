@@ -9,6 +9,7 @@ import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
+import { buildInitializingTaskItem } from "./taskInitialization";
 
 const setTitleMock = vi.hoisted(() => vi.fn(async () => {}));
 
@@ -743,6 +744,48 @@ describe("createInitApi", () => {
       selectedRepoId: "repo-1",
       selectedItemId: null,
     });
+  });
+
+  it("preserves an initializing UI selection across shared snapshot invalidation", async () => {
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.initializingTaskItems.value = [buildInitializingTaskItem({
+      id: "create-1",
+      repoId: "repo-1",
+      prompt: "Create task",
+      agentType: "pty",
+    })];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "create-1";
+    state.lastSelectedItemByRepo.value = { "repo-1": "create-1" };
+    const reloadSnapshot = vi.fn(async () => {});
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      windowWorkspace: { onSharedInvalidation, persistSelection },
+    } as never);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+    await getSharedInvalidationHandler(onSharedInvalidation)();
+
+    expect(reloadSnapshot).toHaveBeenCalled();
+    expect(state.selectedItemId.value).toBe("create-1");
+    expect(state.lastSelectedItemByRepo.value["repo-1"]).toBe("create-1");
+    expect(persistSelection).not.toHaveBeenCalled();
   });
 
   it("loads valid theme preferences from settings", async () => {
