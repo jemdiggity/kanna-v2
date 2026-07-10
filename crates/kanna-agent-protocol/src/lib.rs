@@ -17,6 +17,7 @@ mod events;
 pub mod frames;
 pub mod mcp;
 pub mod opencode;
+mod providers;
 
 pub use adapter::{
     prompt_with_system_prompt, Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec,
@@ -30,3 +31,4 @@ pub use events::{
 };
 pub use frames::{ClientFrame, FrameAgentEvent, ServerFrame, StateChangeScope, StreamKind};
 pub use opencode::OpencodeAdapter;
+pub use providers::{agent_provider_specs, AgentProvider, AgentProviderSpec, AgentSessionType};

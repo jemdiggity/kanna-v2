@@ -7,6 +7,9 @@
 // `scripts/check-agent-protocol-types.sh`.
 
 export type { AgentEvent } from "./generated/AgentEvent";
+export type { AgentProvider } from "./generated/AgentProvider";
+export type { AgentProviderSpec } from "./generated/AgentProviderSpec";
+export type { AgentSessionType } from "./generated/AgentSessionType";
 export type { ClientFrame } from "./generated/ClientFrame";
 export type { FrameAgentEvent } from "./generated/FrameAgentEvent";
 export type { PermissionDecision } from "./generated/PermissionDecision";
@@ -16,3 +19,9 @@ export type { StateChangeScope } from "./generated/StateChangeScope";
 export type { StreamKind } from "./generated/StreamKind";
 export type { TurnStats } from "./generated/TurnStats";
 export type { TurnStatus } from "./generated/TurnStatus";
+export {
+  AGENT_PROVIDERS,
+  AGENT_PROVIDER_SPECS,
+  getAgentProviderSpec,
+  isAgentProvider,
+} from "./generated/AgentProviderRegistry";
