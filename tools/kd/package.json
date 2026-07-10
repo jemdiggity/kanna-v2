@@ -11,7 +11,7 @@
     "build": "tsup",
     "dev": "tsx src/bin/kd.ts",
     "mcp": "tsx src/bin/kd-mcp.ts",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=2",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

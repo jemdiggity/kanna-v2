@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; exec vitest run \"$@\"' --"
+    "test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; exec vitest run --maxWorkers=2 \"$@\"' --"
   },
   "devDependencies": {
     "vitest": "^4.1.4"

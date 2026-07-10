@@ -19,7 +19,7 @@
     "test:e2e:device:profile-disconnected": "KANNA_IOS_E2E_TARGET=device pnpm exec tsx ./e2e/run.ts profile-disconnected",
     "test:e2e:appium:install-xcuitest": "pnpm exec tsx ./e2e/helpers/appium.ts install-xcuitest",
     "test:e2e:appium:start": "pnpm exec tsx ./e2e/helpers/appium.ts start",
-    "test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; if [ \"$1\" = \"--runInBand\" ]; then shift; fi; exec pnpm dlx vitest run \"$@\"' --",
+    "test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; if [ \"$1\" = \"--runInBand\" ]; then shift; fi; exec pnpm exec vitest run --maxWorkers=2 \"$@\"' --",
     "typecheck": "pnpm exec tsc --noEmit",
     "android": "expo run:android"
   },
@@ -51,6 +51,7 @@
     "appium": "^2.19.0",
     "babel-preset-expo": "13.0.0",
     "tsx": "^4.21.0",
+    "vitest": "^4.1.4",
     "webdriverio": "^9.20.0"
   }
 }
