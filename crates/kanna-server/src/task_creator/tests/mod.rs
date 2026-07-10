@@ -140,8 +140,8 @@ fn install_test_provider_binaries(repo_root: &std::path::Path) {
 
     let bin_dir = repo_root.join(".kanna/test-provider-bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
-    for executable in ["claude", "copilot", "codex", "opencode", "agy"] {
-        let path = bin_dir.join(executable);
+    for provider in AgentProvider::ALL {
+        let path = bin_dir.join(provider.executable());
         std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
