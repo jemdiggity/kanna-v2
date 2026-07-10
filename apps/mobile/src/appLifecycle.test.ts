@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  getForegroundTransitionAction,
   shouldCheckForOtaUpdateOnForeground,
   shouldRefreshOnAppStateTransition
 } from "./appLifecycle";
@@ -14,6 +15,54 @@ describe("shouldRefreshOnAppStateTransition", () => {
     expect(shouldRefreshOnAppStateTransition("active", "inactive")).toBe(false);
     expect(shouldRefreshOnAppStateTransition("active", "background")).toBe(false);
     expect(shouldRefreshOnAppStateTransition("background", "background")).toBe(false);
+  });
+});
+
+describe("getForegroundTransitionAction", () => {
+  it.each([
+    ["background", "active"],
+    ["inactive", "active"]
+  ] as const)(
+    "refreshes for a normal %s -> %s foreground transition",
+    (previousState, nextState) => {
+      expect(
+        getForegroundTransitionAction({
+          previousState,
+          nextState,
+          hasDownloadedUpdate: false
+        })
+      ).toBe("refresh");
+    }
+  );
+
+  it("reloads a downloaded update on the exact background -> active transition", () => {
+    expect(
+      getForegroundTransitionAction({
+        previousState: "background",
+        nextState: "active",
+        hasDownloadedUpdate: true
+      })
+    ).toBe("reload");
+  });
+
+  it("preserves refresh behavior for downloaded updates returning from inactive", () => {
+    expect(
+      getForegroundTransitionAction({
+        previousState: "inactive",
+        nextState: "active",
+        hasDownloadedUpdate: true
+      })
+    ).toBe("refresh");
+  });
+
+  it("does nothing for a non-foreground transition", () => {
+    expect(
+      getForegroundTransitionAction({
+        previousState: "active",
+        nextState: "background",
+        hasDownloadedUpdate: false
+      })
+    ).toBe("none");
   });
 });
 

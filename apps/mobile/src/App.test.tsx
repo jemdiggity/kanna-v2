@@ -6,6 +6,7 @@ import {
 } from "./appModel";
 import { createStaticBonjourBrowser } from "./lib/discovery/bonjour";
 import type { MobileAuthSession } from "./lib/firebase/auth";
+import type { CloudTaskIndex } from "./lib/firebase/taskIndex";
 import type { FetchLike } from "./lib/transports/lanTransport";
 
 function createFetchMock(): FetchLike {
@@ -74,7 +75,16 @@ function createFetchMock(): FetchLike {
   }) as FetchLike;
 }
 
-function createTrustedDesktopFetchMock(): FetchLike {
+function createTrustedDesktopFetchMock(
+  recentTasks = [
+    {
+      id: "task-trusted",
+      repoId: "repo-trusted",
+      title: "Trusted LAN task",
+      stage: "in progress"
+    }
+  ]
+): FetchLike {
   return vi.fn(async (input) => {
     const url = typeof input === "string" ? input : input.toString();
 
@@ -119,14 +129,7 @@ function createTrustedDesktopFetchMock(): FetchLike {
       return {
         ok: true,
         status: 200,
-        json: async () => [
-          {
-            id: "task-trusted",
-            repoId: "repo-trusted",
-            title: "Trusted LAN task",
-            stage: "in progress"
-          }
-        ]
+        json: async () => recentTasks
       } as Response;
     }
 
@@ -331,7 +334,7 @@ describe("createAppModel", () => {
     expect(taskIndex.listRecentTasks).toHaveBeenCalledWith("user-1");
   });
 
-  it("falls back to LAN tasks for signed-in users before cloud snapshots exist", async () => {
+  it("combines one-shot cloud and trusted LAN tasks before live snapshots exist", async () => {
     const authSession: MobileAuthSession = {
       initialize: vi.fn().mockResolvedValue(undefined),
       getState: vi.fn(() => ({
@@ -352,7 +355,18 @@ describe("createAppModel", () => {
     };
     const taskIndex = {
       listDesktops: vi.fn(async () => []),
-      listRecentTasks: vi.fn(async () => []),
+      listRecentTasks: vi.fn(async () => [
+        {
+          id: "cloud-task-before-live",
+          repoId: "repo-cloud",
+          repoName: "Cloud Repo",
+          title: "Cloud task before live",
+          stage: "in progress",
+          ownerDesktopId: "desktop-cloud",
+          ownerLocalTaskId: "task-cloud",
+          ownerOnline: false
+        }
+      ]),
       subscribeRecentTasks: vi.fn(() => () => {})
     };
     const model = createAppModel({
@@ -372,6 +386,10 @@ describe("createAppModel", () => {
     await model.initialize();
 
     await expect(model.client.listRecentTasks()).resolves.toEqual([
+      expect.objectContaining({
+        id: "cloud-task-before-live",
+        title: "Cloud task before live"
+      }),
       expect.objectContaining({ id: "task-1", title: "Refactor mobile shell" }),
       expect.objectContaining({ id: "task-2", title: "Review shell polish" })
     ]);
@@ -459,14 +477,33 @@ describe("createAppModel", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("falls back to a trusted Bonjour LAN endpoint when signed-in cloud has no tasks", async () => {
+  it("composes live cloud and trusted Bonjour LAN tasks for signed-in users", async () => {
     const authSession = createSignedInAuthSession();
+    let pushCloudTasks:
+      | ((tasks: Awaited<ReturnType<CloudTaskIndex["listRecentTasks"]>>) => void)
+      | null = null;
     const taskIndex = {
       listDesktops: vi.fn(async () => []),
       listRecentTasks: vi.fn(async () => []),
-      subscribeRecentTasks: vi.fn(() => () => {})
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return () => {};
+      })
     };
-    const fetchImpl = createTrustedDesktopFetchMock();
+    const fetchImpl = createTrustedDesktopFetchMock([
+      {
+        id: "task-trusted",
+        repoId: "repo-trusted",
+        title: "Trusted LAN task",
+        stage: "in progress"
+      },
+      {
+        id: "task-lan-only",
+        repoId: "repo-trusted",
+        title: "LAN-only task",
+        stage: "review"
+      }
+    ]);
     const model = createAppModel({
       fetchImpl,
       persistence: {
@@ -506,14 +543,54 @@ describe("createAppModel", () => {
 
     await model.initialize();
 
+    expect(pushCloudTasks).not.toBeNull();
+    pushCloudTasks?.([
+      {
+        id: "cloud:task-trusted",
+        repoId: "cloud-repo-trusted",
+        repoName: "Trusted Repo",
+        title: "Stale cloud title",
+        stage: "pr",
+        ownerDesktopId: "desktop-trusted",
+        ownerLocalRepoId: "repo-trusted",
+        ownerLocalTaskId: "task-trusted",
+        ownerOnline: true
+      },
+      {
+        id: "cloud:task-cloud-only",
+        repoId: "repo-cloud-only",
+        repoName: "Cloud-only Repo",
+        title: "Cloud-only task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-cloud-only",
+        ownerLocalTaskId: "task-cloud-only",
+        ownerOnline: true
+      }
+    ]);
+
+    await vi.waitFor(() => {
+      expect(model.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: "cloud:task-trusted",
+          title: "Trusted LAN task",
+          stage: "in progress"
+        }),
+        expect.objectContaining({
+          id: "cloud:task-cloud-only",
+          title: "Cloud-only task"
+        }),
+        expect.objectContaining({
+          id: "task-lan-only",
+          title: "LAN-only task"
+        })
+      ]);
+    });
+
     expect(model.sessionStore.getState().errorMessage).toBeNull();
     expect(model.sessionStore.getState()).toMatchObject({
-      connectionMode: "lan",
+      connectionMode: "remote",
       connectionState: "connected",
-      desktopName: "Trusted Mac",
-      recentTasks: [
-        expect.objectContaining({ id: "task-trusted", title: "Trusted LAN task" })
-      ]
+      desktopName: "Kanna Cloud"
     });
   });
 

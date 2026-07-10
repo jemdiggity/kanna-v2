@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSessionStore } from "./sessionStore";
 import { createMobileController } from "./mobileController";
-import type { MobileAuthSession } from "../lib/firebase/auth";
+import type { MobileAuthSession, MobileAuthState } from "../lib/firebase/auth";
 import type {
   TaskAgentStreamEvent,
   TaskAgentSubscription,
@@ -9,6 +9,27 @@ import type {
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../lib/api/client";
+import type { TaskSummary } from "../lib/api/types";
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushMicrotasks(iterations = 5): Promise<void> {
+  for (let index = 0; index < iterations; index += 1) {
+    await Promise.resolve();
+  }
+}
 
 function createTerminalSubscriptionMock(): {
   subscription: TaskTerminalSubscription;
@@ -179,6 +200,1146 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-1"]);
   });
 
+  it("queues a complete trailing bootstrap requested during an active run", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const firstStatus = createDeferred<
+      Awaited<ReturnType<KannaClient["getStatus"]>>
+    >();
+    const stoppedStatus = {
+      state: "stopped" as const,
+      desktopId: "none",
+      desktopName: "No desktop",
+      lanHost: "none",
+      lanPort: 0,
+      pairingCode: null
+    };
+    client.getStatus
+      .mockReturnValueOnce(firstStatus.promise)
+      .mockResolvedValueOnce(stoppedStatus);
+    const controller = createMobileController(client, store);
+
+    const firstBootstrap = controller.bootstrap();
+    await Promise.resolve();
+    expect(client.getStatus).toHaveBeenCalledTimes(1);
+    const trailingBootstrap = controller.bootstrap();
+    firstStatus.resolve(stoppedStatus);
+
+    await Promise.all([firstBootstrap, trailingBootstrap]);
+
+    expect(client.getStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts a new bootstrap in the runner settlement microtask boundary", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const firstStatus = createDeferred<
+      Awaited<ReturnType<KannaClient["getStatus"]>>
+    >();
+    const stoppedStatus = {
+      state: "stopped" as const,
+      desktopId: "none",
+      desktopName: "No desktop",
+      lanHost: "none",
+      lanPort: 0,
+      pairingCode: null
+    };
+    client.getStatus
+      .mockReturnValueOnce(firstStatus.promise)
+      .mockResolvedValueOnce(stoppedStatus);
+    const controller = createMobileController(client, store);
+
+    const firstBootstrap = controller.bootstrap();
+    await Promise.resolve();
+    expect(client.getStatus).toHaveBeenCalledTimes(1);
+    let boundaryBootstrap: Promise<void> | null = null;
+    void firstStatus.promise.then(() => {
+      void Promise.resolve().then(() => {
+        boundaryBootstrap = controller.bootstrap();
+      });
+    });
+    firstStatus.resolve(stoppedStatus);
+
+    await firstBootstrap;
+    await flushMicrotasks();
+
+    expect(client.getStatus).toHaveBeenCalledTimes(2);
+    await boundaryBootstrap;
+  });
+
+  it("does not start a task stream when openTask cannot resolve the task", () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    controller.openTask("missing-task");
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "missing-task",
+      taskTerminalTaskId: null,
+      taskAgentTaskId: null
+    });
+    expect(client.observeTaskTerminal).not.toHaveBeenCalled();
+    expect(client.observeTaskAgent).not.toHaveBeenCalled();
+  });
+
+  it("preserves last-good remote collections until the first live snapshot without polling", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const oldTask: TaskSummary = {
+      id: "old-task",
+      repoId: "old-repo",
+      repoName: "Old Repo",
+      title: "Old replacement result",
+      stage: "in progress"
+    };
+    const replacementTask: TaskSummary = {
+      id: "replacement-task",
+      repoId: "replacement-repo",
+      repoName: "Replacement Repo",
+      title: "Replacement result",
+      stage: "review"
+    };
+    store.setRepos([{ id: oldTask.repoId, name: "Old Repo" }]);
+    store.setRecentTasks([oldTask]);
+    store.setRepoTasks([oldTask]);
+    store.setSearchResults("replacement", [oldTask]);
+    store.setSelectedTask(oldTask.id);
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listRepos.mockResolvedValue([
+      { id: replacementTask.repoId, name: "Replacement Repo" }
+    ]);
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+
+    expect(client.listRepos).not.toHaveBeenCalled();
+    expect(client.listRecentTasks).not.toHaveBeenCalled();
+    expect(client.listRepoTasks).not.toHaveBeenCalled();
+    expect(client.searchTasks).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      recentTasks: [oldTask],
+      repoTasks: [oldTask],
+      searchResults: [oldTask],
+      selectedTaskId: oldTask.id
+    });
+
+    liveUpdate?.([replacementTask]);
+
+    expect(store.getState()).toMatchObject({
+      recentTasks: [replacementTask],
+      searchResults: [replacementTask],
+      selectedTaskId: null
+    });
+    await vi.waitFor(() => {
+      expect(store.getState()).toMatchObject({
+        repos: [{ id: replacementTask.repoId, name: "Replacement Repo" }],
+        selectedRepoId: replacementTask.repoId,
+        repoTasks: [replacementTask]
+      });
+    });
+    expect(store.getState()).toMatchObject({
+      recentTasks: [replacementTask],
+      searchResults: [replacementTask],
+      selectedTaskId: null
+    });
+  });
+
+  it("ignores obsolete live callbacks and accepts the current empty snapshot", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const selectedTask: TaskSummary = {
+      id: "selected-task",
+      repoId: "repo-1",
+      repoName: "Repo One",
+      title: "Selected task",
+      stage: "in progress"
+    };
+    store.setRepos([{ id: selectedTask.repoId, name: "Repo One" }]);
+    store.setRecentTasks([selectedTask]);
+    store.setRepoTasks([selectedTask]);
+    store.setSearchResults("selected", [selectedTask]);
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listRepos.mockResolvedValue([]);
+    const subscriptions: Array<{
+      onUpdate: (tasks: TaskSummary[]) => void;
+      onError: (error: unknown) => void;
+      unsubscribe: ReturnType<typeof vi.fn>;
+    }> = [];
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate, onError) => {
+        const unsubscribe = vi.fn();
+        subscriptions.push({
+          onUpdate,
+          onError: onError ?? (() => undefined),
+          unsubscribe
+        });
+        return unsubscribe;
+      })
+    });
+
+    await controller.bootstrap();
+    controller.openTask(selectedTask.id);
+    await controller.refresh();
+
+    expect(subscriptions).toHaveLength(2);
+    expect(subscriptions[0].unsubscribe).toHaveBeenCalledOnce();
+    expect(store.getState()).toMatchObject({
+      recentTasks: [selectedTask],
+      selectedTaskId: selectedTask.id,
+      taskTerminalTaskId: selectedTask.id
+    });
+    expect(client.observeTaskTerminal).toHaveBeenCalledTimes(2);
+
+    subscriptions[0].onUpdate([
+      { ...selectedTask, id: "obsolete-task", title: "Obsolete task" }
+    ]);
+    subscriptions[0].onError(new Error("obsolete listener failed"));
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: null,
+      recentTasks: [selectedTask],
+      selectedTaskId: selectedTask.id
+    });
+
+    subscriptions[1].onUpdate([]);
+
+    await vi.waitFor(() => {
+      expect(store.getState()).toMatchObject({
+        connectionState: "connected",
+        repos: [],
+        recentTasks: [],
+        repoTasks: [],
+        searchResults: [],
+        selectedTaskId: null,
+        taskTerminalTaskId: null
+      });
+    });
+    expect(client.__terminalStream.subscription.close).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains connected task and stream state when the current live subscription errors", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const selectedTask: TaskSummary = {
+      id: "selected-task",
+      repoId: "repo-1",
+      title: "Selected task",
+      stage: "in progress"
+    };
+    store.setRepos([{ id: selectedTask.repoId, name: "Repo One" }]);
+    store.setRecentTasks([selectedTask]);
+    store.setRepoTasks([selectedTask]);
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    let liveError: ((error: unknown) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, _onUpdate, onError) => {
+        liveError = onError ?? null;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    controller.openTask(selectedTask.id);
+    liveError?.(new Error("task subscription unavailable"));
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: "task subscription unavailable",
+      recentTasks: [selectedTask],
+      repoTasks: [selectedTask],
+      selectedTaskId: selectedTask.id,
+      taskTerminalTaskId: selectedTask.id
+    });
+    expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
+  });
+
+  it("clears an owned cloud subscription error after its current snapshot recovers", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const recoveredTask: TaskSummary = {
+      id: "recovered-task",
+      repoId: "repo-1",
+      title: "Recovered task",
+      stage: "in progress"
+    };
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    let liveError: ((error: unknown) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate, onError) => {
+        liveUpdate = onUpdate;
+        liveError = onError ?? null;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    liveError?.(new Error("cloud tasks unavailable"));
+    expect(store.getState().errorMessage).toBe("cloud tasks unavailable");
+
+    liveUpdate?.([recoveredTask]);
+
+    expect(store.getState().errorMessage).toBeNull();
+    expect(store.getState().recentTasks).toEqual([recoveredTask]);
+  });
+
+  it("clears an old subscription error when its replacement snapshot succeeds", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const refreshStatus = createDeferred<
+      Awaited<ReturnType<KannaClient["getStatus"]>>
+    >();
+    const cloudStatus = {
+      state: "running" as const,
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    };
+    const recoveredTask: TaskSummary = {
+      id: "recovered-task",
+      repoId: "repo-1",
+      title: "Recovered task",
+      stage: "in progress"
+    };
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus
+      .mockResolvedValueOnce(cloudStatus)
+      .mockReturnValueOnce(refreshStatus.promise);
+    const subscriptions: Array<{
+      onUpdate: (tasks: TaskSummary[]) => void;
+      onError: (error: unknown) => void;
+    }> = [];
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate, onError) => {
+        subscriptions.push({
+          onUpdate,
+          onError: onError ?? (() => undefined)
+        });
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    const refresh = controller.refresh();
+    await flushMicrotasks();
+    subscriptions[0].onError(new Error("old cloud listener failed"));
+    expect(store.getState().errorMessage).toBe("old cloud listener failed");
+
+    refreshStatus.resolve(cloudStatus);
+    await refresh;
+    expect(subscriptions).toHaveLength(2);
+    subscriptions[1].onUpdate([recoveredTask]);
+
+    expect(store.getState().errorMessage).toBeNull();
+    expect(store.getState().recentTasks).toEqual([recoveredTask]);
+  });
+
+  it("supplements live task repositories with explicit source repositories", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const cloudTask: TaskSummary = {
+      id: "cloud-task",
+      repoId: "repo-with-task",
+      repoName: "Repo With Task",
+      title: "Cloud task",
+      stage: "in progress"
+    };
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listRepos.mockResolvedValue([
+      { id: "empty-repo", name: "Empty Repo" }
+    ]);
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    liveUpdate?.([cloudTask]);
+    controller.openTask(cloudTask.id);
+
+    expect(store.getState().recentTasks).toEqual([cloudTask]);
+    await vi.waitFor(() => {
+      expect(store.getState().repos).toEqual([
+        { id: "empty-repo", name: "Empty Repo" },
+        { id: "repo-with-task", name: "Repo With Task" }
+      ]);
+    });
+  });
+
+  it("preserves a selected empty repository while its live supplement is pending", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const explicitRepos = createDeferred<
+      Awaited<ReturnType<KannaClient["listRepos"]>>
+    >();
+    const cloudTask: TaskSummary = {
+      id: "cloud-task",
+      repoId: "repo-with-task",
+      repoName: "Repo With Task",
+      title: "Cloud task",
+      stage: "in progress"
+    };
+    store.hydrateContext({
+      selectedDesktopId: null,
+      selectedRepoId: "empty-repo",
+      selectedTaskId: null,
+      activeView: "tasks",
+      authUser: null
+    });
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listRepos.mockReturnValue(explicitRepos.promise);
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    liveUpdate?.([cloudTask]);
+
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "empty-repo",
+      repos: [
+        { id: "empty-repo", name: "empty-repo" },
+        { id: "repo-with-task", name: "Repo With Task" }
+      ],
+      repoTasks: []
+    });
+
+    explicitRepos.resolve([{ id: "empty-repo", name: "Empty Repo" }]);
+    await flushMicrotasks();
+
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "empty-repo",
+      repos: [
+        { id: "empty-repo", name: "Empty Repo" },
+        { id: "repo-with-task", name: "Repo With Task" }
+      ],
+      repoTasks: []
+    });
+  });
+
+  it("ignores an obsolete explicit repository supplement after a newer live snapshot", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const oldRepos = createDeferred<Awaited<ReturnType<KannaClient["listRepos"]>>>();
+    const newRepos = createDeferred<Awaited<ReturnType<KannaClient["listRepos"]>>>();
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listRepos
+      .mockReturnValueOnce(oldRepos.promise)
+      .mockReturnValueOnce(newRepos.promise);
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    liveUpdate?.([]);
+    liveUpdate?.([]);
+    newRepos.resolve([{ id: "new-repo", name: "New Repo" }]);
+    await vi.waitFor(() => {
+      expect(store.getState().repos).toEqual([
+        { id: "new-repo", name: "New Repo" }
+      ]);
+    });
+
+    oldRepos.resolve([{ id: "old-repo", name: "Old Repo" }]);
+    await flushMicrotasks();
+
+    expect(store.getState().repos).toEqual([
+      { id: "new-repo", name: "New Repo" }
+    ]);
+  });
+
+  it("preserves an unrelated current error across a successful live snapshot", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const task: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Cloud task",
+      stage: "in progress"
+    };
+    const sharedError = new Error("shared request failure");
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.sendTaskInput.mockRejectedValueOnce(sharedError);
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    let liveError: ((error: unknown) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate, onError) => {
+        liveUpdate = onUpdate;
+        liveError = onError ?? null;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    liveUpdate?.([task]);
+    liveError?.(sharedError);
+    await controller.sendTaskInput(task.id, "continue");
+    expect(store.getState()).toMatchObject({
+      connectionState: "error",
+      errorMessage: sharedError.message
+    });
+
+    liveUpdate?.([task]);
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "error",
+      errorMessage: sharedError.message,
+      recentTasks: [task]
+    });
+  });
+
+  it("does not start a persisted unresolved task stream before its live snapshot", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const restoredTask: TaskSummary = {
+      id: "restored-task",
+      repoId: "repo-1",
+      title: "Restored task",
+      stage: "in progress"
+    };
+    store.setSelectedTask(restoredTask.id);
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+
+    expect(store.getState().selectedTaskId).toBe(restoredTask.id);
+    expect(client.observeTaskTerminal).not.toHaveBeenCalled();
+
+    liveUpdate?.([restoredTask]);
+
+    expect(store.getState().selectedTaskId).toBe(restoredTask.id);
+    expect(client.observeTaskTerminal).toHaveBeenCalledWith(
+      restoredTask.id,
+      expect.any(Function)
+    );
+  });
+
+  it("does not let a delayed LAN collection read overwrite a newer repo selection", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const staleRead = createDeferred<TaskSummary[]>();
+    const staleReadStarted = createDeferred<void>();
+    const selectedTask: TaskSummary = {
+      id: "new-task",
+      repoId: "new-repo",
+      repoName: "New Repo",
+      title: "New task",
+      stage: "in progress"
+    };
+    const staleTask: TaskSummary = {
+      id: "stale-task",
+      repoId: "repo-1",
+      title: "Stale task",
+      stage: "review"
+    };
+    store.setRepos([{ id: selectedTask.repoId, name: "New Repo" }]);
+    store.setRecentTasks([selectedTask]);
+    store.setRepoTasks([selectedTask]);
+    client.listRecentTasks.mockImplementationOnce(() => {
+      staleReadStarted.resolve();
+      return staleRead.promise;
+    });
+    client.listRepoTasks.mockImplementation(async (repoId: string) =>
+      repoId === selectedTask.repoId ? [selectedTask] : [staleTask]
+    );
+    const controller = createMobileController(client, store);
+
+    const bootstrap = controller.bootstrap();
+    await staleReadStarted.promise;
+    await controller.selectRepo(selectedTask.repoId);
+    staleRead.resolve([staleTask]);
+    await bootstrap;
+
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: selectedTask.repoId,
+      recentTasks: [selectedTask],
+      repoTasks: [selectedTask]
+    });
+  });
+
+  it("invalidates an in-flight LAN refresh when remote live ownership starts", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const staleRead = createDeferred<TaskSummary[]>();
+    const staleReadStarted = createDeferred<void>();
+    const staleTask: TaskSummary = {
+      id: "stale-task",
+      repoId: "repo-1",
+      title: "Stale task",
+      stage: "review"
+    };
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus
+      .mockResolvedValueOnce({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+      .mockResolvedValue({
+        state: "running",
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn(() => vi.fn())
+    });
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.listRecentTasks.mockImplementationOnce(() => {
+      staleReadStarted.resolve();
+      return staleRead.promise;
+    });
+    client.listRepoTasks.mockResolvedValueOnce([staleTask]);
+    const timerAdvance = vi.advanceTimersByTimeAsync(3_000);
+    await staleReadStarted.promise;
+    await timerAdvance;
+
+    await controller.bootstrap();
+    staleRead.resolve([staleTask]);
+    await flushMicrotasks();
+
+    expect(store.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      recentTasks: [expect.objectContaining({ id: "task-1" })],
+      selectedTaskId: "task-1",
+      taskTerminalTaskId: "task-1"
+    });
+  });
+
+  it("switches the existing refresh timer to desktops as soon as live ownership starts", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const desktopRefresh = createDeferred<
+      Awaited<ReturnType<KannaClient["listDesktops"]>>
+    >();
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus
+      .mockResolvedValueOnce({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+      .mockResolvedValue({
+        state: "running",
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn(() => vi.fn())
+    });
+
+    await controller.bootstrap();
+    const taskReadCount = client.listRecentTasks.mock.calls.length;
+    client.listDesktops.mockReturnValueOnce(desktopRefresh.promise);
+
+    const refresh = controller.refresh();
+    await vi.waitFor(() => {
+      expect(client.listDesktops).toHaveBeenCalledTimes(2);
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(client.listRecentTasks).toHaveBeenCalledTimes(taskReadCount);
+
+    desktopRefresh.resolve([
+      { id: "desktop-1", name: "Studio Mac", online: true, mode: "remote" }
+    ]);
+    await refresh;
+  });
+
+  it("ignores a rejected LAN refresh after remote live ownership starts", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const staleRead = createDeferred<TaskSummary[]>();
+    const staleReadStarted = createDeferred<void>();
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus
+      .mockResolvedValueOnce({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+      .mockResolvedValue({
+        state: "running",
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn(() => vi.fn())
+    });
+
+    await controller.bootstrap();
+    client.listRecentTasks.mockImplementationOnce(() => {
+      staleReadStarted.resolve();
+      return staleRead.promise;
+    });
+    const timerAdvance = vi.advanceTimersByTimeAsync(3_000);
+    await staleReadStarted.promise;
+    await timerAdvance;
+
+    await controller.bootstrap();
+    staleRead.reject(new Error("obsolete LAN tasks failed"));
+    await flushMicrotasks();
+
+    expect(store.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      errorMessage: null
+    });
+  });
+
+  it("ignores a stale active-search refresh rejection after live ownership starts", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const staleSearch = createDeferred<TaskSummary[]>();
+    const staleSearchStarted = createDeferred<void>();
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus
+      .mockResolvedValueOnce({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+      .mockResolvedValue({
+        state: "running",
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn(() => vi.fn())
+    });
+
+    await controller.bootstrap();
+    await controller.searchTasks("needle");
+    client.searchTasks.mockImplementationOnce(() => {
+      staleSearchStarted.resolve();
+      return staleSearch.promise;
+    });
+    const timerAdvance = vi.advanceTimersByTimeAsync(3_000);
+    await staleSearchStarted.promise;
+    await timerAdvance;
+
+    await controller.bootstrap();
+    staleSearch.reject(new Error("obsolete search failed"));
+    await flushMicrotasks();
+
+    expect(store.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      errorMessage: null
+    });
+  });
+
+  it("ignores a stale initial collection rejection after a newer repo selection", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const staleRead = createDeferred<TaskSummary[]>();
+    const staleReadStarted = createDeferred<void>();
+    client.listRecentTasks.mockImplementationOnce(() => {
+      staleReadStarted.resolve();
+      return staleRead.promise;
+    });
+    const controller = createMobileController(client, store);
+
+    const bootstrap = controller.bootstrap();
+    await staleReadStarted.promise;
+    await controller.selectRepo("repo-2");
+    staleRead.reject(new Error("obsolete bootstrap tasks failed"));
+    await bootstrap;
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: null,
+      selectedRepoId: "repo-2",
+      repoTasks: [expect.objectContaining({ id: "task-repo-2" })]
+    });
+  });
+
+  it("ignores a stale repo rejection after a newer repo selection commits", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const staleRepoRead = createDeferred<TaskSummary[]>();
+    const staleRepoReadStarted = createDeferred<void>();
+    const currentTask: TaskSummary = {
+      id: "task-current",
+      repoId: "repo-2",
+      title: "Current repo task",
+      stage: "in progress"
+    };
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    client.listRepoTasks.mockImplementationOnce(() => {
+      staleRepoReadStarted.resolve();
+      return staleRepoRead.promise;
+    });
+    client.listRepoTasks.mockResolvedValueOnce([currentTask]);
+
+    const staleSelection = controller.selectRepo("repo-1");
+    await staleRepoReadStarted.promise;
+    await controller.selectRepo("repo-2");
+    staleRepoRead.reject(new Error("obsolete repo failed"));
+    await staleSelection;
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: null,
+      selectedRepoId: "repo-2",
+      repoTasks: [currentTask]
+    });
+  });
+
+  it("does not let an obsolete repo success clear the current repo error", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const staleRepoRead = createDeferred<TaskSummary[]>();
+    const staleRepoReadStarted = createDeferred<void>();
+    const currentError = new Error("current repo failed");
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    client.listRepoTasks.mockImplementationOnce(() => {
+      staleRepoReadStarted.resolve();
+      return staleRepoRead.promise;
+    });
+    client.listRepoTasks.mockRejectedValueOnce(currentError);
+
+    const staleSelection = controller.selectRepo("repo-1");
+    await staleRepoReadStarted.promise;
+    await controller.selectRepo("repo-2");
+    expect(store.getState()).toMatchObject({
+      connectionState: "error",
+      errorMessage: currentError.message,
+      selectedRepoId: "repo-2"
+    });
+
+    staleRepoRead.resolve([]);
+    await staleSelection;
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "error",
+      errorMessage: currentError.message,
+      selectedRepoId: "repo-2"
+    });
+  });
+
+  it("ignores an old UID desktop result after clearing account state", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const oldDesktopRead = createDeferred<
+      Awaited<ReturnType<KannaClient["listDesktops"]>>
+    >();
+    const nextDesktopRead = createDeferred<
+      Awaited<ReturnType<KannaClient["listDesktops"]>>
+    >();
+    const oldDesktopReadStarted = createDeferred<void>();
+    const nextDesktopReadStarted = createDeferred<void>();
+    let authState: MobileAuthState = {
+      status: "signedIn",
+      user: { uid: "user-a", email: "a@example.com", displayName: null }
+    };
+    let authListener: Parameters<MobileAuthSession["subscribe"]>[0] | null = null;
+    vi.mocked(auth.getState).mockImplementation(() => authState);
+    vi.mocked(auth.subscribe).mockImplementation((listener) => {
+      authListener = listener;
+      listener(authState);
+      return vi.fn();
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops
+      .mockImplementationOnce(() => {
+        oldDesktopReadStarted.resolve();
+        return oldDesktopRead.promise;
+      })
+      .mockImplementationOnce(() => {
+        nextDesktopReadStarted.resolve();
+        return nextDesktopRead.promise;
+      });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn(() => vi.fn())
+    });
+
+    const bootstrap = controller.bootstrap();
+    await oldDesktopReadStarted.promise;
+    store.setDesktops([
+      { id: "desktop-a", name: "User A Mac", online: true, mode: "remote" }
+    ]);
+    authState = {
+      status: "signedIn",
+      user: { uid: "user-b", email: "b@example.com", displayName: null }
+    };
+    authListener?.(authState);
+    expect(store.getState().desktops).toEqual([]);
+
+    oldDesktopRead.resolve([
+      { id: "desktop-a", name: "Old User A Mac", online: true, mode: "remote" }
+    ]);
+    await nextDesktopReadStarted.promise;
+
+    expect(store.getState().desktops).toEqual([]);
+    nextDesktopRead.resolve([]);
+    await bootstrap;
+  });
+
+  it("does not publish an old UID desktop error after account replacement", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const oldDesktopRead = createDeferred<
+      Awaited<ReturnType<KannaClient["listDesktops"]>>
+    >();
+    const nextDesktopRead = createDeferred<
+      Awaited<ReturnType<KannaClient["listDesktops"]>>
+    >();
+    const oldDesktopReadStarted = createDeferred<void>();
+    const nextDesktopReadStarted = createDeferred<void>();
+    let authState: MobileAuthState = {
+      status: "signedIn",
+      user: { uid: "user-a", email: "a@example.com", displayName: null }
+    };
+    let authListener: Parameters<MobileAuthSession["subscribe"]>[0] | null = null;
+    vi.mocked(auth.getState).mockImplementation(() => authState);
+    vi.mocked(auth.subscribe).mockImplementation((listener) => {
+      authListener = listener;
+      listener(authState);
+      return vi.fn();
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops
+      .mockImplementationOnce(() => {
+        oldDesktopReadStarted.resolve();
+        return oldDesktopRead.promise;
+      })
+      .mockImplementationOnce(() => {
+        nextDesktopReadStarted.resolve();
+        return nextDesktopRead.promise;
+      });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn(() => vi.fn())
+    });
+    const publications: ReturnType<typeof store.getState>[] = [];
+    store.subscribe(() => publications.push(store.getState()));
+
+    const bootstrap = controller.bootstrap();
+    await oldDesktopReadStarted.promise;
+    authState = {
+      status: "signedIn",
+      user: { uid: "user-b", email: "b@example.com", displayName: null }
+    };
+    authListener?.(authState);
+    oldDesktopRead.reject(new Error("old user desktop failed"));
+    await nextDesktopReadStarted.promise;
+
+    expect(
+      publications.some(
+        (state) =>
+          state.auth.status === "signedIn" &&
+          state.auth.user.uid === "user-b" &&
+          state.errorMessage === "old user desktop failed"
+      )
+    ).toBe(false);
+    nextDesktopRead.resolve([]);
+    await bootstrap;
+  });
+
   it("loads task collections from the signed-in cloud client without LAN pairing", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -318,6 +1479,294 @@ describe("createMobileController", () => {
       connectionState: "connected",
       desktopName: "Kanna Cloud"
     });
+  });
+
+  it("clears account state before publishing a new signed-in UID and restarts live tasks", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    let authState: MobileAuthState = {
+      status: "signedIn",
+      user: { uid: "user-a", email: "a@example.com", displayName: null }
+    };
+    let authListener: Parameters<MobileAuthSession["subscribe"]>[0] | null = null;
+    vi.mocked(auth.getState).mockImplementation(() => authState);
+    vi.mocked(auth.subscribe).mockImplementation((listener) => {
+      authListener = listener;
+      listener(authState);
+      return vi.fn();
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    const subscriptions: Array<{
+      uid: string;
+      onUpdate: (tasks: TaskSummary[]) => void;
+      unsubscribe: ReturnType<typeof vi.fn>;
+    }> = [];
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((uid, onUpdate) => {
+        const unsubscribe = vi.fn();
+        subscriptions.push({ uid, onUpdate, unsubscribe });
+        return unsubscribe;
+      })
+    });
+
+    await controller.bootstrap();
+    expect(subscriptions.map(({ uid }) => uid)).toEqual(["user-a"]);
+    const taskA: TaskSummary = {
+      id: "task-a",
+      repoId: "repo-a",
+      repoName: "Repo A",
+      title: "User A task",
+      stage: "in progress"
+    };
+    store.setTrustedDesktops([
+      {
+        desktopId: "trusted-local",
+        displayName: "Trusted Local Mac",
+        lanEndpoints: [],
+        lastSeenAt: "2026-07-11T00:00:00.000Z"
+      }
+    ]);
+    store.upsertRepoCreationProfile({
+      repoId: "repo-a",
+      desktopId: "desktop-a",
+      agentProvider: "codex",
+      updatedAt: "2026-07-11T00:00:00.000Z"
+    });
+    store.setComposerState(true, "Keep this draft");
+    store.setComposerDesktop("desktop-a");
+    store.setComposerAgentProvider("codex");
+    store.setDesktops([
+      { id: "desktop-a", name: "User A Mac", online: true, mode: "remote" }
+    ]);
+    store.setRepos([{ id: "repo-a", name: "Repo A" }]);
+    store.setRecentTasks([taskA]);
+    store.setRepoTasks([taskA]);
+    store.setSearchResults("keep-query", [taskA]);
+    controller.openTask(taskA.id);
+    client.__terminalStream.emit({
+      type: "ready",
+      taskId: taskA.id,
+      cols: 80,
+      rows: 24
+    });
+    client.__terminalStream.emit({
+      type: "output",
+      taskId: taskA.id,
+      dataB64: "QQ=="
+    });
+    store.beginTaskAgent(taskA.id);
+    store.applyTaskAgentStreamEvent(taskA.id, {
+      type: "event",
+      seq: 1,
+      event: { type: "assistant_text", text: "User A", truncated: false }
+    });
+    const synchronousPublications: ReturnType<typeof store.getState>[] = [];
+    store.subscribe(() => synchronousPublications.push(store.getState()));
+
+    authState = {
+      status: "signedIn",
+      user: { uid: "user-b", email: "b@example.com", displayName: null }
+    };
+    authListener?.(authState);
+
+    expect(subscriptions[0].unsubscribe).toHaveBeenCalledOnce();
+    expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
+    expect(store.getState()).toMatchObject({
+      auth: authState,
+      desktops: [],
+      selectedDesktopId: null,
+      repos: [],
+      selectedRepoId: null,
+      recentTasks: [],
+      repoTasks: [],
+      searchQuery: "keep-query",
+      searchResults: [],
+      selectedTaskId: null,
+      taskTerminalTaskId: null,
+      taskTerminalStatus: "idle",
+      taskTerminalOutput: "",
+      taskTerminalCols: null,
+      taskTerminalRows: null,
+      taskTerminalErrorMessage: null,
+      taskAgentTaskId: null,
+      taskAgentStatus: "idle",
+      taskAgentEvents: [],
+      taskAgentErrorMessage: null,
+      trustedDesktops: [expect.objectContaining({ desktopId: "trusted-local" })],
+      repoCreationProfiles: [expect.objectContaining({ repoId: "repo-a" })],
+      isComposerOpen: true,
+      composerPrompt: "Keep this draft",
+      composerDesktopId: "desktop-a",
+      composerAgentProvider: "codex"
+    });
+    const userBPublications = synchronousPublications.filter(
+      ({ auth: publishedAuth }) =>
+        publishedAuth.status === "signedIn" && publishedAuth.user.uid === "user-b"
+    );
+    expect(userBPublications.length).toBeGreaterThan(0);
+    for (const publication of userBPublications) {
+      expect(publication).toMatchObject({
+        desktops: [],
+        repos: [],
+        recentTasks: [],
+        repoTasks: [],
+        searchResults: [],
+        selectedTaskId: null,
+        taskTerminalTaskId: null,
+        taskAgentTaskId: null
+      });
+    }
+
+    await vi.waitFor(() => {
+      expect(subscriptions.map(({ uid }) => uid)).toEqual(["user-a", "user-b"]);
+    });
+    expect(subscriptions[1].unsubscribe).not.toHaveBeenCalled();
+    const taskB: TaskSummary = {
+      id: "task-b",
+      repoId: "repo-b",
+      repoName: "Repo B",
+      title: "User B task",
+      stage: "review"
+    };
+    subscriptions[1].onUpdate([taskB]);
+    expect(store.getState().recentTasks).toEqual([taskB]);
+
+    authListener?.({
+      status: "signedIn",
+      user: { uid: "user-b", email: "refreshed-b@example.com", displayName: null }
+    });
+    expect(store.getState().recentTasks).toEqual([taskB]);
+    expect(subscriptions.map(({ uid }) => uid)).toEqual(["user-a", "user-b"]);
+    expect(subscriptions[1].unsubscribe).not.toHaveBeenCalled();
+  });
+
+  it("clears signed-in account state and reboots routing through sign-out before another UID", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    let authState: MobileAuthState = {
+      status: "signedIn",
+      user: { uid: "user-a", email: "a@example.com", displayName: null }
+    };
+    let authListener: Parameters<MobileAuthSession["subscribe"]>[0] | null = null;
+    vi.mocked(auth.getState).mockImplementation(() => authState);
+    vi.mocked(auth.subscribe).mockImplementation((listener) => {
+      authListener = listener;
+      listener(authState);
+      return vi.fn();
+    });
+    client.getStatus
+      .mockResolvedValueOnce({
+        state: "running",
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      })
+      .mockResolvedValueOnce({
+        state: "stopped",
+        desktopId: "none",
+        desktopName: "No desktop",
+        lanHost: "none",
+        lanPort: 0,
+        pairingCode: null
+      })
+      .mockResolvedValue({
+        state: "running",
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      });
+    const subscriptions: Array<{
+      uid: string;
+      onUpdate: (tasks: TaskSummary[]) => void;
+      unsubscribe: ReturnType<typeof vi.fn>;
+    }> = [];
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((uid, onUpdate) => {
+        const unsubscribe = vi.fn();
+        subscriptions.push({ uid, onUpdate, unsubscribe });
+        return unsubscribe;
+      })
+    });
+
+    await controller.bootstrap();
+    const taskA: TaskSummary = {
+      id: "task-a",
+      repoId: "repo-a",
+      repoName: "Repo A",
+      title: "User A task",
+      stage: "in progress"
+    };
+    subscriptions[0].onUpdate([taskA]);
+    controller.openTask(taskA.id);
+    store.setTrustedDesktops([
+      {
+        desktopId: "trusted-local",
+        displayName: "Trusted Local Mac",
+        lanEndpoints: [],
+        lastSeenAt: "2026-07-11T00:00:00.000Z"
+      }
+    ]);
+    store.setComposerState(true, "Keep draft");
+    store.setComposerDesktop("desktop-a");
+    store.setComposerAgentProvider("codex");
+
+    authState = { status: "signedOut" };
+    authListener?.(authState);
+
+    expect(subscriptions[0].unsubscribe).toHaveBeenCalledOnce();
+    expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
+    expect(store.getState()).toMatchObject({
+      auth: { status: "signedOut" },
+      desktops: [],
+      repos: [],
+      recentTasks: [],
+      repoTasks: [],
+      searchResults: [],
+      selectedTaskId: null,
+      taskTerminalTaskId: null,
+      taskAgentTaskId: null,
+      trustedDesktops: [expect.objectContaining({ desktopId: "trusted-local" })],
+      isComposerOpen: true,
+      composerPrompt: "Keep draft",
+      composerDesktopId: "desktop-a",
+      composerAgentProvider: "codex"
+    });
+    await flushMicrotasks();
+    expect(client.getStatus).toHaveBeenCalledTimes(2);
+
+    authState = {
+      status: "signedIn",
+      user: { uid: "user-b", email: "b@example.com", displayName: null }
+    };
+    authListener?.(authState);
+    await vi.waitFor(() => {
+      expect(subscriptions.map(({ uid }) => uid)).toEqual(["user-a", "user-b"]);
+    });
+    const taskB: TaskSummary = {
+      id: "task-b",
+      repoId: "repo-b",
+      repoName: "Repo B",
+      title: "User B task",
+      stage: "review"
+    };
+    subscriptions[0].onUpdate([taskA]);
+    expect(store.getState().recentTasks).toEqual([]);
+    subscriptions[1].onUpdate([taskB]);
+    expect(store.getState().recentTasks).toEqual([taskB]);
+    expect(client.getStatus).toHaveBeenCalledTimes(3);
   });
 
   it("searches tasks and switches to the search surface", async () => {
@@ -873,7 +2322,11 @@ describe("createMobileController", () => {
     await controller.bootstrap();
     controller.openTask("cloud-task-agent");
 
-    expect(subscribeCloudTasks).toHaveBeenCalledWith("user-1", expect.any(Function));
+    expect(subscribeCloudTasks).toHaveBeenCalledWith(
+      "user-1",
+      expect.any(Function),
+      expect.any(Function)
+    );
     expect(client.observeTaskAgent).toHaveBeenCalledWith(
       "cloud-task-agent",
       expect.any(Function)
@@ -1052,18 +2505,16 @@ describe("createMobileController", () => {
         ownerOnline: true
       }
     ];
-    client.listDesktops
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          id: "desktop-owner",
-          name: "Kanna Desktop",
-          online: true,
-          mode: "remote",
-          reachableViaRelay: true,
-          connectionMode: "internet"
-        }
-      ]);
+    client.listDesktops.mockResolvedValueOnce([
+      {
+        id: "desktop-owner",
+        name: "Kanna Desktop",
+        online: true,
+        mode: "remote",
+        reachableViaRelay: true,
+        connectionMode: "internet"
+      }
+    ]);
     client.getStatus.mockResolvedValueOnce({
       state: "running",
       desktopId: "cloud",
@@ -1122,9 +2573,6 @@ describe("createMobileController", () => {
       pairingCode: null
     });
     client.listDesktops
-      .mockResolvedValueOnce([
-        { id: "desktop-owner", name: "Studio Mac", online: false, mode: "remote" }
-      ])
       .mockResolvedValueOnce([
         { id: "desktop-owner", name: "Studio Mac", online: false, mode: "remote" }
       ])
