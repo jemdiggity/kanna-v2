@@ -13,18 +13,11 @@ import type { AgentProvider } from "../types/kanna";
 //   3. If the winning source has candidates but none are available, resolution
 //      throws rather than silently falling back to another source or provider.
 //
-// Note: because built-in agent definitions list providers as e.g.
-// `codex, claude, copilot, opencode, antigravity`, the agent's list takes precedence over the task's
-// stored provider on stage advance. Change the ordering in an AGENT.md, or set a
-// stage/explicit provider, to override.
+// Note: the ordered list in a built-in agent definition takes precedence over
+// the task's stored provider on stage advance. Change the ordering in an
+// AGENT.md, or set a stage/explicit provider, to override.
 
-export interface AgentProviderAvailability {
-  claude: boolean;
-  copilot: boolean;
-  codex: boolean;
-  opencode: boolean;
-  antigravity: boolean;
-}
+export type AgentProviderAvailability = Record<AgentProvider, boolean>;
 
 export interface AgentProviderPrecedenceSources {
   explicit?: AgentProvider | AgentProvider[];

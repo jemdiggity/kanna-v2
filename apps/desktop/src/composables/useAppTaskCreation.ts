@@ -1,6 +1,7 @@
 import { ref, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
 import { parseRepoConfig } from "@kanna/core";
+import { isAgentProvider } from "@kanna/agent-protocol";
 import type { AgentProvider } from "../types/kanna";
 import type { AgentExecutionType } from "../stores/agentExecutionType";
 
@@ -234,13 +235,7 @@ export function useAppTaskCreation({
 
   function firstSupportedAgentProvider(agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined): AgentProvider | undefined {
     const providers = Array.isArray(agentProvider) ? agentProvider : [agentProvider];
-    return providers.find((provider): provider is AgentProvider =>
-      provider === "claude"
-      || provider === "copilot"
-      || provider === "codex"
-      || provider === "opencode"
-      || provider === "antigravity"
-    );
+    return providers.find(isAgentProvider);
   }
 
   async function launchSetupTask(repoId: string | null | undefined, repoPath: string) {

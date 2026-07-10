@@ -1,3 +1,11 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  AGENT_PROVIDERS,
+  getAgentProviderSpec,
+  isAgentProvider,
+  type AgentProvider,
+} from "@kanna/agent-protocol";
 import { describe, expect, it } from "vitest";
 import {
   getPreferredAgentProviders,
@@ -6,6 +14,56 @@ import {
   resolveAgentProvider,
   type AgentProviderAvailability,
 } from "./agent-provider";
+
+interface ProviderResolutionCase {
+  name: string;
+  explicit?: string[];
+  stage?: string[];
+  agent?: string[];
+  fallback?: string[];
+  available: string[];
+  expected?: string;
+  error?: string;
+}
+
+const resolutionCases = JSON.parse(readFileSync(resolve(
+  process.cwd(),
+  "../..",
+  "crates/kanna-agent-protocol/src/provider_resolution_cases.json",
+), "utf8")) as ProviderResolutionCase[];
+
+describe("generated provider registry", () => {
+  it("exposes every provider with executable and session metadata", () => {
+    expect(AGENT_PROVIDERS).toEqual([
+      "claude", "copilot", "codex", "opencode", "antigravity",
+    ]);
+    expect(getAgentProviderSpec("antigravity").executable).toBe("agy");
+    expect(getAgentProviderSpec("opencode").default_session_type).toBe("agent");
+    expect(isAgentProvider("future-agent")).toBe(false);
+  });
+
+  it.each(resolutionCases)("matches shared resolution case: $name", (testCase) => {
+    const known = (values?: string[]): AgentProvider[] | undefined => values?.filter(isAgentProvider);
+    const selected = getPreferredAgentProviders({
+      explicit: known(testCase.explicit),
+      stage: known(testCase.stage),
+      agent: known(testCase.agent),
+      item: known(testCase.fallback),
+    });
+    const availability = Object.fromEntries(
+      AGENT_PROVIDERS.map((provider) => [
+        provider,
+        testCase.available.includes(provider),
+      ]),
+    ) as AgentProviderAvailability;
+
+    if (testCase.expected) {
+      expect(resolveAgentProvider(selected, availability)).toBe(testCase.expected);
+    } else {
+      expect(() => resolveAgentProvider(selected, availability)).toThrow(testCase.error);
+    }
+  });
+});
 
 describe("normalizeAgentProviderCandidates", () => {
   it("returns empty array when providers are missing", () => {

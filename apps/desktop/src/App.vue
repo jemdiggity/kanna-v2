@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { isAgentProvider } from "@kanna/agent-protocol";
 import { type AgentProvider, type DbHandle } from "./types/kanna";
 import type { TaskUiSlot } from "./types/taskUi";
 import Sidebar from "./components/Sidebar.vue";
@@ -28,13 +29,7 @@ const isMobile = __KANNA_MOBILE__;
 
 function firstSupportedAgentProvider(agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined): AgentProvider | undefined {
   const providers = Array.isArray(agentProvider) ? agentProvider : [agentProvider];
-  return providers.find((provider): provider is AgentProvider =>
-    provider === "claude"
-    || provider === "copilot"
-    || provider === "codex"
-    || provider === "opencode"
-    || provider === "antigravity"
-  );
+  return providers.find(isAgentProvider);
 }
 
 const store = useKannaStore();

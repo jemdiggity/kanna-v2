@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import { invoke } from "../invoke";
 import type { AgentProvider } from "../types/kanna";
 import { useModalZIndex } from "../composables/useModalZIndex";
@@ -75,7 +76,7 @@ const MAX_VISIBLE_BRANCH_ROWS = 7;
 const BRANCH_ROW_HEIGHT_PX = 36;
 const baseBranchOptionsMaxHeight = `${MAX_VISIBLE_BRANCH_ROWS * BRANCH_ROW_HEIGHT_PX}px`;
 
-const providers: Array<AgentProvider> = ["claude", "codex", "copilot", "opencode", "antigravity"];
+const providers: AgentProvider[] = [...AGENT_PROVIDERS];
 const availableProviders = ref<Array<AgentProvider>>([...providers]);
 type AgentChoice = RecentAgentChoice;
 
@@ -84,11 +85,11 @@ function providerLabel(provider: AgentProvider): string {
 }
 
 function providerBinary(provider: AgentProvider): string {
-  return provider === "antigravity" ? "agy" : provider;
+  return getAgentProviderSpec(provider).executable;
 }
 
 function supportsChatMode(provider: AgentProvider): boolean {
-  return provider === "claude" || provider === "codex";
+  return getAgentProviderSpec(provider).supports_headless;
 }
 
 const baseAgentChoices = computed(() => [

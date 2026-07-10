@@ -1,4 +1,5 @@
 import { nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, type Ref } from "vue";
+import { isAgentProvider } from "@kanna/agent-protocol";
 import type { DbHandle } from "../types/kanna";
 
 import i18n from "../i18n";
@@ -426,10 +427,9 @@ export function useAppLifecycle({
     preferences.agentMessageAppearance = store.agentMessageAppearance;
 
     const savedAgentProvider = await getDesktopSetting("defaultAgentProvider");
-    if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";
-    else if (savedAgentProvider === "codex") preferences.defaultAgentProvider = "codex";
-    else if (savedAgentProvider === "opencode") preferences.defaultAgentProvider = "opencode";
-    else if (savedAgentProvider === "antigravity") preferences.defaultAgentProvider = "antigravity";
+    if (isAgentProvider(savedAgentProvider)) {
+      preferences.defaultAgentProvider = savedAgentProvider;
+    }
     const savedAgentType = await getDesktopSetting("defaultAgentType");
     if (savedAgentType !== null) {
       preferences.defaultAgentType = normalizeAgentExecutionType(savedAgentType);

@@ -1,4 +1,5 @@
-export type AgentProvider = "claude" | "copilot" | "codex" | "opencode" | "antigravity";
+export type { AgentProvider } from "@kanna/agent-protocol";
+import type { AgentProvider } from "@kanna/agent-protocol";
 
 export interface Repo {
   id: string;

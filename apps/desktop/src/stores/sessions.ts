@@ -1,4 +1,5 @@
 import type { AgentProvider, PipelineItem } from "../types/kanna";
+import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
@@ -31,10 +32,6 @@ const CODEX_SPAWN_SUBMIT_DELAY_MS = 5_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function agentProviderBinary(provider: AgentProvider): string {
-  return provider === "antigravity" ? "agy" : provider;
 }
 
 export interface SessionsApi {
@@ -152,21 +149,18 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
   }
 
   async function isAgentProviderAvailable(provider: AgentProvider): Promise<boolean> {
-    const binary = agentProviderBinary(provider);
-    const path = await whichBinaryOptional(binary);
+    const path = await whichBinaryOptional(getAgentProviderSpec(provider).executable);
     return Boolean(path);
   }
 
   async function getAgentProviderAvailability(): Promise<AgentProviderAvailability> {
-    const [claude, copilot, codex, opencode, antigravity] = await Promise.all([
-      isAgentProviderAvailable("claude"),
-      isAgentProviderAvailable("copilot"),
-      isAgentProviderAvailable("codex"),
-      isAgentProviderAvailable("opencode"),
-      isAgentProviderAvailable("antigravity"),
-    ]);
-
-    return { claude, copilot, codex, opencode, antigravity };
+    const entries = await Promise.all(
+      AGENT_PROVIDERS.map(async (provider) => [
+        provider,
+        await isAgentProviderAvailable(provider),
+      ] as const),
+    );
+    return Object.fromEntries(entries) as AgentProviderAvailability;
   }
 
   async function waitForSessionExit(sessionId: string): Promise<void> {

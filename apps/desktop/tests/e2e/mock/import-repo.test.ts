@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
@@ -31,7 +32,7 @@ const FIRST_REPO_NAME = "import-repo-primary";
 const SECOND_REPO_NAME = "import-repo-secondary";
 const INVALID_CREATE_REPO_NAME = "repo with spaces";
 const SETUP_TASK_PROMPT = "Set up Kanna for this repository.";
-const SUPPORTED_SETUP_AGENT_PROVIDERS = ["claude", "copilot", "codex", "opencode", "antigravity"];
+const SUPPORTED_SETUP_AGENT_PROVIDERS = [...AGENT_PROVIDERS];
 
 async function findRepoHeader(client: WebDriverClient, repoName: string): Promise<string> {
   const headers = await client.findElements(".repo-header");

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { mount } from "@vue/test-utils";
+import { AGENT_PROVIDERS, AGENT_PROVIDER_SPECS } from "@kanna/agent-protocol";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NewTaskModal from "../NewTaskModal.vue";
@@ -130,6 +131,61 @@ describe("NewTaskModal", () => {
     }
 
     expect(selectedAgentLabel(wrapper)).toBe("antigravity");
+  });
+
+  it("offers every installed PTY provider and every headless-capable provider", async () => {
+    installedProviderNames = new Set(AGENT_PROVIDER_SPECS.map((spec) => spec.executable));
+    const sortedProviders = [...AGENT_PROVIDERS].sort((a, b) => a.localeCompare(b));
+    const sortedHeadlessProviders = AGENT_PROVIDER_SPECS
+      .filter((spec) => spec.supports_headless)
+      .map((spec) => spec.id)
+      .sort((a, b) => a.localeCompare(b));
+    const expectedChoices = [
+      ...sortedProviders,
+      ...sortedHeadlessProviders.map((provider) => `${provider} sdk`),
+    ];
+    const wrapper = mount(NewTaskModal, {
+      props: { defaultAgentProvider: sortedProviders[0] },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    const choices: string[] = [];
+    for (let index = 0; index < expectedChoices.length; index += 1) {
+      choices.push(selectedAgentLabel(wrapper));
+      await wrapper.get(".agent-provider").trigger("click");
+      await flushPromises();
+    }
+
+    expect(choices).toEqual(expectedChoices);
+  });
+
+  it("keeps OpenCode selectable in headless agent mode", async () => {
+    installedProviderNames = new Set(["opencode"]);
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        defaultAgentProvider: "opencode",
+        defaultAgentType: "agent",
+        baseBranches: ["main"],
+        defaultBaseBranch: "main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(selectedAgentLabel(wrapper)).toBe("opencode sdk");
+    expect(wrapper.find('[data-testid="model-select"]').exists()).toBe(false);
+
+    await wrapper.get("textarea").setValue("Use OpenCode headlessly");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+    expect(wrapper.emitted("submit")?.[0]).toEqual([
+      "Use OpenCode headlessly", "opencode", "default", "main", "agent",
+    ]);
   });
 
   it("orders agent choices by most recent exact usage", async () => {

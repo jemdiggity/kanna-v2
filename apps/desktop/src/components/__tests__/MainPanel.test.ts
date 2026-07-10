@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { flushPromises, mount } from "@vue/test-utils";
+import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PipelineItem } from "../../types/kanna";
 import type { TaskUiSlot } from "../../types/taskUi";
@@ -178,6 +179,33 @@ describe("MainPanel", () => {
     expect(wrapper.text()).toContain("Version 1.0.32");
     expect(wrapper.text()).toContain("Version 0.125.0-beta.1+20260429");
     expect(wrapper.text()).toContain("Version 1.0.14");
+  }, 15_000);
+
+  it("renders a setup card and checks the generated executable for every provider", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "read_env_var") return Promise.reject(new Error("env var not set"));
+      return Promise.reject(new Error("missing"));
+    });
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: { item: null, hasRepos: false },
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+
+    await flushPromises();
+
+    expect(wrapper.findAll(".agent-card")).toHaveLength(AGENT_PROVIDERS.length);
+    for (const provider of AGENT_PROVIDERS) {
+      expect(invokeMock).toHaveBeenCalledWith("which_binary", {
+        name: getAgentProviderSpec(provider).executable,
+      });
+    }
   }, 15_000);
 
   it("shows the Antigravity install command when agy is missing", async () => {

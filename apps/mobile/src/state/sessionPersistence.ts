@@ -1,5 +1,6 @@
 import type { ComposerAgentProvider, MobileView } from "./sessionStore";
 import type { MobileAuthUser } from "../lib/firebase/auth";
+import { isAgentProvider } from "@kanna/agent-protocol";
 
 const MOBILE_CONTEXT_STORAGE_KEY = "kanna.mobile.context.v1";
 
@@ -103,16 +104,6 @@ function isMobileView(value: unknown): value is MobileView {
   );
 }
 
-function isComposerAgentProvider(value: unknown): value is ComposerAgentProvider {
-  return (
-    value === "claude" ||
-    value === "copilot" ||
-    value === "codex" ||
-    value === "opencode" ||
-    value === "antigravity"
-  );
-}
-
 function parsePersistedAuthUser(value: unknown): MobileAuthUser | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -179,7 +170,7 @@ function parseRepoCreationProfiles(value: unknown): RepoCreationProfile[] {
     if (
       typeof candidate.repoId !== "string" ||
       typeof candidate.desktopId !== "string" ||
-      !isComposerAgentProvider(candidate.agentProvider)
+      !isAgentProvider(candidate.agentProvider)
     ) {
       continue;
     }
