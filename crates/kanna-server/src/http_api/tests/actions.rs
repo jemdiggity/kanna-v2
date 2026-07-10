@@ -1408,6 +1408,8 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })
                     .to_string(),
@@ -1796,6 +1798,8 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })
                     .to_string(),
