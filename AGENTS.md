@@ -369,7 +369,7 @@ User makes PR → GitHub API → DB update → stage transition
 ### Stores (`apps/desktop/src/stores/`)
 
 - **`kanna.ts`** (Pinia) — App state: repo/item selection, sorted items (pinned → merge → pr → active → blocked), debounced activity transitions (unread → idle after 1s), `generateId()` via `crypto.getRandomValues()`, operator event emission, undo support. Key interfaces: `PtySpawnOptions` (agentProvider, model, permissionMode, allowedTools, maxTurns, maxBudgetUsd, setupCmds, portEnv).
-- **`db.ts`** — DB setup: `resolveDbName()` from env vars, `loadDatabase()` with mock fallback, `runMigrations()` with all table schemas.
+- **`db.ts`** — Frontend database compatibility: resolves the database name, performs legacy file-location copying, and exposes the disabled/DEV-E2E `DbHandle` facade. It does not own the schema.
 
 ### Tauri Commands (`apps/desktop/src-tauri/src/commands/`)
 
@@ -499,7 +499,7 @@ User makes PR → GitHub API → DB update → stage transition
 
 ## Database
 
-SQLite via `tauri-plugin-sql`. Schema defined inline in `stores/db.ts`'s `runMigrations()`. See the Database Tables inventory in the Codebase Overview section for the full table list.
+`kanna-server` owns SQLite through bundled `rusqlite` and owns all schema definitions and migrations in `crates/kanna-server/src/db/mod.rs`. Server startup calls `Db::open_migrated` before serving requests. Desktop `stores/db.ts` only resolves the database name, performs legacy file-location copying, and provides the disabled/DEV-E2E `DbHandle` facade for compatibility. See the Database Tables inventory in the Codebase Overview section for the full table list.
 
 DB name is resolved by `kd` from the current context: main instances use `kanna-v2.db`, and worktrees auto-name their DB `kanna-wt-{worktree-dir}.db` (for example `kanna-wt-task-10720bf8.db`). In the current checked-in dev build, Tauri's app identifier is `build.kanna`, so the default DB directory is `~/Library/Application Support/build.kanna/`. If the app identifier changes for another build flavor, the enclosing Application Support directory changes with it.
 
