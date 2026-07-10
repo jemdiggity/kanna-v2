@@ -3,12 +3,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { VALID_AGENT_PROVIDERS } from "./agent-providers.js";
 import { NEW_CUSTOM_TASK_PROMPT, parseAgentMd } from "./custom-tasks.js";
 import { scanCustomTasks } from "./custom-tasks-scanner.js";
 
 describe("NEW_CUSTOM_TASK_PROMPT", () => {
   it("documents all supported agent providers and provider-specific yolo-equivalent permission defaults", () => {
-    expect(NEW_CUSTOM_TASK_PROMPT).toContain('- agent_provider: "claude" | "copilot" | "codex" | "opencode" | "antigravity"');
+    const providerUnion = VALID_AGENT_PROVIDERS.map((provider) => `"${provider}"`).join(" | ");
+    expect(NEW_CUSTOM_TASK_PROMPT).toContain(`- agent_provider: ${providerUnion}`);
     expect(NEW_CUSTOM_TASK_PROMPT).toContain('permission_mode: "dontAsk" | "acceptEdits" | "default"');
     expect(NEW_CUSTOM_TASK_PROMPT).toContain("default: provider-specific yolo-equivalent");
     expect(NEW_CUSTOM_TASK_PROMPT).toContain("Codex -> --yolo");

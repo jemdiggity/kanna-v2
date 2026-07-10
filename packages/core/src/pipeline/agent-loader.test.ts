@@ -6,6 +6,7 @@ import {
   parseAgentExtension,
   validateAgentDefinition,
 } from "./agent-loader";
+import type { AgentDefinition, AgentExtension } from "./pipeline-types";
 
 describe("parseAgentDefinition", () => {
   it("parses valid AGENT.md with all fields", () => {
@@ -243,13 +244,13 @@ describe("validateAgentDefinition", () => {
       description: "Valid description",
       agent_provider: ["codex", "nope"],
       prompt: "Do something.",
-    };
+    } as unknown as AgentDefinition;
     const errors = validateAgentDefinition(def);
     expect(errors.some((e) => e.includes("agent_provider"))).toBe(true);
   });
 
   it("accepts all known agent_provider values", () => {
-    const def = {
+    const def: AgentDefinition = {
       name: "Valid Name",
       description: "Valid description",
       agent_provider: ["claude", "copilot", "codex", "opencode", "antigravity"],
@@ -300,10 +301,20 @@ Extra instructions.
 `;
     expect(() => parseAgentExtension(content)).toThrow(/permission_mode.*neverAsk/);
   });
+
+  it("rejects unknown agent_provider values", () => {
+    const content = `---
+agent_provider: claude, future-agent
+---
+
+Extra instructions.
+`;
+    expect(() => parseAgentExtension(content)).toThrow(/agent_provider.*future-agent/);
+  });
 });
 
 describe("applyAgentExtension", () => {
-  const base = {
+  const base: AgentDefinition = {
     name: "review",
     description: "Reviews branches",
     model: "sonnet",
@@ -366,13 +377,12 @@ Extra.
   });
 
   it("rejects a merged definition with an unknown agent_provider", () => {
-    const content = `---
-agent_provider: claude, nope
----
+    const extension = {
+      prompt: "Extra.",
+      agent_provider: ["claude", "nope"],
+    } as unknown as AgentExtension;
 
-Extra.
-`;
-    expect(() => applyAgentExtension(base, parseAgentExtension(content))).toThrow(/agent_provider.*nope/);
+    expect(() => applyAgentExtension(base, extension)).toThrow(/agent_provider.*nope/);
   });
 
   it("extends the built-in review agent with the repo extension", () => {

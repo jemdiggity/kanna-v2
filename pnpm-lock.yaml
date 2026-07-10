@@ -31,6 +31,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@kanna/agent-protocol':
+        specifier: workspace:*
+        version: link:../../packages/agent-protocol
       '@kanna/stream-client':
         specifier: workspace:*
         version: link:../../packages/stream-client
@@ -231,6 +234,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@kanna/agent-protocol':
+        specifier: workspace:*
+        version: link:../agent-protocol
       smol-toml:
         specifier: ^1.6.0
         version: 1.6.1
@@ -246,6 +252,10 @@ importers:
         version: 3.2.4(@types/node@25.6.0)(happy-dom@20.8.9)(jiti@2.6.1)(lightningcss@1.27.0)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.3)
 
   packages/db:
+    dependencies:
+      '@kanna/agent-protocol':
+        specifier: workspace:*
+        version: link:../agent-protocol
     devDependencies:
       vitest:
         specifier: ^3

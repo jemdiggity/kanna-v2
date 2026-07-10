@@ -11,5 +11,8 @@
   },
   "devDependencies": {
     "vitest": "^3"
+  },
+  "dependencies": {
+    "@kanna/agent-protocol": "workspace:*"
   }
 }
