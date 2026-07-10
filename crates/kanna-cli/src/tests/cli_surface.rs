@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn parses_dependent_tasks_exist_command() {
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "dependent-tasks-exist",
+        "--task-id",
+        "task-1",
+        "--server-url",
+        "http://127.0.0.1:48120",
+    ])
+    .unwrap();
+
+    match cli.command {
+        crate::Commands::Task {
+            command:
+                crate::TaskCommands::DependentTasksExist {
+                    task_id,
+                    server_url,
+                },
+        } => {
+            assert_eq!(task_id, "task-1");
+            assert_eq!(server_url.as_deref(), Some("http://127.0.0.1:48120"));
+        }
+        _ => panic!("expected task dependent-tasks-exist command"),
+    }
+}
+
+#[test]
+fn dependent_tasks_exist_requires_task_id() {
+    let error = match crate::Cli::try_parse_from(["kanna-cli", "task", "dependent-tasks-exist"]) {
+        Ok(_) => panic!("--task-id should be required"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+    assert!(error.to_string().contains("--task-id"));
+}
+
+#[test]
 fn parses_new_repo_and_task_subcommands() {
     let cli = crate::Cli::try_parse_from(["kanna-cli", "guide", "--json"]).unwrap();
     match cli.command {

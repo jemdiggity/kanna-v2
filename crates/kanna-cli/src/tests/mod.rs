@@ -69,6 +69,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_is_dependent_tasks_exist",
+            TypedToolSurface {
+                command_path: &["task", "dependent-tasks-exist"],
+                param_args: &[("task_id", "task_id")],
+            },
+        ),
+        (
             "kanna_wait_task",
             TypedToolSurface {
                 command_path: &["task", "wait"],
