@@ -839,6 +839,47 @@ describe("diff view", () => {
     await client.waitForNoElement(".diff-view", 2_000);
   });
 
+  it("keeps diff content clear of the vertical scrollbar lane", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    const scrollbarFile = "e2e-scrollbar-gutter.txt";
+
+    await tauriInvoke(client, "run_script", {
+      script: `for i in $(seq 1 220); do printf '# scrollbar gutter e2e %03d\n' "$i"; done > ${scrollbarFile}`,
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await openDiffModal(client);
+    await waitForDiffText(client, `return text.includes(${JSON.stringify(scrollbarFile)});`);
+    await waitForDiffScrollHeight(client, 1_200);
+
+    const result = await client.executeSync<{
+      hasVerticalOverflow: boolean;
+      paddingInlineEnd: number;
+      contentGap: number;
+    } | null>(
+      `const container = document.querySelector(".diff-container");
+       const wrapper = Array.from(document.querySelectorAll(".diff-file")).find((element) => {
+         const header = element.querySelector(".diff-file-header");
+         return (header?.getAttribute("title") || header?.textContent || "") === ${JSON.stringify(scrollbarFile)};
+       });
+       if (!(container instanceof HTMLElement) || !(wrapper instanceof HTMLElement)) return null;
+       const containerRect = container.getBoundingClientRect();
+       const wrapperRect = wrapper.getBoundingClientRect();
+       return {
+         hasVerticalOverflow: container.scrollHeight > container.clientHeight,
+         paddingInlineEnd: Number.parseFloat(getComputedStyle(container).paddingInlineEnd),
+         contentGap: containerRect.right - wrapperRect.right,
+       };`
+    );
+
+    expect(result).not.toBeNull();
+    if (!result) return;
+    expect(result.hasVerticalOverflow).toBe(true);
+    expect(result.paddingInlineEnd).toBe(12);
+    expect(result.contentGap).toBeGreaterThanOrEqual(result.paddingInlineEnd);
+  });
+
   it("keeps the sticky diff file header flush with the diff scroller", async () => {
     const branch = await getSelectedTaskBranch();
 

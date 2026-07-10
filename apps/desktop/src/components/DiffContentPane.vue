@@ -41,6 +41,8 @@ defineExpose({ getContainerElement });
 .diff-container {
   flex: 1;
   min-height: 0;
+  box-sizing: border-box;
+  padding-inline-end: 12px;
   overflow: auto;
 }
 
