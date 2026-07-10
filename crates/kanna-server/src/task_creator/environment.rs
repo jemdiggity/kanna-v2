@@ -281,6 +281,7 @@ pub(crate) fn warm_login_shell_path() {
 
 /// Cheap binary availability check against the process PATH plus the cached
 /// login-shell PATH — never a per-call login shell.
+#[cfg(not(test))]
 pub(super) fn binary_on_path(name: &str) -> bool {
     if let Ok(process_path) = std::env::var("PATH") {
         if resolve_binary_from_path(name, &process_path).is_some() {

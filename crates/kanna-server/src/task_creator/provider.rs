@@ -33,7 +33,7 @@ pub(super) fn resolve_agent_provider(
         stage_provider,
         agent,
         fallback_provider,
-        |provider| binary_available(provider.executable()),
+        provider_available,
     )
 }
 
@@ -94,6 +94,14 @@ pub(super) fn resolve_agent_provider_with(
     ))
 }
 
-fn binary_available(name: &str) -> bool {
-    super::environment::binary_on_path(name)
+#[cfg(not(test))]
+fn provider_available(provider: AgentProvider) -> bool {
+    super::environment::binary_on_path(provider.executable())
+}
+
+#[cfg(test)]
+fn provider_available(_provider: AgentProvider) -> bool {
+    // High-level unit tests exercise provider precedence without requiring
+    // every supported third-party CLI to be installed on the test host.
+    true
 }

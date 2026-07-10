@@ -1767,6 +1767,8 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
     db.set_test_setting("defaultAgentProvider", "copilot")
         .unwrap();
 
+    // Executable discovery has dedicated coverage; keep this integration test
+    // focused on provider-source precedence by preparing PTY sessions.
     let prepared = prepare_task_for_api(
         &db,
         &config,
@@ -1779,7 +1781,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             base_ref: None,
             agent: None,
             agent_provider: None,
-            agent_type: None,
+            agent_type: Some("pty".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -1814,7 +1816,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
-            agent_type: None,
+            agent_type: Some("pty".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
