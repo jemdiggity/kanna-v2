@@ -25,7 +25,12 @@
 - Modify: `tests/cli-contract/package.json`
 - Modify: `tests/cli-contract/vitest.config.ts`
 - Create: `tests/cli-contract/vitest.live.config.ts`
+- Create: `tests/cli-contract/helpers/claude-availability.ts`
 - Create: `tests/cli-contract/helpers/live-contract-guard.ts`
+- Modify: `tests/cli-contract/helpers/claude.ts`
+- Modify: `tests/cli-contract/helpers/codex.ts`
+- Modify: `tests/cli-contract/helpers/copilot.ts`
+- Modify: `tests/cli-contract/helpers/opencode.ts`
 - Move: two static CLI contracts to `tests/cli-contract/tests/offline/`
 - Move: twelve external-provider contracts to `tests/cli-contract/tests/live/`
 - Modify: `tests/remote-e2e/package.json`
