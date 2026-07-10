@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { assertLiveAgentCliContractsEnabled } from "./live-contract-guard";
 
 export interface CodexResult {
   stdout: string;
@@ -13,6 +14,7 @@ export interface CodexResult {
  * Codex installs via npm, so its location follows the active node manager.
  */
 export async function findCodexBinary(): Promise<string> {
+  assertLiveAgentCliContractsEnabled();
   const fromShell = await new Promise<string>((resolve) => {
     const child = spawn("/bin/zsh", ["-lc", "command -v codex"], {
       stdio: ["ignore", "pipe", "ignore"],

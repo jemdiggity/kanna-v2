@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { parseAgentDefinition } from "../../../packages/core/src/pipeline/agent-loader";
+import { parseAgentDefinition } from "../../../../packages/core/src/pipeline/agent-loader";
 
-const repoRoot = resolve(new URL("../../..", import.meta.url).pathname);
+// This test lives one lane deeper than the historical flat tests directory.
+const repoRoot = resolve(new URL("../../../..", import.meta.url).pathname);
 const agentsRoot = join(repoRoot, ".kanna", "agents");
 const catalogPath = join(repoRoot, "crates", "kanna-tool-catalog", "src", "catalog.json");
 

@@ -252,7 +252,9 @@ pnpm test
 # Package-specific unit tests
 cd packages/core && pnpm test
 
-# Explicit process-heavy suites
+# Explicit live/process-heavy suites
+# Requires installed and authenticated agent CLIs and may consume quota:
+pnpm test:agent-cli-compat
 pnpm test:remote-e2e
 pnpm test:tui-fidelity
 
@@ -512,7 +514,7 @@ DB name is resolved by `kd` from the current context: main instances use `kanna-
 - **Unit tests:** vitest in `packages/core/`, `packages/db/`, and `apps/desktop/src/composables/` (useBackup, useInlineSearch, useNavigationHistory, useShortcutContext have `.test.ts` files)
 - **Integration tests:** Rust tests in `apps/desktop/src-tauri/tests/` (real Claude CLI)
 - **Daemon tests:** `crates/daemon/tests/` — handoff and reconnect tests with real daemon processes
-- **CLI contract tests:** `tests/cli-contract/` — verify Claude and Copilot CLI flag compatibility
+- **CLI contract tests:** `tests/cli-contract/tests/offline/` runs under canonical `pnpm test`; real Claude, Copilot, Codex, and OpenCode compatibility lives in `tests/cli-contract/tests/live/` and runs only through `pnpm test:agent-cli-compat` because it requires installed/authenticated CLIs and may consume quota
 - **E2E tests:** `pnpm test:e2e` + W3C WebDriver via `tauri-plugin-webdriver` on port 4445
   - Mock tests (`apps/desktop/tests/e2e/mock/`): action-bar, app-launch, diff-view, import-repo, keyboard-shortcuts, preferences, task-lifecycle
   - Real tests (`apps/desktop/tests/e2e/real/`): claude-session, diff-after-claude (requires Claude CLI)

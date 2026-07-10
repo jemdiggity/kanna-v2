@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isClaudeUnavailable, runClaude, runClaudeRaw } from "../helpers/claude";
+import { isClaudeUnavailable, runClaude, runClaudeRaw } from "../../helpers/claude";
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { once } from "node:events";
 import { spawn } from "node:child_process";

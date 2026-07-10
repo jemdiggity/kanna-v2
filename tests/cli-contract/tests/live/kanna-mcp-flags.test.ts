@@ -2,9 +2,9 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runCodexRaw } from "../helpers/codex";
-import { runCopilot } from "../helpers/copilot";
-import { runOpenCodeRaw } from "../helpers/opencode";
+import { runCodexRaw } from "../../helpers/codex";
+import { runCopilot } from "../../helpers/copilot";
+import { runOpenCodeRaw } from "../../helpers/opencode";
 
 async function withMcpConfig<T>(fn: (path: string, cwd: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "kanna-cli-contract-mcp-"));

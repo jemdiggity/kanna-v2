@@ -58,18 +58,19 @@ No migration 027 or other schema change will be coupled to this cleanup. A serve
 
 ## 3. Resource-Bounded Test Orchestration
 
-The canonical `pnpm test` currently launches up to twelve Turbo package tasks, several of which each start their own multi-worker Vitest pool. It also includes remote E2E, Chromium/Cargo fidelity, and other process-heavy suites under ordinary package `test` scripts. On the reviewed ten-core host this nested fan-out made the desktop suite more than seven times slower and caused unrelated five- and fifteen-second tests to time out. The same desktop suite passed all 1,020 tests in isolation.
+The canonical `pnpm test` currently launches up to twelve Turbo package tasks, several of which each start their own multi-worker Vitest pool. It also includes remote E2E, Chromium/Cargo fidelity, and live agent CLI compatibility tests under ordinary package `test` scripts. Those CLI tests require installed, authenticated external agents and can consume quota, so they are neither deterministic nor suitable for secret-free fork CI. On the reviewed ten-core host the nested fan-out also made the desktop suite more than seven times slower and caused unrelated five- and fifteen-second tests to time out. The same desktop suite passed all 1,020 tests in isolation.
 
 Separate test tiers and apply one host-level resource budget:
 
-- root `pnpm test` runs deterministic unit and contract suites only
+- root `pnpm test` runs deterministic, offline unit and static contract suites only
+- the two static CLI contracts live under `tests/cli-contract/tests/offline/`; twelve real-provider contracts live under `tests/cli-contract/tests/live/`, are guarded against accidental execution, and run only through `test:agent-cli-compat`
 - remote E2E and TUI fidelity move behind `test:remote-e2e` and `test:tui-fidelity` scripts and remain independently runnable
 - root Turbo test concurrency defaults to two package tasks, and Vitest-based package scripts default to at most two workers, bounding ordinary nested test fan-out to four workers
 - mobile tests stop downloading an ad hoc Vitest through `pnpm dlx` and use the workspace-pinned test runner
 
 Rust verification will distinguish ordinary workspace tests from daemon process integration tests. The canonical workflow runs non-daemon workspace tests normally, then runs the daemon crate with `--test-threads=1`, matching the harness contract documented in both `AGENTS.md` and `agent_sessions.rs`. This avoids treating a deliberately serialized process test as safe for default libtest concurrency.
 
-CI will run the same canonical JavaScript and Rust commands used locally. Integration and fidelity suites remain separate jobs or explicit commands so a unit-test result has a single meaning.
+CI will run the same canonical JavaScript and Rust commands used locally. Live agent compatibility, integration, and fidelity suites remain explicit local commands; fork CI stays secret-free and never runs the live agent lane.
 
 Timeouts will not be increased as the primary fix. A timeout may change only when a test's documented external operation legitimately requires a different budget after orchestration is bounded.
 
@@ -109,7 +110,7 @@ Implementation follows test-first changes at each boundary:
 
 - reproduce the CLI catalog parity failure, then add parser, encoded-path, HTTP method/response, and surface-mapping coverage
 - retain Rust legacy-database upgrade tests while deleting only retired frontend migration tests
-- add test-tier assertions so unit scripts cannot silently invoke remote E2E or browser/Cargo fidelity runners
+- add test-tier assertions so unit scripts cannot silently invoke live agent CLIs, remote E2E, or browser/Cargo fidelity runners
 - verify bounded test commands under the root orchestration rather than relying only on isolated package passes
 - add Rust serialization and metadata tests for every provider
 - regenerate TypeScript protocol output and verify freshness
@@ -122,4 +123,4 @@ Final verification will run the canonical root JavaScript tests, focused CLI and
 
 The changes are source-compatible and ship together. If generated provider output is stale, verification fails before packaging. If the pipeline schema diverges, its parity test identifies the missing or extra provider. If no configured provider is installed, task creation fails before a worktree agent spawn with an actionable candidate list. If server database migration fails, startup remains blocked with the server's migration error; there is no hidden frontend fallback.
 
-The test split preserves explicit entry points for remote E2E and fidelity coverage, so reducing `pnpm test` to unit and contract semantics does not remove those suites.
+The test split preserves explicit entry points for live agent CLI compatibility, remote E2E, and fidelity coverage, so reducing `pnpm test` to offline unit and contract semantics does not remove those suites.

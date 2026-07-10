@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { isClaudeUnavailable, runClaude } from "../helpers/claude";
-import { AGENT_MODELS } from "../../../packages/core/src/agent-models";
+import { isClaudeUnavailable, runClaude } from "../../helpers/claude";
+import { AGENT_MODELS } from "../../../../packages/core/src/agent-models";
 
 // Confirms every Claude model id the app offers in its picker is accepted by the
 // real `claude` CLI. An unknown model returns a result with api_error_status 404

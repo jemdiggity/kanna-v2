@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runOpenCodeJson } from "../helpers/opencode";
+import { runOpenCodeJson } from "../../helpers/opencode";
 
 // Pins the `opencode run --format json` JSONL event contract that the Rust
 // OpencodeAdapter in crates/kanna-agent-protocol depends on. Opencode 1.16.2

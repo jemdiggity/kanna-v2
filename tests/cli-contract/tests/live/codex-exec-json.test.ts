@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runCodexExec } from "../helpers/codex";
+import { runCodexExec } from "../../helpers/codex";
 
 // Pins the `codex exec --json` JSONL event contract that the Rust
 // CodexAdapter in crates/kanna-agent-protocol depends on. If these break,

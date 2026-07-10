@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runOpenCodeRaw } from "../helpers/opencode";
+import { runOpenCodeRaw } from "../../helpers/opencode";
 
 function output(result: { stdout: string; stderr: string }): string {
   return `${result.stdout}\n${result.stderr}`;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { runCodexExec } from "../helpers/codex";
-import { AGENT_MODELS } from "../../../packages/core/src/agent-models";
+import { runCodexExec } from "../../helpers/codex";
+import { AGENT_MODELS } from "../../../../packages/core/src/agent-models";
 
 // Confirms every codex model id the app offers in its picker is accepted by the
 // real `codex exec` CLI. Codex validates the model server-side and rejects an

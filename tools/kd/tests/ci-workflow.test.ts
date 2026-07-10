@@ -11,6 +11,7 @@ describe("canonical CI workflow", () => {
 
     expect(workflow).toContain("run: pnpm test");
     expect(workflow).toContain("run: ./kd test rust");
+    expect(workflow).not.toContain("pnpm test:agent-cli-compat");
     expect(workflow).not.toContain("pnpm test:remote-e2e");
     expect(workflow).not.toContain("pnpm test:tui-fidelity");
     expect(workflow.match(/pnpm install --frozen-lockfile/g)).toHaveLength(2);

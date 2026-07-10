@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runCopilot, runCopilotRaw } from "../helpers/copilot";
+import { runCopilot, runCopilotRaw } from "../../helpers/copilot";
 
 describe("copilot CLI flags", () => {
   it("-p produces output and exits", async () => {

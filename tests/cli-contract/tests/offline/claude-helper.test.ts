@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isClaudeUnavailable, type ClaudeResult } from "../helpers/claude";
+import { isClaudeUnavailable, type ClaudeResult } from "../../helpers/claude-availability";
 
 describe("isClaudeUnavailable", () => {
   it("treats 401 authentication failures as unavailable", () => {

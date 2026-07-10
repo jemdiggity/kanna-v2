@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isClaudeUnavailable, runClaude, runClaudeRaw } from "../helpers/claude";
+import { isClaudeUnavailable, runClaude, runClaudeRaw } from "../../helpers/claude";
 
 describe("CLI flags", () => {
   it("stream-json produces valid NDJSON", async () => {

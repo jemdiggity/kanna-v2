@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isClaudeUnavailable, runClaude } from "../helpers/claude";
+import { isClaudeUnavailable, runClaude } from "../../helpers/claude";
 
 describe("output format", () => {
   it("result message has session_id", async () => {

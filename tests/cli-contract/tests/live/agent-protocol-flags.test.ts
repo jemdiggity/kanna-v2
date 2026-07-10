@@ -3,7 +3,7 @@ import {
   runClaude,
   runClaudeStreamInput,
   isClaudeUnavailable,
-} from "../helpers/claude";
+} from "../../helpers/claude";
 
 // Pins the Claude CLI behavior that the Rust ClaudeAdapter in
 // crates/kanna-agent-protocol depends on, beyond the long-standing

@@ -4,7 +4,7 @@
 
 **Goal:** Make local and CI JavaScript/Rust verification deterministic under bounded host resources without increasing timeouts.
 
-**Architecture:** `pnpm test` remains the JavaScript unit/contract entry point, with Turbo limited to two package tasks and every ordinary Vitest process limited to two workers. Process-heavy remote E2E and TUI fidelity use explicit scripts. `./kd test rust` prepares the frontend and sidecar inputs required by Tauri, runs non-daemon workspace tests normally, then runs the daemon crate with one libtest thread.
+**Architecture:** `pnpm test` remains the offline JavaScript unit/static-contract entry point, with Turbo limited to two package tasks and every ordinary Vitest process limited to two workers. Live agent CLI compatibility uses a guarded, serialized `test:agent-cli-compat` lane; process-heavy remote E2E and TUI fidelity use separate explicit scripts. `./kd test rust` prepares the frontend and sidecar inputs required by Tauri, runs non-daemon workspace tests normally, then runs the daemon crate with one libtest thread.
 
 **Tech Stack:** pnpm 11, Turbo 2, Vitest 3/4, TypeScript, kd task registry, Cargo/libtest, GitHub Actions.
 
@@ -23,6 +23,11 @@
 - Modify: `services/firebase-functions/package.json`
 - Modify: `services/relay/package.json`
 - Modify: `tests/cli-contract/package.json`
+- Modify: `tests/cli-contract/vitest.config.ts`
+- Create: `tests/cli-contract/vitest.live.config.ts`
+- Create: `tests/cli-contract/helpers/live-contract-guard.ts`
+- Move: two static CLI contracts to `tests/cli-contract/tests/offline/`
+- Move: twelve external-provider contracts to `tests/cli-contract/tests/live/`
 - Modify: `tests/remote-e2e/package.json`
 - Modify: `tests/tui-fidelity/package.json`
 - Modify: `tools/kd/package.json`
@@ -106,6 +111,7 @@ Set root scripts to:
 ```json
 {
   "test": "turbo test --concurrency=2",
+  "test:agent-cli-compat": "pnpm --filter @kanna/cli-contract test:agent-cli-compat",
   "test:remote-e2e": "./kd test remote-e2e",
   "test:tui-fidelity": "pnpm --filter @kanna/tui-fidelity test:tui-fidelity"
 }
@@ -129,7 +135,7 @@ Rename heavy package scripts:
 }
 ```
 
-Neither heavy package retains a generic `test` script, so Turbo excludes it from `pnpm test`.
+Neither heavy package retains a generic `test` script, so Turbo excludes it from `pnpm test`. The CLI-contract package keeps a generic `test`, but its default Vitest config includes only `tests/offline/**/*.test.ts`; real-provider tests are isolated under `tests/live/`.
 
 - [ ] **Step 4: Bound ordinary Vitest scripts**
 
@@ -149,10 +155,11 @@ Use these exact forms while retaining each package's current arguments:
 "test": "pnpm exec vitest run --maxWorkers=2 --exclude 'dist/**'"
 
 // cli-contract
-"test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; exec vitest run --maxWorkers=2 \"$@\"' --"
+"test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; exec vitest run --maxWorkers=2 \"$@\"' --",
+"test:agent-cli-compat": "KANNA_RUN_LIVE_AGENT_CLI_CONTRACTS=1 vitest run --config vitest.live.config.ts"
 ```
 
-Do not change remote E2E's existing one-worker isolation or any timeout.
+The live config preserves the existing 120-second test and 30-second hook timeouts, sets `fileParallelism: false` and `maxWorkers: 1`, and includes only `tests/live/**/*.test.ts`. All provider helpers call the shared opt-in guard before binary discovery. Do not change remote E2E's existing one-worker isolation or any timeout.
 
 - [ ] **Step 5: Pin mobile Vitest and refresh the lockfile**
 
@@ -342,7 +349,8 @@ Add `test rust` to the top-level and `kd test --help` output. Document in `AGENT
 pnpm test
 ./kd test rust
 
-# Explicit process-heavy suites
+# Explicit live/process-heavy suites
+pnpm test:agent-cli-compat
 pnpm test:remote-e2e
 pnpm test:tui-fidelity
 ```
@@ -385,6 +393,7 @@ describe("canonical CI workflow", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     expect(workflow).toContain("run: pnpm test");
     expect(workflow).toContain("run: ./kd test rust");
+    expect(workflow).not.toContain("pnpm test:agent-cli-compat");
     expect(workflow).not.toContain("pnpm test:remote-e2e");
     expect(workflow).not.toContain("pnpm test:tui-fidelity");
     expect(workflow.match(/pnpm install --frozen-lockfile/g)).toHaveLength(2);
@@ -501,7 +510,7 @@ Expected: all selected tests pass.
 pnpm test
 ```
 
-Expected: Turbo runs only unit/contract packages; desktop passes all tests without starvation timeouts; remote E2E and TUI fidelity do not appear as Turbo test tasks.
+Expected: Turbo runs only offline unit/static-contract tests; the CLI-contract task lists exactly the two offline files; desktop passes without starvation timeouts; live agent compatibility, remote E2E, and TUI fidelity do not run.
 
 - [ ] **Step 3: Run canonical Rust tests**
 
@@ -516,7 +525,9 @@ Expected: non-daemon workspace tests pass, followed by serialized daemon tests i
 ```bash
 pnpm --filter @kanna/remote-e2e typecheck
 pnpm --filter @kanna/tui-fidelity typecheck
+pnpm --dir tests/cli-contract exec vitest list --filesOnly --staticParse
+pnpm --dir tests/cli-contract exec vitest list --config vitest.live.config.ts --filesOnly --staticParse
 git diff --check
 ```
 
-Expected: both heavy-suite packages typecheck and the diff has no whitespace errors. Do not increase test or socket timeouts.
+Expected: both heavy-suite packages typecheck; default CLI discovery lists exactly two offline files; live discovery lists exactly twelve files without executing them; and the diff has no whitespace errors. Do not run live agent contracts or increase test/socket timeouts.

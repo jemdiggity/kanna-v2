@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; exec vitest run --maxWorkers=2 \"$@\"' --"
+    "test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; exec vitest run --maxWorkers=2 \"$@\"' --",
+    "test:agent-cli-compat": "KANNA_RUN_LIVE_AGENT_CLI_CONTRACTS=1 vitest run --config vitest.live.config.ts"
   },
   "devDependencies": {
     "vitest": "^4.1.4"
