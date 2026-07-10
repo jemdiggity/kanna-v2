@@ -217,6 +217,15 @@ pub(super) fn apply_workspace_path_env(
     }
 }
 
+pub(super) fn build_workspace_search_path(
+    workspace_root: &str,
+    repo_config: &RepoConfig,
+) -> Option<String> {
+    let mut env = HashMap::new();
+    apply_workspace_path_env(&mut env, workspace_root, repo_config);
+    env.remove("PATH")
+}
+
 pub(super) fn which_binary(name: &str) -> Result<Option<String>, String> {
     resolve_binary_from_candidates(name, sidecar_candidates(name), None).map(Some)
 }
@@ -228,42 +237,32 @@ pub(super) fn resolve_headless_agent_executable(
 ) -> Result<Option<String>, String> {
     match provider {
         AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
-            let resolved = which_binary_with_path(provider.executable(), path, worktree_path);
-            #[cfg(test)]
-            {
-                headless_executable_or_test_fallback(provider, resolved)
-            }
-            #[cfg(not(test))]
-            {
-                resolved
-            }
+            resolve_provider_executable(provider, path, worktree_path).map(Some)
         }
         AgentProvider::Copilot | AgentProvider::Antigravity => Ok(None),
     }
 }
 
-#[cfg(test)]
-fn headless_executable_or_test_fallback(
+pub(super) fn resolve_provider_executable(
     provider: AgentProvider,
-    resolved: Result<Option<String>, String>,
-) -> Result<Option<String>, String> {
-    // Unit tests exercise task orchestration without requiring third-party
-    // provider CLIs on the host; successful real resolution is preserved.
-    resolved.or_else(|_| Ok(Some(provider.executable().to_string())))
+    path: Option<&str>,
+    workspace_root: &str,
+) -> Result<String, String> {
+    which_binary_with_path(provider.executable(), path, workspace_root)
 }
 
 fn which_binary_with_path(
     name: &str,
     path: Option<&str>,
     worktree_path: &str,
-) -> Result<Option<String>, String> {
+) -> Result<String, String> {
     if let Some(path) = path {
         if let Some(binary) = resolve_workspace_binary_from_path(name, path, worktree_path) {
-            return Ok(Some(binary));
+            return Ok(binary);
         }
     }
 
-    resolve_binary_from_candidates(name, sidecar_candidates(name), path).map(Some)
+    resolve_binary_from_candidates(name, sidecar_candidates(name), path)
 }
 
 /// The user's real PATH as an interactive login shell resolves it, captured
@@ -299,18 +298,6 @@ pub(crate) fn warm_login_shell_path() {
 
 /// Cheap binary availability check against the process PATH plus the cached
 /// login-shell PATH — never a per-call login shell.
-#[cfg(not(test))]
-pub(super) fn binary_on_path(name: &str) -> bool {
-    if let Ok(process_path) = std::env::var("PATH") {
-        if resolve_binary_from_path(name, &process_path).is_some() {
-            return true;
-        }
-    }
-    login_shell_path()
-        .map(|path| resolve_binary_from_path(name, path).is_some())
-        .unwrap_or(false)
-}
-
 fn resolve_binary_from_candidates(
     name: &str,
     candidates: Vec<PathBuf>,
@@ -318,8 +305,9 @@ fn resolve_binary_from_candidates(
 ) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
         if let Some(path) = path {
-            return resolve_binary_from_path(name, path)
-                .ok_or_else(|| format!("binary '{}' not found in PATH", name));
+            if let Some(binary) = resolve_binary_from_path(name, path) {
+                return Ok(binary);
+            }
         }
 
         // The process PATH first (cheap, and correct when launched from a

@@ -27,13 +27,18 @@ pub(super) fn resolve_agent_provider(
     stage_provider: Option<&str>,
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
+    search_path: Option<&str>,
+    workspace_root: &str,
 ) -> Result<AgentProvider, String> {
     resolve_agent_provider_with(
         explicit_provider,
         stage_provider,
         agent,
         fallback_provider,
-        provider_available,
+        |provider| {
+            super::environment::resolve_provider_executable(provider, search_path, workspace_root)
+                .is_ok()
+        },
     )
 }
 
@@ -92,16 +97,4 @@ pub(super) fn resolve_agent_provider_with(
             .collect::<Vec<_>>()
             .join(", ")
     ))
-}
-
-#[cfg(not(test))]
-fn provider_available(provider: AgentProvider) -> bool {
-    super::environment::binary_on_path(provider.executable())
-}
-
-#[cfg(test)]
-fn provider_available(_provider: AgentProvider) -> bool {
-    // High-level unit tests exercise provider precedence without requiring
-    // every supported third-party CLI to be installed on the test host.
-    true
 }

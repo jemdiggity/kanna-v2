@@ -48,6 +48,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
 }"#,
         )
         .unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")

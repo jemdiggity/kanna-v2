@@ -25,8 +25,8 @@ use definitions::{
     RepoConfig,
 };
 use environment::{
-    apply_workspace_path_env, build_spawn_env, claim_task_ports, resolve_headless_agent_executable,
-    write_kanna_mcp_config,
+    apply_workspace_path_env, build_spawn_env, build_workspace_search_path, claim_task_ports,
+    resolve_headless_agent_executable, resolve_provider_executable, write_kanna_mcp_config,
 };
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{resolve_agent_provider, resolve_agent_type, AgentProvider, AgentSessionType};
@@ -164,11 +164,22 @@ pub(crate) fn prepare_rerun_stage_for_api(
             vars: repo_vars.as_ref(),
         },
     );
+    let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+    let provider_workspace_root = if std::path::Path::new(&worktree_path).is_dir() {
+        worktree_path.as_str()
+    } else {
+        repo.path.as_str()
+    };
+    let provider_repo_config = read_repo_config(provider_workspace_root)?;
+    let provider_search_path =
+        build_workspace_search_path(provider_workspace_root, &provider_repo_config);
     let provider = resolve_agent_provider(
         None,
         current_stage.agent_provider.as_deref(),
         agent.as_ref(),
         source_task.agent_provider.as_deref(),
+        provider_search_path.as_deref(),
+        provider_workspace_root,
     )?;
     let model = agent.as_ref().and_then(|agent| agent.model.clone());
     let permission_mode = agent
@@ -179,7 +190,6 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .map(|agent| agent.allowed_tools.clone())
         .unwrap_or_default();
     let agent_type = resolve_agent_type(source_task.agent_type.as_deref(), provider)?;
-    let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
     if !std::path::Path::new(&worktree_path).is_dir() {
         let start_point = source_task
             .base_ref
@@ -283,11 +293,26 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         Some(agent_name) => Some(read_agent_definition(&repo.path, agent_name)?),
         None => None,
     };
+    let current_worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+    let requested_workspace_root = match &workspace_spec {
+        RunWorkspaceSpec::Resume(resume) => resume.cwd.as_str(),
+        RunWorkspaceSpec::Current | RunWorkspaceSpec::Fork { .. } => current_worktree_path.as_str(),
+    };
+    let provider_workspace_root = if std::path::Path::new(requested_workspace_root).is_dir() {
+        requested_workspace_root
+    } else {
+        repo.path.as_str()
+    };
+    let provider_repo_config = read_repo_config(provider_workspace_root)?;
+    let provider_search_path =
+        build_workspace_search_path(provider_workspace_root, &provider_repo_config);
     let provider = resolve_agent_provider(
         explicit_provider.as_deref(),
         target_stage.agent_provider.as_deref(),
         agent.as_ref(),
         None,
+        provider_search_path.as_deref(),
+        provider_workspace_root,
     )?;
     let agent_type = resolve_agent_type(source_agent_type, provider)?;
     let model = agent.as_ref().and_then(|agent| agent.model.clone());
@@ -543,6 +568,11 @@ fn build_prepared_session(
 ) -> Result<(PreparedSessionSpawn, Option<String>), String> {
     Ok(match agent_type {
         AgentSessionType::Pty => {
+            let executable = resolve_provider_executable(
+                provider,
+                spawn_env.get("PATH").map(String::as_str),
+                worktree_path,
+            )?;
             let claude_session = match (provider, claude_resume) {
                 (AgentProvider::Claude, Some(session_id)) => Some(
                     commands::ClaudeSessionBinding::Resume(session_id.to_string()),
@@ -566,6 +596,7 @@ fn build_prepared_session(
             );
             let agent_cmd = build_agent_command(
                 &provider,
+                &executable,
                 &final_prompt,
                 model.as_deref(),
                 permission_mode.as_deref(),
@@ -915,11 +946,14 @@ pub(crate) fn create_dormant_task_for_api(
     } else {
         None
     };
+    let provider_search_path = build_workspace_search_path(&repo.path, &repo_config);
     let provider = resolve_agent_provider(
         explicit_provider.as_deref(),
         stage.agent_provider.as_deref(),
         agent.as_ref(),
         default_provider.as_deref(),
+        provider_search_path.as_deref(),
+        &repo.path,
     )?;
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
     let task_id = generate_task_id()?;
@@ -1008,11 +1042,14 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     } else {
         None
     };
+    let provider_search_path = build_workspace_search_path(&repo.path, &repo_config);
     let provider = resolve_agent_provider(
         None,
         stage.agent_provider.as_deref(),
         agent.as_ref(),
         item.agent_provider.as_deref(),
+        provider_search_path.as_deref(),
+        &repo.path,
     )?;
     let agent_type = resolve_agent_type(item.agent_type.as_deref(), provider)?;
     let branch = item
@@ -1393,6 +1430,7 @@ fn resolve_task_spawn(
         )
     };
 
+    let provider_search_path = build_workspace_search_path(&repo.path, repo_config);
     let provider = resolve_agent_provider(
         request.explicit_provider.as_deref(),
         if request.agent.is_some() {
@@ -1406,6 +1444,8 @@ fn resolve_task_spawn(
         } else {
             request.default_provider.as_deref()
         },
+        provider_search_path.as_deref(),
+        &repo.path,
     )?;
     let model = request
         .model

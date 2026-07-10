@@ -82,10 +82,24 @@ fn test_config(label: &str) -> Config {
 }
 
 fn init_git_repo(label: &str) -> std::path::PathBuf {
+    init_git_repo_with_provider_fixtures(label, true)
+}
+
+fn init_git_repo_without_provider_fixtures(label: &str) -> std::path::PathBuf {
+    init_git_repo_with_provider_fixtures(label, false)
+}
+
+fn init_git_repo_with_provider_fixtures(
+    label: &str,
+    with_provider_fixtures: bool,
+) -> std::path::PathBuf {
     let repo_root = std::env::temp_dir().join(format!("kanna-task-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    if with_provider_fixtures {
+        install_test_provider_binaries(&repo_root);
+    }
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -107,7 +121,7 @@ fn init_git_repo(label: &str) -> std::path::PathBuf {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -119,6 +133,30 @@ fn init_git_repo(label: &str) -> std::path::PathBuf {
         .unwrap()
         .success());
     repo_root
+}
+
+fn install_test_provider_binaries(repo_root: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = repo_root.join(".kanna/test-provider-bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    for executable in ["claude", "copilot", "codex", "opencode", "agy"] {
+        let path = bin_dir.join(executable);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": {
+                "path": {
+                    "prepend": [".kanna/test-provider-bin"]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
 }
 
 /// Fake daemon for post dispatch into a live session: replies `Ok` to each
@@ -268,18 +306,48 @@ fn insert_finished_stage_run(db: &Db, task_id: &str, stage: &str, result: &str) 
     .unwrap();
 }
 
-fn ensure_test_sidecar(name: &str) -> (std::path::PathBuf, bool) {
+struct ScopedTestSidecar {
+    path: std::path::PathBuf,
+    remove_on_drop: bool,
+}
+
+impl ScopedTestSidecar {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for ScopedTestSidecar {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn ensure_test_sidecar(name: &str) -> ScopedTestSidecar {
+    use std::os::unix::fs::PermissionsExt;
+
     let sidecar_path = std::env::current_exe()
         .unwrap()
         .parent()
         .unwrap()
         .join(name);
     if sidecar_path.exists() {
-        return (sidecar_path, false);
+        return ScopedTestSidecar {
+            path: sidecar_path,
+            remove_on_drop: false,
+        };
     }
 
     std::fs::write(&sidecar_path, "#!/bin/sh\nexit 0\n").unwrap();
-    (sidecar_path, true)
+    let mut permissions = std::fs::metadata(&sidecar_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&sidecar_path, permissions).unwrap();
+    ScopedTestSidecar {
+        path: sidecar_path,
+        remove_on_drop: true,
+    }
 }
 
 fn init_git_repo_with_pipeline(

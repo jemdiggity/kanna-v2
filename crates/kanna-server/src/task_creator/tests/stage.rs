@@ -35,6 +35,7 @@ fn prepare_merge_agent_creates_in_progress_task() {
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -56,7 +57,7 @@ fn prepare_merge_agent_creates_in_progress_task() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -299,6 +300,7 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
         "---\nagent_provider: claude\n---\nLive agent: $TASK_PROMPT",
     )
     .unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -433,6 +435,7 @@ fn prepare_advance_stage_applies_repo_agent_extension() {
         "Repo extension: run the full unit and integration suites.",
     )
     .unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -548,6 +551,7 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
         "---\nagent_provider: claude\n---\nReview $TASK_PROMPT",
     )
     .unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -965,7 +969,12 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
     std::fs::write(
         repo_root.join(".kanna/config.json"),
         serde_json::json!({
-            "teardown": ["echo repo-teardown"]
+            "teardown": ["echo repo-teardown"],
+            "workspace": {
+                "path": {
+                    "prepend": [".kanna/test-provider-bin"]
+                }
+            }
         })
         .to_string(),
     )
@@ -1363,6 +1372,19 @@ fn write_post_pipeline_fixtures(repo_root: &std::path::Path) {
 fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
     assert!(Command::new("git")
         .args(["branch", "task-source"])
+        .current_dir(repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let source_worktree = repo_root.join(".kanna-worktrees/task-source");
+    std::fs::create_dir_all(source_worktree.parent().unwrap()).unwrap();
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            source_worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
         .current_dir(repo_root)
         .status()
         .unwrap()

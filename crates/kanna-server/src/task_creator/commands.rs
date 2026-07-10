@@ -1,4 +1,3 @@
-use super::environment::which_binary;
 use super::provider::AgentProvider;
 use kanna_agent_protocol::mcp::{
     codex_mcp_config_overrides, opencode_mcp_config_content, read_kanna_mcp_server,
@@ -19,6 +18,7 @@ pub(super) enum ClaudeSessionBinding {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_agent_command(
     provider: &AgentProvider,
+    executable: &str,
     prompt: &str,
     model: Option<&str>,
     permission_mode: Option<&str>,
@@ -44,6 +44,7 @@ pub(super) fn build_agent_command(
         }
     };
     let escaped_prompt = shell_single_quote(&prompt_with_fallback);
+    let executable = format!("'{}'", shell_single_quote(executable));
     match provider {
         AgentProvider::Claude => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
@@ -87,7 +88,7 @@ pub(super) fn build_agent_command(
             // the positional prompt: `--mcp-config <path> '<prompt>'` makes
             // the CLI treat the prompt as a second MCP config file and exit
             // with "MCP config file not found: <prompt>".
-            format!("claude {} -- '{}'", flags.join(" "), escaped_prompt)
+            format!("{executable} {} -- '{}'", flags.join(" "), escaped_prompt)
         }
         AgentProvider::Copilot => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
@@ -110,7 +111,7 @@ pub(super) fn build_agent_command(
                     flags.push(format!("--deny-tool={}", tool));
                 }
             }
-            format!("copilot {} -i '{}'", flags.join(" "), escaped_prompt)
+            format!("{executable} {} -i '{}'", flags.join(" "), escaped_prompt)
         }
         AgentProvider::Codex => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
@@ -118,19 +119,15 @@ pub(super) fn build_agent_command(
             if let Some(model) = model {
                 flags.push(format!("-m {}", model));
             }
-            format!("codex {} '{}'", flags.join(" "), escaped_prompt)
+            format!("{executable} {} '{}'", flags.join(" "), escaped_prompt)
         }
         AgentProvider::Opencode => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
             if let Some(model) = model {
                 flags.push(format!("-m {}", model));
             }
-            let executable = which_binary("opencode")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "opencode".to_string());
             let mut parts = vec![
-                format!("'{}'", shell_single_quote(&executable)),
+                executable.clone(),
                 "run".to_string(),
                 "--interactive".to_string(),
             ];
@@ -165,7 +162,7 @@ pub(super) fn build_agent_command(
                 ));
                 flags.push(format!("--add-dir '{}'", shell_single_quote(&alias_path)));
             }
-            let mut parts = vec![provider.executable().to_string()];
+            let mut parts = vec![executable.clone()];
             parts.extend(flags);
             if !prompt.is_empty() {
                 parts.push("--prompt-interactive".to_string());

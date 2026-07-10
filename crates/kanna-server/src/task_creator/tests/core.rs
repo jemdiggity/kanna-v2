@@ -598,6 +598,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
 
     let command = super::build_agent_command(
         &AgentProvider::Claude,
+        AgentProvider::Claude.executable(),
         "Review the branch.",
         None,
         Some("dontAsk"),
@@ -691,6 +692,7 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
 
     let command = super::build_agent_command(
         &AgentProvider::Antigravity,
+        AgentProvider::Antigravity.executable(),
         "Ship the task.",
         None,
         Some("dontAsk"),
@@ -705,7 +707,7 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
     );
 
     assert!(command.starts_with(
-        "mkdir -p '/tmp/kanna-antigravity-workspaces' && rm -f '/tmp/kanna-antigravity-workspaces/task-123' && ln -s '/tmp/repo/.kanna-worktrees/task-123' '/tmp/kanna-antigravity-workspaces/task-123' && agy --dangerously-skip-permissions --add-dir '/tmp/kanna-antigravity-workspaces/task-123' --prompt-interactive '"
+        "mkdir -p '/tmp/kanna-antigravity-workspaces' && rm -f '/tmp/kanna-antigravity-workspaces/task-123' && ln -s '/tmp/repo/.kanna-worktrees/task-123' '/tmp/kanna-antigravity-workspaces/task-123' && 'agy' --dangerously-skip-permissions --add-dir '/tmp/kanna-antigravity-workspaces/task-123' --prompt-interactive '"
     ));
     assert!(command.contains("## Kanna Task Environment"));
     assert!(command.contains("task `task-123`"));
@@ -742,6 +744,7 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
     let mcp_config = write_test_mcp_config("codex-command");
     let command = super::build_agent_command(
         &AgentProvider::Codex,
+        AgentProvider::Codex.executable(),
         "Do work.",
         None,
         Some("dontAsk"),
@@ -755,7 +758,7 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
         None,
     );
 
-    assert!(command.starts_with("codex "));
+    assert!(command.starts_with("'codex' "));
     assert!(command.contains("-c 'mcp_servers.kanna-mcp.command=\"/tmp/kanna mcp/kanna-mcp\"'"));
     assert!(command.contains("-c 'mcp_servers.kanna-mcp.args=[\"serve\"]'"));
     assert!(command.contains(
@@ -772,6 +775,7 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
     let mcp_config = write_test_mcp_config("copilot-command");
     let command = super::build_agent_command(
         &AgentProvider::Copilot,
+        AgentProvider::Copilot.executable(),
         "Do work.",
         None,
         Some("dontAsk"),
@@ -785,7 +789,7 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
         None,
     );
 
-    assert!(command.starts_with("copilot "));
+    assert!(command.starts_with("'copilot' "));
     assert!(command.contains("--additional-mcp-config @'"));
     assert!(command.contains(mcp_config.to_string_lossy().as_ref()));
     assert!(command.contains("-i 'Kanna preamble."));
@@ -799,6 +803,7 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
     let mcp_config = write_test_mcp_config("opencode-command");
     let command = super::build_agent_command(
         &AgentProvider::Opencode,
+        AgentProvider::Opencode.executable(),
         "Do work.",
         None,
         Some("dontAsk"),
@@ -813,6 +818,7 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
     );
 
     assert!(command.contains("OPENCODE_CONFIG_CONTENT='"));
+    assert!(command.contains("'opencode' run --interactive"));
     assert!(command.contains("\"$schema\":\"https://opencode.ai/config.json\""));
     assert!(command
         .contains("\"mcp\":{\"kanna-mcp\":{\"command\":[\"/tmp/kanna mcp/kanna-mcp\",\"serve\"]"));
@@ -875,9 +881,9 @@ fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
 fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
     let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
     let mut config = test_config("spawn-env-kanna-cli-path");
-    let (kanna_cli_path, created_test_sidecar) = ensure_test_sidecar("kanna-cli");
-    let (kanna_mcp_path, created_test_mcp_sidecar) = ensure_test_sidecar("kanna-mcp");
-    config.kanna_cli_path = Some(kanna_cli_path.to_string_lossy().to_string());
+    let kanna_cli_sidecar = ensure_test_sidecar("kanna-cli");
+    let _kanna_mcp_sidecar = ensure_test_sidecar("kanna-mcp");
+    config.kanna_cli_path = Some(kanna_cli_sidecar.path().to_string_lossy().to_string());
     let env = build_spawn_env(&config, "task-1", &HashMap::new()).unwrap();
     let cli_path = env
         .get("KANNA_CLI_PATH")
@@ -890,12 +896,6 @@ fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
     let path = env.get("PATH").expect("PATH should be provided");
 
     assert_eq!(path.split(':').next(), Some(cli_dir.as_str()));
-    if created_test_sidecar {
-        let _ = std::fs::remove_file(kanna_cli_path);
-    }
-    if created_test_mcp_sidecar {
-        let _ = std::fs::remove_file(kanna_mcp_path);
-    }
 }
 
 #[test]
@@ -1191,8 +1191,8 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
 #[test]
 fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
     let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
-    let (codex_sidecar, created_sidecar) = ensure_test_sidecar("codex");
-    let repo_root = init_git_repo("codex-headless-executable");
+    let codex_sidecar = ensure_test_sidecar("codex");
+    let repo_root = init_git_repo_without_provider_fixtures("codex-headless-executable");
     let config = test_config("codex-headless-executable");
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1229,14 +1229,11 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
     match prepared.session {
         PreparedSessionSpawn::Agent { executable, .. } => {
             let executable = executable.expect("codex executable should be resolved");
-            assert_eq!(executable, codex_sidecar.to_string_lossy());
+            assert_eq!(executable, codex_sidecar.path().to_string_lossy());
         }
         _ => panic!("expected agent session"),
     }
 
-    if created_sidecar {
-        let _ = std::fs::remove_file(&codex_sidecar);
-    }
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
@@ -1450,6 +1447,10 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
         .join(".kanna/fake-bin")
         .to_string_lossy()
         .to_string();
+    let expected_executable = std::path::Path::new(&expected_dir)
+        .join("codex")
+        .to_string_lossy()
+        .to_string();
     match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.last().expect("pty shell should include command");
@@ -1459,8 +1460,10 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
                 "command should restore spawn PATH before running agent: {command}"
             );
             let path_index = command.find("export PATH=").unwrap();
-            let codex_index = command.find("codex ").unwrap();
-            assert!(path_index < codex_index);
+            let executable_index = command
+                .find(&expected_executable)
+                .expect("PTY command should launch the resolved workspace executable");
+            assert!(path_index < executable_index);
         }
         _ => panic!("expected pty session"),
     }
@@ -1593,6 +1596,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -1614,7 +1618,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -1711,6 +1715,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -1732,7 +1737,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(&repo_root)
         .status()
         .unwrap()
