@@ -6,6 +6,25 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["name", "stages"],
+  "$defs": {
+    "agentProvider": {
+      "enum": ["claude", "copilot", "codex", "opencode", "antigravity"]
+    },
+    "agentProviderSelection": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/agentProvider"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/agentProvider"
+          },
+          "minItems": 1
+        }
+      ]
+    }
+  },
   "properties": {
     "$schema": {
       "type": "string",
@@ -61,18 +80,7 @@
             "type": "string"
           },
           "agent_provider": {
-            "oneOf": [
-              {
-                "enum": ["codex", "claude", "copilot", "opencode", "antigravity"]
-              },
-              {
-                "type": "array",
-                "items": {
-                  "enum": ["codex", "claude", "copilot", "opencode", "antigravity"]
-                },
-                "minItems": 1
-              }
-            ]
+            "$ref": "#/$defs/agentProviderSelection"
           },
           "environment": {
             "type": "string"
@@ -107,18 +115,7 @@
                 "type": "string"
               },
               "agent_provider": {
-                "oneOf": [
-                  {
-                    "enum": ["codex", "claude", "copilot", "opencode", "antigravity"]
-                  },
-                  {
-                    "type": "array",
-                    "items": {
-                      "enum": ["codex", "claude", "copilot", "opencode", "antigravity"]
-                    },
-                    "minItems": 1
-                  }
-                ]
+                "$ref": "#/$defs/agentProviderSelection"
               }
             }
           }

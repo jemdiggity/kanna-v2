@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, expect, it } from "vitest";
 import { parsePipelineJson } from "./pipeline-loader";
 
@@ -48,6 +49,14 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA pipeline assets", () => {
+  it("keeps the pipeline provider schema aligned with the generated registry", () => {
+    const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json")) as {
+      $defs?: { agentProvider?: { enum?: string[] } };
+    };
+
+    expect(schema.$defs?.agentProvider?.enum).toEqual([...AGENT_PROVIDERS]);
+  });
+
   it("keeps the commit agent focused on committing work instead of task-session mechanics", () => {
     const commitAgent = readRepoFile(".kanna/agents/commit/AGENT.md");
 
