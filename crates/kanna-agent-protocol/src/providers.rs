@@ -4,6 +4,8 @@ use std::{fmt, str::FromStr};
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 
+pub const PROVIDER_RESOLUTION_CASES_JSON: &str = include_str!("provider_resolution_cases.json");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]

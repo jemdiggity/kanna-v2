@@ -31,4 +31,7 @@ pub use events::{
 };
 pub use frames::{ClientFrame, FrameAgentEvent, ServerFrame, StateChangeScope, StreamKind};
 pub use opencode::OpencodeAdapter;
-pub use providers::{agent_provider_specs, AgentProvider, AgentProviderSpec, AgentSessionType};
+pub use providers::{
+    agent_provider_specs, AgentProvider, AgentProviderSpec, AgentSessionType,
+    PROVIDER_RESOLUTION_CASES_JSON,
+};

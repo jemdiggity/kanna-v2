@@ -9,12 +9,12 @@ filegroup(
     name = "cargo_srcs",
     srcs = [
         "Cargo.toml",
-    ] + glob(["src/**/*.rs"]),
+    ] + glob(["src/**/*.rs", "src/**/*.json"]),
 )
 
 rust_library(
     name = "kanna_agent_protocol_for_daemon",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs", "src/**/*.json"]),
     crate_root = "src/lib.rs",
     crate_name = "kanna_agent_protocol",
     edition = "2021",
@@ -26,7 +26,7 @@ rust_library(
 
 rust_library(
     name = "kanna_agent_protocol_for_server",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs", "src/**/*.json"]),
     crate_root = "src/lib.rs",
     crate_name = "kanna_agent_protocol",
     edition = "2021",
@@ -38,7 +38,7 @@ rust_library(
 
 rust_library(
     name = "kanna_agent_protocol_for_task_transfer",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs", "src/**/*.json"]),
     crate_root = "src/lib.rs",
     crate_name = "kanna_agent_protocol",
     edition = "2021",

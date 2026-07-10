@@ -31,6 +31,7 @@ use environment::{
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{resolve_agent_provider, resolve_agent_type, AgentProvider, AgentSessionType};
 use std::collections::HashMap;
+use std::str::FromStr;
 use types::{
     CreatedTask, ForkedWorkspace, PreparedRunWorkspace, PreparedSessionSpawn, PreparedStageRerun,
     RunWorkspaceSpec, TaskCreationRequest,
@@ -164,10 +165,10 @@ pub(crate) fn prepare_rerun_stage_for_api(
         },
     );
     let provider = resolve_agent_provider(
-        source_task.agent_provider.as_deref(),
         None,
         current_stage.agent_provider.as_deref(),
         agent.as_ref(),
+        source_task.agent_provider.as_deref(),
     )?;
     let model = agent.as_ref().and_then(|agent| agent.model.clone());
     let permission_mode = agent
@@ -284,9 +285,9 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     };
     let provider = resolve_agent_provider(
         explicit_provider.as_deref(),
-        None,
         target_stage.agent_provider.as_deref(),
         agent.as_ref(),
+        None,
     )?;
     let agent_type = resolve_agent_type(source_agent_type, provider)?;
     let model = agent.as_ref().and_then(|agent| agent.model.clone());
@@ -472,7 +473,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
             ],
             cols: 80,
             rows: 24,
-            agent_provider: AgentProvider::Claude.to_daemon_provider(),
+            agent_provider: AgentProvider::Claude,
         },
     })
 }
@@ -594,7 +595,7 @@ fn build_prepared_session(
                     ],
                     cols: 80,
                     rows: 24,
-                    agent_provider: provider.to_daemon_provider(),
+                    agent_provider: provider,
                 },
                 provider_session_id,
             )
@@ -615,7 +616,7 @@ fn build_prepared_session(
             );
             (
                 PreparedSessionSpawn::Agent {
-                    agent_provider: provider.to_daemon_provider(),
+                    agent_provider: provider,
                     prompt: final_prompt,
                     model,
                     permission_mode,
@@ -916,9 +917,9 @@ pub(crate) fn create_dormant_task_for_api(
     };
     let provider = resolve_agent_provider(
         explicit_provider.as_deref(),
-        default_provider.as_deref(),
         stage.agent_provider.as_deref(),
         agent.as_ref(),
+        default_provider.as_deref(),
     )?;
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
     let task_id = generate_task_id()?;
@@ -1008,10 +1009,10 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         None
     };
     let provider = resolve_agent_provider(
-        item.agent_provider.as_deref(),
         None,
         stage.agent_provider.as_deref(),
         agent.as_ref(),
+        item.agent_provider.as_deref(),
     )?;
     let agent_type = resolve_agent_type(item.agent_type.as_deref(), provider)?;
     let branch = item
@@ -1185,10 +1186,11 @@ fn read_default_agent_provider_setting(db: &Db) -> Result<Option<String>, String
     let provider = db
         .get_setting("defaultAgentProvider")
         .map_err(|e| format!("db error: {}", e))?;
-    Ok(match provider.as_deref() {
-        Some("claude" | "copilot" | "codex" | "opencode" | "antigravity") => provider,
-        _ => Some("claude".to_string()),
-    })
+    let provider = provider
+        .as_deref()
+        .and_then(|provider| AgentProvider::from_str(provider).ok())
+        .unwrap_or(AgentProvider::Claude);
+    Ok(Some(provider.as_str().to_string()))
 }
 
 struct ResolvedTaskSpawn {
@@ -1396,14 +1398,14 @@ fn resolve_task_spawn(
         if request.agent.is_some() {
             None
         } else {
-            request.default_provider.as_deref()
-        },
-        if request.agent.is_some() {
-            None
-        } else {
             stage.agent_provider.as_deref()
         },
         agent.as_ref(),
+        if request.agent.is_some() {
+            None
+        } else {
+            request.default_provider.as_deref()
+        },
     )?;
     let model = request
         .model

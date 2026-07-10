@@ -1,51 +1,6 @@
 use super::definitions::AgentDefinition;
-use kanna_daemon::protocol::AgentProvider as DaemonAgentProvider;
-
-#[derive(Clone, Copy)]
-pub(super) enum AgentProvider {
-    Claude,
-    Copilot,
-    Codex,
-    Opencode,
-    Antigravity,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum AgentSessionType {
-    Pty,
-    Agent,
-}
-
-impl AgentSessionType {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pty => "pty",
-            Self::Agent => "agent",
-        }
-    }
-}
-
-impl AgentProvider {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Copilot => "copilot",
-            Self::Codex => "codex",
-            Self::Opencode => "opencode",
-            Self::Antigravity => "antigravity",
-        }
-    }
-
-    pub(super) fn to_daemon_provider(self) -> DaemonAgentProvider {
-        match self {
-            Self::Claude => DaemonAgentProvider::Claude,
-            Self::Copilot => DaemonAgentProvider::Copilot,
-            Self::Codex => DaemonAgentProvider::Codex,
-            Self::Opencode => DaemonAgentProvider::Opencode,
-            Self::Antigravity => DaemonAgentProvider::Antigravity,
-        }
-    }
-}
+pub(super) use kanna_agent_protocol::{AgentProvider, AgentSessionType};
+use std::str::FromStr;
 
 pub(super) fn resolve_agent_type(
     explicit_agent_type: Option<&str>,
@@ -55,12 +10,7 @@ pub(super) fn resolve_agent_type(
         Some("pty") => Ok(AgentSessionType::Pty),
         Some("agent") => Ok(AgentSessionType::Agent),
         Some(other) => Err(format!("unsupported agent_type: {}", other)),
-        None => Ok(match provider {
-            AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
-                AgentSessionType::Agent
-            }
-            AgentProvider::Copilot | AgentProvider::Antigravity => AgentSessionType::Pty,
-        }),
+        None => Ok(provider.default_session_type()),
     }
 }
 
@@ -74,57 +24,74 @@ pub(super) fn normalize_agent_type(agent_type: Option<&str>) -> Option<&str> {
 
 pub(super) fn resolve_agent_provider(
     explicit_provider: Option<&str>,
-    default_provider: Option<&str>,
     stage_provider: Option<&str>,
     agent: Option<&AgentDefinition>,
+    fallback_provider: Option<&str>,
 ) -> Result<AgentProvider, String> {
-    let mut candidates = Vec::new();
-    if let Some(provider) = explicit_provider.or(default_provider).or(stage_provider) {
-        candidates.extend(
-            provider
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-        );
-    }
-    if candidates.is_empty() {
-        candidates.extend(
-            agent
-                .map(|agent| agent.agent_providers.clone())
-                .unwrap_or_default(),
-        );
-    }
-
-    let parsed = candidates
-        .iter()
-        .filter_map(|candidate| match candidate.as_str() {
-            "claude" => Some(AgentProvider::Claude),
-            "copilot" => Some(AgentProvider::Copilot),
-            "codex" => Some(AgentProvider::Codex),
-            "opencode" => Some(AgentProvider::Opencode),
-            "antigravity" => Some(AgentProvider::Antigravity),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if parsed.is_empty() {
-        return Err("no agent provider configured for task creation".to_string());
-    }
-
-    for provider in &parsed {
-        if binary_available(provider_binary_name(*provider)) {
-            return Ok(*provider);
-        }
-    }
-
-    Ok(parsed[0])
+    resolve_agent_provider_with(
+        explicit_provider,
+        stage_provider,
+        agent,
+        fallback_provider,
+        |provider| binary_available(provider.executable()),
+    )
 }
 
-pub(super) fn provider_binary_name(provider: AgentProvider) -> &'static str {
-    match provider {
-        AgentProvider::Antigravity => "agy",
-        _ => provider.as_str(),
+pub(super) fn resolve_agent_provider_with(
+    explicit_provider: Option<&str>,
+    stage_provider: Option<&str>,
+    agent: Option<&AgentDefinition>,
+    fallback_provider: Option<&str>,
+    is_available: impl Fn(AgentProvider) -> bool,
+) -> Result<AgentProvider, String> {
+    let string_source = explicit_provider
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| stage_provider.filter(|value| !value.trim().is_empty()));
+
+    let raw_candidates = if let Some(source) = string_source {
+        source
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else if let Some(agent) = agent.filter(|agent| !agent.agent_providers.is_empty()) {
+        agent.agent_providers.clone()
+    } else if let Some(source) = fallback_provider.filter(|value| !value.trim().is_empty()) {
+        source
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    if raw_candidates.is_empty() {
+        return Err("No agent provider configured for this request.".to_string());
     }
+
+    let candidates = raw_candidates
+        .iter()
+        .map(|candidate| AgentProvider::from_str(candidate))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(provider) = candidates
+        .iter()
+        .copied()
+        .find(|provider| is_available(*provider))
+    {
+        return Ok(provider);
+    }
+
+    Err(format!(
+        "None of the configured agent providers are available: {}.",
+        candidates
+            .iter()
+            .map(|provider| provider.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 fn binary_available(name: &str) -> bool {

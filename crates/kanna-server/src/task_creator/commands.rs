@@ -1,5 +1,5 @@
 use super::environment::which_binary;
-use super::provider::{provider_binary_name, AgentProvider};
+use super::provider::AgentProvider;
 use kanna_agent_protocol::mcp::{
     codex_mcp_config_overrides, opencode_mcp_config_content, read_kanna_mcp_server,
 };
@@ -165,7 +165,7 @@ pub(super) fn build_agent_command(
                 ));
                 flags.push(format!("--add-dir '{}'", shell_single_quote(&alias_path)));
             }
-            let mut parts = vec![provider_binary_name(*provider).to_string()];
+            let mut parts = vec![provider.executable().to_string()];
             parts.extend(flags);
             if !prompt.is_empty() {
                 parts.push("--prompt-interactive".to_string());

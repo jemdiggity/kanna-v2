@@ -1,4 +1,67 @@
+use super::super::definitions::AgentDefinition;
+use super::super::provider::resolve_agent_provider_with;
 use super::*;
+
+#[derive(serde::Deserialize)]
+struct ProviderResolutionCase {
+    name: String,
+    #[serde(default)]
+    explicit: Vec<String>,
+    #[serde(default)]
+    stage: Vec<String>,
+    #[serde(default)]
+    agent: Vec<String>,
+    #[serde(default)]
+    fallback: Vec<String>,
+    #[serde(default)]
+    available: Vec<String>,
+    expected: Option<String>,
+    error: Option<String>,
+}
+
+fn joined(values: &[String]) -> Option<String> {
+    (!values.is_empty()).then(|| values.join(","))
+}
+
+#[test]
+fn provider_resolution_cases_match_shared_contract() {
+    let cases: Vec<ProviderResolutionCase> =
+        serde_json::from_str(kanna_agent_protocol::PROVIDER_RESOLUTION_CASES_JSON).unwrap();
+
+    for case in cases {
+        let agent = (!case.agent.is_empty()).then(|| AgentDefinition {
+            prompt: String::new(),
+            agent_providers: case.agent.clone(),
+            model: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+        });
+        let available = case.available.clone();
+        let result = resolve_agent_provider_with(
+            joined(&case.explicit).as_deref(),
+            joined(&case.stage).as_deref(),
+            agent.as_ref(),
+            joined(&case.fallback).as_deref(),
+            |provider| available.iter().any(|value| value == provider.as_str()),
+        );
+
+        match (case.expected, case.error) {
+            (Some(expected), None) => {
+                assert_eq!(result.unwrap().as_str(), expected, "{}", case.name)
+            }
+            (None, Some(error)) => assert_eq!(result.unwrap_err(), error, "{}", case.name),
+            _ => panic!("invalid provider fixture: {}", case.name),
+        }
+    }
+}
+
+#[test]
+fn provider_resolution_rejects_unknown_values() {
+    assert_eq!(
+        resolve_agent_provider_with(Some("future-agent"), None, None, None, |_| true).unwrap_err(),
+        "unsupported agent provider: future-agent",
+    );
+}
 
 #[test]
 fn claim_task_ports_skips_reserved_ports_and_offsets() {
@@ -1640,7 +1703,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
 }
 
 #[test]
-fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider() {
+fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_setting() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-task-default-agent-provider-{}",
         std::process::id()
@@ -1737,7 +1800,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
         .unwrap()
         .unwrap();
 
-    assert_eq!(created_source.agent_provider.as_deref(), Some("copilot"));
+    assert_eq!(created_source.agent_provider.as_deref(), Some("codex"));
 
     let prepared = prepare_task_for_api(
         &db,
@@ -1750,7 +1813,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             stage: None,
             base_ref: None,
             agent: None,
-            agent_provider: Some("codex".to_string()),
+            agent_provider: Some("claude".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
@@ -1772,7 +1835,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
         .unwrap()
         .unwrap();
 
-    assert_eq!(created_source.agent_provider.as_deref(), Some("codex"));
+    assert_eq!(created_source.agent_provider.as_deref(), Some("claude"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -1781,6 +1844,18 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
 fn default_agent_provider_setting_falls_back_to_claude_when_unset() {
     let db_path = Db::test_db_path("default-agent-provider-unset");
     let db = Db::open_for_tests(&db_path).unwrap();
+
+    let provider = read_default_agent_provider_setting(&db).unwrap();
+
+    assert_eq!(provider.as_deref(), Some("claude"));
+}
+
+#[test]
+fn default_agent_provider_setting_falls_back_to_claude_when_invalid() {
+    let db_path = Db::test_db_path("default-agent-provider-invalid");
+    let db = Db::open_for_tests(&db_path).unwrap();
+    db.set_test_setting("defaultAgentProvider", "future-agent")
+        .unwrap();
 
     let provider = read_default_agent_provider_setting(&db).unwrap();
 
