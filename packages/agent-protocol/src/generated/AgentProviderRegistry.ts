@@ -42,7 +42,7 @@ export function isAgentProvider(value: unknown): value is AgentProvider {
     && AGENT_PROVIDERS.includes(value as AgentProvider);
 }
 
-export function getAgentProviderSpec(provider: AgentProvider): AgentProviderSpec {
+export function getAgentProviderSpec(provider: AgentProvider): Readonly<AgentProviderSpec> {
   const spec = AGENT_PROVIDER_SPECS.find((candidate) => candidate.id === provider);
   if (!spec) throw new Error(`Unknown agent provider: ${provider}`);
   return spec;

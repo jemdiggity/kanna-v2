@@ -114,8 +114,11 @@ mod tests {
 
     #[test]
     fn export_bindings_provider_registry() {
-        let output_dir = std::env::var("TS_RS_EXPORT_DIR")
-            .expect("TS_RS_EXPORT_DIR must be set by the protocol generator");
+        let output_dir = match std::env::var("TS_RS_EXPORT_DIR") {
+            Ok(output_dir) => output_dir,
+            Err(std::env::VarError::NotPresent) => return,
+            Err(error) => panic!("TS_RS_EXPORT_DIR must be valid Unicode: {error}"),
+        };
         let specs_json = serde_json::to_string_pretty(&agent_provider_specs()).unwrap();
         let source = format!(
             r#"// Generated from crates/kanna-agent-protocol. Do not edit manually.
@@ -131,7 +134,7 @@ export function isAgentProvider(value: unknown): value is AgentProvider {{
     && AGENT_PROVIDERS.includes(value as AgentProvider);
 }}
 
-export function getAgentProviderSpec(provider: AgentProvider): AgentProviderSpec {{
+export function getAgentProviderSpec(provider: AgentProvider): Readonly<AgentProviderSpec> {{
   const spec = AGENT_PROVIDER_SPECS.find((candidate) => candidate.id === provider);
   if (!spec) throw new Error(`Unknown agent provider: ${{provider}}`);
   return spec;
