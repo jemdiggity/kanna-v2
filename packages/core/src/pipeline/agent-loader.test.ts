@@ -8,6 +8,34 @@ import {
 } from "./agent-loader";
 import type { AgentDefinition, AgentExtension } from "./pipeline-types";
 
+const MALFORMED_AGENT_PROVIDER_CASES = [
+  {
+    name: "mixed array",
+    yaml: "agent_provider:\n  - claude\n  - 7",
+    error: /agent_provider.*string.*array of strings/,
+  },
+  {
+    name: "all-nonstring array",
+    yaml: "agent_provider:\n  - 7\n  - true",
+    error: /agent_provider.*string.*array of strings/,
+  },
+  {
+    name: "non-string scalar",
+    yaml: "agent_provider: 42",
+    error: /agent_provider.*string.*array of strings/,
+  },
+  {
+    name: "empty array",
+    yaml: "agent_provider: []",
+    error: /agent_provider.*at least one non-empty provider/,
+  },
+  {
+    name: "blank string",
+    yaml: 'agent_provider: "   "',
+    error: /agent_provider.*at least one non-empty provider/,
+  },
+] as const;
+
 describe("parseAgentDefinition", () => {
   it("parses valid AGENT.md with all fields", () => {
     const content = `---
@@ -127,6 +155,21 @@ Do something.
 `;
     expect(() => parseAgentDefinition(content)).toThrow(/agent_provider.*claud/);
   });
+
+  it.each(MALFORMED_AGENT_PROVIDER_CASES)(
+    "rejects $name agent_provider frontmatter",
+    ({ yaml, error }) => {
+      const content = `---
+name: Malformed Provider
+description: Has malformed provider frontmatter
+${yaml}
+---
+
+Do something.
+`;
+      expect(() => parseAgentDefinition(content)).toThrow(error);
+    },
+  );
 
   it("uses markdown body as the prompt field", () => {
     const content = `---
@@ -311,6 +354,19 @@ Extra instructions.
 `;
     expect(() => parseAgentExtension(content)).toThrow(/agent_provider.*future-agent/);
   });
+
+  it.each(MALFORMED_AGENT_PROVIDER_CASES)(
+    "rejects $name agent_provider frontmatter",
+    ({ yaml, error }) => {
+      const content = `---
+${yaml}
+---
+
+Extra instructions.
+`;
+      expect(() => parseAgentExtension(content)).toThrow(error);
+    },
+  );
 });
 
 describe("applyAgentExtension", () => {

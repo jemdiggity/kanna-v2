@@ -23,9 +23,18 @@ function parsePermissionMode(value: unknown): PermissionMode | undefined {
   );
 }
 
-function parseAgentProviders(value: unknown): AgentProvider[] | undefined {
+function parseAgentProviders(value: unknown): AgentProvider[] {
+  if (
+    typeof value !== "string" &&
+    !(Array.isArray(value) && value.every((provider) => typeof provider === "string"))
+  ) {
+    throw new Error("agent_provider must be a string or an array of strings");
+  }
+
   const providers = splitAgentProviderValue(value);
-  if (providers.length === 0) return undefined;
+  if (providers.length === 0) {
+    throw new Error("agent_provider must include at least one non-empty provider");
+  }
 
   const invalid = providers.filter((provider) => !isAgentProvider(provider));
   if (invalid.length > 0) {
@@ -72,9 +81,7 @@ export function parseAgentDefinition(content: string): AgentDefinition {
   // agent_provider: YAML array, single string, or comma-separated string.
   if (fm.agent_provider !== undefined) {
     const agentProviders = parseAgentProviders(fm.agent_provider);
-    if (agentProviders !== undefined) {
-      def.agent_provider = agentProviders;
-    }
+    def.agent_provider = agentProviders;
   }
 
   const errors = validateAgentDefinition(def);
@@ -114,9 +121,7 @@ export function parseAgentExtension(content: string): AgentExtension {
 
   if (fm.agent_provider !== undefined) {
     const agentProviders = parseAgentProviders(fm.agent_provider);
-    if (agentProviders !== undefined) {
-      ext.agent_provider = agentProviders;
-    }
+    ext.agent_provider = agentProviders;
   }
 
   return ext;
