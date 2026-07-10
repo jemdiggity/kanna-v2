@@ -333,6 +333,94 @@ fn run_quick_check(conn: &Connection) -> Result<(), rusqlite::Error> {
     )))
 }
 
+fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = database_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+pub(crate) fn relocate_legacy_database_if_needed(
+    legacy_path: &Path,
+    canonical_path: &Path,
+) -> Result<bool, String> {
+    if canonical_path.exists() || !legacy_path.exists() {
+        return Ok(false);
+    }
+
+    let canonical_parent = canonical_path.parent().ok_or_else(|| {
+        format!(
+            "canonical database path has no parent: {}",
+            canonical_path.display()
+        )
+    })?;
+    std::fs::create_dir_all(canonical_parent).map_err(|error| {
+        format!(
+            "failed to create canonical database directory {}: {error}",
+            canonical_parent.display()
+        )
+    })?;
+
+    let connection =
+        Connection::open_with_flags(legacy_path, database_open_flags()).map_err(|error| {
+            format!(
+                "failed to open legacy database {}: {error}",
+                legacy_path.display()
+            )
+        })?;
+    configure_shared_database_connection(&connection).map_err(|error| {
+        format!(
+            "failed to configure legacy database {}: {error}",
+            legacy_path.display()
+        )
+    })?;
+    let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|error| {
+            format!(
+                "failed to checkpoint legacy database {}: {error}",
+                legacy_path.display()
+            )
+        })?;
+    if busy != 0 || log_frames != checkpointed_frames {
+        return Err(format!(
+            "legacy database checkpoint did not complete for {}: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}",
+            legacy_path.display()
+        ));
+    }
+    run_quick_check(&connection).map_err(|error| {
+        format!(
+            "legacy database health check failed for {}: {error}",
+            legacy_path.display()
+        )
+    })?;
+    drop(connection);
+
+    std::fs::rename(legacy_path, canonical_path).map_err(|error| {
+        format!(
+            "failed to atomically relocate legacy database {} to {}: {error}",
+            legacy_path.display(),
+            canonical_path.display()
+        )
+    })?;
+
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = sqlite_sidecar_path(legacy_path, suffix);
+        if let Err(error) = std::fs::remove_file(&sidecar) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "failed to remove checkpointed legacy SQLite sidecar {}: {}",
+                    sidecar.display(),
+                    error
+                );
+            }
+        }
+    }
+
+    Ok(true)
+}
+
 fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         r#"

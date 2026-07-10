@@ -1,5 +1,4 @@
 import { invoke } from "../invoke";
-import { migrateLegacyDatabaseIfNeeded } from "../composables/useBackup";
 import { debugLog } from "../utils/debugLog";
 import type { DbHandle } from "../types/kanna";
 
@@ -52,6 +51,5 @@ export async function resolveDbName(): Promise<string> {
 export async function loadDatabase(): Promise<{ db: DbHandle; dbName: string }> {
   const dbName = await resolveDbName();
   debugLog("[db] using server-owned database:", dbName);
-  await migrateLegacyDatabaseIfNeeded(dbName);
   return { db: frontendSqlDisabledDb, dbName };
 }

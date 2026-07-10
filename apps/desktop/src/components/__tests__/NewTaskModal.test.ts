@@ -16,20 +16,16 @@ function selectedAgentLabel(wrapper: ReturnType<typeof mount<typeof NewTaskModal
   return wrapper.get(".agent-provider").text();
 }
 
-let installedProviderNames = new Set(["claude", "codex", "opencode", "agy"]);
+const invokeMock = vi.hoisted(() => vi.fn());
+const DEFAULT_AVAILABLE_PROVIDERS = ["claude", "codex", "opencode", "antigravity"] as const;
 
 vi.mock("../../invoke", () => ({
-  invoke: vi.fn(async (command: string, args?: { name?: string; repoPath?: string }) => {
-    if (command === "which_binary" && args?.name && installedProviderNames.has(args.name)) {
-      return true;
-    }
-    throw new Error("missing");
-  }),
+  invoke: invokeMock,
 }));
 
 describe("NewTaskModal", () => {
   beforeEach(() => {
-    installedProviderNames = new Set(["claude", "codex", "opencode", "agy"]);
+    invokeMock.mockClear();
   });
 
   afterEach(() => {
@@ -86,7 +82,10 @@ describe("NewTaskModal", () => {
 
   it("includes OpenCode in the agent cycle when installed", async () => {
     const wrapper = mount(NewTaskModal, {
-      props: { defaultAgentProvider: "codex" },
+      props: {
+        defaultAgentProvider: "codex",
+        availableAgentProviders: [...DEFAULT_AVAILABLE_PROVIDERS],
+      },
       global: {
         mocks: {
           $t: (key: string) => key,
@@ -112,7 +111,10 @@ describe("NewTaskModal", () => {
 
   it("includes Antigravity in the agent cycle when agy is installed", async () => {
     const wrapper = mount(NewTaskModal, {
-      props: { defaultAgentProvider: "opencode" },
+      props: {
+        defaultAgentProvider: "opencode",
+        availableAgentProviders: [...DEFAULT_AVAILABLE_PROVIDERS],
+      },
       global: {
         mocks: {
           $t: (key: string) => key,
@@ -134,7 +136,6 @@ describe("NewTaskModal", () => {
   });
 
   it("offers every installed PTY provider and every headless-capable provider", async () => {
-    installedProviderNames = new Set(AGENT_PROVIDER_SPECS.map((spec) => spec.executable));
     const sortedProviders = [...AGENT_PROVIDERS].sort((a, b) => a.localeCompare(b));
     const sortedHeadlessProviders = AGENT_PROVIDER_SPECS
       .filter((spec) => spec.supports_headless)
@@ -145,7 +146,10 @@ describe("NewTaskModal", () => {
       ...sortedHeadlessProviders.map((provider) => `${provider} sdk`),
     ];
     const wrapper = mount(NewTaskModal, {
-      props: { defaultAgentProvider: sortedProviders[0] },
+      props: {
+        defaultAgentProvider: sortedProviders[0],
+        availableAgentProviders: sortedProviders,
+      },
       global: { mocks: { $t: (key: string) => key } },
     });
 
@@ -163,11 +167,11 @@ describe("NewTaskModal", () => {
   });
 
   it("keeps OpenCode selectable in headless agent mode", async () => {
-    installedProviderNames = new Set(["opencode"]);
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "opencode",
         defaultAgentType: "agent",
+        availableAgentProviders: ["opencode"],
         baseBranches: ["main"],
         defaultBaseBranch: "main",
       },
@@ -188,11 +192,53 @@ describe("NewTaskModal", () => {
     ]);
   });
 
-  it("orders agent choices by most recent exact usage", async () => {
-    installedProviderNames = new Set(["claude", "copilot", "codex", "opencode"]);
+  it("uses repo-scoped provider availability without probing the desktop PATH", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        defaultAgentProvider: "opencode",
+        availableAgentProviders: ["opencode"],
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(selectedAgentLabel(wrapper)).toBe("opencode");
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(selectedAgentLabel(wrapper)).toBe("opencode sdk");
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(selectedAgentLabel(wrapper)).toBe("opencode");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("does not offer or submit an unavailable provider when the repo has no agent executable", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
+        availableAgentProviders: [],
+        baseBranches: ["main"],
+        defaultBaseBranch: "main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    await wrapper.get("textarea").setValue("Cannot run");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+    expect(selectedAgentLabel(wrapper)).toBe("mainPanel.agentNotInstalled");
+    expect(wrapper.get(".btn-primary").attributes()).toHaveProperty("disabled");
+    expect(wrapper.emitted("submit")).toBeUndefined();
+  });
+
+  it("orders agent choices by most recent exact usage", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        defaultAgentProvider: "claude",
+        availableAgentProviders: ["claude", "copilot", "codex", "opencode"],
         recentAgentChoices: [
           { provider: "copilot", executionType: "pty" },
           { provider: "codex", executionType: "agent" },
@@ -280,6 +326,7 @@ describe("NewTaskModal", () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
+        availableAgentProviders: [...DEFAULT_AVAILABLE_PROVIDERS],
         pipelines: ["default"],
         defaultPipeline: "default",
         baseBranches: ["origin/main", "main", "feature/task-base-branch"],
@@ -390,6 +437,7 @@ describe("NewTaskModal", () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
+        availableAgentProviders: [...DEFAULT_AVAILABLE_PROVIDERS],
         pipelines: ["default"],
         defaultPipeline: "default",
         baseBranches: ["origin/main"],

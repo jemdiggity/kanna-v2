@@ -45,6 +45,7 @@ setDesktopServerClientHandlersForTests({
     },
     hasOperatorData: false,
   }),
+  fetchRepoAgentProviders: async () => ["claude", "copilot", "codex", "opencode", "antigravity"],
   patchRepo: async () => {},
   fetchPendingIncomingTransfers: async () => [],
   claimPendingIncomingTransfer: async () => false,

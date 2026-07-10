@@ -1,7 +1,9 @@
+use kanna_agent_protocol::AgentProvider;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Default, Deserialize)]
 pub(super) struct RepoConfig {
@@ -42,6 +44,7 @@ pub(super) struct PipelineStage {
     pub(super) name: String,
     pub(super) agent: Option<String>,
     pub(super) prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) agent_provider: Option<String>,
     pub(super) environment: Option<String>,
     pub(super) policy: PipelineStagePolicy,
@@ -57,6 +60,7 @@ pub(super) struct PipelinePost {
     pub(super) name: String,
     pub(super) agent: Option<String>,
     pub(super) prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) agent_provider: Option<String>,
 }
 
@@ -192,15 +196,9 @@ enum RawPipelineStageExecution {
     Continue,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawAgentProviderList {
-    Single(String),
-    Multiple(Vec<String>),
-}
-
 #[derive(Default, Deserialize)]
 struct AgentFrontmatter {
+    #[serde(default, deserialize_with = "deserialize_optional_yaml_value")]
     agent_provider: Option<YamlValue>,
     model: Option<String>,
     permission_mode: Option<String>,
@@ -243,9 +241,41 @@ pub(super) fn read_pipeline_definition(
         Ok(content) => content,
         Err(_) => read_builtin_resource(&format!(".kanna/pipelines/{pipeline_name}.json"))?,
     };
-    let raw: RawPipelineDefinition = serde_json::from_str(&content)
+    let value: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("invalid pipeline definition: {}", e))?;
+    reject_explicit_null_pipeline_providers(&value)?;
+    let raw: RawPipelineDefinition =
+        serde_json::from_value(value).map_err(|e| format!("invalid pipeline definition: {}", e))?;
     normalize_pipeline_definition(raw)
+}
+
+fn reject_explicit_null_pipeline_providers(value: &serde_json::Value) -> Result<(), String> {
+    let Some(stages) = value.get("stages").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    for (index, stage) in stages.iter().enumerate() {
+        if stage
+            .get("agent_provider")
+            .is_some_and(serde_json::Value::is_null)
+        {
+            return Err(format!(
+                "invalid pipeline definition: stages[{index}].agent_provider must be a string or a non-empty array of strings"
+            ));
+        }
+        for post_key in ["post", "post_action"] {
+            if stage
+                .get(post_key)
+                .and_then(serde_json::Value::as_object)
+                .and_then(|post| post.get("agent_provider"))
+                .is_some_and(serde_json::Value::is_null)
+            {
+                return Err(format!(
+                    "invalid pipeline definition: stages[{index}].{post_key}.agent_provider must be a string or a non-empty array of strings"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn read_task_pipeline_definition(
@@ -465,7 +495,7 @@ fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {
 
     Ok(AgentDefinition {
         prompt: body.trim().to_string(),
-        agent_providers: parse_agent_providers(fm.agent_provider),
+        agent_providers: parse_agent_providers(fm.agent_provider)?,
         model: fm.model,
         permission_mode: fm.permission_mode,
         allowed_tools: fm.allowed_tools.unwrap_or_default(),
@@ -482,7 +512,7 @@ fn parse_agent_extension(content: &str) -> Result<AgentExtension, String> {
     };
 
     let agent_providers = match fm.agent_provider {
-        Some(value) => parse_agent_providers(Some(value)),
+        Some(value) => parse_agent_providers(Some(value))?,
         None => Vec::new(),
     };
 
@@ -519,20 +549,37 @@ fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
     (None, normalized)
 }
 
-fn parse_agent_providers(value: Option<YamlValue>) -> Vec<String> {
-    match value {
-        Some(YamlValue::Sequence(values)) => values
-            .into_iter()
-            .filter_map(|value| value.as_str().map(str::to_string))
-            .collect(),
+fn parse_agent_providers(value: Option<YamlValue>) -> Result<Vec<String>, String> {
+    let providers: Vec<String> = match value {
+        None => return Ok(Vec::new()),
+        Some(YamlValue::Sequence(values)) => {
+            if !values.iter().all(|value| value.as_str().is_some()) {
+                return Err("agent_provider must be a string or an array of strings".to_string());
+            }
+            values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::trim).map(str::to_string))
+                .filter(|value| !value.is_empty())
+                .collect()
+        }
         Some(YamlValue::String(value)) => value
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .collect(),
-        _ => Vec::new(),
+        Some(_) => {
+            return Err("agent_provider must be a string or an array of strings".to_string());
+        }
+    };
+
+    if providers.is_empty() {
+        return Err("agent_provider must include at least one non-empty provider".to_string());
     }
+    for provider in &providers {
+        AgentProvider::from_str(provider)?;
+    }
+    Ok(providers)
 }
 
 fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineDefinition, String> {
@@ -618,10 +665,42 @@ fn deserialize_optional_provider_list<'de, D>(deserializer: D) -> Result<Option<
 where
     D: serde::Deserializer<'de>,
 {
-    let value = Option::<RawAgentProviderList>::deserialize(deserializer)?;
-    Ok(match value {
-        Some(RawAgentProviderList::Single(provider)) => Some(provider),
-        Some(RawAgentProviderList::Multiple(providers)) => Some(providers.join(",")),
-        None => None,
-    })
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let providers = match value {
+        // Pipeline snapshots created before provider validation serialized an
+        // unset optional field as null. Continue reading those durable task
+        // snapshots while omitting the field from newly serialized snapshots.
+        serde_json::Value::Null => return Ok(None),
+        serde_json::Value::String(provider) => vec![provider],
+        serde_json::Value::Array(values) => {
+            if values.is_empty() || !values.iter().all(serde_json::Value::is_string) {
+                return Err(serde::de::Error::custom(
+                    "agent_provider must be a string or a non-empty array of strings",
+                ));
+            }
+            values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        }
+        _ => {
+            return Err(serde::de::Error::custom(
+                "agent_provider must be a string or a non-empty array of strings",
+            ));
+        }
+    };
+
+    for provider in &providers {
+        AgentProvider::from_str(provider).map_err(|error| {
+            serde::de::Error::custom(format!("invalid agent_provider: {error}"))
+        })?;
+    }
+    Ok(Some(providers.join(",")))
+}
+
+fn deserialize_optional_yaml_value<'de, D>(deserializer: D) -> Result<Option<YamlValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    YamlValue::deserialize(deserializer).map(Some)
 }

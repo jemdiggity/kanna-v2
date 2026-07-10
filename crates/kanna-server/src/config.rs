@@ -90,33 +90,22 @@ fn legacy_db_path_for_root(data_root: &Path) -> PathBuf {
     kanna_runtime_defaults::legacy_desktop_db_path_for_app_support_root(data_root)
 }
 
-fn preferred_db_path_for_root(data_root: &Path) -> PathBuf {
-    preferred_db_path_for_candidates(
-        canonical_db_path_for_root(data_root),
-        legacy_db_path_for_root(data_root),
-    )
-}
-
-fn preferred_db_path_for_candidates(canonical: PathBuf, legacy: PathBuf) -> PathBuf {
-    if canonical.exists() {
-        return canonical;
-    }
-
-    if legacy.exists() {
-        return legacy;
-    }
-
-    canonical
-}
-
 fn normalize_db_path_with_candidates(configured: &Path, canonical: &Path, legacy: &Path) -> String {
     if configured == canonical || configured == legacy {
-        return preferred_db_path_for_candidates(canonical.to_path_buf(), legacy.to_path_buf())
-            .to_string_lossy()
-            .to_string();
+        return canonical.to_string_lossy().to_string();
     }
 
     configured.to_string_lossy().to_string()
+}
+
+pub(crate) fn legacy_database_relocation_paths(db_path: &str) -> Option<(PathBuf, PathBuf)> {
+    let canonical = PathBuf::from(db_path);
+    let data_root = canonical.parent()?.parent()?;
+    if canonical != canonical_db_path_for_root(data_root) {
+        return None;
+    }
+
+    Some((legacy_db_path_for_root(data_root), canonical))
 }
 
 fn load_from_path(
@@ -135,9 +124,7 @@ fn load_from_path(
     let legacy = legacy_db_path_for_root(data_root);
     let db_path = match raw.db_path {
         Some(path) => normalize_db_path_with_candidates(Path::new(&path), &canonical, &legacy),
-        None => preferred_db_path_for_root(data_root)
-            .to_string_lossy()
-            .to_string(),
+        None => canonical.to_string_lossy().to_string(),
     };
 
     Ok(Config {
@@ -235,6 +222,32 @@ mod tests {
                 .display()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn load_from_path_keeps_canonical_path_when_only_legacy_database_exists() {
+        let root = unique_test_dir("legacy-only");
+        let legacy = root.join("com.kanna.app").join("kanna-v2.db");
+        let canonical = root.join("build.kanna").join("kanna-v2.db");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, b"legacy database").unwrap();
+
+        let config_path = root.join("server.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "relay_url = \"\"\n\
+                 device_token = \"device-token\"\n\
+                 db_path = \"{}\"\n",
+                canonical.display()
+            ),
+        )
+        .unwrap();
+
+        let config = load_from_path(&config_path, &root).unwrap();
+
+        assert_eq!(config.db_path, canonical.display().to_string());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

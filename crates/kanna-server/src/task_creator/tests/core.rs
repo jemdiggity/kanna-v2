@@ -112,6 +112,156 @@ fn write_agent_repo(label: &str, agent_md: &str, extend_md: Option<&str>) -> std
     repo_root
 }
 
+const MALFORMED_AGENT_PROVIDER_CASES: &[(&str, &str, &str)] = &[
+    (
+        "mixed-array",
+        "agent_provider:\n  - claude\n  - 7",
+        "agent_provider must be a string or an array of strings",
+    ),
+    (
+        "non-string-scalar",
+        "agent_provider: 42",
+        "agent_provider must be a string or an array of strings",
+    ),
+    (
+        "null",
+        "agent_provider: null",
+        "agent_provider must be a string or an array of strings",
+    ),
+    (
+        "empty-array",
+        "agent_provider: []",
+        "agent_provider must include at least one non-empty provider",
+    ),
+    (
+        "blank-string",
+        "agent_provider: \"   \"",
+        "agent_provider must include at least one non-empty provider",
+    ),
+    (
+        "unknown-provider",
+        "agent_provider: future-agent",
+        "unsupported agent provider: future-agent",
+    ),
+];
+
+#[test]
+fn read_agent_definition_rejects_malformed_provider_frontmatter() {
+    for (label, yaml, expected) in MALFORMED_AGENT_PROVIDER_CASES {
+        let agent_md = format!("---\n{yaml}\n---\nAgent prompt.");
+        let repo_root = write_agent_repo(label, &agent_md, None);
+
+        let error = super::super::definitions::read_agent_definition(
+            &repo_root.to_string_lossy(),
+            "reviewer",
+        )
+        .err()
+        .expect("malformed provider frontmatter should fail");
+
+        assert!(
+            error.contains(expected),
+            "{label}: expected {error:?} to contain {expected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
+fn read_agent_extension_rejects_malformed_provider_frontmatter() {
+    for (label, yaml, expected) in MALFORMED_AGENT_PROVIDER_CASES {
+        let extension = format!("---\n{yaml}\n---\nExtended prompt.");
+        let repo_root = write_agent_repo(
+            &format!("extension-{label}"),
+            "---\nagent_provider: claude\n---\nAgent prompt.",
+            Some(&extension),
+        );
+
+        let error = super::super::definitions::read_agent_definition(
+            &repo_root.to_string_lossy(),
+            "reviewer",
+        )
+        .err()
+        .expect("malformed provider extension should fail");
+
+        assert!(
+            error.contains(expected),
+            "{label}: expected {error:?} to contain {expected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
+fn read_pipeline_definition_rejects_malformed_provider_selections() {
+    let cases = [
+        ("empty-array", serde_json::json!([])),
+        ("mixed-array", serde_json::json!(["claude", 7])),
+        ("non-string-scalar", serde_json::json!(42)),
+        ("null", serde_json::Value::Null),
+        ("blank-string", serde_json::json!("")),
+        ("unknown-provider", serde_json::json!("future-agent")),
+    ];
+
+    for (label, provider) in cases {
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-pipeline-provider-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        let pipeline_dir = repo_root.join(".kanna/pipelines");
+        std::fs::create_dir_all(&pipeline_dir).unwrap();
+        std::fs::write(
+            pipeline_dir.join("qa.json"),
+            serde_json::json!({
+                "name": "qa",
+                "stages": [{
+                    "name": "in progress",
+                    "transition": "manual",
+                    "agent_provider": provider,
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error =
+            super::super::definitions::read_pipeline_definition(&repo_root.to_string_lossy(), "qa")
+                .err()
+                .expect("malformed pipeline provider selection should fail");
+
+        assert!(
+            error.contains("agent_provider"),
+            "{label}: expected provider-specific error, got {error:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
+fn stored_pipeline_definition_accepts_legacy_null_provider_and_omits_it_on_reserialize() {
+    let snapshot = serde_json::json!({
+        "name": "qa",
+        "stages": [{
+            "name": "in progress",
+            "agent": null,
+            "prompt": "$TASK_PROMPT",
+            "agent_provider": null,
+            "environment": null,
+            "policy": { "transition": "manual" },
+            "post": null,
+        }],
+        "environments": null,
+    })
+    .to_string();
+
+    let pipeline =
+        super::super::definitions::read_task_pipeline_definition("/unused", "qa", Some(&snapshot))
+            .expect("legacy durable pipeline snapshots should remain readable");
+    let serialized = serde_json::to_value(pipeline).unwrap();
+
+    assert!(serialized["stages"][0].get("agent_provider").is_none());
+}
+
 #[test]
 fn read_agent_definition_without_extension_keeps_base() {
     let repo_root = write_agent_repo(
@@ -586,6 +736,79 @@ fn resolve_agent_type_defaults_antigravity_to_pty() {
 }
 
 #[test]
+fn resolve_agent_type_rejects_headless_sessions_for_pty_only_providers() {
+    for provider in [AgentProvider::Copilot, AgentProvider::Antigravity] {
+        for agent_type in ["agent", "sdk", "chat"] {
+            assert_eq!(
+                resolve_agent_type(Some(agent_type), provider).unwrap_err(),
+                format!("provider {provider} does not support headless agent sessions")
+            );
+        }
+    }
+}
+
+#[test]
+fn resolve_headless_agent_executable_defensively_rejects_pty_only_providers() {
+    for provider in [AgentProvider::Copilot, AgentProvider::Antigravity] {
+        assert_eq!(
+            super::super::environment::resolve_headless_agent_executable(provider, None, "/tmp")
+                .unwrap_err(),
+            format!("provider {provider} does not support headless agent sessions")
+        );
+    }
+}
+
+#[test]
+fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() {
+    let repo_root = init_git_repo("unsupported-headless-provider");
+    let config = test_config("unsupported-headless-provider");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    for provider in ["copilot", "antigravity"] {
+        let result = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: format!("Use {provider} headlessly"),
+                display_name: None,
+                pipeline_name: None,
+                stage: None,
+                base_ref: None,
+                agent: None,
+                agent_provider: Some(provider.to_string()),
+                agent_type: Some("agent".to_string()),
+                model: None,
+                permission_mode: None,
+                allowed_tools: None,
+                disallowed_tools: None,
+                max_turns: None,
+                max_budget_usd: None,
+                setup_cmds: None,
+                resume_session_id: None,
+                blocker_task_ids: None,
+                notify_task_id: None,
+                parent_task_id: None,
+            },
+        );
+
+        assert_eq!(
+            result
+                .err()
+                .expect("PTY-only headless provider should fail"),
+            format!("provider {provider} does not support headless agent sessions")
+        );
+        assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
+        assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+    }
+
+    assert!(!repo_root.join(".kanna-worktrees").exists());
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     let preamble = super::build_kanna_preamble(
         &AgentProvider::Claude,
@@ -879,7 +1102,7 @@ fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
 
 #[test]
 fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
-    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
+    let _sidecar_guard = crate::test_sidecar_guard();
     let mut config = test_config("spawn-env-kanna-cli-path");
     let kanna_cli_sidecar = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp_sidecar = ensure_test_sidecar("kanna-mcp");
@@ -1190,7 +1413,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
 
 #[test]
 fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
-    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
+    let _sidecar_guard = crate::test_sidecar_guard();
     let codex_sidecar = ensure_test_sidecar("codex");
     let repo_root = init_git_repo_without_provider_fixtures("codex-headless-executable");
     let config = test_config("codex-headless-executable");
@@ -1239,7 +1462,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
 
 #[test]
 fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution() {
-    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
+    let _sidecar_guard = crate::test_sidecar_guard();
     use std::os::unix::fs::PermissionsExt;
 
     let repo_root = init_git_repo("headless-workspace-path");

@@ -235,12 +235,12 @@ pub(super) fn resolve_headless_agent_executable(
     path: Option<&str>,
     worktree_path: &str,
 ) -> Result<Option<String>, String> {
-    match provider {
-        AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
-            resolve_provider_executable(provider, path, worktree_path).map(Some)
-        }
-        AgentProvider::Copilot | AgentProvider::Antigravity => Ok(None),
+    if !provider.supports_headless() {
+        return Err(format!(
+            "provider {provider} does not support headless agent sessions"
+        ));
     }
+    resolve_provider_executable(provider, path, worktree_path).map(Some)
 }
 
 pub(super) fn resolve_provider_executable(

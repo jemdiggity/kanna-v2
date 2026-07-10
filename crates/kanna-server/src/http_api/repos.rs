@@ -4,7 +4,7 @@ use crate::mobile_api::MobileApi;
 use axum::extract::Query;
 use axum::extract::{Path, State};
 use axum::Json;
-use kanna_agent_protocol::StateChangeScope;
+use kanna_agent_protocol::{AgentProvider, StateChangeScope};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -190,6 +190,51 @@ pub(super) async fn list_repo_tasks(
         .list_repo_tasks(&repo_id)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(tasks))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AvailableAgentProvider {
+    id: AgentProvider,
+    executable: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AvailableAgentProvidersResponse {
+    providers: Vec<AvailableAgentProvider>,
+}
+
+pub(super) async fn list_available_agent_providers(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+) -> Result<Json<AvailableAgentProvidersResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {e}"),
+        )
+    })?;
+    let repo = db
+        .get_repo(&repo_id)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {e}"),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("repo not found: {repo_id}"),
+            )
+        })?;
+    let providers = crate::task_creator::resolve_available_agent_providers(&repo.path)
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?
+        .into_iter()
+        .map(|(id, executable)| AvailableAgentProvider { id, executable })
+        .collect();
+    Ok(Json(AvailableAgentProvidersResponse { providers }))
 }
 
 #[derive(Debug, Serialize)]

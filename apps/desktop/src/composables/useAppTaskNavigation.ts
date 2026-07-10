@@ -1,6 +1,6 @@
 import { computed, watch, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
-import type { AgentProvider, PipelineItem } from "../types/kanna";
+import type { PipelineItem } from "../types/kanna";
 import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
 import type { CustomTaskConfig } from "@kanna/core";
 
@@ -82,9 +82,6 @@ interface UseAppTaskNavigationOptions {
   showBlockerSelect: Ref<boolean>;
   blockerSelectMode: Ref<"block" | "edit">;
   customTasks: Ref<CustomTaskConfig[]>;
-  firstSupportedAgentProvider: (
-    agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined,
-  ) => AgentProvider | undefined;
   openPeerPicker: (taskId: string) => void;
   openPairPeerPicker: () => void;
 }
@@ -112,7 +109,6 @@ export function useAppTaskNavigation({
   showBlockerSelect,
   blockerSelectMode,
   customTasks,
-  firstSupportedAgentProvider,
   openPeerPicker,
   openPairPeerPicker,
 }: UseAppTaskNavigationOptions) {
@@ -406,11 +402,9 @@ export function useAppTaskNavigation({
     if (!repo) return;
     try {
       let resolvedTask = task;
-      let requestedAgentProvider: AgentProvider | undefined;
 
       if (task.agent) {
         const agent = await store.loadAgent(repo.path, task.agent);
-        const firstProvider = firstSupportedAgentProvider(agent.agent_provider);
 
         resolvedTask = {
           ...task,
@@ -418,13 +412,11 @@ export function useAppTaskNavigation({
           permissionMode: task.permissionMode ?? agent.permission_mode,
           allowedTools: task.allowedTools ?? agent.allowed_tools,
         };
-        requestedAgentProvider = task.agentProvider ?? firstProvider;
       }
 
       await store.createItem(store.selectedRepoId, repo.path, resolvedTask.prompt, "pty", {
         customTask: resolvedTask,
         stage: task.stage,
-        agentProvider: requestedAgentProvider,
       });
     } catch (e: unknown) {
       console.error("[App] custom task launch failed:", e);
@@ -511,7 +503,6 @@ export function useAppTaskNavigation({
         "Help me create or update the .kanna/config.json for this repository.",
         "pty",
         {
-          agentProvider: firstSupportedAgentProvider(agent.agent_provider),
           customTask: {
             name: "Create Config",
             agent: "config-factory",
@@ -547,7 +538,6 @@ export function useAppTaskNavigation({
         "Set up Kanna for this repository.",
         "pty",
         {
-          agentProvider: firstSupportedAgentProvider(agent.agent_provider),
           customTask: {
             name: "Set Up Repository",
             agent: "setup",

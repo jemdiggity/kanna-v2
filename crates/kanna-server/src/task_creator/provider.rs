@@ -6,12 +6,19 @@ pub(super) fn resolve_agent_type(
     explicit_agent_type: Option<&str>,
     provider: AgentProvider,
 ) -> Result<AgentSessionType, String> {
-    match normalize_agent_type(explicit_agent_type) {
+    let agent_type = match normalize_agent_type(explicit_agent_type) {
         Some("pty") => Ok(AgentSessionType::Pty),
         Some("agent") => Ok(AgentSessionType::Agent),
         Some(other) => Err(format!("unsupported agent_type: {}", other)),
         None => Ok(provider.default_session_type()),
+    }?;
+
+    if agent_type == AgentSessionType::Agent && !provider.supports_headless() {
+        return Err(format!(
+            "provider {provider} does not support headless agent sessions"
+        ));
     }
+    Ok(agent_type)
 }
 
 pub(super) fn normalize_agent_type(agent_type: Option<&str>) -> Option<&str> {

@@ -468,6 +468,8 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
+    let _sidecar_guard = crate::test_sidecar_guard();
+
     let unique = format!(
         "{}-{}",
         std::process::id(),

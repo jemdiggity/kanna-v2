@@ -1,8 +1,8 @@
 import type { CommandResult, CommandRunner } from "./process";
 
 export interface RustTestCommand {
-  name: "frontend" | "sidecars" | "workspace" | "daemon";
-  command: "pnpm" | "./kd" | "cargo";
+  name: "agent-protocol" | "frontend" | "sidecars" | "workspace" | "daemon";
+  command: "./scripts/check-agent-protocol-types.sh" | "pnpm" | "./kd" | "cargo";
   args: string[];
 }
 
@@ -10,6 +10,11 @@ interface ExecutedRustTestCommand extends RustTestCommand, CommandResult {}
 
 export function buildRustTestCommands(): RustTestCommand[] {
   return [
+    {
+      name: "agent-protocol",
+      command: "./scripts/check-agent-protocol-types.sh",
+      args: [],
+    },
     { name: "frontend", command: "pnpm", args: ["--dir", "apps/desktop", "build"] },
     { name: "sidecars", command: "./kd", args: ["build", "sidecars"] },
     { name: "workspace", command: "cargo", args: ["test", "--workspace", "--exclude", "kanna-daemon"] },

@@ -1,14 +1,9 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const readEnvVarMock = vi.fn<(name: string) => Promise<string>>(async () => "");
-const migrateLegacyDatabaseIfNeededMock = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock("../tauri-mock", () => ({
   isTauri: true,
-}));
-
-vi.mock("../composables/useBackup", () => ({
-  migrateLegacyDatabaseIfNeeded: migrateLegacyDatabaseIfNeededMock,
 }));
 
 vi.mock("../invoke", () => ({
@@ -31,7 +26,6 @@ describe("desktop DB bootstrap boundary", () => {
   beforeEach(() => {
     readEnvVarMock.mockReset();
     readEnvVarMock.mockResolvedValue("");
-    migrateLegacyDatabaseIfNeededMock.mockClear();
   });
 
   it("prefers explicit KANNA_DB_NAME over the default name", async () => {
@@ -51,7 +45,6 @@ describe("desktop DB bootstrap boundary", () => {
     const loaded = await loadDatabase();
 
     expect(loaded.dbName).toBe("kanna-v2.db");
-    expect(migrateLegacyDatabaseIfNeededMock).toHaveBeenCalledWith("kanna-v2.db");
     await expect(loaded.db.execute("SELECT 1")).rejects.toThrow(
       /frontend SQLite access is disabled/,
     );

@@ -6,7 +6,6 @@ import type { DbHandle } from "../types/kanna";
 
 const RETENTION_DAYS = 7;
 const BACKUP_SUFFIX_REGEX = /\.backup-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})(?:-\d+)?$/;
-const LEGACY_APP_DATA_DIR_NAME = "com.kanna.app";
 const scheduledStartupBackups = new Set<string>();
 
 function backupTimestamp(): string {
@@ -22,44 +21,9 @@ function parseBackupTimestamp(filename: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-function resolveSiblingDir(path: string, siblingName: string): string | null {
-  const normalized = path.replace(/\/+$/, "");
-  const slashIndex = normalized.lastIndexOf("/");
-  if (slashIndex < 0) return null;
-  return `${normalized.slice(0, slashIndex + 1)}${siblingName}`;
-}
-
-async function copyIfExists(src: string, dst: string): Promise<void> {
-  const exists = await invoke<boolean>("file_exists", { path: src });
-  if (exists) {
-    await invoke("copy_file", { src, dst });
-  }
-}
-
 async function resolveDbPath(dbName: string): Promise<string> {
   const appDataDir = await invoke<string>("get_app_data_dir");
   return `${appDataDir}/${dbName}`;
-}
-
-export async function migrateLegacyDatabaseIfNeeded(dbName: string): Promise<void> {
-  const appDataDir = await invoke<string>("get_app_data_dir");
-  const legacyAppDataDir = resolveSiblingDir(appDataDir, LEGACY_APP_DATA_DIR_NAME);
-  if (!legacyAppDataDir || legacyAppDataDir === appDataDir) return;
-
-  const dbPath = `${appDataDir}/${dbName}`;
-  const currentExists = await invoke<boolean>("file_exists", { path: dbPath });
-  if (currentExists) return;
-
-  const legacyDbPath = `${legacyAppDataDir}/${dbName}`;
-  const legacyExists = await invoke<boolean>("file_exists", { path: legacyDbPath });
-  if (!legacyExists) return;
-
-  await invoke("ensure_directory", { path: appDataDir });
-  await invoke("copy_file", { src: legacyDbPath, dst: dbPath });
-  await copyIfExists(`${legacyDbPath}-wal`, `${dbPath}-wal`);
-  await copyIfExists(`${legacyDbPath}-shm`, `${dbPath}-shm`);
-
-  console.info(`[db] migrated legacy database: ${legacyDbPath} -> ${dbPath}`);
 }
 
 export async function createBackup(
@@ -153,4 +117,4 @@ export function startPeriodicBackup(
 }
 
 // Exported for testing
-export { parseBackupTimestamp, backupTimestamp, resolveDbPath, resolveSiblingDir };
+export { parseBackupTimestamp, backupTimestamp, resolveDbPath };

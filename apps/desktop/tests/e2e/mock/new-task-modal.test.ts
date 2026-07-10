@@ -163,6 +163,17 @@ describe("new task modal", () => {
       ].join("\n"),
     );
     await chmod(join(fakeBinDir, "claude"), 0o755);
+    await writeFile(
+      join(fakeBinDir, "opencode"),
+      [
+        "#!/bin/sh",
+        "mkdir -p .kanna",
+        "printf '%s\\n' \"$@\" > .kanna/new-task-modal-opencode-args.txt",
+        "printf 'fake new task modal opencode complete\\n'",
+        "",
+      ].join("\n"),
+    );
+    await chmod(join(fakeBinDir, "opencode"), 0o755);
     await git(testRepoPath, ["add", ".kanna"]);
     await git(testRepoPath, ["commit", "-m", "test: add new task modal fixtures"]);
     await git(testRepoPath, ["push", "origin", "main"]);
@@ -293,6 +304,24 @@ describe("new task modal", () => {
     await submitTaskFromModal(client, sdkPrompt);
     expect(await waitForTaskCreated(client, sdkPrompt)).toEqual(expect.objectContaining({
       agent_provider: "claude",
+      agent_type: "agent",
+    }));
+  });
+
+  it("creates OpenCode SDK tasks as headless agent tasks", async () => {
+    const prompt = "Create SDK OpenCode task";
+
+    await resetRecentAgentChoices(client);
+    await resetDefaultAgentPreference(client);
+    await openNewTaskModal(client);
+    await cycleToAgentChoice(client, "opencode sdk");
+    const promptInput = await client.waitForElement(".prompt-input", 2_000);
+    await client.sendKeys(promptInput, prompt);
+    await client.click(await client.waitForElement(".modal-overlay .btn-primary:not(:disabled)", 2_000));
+    await client.waitForNoElement(".modal-overlay", 5_000);
+
+    expect(await waitForTaskCreated(client, prompt)).toEqual(expect.objectContaining({
+      agent_provider: "opencode",
       agent_type: "agent",
     }));
   });

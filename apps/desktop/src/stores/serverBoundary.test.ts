@@ -96,6 +96,8 @@ describe("desktop server boundary", () => {
       { file: resolve(SRC_ROOT, "stores", "db.ts"), needle: "runMigrations" },
       { file: resolve(SRC_ROOT, "stores", "db.ts"), needle: "checkDatabaseHealth" },
       { file: resolve(SRC_ROOT, "stores", "db.ts"), needle: "schema_migrations" },
+      { file: resolve(SRC_ROOT, "stores", "db.ts"), needle: "migrateLegacyDatabaseIfNeeded" },
+      { file: resolve(SRC_ROOT, "composables", "useBackup.ts"), needle: "migrateLegacyDatabaseIfNeeded" },
     ];
 
     const violations = forbidden

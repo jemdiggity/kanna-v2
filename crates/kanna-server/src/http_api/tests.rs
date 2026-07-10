@@ -34,6 +34,8 @@ fn ensure_test_kanna_cli_sidecar() -> (PathBuf, bool) {
 }
 
 fn ensure_test_sidecar(name: &str) -> (PathBuf, bool) {
+    use std::os::unix::fs::PermissionsExt;
+
     let sidecar_path = std::env::current_exe()
         .unwrap()
         .parent()
@@ -44,6 +46,9 @@ fn ensure_test_sidecar(name: &str) -> (PathBuf, bool) {
     }
 
     std::fs::write(&sidecar_path, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut permissions = std::fs::metadata(&sidecar_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&sidecar_path, permissions).unwrap();
     (sidecar_path, true)
 }
 

@@ -18,6 +18,19 @@ mod worktree_cleanup;
 use config::Config;
 use std::sync::Arc;
 
+/// Serializes unit tests that stage fake sidecars beside the shared test
+/// executable. Those paths are process-wide, so every creator must hold this
+/// guard until it has finished using and cleaning up the fixture.
+#[cfg(test)]
+static TEST_SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_sidecar_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_SIDECAR_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -81,6 +94,23 @@ async fn main() {
             &relay_url
         }
     );
+
+    if let Some((legacy_path, canonical_path)) =
+        config::legacy_database_relocation_paths(&config.db_path)
+    {
+        match db::relocate_legacy_database_if_needed(&legacy_path, &canonical_path) {
+            Ok(true) => log::info!(
+                "Relocated legacy database: {} -> {}",
+                legacy_path.display(),
+                canonical_path.display()
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Failed to relocate legacy database: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let heartbeat_config = config.clone();
     tokio::spawn(async move {

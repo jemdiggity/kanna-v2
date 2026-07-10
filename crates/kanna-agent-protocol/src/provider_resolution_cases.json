@@ -24,6 +24,13 @@
     "expected": "copilot"
   },
   {
+    "name": "agent ordered fallback skips unavailable first candidate",
+    "agent": ["codex", "claude"],
+    "fallback": ["opencode"],
+    "available": ["claude", "opencode"],
+    "expected": "claude"
+  },
+  {
     "name": "fallback is last",
     "fallback": ["opencode"],
     "available": ["opencode"],

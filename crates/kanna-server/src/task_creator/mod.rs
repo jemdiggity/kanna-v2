@@ -59,6 +59,21 @@ pub(crate) use stages::{
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
+pub(crate) fn resolve_available_agent_providers(
+    repo_path: &str,
+) -> Result<Vec<(AgentProvider, String)>, String> {
+    let repo_config = read_repo_config(repo_path)?;
+    let search_path = build_workspace_search_path(repo_path, &repo_config);
+    Ok(AgentProvider::ALL
+        .into_iter()
+        .filter_map(|provider| {
+            resolve_provider_executable(provider, search_path.as_deref(), repo_path)
+                .ok()
+                .map(|executable| (provider, executable))
+        })
+        .collect())
+}
+
 #[derive(Debug)]
 pub(crate) struct DormantMergeConflict {
     pub(crate) base_branch: String,

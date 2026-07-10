@@ -3,8 +3,13 @@ import { buildRustTestCommands, executeRustTests } from "../src/runtime/rust-tes
 import type { CommandRunner } from "../src/runtime/process";
 
 describe("Rust test orchestration", () => {
-  it("prepares Tauri inputs before workspace and serialized daemon tests", () => {
+  it("checks generated agent protocol types before Tauri inputs and Rust tests", () => {
     expect(buildRustTestCommands()).toEqual([
+      {
+        name: "agent-protocol",
+        command: "./scripts/check-agent-protocol-types.sh",
+        args: [],
+      },
       { name: "frontend", command: "pnpm", args: ["--dir", "apps/desktop", "build"] },
       { name: "sidecars", command: "./kd", args: ["build", "sidecars"] },
       { name: "workspace", command: "cargo", args: ["test", "--workspace", "--exclude", "kanna-daemon"] },
@@ -13,19 +18,21 @@ describe("Rust test orchestration", () => {
   });
 
   it("stops after the first failed prerequisite", async () => {
-    const calls: string[] = [];
+    const calls: Array<{ command: string; args: string[] }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push(`${command} ${args.join(" ")}`);
+        calls.push({ command, args });
         expect(options?.streamOutput).toBe(true);
-        return { exitCode: 1, stdout: "", stderr: "frontend failed" };
+        return { exitCode: 1, stdout: "", stderr: "agent protocol types are stale" };
       },
     };
 
     const result = await executeRustTests({ repoRoot: "/repo", env: {}, runner });
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("frontend failed");
-    expect(calls).toEqual(["pnpm --dir apps/desktop build"]);
+    expect(result.message).toContain("agent protocol types are stale");
+    expect(calls).toEqual([
+      { command: "./scripts/check-agent-protocol-types.sh", args: [] },
+    ]);
   });
 
   it("executes every command in order and returns the accumulated results", async () => {
@@ -63,6 +70,7 @@ describe("Rust test orchestration", () => {
   it("stops after an intermediate failure and retains prior and failed results", async () => {
     const planned = buildRustTestCommands();
     const outcomes = [
+      { exitCode: 0, stdout: "agent protocol types passed", stderr: "" },
       { exitCode: 0, stdout: "frontend passed", stderr: "" },
       { exitCode: 0, stdout: "sidecars passed", stderr: "" },
       { exitCode: 1, stdout: "", stderr: "workspace failed" },
@@ -78,13 +86,13 @@ describe("Rust test orchestration", () => {
     const result = await executeRustTests({ repoRoot: "/repo", env: {}, runner });
 
     expect(calls).toEqual(
-      planned.slice(0, 3).map(({ command, args }) => `${command} ${args.join(" ")}`),
+      planned.slice(0, 4).map(({ command, args }) => `${command} ${args.join(" ")}`),
     );
     expect(result).toEqual({
       ok: false,
       message: "workspace failed",
       data: {
-        commands: planned.slice(0, 3).map((command, index) => ({
+        commands: planned.slice(0, 4).map((command, index) => ({
           ...command,
           ...outcomes[index],
         })),

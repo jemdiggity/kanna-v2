@@ -22,8 +22,6 @@ use std::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
-static TEST_SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Serializes tests that point `CLAUDE_CONFIG_DIR` at a test-local session
 /// store: the variable is process-global, so concurrent writers would read
 /// each other's stores.
