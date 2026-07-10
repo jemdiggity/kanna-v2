@@ -158,9 +158,9 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
-    /// Check whether a task has dependent tasks
+    /// Check whether open tasks still depend on a task's branch
     DependentTasksExist {
-        /// The task/pipeline_item ID
+        /// Task whose branch may still have dependent tasks
         #[arg(long)]
         task_id: String,
 
