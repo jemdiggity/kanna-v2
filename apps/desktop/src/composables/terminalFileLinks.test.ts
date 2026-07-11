@@ -90,6 +90,37 @@ function waitForImageLinkActivation(container: HTMLElement): Promise<{ url: stri
 }
 
 describe("terminalFileLinks", () => {
+  it("maps xterm's one-based provider rows to zero-based buffer lines", async () => {
+    let registeredProvider: {
+      provideLinks(bufferLineNumber: number, callback: (links: unknown[] | undefined) => void): void
+    } | null = null
+    const getLine = vi.fn((lineNumber: number) =>
+      lineNumber === 0
+        ? { translateToString: vi.fn(() => "README.md") }
+        : null,
+    )
+    const term = {
+      buffer: { active: { getLine } },
+      registerLinkProvider: vi.fn((provider) => {
+        registeredProvider = provider
+      }),
+    }
+    invokeMock.mockResolvedValue(true)
+
+    createTerminalFileLinkProvider({
+      term: term as never,
+      options: { worktreePath: "/worktree" },
+      getContainer: () => document.createElement("div"),
+    }).register()
+
+    const links = await new Promise<unknown[] | undefined>((resolve) => {
+      registeredProvider?.provideLinks(1, resolve)
+    })
+
+    expect(getLine).toHaveBeenCalledWith(0)
+    expect(links).toHaveLength(1)
+  })
+
   it("links Copilot-style bare filenames and nested file paths", async () => {
     invokeMock.mockImplementation(async (command: string, args: { path: string }) => {
       return command === "file_exists" && (
