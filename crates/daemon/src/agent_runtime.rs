@@ -89,6 +89,7 @@ fn set_status(
     broadcast_tx: &broadcast::Sender<String>,
     session_id: &str,
     status: SessionStatus,
+    waiting_prompt_snippet: Option<String>,
 ) {
     if record.status == status {
         return;
@@ -96,9 +97,44 @@ fn set_status(
     record.status = status;
     broadcast_event(
         broadcast_tx,
-        &Event::StatusChanged {
-            session_id: session_id.to_string(),
-            status,
-        },
+        &status_changed_event(session_id, status, waiting_prompt_snippet),
     );
+}
+
+fn status_changed_event(
+    session_id: &str,
+    status: SessionStatus,
+    waiting_prompt_snippet: Option<String>,
+) -> Event {
+    Event::StatusChanged {
+        session_id: session_id.to_string(),
+        status,
+        waiting_prompt_snippet: if matches!(status, SessionStatus::Waiting | SessionStatus::Idle) {
+            waiting_prompt_snippet
+        } else {
+            None
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_agent_status_carries_latest_assistant_prompt() {
+        let event = status_changed_event(
+            "agent-1",
+            SessionStatus::Idle,
+            Some("Ready for review".to_string()),
+        );
+
+        assert!(matches!(
+            event,
+            Event::StatusChanged {
+                waiting_prompt_snippet: Some(prompt),
+                ..
+            } if prompt == "Ready for review"
+        ));
+    }
 }

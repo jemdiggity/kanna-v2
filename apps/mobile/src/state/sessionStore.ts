@@ -188,7 +188,8 @@ export function createSessionStore(): SessionStore {
         task.repoId === other.repoId &&
         task.title === other.title &&
         task.stage === other.stage &&
-        (task.snippet ?? null) === (other.snippet ?? null) &&
+        (task.waitingPromptSnippet ?? null) ===
+          (other.waitingPromptSnippet ?? null) &&
         (task.agentType ?? null) === (other.agentType ?? null)
       );
     });

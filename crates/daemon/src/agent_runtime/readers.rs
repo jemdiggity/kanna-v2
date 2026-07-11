@@ -98,6 +98,12 @@ async fn process_event(
         };
         record.last_activity_at = std::time::Instant::now();
 
+        if let AgentEvent::AssistantText { text, .. } = &event {
+            if let Some(prompt) = kanna_daemon::headless_terminal::bound_waiting_prompt(text) {
+                record.last_assistant_prompt = Some(prompt);
+            }
+        }
+
         {
             let provider_session_id = match record.adapter.lock() {
                 Ok(adapter) => adapter.provider_session_id(),
@@ -149,7 +155,13 @@ async fn process_event(
             } else {
                 next
             };
-            set_status(record, broadcast_tx, session_id, next);
+            set_status(
+                record,
+                broadcast_tx,
+                session_id,
+                next,
+                record.last_assistant_prompt.clone(),
+            );
         }
 
         record.shared.clone()
@@ -197,7 +209,7 @@ async fn handle_child_exit(
         if let Some(fds) = record.handoff_fds.take() {
             fds.close();
         }
-        set_status(record, broadcast_tx, session_id, SessionStatus::Idle);
+        set_status(record, broadcast_tx, session_id, SessionStatus::Idle, None);
         let per_turn = matches!(record.turn_model, TurnModel::PerTurn);
         (record.shared.clone(), code, per_turn, interrupted)
     };

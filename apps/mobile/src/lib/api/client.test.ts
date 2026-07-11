@@ -33,7 +33,7 @@ describe("createKannaClient", () => {
           repoId: "repo-1",
           title: "Refactor mobile client",
           stage: "in progress",
-          snippet: "Latest agent output preview"
+          waitingPromptSnippet: "Latest agent output preview"
         }
       ]),
       searchTasks: vi.fn().mockResolvedValue([
@@ -74,7 +74,9 @@ describe("createKannaClient", () => {
     ]);
     expect(await client.listRepoTasks("repo-1")).toHaveLength(1);
     expect(await client.listRecentTasks()).toHaveLength(1);
-    expect((await client.listRecentTasks())[0]?.snippet).toBe("Latest agent output preview");
+    expect((await client.listRecentTasks())[0]?.waitingPromptSnippet).toBe(
+      "Latest agent output preview"
+    );
     expect(await client.searchTasks("search")).toHaveLength(1);
     expect(await client.createTask({
       repoId: "repo-1",

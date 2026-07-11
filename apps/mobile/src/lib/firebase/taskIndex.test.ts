@@ -45,9 +45,10 @@ describe("cloud task index", () => {
         cloudTaskId: "cloud-task-1",
         ownerDesktopId: "desktop-1",
         ownerLocalTaskId: "task-1",
-        title: "Fix mobile cloud",
-        promptSnippet: "Fix mobile cloud",
-        displayName: "Mobile cloud",
+        title: "Prompt-derived title",
+        promptSnippet: "Original task prompt",
+        waitingPromptSnippet: "Ready for review",
+        displayName: "Current editable title",
         stage: "in progress",
         activity: "working",
         status: "active",
@@ -77,15 +78,31 @@ describe("cloud task index", () => {
       id: "cloud-task-1",
       repoId: "repo-1",
       repoName: "kanna",
-      title: "Mobile cloud",
+      title: "Current editable title",
       stage: "in progress",
-      snippet: "Fix mobile cloud",
+      waitingPromptSnippet: "Ready for review",
       agentProvider: "claude",
       agentType: "agent",
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
       ownerOnline: false,
     });
+    expect(
+      mapCloudTaskSnapshot({
+        cloudTaskId: "cloud-task-1",
+        ownerDesktopId: "desktop-1",
+        ownerLocalTaskId: "task-1",
+        title: "Prompt-derived title",
+        promptSnippet: "Original task prompt",
+        waitingPromptSnippet: "Ready for review",
+        displayName: "Current editable title",
+        stage: "in progress",
+        status: "active",
+        repo: { cloudRepoId: "repo-1", name: "kanna" },
+        updatedAt: "2026-05-14T00:01:00.000Z",
+        closedAt: null,
+      }),
+    ).not.toHaveProperty("snippet");
   });
 
   it("uses owner identity as the mobile task id when cloudTaskId is absent", () => {
@@ -190,7 +207,7 @@ describe("cloud task index", () => {
     );
   });
 
-  it("primes live task subscriptions from desktop task collections", async () => {
+  it("uses the initial live task snapshot without a stale prime read", async () => {
     const desktopDoc = {
       id: "desktop-doc",
       ref: { kind: "desktop-ref", id: "desktop-doc" },
@@ -200,23 +217,26 @@ describe("cloud task index", () => {
       onNext({ docs: [desktopDoc] });
       return vi.fn();
     });
-    firestoreMocks.onSnapshot.mockImplementationOnce(() => vi.fn());
-    firestoreMocks.getDocs.mockResolvedValueOnce({
-      docs: [{
-        data: () => ({
-          cloudTaskId: "cloud-task-1",
-          ownerDesktopId: "desktop-1",
-          ownerLocalTaskId: "task-1",
-          title: "Fix mobile cloud",
-          promptSnippet: "Fix mobile cloud",
-          displayName: null,
-          stage: "in progress",
-          status: "active",
-          repo: { cloudRepoId: "repo-1", name: "kanna" },
-          updatedAt: "2026-05-14T00:01:00.000Z",
-          closedAt: null,
-        }),
-      }],
+    firestoreMocks.onSnapshot.mockImplementationOnce((_query, onNext) => {
+      onNext({
+        docs: [{
+          data: () => ({
+            cloudTaskId: "cloud-task-1",
+            ownerDesktopId: "desktop-1",
+            ownerLocalTaskId: "task-1",
+            title: "Prompt-derived title",
+            promptSnippet: "Original task prompt",
+            waitingPromptSnippet: "Ready for review",
+            displayName: "Current renamed title",
+            stage: "in progress",
+            status: "active",
+            repo: { cloudRepoId: "repo-1", name: "kanna" },
+            updatedAt: "2026-05-14T00:01:00.000Z",
+            closedAt: null,
+          }),
+        }],
+      });
+      return vi.fn();
     });
     const onUpdate = vi.fn();
 
@@ -229,15 +249,18 @@ describe("cloud task index", () => {
       expect(onUpdate).toHaveBeenCalledWith([
         expect.objectContaining({
           id: "cloud-task-1",
+          title: "Current renamed title",
+          waitingPromptSnippet: "Ready for review",
           ownerDesktopId: "desktop-1",
           ownerLocalTaskId: "task-1"
         })
       ]);
     });
+    expect(firestoreMocks.getDocs).not.toHaveBeenCalled();
   });
 
   it("does not emit an empty live task list while known desktops are still hydrating", async () => {
-    let resolveActivePrime:
+    let publishActiveSnapshot:
       | ((snapshot: { docs: Array<{ data: () => Record<string, unknown> }> }) => void)
       | null = null;
     const activeDesktop = {
@@ -255,19 +278,14 @@ describe("cloud task index", () => {
       return vi.fn();
     });
     firestoreMocks.onSnapshot
-      .mockImplementationOnce(() => vi.fn())
+      .mockImplementationOnce((_query, onNext) => {
+        publishActiveSnapshot = onNext;
+        return vi.fn();
+      })
       .mockImplementationOnce((_query, onNext) => {
         onNext({ docs: [] });
         return vi.fn();
       });
-    firestoreMocks.getDocs
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveActivePrime = resolve;
-          })
-      )
-      .mockResolvedValueOnce({ docs: [] });
     const onUpdate = vi.fn();
 
     createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
@@ -278,7 +296,7 @@ describe("cloud task index", () => {
 
     expect(onUpdate).not.toHaveBeenCalledWith([]);
 
-    resolveActivePrime?.({
+    publishActiveSnapshot?.({
       docs: [{
         data: () => ({
           cloudTaskId: "cloud-task-1",
@@ -305,6 +323,7 @@ describe("cloud task index", () => {
         })
       ]);
     });
+    expect(firestoreMocks.getDocs).not.toHaveBeenCalled();
   });
 
   it("connects the default Firestore client to the configured emulator", async () => {

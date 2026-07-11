@@ -1,7 +1,6 @@
 import { type AgentProvider, type PipelineItem } from "@kanna/db";
 import { invoke } from "../invoke";
 import { createDesktopTask, fetchClosedTaskIdentities } from "../services/desktopServerClient";
-import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
 import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import { debugLog } from "../utils/debugLog";
 import { resolveRealE2eAgentOverride } from "./e2eRealAgentOverride";
@@ -13,7 +12,6 @@ import {
 import { resolveInitialBaseRef } from "./taskBaseBranch";
 import { normalizeAgentExecutionType, type AgentExecutionType } from "./agentExecutionType";
 import { requireService, type CreateItemOptions, type StoreContext } from "./state";
-import { showCloudPublishErrorToast } from "./taskPublishing";
 import type { TasksApi } from "./tasks";
 
 const CREATE_SNAPSHOT_RETRY_DELAYS_MS = [50, 150] as const;
@@ -242,12 +240,10 @@ export function createTaskItemActions(
       context.state.pendingCreateVisibility.delete(createdTaskId);
       return hydratedItem;
     };
-    const publishHydratedCreatedTask = (hydratedItem: PipelineItem) => {
+    const publishHydratedCreatedTask = () => {
       if (publishedCreatedTask) return;
       publishedCreatedTask = true;
-      const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
       void publishDesktopLanTaskSnapshot(context.requireDb());
-      publishCreatedTaskSnapshot(createdTaskId, hydratedItem, createdRepo);
     };
     const isCreatedTaskReconciliationLive = () => context.state.initializingTaskItems.value.some(
       (candidate) => candidate.id === initializingItemId && candidate.taskId === createdTaskId,
@@ -299,14 +295,14 @@ export function createTaskItemActions(
     }
 
     if (createdItem) {
-      publishHydratedCreatedTask(createdItem);
+      publishHydratedCreatedTask();
     } else {
       const continueCreatedTaskReconciliation = async () => {
         let retryIndex = 0;
         while (true) {
           const alreadyHydrated = await handoffHydratedCreatedTask();
           if (alreadyHydrated) {
-            publishHydratedCreatedTask(alreadyHydrated);
+            publishHydratedCreatedTask();
             return;
           }
           if (!isCreatedTaskReconciliationLive()) return;
@@ -319,7 +315,7 @@ export function createTaskItemActions(
 
           const hydratedAfterSleep = await handoffHydratedCreatedTask();
           if (hydratedAfterSleep) {
-            publishHydratedCreatedTask(hydratedAfterSleep);
+            publishHydratedCreatedTask();
             return;
           }
           if (!isCreatedTaskReconciliationLive()) return;
@@ -334,7 +330,7 @@ export function createTaskItemActions(
 
           const hydratedAfterReload = await handoffHydratedCreatedTask();
           if (hydratedAfterReload) {
-            publishHydratedCreatedTask(hydratedAfterReload);
+            publishHydratedCreatedTask();
             return;
           }
           if (!isCreatedTaskReconciliationLive()) return;
@@ -353,33 +349,6 @@ export function createTaskItemActions(
       console.error("[store] failed to invalidate windows after task creation:", error);
     }
     return createdTaskId;
-  }
-
-  function publishCreatedTaskSnapshot(taskId: string, createdItem: PipelineItem, createdRepo: Parameters<typeof publishDesktopTaskSnapshot>[2]) {
-    const publishPromise = publishDesktopTaskSnapshot(context.requireDb(), createdItem, createdRepo)
-      .then(() => {
-        if (import.meta.env.DEV && typeof window !== "undefined") {
-          (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
-            status: "ok",
-            taskId,
-          };
-        }
-      })
-      .catch((error) => {
-        if (import.meta.env.DEV && typeof window !== "undefined") {
-          (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
-            status: "error",
-            taskId,
-            message: error instanceof Error ? error.message : String(error),
-          };
-        }
-        console.warn("[cloud] failed to publish task snapshot:", error);
-        showCloudPublishErrorToast(context, error);
-        throw error;
-      });
-    void publishPromise.catch((error) => {
-      console.debug("[cloud] async publish task snapshot failed after non-awaited path:", error);
-    });
   }
 
   return { createItem };

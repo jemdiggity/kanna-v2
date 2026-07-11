@@ -156,6 +156,7 @@ const mockState = vi.hoisted(() => {
       case "run_script":
       case "ensure_directory":
       case "write_text_file":
+      case "set_transfer_task_snapshot":
         return undefined;
       case "list_sessions":
         return pipelineItems
@@ -1277,19 +1278,36 @@ describe("kanna store task base branch integration", () => {
     ).toBe(false);
   });
 
-  it("shows a toast when cloud task snapshot publish fails after local task creation", async () => {
-    publishDesktopTaskSnapshotMock.mockRejectedValue(
-      Object.assign(new Error("Missing or insufficient permissions."), { code: "permission-denied" }),
-    );
+  it("publishes a created task over LAN and invalidates the elected cloud owner without writing Firestore directly", async () => {
     const store = await createStore();
+    const invalidateSharedData = vi.fn(async () => {});
+    store.attachWindowWorkspace({
+      bootstrap: { windowId: "secondary", selectedRepoId: null, selectedItemId: null },
+      initialize: vi.fn(async () => {}),
+      loadSnapshot: vi.fn(async () => ({ windows: [] })),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection: vi.fn(async () => {}),
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData,
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    });
 
     await store.createItem("repo-1", "/tmp/repo", "Ship cloud-visible task", "agent", {
       agentProvider: "claude",
     });
 
     await vi.waitFor(() => {
-      expect(toastErrorMock).toHaveBeenCalledWith("Cloud publish failed: permission-denied");
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "set_transfer_task_snapshot",
+        expect.objectContaining({ snapshot: expect.any(Object) }),
+      );
     });
+    expect(invalidateSharedData).toHaveBeenCalledWith("createItem");
+    expect(publishDesktopTaskSnapshotMock).not.toHaveBeenCalled();
   });
 
   it("prefers origin/dev for the dev default branch and uses that remote ref as the worktree start point", async () => {
@@ -2264,7 +2282,7 @@ describe("kanna store task base branch integration", () => {
     }
   });
 
-  it("publishes a task hydrated by another snapshot during the background retry sleep", async () => {
+  it("publishes a task over LAN when another snapshot hydrates it during the background retry sleep", async () => {
     const store = await createStore();
     updateDesktopServerClientHandlersForTests({ patchTask: async () => {} });
     let includeDurableTask = false;
@@ -2312,7 +2330,12 @@ describe("kanna store task base branch integration", () => {
       await vi.advanceTimersByTimeAsync(500);
       await flushStore();
 
-      expect(publishDesktopTaskSnapshotMock).toHaveBeenCalledTimes(1);
+      expect(
+        mockState.invokeMock.mock.calls.filter(([command]) =>
+          command === "set_transfer_task_snapshot"
+        ),
+      ).toHaveLength(1);
+      expect(publishDesktopTaskSnapshotMock).not.toHaveBeenCalled();
       const attemptsAfterPublish = snapshotAttempts;
       await vi.advanceTimersByTimeAsync(5_000);
       await flushStore();

@@ -93,6 +93,9 @@ function createPipelineItem(overrides: Partial<PipelineItem> = {}): PipelineItem
 const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
+const nativeCloseRegistrationHarness = {
+  onRegistered: null as null | ((handler: NonNullable<typeof closeRequestedHandler>) => void),
+};
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
 const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   vi.fn((_uid: string, onSnapshot: (snapshot: { repos: unknown[]; items: unknown[]; terminalRefs: Record<string, unknown> }) => void) => {
@@ -101,6 +104,15 @@ const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   }),
 );
 const reconcileDesktopTaskSnapshotsMock = vi.hoisted(() => vi.fn(async () => {}));
+const publishDesktopWaitingPromptSnippetMock = vi.hoisted(() => vi.fn(async () => {}));
+const fenceAndDrainDesktopCloudWritesMock = vi.hoisted(() => vi.fn(async () => {}));
+const resumeDesktopCloudWritesMock = vi.hoisted(() => vi.fn());
+const desktopAuthHarness = vi.hoisted(() => ({
+  subscriber: null as null | ((state: unknown) => void),
+}));
+const windowWorkspaceInvalidationHandlers = new Set<(
+  payload: { reason?: string; sourceWindowId?: string },
+) => void | Promise<void>>();
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -214,6 +226,7 @@ const mockWindowWorkspace = {
     selectedRepoId: null,
     selectedItemId: null,
   },
+  initialize: vi.fn(async () => {}),
   loadSnapshot: vi.fn(async () => ({ windows: [] })),
   saveSnapshot: vi.fn(async () => {}),
   openWindow: vi.fn(async () => {}),
@@ -224,6 +237,12 @@ const mockWindowWorkspace = {
   persistSidebarWidth: vi.fn(async () => {}),
   invalidateSharedData: vi.fn(async () => {}),
   restoreAdditionalWindows: vi.fn(async () => {}),
+  onSharedInvalidation: vi.fn(async (handler: (
+    payload: { reason?: string; sourceWindowId?: string },
+  ) => void | Promise<void>) => {
+    windowWorkspaceInvalidationHandlers.add(handler);
+    return () => windowWorkspaceInvalidationHandlers.delete(handler);
+  }),
 };
 
 let capturedKeyboardActions: KeyboardActions | null = null;
@@ -256,6 +275,7 @@ vi.mock("@tauri-apps/api/window", () => ({
     setTheme: nativeWindowSetThemeMock,
     onCloseRequested: vi.fn(async (handler: (event: { preventDefault: () => void }) => void | Promise<void>) => {
       closeRequestedHandler = handler;
+      nativeCloseRegistrationHarness.onRegistered?.(handler);
       return () => {
         closeRequestedHandler = null;
       };
@@ -378,11 +398,16 @@ vi.mock("./services/desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
     initialize: vi.fn(async () => {}),
     subscribe: vi.fn((handler: (state: unknown) => void) => {
+      desktopAuthHarness.subscriber = handler;
       handler({
         status: "signedIn",
         user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
       });
-      return () => {};
+      return () => {
+        if (desktopAuthHarness.subscriber === handler) {
+          desktopAuthHarness.subscriber = null;
+        }
+      };
     }),
   })),
 }));
@@ -395,7 +420,10 @@ vi.mock("./services/desktopCloudTaskIndex", () => ({
 
 vi.mock("./services/desktopCloudPublisher", () => ({
   deleteRemoteTaskSnapshots: vi.fn(async () => {}),
+  fenceAndDrainDesktopCloudWrites: fenceAndDrainDesktopCloudWritesMock,
+  publishDesktopWaitingPromptSnippet: publishDesktopWaitingPromptSnippetMock,
   reconcileDesktopTaskSnapshots: reconcileDesktopTaskSnapshotsMock,
+  resumeDesktopCloudWrites: resumeDesktopCloudWritesMock,
 }));
 
 vi.mock("./services/desktopRelayTerminal", () => ({
@@ -572,6 +600,54 @@ function buildOutgoingTransferFinalizationRequestedEvent() {
     },
   };
 }
+
+function buildLocalCloudItem(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "task-local",
+    repo_id: "repo-1",
+    prompt: "Improve the card",
+    pipeline: "default",
+    stage: "in progress",
+    tags: "[]",
+    pr_number: null,
+    pr_url: null,
+    branch: "task-local",
+    activity: "working",
+    activity_changed_at: "2026-07-11T00:00:00.000Z",
+    unread_at: null,
+    port_offset: null,
+    port_env: null,
+    pinned: 0,
+    pin_order: null,
+    display_name: "Improve mobile cards",
+    issue_number: null,
+    issue_title: null,
+    closed_at: null,
+    agent_session_id: null,
+    base_ref: "main",
+    agent_provider: "claude",
+    agent_type: "pty",
+    previous_stage: null,
+    stage_result: null,
+    teardown_started_at: null,
+    last_output_preview: null,
+    active_post_action: null,
+    created_at: "2026-07-11T00:00:00.000Z",
+    updated_at: "2026-07-11T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function workspaceWindowState(windowId: string, order: number) {
+  return {
+    windowId,
+    selectedRepoId: null,
+    selectedItemId: null,
+    sidebarHidden: false,
+    sidebarWidth: 260,
+    order,
+  };
+}
 async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof SidebarWithoutRepoStub) {
   vi.stubGlobal("__KANNA_MOBILE__", false);
   const { default: App } = await import("./App.vue");
@@ -605,9 +681,9 @@ async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof Sidebar
       },
     },
   });
-  await flushPromises();
-  await flushPromises();
-  await flushPromises();
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await flushPromises();
+  }
   return wrapper;
 }
 
@@ -648,9 +724,9 @@ async function mountAppWithOverrides(
       },
     },
   });
-  await flushPromises();
-  await flushPromises();
-  await flushPromises();
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await flushPromises();
+  }
   return wrapper;
 }
 
@@ -700,8 +776,10 @@ describe("App", () => {
     listenHandlers.clear();
     currentWebviewWindowListenHandlers.clear();
     closeRequestedHandler = null;
+    nativeCloseRegistrationHarness.onRegistered = null;
     capturedKeyboardActions = null;
     mockWindowWorkspace.loadSnapshot.mockClear();
+    mockWindowWorkspace.initialize.mockClear();
     mockWindowWorkspace.saveSnapshot.mockClear();
     mockWindowWorkspace.openWindow.mockClear();
     mockWindowWorkspace.closeWindow.mockClear();
@@ -711,7 +789,13 @@ describe("App", () => {
     mockWindowWorkspace.persistSidebarWidth.mockClear();
     mockWindowWorkspace.invalidateSharedData.mockClear();
     mockWindowWorkspace.restoreAdditionalWindows.mockClear();
+    mockWindowWorkspace.onSharedInvalidation.mockClear();
     mockWindowWorkspace.bootstrap.windowId = "main";
+    windowWorkspaceInvalidationHandlers.clear();
+    mockWindowWorkspace.loadSnapshot.mockReset();
+    mockWindowWorkspace.loadSnapshot.mockImplementation(async () => ({
+      windows: [workspaceWindowState(mockWindowWorkspace.bootstrap.windowId, 0)],
+    }));
     dbSelectMock.mockReset();
     dbSelectMock.mockResolvedValue([]);
     dbMock.execute.mockReset();
@@ -742,6 +826,12 @@ describe("App", () => {
     subscribeDesktopCloudTasksMock.mockClear();
     reconcileDesktopTaskSnapshotsMock.mockReset();
     reconcileDesktopTaskSnapshotsMock.mockResolvedValue(undefined);
+    publishDesktopWaitingPromptSnippetMock.mockReset();
+    publishDesktopWaitingPromptSnippetMock.mockResolvedValue(undefined);
+    fenceAndDrainDesktopCloudWritesMock.mockReset();
+    fenceAndDrainDesktopCloudWritesMock.mockResolvedValue(undefined);
+    resumeDesktopCloudWritesMock.mockClear();
+    desktopAuthHarness.subscriber = null;
     appUpdateStartMock.mockClear();
     appUpdateMock.dispose.mockClear();
     appUpdateMock.dismiss.mockClear();
@@ -787,6 +877,49 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it("keeps restored secondary windows read-only for Firestore publication", async () => {
+    vi.useFakeTimers();
+    mockWindowWorkspace.bootstrap.windowId = "window-2";
+    mockWindowWorkspace.loadSnapshot.mockResolvedValue({
+      windows: [workspaceWindowState("main", 0), workspaceWindowState("window-2", 1)],
+    });
+    const localItems = reactive([buildLocalCloudItem()]);
+    store.items = localItems;
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    localItems[0].last_output_preview = "Ready for review.";
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
+    expect(publishDesktopWaitingPromptSnippetMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("fails cloud publication over to the next window after the owner closes", async () => {
+    mockWindowWorkspace.bootstrap.windowId = "window-2";
+    mockWindowWorkspace.loadSnapshot.mockResolvedValue({
+      windows: [workspaceWindowState("main", 0), workspaceWindowState("window-2", 1)],
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
+
+    mockWindowWorkspace.loadSnapshot.mockResolvedValue({
+      windows: [workspaceWindowState("window-2", 0)],
+    });
+    for (const handler of windowWorkspaceInvalidationHandlers) {
+      await handler({ reason: "windowMembership", sourceWindowId: "main" });
+    }
+    await flushPromises();
+
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledWith(dbMock);
+
+    wrapper.unmount();
+  });
+
   it("reconciles cloud task snapshots on sign-in without periodic writes", async () => {
     vi.useFakeTimers();
 
@@ -803,6 +936,49 @@ describe("App", () => {
 
     expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
     expect(cloudTasksMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("reconciles again after signing out and back into the same account", async () => {
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
+
+    desktopAuthHarness.subscriber?.({ status: "signedOut" });
+    desktopAuthHarness.subscriber?.({
+      status: "signedIn",
+      user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+    });
+    await flushPromises();
+
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(2);
+
+    wrapper.unmount();
+  });
+
+  it("does not let a delayed sign-in reconcile suppress a newer title change", async () => {
+    const firstReconcile = createDeferred<void>();
+    reconcileDesktopTaskSnapshotsMock
+      .mockImplementationOnce(async () => firstReconcile.promise)
+      .mockResolvedValue(undefined);
+    const localItems = reactive([buildLocalCloudItem({ display_name: "Title A" })]);
+    store.items = localItems;
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
+
+    localItems[0].display_name = "Title B";
+    await flushPromises();
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(2);
+
+    firstReconcile.resolve();
+    await flushPromises();
+    localItems[0].display_name = "Title A";
+    await flushPromises();
+
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(3);
 
     wrapper.unmount();
   });
@@ -2254,7 +2430,71 @@ describe("App", () => {
 
     await capturedKeyboardActions?.closeWindow();
 
+    expect(fenceAndDrainDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
     expect(mockWindowWorkspace.closeWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it("drains cloud writes before removing the publisher window", async () => {
+    const drain = createDeferred<void>();
+    fenceAndDrainDesktopCloudWritesMock.mockImplementationOnce(async () => drain.promise);
+    await mountApp(SidebarWithRepoStub);
+    reconcileDesktopTaskSnapshotsMock.mockClear();
+
+    const closing = capturedKeyboardActions?.closeWindow();
+    await flushPromises();
+    expect(mockWindowWorkspace.closeWindow).not.toHaveBeenCalled();
+    for (const handler of windowWorkspaceInvalidationHandlers) {
+      await handler({ reason: "windowMembership", sourceWindowId: "window-2" });
+    }
+    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
+
+    drain.resolve();
+    await closing;
+
+    expect(mockWindowWorkspace.closeWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips membership initialization when the native window closes as its handler registers", async () => {
+    const event = { preventDefault: vi.fn() };
+    let closing: Promise<void> | null = null;
+    nativeCloseRegistrationHarness.onRegistered = (handler) => {
+      closing = Promise.resolve(handler(event));
+    };
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await closing;
+
+    expect(fenceAndDrainDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.initialize).not.toHaveBeenCalled();
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(store.init).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("waits for in-flight membership initialization before removing an early-closing window", async () => {
+    const initialization = createDeferred<void>();
+    mockWindowWorkspace.initialize.mockImplementationOnce(async () => initialization.promise);
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = await waitForNativeCloseRequestedHandler();
+    expect(handler).toBeTypeOf("function");
+    expect(store.init).not.toHaveBeenCalled();
+
+    const event = { preventDefault: vi.fn() };
+    const closing = handler?.(event);
+    await flushPromises();
+
+    expect(fenceAndDrainDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.forgetCurrentWindow).not.toHaveBeenCalled();
+
+    initialization.resolve();
+    await closing;
+
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(store.init).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    wrapper.unmount();
   });
 
   it("opens a new window when the native window-open event arrives", async () => {
@@ -2299,9 +2539,29 @@ describe("App", () => {
     expect(event.preventDefault).not.toHaveBeenCalled();
   });
 
+  it("keeps the native window open when the cloud write drain times out", async () => {
+    fenceAndDrainDesktopCloudWritesMock.mockRejectedValueOnce(
+      new Error("cloud write drain timed out after 5000ms"),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await mountApp(SidebarWithRepoStub);
+    resumeDesktopCloudWritesMock.mockClear();
+    const handler = await waitForNativeCloseRequestedHandler();
+    const event = { preventDefault: vi.fn() };
+
+    await handler?.(event);
+
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.forgetCurrentWindow).not.toHaveBeenCalled();
+    expect(resumeDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
+
+    errorSpy.mockRestore();
+  });
+
   it("keeps the native window open if workspace closure persistence fails", async () => {
     mockWindowWorkspace.forgetCurrentWindow.mockRejectedValueOnce(new Error("write failed"));
     await mountApp(SidebarWithRepoStub);
+    resumeDesktopCloudWritesMock.mockClear();
     const handler = await waitForNativeCloseRequestedHandler();
     expect(handler).toBeTypeOf("function");
     const event = { preventDefault: vi.fn() };
@@ -2310,6 +2570,39 @@ describe("App", () => {
 
     expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(resumeDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the previous publisher when close persistence and workspace recovery both fail", async () => {
+    mockWindowWorkspace.bootstrap.windowId = "window-2";
+    mockWindowWorkspace.loadSnapshot.mockResolvedValue({
+      windows: [workspaceWindowState("window-2", 0)],
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
+    reconcileDesktopTaskSnapshotsMock.mockClear();
+    resumeDesktopCloudWritesMock.mockClear();
+
+    mockWindowWorkspace.forgetCurrentWindow.mockRejectedValueOnce(new Error("write failed"));
+    mockWindowWorkspace.initialize.mockRejectedValueOnce(new Error("server unavailable"));
+    mockWindowWorkspace.loadSnapshot.mockRejectedValueOnce(new Error("server unavailable"));
+    const handler = await waitForNativeCloseRequestedHandler();
+    const event = { preventDefault: vi.fn() };
+
+    await handler?.(event);
+    await flushPromises();
+
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(resumeDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
+
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+    wrapper.unmount();
   });
 
   it("navigates tasks when the native task-navigation event arrives", async () => {
@@ -2892,6 +3185,7 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
+          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -3870,6 +4164,7 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
+          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -3924,6 +4219,7 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
+          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -4243,6 +4539,7 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
+          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,

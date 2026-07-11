@@ -4,7 +4,10 @@ import {
   deleteDesktopTaskSnapshotForLocalTask,
   deleteRemoteTaskSnapshots,
   publishDesktopTaskSnapshot,
+  publishDesktopWaitingPromptSnippet,
   reconcileDesktopTaskSnapshots,
+  fenceAndDrainDesktopCloudWrites,
+  resumeDesktopCloudWrites,
 } from "./desktopCloudPublisher";
 import { setDesktopSnapshotFetcherForTests } from "./desktopServerClient";
 
@@ -13,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   getDoc: vi.fn(),
   getDocs: vi.fn(),
   setDoc: vi.fn(),
+  updateDoc: vi.fn(),
   set: vi.fn(),
   delete: vi.fn(),
   commit: vi.fn(),
@@ -45,6 +49,7 @@ vi.mock("firebase/firestore", () => ({
   query: (...args: unknown[]) => mocks.query(...args),
   serverTimestamp: (...args: unknown[]) => mocks.serverTimestamp(...args),
   setDoc: (...args: unknown[]) => mocks.setDoc(...args),
+  updateDoc: (...args: unknown[]) => mocks.updateDoc(...args),
   where: (...args: unknown[]) => mocks.where(...args),
   writeBatch: vi.fn(() => ({
     set: (...args: unknown[]) => mocks.set(...args),
@@ -164,6 +169,7 @@ describe("desktop cloud live task index publisher", () => {
     mocks.serverTimestamp.mockReturnValue("SERVER_TIMESTAMP");
     mocks.commit.mockResolvedValue(undefined);
     mocks.setDoc.mockResolvedValue(undefined);
+    mocks.updateDoc.mockResolvedValue(undefined);
     mocks.getDoc.mockResolvedValue(missingDocSnapshot());
     mocks.getDocs.mockResolvedValue({ docs: [] });
     setDesktopSnapshotFetcherForTests(async () => ({
@@ -209,6 +215,141 @@ describe("desktop cloud live task index publisher", () => {
     );
     expect(taskDocAllocations()).toHaveLength(0);
     expect(mocks.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("merges a waiting prompt into only the matching task document", async () => {
+    mocks.getDoc.mockResolvedValue({ exists: () => true });
+    mocks.getDocs.mockResolvedValueOnce({ docs: [
+      docSnapshot("task-doc", {
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-prompt",
+      }),
+    ] });
+
+    await publishDesktopWaitingPromptSnippet({
+      localRepoId: "repo-1",
+      ownerLocalTaskId: "task-prompt",
+      waitingPromptSnippet: "Ready for review",
+    });
+
+    expect(mocks.updateDoc).toHaveBeenCalledTimes(1);
+    expect(mocks.updateDoc).toHaveBeenCalledWith(
+      { kind: "doc-ref", id: "task-doc" },
+      { waitingPromptSnippet: "Ready for review" },
+    );
+    expect(mocks.setDoc).not.toHaveBeenCalled();
+    expect(mocks.set).not.toHaveBeenCalled();
+    expect(mocks.commit).not.toHaveBeenCalled();
+  });
+
+  it("serializes a waiting prompt update behind an in-flight structural reconcile", async () => {
+    let resolveCommit: (() => void) | null = null;
+    const commitPending = new Promise<void>((resolve) => {
+      resolveCommit = resolve;
+    });
+    mocks.getDoc.mockResolvedValue({ exists: () => true });
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [
+        docSnapshot("task-doc", {
+          localRepoId: "repo-1",
+          ownerLocalTaskId: "task-open",
+        }),
+      ] })
+      .mockResolvedValueOnce({ docs: [
+        docSnapshot("task-doc", {
+          localRepoId: "repo-1",
+          ownerLocalTaskId: "task-open",
+        }),
+      ] });
+    mocks.commit.mockImplementationOnce(() => commitPending);
+
+    const reconcile = reconcileDesktopTaskSnapshots(null as never);
+    await vi.waitFor(() => expect(mocks.commit).toHaveBeenCalledTimes(1));
+
+    const promptUpdate = publishDesktopWaitingPromptSnippet({
+      localRepoId: "repo-1",
+      ownerLocalTaskId: "task-open",
+      waitingPromptSnippet: "Newest prompt",
+    });
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.getDoc).not.toHaveBeenCalled();
+    expect(mocks.updateDoc).not.toHaveBeenCalled();
+
+    resolveCommit?.();
+    await reconcile;
+    await promptUpdate;
+    expect(mocks.updateDoc).toHaveBeenCalledWith(
+      { kind: "doc-ref", id: "task-doc" },
+      { waitingPromptSnippet: "Newest prompt" },
+    );
+  });
+
+  it("fences new writes and drains queued writes before ownership handoff", async () => {
+    let resolveCommit: (() => void) | null = null;
+    const commitPending = new Promise<void>((resolve) => {
+      resolveCommit = resolve;
+    });
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [
+        docSnapshot("task-doc", {
+          localRepoId: "repo-1",
+          ownerLocalTaskId: "task-open",
+        }),
+      ] });
+    mocks.commit.mockImplementationOnce(() => commitPending);
+
+    const reconcile = reconcileDesktopTaskSnapshots(null as never);
+    await vi.waitFor(() => expect(mocks.commit).toHaveBeenCalledTimes(1));
+    let drained = false;
+    const drain = fenceAndDrainDesktopCloudWrites().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    await expect(publishDesktopWaitingPromptSnippet({
+      localRepoId: "repo-1",
+      ownerLocalTaskId: "task-open",
+      waitingPromptSnippet: "Too late",
+    })).rejects.toThrow("cloud writes are fenced");
+
+    resolveCommit?.();
+    await reconcile;
+    await drain;
+    expect(drained).toBe(true);
+
+    resumeDesktopCloudWrites();
+  });
+
+  it("bounds an offline write drain instead of hanging window close forever", async () => {
+    let resolveCommit: (() => void) | null = null;
+    const commitPending = new Promise<void>((resolve) => {
+      resolveCommit = resolve;
+    });
+    mocks.getDocs.mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] });
+    mocks.commit.mockImplementationOnce(() => commitPending);
+
+    const reconcile = reconcileDesktopTaskSnapshots(null as never);
+    await vi.waitFor(() => expect(mocks.commit).toHaveBeenCalledTimes(1));
+
+    vi.useFakeTimers();
+    try {
+      const drain = fenceAndDrainDesktopCloudWrites(1_000);
+      const rejection = expect(drain).rejects.toThrow(
+        "cloud write drain timed out after 1000ms",
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+      resumeDesktopCloudWrites();
+      resolveCommit?.();
+      await reconcile;
+    }
   });
 
   it("deletes duplicate task documents for the same local identity", async () => {
@@ -585,6 +726,7 @@ describe("desktop cloud live task index publisher", () => {
       ownerLocalTaskId: "task-open",
       title: "Open task",
       promptSnippet: "Open task",
+      waitingPromptSnippet: null,
       displayName: null,
       stage: "in progress",
       activity: "working",

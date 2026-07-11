@@ -175,6 +175,25 @@ impl Db {
         }
     }
 
+    pub fn update_pipeline_item_waiting_prompt(
+        &self,
+        id: &str,
+        prompt: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let Some(task_id) = self.resolve_pipeline_item_id(id)? else {
+            return Ok(false);
+        };
+        let changed = self.conn.execute(
+            "UPDATE pipeline_item
+             SET last_output_preview = ?, updated_at = datetime('now')
+             WHERE id = ?
+               AND closed_at IS NULL
+               AND COALESCE(last_output_preview, '') != ?",
+            (prompt, &task_id, prompt),
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn resolve_pipeline_item_id(
         &self,
         task_or_branch_id: &str,

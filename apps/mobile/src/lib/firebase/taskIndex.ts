@@ -21,6 +21,7 @@ export interface CloudTaskSnapshot {
   ownerLocalTaskId: string;
   title: string;
   promptSnippet: string | null;
+  waitingPromptSnippet?: string | null;
   displayName: string | null;
   stage: string;
   status: string;
@@ -88,26 +89,6 @@ export function createFirestoreTaskIndex(
         onUpdate(sortCloudTasks(all).map(mapCloudTaskSnapshot));
       };
 
-      const primeTasks = async (
-        desktopId: string,
-        tasksQuery: ReturnType<typeof query>
-      ) => {
-        try {
-          const tasksSnapshot = await getDocs(tasksQuery);
-          if (cancelled) return;
-          tasksByDesktop.set(
-            desktopId,
-            tasksSnapshot.docs.map((doc) => doc.data() as CloudTaskSnapshot),
-          );
-          hydratingDesktopIds.delete(desktopId);
-          emit();
-        } catch (error) {
-          hydratingDesktopIds.delete(desktopId);
-          emit();
-          console.warn("[cloud-task-index] failed to prime desktop tasks", error);
-        }
-      };
-
       const desktopsUnsub = onSnapshot(
         collection(db, "users", uid, "desktops"),
         (desktopsSnapshot) => {
@@ -121,7 +102,6 @@ export function createFirestoreTaskIndex(
               collection(desktopDoc.ref, "tasks"),
               where("closedAt", "==", null),
             );
-            void primeTasks(desktopDoc.id, tasksQuery);
             taskUnsubs.set(
               desktopDoc.id,
               onSnapshot(tasksQuery, (tasksSnapshot) => {
@@ -186,7 +166,7 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     repoName: snapshot.repo.name,
     title: snapshot.displayName ?? snapshot.title,
     stage: snapshot.stage,
-    snippet: snapshot.promptSnippet ?? undefined,
+    waitingPromptSnippet: snapshot.waitingPromptSnippet ?? undefined,
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),
     ownerDesktopId: snapshot.ownerDesktopId,

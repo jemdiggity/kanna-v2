@@ -12,7 +12,14 @@ import {
 } from "../services/desktopCloudTaskIndex";
 import { invoke } from "../invoke";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
-import { deleteRemoteTaskSnapshots, reconcileDesktopTaskSnapshots } from "../services/desktopCloudPublisher";
+import {
+  deleteRemoteTaskSnapshots,
+  fenceAndDrainDesktopCloudWrites,
+  publishDesktopWaitingPromptSnippet,
+  reconcileDesktopTaskSnapshots,
+  resumeDesktopCloudWrites,
+} from "../services/desktopCloudPublisher";
+import { createWaitingPromptPublishQueue } from "../services/waitingPromptPublishQueue";
 import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import { createConfiguredDesktopRelayTerminalClient } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
@@ -22,6 +29,10 @@ import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/re
 import { buildWorkspace } from "../workspace/buildWorkspace";
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
+import {
+  WINDOW_WORKSPACE_MEMBERSHIP_REASON,
+  type WindowWorkspaceController,
+} from "../windowWorkspace";
 import type { useToast } from "./useToast";
 
 export function hasLocalTaskSelectionIdentity(input: {
@@ -48,25 +59,53 @@ interface UseAppCloudWorkspaceOptions {
   db: DbHandle;
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
+  windowWorkspace: WindowWorkspaceController | undefined;
 }
 
 const CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS = 30_000;
 
-export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceOptions) {
+export function useAppCloudWorkspace({
+  db,
+  store,
+  toast,
+  windowWorkspace,
+}: UseAppCloudWorkspaceOptions) {
   const desktopAuthSession = ref<DesktopAuthSession | null>(null);
   const desktopAuthState = ref<DesktopAuthState>({ status: "signedOut" });
   const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
   const lanSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
   const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
   let unsubscribeDesktopAuth: (() => void) | null = null;
+  let unsubscribeWindowMembership: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let subscribedCloudUid: string | null = null;
   let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
-  const reconciledCloudSnapshotUsers = new Set<string>();
+  let reconciledCloudSnapshotUid: string | null = null;
   let lastPublishedTaskFingerprint: string | null = null;
   let lastCloudBackendErrorToastAt: number | null = null;
+  let publicationOwnershipGeneration = 0;
+  let publicationRelinquished = false;
+  let publicationOwnedBeforeRelinquish = false;
+  const publishesLocalCloudState = ref(false);
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
+  const waitingPromptPublishQueue = createWaitingPromptPublishQueue({
+    delayMs: 5_000,
+    publish: async (taskId, value) => {
+      if (!publishesLocalCloudState.value) return;
+      const item = store.items.find((candidate) => candidate.id === taskId);
+      if (!item || item.closed_at !== null) return;
+      await publishDesktopWaitingPromptSnippet({
+        localRepoId: item.repo_id,
+        ownerLocalTaskId: item.id,
+        waitingPromptSnippet: value,
+      });
+    },
+    onError: (error) => {
+      console.warn("[cloud] failed to publish waiting prompt:", error);
+      showCloudBackendErrorToast(error);
+    },
+  });
 
   const localReposForCloudMatching = computedAsync(async () => {
     return Promise.all(store.repos.map(async (repo) => {
@@ -339,19 +378,74 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
   // Publish (reconcile) only when the local open-task set actually changed.
   // Writes are event-driven now — no periodic reconcile poll.
   function publishLocalTaskChangesIfNeeded(): void {
-    if (desktopAuthState.value.status !== "signedIn") return;
+    if (!publishesLocalCloudState.value || desktopAuthState.value.status !== "signedIn") return;
     const fingerprint = computeTaskSnapshotFingerprint(store.items);
     if (fingerprint === lastPublishedTaskFingerprint) return;
     lastPublishedTaskFingerprint = fingerprint;
-    void reconcileDesktopTaskSnapshots(db).catch((error) => {
-      console.warn("[cloud] failed to publish local task snapshot change:", error);
-      showCloudBackendErrorToast(error);
-    });
+    const waitingPrompts = captureWaitingPrompts();
+    void reconcileDesktopTaskSnapshots(db)
+      .then(() => seedUnchangedWaitingPrompts(waitingPrompts))
+      .catch((error) => {
+        console.warn("[cloud] failed to publish local task snapshot change:", error);
+        showCloudBackendErrorToast(error);
+      });
+  }
+
+  function captureWaitingPrompts(): Map<string, string | null> {
+    return new Map(
+      store.items
+        .filter((item) => item.closed_at === null)
+        .map((item) => [item.id, item.last_output_preview]),
+    );
+  }
+
+  function seedUnchangedWaitingPrompts(prompts: Map<string, string | null>): void {
+    for (const [taskId, prompt] of prompts) {
+      const current = store.items.find((item) => item.id === taskId);
+      if (
+        current?.closed_at === null
+        && current.last_output_preview === prompt
+      ) {
+        waitingPromptPublishQueue.seed(taskId, prompt);
+      }
+    }
   }
 
   watch(
     () => computeTaskSnapshotFingerprint(store.items),
     () => publishLocalTaskChangesIfNeeded(),
+  );
+
+  watch(
+    () => store.items.map((item) => ({
+      id: item.id,
+      closedAt: item.closed_at,
+      prompt: item.last_output_preview,
+    })),
+    (items, previous = []) => {
+      const currentIds = new Set(items.map((item) => item.id));
+      for (const previousItem of previous) {
+        if (!currentIds.has(previousItem.id)) {
+          waitingPromptPublishQueue.cancel(previousItem.id);
+        }
+      }
+
+      const previousById = new Map(previous.map((item) => [item.id, item]));
+      for (const item of items) {
+        if (item.closedAt !== null) {
+          waitingPromptPublishQueue.cancel(item.id);
+          continue;
+        }
+        if (
+          !publishesLocalCloudState.value
+          || desktopAuthState.value.status !== "signedIn"
+          || !item.prompt
+        ) continue;
+        if (previousById.get(item.id)?.prompt !== item.prompt) {
+          waitingPromptPublishQueue.schedule(item.id, item.prompt);
+        }
+      }
+    },
   );
 
   async function refreshLanTasks(): Promise<void> {
@@ -367,7 +461,104 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     };
   }
 
+  function resetLocalCloudPublicationState(): void {
+    reconciledCloudSnapshotUid = null;
+    lastPublishedTaskFingerprint = null;
+    for (const item of store.items) {
+      waitingPromptPublishQueue.cancel(item.id);
+    }
+  }
+
+  function reconcileSignedInLocalCloudState(uid: string): void {
+    if (
+      !publishesLocalCloudState.value
+      || reconciledCloudSnapshotUid === uid
+    ) {
+      return;
+    }
+
+    reconciledCloudSnapshotUid = uid;
+    const taskFingerprint = computeTaskSnapshotFingerprint(store.items);
+    const waitingPrompts = captureWaitingPrompts();
+    void reconcileDesktopTaskSnapshots(db)
+      .then(() => {
+        const currentAuthState = desktopAuthState.value;
+        if (
+          !publishesLocalCloudState.value
+          || currentAuthState.status !== "signedIn"
+          || currentAuthState.user.uid !== uid
+        ) {
+          return;
+        }
+        // Seed only the exact state included in this reconciliation. Changes
+        // that landed while it was in flight retain their own publication.
+        if (computeTaskSnapshotFingerprint(store.items) === taskFingerprint) {
+          lastPublishedTaskFingerprint = taskFingerprint;
+        }
+        seedUnchangedWaitingPrompts(waitingPrompts);
+      })
+      .catch((error) => {
+        if (
+          publishesLocalCloudState.value
+          && desktopAuthState.value.status === "signedIn"
+          && desktopAuthState.value.user.uid === uid
+        ) {
+          reconciledCloudSnapshotUid = null;
+        }
+        console.warn("[cloud] failed to reconcile local task snapshots:", error);
+        showCloudBackendErrorToast(error);
+      });
+  }
+
+  async function refreshLocalCloudPublicationOwnership(
+    fallbackOwnership?: boolean,
+  ): Promise<void> {
+    const generation = ++publicationOwnershipGeneration;
+    if (publicationRelinquished) return;
+    let ownsPublication = false;
+
+    if (windowWorkspace) {
+      try {
+        const snapshot = await windowWorkspace.loadSnapshot();
+        const leader = [...snapshot.windows]
+          .sort((left, right) => left.order - right.order)[0];
+        ownsPublication = leader?.windowId === windowWorkspace.bootstrap.windowId;
+      } catch (error) {
+        // Preserve the historical main-window fallback if workspace state is
+        // temporarily unreadable. A later membership event retries election.
+        ownsPublication = fallbackOwnership
+          ?? windowWorkspace.bootstrap.windowId === "main";
+        console.warn("[cloud] failed to elect local snapshot publisher:", error);
+      }
+    }
+
+    if (generation !== publicationOwnershipGeneration || publicationRelinquished) return;
+    if (publishesLocalCloudState.value === ownsPublication) return;
+
+    publishesLocalCloudState.value = ownsPublication;
+    if (!ownsPublication) {
+      resetLocalCloudPublicationState();
+      return;
+    }
+
+    if (desktopAuthState.value.status === "signedIn") {
+      reconcileSignedInLocalCloudState(desktopAuthState.value.user.uid);
+    }
+  }
+
   async function initializeDesktopCloudAuth(): Promise<void> {
+    publicationRelinquished = false;
+    resumeDesktopCloudWrites();
+    unsubscribeWindowMembership?.();
+    unsubscribeWindowMembership = windowWorkspace
+      ? await windowWorkspace.onSharedInvalidation(async (payload) => {
+          if (payload.reason === WINDOW_WORKSPACE_MEMBERSHIP_REASON) {
+            await refreshLocalCloudPublicationOwnership();
+          }
+        })
+      : null;
+    await refreshLocalCloudPublicationOwnership();
+
     const session = await getConfiguredDesktopAuthSession();
     desktopAuthSession.value = session;
     await session.initialize();
@@ -375,19 +566,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     unsubscribeDesktopAuth = session.subscribe((state) => {
       desktopAuthState.value = state;
       if (state.status === "signedIn") {
-        if (!reconciledCloudSnapshotUsers.has(state.user.uid)) {
-          reconciledCloudSnapshotUsers.add(state.user.uid);
-          void reconcileDesktopTaskSnapshots(db)
-            .then(() => {
-              // Seed the fingerprint so the change watcher doesn't immediately
-              // republish what we just reconciled on sign-in.
-              lastPublishedTaskFingerprint = computeTaskSnapshotFingerprint(store.items);
-            })
-            .catch((error) => {
-              console.warn("[cloud] failed to reconcile local task snapshots:", error);
-              showCloudBackendErrorToast(error);
-            });
-        }
+        reconcileSignedInLocalCloudState(state.user.uid);
         // One-shot read for immediate data, then live onSnapshot updates.
         void refreshCloudTasksForSignedInUser().catch((error) => {
           console.warn("[cloud] failed to refresh cloud tasks:", error);
@@ -395,6 +574,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
         });
         startCloudTaskSubscription(state.user.uid);
       } else {
+        resetLocalCloudPublicationState();
         stopCloudTaskSubscription();
         cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
       }
@@ -405,6 +585,29 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
       getState: () => desktopAuthState.value,
       readEnv: (name) => invoke<string>("read_env_var", { name }),
     });
+  }
+
+  async function relinquishDesktopCloudWorkspace(): Promise<void> {
+    publicationOwnedBeforeRelinquish = publishesLocalCloudState.value;
+    publicationRelinquished = true;
+    publicationOwnershipGeneration += 1;
+    publishesLocalCloudState.value = false;
+    resetLocalCloudPublicationState();
+    await fenceAndDrainDesktopCloudWrites();
+  }
+
+  async function resumeDesktopCloudWorkspace(): Promise<void> {
+    resumeDesktopCloudWrites();
+    publicationRelinquished = false;
+    try {
+      await windowWorkspace?.initialize();
+    } catch (error) {
+      // A failed close normally means the membership row is still present.
+      // Continue election with the ownership we held before relinquishing so
+      // a simultaneous server outage cannot strand every live window read-only.
+      console.warn("[cloud] failed to restore window workspace membership:", error);
+    }
+    await refreshLocalCloudPublicationOwnership(publicationOwnedBeforeRelinquish);
   }
 
   function initializeDesktopLanTaskSync(): void {
@@ -518,8 +721,17 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
   }
 
   function disposeDesktopCloudWorkspace(): void {
+    publicationRelinquished = true;
+    publicationOwnershipGeneration += 1;
+    publishesLocalCloudState.value = false;
+    resetLocalCloudPublicationState();
+    void fenceAndDrainDesktopCloudWrites().catch((error) => {
+      console.warn("[cloud] timed out draining writes during disposal:", error);
+    });
     unsubscribeDesktopAuth?.();
+    unsubscribeWindowMembership?.();
     stopCloudTaskSubscription();
+    waitingPromptPublishQueue.dispose();
     if (lanRefreshTimer) {
       clearInterval(lanRefreshTimer);
     }
@@ -555,6 +767,8 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     initializeDesktopLanTaskSync,
     closeSelectedWorkspaceTask,
     advanceSelectedRemoteWorkspaceTask,
+    relinquishDesktopCloudWorkspace,
+    resumeDesktopCloudWorkspace,
     disposeDesktopCloudWorkspace,
   };
 }

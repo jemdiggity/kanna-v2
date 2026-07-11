@@ -221,6 +221,14 @@ impl SessionHandle {
         }
     }
 
+    pub async fn waiting_prompt_snippet(
+        &self,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut state = self.state.lock().await;
+        let provider = state.agent_provider;
+        state.headless_terminal.waiting_prompt_snippet(provider)
+    }
+
     pub async fn status(&self) -> SessionStatus {
         self.state.lock().await.status
     }

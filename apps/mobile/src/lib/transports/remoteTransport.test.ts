@@ -132,7 +132,7 @@ describe("remote transport", () => {
           repoId: "repo-1",
           title: "Remote task",
           stage: "in progress",
-          snippet: "remote output"
+          waitingPromptSnippet: "remote output"
         }
       ])
       .mockResolvedValueOnce([
@@ -176,7 +176,7 @@ describe("remote transport", () => {
         repoId: "repo-1",
         title: "Remote task",
         stage: "in progress",
-        snippet: "remote output"
+        waitingPromptSnippet: "remote output"
       }
     ]);
     await expect(transport.listRepoTasks("repo-1")).resolves.toEqual([

@@ -49,6 +49,7 @@ pub async fn adopt_agent_session(
     let turn_model = adapter.turn_model();
 
     let journal = AgentJournal::open(&data_dir, &info.session_id);
+    let last_assistant_prompt = journal.latest_assistant_prompt();
     let provider_session_id = info
         .provider_session_id
         .clone()
@@ -77,6 +78,7 @@ pub async fn adopt_agent_session(
         } else {
             SessionStatus::Idle
         },
+        last_assistant_prompt,
         session_allowed_tools,
         pending_permissions,
         exited: !alive,

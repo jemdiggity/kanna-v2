@@ -209,6 +209,7 @@ async function seedCloudDesktopSnapshot(input: {
       ownerLocalTaskId: stringValue(input.localTask.taskId),
       title: stringValue(RELAY_TASK_TITLE),
       promptSnippet: stringValue("Run deterministic scripted task"),
+      waitingPromptSnippet: nullValue(),
       displayName: stringValue(RELAY_TASK_TITLE),
       stage: stringValue("in progress"),
       status: stringValue("working"),

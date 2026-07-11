@@ -34,6 +34,7 @@ use super::transfers::{
     get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
     list_pending_incoming_transfers, reject_task_transfer, update_task_transfer_payload,
 };
+use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
 use axum::http::Request;
 use axum::response::IntoResponse;
@@ -52,6 +53,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/settings/{key}",
             get(get_setting).put(put_setting).delete(delete_setting),
+        )
+        .route(
+            "/v1/window-workspace/mutations",
+            post(mutate_window_workspace),
         )
         .route("/v1/operator-events", post(post_operator_events))
         .route("/v1/analytics/repos/{repo_id}", get(get_repo_analytics))

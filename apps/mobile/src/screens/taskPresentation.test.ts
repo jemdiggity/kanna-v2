@@ -1,94 +1,48 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildTaskListItemModel,
-  buildTaskWorkspaceHeaderModel
-} from "./taskPresentation";
+import { buildTaskListItemModel } from "./taskPresentation";
 
 describe("buildTaskListItemModel", () => {
-  it("prefers repo names and trims snippets for task cards", () => {
-    const model = buildTaskListItemModel(
-      {
-        id: "task-1",
-        repoId: "repo-1",
-        title: "Refactor mobile task cards",
-        stage: "in progress",
-        snippet: "  Recent output line  "
-      },
-      "kanna-tauri",
-      false
-    );
-
-    expect(model.repoLabel).toBe("kanna-tauri");
-    expect(model.stageLabel).toBe("in progress");
-    expect(model.preview).toBe("Recent output line");
-    expect(model.scopeLabel).toBe("Task");
-  });
-
-  it("falls back cleanly for recent tasks without snippets", () => {
-    const model = buildTaskListItemModel(
-      {
-        id: "task-2",
-        repoId: "repo-2",
-        title: "Review task output",
-        stage: "pr"
-      },
-      null,
-      true
-    );
-
-    expect(model.repoLabel).toBe("repo-2");
-    expect(model.scopeLabel).toBe("Recent");
-    expect(model.preview).toBe("Ready for review.");
-  });
-
-  it("uses shorter generic preview copy for active work", () => {
-    const model = buildTaskListItemModel(
-      {
-        id: "task-3",
-        repoId: "repo-3",
-        title: "Wire up task refresh",
-        stage: "in progress"
-      },
-      "repo-three",
-      false
-    );
-
-    expect(model.preview).toBe("Open the task for the latest output.");
-  });
-
-  it("does not treat legacy merge stage as a separate lifecycle state", () => {
-    const model = buildTaskListItemModel(
-      {
-        id: "task-merge",
-        repoId: "repo-1",
-        title: "Merge Master",
-        stage: "merge"
-      },
-      "repo-one",
-      false
-    );
-
-    expect(model.preview).toBe("Open the task for the latest output.");
-  });
-});
-
-describe("buildTaskWorkspaceHeaderModel", () => {
-  it("builds task workspace header copy for an active task", () => {
-    const model = buildTaskWorkspaceHeaderModel({
-      desktopName: "Studio Mac",
-      repoName: "kanna-tauri",
-      task: {
-        id: "task-9",
-        repoId: "repo-1",
-        title: "Tighten mobile workspace",
-        stage: "pr",
-        snippet: "Latest agent output"
-      }
+  it("shows the current title and waiting prompt", () => {
+    const model = buildTaskListItemModel({
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Current editable title",
+      stage: "in progress",
+      waitingPromptSnippet: "Ready for review"
     });
 
-    expect(model.desktopLabel).toBe("Studio Mac");
-    expect(model.repoLabel).toBe("kanna-tauri");
-    expect(model.stageLabel).toBe("pr");
-    expect(model.snippetLabel).toBe("Latest agent output");
+    expect(model).toEqual({
+      stageLabel: "in progress",
+      title: "Current editable title",
+      waitingPromptSnippet: "Ready for review",
+      isWaitingPromptPlaceholder: false
+    });
+  });
+
+  it("uses a muted ellipsis before the first waiting prompt", () => {
+    const model = buildTaskListItemModel({
+      id: "task-2",
+      repoId: "repo-1",
+      title: "New task",
+      stage: "in progress"
+    });
+
+    expect(model.waitingPromptSnippet).toBe("…");
+    expect(model.isWaitingPromptPlaceholder).toBe(true);
+  });
+
+  it("bounds title and prompt including the ellipsis without splitting surrogates", () => {
+    const model = buildTaskListItemModel({
+      id: "task-3",
+      repoId: "repo-1",
+      title: "😀".repeat(81),
+      stage: "review",
+      waitingPromptSnippet: "界".repeat(241)
+    });
+
+    expect(Array.from(model.title)).toHaveLength(80);
+    expect(model.title.endsWith("…")).toBe(true);
+    expect(Array.from(model.waitingPromptSnippet)).toHaveLength(240);
+    expect(model.waitingPromptSnippet.endsWith("…")).toBe(true);
   });
 });

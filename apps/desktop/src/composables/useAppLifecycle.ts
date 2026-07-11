@@ -67,6 +67,8 @@ interface UseAppLifecycleOptions {
   openImageUrlPreview: (imageUrl: string) => void;
   preferences: AppPreferences;
   remoteTaskDiagnostics: Ref<unknown>;
+  relinquishDesktopCloudWorkspace: () => Promise<void>;
+  resumeDesktopCloudWorkspace: () => Promise<void>;
   restoreSidebarWidth: () => Promise<void>;
   shortcutsStartFull: Ref<boolean>;
   showShortcutsModal: Ref<boolean>;
@@ -105,6 +107,8 @@ export function useAppLifecycle({
   openImageUrlPreview,
   preferences,
   remoteTaskDiagnostics,
+  relinquishDesktopCloudWorkspace,
+  resumeDesktopCloudWorkspace,
   restoreSidebarWidth,
   shortcutsStartFull,
   showShortcutsModal,
@@ -118,14 +122,26 @@ export function useAppLifecycle({
 }: UseAppLifecycleOptions) {
   const appUnlisteners: Array<() => void> = [];
   let closingCurrentWindow = false;
+  let resolveWindowMembershipInitialization: (() => void) | null = null;
+  const windowMembershipInitialization = new Promise<void>((resolve) => {
+    resolveWindowMembershipInitialization = resolve;
+  });
+
+  function finishWindowMembershipInitialization() {
+    resolveWindowMembershipInitialization?.();
+    resolveWindowMembershipInitialization = null;
+  }
 
   async function requestCloseCurrentWindow() {
     if (closingCurrentWindow) return;
     closingCurrentWindow = true;
     try {
+      await relinquishDesktopCloudWorkspace();
+      await windowMembershipInitialization;
       await windowWorkspace.closeWindow();
     } catch (error: unknown) {
       closingCurrentWindow = false;
+      await resumeDesktopCloudWorkspace();
       throw error;
     }
   }
@@ -188,6 +204,42 @@ export function useAppLifecycle({
 
   // Init
   onMounted(async () => {
+    if (isTauri) {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const unlistenNativeWindowCloseRequest = await getCurrentWindow().onCloseRequested(async (event) => {
+          if (closingCurrentWindow) return;
+          closingCurrentWindow = true;
+          try {
+            await relinquishDesktopCloudWorkspace();
+            await windowMembershipInitialization;
+            await windowWorkspace.forgetCurrentWindow();
+          } catch (error: unknown) {
+            closingCurrentWindow = false;
+            event.preventDefault();
+            await resumeDesktopCloudWorkspace();
+            console.error("[App] native window close request failed:", error);
+          }
+        });
+        appUnlisteners.push(unlistenNativeWindowCloseRequest);
+      } catch (e: unknown) {
+        finishWindowMembershipInitialization();
+        console.error("[App] native window close-request listener registration failed:", e);
+        return;
+      }
+    }
+
+    if (closingCurrentWindow) {
+      finishWindowMembershipInitialization();
+      return;
+    }
+    try {
+      await windowWorkspace.initialize();
+    } finally {
+      finishWindowMembershipInitialization();
+    }
+    if (closingCurrentWindow) return;
+
     appUpdate.start();
     window.addEventListener("dragenter", suppressFileDropNavigation);
     window.addEventListener("dragover", suppressFileDropNavigation);
@@ -230,28 +282,6 @@ export function useAppLifecycle({
       appUnlisteners.push(unlistenNativeCloseWindow);
     } catch (e: unknown) {
       console.error("[App] native close-window listener registration failed:", e);
-    }
-
-    if (isTauri) {
-      void (async () => {
-        try {
-          const { getCurrentWindow } = await import("@tauri-apps/api/window");
-          const unlistenNativeWindowCloseRequest = await getCurrentWindow().onCloseRequested(async (event) => {
-            if (closingCurrentWindow) return;
-            closingCurrentWindow = true;
-            try {
-              await windowWorkspace.forgetCurrentWindow();
-            } catch (error: unknown) {
-              closingCurrentWindow = false;
-              event.preventDefault();
-              console.error("[App] native window close request failed:", error);
-            }
-          });
-          appUnlisteners.push(unlistenNativeWindowCloseRequest);
-        } catch (e: unknown) {
-          console.error("[App] native window close-request listener registration failed:", e);
-        }
-      })();
     }
 
     listenNativeMenuAction(

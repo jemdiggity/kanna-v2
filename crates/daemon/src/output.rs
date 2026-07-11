@@ -456,14 +456,30 @@ async fn emit_status_changed(
     session_id: &str,
     status: SessionStatus,
 ) {
-    let changed = session.update_status(status).await;
-    if !changed {
+    if !session.update_status(status).await {
         return;
     }
+
+    let waiting_prompt_snippet = if matches!(status, SessionStatus::Waiting | SessionStatus::Idle) {
+        match session.waiting_prompt_snippet().await {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                log::warn!(
+                    "failed to extract waiting prompt for session {}: {}",
+                    session_id,
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     if let Ok(json) = serde_json::to_string(&Event::StatusChanged {
         session_id: session_id.to_string(),
         status,
+        waiting_prompt_snippet,
     }) {
         let _ = broadcast_tx.send(json);
     }

@@ -251,6 +251,8 @@ pub enum Event {
     StatusChanged {
         session_id: String,
         status: SessionStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        waiting_prompt_snippet: Option<String>,
     },
     SessionCreated {
         session_id: String,
@@ -453,6 +455,43 @@ mod tests {
         assert!(json.contains("\"Ok\""));
         let decoded: Event = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, Event::Ok));
+    }
+
+    #[test]
+    fn status_changed_roundtrips_optional_waiting_prompt() {
+        let event = Event::StatusChanged {
+            session_id: "task-1".to_string(),
+            status: SessionStatus::Idle,
+            waiting_prompt_snippet: Some("The branch is ready for review.".to_string()),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: Event = serde_json::from_str(&json).unwrap();
+
+        assert!(matches!(
+            decoded,
+            Event::StatusChanged {
+                session_id,
+                status: SessionStatus::Idle,
+                waiting_prompt_snippet: Some(prompt),
+            } if session_id == "task-1" && prompt == "The branch is ready for review."
+        ));
+    }
+
+    #[test]
+    fn status_changed_accepts_legacy_payload_without_waiting_prompt() {
+        let decoded: Event = serde_json::from_str(
+            r#"{"type":"StatusChanged","session_id":"task-1","status":"idle"}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            decoded,
+            Event::StatusChanged {
+                waiting_prompt_snippet: None,
+                ..
+            }
+        ));
     }
 
     #[test]

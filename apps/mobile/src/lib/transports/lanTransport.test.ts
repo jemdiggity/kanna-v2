@@ -17,7 +17,7 @@ describe("createLanTransport", () => {
           repoId: "repo-1",
           title: "Refactor mobile shell",
           stage: "in progress",
-          snippet: "Latest agent output preview",
+          waitingPromptSnippet: "Latest agent output preview",
           agentType: "agent"
         }]
       })
@@ -79,7 +79,7 @@ describe("createLanTransport", () => {
         repoId: "repo-1",
         title: "Refactor mobile shell",
         stage: "in progress",
-        snippet: "Latest agent output preview",
+        waitingPromptSnippet: "Latest agent output preview",
         agentType: "agent"
       }
     ]);

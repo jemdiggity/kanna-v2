@@ -685,6 +685,7 @@ async fn stream_agent_once(
             Ok(DaemonEvent::StatusChanged {
                 session_id: event_session,
                 status,
+                ..
             }) if event_session == session_id => {
                 if frame_tx
                     .send(ServerFrame::StatusChanged {

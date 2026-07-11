@@ -26,6 +26,26 @@ fn persist_exit_resume_session_id(
     Ok(())
 }
 
+fn persist_waiting_prompt(
+    state: &http_api::AppState,
+    session_id: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Ok(());
+    }
+    let db = crate::db::Db::open(&state.config().db_path)
+        .map_err(|error| format!("db error: {error}"))?;
+    if db
+        .update_pipeline_item_waiting_prompt(session_id, prompt)
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    }
+    Ok(())
+}
+
 pub(crate) async fn terminal_state_watcher_loop(
     state: Arc<http_api::AppState>,
     replacements: session_replacements::SessionReplacements,
@@ -69,6 +89,19 @@ async fn terminal_state_watcher_once(
             .await
             .map_err(|e| format!("daemon read failed: {}", e))?
         {
+            DaemonEvent::StatusChanged {
+                session_id,
+                waiting_prompt_snippet: Some(prompt),
+                ..
+            } => {
+                if let Err(error) = persist_waiting_prompt(state, &session_id, &prompt) {
+                    log::warn!(
+                        "failed to persist waiting prompt for {}: {}",
+                        session_id,
+                        error
+                    );
+                }
+            }
             DaemonEvent::Exit {
                 session_id,
                 code,
@@ -356,6 +389,67 @@ mod tests {
         server.await.unwrap();
 
         assert_task_agent_session_id(&config, "019d99a5-aa94-7c73-b786-644cc095c037");
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_persists_only_changed_waiting_prompts() {
+        let unique = unique_name("terminal-watcher-waiting-prompt");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+        let mut state_changes = state.subscribe_state_changes();
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            for _ in 0..2 {
+                write_event(
+                    &mut subscriber,
+                    &DaemonEvent::StatusChanged {
+                        session_id: "task-child".to_string(),
+                        status: kanna_daemon::protocol::SessionStatus::Idle,
+                        waiting_prompt_snippet: Some("Ready for review".to_string()),
+                    },
+                )
+                .await;
+            }
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &state,
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        let db = Db::open(&config.db_path).unwrap();
+        assert_eq!(
+            db.get_pipeline_item("task-child")
+                .unwrap()
+                .unwrap()
+                .last_output_preview
+                .as_deref(),
+            Some("Ready for review")
+        );
+        assert!(matches!(
+            state_changes.try_recv(),
+            Ok(kanna_agent_protocol::ServerFrame::StateChanged {
+                scope: kanna_agent_protocol::StateChangeScope::Tasks
+            })
+        ));
+        assert!(matches!(
+            state_changes.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

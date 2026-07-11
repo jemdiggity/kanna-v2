@@ -70,8 +70,15 @@ const {
   initializeDesktopLanTaskSync,
   closeSelectedWorkspaceTask,
   advanceSelectedRemoteWorkspaceTask,
+  relinquishDesktopCloudWorkspace,
+  resumeDesktopCloudWorkspace,
   disposeDesktopCloudWorkspace,
-} = useAppCloudWorkspace({ db, store, toast });
+} = useAppCloudWorkspace({
+  db,
+  store,
+  toast,
+  windowWorkspace,
+});
 if (import.meta.env.DEV) {
   void cloudSnapshot;
   void lanSnapshot;
@@ -240,6 +247,8 @@ const {
   openImageUrlPreview,
   preferences,
   remoteTaskDiagnostics,
+  relinquishDesktopCloudWorkspace,
+  resumeDesktopCloudWorkspace,
   restoreSidebarWidth,
   shortcutsStartFull,
   showShortcutsModal,

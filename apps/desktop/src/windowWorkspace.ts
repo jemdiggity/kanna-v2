@@ -2,7 +2,11 @@ import type { DbHandle } from "./types/kanna";
 
 import { emit } from "./emit";
 import { listen } from "./listen";
-import { getDesktopSetting, putDesktopSetting } from "./services/desktopServerClient";
+import {
+  getDesktopSetting,
+  mutateDesktopWindowWorkspace,
+  type DesktopWindowWorkspaceMutation,
+} from "./services/desktopServerClient";
 import { isTauri } from "./tauri-mock";
 
 export interface WindowBootstrap {
@@ -23,8 +27,8 @@ export interface WorkspaceSnapshot {
 
 export interface WindowWorkspaceController {
   bootstrap: WindowBootstrap;
+  initialize: () => Promise<void>;
   loadSnapshot: () => Promise<WorkspaceSnapshot>;
-  saveSnapshot: (snapshot: WorkspaceSnapshot) => Promise<void>;
   openWindow: (selection: {
     selectedRepoId: string | null;
     selectedItemId: string | null;
@@ -44,6 +48,7 @@ export interface WindowWorkspaceController {
 
 export const WINDOW_WORKSPACE_SETTINGS_KEY = "window_workspace_v1";
 export const WINDOW_WORKSPACE_INVALIDATED_EVENT = "kanna://window-workspace-invalidated";
+export const WINDOW_WORKSPACE_MEMBERSHIP_REASON = "windowMembership";
 export const WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT = "kanna://native-new-window";
 export const WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT = "kanna://native-close-window";
 export const WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_UP_EVENT = "kanna://native-navigate-task-up";
@@ -119,6 +124,50 @@ function normalizeWorkspaceSnapshot(snapshot: WorkspaceSnapshot): WorkspaceSnaps
   };
 }
 
+export function applyWindowWorkspaceMutation(
+  snapshot: WorkspaceSnapshot,
+  mutation: DesktopWindowWorkspaceMutation,
+): WorkspaceSnapshot {
+  const next = normalizeWorkspaceSnapshot(snapshot);
+  switch (mutation.operation) {
+    case "ensure":
+      if (!next.windows.some((entry) => entry.windowId === mutation.window.windowId)) {
+        next.windows.push(mutation.window);
+      }
+      break;
+    case "updateSelection": {
+      const entry = next.windows.find((candidate) => candidate.windowId === mutation.windowId);
+      if (entry) {
+        entry.selectedRepoId = mutation.selectedRepoId;
+        entry.selectedItemId = mutation.selectedItemId;
+      }
+      break;
+    }
+    case "updateSidebarHidden": {
+      const entry = next.windows.find((candidate) => candidate.windowId === mutation.windowId);
+      if (entry) entry.sidebarHidden = mutation.sidebarHidden;
+      break;
+    }
+    case "updateSidebarWidth": {
+      const entry = next.windows.find((candidate) => candidate.windowId === mutation.windowId);
+      if (entry) entry.sidebarWidth = normalizeSidebarWidth(mutation.sidebarWidth);
+      break;
+    }
+    case "remove": {
+      if (mutation.observedWindowIds && mutation.liveWindowIds) {
+        const observed = new Set(mutation.observedWindowIds);
+        const live = new Set(mutation.liveWindowIds);
+        next.windows = next.windows.filter((entry) =>
+          !observed.has(entry.windowId) || live.has(entry.windowId),
+        );
+      }
+      next.windows = next.windows.filter((entry) => entry.windowId !== mutation.windowId);
+      break;
+    }
+  }
+  return normalizeWorkspaceSnapshot(next);
+}
+
 function buildWindowUrl(state: WindowBootstrap): string {
   const params = new URLSearchParams();
   params.set("windowId", state.windowId);
@@ -179,11 +228,6 @@ export async function readWorkspaceSnapshot(db: DbHandle): Promise<WorkspaceSnap
   }
 }
 
-export async function writeWorkspaceSnapshot(db: DbHandle, snapshot: WorkspaceSnapshot): Promise<void> {
-  void db;
-  await putDesktopSetting(WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(normalizeWorkspaceSnapshot(snapshot)));
-}
-
 export async function resolveWindowBootstrap(
   db: DbHandle,
   bootstrap: WindowBootstrap,
@@ -213,23 +257,54 @@ export function createWindowWorkspace(input: {
   const { db, bootstrap } = input;
   let currentWindowUpdateQueue = Promise.resolve();
 
+  async function mutateWorkspace(
+    mutation: DesktopWindowWorkspaceMutation,
+  ): Promise<WorkspaceSnapshot> {
+    const snapshot = await mutateDesktopWindowWorkspace(mutation);
+    return normalizeWorkspaceSnapshot(snapshot);
+  }
+
   async function loadSnapshot(): Promise<WorkspaceSnapshot> {
     return reconcileWorkspaceSnapshot(await readWorkspaceSnapshot(db), bootstrap.windowId);
   }
 
-  async function saveSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
-    await writeWorkspaceSnapshot(db, reconcileWorkspaceSnapshot(snapshot, bootstrap.windowId));
+  async function initialize(): Promise<void> {
+    const snapshot = await readWorkspaceSnapshot(db);
+    await mutateWorkspace({
+      operation: "ensure",
+      window: {
+        windowId: bootstrap.windowId,
+        selectedRepoId: bootstrap.selectedRepoId,
+        selectedItemId: bootstrap.selectedItemId,
+        sidebarHidden: false,
+        sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+        order: snapshot.windows.length,
+      },
+    });
+    await notifyWindowMembershipChanged();
   }
 
   async function forgetCurrentWindow(): Promise<void> {
     const snapshot = await loadSnapshot();
     const openWindowIds = await readOpenWorkspaceWindowIds();
-    const liveSnapshot = openWindowIds
-      ? {
-          windows: snapshot.windows.filter((entry) => openWindowIds.has(entry.windowId)),
-        }
-      : snapshot;
-    await writeWorkspaceSnapshot(db, removeWindowFromWorkspaceSnapshot(liveSnapshot, bootstrap.windowId));
+    await mutateWorkspace({
+      operation: "remove",
+      windowId: bootstrap.windowId,
+      ...(openWindowIds
+        ? {
+            observedWindowIds: snapshot.windows.map((entry) => entry.windowId),
+            liveWindowIds: [...openWindowIds],
+          }
+        : {}),
+    });
+    await notifyWindowMembershipChanged();
+  }
+
+  async function notifyWindowMembershipChanged(): Promise<void> {
+    await emit(WINDOW_WORKSPACE_INVALIDATED_EVENT, {
+      reason: WINDOW_WORKSPACE_MEMBERSHIP_REASON,
+      sourceWindowId: bootstrap.windowId,
+    });
   }
 
   async function spawnWindow(state: WindowBootstrap): Promise<void> {
@@ -237,13 +312,19 @@ export function createWindowWorkspace(input: {
 
     if (isTauri) {
       const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      new WebviewWindow(`window-${state.windowId}`, {
-        url,
-        title: "",
-        width: 1200,
-        height: 800,
-        minWidth: 800,
-        minHeight: 600,
+      await new Promise<void>((resolve, reject) => {
+        const webview = new WebviewWindow(`window-${state.windowId}`, {
+          url,
+          title: "",
+          width: 1200,
+          height: 800,
+          minWidth: 800,
+          minHeight: 600,
+        });
+        void webview.once("tauri://created", () => resolve());
+        void webview.once("tauri://error", (event) => {
+          reject(new Error(`failed to create window: ${String(event.payload)}`));
+        });
       });
       return;
     }
@@ -261,17 +342,11 @@ export function createWindowWorkspace(input: {
     window.close();
   }
 
-  function updateCurrentWindow(
-    apply: (entry: WorkspaceWindowState) => WorkspaceWindowState,
+  function queueCurrentWindowMutation(
+    mutation: DesktopWindowWorkspaceMutation,
   ): Promise<void> {
     const update = currentWindowUpdateQueue.catch(() => undefined).then(async () => {
-      const snapshot = await loadSnapshot();
-      const next = normalizeWorkspaceSnapshot({
-        windows: snapshot.windows.map((entry) =>
-          entry.windowId === bootstrap.windowId ? apply(entry) : entry,
-        ),
-      });
-      await saveSnapshot(next);
+      await mutateWorkspace(mutation);
     });
     currentWindowUpdateQueue = update;
     return update;
@@ -279,8 +354,8 @@ export function createWindowWorkspace(input: {
 
   return {
     bootstrap,
+    initialize,
     loadSnapshot,
-    saveSnapshot,
     openWindow: async (selection) => {
       const windowId = createWindowId();
       const snapshot = await loadSnapshot();
@@ -292,9 +367,6 @@ export function createWindowWorkspace(input: {
         sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
         order: snapshot.windows.length,
       };
-      await saveSnapshot({
-        windows: [...snapshot.windows, nextWindow],
-      });
       await spawnWindow(nextWindow);
     },
     forgetCurrentWindow,
@@ -303,23 +375,26 @@ export function createWindowWorkspace(input: {
       await closeCurrentWindow();
     },
     persistSelection: async (selection) => {
-      await updateCurrentWindow((entry) => ({
-        ...entry,
+      await queueCurrentWindowMutation({
+        operation: "updateSelection",
+        windowId: bootstrap.windowId,
         selectedRepoId: selection.selectedRepoId,
         selectedItemId: selection.selectedItemId,
-      }));
+      });
     },
     persistSidebarHidden: async (hidden) => {
-      await updateCurrentWindow((entry) => ({
-        ...entry,
+      await queueCurrentWindowMutation({
+        operation: "updateSidebarHidden",
+        windowId: bootstrap.windowId,
         sidebarHidden: hidden,
-      }));
+      });
     },
     persistSidebarWidth: async (width) => {
-      await updateCurrentWindow((entry) => ({
-        ...entry,
+      await queueCurrentWindowMutation({
+        operation: "updateSidebarWidth",
+        windowId: bootstrap.windowId,
         sidebarWidth: normalizeSidebarWidth(width),
-      }));
+      });
     },
     invalidateSharedData: async (reason) => {
       await emit(WINDOW_WORKSPACE_INVALIDATED_EVENT, {

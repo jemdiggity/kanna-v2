@@ -7,6 +7,7 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  updateDoc,
   where,
   writeBatch,
   type CollectionReference,
@@ -27,6 +28,9 @@ import { fetchDesktopSnapshot } from "./desktopServerClient";
 import { getCachedRepoRemoteUrl, __resetRepoRemoteUrlCacheForTests } from "./repoRemoteUrl";
 
 const GENERIC_DESKTOP_NAME = "Kanna Desktop";
+const DEFAULT_CLOUD_WRITE_DRAIN_TIMEOUT_MS = 5_000;
+let cloudWriteTail: Promise<void> = Promise.resolve();
+let cloudWritesAccepted = true;
 
 export interface RemoteTaskSnapshotIdentity {
   ownerDesktopId: string;
@@ -36,6 +40,12 @@ export interface RemoteTaskSnapshotIdentity {
 
 export interface PublishDesktopTaskSnapshotsOptions {
   closedSinceDays?: number;
+}
+
+export interface DesktopWaitingPromptSnippetInput {
+  localRepoId: string;
+  ownerLocalTaskId: string;
+  waitingPromptSnippet: string;
 }
 
 interface CloudWriteContext {
@@ -56,6 +66,16 @@ export async function publishDesktopTaskSnapshot(
   db: DbHandle | null | undefined,
   item: PipelineItem,
   repo: Repo | null = null,
+): Promise<void> {
+  await runSerializedCloudWrite(async () => {
+    await publishDesktopTaskSnapshotNow(db, item, repo);
+  });
+}
+
+async function publishDesktopTaskSnapshotNow(
+  db: DbHandle | null | undefined,
+  item: PipelineItem,
+  repo: Repo | null,
 ): Promise<void> {
   void db;
   const snapshotState = await fetchDesktopSnapshot();
@@ -87,26 +107,73 @@ export async function publishDesktopTaskSnapshot(
   await upsertTaskSnapshots(context, [snapshot], { deleteStale: false });
 }
 
-export async function deleteRemoteTaskSnapshots(identity: RemoteTaskSnapshotIdentity): Promise<void> {
+export async function publishDesktopWaitingPromptSnippet(
+  input: DesktopWaitingPromptSnippetInput,
+): Promise<void> {
+  await runSerializedCloudWrite(async () => {
+    await publishDesktopWaitingPromptSnippetNow(input);
+  });
+}
+
+async function publishDesktopWaitingPromptSnippetNow(
+  input: DesktopWaitingPromptSnippetInput,
+): Promise<void> {
+  const waitingPromptSnippet = input.waitingPromptSnippet.trim();
+  if (!waitingPromptSnippet) return;
+
   const context = await getCloudWriteContext();
   if (!context) return;
-  await deleteTaskSnapshotByIdentity(context, identity, { createDesktopDoc: false });
+  const desktopDoc = await findDesktopDocument(context, context.desktopId);
+  if (!desktopDoc) {
+    throw new Error(`cloud desktop document not found for ${context.desktopId}`);
+  }
+
+  const tasksRef = collection(desktopDoc, "tasks");
+  const candidates = await getDocs(query(
+    tasksRef,
+    where("ownerLocalTaskId", "==", input.ownerLocalTaskId),
+  ));
+  const targetKey = identityKey(input.localRepoId, input.ownerLocalTaskId);
+  const target = candidates.docs.find((candidate) =>
+    taskIdentityKeyFromData(candidate.data() as TaskSnapshotDocument) === targetKey,
+  );
+  if (!target) {
+    throw new Error(`cloud task document not found for ${input.ownerLocalTaskId}`);
+  }
+
+  await updateDoc(target.ref, { waitingPromptSnippet });
+}
+
+export async function deleteRemoteTaskSnapshots(identity: RemoteTaskSnapshotIdentity): Promise<void> {
+  await runSerializedCloudWrite(async () => {
+    const context = await getCloudWriteContext();
+    if (!context) return;
+    await deleteTaskSnapshotByIdentity(context, identity, { createDesktopDoc: false });
+  });
 }
 
 export async function deleteDesktopTaskSnapshotForLocalTask(
   localRepoId: string,
   ownerLocalTaskId: string,
 ): Promise<void> {
-  const context = await getCloudWriteContext();
-  if (!context) return;
-  await deleteTaskSnapshotByIdentity(context, {
-    ownerDesktopId: context.desktopId,
-    localRepoId,
-    ownerLocalTaskId,
-  }, { createDesktopDoc: false });
+  await runSerializedCloudWrite(async () => {
+    const context = await getCloudWriteContext();
+    if (!context) return;
+    await deleteTaskSnapshotByIdentity(context, {
+      ownerDesktopId: context.desktopId,
+      localRepoId,
+      ownerLocalTaskId,
+    }, { createDesktopDoc: false });
+  });
 }
 
 export async function reconcileDesktopTaskSnapshots(db: DbHandle | null | undefined): Promise<void> {
+  await runSerializedCloudWrite(async () => {
+    await reconcileDesktopTaskSnapshotsNow(db);
+  });
+}
+
+async function reconcileDesktopTaskSnapshotsNow(db: DbHandle | null | undefined): Promise<void> {
   void db;
   const context = await getCloudWriteContext();
   if (!context) return;
@@ -141,6 +208,43 @@ export async function publishDesktopTaskSnapshots(
 
 export function __resetDesktopCloudPublisherCachesForTests(): void {
   __resetRepoRemoteUrlCacheForTests();
+  cloudWriteTail = Promise.resolve();
+  cloudWritesAccepted = true;
+}
+
+function runSerializedCloudWrite<T>(operation: () => Promise<T>): Promise<T> {
+  if (!cloudWritesAccepted) {
+    return Promise.reject(new Error("cloud writes are fenced"));
+  }
+  const run = cloudWriteTail.then(operation, operation);
+  cloudWriteTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+export async function fenceAndDrainDesktopCloudWrites(
+  timeoutMs = DEFAULT_CLOUD_WRITE_DRAIN_TIMEOUT_MS,
+): Promise<void> {
+  cloudWritesAccepted = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      cloudWriteTail,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`cloud write drain timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+export function resumeDesktopCloudWrites(): void {
+  cloudWritesAccepted = true;
 }
 
 async function buildSnapshot(
@@ -297,6 +401,19 @@ async function resolveDesktopDocument(
     updatedAt: serverTimestamp(),
   }, { merge: true });
   return legacyDoc.ref;
+}
+
+async function findDesktopDocument(
+  context: CloudWriteContext,
+  desktopId: string,
+): Promise<DocumentReference | null> {
+  const desktopsRef = collection(context.firestore, "users", context.uid, "desktops");
+  const desktopRef = doc(desktopsRef, desktopDocId(desktopId));
+  const existing = await getDoc(desktopRef);
+  if (existing.exists()) return desktopRef;
+
+  const legacy = await getDocs(query(desktopsRef, where("desktopId", "==", desktopId), limit(1)));
+  return legacy.docs[0]?.ref ?? null;
 }
 
 // Firestore document ids may not contain "/" (and a few reserved forms). Desktop

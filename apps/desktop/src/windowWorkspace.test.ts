@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyWindowWorkspaceMutation,
   createWindowWorkspace,
   removeWindowFromWorkspaceSnapshot,
   parseWindowBootstrap,
@@ -38,6 +39,14 @@ describe("windowWorkspace", () => {
       putSetting: async (key, value) => {
         settingStore.set(key, value);
         return { key, value };
+      },
+      mutateWindowWorkspace: async (mutation) => {
+        const current = JSON.parse(
+          settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? '{"windows":[]}',
+        ) as WorkspaceSnapshot;
+        const next = applyWindowWorkspaceMutation(current, mutation);
+        settingStore.set(WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(next));
+        return next;
       },
     });
     vi.spyOn(window, "close").mockImplementation(() => {});
@@ -280,7 +289,7 @@ describe("windowWorkspace", () => {
     ]);
   });
 
-  it("serializes workspace writes so an older selection cannot overwrite a newer one", async () => {
+  it("serializes workspace mutations so an older selection cannot overwrite a newer one", async () => {
     settingStore.set(
       WINDOW_WORKSPACE_SETTINGS_KEY,
       JSON.stringify({
@@ -296,17 +305,21 @@ describe("windowWorkspace", () => {
     );
     const firstWriteStarted = createDeferred<void>();
     const releaseFirstWrite = createDeferred<void>();
-    let writeCount = 0;
+    let mutationCount = 0;
     updateDesktopServerClientHandlersForTests({
       getSetting: async (key) => settingStore.get(key) ?? null,
-      putSetting: async (key, value) => {
-        writeCount += 1;
-        if (writeCount === 1) {
+      mutateWindowWorkspace: async (mutation) => {
+        mutationCount += 1;
+        if (mutationCount === 1) {
           firstWriteStarted.resolve();
           await releaseFirstWrite.promise;
         }
-        settingStore.set(key, value);
-        return { key, value };
+        const current = JSON.parse(
+          settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? '{"windows":[]}',
+        ) as WorkspaceSnapshot;
+        const next = applyWindowWorkspaceMutation(current, mutation);
+        settingStore.set(WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(next));
+        return next;
       },
     });
     const workspace = createWindowWorkspace({
@@ -329,7 +342,7 @@ describe("windowWorkspace", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(writeCount).toBe(1);
+    expect(mutationCount).toBe(1);
 
     releaseFirstWrite.resolve();
     await Promise.all([olderWrite, newerWrite]);
@@ -388,5 +401,103 @@ describe("windowWorkspace", () => {
         },
       ],
     });
+  });
+
+  it("notifies peer windows when the current window leaves the workspace", async () => {
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+          {
+            windowId: "win-2",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    const main = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+    const secondary = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "win-2", selectedRepoId: null, selectedItemId: null },
+    });
+    const handler = vi.fn();
+    const unlisten = await main.onSharedInvalidation(handler);
+
+    await secondary.closeWindow();
+
+    expect(handler).toHaveBeenCalledWith({
+      reason: "windowMembership",
+      sourceWindowId: "win-2",
+    });
+    unlisten();
+  });
+
+  it("does not restore a removed leader when another window saves selection", async () => {
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+          {
+            windowId: "win-2",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    const main = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+    const secondary = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "win-2", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await Promise.all([
+      main.forgetCurrentWindow(),
+      secondary.persistSelection({
+        selectedRepoId: "repo-new",
+        selectedItemId: "task-new",
+      }),
+    ]);
+
+    const saved = JSON.parse(
+      settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? "",
+    ) as WorkspaceSnapshot;
+    expect(saved.windows).toEqual([{
+      windowId: "win-2",
+      selectedRepoId: "repo-new",
+      selectedItemId: "task-new",
+      order: 0,
+      sidebarHidden: false,
+      sidebarWidth: 260,
+    }]);
   });
 });

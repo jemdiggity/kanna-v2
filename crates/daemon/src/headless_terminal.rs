@@ -16,6 +16,8 @@ type HeadlessTerminalResult<T> = Result<T, Box<dyn std::error::Error + Send + Sy
 // row count. Budget against the full grid so 10K logical rows survive snapshot.
 const GHOSTTY_SCROLLBACK_BYTES_PER_CELL: usize = 20;
 const STATUS_ROWS: usize = 8;
+const WAITING_PROMPT_MAX_CHARS: usize = 240;
+const WAITING_PROMPT_MAX_LINES: usize = 3;
 const WAITING_MARKER: &str = "do you want to allow";
 const INTERRUPT_MARKER: &str = "esc to interrupt";
 const COPILOT_BUSY_MARKER: &str = "esc to cancel";
@@ -229,6 +231,17 @@ impl HeadlessTerminal {
         Ok(status)
     }
 
+    pub fn waiting_prompt_snippet(
+        &mut self,
+        provider: Option<AgentProvider>,
+    ) -> HeadlessTerminalResult<Option<String>> {
+        let Some(provider) = provider else {
+            return Ok(None);
+        };
+        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
+        Ok(waiting_prompt_from_lines(&footer_lines, provider))
+    }
+
     pub fn codex_resume_session_id(&mut self) -> HeadlessTerminalResult<Option<String>> {
         let footer_lines = self.visible_footer_lines(16)?;
         let joined = footer_lines.join(" ");
@@ -286,6 +299,24 @@ fn normalize_row_text(text: &str) -> String {
         }
     }
     normalized
+}
+
+pub fn bound_waiting_prompt(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let chars = normalized.chars().collect::<Vec<_>>();
+    if chars.len() <= WAITING_PROMPT_MAX_CHARS {
+        return Some(normalized);
+    }
+
+    let mut bounded = chars[..WAITING_PROMPT_MAX_CHARS - 1]
+        .iter()
+        .collect::<String>();
+    bounded.push('…');
+    Some(bounded)
 }
 
 fn extract_codex_resume_session_id(text: &str) -> Option<String> {
@@ -392,6 +423,126 @@ fn prompt_remainder<'a>(line: &'a str, prompts: &[char]) -> Option<&'a str> {
 
 fn line_contains_worktree_path(line: &str) -> bool {
     line.contains(".kanna-worktrees/") || line.contains("[⎇ ")
+}
+
+fn line_is_visual_divider(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|character| matches!(character, '─' | '━' | '—' | '-' | ' '))
+}
+
+fn line_is_claude_spinner(line: &str) -> bool {
+    const SPINNER_GLYPHS: &[char] = &['✻', '✽', '✶', '✳', '✢', '✣', '✤', '✥'];
+    let mut characters = line.trim_start().chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    SPINNER_GLYPHS.contains(&first) && characters.next().is_some_and(char::is_whitespace)
+}
+
+fn line_is_provider_chrome(line: &str, provider: AgentProvider) -> bool {
+    let trimmed = line.trim();
+    let common_chrome = trimmed.is_empty()
+        || line_is_visual_divider(trimmed)
+        || line_starts_with_prompt(trimmed, &[CLAUDE_IDLE_PROMPT, CODEX_IDLE_PROMPT])
+        || line_contains_worktree_path(trimmed)
+        || contains_ascii_case_insensitive(trimmed, INTERRUPT_MARKER)
+        || contains_ascii_case_insensitive(trimmed, COPILOT_BUSY_MARKER)
+        || contains_ascii_case_insensitive(trimmed, ANTIGRAVITY_BUSY_MARKER)
+        || contains_ascii_case_insensitive(trimmed, "bypass permissions")
+        || contains_ascii_case_insensitive(trimmed, "/ commands");
+    if common_chrome {
+        return true;
+    }
+
+    match provider {
+        AgentProvider::Claude => {
+            trimmed == "Claude Code"
+                || line_is_claude_spinner(trimmed)
+                || (["Sonnet", "Opus", "Haiku"]
+                    .iter()
+                    .any(|model| trimmed.starts_with(model))
+                    && contains_ascii_case_insensitive(trimmed, " with "))
+        }
+        AgentProvider::Codex => {
+            trimmed == "OpenAI Codex"
+                || trimmed.starts_with("◦ Working")
+                || (trimmed.contains(" · ")
+                    && (trimmed.starts_with("gpt-")
+                        || trimmed.starts_with("o1")
+                        || trimmed.starts_with("o3")
+                        || trimmed.starts_with("o4")))
+        }
+        AgentProvider::Opencode => trimmed == "OpenCode",
+        AgentProvider::Antigravity => trimmed == "Antigravity",
+        AgentProvider::Copilot => trimmed == "GitHub Copilot",
+    }
+}
+
+fn waiting_question_from_lines(lines: &[String]) -> Option<String> {
+    let start = lines
+        .iter()
+        .rposition(|line| contains_ascii_case_insensitive(line, WAITING_MARKER))
+        .or_else(|| {
+            lines.windows(2).rposition(|pair| {
+                contains_ascii_case_insensitive(&format!("{} {}", pair[0], pair[1]), WAITING_MARKER)
+            })
+        })?;
+
+    let mut question = Vec::new();
+    for line in lines.iter().skip(start) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if question.is_empty() {
+                continue;
+            }
+            break;
+        }
+        if !question.is_empty() && line_is_permission_option(trimmed) {
+            break;
+        }
+        question.push(trimmed);
+        if trimmed.ends_with('?') || question.len() == WAITING_PROMPT_MAX_LINES {
+            break;
+        }
+    }
+    bound_waiting_prompt(&question.join(" "))
+}
+
+fn line_is_permission_option(line: &str) -> bool {
+    let trimmed = prompt_remainder(line, &[CLAUDE_IDLE_PROMPT, CODEX_IDLE_PROMPT])
+        .unwrap_or(line)
+        .trim_start();
+    let digit_count = trimmed.chars().take_while(char::is_ascii_digit).count();
+    digit_count > 0
+        && trimmed[digit_count..]
+            .chars()
+            .next()
+            .is_some_and(|character| matches!(character, '.' | ')'))
+}
+
+fn waiting_prompt_from_lines(lines: &[String], provider: AgentProvider) -> Option<String> {
+    if let Some(question) = waiting_question_from_lines(lines) {
+        return Some(question);
+    }
+
+    let mut content = Vec::new();
+    for line in lines.iter().rev() {
+        if line_is_provider_chrome(line, provider) {
+            if content.is_empty() {
+                continue;
+            }
+            break;
+        }
+        content.push(line.trim());
+        if content.len() == WAITING_PROMPT_MAX_LINES {
+            break;
+        }
+    }
+    content.reverse();
+    bound_waiting_prompt(&content.join(" "))
 }
 
 fn claude_line_starts_subagent_parent(line: &str) -> bool {
@@ -523,7 +674,7 @@ mod tests {
 
     use crate::protocol::{AgentProvider, SessionStatus};
 
-    use super::{initial_session_status, HeadlessTerminal, TerminalSnapshot};
+    use super::{bound_waiting_prompt, initial_session_status, HeadlessTerminal, TerminalSnapshot};
 
     #[test]
     fn ascii_case_insensitive_contains_matches_status_markers() {
@@ -680,6 +831,128 @@ mod tests {
     }
 
     #[test]
+    fn idle_prompt_snippet_keeps_agent_text_and_drops_codex_chrome() {
+        let mut terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "OpenAI Codex\r\n",
+                "• Updated the mobile task card and all focused tests pass.\r\n",
+                "gpt-5.5 high · /tmp/.kanna-worktrees/task-1\r\n",
+                "────────────────────────────────\r\n",
+                "› \r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .unwrap()
+                .as_deref(),
+            Some("• Updated the mobile task card and all focused tests pass.")
+        );
+    }
+
+    #[test]
+    fn idle_prompt_snippet_drops_codex_model_footer_without_a_worktree_path() {
+        let mut terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "OpenAI Codex\r\n",
+                "gpt-5.5 high · /tmp/project\r\n",
+                "• The renamed title is synced to mobile.\r\n",
+                "────────────────────────────────\r\n",
+                "› \r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .unwrap()
+                .as_deref(),
+            Some("• The renamed title is synced to mobile.")
+        );
+    }
+
+    #[test]
+    fn waiting_prompt_snippet_uses_visible_permission_question() {
+        let mut terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "Do you want to allow Bash to run the focused tests?\r\n",
+                "1. Yes\r\n",
+                "2. No\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("Do you want to allow Bash to run the focused tests?")
+        );
+    }
+
+    #[test]
+    fn waiting_prompt_snippet_reassembles_a_wrapped_permission_question() {
+        let mut terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "Do you want to\r\n",
+                "allow Bash to run the focused tests?\r\n",
+                "1. Yes\r\n",
+                "2. No\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("Do you want to allow Bash to run the focused tests?")
+        );
+    }
+
+    #[test]
+    fn waiting_prompt_snippet_keeps_question_continuation_after_marker_line() {
+        let mut terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "Do you want to allow Bash to run this\r\n",
+                "command with elevated permissions?\r\n",
+                "1. Yes\r\n",
+                "2. No\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("Do you want to allow Bash to run this command with elevated permissions?")
+        );
+    }
+
+    #[test]
+    fn waiting_prompt_snippet_is_bounded_to_240_unicode_scalars() {
+        let bounded = bound_waiting_prompt(&"界".repeat(300)).unwrap();
+
+        assert_eq!(bounded.chars().count(), 240);
+        assert!(bounded.ends_with('…'));
+    }
+
+    #[test]
     fn codex_status_comes_from_visible_footer_content() {
         let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
         headless_terminal.write(
@@ -737,6 +1010,12 @@ mod tests {
                 .visible_status(Some(AgentProvider::Codex))
                 .unwrap(),
             Some(SessionStatus::Idle)
+        );
+        assert_eq!(
+            headless_terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .unwrap(),
+            None
         );
     }
 
@@ -983,6 +1262,13 @@ mod tests {
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
+        );
+        assert_eq!(
+            headless_terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("All done")
         );
     }
 

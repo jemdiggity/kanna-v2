@@ -25,6 +25,7 @@ export interface CloudTaskSnapshot {
   ownerLocalTaskId: string;
   title: string;
   promptSnippet: string | null;
+  waitingPromptSnippet: string | null;
   displayName: string | null;
   stage: string;
   activity: CloudTaskActivity;

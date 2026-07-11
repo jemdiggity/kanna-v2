@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyWindowWorkspaceMutation,
   createWindowWorkspace,
   WINDOW_WORKSPACE_SETTINGS_KEY,
   type WorkspaceSnapshot,
@@ -10,7 +11,12 @@ import { updateDesktopServerClientHandlersForTests } from "./services/desktopSer
 const settingStore = vi.hoisted(() => new Map<string, string>());
 const closeMock = vi.hoisted(() => vi.fn(async () => {}));
 const destroyMock = vi.hoisted(() => vi.fn(async () => {}));
+const emitMock = vi.hoisted(() => vi.fn(async () => {}));
 const openWebviewLabels = vi.hoisted(() => ["main"]);
+const ensuredWindowWasLive = vi.hoisted(() => [] as boolean[]);
+const webviewCreatedHarness = vi.hoisted(() => ({
+  handler: null as null | ((label: string) => Promise<void>),
+}));
 
 vi.mock("./tauri-mock", () => ({
   isTauri: true,
@@ -23,10 +29,35 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  emit: emitMock,
+  listen: vi.fn(async () => () => {}),
+}));
+
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getAllWebviewWindows: vi.fn(async () =>
     openWebviewLabels.map((label) => ({ label })),
   ),
+  WebviewWindow: class {
+    label: string;
+
+    constructor(label: string) {
+      this.label = label;
+      openWebviewLabels.push(label);
+    }
+
+    async once(event: string, handler: (event: { payload: unknown }) => void) {
+      if (event === "tauri://created") {
+        queueMicrotask(() => {
+          void (async () => {
+            await webviewCreatedHarness.handler?.(this.label);
+            handler({ payload: null });
+          })();
+        });
+      }
+      return () => {};
+    }
+  },
 }));
 
 vi.mock("@kanna/" + "db", () => ({
@@ -45,10 +76,26 @@ describe("windowWorkspace in Tauri", () => {
         settingStore.set(key, value);
         return { key, value };
       },
+      mutateWindowWorkspace: async (mutation) => {
+        if (mutation.operation === "ensure" && mutation.window.windowId !== "main") {
+          ensuredWindowWasLive.push(
+            openWebviewLabels.includes(`window-${mutation.window.windowId}`),
+          );
+        }
+        const current = JSON.parse(
+          settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? '{"windows":[]}',
+        ) as WorkspaceSnapshot;
+        const next = applyWindowWorkspaceMutation(current, mutation);
+        settingStore.set(WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(next));
+        return next;
+      },
     });
     openWebviewLabels.splice(0, openWebviewLabels.length, "main");
     closeMock.mockClear();
     destroyMock.mockClear();
+    emitMock.mockClear();
+    ensuredWindowWasLive.splice(0);
+    webviewCreatedHarness.handler = null;
   });
 
   it("requests a normal native close instead of directly destroying the webview", async () => {
@@ -80,6 +127,10 @@ describe("windowWorkspace in Tauri", () => {
 
     expect(closeMock).toHaveBeenCalledTimes(1);
     expect(destroyMock).not.toHaveBeenCalled();
+    expect(emitMock).toHaveBeenCalledWith(
+      "kanna://window-workspace-invalidated",
+      { reason: "windowMembership", sourceWindowId: "main" },
+    );
   });
 
   it("prunes stale saved windows when the last live window closes", async () => {
@@ -170,5 +221,78 @@ describe("windowWorkspace in Tauri", () => {
         },
       ],
     });
+  });
+
+  it("lets the created webview register its own live membership", async () => {
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [{
+          windowId: "main",
+          selectedRepoId: null,
+          selectedItemId: null,
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+        }],
+      } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+    webviewCreatedHarness.handler = async (label) => {
+      const windowId = label.slice("window-".length);
+      const child = createWindowWorkspace({
+        db: {} as never,
+        bootstrap: { windowId, selectedRepoId: "repo-1", selectedItemId: "task-1" },
+      });
+      await child.initialize();
+    };
+
+    await workspace.openWindow({ selectedRepoId: "repo-1", selectedItemId: "task-1" });
+
+    expect(ensuredWindowWasLive).toEqual([true]);
+  });
+
+  it("does not resurrect a child that closes before the opener observes creation", async () => {
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [{
+          windowId: "main",
+          selectedRepoId: null,
+          selectedItemId: null,
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+        }],
+      } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+    let childWindowId = "";
+    webviewCreatedHarness.handler = async (label) => {
+      childWindowId = label.slice("window-".length);
+      const child = createWindowWorkspace({
+        db: {} as never,
+        bootstrap: {
+          windowId: childWindowId,
+          selectedRepoId: "repo-1",
+          selectedItemId: "task-1",
+        },
+      });
+      await child.initialize();
+      await child.forgetCurrentWindow();
+    };
+
+    await workspace.openWindow({ selectedRepoId: "repo-1", selectedItemId: "task-1" });
+
+    const saved = JSON.parse(
+      settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? "",
+    ) as WorkspaceSnapshot;
+    expect(saved.windows.some((entry) => entry.windowId === childWindowId)).toBe(false);
   });
 });

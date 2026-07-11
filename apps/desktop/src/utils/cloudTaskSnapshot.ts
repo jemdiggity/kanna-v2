@@ -14,6 +14,7 @@ export interface CloudTaskSnapshotInput {
     | "pr_number"
     | "pr_url"
     | "display_name"
+    | "last_output_preview"
     | "agent_provider"
     | "agent_type"
     | "created_at"
@@ -35,6 +36,7 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
     ownerLocalTaskId: input.item.id,
     title,
     promptSnippet: prompt ? prompt.slice(0, 500) : null,
+    waitingPromptSnippet: input.item.last_output_preview?.trim() || null,
     displayName: input.item.display_name,
     stage: input.item.stage,
     activity: input.item.activity,
