@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
+import { assertLiveAgentCliContractsEnabled } from "./live-contract-guard";
 
 export interface CopilotResult {
   stdout: string;
@@ -63,6 +64,7 @@ async function runProcess(
  * Install methods: brew, curl installer (~/.local/bin), npm global.
  */
 export async function findCopilotBinary(): Promise<string> {
+  assertLiveAgentCliContractsEnabled();
   const home = process.env.HOME || "";
   const candidates = [
     `${home}/.local/bin/copilot`,

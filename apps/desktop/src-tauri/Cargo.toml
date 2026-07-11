@@ -25,6 +25,7 @@ serde_json = "1"
 git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 tokio = { version = "1", features = ["full"] }
 kanna-runtime-defaults = { path = "../../../crates/runtime-defaults" }
+kanna-agent-protocol = { path = "../../../crates/kanna-agent-protocol" }
 chrono = "0.4"
 libc = "0.2"
 base64 = "0.22"

@@ -2,24 +2,24 @@
 
 ## Project
 
-Kanna — Tauri v2 desktop app for managing coding agent tasks (Claude Code, GitHub Copilot). Vue 3 frontend, Rust backend, SQLite database. Public repository hosted on GitHub.
+Kanna — Tauri v2 desktop app for managing coding agent tasks. Vue 3 frontend, Rust backend, SQLite database. Public repository hosted on GitHub.
 
 Kanna is a product distributed to end users as a signed macOS app. All dependencies must be vendored or statically linked — never depend on libraries installed on the build machine (e.g., Homebrew). Release builds must run on any Mac without developer tools installed.
 
-**Target user:** Software developers who use coding agents (Claude Code, GitHub Copilot) and want to run multiple agent tasks in parallel without juggling terminals and branches.
+**Target user:** Software developers who use coding agents and want to run multiple agent tasks in parallel without juggling terminals and branches.
 
 ## Product Behavior
 
 ### Core concepts
 
-- **Task** — A unit of work. Has a prompt, a git worktree, a Claude agent session, and a lifecycle stage. One task = one branch = one PR.
+- **Task** — A unit of work. Has a prompt, a git worktree, an agent session, and a lifecycle stage. One task = one branch = one PR.
 - **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr` (post: `approve`, which marks the PR ready and signals the merge master). Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new branch + worktree named `task-{id}-{n}` (the durable task id plus a workspace counter; the creation workspace is plain `task-{id}`) cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A workspace is an ephemeral manifestation of the task. A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; when the task leaves a workspace, the workspace's repo-config `teardown` commands run best-effort in a detached `td-{branch}` daemon session, and open-task worktrees stay available for revision resume until the task closes. Advancing past the final stage closes the task; close snapshots dirty workspace state into local WIP commits, removes the task's worktrees, and keeps the branches.
 - **Daemon** — Standalone process that manages PTY sessions. Survives app restarts. Handles seamless upgrades via fd handoff.
 
 ### Workflows
 
 **Create a task:**
-1. Cmd+N → enter prompt (choose Claude or Copilot agent)
+1. Cmd+N → enter prompt (choose an available agent provider)
 2. App creates git worktree (`{repo}/.kanna-worktrees/task-{uuid}`)
 3. Runs `.kanna/config.json` setup scripts if present (e.g., `pnpm install`)
 4. Spawns agent CLI in the worktree via daemon
@@ -245,12 +245,18 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd cloud deploy --staging     # deploy Firebase cloud services to staging
 ./kd cloud deploy --production  # deploy Firebase cloud services to production
 
-# Unit tests
-pnpm test                     # all packages via turborepo
-cd packages/core && pnpm test # core package only
+# Canonical automated verification
+pnpm test
+./kd test rust
 
-# Daemon tests
-cd crates/daemon && cargo test -- --test-threads=1
+# Package-specific unit tests
+cd packages/core && pnpm test
+
+# Explicit live/process-heavy suites
+# Requires installed and authenticated agent CLIs and may consume quota:
+pnpm test:agent-cli-compat
+pnpm test:remote-e2e
+pnpm test:tui-fidelity
 
 # Rust integration tests (needs claude in PATH)
 cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignored --nocapture
@@ -295,7 +301,7 @@ Publish only through `./kd mobile ota publish --staging|--production`. Check poi
 - **Vue composables** in `apps/desktop/src/composables/` — useTerminal, useKeyboardShortcuts, useBackup, etc.
 - **Daemon** in `crates/daemon/` — standalone PTY session manager. See `crates/daemon/SPEC.md` for full spec.
 - **Agent SDK** wraps Claude CLI via `--output-format stream-json`, communicates via NDJSON on stdin/stdout
-- **Agent providers** — supports both Claude and Copilot via `agent_provider` field (`"claude"` | `"copilot"`)
+- **Agent providers** — the generated registry supports Claude (`"claude"`), GitHub Copilot (`"copilot"`), Codex (`"codex"`), OpenCode (`"opencode"`), and Antigravity (`"antigravity"`, executable `agy`). Claude, Codex, and OpenCode support headless agent sessions; Copilot and Antigravity are PTY-only.
 - **Permission mode flags** use camelCase: `dontAsk`, `acceptEdits`, `default` (not kebab-case)
 - **Browser mock layer** (`tauri-mock.ts`, `invoke.ts`, `listen.ts`, `dialog.ts`) enables running the frontend in a regular browser without Tauri APIs
 
@@ -369,7 +375,7 @@ User makes PR → GitHub API → DB update → stage transition
 ### Stores (`apps/desktop/src/stores/`)
 
 - **`kanna.ts`** (Pinia) — App state: repo/item selection, sorted items (pinned → merge → pr → active → blocked), debounced activity transitions (unread → idle after 1s), `generateId()` via `crypto.getRandomValues()`, operator event emission, undo support. Key interfaces: `PtySpawnOptions` (agentProvider, model, permissionMode, allowedTools, maxTurns, maxBudgetUsd, setupCmds, portEnv).
-- **`db.ts`** — DB setup: `resolveDbName()` from env vars, `loadDatabase()` with mock fallback, `runMigrations()` with all table schemas.
+- **`db.ts`** — Frontend database compatibility: resolves the database name and exposes the disabled/DEV-E2E `DbHandle` facade. The server owns the schema, migrations, and legacy file-location relocation.
 
 ### Tauri Commands (`apps/desktop/src-tauri/src/commands/`)
 
@@ -499,7 +505,7 @@ User makes PR → GitHub API → DB update → stage transition
 
 ## Database
 
-SQLite via `tauri-plugin-sql`. Schema defined inline in `stores/db.ts`'s `runMigrations()`. See the Database Tables inventory in the Codebase Overview section for the full table list.
+`kanna-server` owns SQLite through bundled `rusqlite`, with all schema definitions and schema migrations in `crates/kanna-server/src/db/mod.rs`. Server startup owns legacy file-location relocation and completes it before calling `Db::open_migrated` and serving requests. Desktop `stores/db.ts` only resolves the database name and provides the disabled/DEV-E2E `DbHandle` facade for compatibility. See the Database Tables inventory in the Codebase Overview section for the full table list.
 
 DB name is resolved by `kd` from the current context: main instances use `kanna-v2.db`, and worktrees auto-name their DB `kanna-wt-{worktree-dir}.db` (for example `kanna-wt-task-10720bf8.db`). In the current checked-in dev build, Tauri's app identifier is `build.kanna`, so the default DB directory is `~/Library/Application Support/build.kanna/`. If the app identifier changes for another build flavor, the enclosing Application Support directory changes with it.
 
@@ -508,7 +514,7 @@ DB name is resolved by `kd` from the current context: main instances use `kanna-
 - **Unit tests:** vitest in `packages/core/`, `packages/db/`, and `apps/desktop/src/composables/` (useBackup, useInlineSearch, useNavigationHistory, useShortcutContext have `.test.ts` files)
 - **Integration tests:** Rust tests in `apps/desktop/src-tauri/tests/` (real Claude CLI)
 - **Daemon tests:** `crates/daemon/tests/` — handoff and reconnect tests with real daemon processes
-- **CLI contract tests:** `tests/cli-contract/` — verify Claude and Copilot CLI flag compatibility
+- **CLI contract tests:** `tests/cli-contract/tests/offline/` runs under canonical `pnpm test`; real Claude, Copilot, Codex, and OpenCode compatibility lives in `tests/cli-contract/tests/live/` and runs only through `pnpm test:agent-cli-compat` because it requires installed/authenticated CLIs and may consume quota
 - **E2E tests:** `pnpm test:e2e` + W3C WebDriver via `tauri-plugin-webdriver` on port 4445
   - Mock tests (`apps/desktop/tests/e2e/mock/`): action-bar, app-launch, diff-view, import-repo, keyboard-shortcuts, preferences, task-lifecycle
   - Real tests (`apps/desktop/tests/e2e/real/`): claude-session, diff-after-claude (requires Claude CLI)
@@ -542,7 +548,7 @@ If a behavior should have E2E coverage but cannot reasonably get it yet, the cha
 - Branch names: `task-{id}` at creation; stage forks append a workspace counter (`task-{id}-2`, `task-{id}-3`, …)
 - GitHub labels: `kn:wip`, `kn:pr-ready`, `kn:claimed`
 - API tokens from env: `KANNA_GITHUB_TOKEN`, `KANNA_SLACK_TOKEN`, `KANNA_DISCORD_TOKEN`
-- Agent providers: `"claude"` or `"copilot"` — stored in `pipeline_item.agent_provider`
+- Agent provider IDs: `"claude"`, `"copilot"`, `"codex"`, `"opencode"`, and `"antigravity"` — generated from `crates/kanna-agent-protocol/src/providers.rs` and stored in `pipeline_item.agent_provider`
 - i18n locales: English (`en`), Japanese (`ja`), Korean (`ko`) in `apps/desktop/src/i18n/locales/`
 - Keyboard shortcut contexts: `"main"`, `"diff"`, `"file"`, `"shell"`, `"tree"` — managed by `useShortcutContext`
 - `.kanna/` per repo — project-level Kanna config:

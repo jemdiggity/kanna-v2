@@ -4,7 +4,7 @@ import type {
   TaskSummary,
   RepoSummary,
 } from "../lib/api/types";
-import type { FrameAgentEvent } from "@kanna/agent-protocol";
+import type { AgentProvider, FrameAgentEvent } from "@kanna/agent-protocol";
 import type { MobileAuthState } from "../lib/firebase/auth";
 import type {
   PersistedSessionContext,
@@ -35,12 +35,7 @@ export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
 export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type AuthState = MobileAuthState;
-export type ComposerAgentProvider =
-  | "claude"
-  | "copilot"
-  | "codex"
-  | "opencode"
-  | "antigravity";
+export type ComposerAgentProvider = AgentProvider;
 
 export interface SessionState {
   connectionMode: DesktopMode | null;

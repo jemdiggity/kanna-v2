@@ -7,8 +7,8 @@ use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
 use super::pairing::create_pairing_session;
 use super::repos::{
-    add_repo, dependent_tasks_exist, get_repo_by_path, list_repo_tasks, list_repos, patch_repo,
-    reorder_repos,
+    add_repo, dependent_tasks_exist, get_repo_by_path, list_available_agent_providers,
+    list_repo_tasks, list_repos, patch_repo, reorder_repos,
 };
 use super::settings::{delete_setting, get_setting, put_setting};
 use super::signal_agent::signal_agent;
@@ -62,6 +62,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/repos/actions/reorder", post(reorder_repos))
         .route("/v1/repos/{repo_id}", axum::routing::patch(patch_repo))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
+        .route(
+            "/v1/repos/{repo_id}/agent-providers",
+            get(list_available_agent_providers),
+        )
         .route(
             "/v1/repos/{repo_id}/agents/{agent}/signal",
             post(signal_agent),

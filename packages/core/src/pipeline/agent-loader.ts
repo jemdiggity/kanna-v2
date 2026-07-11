@@ -1,6 +1,11 @@
 import type { AgentDefinition, AgentExtension } from "./pipeline-types";
 import { parseFrontmatter } from "../config/custom-tasks";
-import { VALID_AGENT_PROVIDERS, isAgentProvider, splitAgentProviderValue } from "../config/agent-providers";
+import {
+  VALID_AGENT_PROVIDERS,
+  isAgentProvider,
+  splitAgentProviderValue,
+  type AgentProvider,
+} from "../config/agent-providers";
 
 const VALID_PERMISSION_MODES = ["default", "acceptEdits", "dontAsk"] as const;
 type PermissionMode = AgentDefinition["permission_mode"];
@@ -16,6 +21,29 @@ function parsePermissionMode(value: unknown): PermissionMode | undefined {
   throw new Error(
     `permission_mode must be one of: ${VALID_PERMISSION_MODES.join(", ")} (got "${value}")`
   );
+}
+
+function parseAgentProviders(value: unknown): AgentProvider[] {
+  if (
+    typeof value !== "string" &&
+    !(Array.isArray(value) && value.every((provider) => typeof provider === "string"))
+  ) {
+    throw new Error("agent_provider must be a string or an array of strings");
+  }
+
+  const providers = splitAgentProviderValue(value);
+  if (providers.length === 0) {
+    throw new Error("agent_provider must include at least one non-empty provider");
+  }
+
+  const invalid = providers.filter((provider) => !isAgentProvider(provider));
+  if (invalid.length > 0) {
+    throw new Error(
+      `agent_provider must be one of: ${VALID_AGENT_PROVIDERS.join(", ")} (got "${invalid.join(", ")}")`,
+    );
+  }
+
+  return providers.filter(isAgentProvider);
 }
 
 // An agent definition (`.kanna/agents/*/AGENT.md`) describes a reusable *role* and
@@ -52,10 +80,8 @@ export function parseAgentDefinition(content: string): AgentDefinition {
 
   // agent_provider: YAML array, single string, or comma-separated string.
   if (fm.agent_provider !== undefined) {
-    const providers = splitAgentProviderValue(fm.agent_provider);
-    if (providers.length > 0) {
-      def.agent_provider = providers;
-    }
+    const agentProviders = parseAgentProviders(fm.agent_provider);
+    def.agent_provider = agentProviders;
   }
 
   const errors = validateAgentDefinition(def);
@@ -94,10 +120,8 @@ export function parseAgentExtension(content: string): AgentExtension {
   }
 
   if (fm.agent_provider !== undefined) {
-    const providers = splitAgentProviderValue(fm.agent_provider);
-    if (providers.length > 0) {
-      ext.agent_provider = providers;
-    }
+    const agentProviders = parseAgentProviders(fm.agent_provider);
+    ext.agent_provider = agentProviders;
   }
 
   return ext;

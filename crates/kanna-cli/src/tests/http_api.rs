@@ -61,6 +61,38 @@ async fn get_task_via_api_fetches_single_task_path() {
 }
 
 #[tokio::test]
+async fn dependent_tasks_exist_via_api_fetches_and_decodes_dependent_tasks() {
+    let response = http_json_response(
+        "200 OK",
+        r#"{"exists":true,"dependentTasks":[{"taskId":"dependent-1","title":"Dependent task","branch":"feature/child","baseRef":"origin/feature/parent","reason":"base_ref"}]}"#,
+    );
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let result = dependent_tasks_exist_via_api(&base_url, "task-123")
+        .await
+        .unwrap();
+    let request = handle.await.unwrap();
+
+    assert!(result.exists);
+    assert_eq!(result.dependent_tasks[0].task_id, "dependent-1");
+    assert_eq!(result.dependent_tasks[0].reason, "base_ref");
+    assert!(request.starts_with("GET /v1/tasks/task-123/dependent-tasks-exist HTTP/1.1"));
+    assert_eq!(
+        serde_json::to_value(result).unwrap(),
+        json!({
+            "exists": true,
+            "dependentTasks": [{
+                "taskId": "dependent-1",
+                "title": "Dependent task",
+                "branch": "feature/child",
+                "baseRef": "origin/feature/parent",
+                "reason": "base_ref"
+            }]
+        })
+    );
+}
+
+#[tokio::test]
 async fn close_task_posts_to_close_action_path() {
     let response = "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n".to_string();
     let (base_url, handle) = serve_single_http_response(response).await;

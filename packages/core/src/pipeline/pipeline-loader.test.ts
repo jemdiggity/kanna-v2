@@ -113,13 +113,88 @@ describe("parsePipelineJson", () => {
     expect(result.stages[0].agent_provider).toEqual(["codex", "claude"]);
   });
 
-  it("ignores a stage agent_provider array containing non-strings", () => {
+  it("rejects a stage agent_provider array containing non-strings", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
       stages: [{ name: "Stage 1", transition: "auto", agent_provider: ["codex", 3] }],
     });
-    const result = parsePipelineJson(json);
-    expect(result.stages[0].agent_provider).toBeUndefined();
+    expect(() => parsePipelineJson(json)).toThrow(
+      /Stage "Stage 1" has an invalid agent_provider value/,
+    );
+  });
+
+  it("rejects an unknown stage agent_provider", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [{ name: "Stage 1", transition: "auto", agent_provider: "future-agent" }],
+    });
+    expect(() => parsePipelineJson(json)).toThrow(
+      /Stage "Stage 1" has unsupported agent_provider values: future-agent/,
+    );
+  });
+
+  it("rejects an unknown post agent_provider", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [{
+        name: "in progress",
+        transition: "manual",
+        post: { name: "commit", agent_provider: "future-agent" },
+      }],
+    });
+    expect(() => parsePipelineJson(json)).toThrow(
+      /Post "commit" on stage "in progress" has unsupported agent_provider values: future-agent/,
+    );
+  });
+
+  it("rejects a post agent_provider array containing non-strings", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [{
+        name: "in progress",
+        transition: "manual",
+        post: { name: "commit", agent_provider: ["codex", 3] },
+      }],
+    });
+    expect(() => parsePipelineJson(json)).toThrow(
+      /Post "commit" on stage "in progress" has an invalid agent_provider value/,
+    );
+  });
+
+  it("rejects an unknown agent_provider on a folded legacy post", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [
+        { name: "in progress", transition: "manual" },
+        {
+          name: "commit",
+          transition: "auto",
+          mode: "continue",
+          agent_provider: "future-agent",
+        },
+      ],
+    });
+    expect(() => parsePipelineJson(json)).toThrow(
+      /Stage "commit" has unsupported agent_provider values: future-agent/,
+    );
+  });
+
+  it("rejects a mixed agent_provider array on a folded legacy post", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [
+        { name: "in progress", transition: "manual" },
+        {
+          name: "commit",
+          transition: "auto",
+          mode: "continue",
+          agent_provider: ["codex", 3],
+        },
+      ],
+    });
+    expect(() => parsePipelineJson(json)).toThrow(
+      /Stage "commit" has an invalid agent_provider value/,
+    );
   });
 
   it("drops legacy follow_task values", () => {

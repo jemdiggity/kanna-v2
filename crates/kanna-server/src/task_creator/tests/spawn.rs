@@ -257,6 +257,10 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
     )
     .unwrap();
     let task_id = prepared.created_task.task_id.clone();
+    let expected_executable = std::path::Path::new(&prepared.cwd)
+        .join(".kanna/test-provider-bin/claude")
+        .to_string_lossy()
+        .to_string();
     let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
 
@@ -269,7 +273,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
         } => {
             assert_eq!(session_id, task_id);
             let shell_command = args.last().expect("shell command argument");
-            assert!(shell_command.contains("claude "));
+            assert!(shell_command.contains(&format!("'{expected_executable}' ")));
             assert!(shell_command.contains("--mcp-config"));
             assert!(shell_command.contains("/runtime/mcp/"));
             assert!(shell_command.contains("--append-system-prompt"));
@@ -334,6 +338,10 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
     )
     .unwrap();
     let task_id = prepared.created_task.task_id.clone();
+    let expected_executable = std::path::Path::new(&prepared.cwd)
+        .join(".kanna/test-provider-bin/copilot")
+        .to_string_lossy()
+        .to_string();
     let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
 
@@ -346,7 +354,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
         } => {
             assert_eq!(session_id, task_id);
             let shell_command = args.last().expect("shell command argument");
-            assert!(shell_command.contains("copilot "));
+            assert!(shell_command.contains(&format!("'{expected_executable}' ")));
             assert!(!shell_command.contains("--append-system-prompt"));
             let context_index = shell_command
                 .find("## Kanna Task Environment")
@@ -414,6 +422,10 @@ async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
     .unwrap();
     let task_id = prepared.created_task.task_id.clone();
     let worktree_path = prepared.created_task.worktree_path.clone();
+    let expected_executable = std::path::Path::new(&worktree_path)
+        .join(".kanna/test-provider-bin/agy")
+        .to_string_lossy()
+        .to_string();
     let alias_name: String = std::path::Path::new(&worktree_path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -448,14 +460,14 @@ async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
             assert!(shell_command.contains(&format!("rm -f '{alias_path}'")));
             assert!(shell_command.contains(&format!("ln -s '{}' '{alias_path}'", worktree_path)));
             assert!(shell_command.contains(&format!(
-                "agy --dangerously-skip-permissions --add-dir '{alias_path}'"
+                "'{expected_executable}' --dangerously-skip-permissions --add-dir '{alias_path}'"
             )));
             let alias_setup_index = shell_command
                 .find(&format!("ln -s '{}' '{alias_path}'", worktree_path))
                 .expect("worktree alias setup should be present");
             let launch_index = shell_command
                 .find(&format!(
-                    "agy --dangerously-skip-permissions --add-dir '{alias_path}'"
+                    "'{expected_executable}' --dangerously-skip-permissions --add-dir '{alias_path}'"
                 ))
                 .expect("Antigravity launch should use the alias");
             assert!(alias_setup_index < launch_index);

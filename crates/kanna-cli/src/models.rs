@@ -74,6 +74,23 @@ pub(crate) struct TaskDetail {
     pub(crate) dirty: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DependentTaskInfo {
+    pub(crate) task_id: String,
+    pub(crate) title: String,
+    pub(crate) branch: Option<String>,
+    pub(crate) base_ref: Option<String>,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DependentTasksExistResponse {
+    pub(crate) exists: bool,
+    pub(crate) dependent_tasks: Vec<DependentTaskInfo>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskStatusRow {

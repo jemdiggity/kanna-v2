@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { invoke } from "../invoke";
+import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import type { AgentProvider } from "../types/kanna";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
@@ -18,6 +18,7 @@ const props = defineProps<{
   defaultAgentProvider?: AgentProvider;
   defaultAgentType?: AgentExecutionType;
   recentAgentChoices?: RecentAgentChoice[];
+  availableAgentProviders?: AgentProvider[];
   pipelines?: string[];
   defaultPipeline?: string;
   baseBranches?: string[];
@@ -75,20 +76,20 @@ const MAX_VISIBLE_BRANCH_ROWS = 7;
 const BRANCH_ROW_HEIGHT_PX = 36;
 const baseBranchOptionsMaxHeight = `${MAX_VISIBLE_BRANCH_ROWS * BRANCH_ROW_HEIGHT_PX}px`;
 
-const providers: Array<AgentProvider> = ["claude", "codex", "copilot", "opencode", "antigravity"];
-const availableProviders = ref<Array<AgentProvider>>([...providers]);
+const providers: AgentProvider[] = [...AGENT_PROVIDERS];
+const availableProviders = computed<AgentProvider[]>(() => {
+  const scoped = props.availableAgentProviders;
+  return [...(scoped === undefined ? providers : scoped)]
+    .sort((a, b) => a.localeCompare(b));
+});
 type AgentChoice = RecentAgentChoice;
 
 function providerLabel(provider: AgentProvider): string {
   return provider;
 }
 
-function providerBinary(provider: AgentProvider): string {
-  return provider === "antigravity" ? "agy" : provider;
-}
-
 function supportsChatMode(provider: AgentProvider): boolean {
-  return provider === "claude" || provider === "codex";
+  return getAgentProviderSpec(provider).supports_headless;
 }
 
 const baseAgentChoices = computed(() => [
@@ -145,28 +146,10 @@ function cycleAgentChoice(direction: -1 | 1) {
   applyChoice(choices[(idx + direction + choices.length) % choices.length]);
 }
 
-onMounted(async () => {
+onMounted(() => {
   textareaRef.value?.focus();
-  try {
-    // Detect installed CLIs and filter options
-    const checks = await Promise.all(providers.map(async (p) => {
-      try {
-        await invoke("which_binary", { name: providerBinary(p) });
-        return p;
-      } catch (error) {
-        console.debug(`[newtask] CLI binary not found or unavailable: ${p}`, error);
-        return null as AgentProvider | null;
-      }
-    }));
-    const found = (checks.filter(Boolean) as AgentProvider[]).sort((a, b) => a.localeCompare(b));
-    if (found.length > 0) availableProviders.value = found;
-    else availableProviders.value = [...providers]; // if none detected, keep all options
-
-    const nextChoice = preferredChoice();
-    if (nextChoice) applyChoice(nextChoice);
-  } catch (e) {
-    console.debug("[newtask] cli detection failed:", e);
-  }
+  const nextChoice = preferredChoice();
+  if (nextChoice) applyChoice(nextChoice);
 });
 
 watch(baseBranchQuery, () => {
@@ -200,7 +183,7 @@ watch(showBaseBranchPicker, async (open) => {
 
 function handleSubmit() {
   const text = prompt.value.trim();
-  if (!text || !hasValidBaseBranch.value || selectedBaseBranch.value === null) return;
+  if (!text || agentChoices.value.length === 0 || !hasValidBaseBranch.value || selectedBaseBranch.value === null) return;
   emit("submit", text, agentProvider.value, selectedPipeline.value, selectedBaseBranch.value, displayMode.value);
   prompt.value = "";
 }
@@ -367,8 +350,14 @@ function handleKeydown(e: KeyboardEvent) {
     <div class="modal" @keydown="handleKeydown">
       <div class="modal-header">
         <h3>{{ $t('tasks.newTask') }}</h3>
-        <button class="agent-provider" type="button" @mousedown.prevent @click="cycleAgentChoice(1)">
-          {{ agentChoiceLabel(agentProvider, displayMode) }}
+        <button
+          class="agent-provider"
+          type="button"
+          :disabled="agentChoices.length === 0"
+          @mousedown.prevent
+          @click="cycleAgentChoice(1)"
+        >
+          {{ agentChoices.length === 0 ? $t('mainPanel.agentNotInstalled') : agentChoiceLabel(agentProvider, displayMode) }}
         </button>
       </div>
       <div class="modal-body">
@@ -505,7 +494,7 @@ function handleKeydown(e: KeyboardEvent) {
           <button class="btn btn-cancel" @click="emit('cancel')">{{ $t('actions.cancel') }}</button>
           <button
             class="btn btn-primary"
-            :disabled="!prompt.trim() || !hasValidBaseBranch"
+            :disabled="!prompt.trim() || agentChoices.length === 0 || !hasValidBaseBranch"
             @click="handleSubmit"
           >
             {{ $t('actions.create') }}

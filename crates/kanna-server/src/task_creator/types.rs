@@ -123,6 +123,9 @@ pub(crate) struct PreparedStageRerun {
     pub(super) provider_session_id: Option<String>,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
+    /// Headless reruns execute setup only after the prior session is killed,
+    /// then resolve their executable from the initialized workspace.
+    pub(super) deferred_setup: Vec<String>,
     pub(super) session: PreparedSessionSpawn,
 }
 

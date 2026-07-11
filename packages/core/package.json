@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=2",
     "dev": "tsc --watch"
   },
   "devDependencies": {
@@ -14,6 +14,7 @@
     "vitest": "^3"
   },
   "dependencies": {
+    "@kanna/agent-protocol": "workspace:*",
     "smol-toml": "^1.6.0",
     "yaml": "^2.8.3"
   }

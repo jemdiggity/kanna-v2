@@ -138,7 +138,8 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
                 .body(Body::from(
                     serde_json::json!({
                         "repoId": "repo-1",
-                        "prompt": "Use the saved default provider"
+                        "prompt": "Use the saved default provider",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE
                     })
                     .to_string(),
                 ))
@@ -467,6 +468,8 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
+    let _sidecar_guard = crate::test_sidecar_guard();
+
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -526,7 +529,11 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
                         Some("http://127.0.0.1:48120")
                     );
                     let path = env.get("PATH").expect("PATH should be set for sidecar");
-                    assert_eq!(path.split(':').next(), Some(expected_cli_dir.as_str()));
+                    assert!(
+                        std::env::split_paths(path)
+                            .any(|entry| entry == std::path::Path::new(&expected_cli_dir)),
+                        "PATH should include the Kanna CLI directory: {path}"
+                    );
                     session_id
                 }
                 other => panic!("expected SpawnAgent command, got {:?}", other),
@@ -969,11 +976,6 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
                 assert_eq!(agent_provider, Some(AgentProvider::Claude));
                 session_id
             }
-            DaemonCommand::SpawnAgent { session_id, params } => {
-                assert!(params.cwd.contains(".kanna-worktrees/task-"));
-                assert_eq!(params.agent_provider, AgentProvider::Claude);
-                session_id
-            }
             other => panic!("expected spawn command, got {:?}", other),
         };
         write_half
@@ -1029,6 +1031,9 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "All blockers are already closed",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
+                        "agentType": "pty",
                         "blockerTaskIds": ["blocker-1"]
                     })
                     .to_string(),

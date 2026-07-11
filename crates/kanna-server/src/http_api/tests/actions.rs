@@ -1297,6 +1297,8 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
+    let _sidecar_guard = crate::test_sidecar_guard();
+
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -1408,6 +1410,8 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })
                     .to_string(),
@@ -1687,6 +1691,8 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
+    let _sidecar_guard = crate::test_sidecar_guard();
+
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -1796,6 +1802,8 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Build on task A",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
                         "blockerTaskIds": ["task-a"]
                     })
                     .to_string(),
@@ -1977,6 +1985,8 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    let _sidecar_guard = crate::test_sidecar_guard();
 
     let unique = format!(
         "{}-{}",
@@ -2218,6 +2228,8 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    let _sidecar_guard = crate::test_sidecar_guard();
 
     let unique = format!(
         "{}-{}",
@@ -2492,6 +2504,8 @@ async fn non_conflicting_multi_blocker_merge_starts_dependent_directly() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    let _sidecar_guard = crate::test_sidecar_guard();
 
     let unique = format!(
         "{}-{}",
@@ -2874,6 +2888,8 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
+    let _sidecar_guard = crate::test_sidecar_guard();
+
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -3081,6 +3097,8 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
+
+    let _sidecar_guard = crate::test_sidecar_guard();
 
     let unique = format!(
         "{}-{}",
@@ -3744,6 +3762,8 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    let _sidecar_guard = crate::test_sidecar_guard();
 
     let unique = format!(
         "{}-{}",

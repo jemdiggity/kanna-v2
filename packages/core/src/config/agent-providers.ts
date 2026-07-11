@@ -1,25 +1,16 @@
-// Single source of truth for the set of agent providers Kanna understands, plus
-// the shared frontmatter-parsing helpers used by both the agent-definition loader
-// (`.kanna/agents/*/AGENT.md`) and the task-template loader (`.kanna/tasks/*/agent.md`).
-//
-// Keep VALID_AGENT_PROVIDERS in sync with `AgentProvider` in `@kanna/db`
-// (packages/db/src/schema.ts) and with the `agent_provider` enum in
-// `.kanna/pipelines/schema.json`. `@kanna/core` intentionally does not depend on
-// `@kanna/db`, so the union is duplicated here rather than imported.
+// Provider identity comes from the generated @kanna/agent-protocol contract.
+// This module keeps the shared frontmatter helper alongside compatibility
+// exports used by the agent-definition and task-template loaders.
+import {
+  AGENT_PROVIDERS,
+  isAgentProvider,
+  type AgentProvider,
+} from "@kanna/agent-protocol";
 
-export const VALID_AGENT_PROVIDERS = [
-  "claude",
-  "copilot",
-  "codex",
-  "opencode",
-  "antigravity",
-] as const;
-
-export type KnownAgentProvider = (typeof VALID_AGENT_PROVIDERS)[number];
-
-export function isAgentProvider(value: unknown): value is KnownAgentProvider {
-  return typeof value === "string" && (VALID_AGENT_PROVIDERS as readonly string[]).includes(value);
-}
+export { AGENT_PROVIDERS, isAgentProvider };
+export type { AgentProvider };
+export const VALID_AGENT_PROVIDERS = AGENT_PROVIDERS;
+export type KnownAgentProvider = AgentProvider;
 
 /**
  * Split a frontmatter `agent_provider` value into an ordered list of trimmed,

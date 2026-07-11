@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { type AgentProvider, type DbHandle } from "./types/kanna";
+import { type DbHandle } from "./types/kanna";
 import type { TaskUiSlot } from "./types/taskUi";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
@@ -25,17 +25,6 @@ import { useThemeRuntime } from "./theme/runtime";
 import { type WindowWorkspaceController } from "./windowWorkspace";
 
 const isMobile = __KANNA_MOBILE__;
-
-function firstSupportedAgentProvider(agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined): AgentProvider | undefined {
-  const providers = Array.isArray(agentProvider) ? agentProvider : [agentProvider];
-  return providers.find((provider): provider is AgentProvider =>
-    provider === "claude"
-    || provider === "copilot"
-    || provider === "codex"
-    || provider === "opencode"
-    || provider === "antigravity"
-  );
-}
 
 const store = useKannaStore();
 const toast = useToast();
@@ -216,7 +205,6 @@ const appPreferences = useAppPreferences({
   db,
   store,
   effectiveAppTheme,
-  firstSupportedAgentProvider,
 });
 const {
   preferences,
@@ -239,7 +227,6 @@ const appTaskNavigation = useAppTaskNavigation({
   showBlockerSelect,
   blockerSelectMode,
   customTasks,
-  firstSupportedAgentProvider,
   openPeerPicker,
   openPairPeerPicker,
 });

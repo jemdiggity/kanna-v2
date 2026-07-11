@@ -339,17 +339,10 @@ fn prepare_stage_run_for_target_returning_prompt(
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
     )?;
-    // Stage transitions let the target stage's agent definition own the
-    // provider; a `provider_override` (revisions) pins it instead — a
-    // revision reruns the same stage's work and must keep the provider that
-    // work actually ran with, not re-resolve from the def's priority list.
-    let explicit_provider = provider_override.or_else(|| {
-        if target_stage.agent.is_some() {
-            None
-        } else {
-            source_task.agent_provider.clone()
-        }
-    });
+    // Stage transitions let the target stage and agent definition own the
+    // provider. Only a real override (for example a revision pin) is
+    // explicit; the task's stored provider remains the final fallback.
+    let explicit_provider = provider_override;
     let branch = source_task
         .branch
         .as_deref()
@@ -371,6 +364,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         feedback,
         source_task.agent_type.as_deref(),
         explicit_provider,
+        source_task.agent_provider.as_deref(),
     )?;
     if matches!(run.workspace, PreparedRunWorkspace::Forked(_)) {
         let departed_stage = source_task
@@ -558,6 +552,7 @@ fn prepare_revision_resume(
         Some(revision_prompt.to_string()),
         source_task.agent_type.as_deref(),
         explicit_provider,
+        source_task.agent_provider.as_deref(),
     )?;
     // The stage's current definition must still resolve to a resumable
     // Claude PTY session; a def that changed provider or session type since

@@ -894,6 +894,10 @@ mod tests {
 
     #[test]
     fn transfer_sidecar_env_includes_stable_peer_id_and_display_name() {
+        let _lock = env_lock();
+        let _transfer_root = EnvVarGuard::unset("KANNA_TRANSFER_ROOT");
+        let _display_name = EnvVarGuard::unset("KANNA_TRANSFER_DISPLAY_NAME");
+        let _peer_id = EnvVarGuard::unset("KANNA_TRANSFER_PEER_ID");
         let temp = TestTempDir::new();
 
         let env = build_transfer_sidecar_env(temp.path(), Some("Jeremy's MacBook Pro"))

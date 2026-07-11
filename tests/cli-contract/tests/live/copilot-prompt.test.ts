@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runCopilotRaw } from "../helpers/copilot";
+import { runCopilotRaw } from "../../helpers/copilot";
 
 /**
  * Test the different ways to pass prompts to copilot CLI.

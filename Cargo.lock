@@ -2895,6 +2895,7 @@ dependencies = [
  "git2",
  "ignore",
  "image",
+ "kanna-agent-protocol",
  "kanna-runtime-defaults",
  "libc",
  "objc2",

@@ -3356,7 +3356,6 @@ describe("App", () => {
       "Set up Kanna for this repository.",
       "pty",
       expect.objectContaining({
-        agentProvider: "codex",
         customTask: expect.objectContaining({
           agent: "setup",
           name: "Set Up Repository",
@@ -3364,6 +3363,7 @@ describe("App", () => {
         }),
       }),
     );
+    expect(store.createItem.mock.calls.at(-1)?.[4]).not.toHaveProperty("agentProvider");
 
     store.loadAgent.mockClear();
     store.createItem.mockClear();
@@ -3378,7 +3378,6 @@ describe("App", () => {
       "Help me create or update the .kanna/config.json for this repository.",
       "pty",
       expect.objectContaining({
-        agentProvider: "codex",
         customTask: expect.objectContaining({
           agent: "config-factory",
           name: "Create Config",
@@ -3386,6 +3385,7 @@ describe("App", () => {
         }),
       }),
     );
+    expect(store.createItem.mock.calls.at(-1)?.[4]).not.toHaveProperty("agentProvider");
   });
 
   it("launches the setup agent after importing a repository from AddRepoModal", async () => {
@@ -3424,7 +3424,6 @@ describe("App", () => {
       "Set up Kanna for this repository.",
       "pty",
       expect.objectContaining({
-        agentProvider: "codex",
         customTask: expect.objectContaining({
           agent: "setup",
           name: "Set Up Repository",
@@ -3432,6 +3431,7 @@ describe("App", () => {
         }),
       }),
     );
+    expect(store.createItem.mock.calls.at(-1)?.[4]).not.toHaveProperty("agentProvider");
   });
 
   it("keeps loading transfer peers until discovery has had time to warm up", async () => {

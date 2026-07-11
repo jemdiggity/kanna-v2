@@ -1,4 +1,5 @@
 import { reactive, ref, type ComputedRef } from "vue";
+import { isAgentProvider } from "@kanna/agent-protocol";
 import type { AgentProvider, DbHandle } from "../types/kanna";
 
 import i18n from "../i18n";
@@ -28,15 +29,11 @@ interface UseAppPreferencesOptions {
   db: DbHandle;
   store: ReturnType<typeof useKannaStore>;
   effectiveAppTheme: ComputedRef<ResolvedTheme>;
-  firstSupportedAgentProvider: (
-    agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined,
-  ) => AgentProvider | undefined;
 }
 
 export function useAppPreferences({
   store,
   effectiveAppTheme,
-  firstSupportedAgentProvider,
 }: UseAppPreferencesOptions) {
   const commandUsageCounts = ref<Record<string, number>>({});
   const preferences = reactive({
@@ -145,7 +142,7 @@ export function useAppPreferences({
     } else if (key === "dev.lingerTerminals") {
       preferences.devLingerTerminals = value === "true";
     } else if (key === "defaultAgentProvider") {
-      preferences.defaultAgentProvider = firstSupportedAgentProvider(value) ?? "claude";
+      preferences.defaultAgentProvider = isAgentProvider(value) ? value : "claude";
     } else if (key === "defaultAgentType") {
       preferences.defaultAgentType = normalizeAgentExecutionType(value);
     } else if (key === "recentAgentChoices") {

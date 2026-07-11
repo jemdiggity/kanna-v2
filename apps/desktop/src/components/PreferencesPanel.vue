@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import {
+  AGENT_PROVIDERS,
+  AGENT_PROVIDER_SPECS,
+  getAgentProviderSpec,
+  isAgentProvider,
+} from "@kanna/agent-protocol"
 import type { AgentProvider } from "../types/kanna"
 import type { AgentExecutionType } from "../stores/agentExecutionType"
 import { invoke } from "../invoke"
@@ -78,11 +84,15 @@ const signedInUserEmail = computed(() =>
 )
 const defaultAgentSelection = computed(() => {
   const provider = props.preferences.defaultAgentProvider
-  if (props.preferences.defaultAgentType === "agent" && (provider === "claude" || provider === "codex")) {
-    return `${provider}-sdk`
-  }
-  return provider
+  return props.preferences.defaultAgentType === "agent"
+    && getAgentProviderSpec(provider).supports_headless
+    ? `${provider}-sdk`
+    : provider
 })
+const providerOptions = AGENT_PROVIDERS
+const headlessProviderOptions = AGENT_PROVIDER_SPECS
+  .filter((spec) => spec.supports_headless)
+  .map((spec) => spec.id)
 
 function cycleTab(direction: -1 | 1) {
   const idx = tabs.indexOf(activeTab.value)
@@ -171,13 +181,12 @@ async function signOutAccount() {
 }
 
 function handleDefaultAgentChange(value: string) {
-  if (value === "claude-sdk" || value === "codex-sdk") {
-    emit("update", "defaultAgentProvider", value.replace("-sdk", ""))
-    emit("update", "defaultAgentType", "agent")
-    return
-  }
-  emit("update", "defaultAgentProvider", value)
-  emit("update", "defaultAgentType", "pty")
+  const headless = value.endsWith("-sdk")
+  const rawProvider = headless ? value.slice(0, -4) : value
+  if (!isAgentProvider(rawProvider)) return
+  if (headless && !getAgentProviderSpec(rawProvider).supports_headless) return
+  emit("update", "defaultAgentProvider", rawProvider)
+  emit("update", "defaultAgentType", headless ? "agent" : "pty")
 }
 
 onMounted(() => {
@@ -308,13 +317,16 @@ defineExpose({ cycleTab })
             :value="defaultAgentSelection"
             @change="handleDefaultAgentChange(($event.target as HTMLSelectElement).value)"
           >
-            <option value="claude">claude</option>
-            <option value="codex">codex</option>
-            <option value="copilot">copilot</option>
-            <option value="opencode">opencode</option>
-            <option value="antigravity">antigravity</option>
-            <option value="claude-sdk">claude (sdk)</option>
-            <option value="codex-sdk">codex (sdk)</option>
+            <option v-for="provider in providerOptions" :key="provider" :value="provider">
+              {{ provider }}
+            </option>
+            <option
+              v-for="provider in headlessProviderOptions"
+              :key="`${provider}-sdk`"
+              :value="`${provider}-sdk`"
+            >
+              {{ provider }} (sdk)
+            </option>
           </select>
         </div>
       </div>

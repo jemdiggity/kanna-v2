@@ -1,21 +1,10 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
+import type { ClaudeResult } from "./claude-availability";
+import { assertLiveAgentCliContractsEnabled } from "./live-contract-guard";
 
-export interface ClaudeResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  lines: Array<Record<string, unknown>>;
-  duration: number;
-}
-
-const CLAUDE_UNAVAILABLE_PATTERNS = [
-  "does not have access to Claude",
-  "Please login again or contact your administrator.",
-  "Failed to authenticate.",
-  "Invalid authentication credentials",
-];
+export { isClaudeUnavailable, type ClaudeResult } from "./claude-availability";
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -70,6 +59,7 @@ async function runProcess(
  * Find the claude binary.
  */
 export async function findClaudeBinary(): Promise<string> {
+  assertLiveAgentCliContractsEnabled();
   const home = process.env.HOME || "";
   const candidates = [
     `${home}/.local/bin/claude`,
@@ -124,28 +114,6 @@ export async function runClaude(opts: {
   }
 
   return { stdout: stdoutBuf, stderr: stderrBuf, exitCode, lines, duration };
-}
-
-export function isClaudeUnavailable(result: ClaudeResult): boolean {
-  const resultLine = result.lines.find((line) => line.type === "result");
-  if (!resultLine) {
-    return false;
-  }
-
-  const output = resultLine.result;
-  const apiErrorStatus = resultLine.api_error_status;
-  const errorCode = resultLine.error;
-  return (
-    resultLine.is_error === true &&
-    (
-      apiErrorStatus === 401 ||
-      errorCode === "authentication_failed" ||
-      (
-        typeof output === "string" &&
-        CLAUDE_UNAVAILABLE_PATTERNS.some((pattern) => output.includes(pattern))
-      )
-    )
-  );
 }
 
 /**

@@ -85,6 +85,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :default-agent-provider="preferences.defaultAgentProvider"
     :default-agent-type="preferences.defaultAgentType"
     :recent-agent-choices="preferences.recentAgentChoices"
+    :available-agent-providers="c.appTaskCreation.availableAgentProviders.value"
     :pipelines="m.availablePipelines.value"
     :default-pipeline="m.defaultPipelineName.value"
     :base-branches="m.availableBaseBranches.value"

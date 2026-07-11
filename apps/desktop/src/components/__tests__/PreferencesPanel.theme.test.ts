@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { mount } from "@vue/test-utils";
+import { AGENT_PROVIDERS, AGENT_PROVIDER_SPECS } from "@kanna/agent-protocol";
 import { describe, expect, it, vi } from "vitest";
 import PreferencesPanel from "../PreferencesPanel.vue";
 import en from "../../i18n/locales/en.json";
@@ -81,13 +82,10 @@ describe("PreferencesPanel theme controls", () => {
 
     expect(en.preferences.defaultAgent).toBe("Default agent");
     expect(defaultAgentSelect.findAll("option").map((option) => option.text())).toEqual([
-      "claude",
-      "codex",
-      "copilot",
-      "opencode",
-      "antigravity",
-      "claude (sdk)",
-      "codex (sdk)",
+      ...AGENT_PROVIDERS,
+      ...AGENT_PROVIDER_SPECS
+        .filter((spec) => spec.supports_headless)
+        .map((spec) => `${spec.id} (sdk)`),
     ]);
   });
 
@@ -112,5 +110,15 @@ describe("PreferencesPanel theme controls", () => {
     expect(wrapper.emitted("update")).toContainEqual(["defaultAgentType", "pty"]);
     expect(wrapper.emitted("update")).toContainEqual(["defaultAgentProvider", "claude"]);
     expect(wrapper.emitted("update")).toContainEqual(["defaultAgentType", "agent"]);
+  });
+
+  it("ignores an invalid provider selection", async () => {
+    const wrapper = mountPreferences();
+    const select = wrapper.get('[data-testid="default-agent-select"]');
+    (select.element as HTMLSelectElement).value = "future-agent";
+
+    await select.trigger("change");
+
+    expect(wrapper.emitted("update")).toBeUndefined();
   });
 });

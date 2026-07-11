@@ -1,3 +1,5 @@
+import type { AgentProvider } from "@kanna/agent-protocol";
+
 export interface PipelineEnvironment {
   setup?: string[];
   teardown?: string[];
@@ -17,7 +19,7 @@ export interface PipelinePost {
   description?: string;
   agent?: string;
   prompt?: string;
-  agent_provider?: string | string[];
+  agent_provider?: AgentProvider | AgentProvider[];
 }
 
 export interface PipelineStage {
@@ -25,7 +27,7 @@ export interface PipelineStage {
   description?: string;
   agent?: string;
   prompt?: string;
-  agent_provider?: string | string[];
+  agent_provider?: AgentProvider | AgentProvider[];
   environment?: string;
   policy: PipelineStagePolicy;
   post?: PipelinePost;
@@ -41,7 +43,7 @@ export interface PipelineDefinition {
 export interface AgentDefinition {
   name: string;
   description: string;
-  agent_provider?: string | string[];
+  agent_provider?: AgentProvider | AgentProvider[];
   model?: string;
   permission_mode?: "default" | "acceptEdits" | "dontAsk";
   allowed_tools?: string[];
@@ -57,7 +59,7 @@ export interface AgentDefinition {
  */
 export interface AgentExtension {
   description?: string;
-  agent_provider?: string | string[];
+  agent_provider?: AgentProvider | AgentProvider[];
   model?: string;
   permission_mode?: "default" | "acceptEdits" | "dontAsk";
   allowed_tools?: string[];

@@ -1,4 +1,67 @@
+use super::super::definitions::AgentDefinition;
+use super::super::provider::resolve_agent_provider_with;
 use super::*;
+
+#[derive(serde::Deserialize)]
+struct ProviderResolutionCase {
+    name: String,
+    #[serde(default)]
+    explicit: Vec<String>,
+    #[serde(default)]
+    stage: Vec<String>,
+    #[serde(default)]
+    agent: Vec<String>,
+    #[serde(default)]
+    fallback: Vec<String>,
+    #[serde(default)]
+    available: Vec<String>,
+    expected: Option<String>,
+    error: Option<String>,
+}
+
+fn joined(values: &[String]) -> Option<String> {
+    (!values.is_empty()).then(|| values.join(","))
+}
+
+#[test]
+fn provider_resolution_cases_match_shared_contract() {
+    let cases: Vec<ProviderResolutionCase> =
+        serde_json::from_str(kanna_agent_protocol::PROVIDER_RESOLUTION_CASES_JSON).unwrap();
+
+    for case in cases {
+        let agent = (!case.agent.is_empty()).then(|| AgentDefinition {
+            prompt: String::new(),
+            agent_providers: case.agent.clone(),
+            model: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+        });
+        let available = case.available.clone();
+        let result = resolve_agent_provider_with(
+            joined(&case.explicit).as_deref(),
+            (!case.stage.is_empty()).then_some(case.stage.as_slice()),
+            agent.as_ref(),
+            joined(&case.fallback).as_deref(),
+            |provider| available.iter().any(|value| value == provider.as_str()),
+        );
+
+        match (case.expected, case.error) {
+            (Some(expected), None) => {
+                assert_eq!(result.unwrap().as_str(), expected, "{}", case.name)
+            }
+            (None, Some(error)) => assert_eq!(result.unwrap_err(), error, "{}", case.name),
+            _ => panic!("invalid provider fixture: {}", case.name),
+        }
+    }
+}
+
+#[test]
+fn provider_resolution_rejects_unknown_values() {
+    assert_eq!(
+        resolve_agent_provider_with(Some("future-agent"), None, None, None, |_| true).unwrap_err(),
+        "unsupported agent provider: future-agent",
+    );
+}
 
 #[test]
 fn claim_task_ports_skips_reserved_ports_and_offsets() {
@@ -47,6 +110,247 @@ fn write_agent_repo(label: &str, agent_md: &str, extend_md: Option<&str>) -> std
         std::fs::write(agent_dir.join("EXTEND.md"), extend_md).unwrap();
     }
     repo_root
+}
+
+const MALFORMED_AGENT_PROVIDER_CASES: &[(&str, &str, &str)] = &[
+    (
+        "mixed-array",
+        "agent_provider:\n  - claude\n  - 7",
+        "agent_provider must be a string or an array of strings",
+    ),
+    (
+        "non-string-scalar",
+        "agent_provider: 42",
+        "agent_provider must be a string or an array of strings",
+    ),
+    (
+        "null",
+        "agent_provider: null",
+        "agent_provider must be a string or an array of strings",
+    ),
+    (
+        "empty-array",
+        "agent_provider: []",
+        "agent_provider must include at least one non-empty provider",
+    ),
+    (
+        "blank-string",
+        "agent_provider: \"   \"",
+        "agent_provider must include at least one non-empty provider",
+    ),
+    (
+        "unknown-provider",
+        "agent_provider: future-agent",
+        "unsupported agent provider: future-agent",
+    ),
+];
+
+#[test]
+fn read_agent_definition_rejects_malformed_provider_frontmatter() {
+    for (label, yaml, expected) in MALFORMED_AGENT_PROVIDER_CASES {
+        let agent_md = format!("---\n{yaml}\n---\nAgent prompt.");
+        let repo_root = write_agent_repo(label, &agent_md, None);
+
+        let error = super::super::definitions::read_agent_definition(
+            &repo_root.to_string_lossy(),
+            "reviewer",
+        )
+        .err()
+        .expect("malformed provider frontmatter should fail");
+
+        assert!(
+            error.contains(expected),
+            "{label}: expected {error:?} to contain {expected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
+fn read_agent_extension_rejects_malformed_provider_frontmatter() {
+    for (label, yaml, expected) in MALFORMED_AGENT_PROVIDER_CASES {
+        let extension = format!("---\n{yaml}\n---\nExtended prompt.");
+        let repo_root = write_agent_repo(
+            &format!("extension-{label}"),
+            "---\nagent_provider: claude\n---\nAgent prompt.",
+            Some(&extension),
+        );
+
+        let error = super::super::definitions::read_agent_definition(
+            &repo_root.to_string_lossy(),
+            "reviewer",
+        )
+        .err()
+        .expect("malformed provider extension should fail");
+
+        assert!(
+            error.contains(expected),
+            "{label}: expected {error:?} to contain {expected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
+fn read_pipeline_definition_rejects_malformed_provider_selections() {
+    let cases = [
+        ("empty-array", serde_json::json!([])),
+        ("mixed-array", serde_json::json!(["claude", 7])),
+        ("non-string-scalar", serde_json::json!(42)),
+        ("null", serde_json::Value::Null),
+        ("blank-string", serde_json::json!("")),
+        ("unknown-provider", serde_json::json!("future-agent")),
+    ];
+
+    for (label, provider) in cases {
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-pipeline-provider-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        let pipeline_dir = repo_root.join(".kanna/pipelines");
+        std::fs::create_dir_all(&pipeline_dir).unwrap();
+        std::fs::write(
+            pipeline_dir.join("qa.json"),
+            serde_json::json!({
+                "name": "qa",
+                "stages": [{
+                    "name": "in progress",
+                    "transition": "manual",
+                    "agent_provider": provider,
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error =
+            super::super::definitions::read_pipeline_definition(&repo_root.to_string_lossy(), "qa")
+                .err()
+                .expect("malformed pipeline provider selection should fail");
+
+        assert!(
+            error.contains("agent_provider"),
+            "{label}: expected provider-specific error, got {error:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
+fn read_pipeline_definition_rejects_legacy_csv_provider_selections() {
+    for location in ["stage", "post", "post_action"] {
+        let mut stage = serde_json::json!({
+            "name": "in progress",
+            "transition": "manual",
+        });
+        if location == "stage" {
+            stage["agent_provider"] = serde_json::json!("codex,claude");
+        } else {
+            stage[location] = serde_json::json!({
+                "name": "commit",
+                "agent_provider": "codex,claude",
+            });
+        }
+
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-pipeline-csv-provider-{location}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        let pipeline_dir = repo_root.join(".kanna/pipelines");
+        std::fs::create_dir_all(&pipeline_dir).unwrap();
+        std::fs::write(
+            pipeline_dir.join("qa.json"),
+            serde_json::json!({
+                "name": "qa",
+                "stages": [stage],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error =
+            super::super::definitions::read_pipeline_definition(&repo_root.to_string_lossy(), "qa")
+                .err()
+                .expect("live pipeline definitions must reject legacy CSV providers");
+
+        assert!(
+            error.contains("agent_provider"),
+            "{location}: expected provider-specific error, got {error:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
+fn stored_pipeline_definition_accepts_legacy_null_provider_and_omits_it_on_reserialize() {
+    let snapshot = serde_json::json!({
+        "name": "qa",
+        "stages": [{
+            "name": "in progress",
+            "agent": null,
+            "prompt": "$TASK_PROMPT",
+            "agent_provider": null,
+            "environment": null,
+            "policy": { "transition": "manual" },
+            "post": null,
+        }],
+        "environments": null,
+    })
+    .to_string();
+
+    let pipeline =
+        super::super::definitions::read_task_pipeline_definition("/unused", "qa", Some(&snapshot))
+            .expect("legacy durable pipeline snapshots should remain readable");
+    let serialized = serde_json::to_value(pipeline).unwrap();
+
+    assert!(serialized["stages"][0].get("agent_provider").is_none());
+}
+
+#[test]
+fn stored_pipeline_definition_normalizes_legacy_csv_and_preserves_provider_lists() {
+    for post_key in ["post", "post_action"] {
+        let mut stage = serde_json::json!({
+            "name": "review",
+            "agent": "review",
+            "prompt": "$TASK_PROMPT",
+            "agent_provider": "codex,claude",
+            "environment": null,
+            "policy": { "transition": "manual" },
+        });
+        stage[post_key] = serde_json::json!({
+            "name": "commit",
+            "agent": "commit",
+            "prompt": null,
+            "agent_provider": "codex,claude",
+        });
+        let snapshot = serde_json::json!({
+            "name": "qa",
+            "stages": [stage],
+            "environments": null,
+        })
+        .to_string();
+
+        let pipeline = super::super::definitions::read_task_pipeline_definition(
+            "/unused",
+            "qa",
+            Some(&snapshot),
+        )
+        .expect("durable pipeline snapshots should remain readable");
+        let serialized = serde_json::to_value(pipeline).unwrap();
+
+        assert_eq!(
+            serialized["stages"][0]["agent_provider"],
+            serde_json::json!(["codex", "claude"]),
+            "{post_key} stage providers"
+        );
+        assert_eq!(
+            serialized["stages"][0]["post"]["agent_provider"],
+            serde_json::json!(["codex", "claude"]),
+            "{post_key} providers"
+        );
+    }
 }
 
 #[test]
@@ -523,6 +827,79 @@ fn resolve_agent_type_defaults_antigravity_to_pty() {
 }
 
 #[test]
+fn resolve_agent_type_rejects_headless_sessions_for_pty_only_providers() {
+    for provider in [AgentProvider::Copilot, AgentProvider::Antigravity] {
+        for agent_type in ["agent", "sdk", "chat"] {
+            assert_eq!(
+                resolve_agent_type(Some(agent_type), provider).unwrap_err(),
+                format!("provider {provider} does not support headless agent sessions")
+            );
+        }
+    }
+}
+
+#[test]
+fn resolve_headless_agent_executable_defensively_rejects_pty_only_providers() {
+    for provider in [AgentProvider::Copilot, AgentProvider::Antigravity] {
+        assert_eq!(
+            super::super::environment::resolve_headless_agent_executable(provider, None, "/tmp")
+                .unwrap_err(),
+            format!("provider {provider} does not support headless agent sessions")
+        );
+    }
+}
+
+#[test]
+fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() {
+    let repo_root = init_git_repo("unsupported-headless-provider");
+    let config = test_config("unsupported-headless-provider");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    for provider in ["copilot", "antigravity"] {
+        let result = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: format!("Use {provider} headlessly"),
+                display_name: None,
+                pipeline_name: None,
+                stage: None,
+                base_ref: None,
+                agent: None,
+                agent_provider: Some(provider.to_string()),
+                agent_type: Some("agent".to_string()),
+                model: None,
+                permission_mode: None,
+                allowed_tools: None,
+                disallowed_tools: None,
+                max_turns: None,
+                max_budget_usd: None,
+                setup_cmds: None,
+                resume_session_id: None,
+                blocker_task_ids: None,
+                notify_task_id: None,
+                parent_task_id: None,
+            },
+        );
+
+        assert_eq!(
+            result
+                .err()
+                .expect("PTY-only headless provider should fail"),
+            format!("provider {provider} does not support headless agent sessions")
+        );
+        assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
+        assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+    }
+
+    assert!(!repo_root.join(".kanna-worktrees").exists());
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     let preamble = super::build_kanna_preamble(
         &AgentProvider::Claude,
@@ -535,6 +912,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
 
     let command = super::build_agent_command(
         &AgentProvider::Claude,
+        AgentProvider::Claude.executable(),
         "Review the branch.",
         None,
         Some("dontAsk"),
@@ -628,6 +1006,7 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
 
     let command = super::build_agent_command(
         &AgentProvider::Antigravity,
+        AgentProvider::Antigravity.executable(),
         "Ship the task.",
         None,
         Some("dontAsk"),
@@ -642,7 +1021,7 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
     );
 
     assert!(command.starts_with(
-        "mkdir -p '/tmp/kanna-antigravity-workspaces' && rm -f '/tmp/kanna-antigravity-workspaces/task-123' && ln -s '/tmp/repo/.kanna-worktrees/task-123' '/tmp/kanna-antigravity-workspaces/task-123' && agy --dangerously-skip-permissions --add-dir '/tmp/kanna-antigravity-workspaces/task-123' --prompt-interactive '"
+        "mkdir -p '/tmp/kanna-antigravity-workspaces' && rm -f '/tmp/kanna-antigravity-workspaces/task-123' && ln -s '/tmp/repo/.kanna-worktrees/task-123' '/tmp/kanna-antigravity-workspaces/task-123' && 'agy' --dangerously-skip-permissions --add-dir '/tmp/kanna-antigravity-workspaces/task-123' --prompt-interactive '"
     ));
     assert!(command.contains("## Kanna Task Environment"));
     assert!(command.contains("task `task-123`"));
@@ -679,6 +1058,7 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
     let mcp_config = write_test_mcp_config("codex-command");
     let command = super::build_agent_command(
         &AgentProvider::Codex,
+        AgentProvider::Codex.executable(),
         "Do work.",
         None,
         Some("dontAsk"),
@@ -692,7 +1072,7 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
         None,
     );
 
-    assert!(command.starts_with("codex "));
+    assert!(command.starts_with("'codex' "));
     assert!(command.contains("-c 'mcp_servers.kanna-mcp.command=\"/tmp/kanna mcp/kanna-mcp\"'"));
     assert!(command.contains("-c 'mcp_servers.kanna-mcp.args=[\"serve\"]'"));
     assert!(command.contains(
@@ -709,6 +1089,7 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
     let mcp_config = write_test_mcp_config("copilot-command");
     let command = super::build_agent_command(
         &AgentProvider::Copilot,
+        AgentProvider::Copilot.executable(),
         "Do work.",
         None,
         Some("dontAsk"),
@@ -722,7 +1103,7 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
         None,
     );
 
-    assert!(command.starts_with("copilot "));
+    assert!(command.starts_with("'copilot' "));
     assert!(command.contains("--additional-mcp-config @'"));
     assert!(command.contains(mcp_config.to_string_lossy().as_ref()));
     assert!(command.contains("-i 'Kanna preamble."));
@@ -736,6 +1117,7 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
     let mcp_config = write_test_mcp_config("opencode-command");
     let command = super::build_agent_command(
         &AgentProvider::Opencode,
+        AgentProvider::Opencode.executable(),
         "Do work.",
         None,
         Some("dontAsk"),
@@ -750,6 +1132,7 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
     );
 
     assert!(command.contains("OPENCODE_CONFIG_CONTENT='"));
+    assert!(command.contains("'opencode' run --interactive"));
     assert!(command.contains("\"$schema\":\"https://opencode.ai/config.json\""));
     assert!(command
         .contains("\"mcp\":{\"kanna-mcp\":{\"command\":[\"/tmp/kanna mcp/kanna-mcp\",\"serve\"]"));
@@ -810,11 +1193,11 @@ fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
 
 #[test]
 fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
-    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
+    let _sidecar_guard = crate::test_sidecar_guard();
     let mut config = test_config("spawn-env-kanna-cli-path");
-    let (kanna_cli_path, created_test_sidecar) = ensure_test_sidecar("kanna-cli");
-    let (kanna_mcp_path, created_test_mcp_sidecar) = ensure_test_sidecar("kanna-mcp");
-    config.kanna_cli_path = Some(kanna_cli_path.to_string_lossy().to_string());
+    let kanna_cli_sidecar = ensure_test_sidecar("kanna-cli");
+    let _kanna_mcp_sidecar = ensure_test_sidecar("kanna-mcp");
+    config.kanna_cli_path = Some(kanna_cli_sidecar.path().to_string_lossy().to_string());
     let env = build_spawn_env(&config, "task-1", &HashMap::new()).unwrap();
     let cli_path = env
         .get("KANNA_CLI_PATH")
@@ -827,12 +1210,6 @@ fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
     let path = env.get("PATH").expect("PATH should be provided");
 
     assert_eq!(path.split(':').next(), Some(cli_dir.as_str()));
-    if created_test_sidecar {
-        let _ = std::fs::remove_file(kanna_cli_path);
-    }
-    if created_test_mcp_sidecar {
-        let _ = std::fs::remove_file(kanna_mcp_path);
-    }
 }
 
 #[test]
@@ -980,7 +1357,9 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             disallowed_tools: Some(vec!["WebFetch".to_string()]),
             max_turns: Some(7),
             max_budget_usd: Some(1.5),
-            setup_cmds: Some(vec!["echo custom setup".to_string()]),
+            setup_cmds: Some(vec![
+                "printf 'custom setup' > .kanna/custom-setup-ran".to_string()
+            ]),
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -1004,11 +1383,17 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
     );
     assert_eq!(spawn_options["maxTurns"], 7);
     assert_eq!(spawn_options["maxBudgetUsd"], 1.5);
-
+    assert_eq!(
+        std::fs::read_to_string(
+            std::path::Path::new(&prepared.cwd).join(".kanna/custom-setup-ran"),
+        )
+        .unwrap(),
+        "custom setup"
+    );
     match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
-            assert!(command.contains("echo custom setup"));
+            assert!(!command.contains("custom-setup-ran"));
             assert!(command.contains("--model opus"));
             assert!(command.contains("--permission-mode acceptEdits"));
             assert!(command.contains("--allowedTools Bash"));
@@ -1127,9 +1512,9 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
 
 #[test]
 fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
-    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
-    let (codex_sidecar, created_sidecar) = ensure_test_sidecar("codex");
-    let repo_root = init_git_repo("codex-headless-executable");
+    let _sidecar_guard = crate::test_sidecar_guard();
+    let codex_sidecar = ensure_test_sidecar("codex");
+    let repo_root = init_git_repo_without_provider_fixtures("codex-headless-executable");
     let config = test_config("codex-headless-executable");
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1166,20 +1551,17 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
     match prepared.session {
         PreparedSessionSpawn::Agent { executable, .. } => {
             let executable = executable.expect("codex executable should be resolved");
-            assert_eq!(executable, codex_sidecar.to_string_lossy());
+            assert_eq!(executable, codex_sidecar.path().to_string_lossy());
         }
         _ => panic!("expected agent session"),
     }
 
-    if created_sidecar {
-        let _ = std::fs::remove_file(&codex_sidecar);
-    }
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]
 fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution() {
-    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
+    let _sidecar_guard = crate::test_sidecar_guard();
     use std::os::unix::fs::PermissionsExt;
 
     let repo_root = init_git_repo("headless-workspace-path");
@@ -1387,6 +1769,10 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
         .join(".kanna/fake-bin")
         .to_string_lossy()
         .to_string();
+    let expected_executable = std::path::Path::new(&expected_dir)
+        .join("codex")
+        .to_string_lossy()
+        .to_string();
     match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.last().expect("pty shell should include command");
@@ -1396,8 +1782,10 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
                 "command should restore spawn PATH before running agent: {command}"
             );
             let path_index = command.find("export PATH=").unwrap();
-            let codex_index = command.find("codex ").unwrap();
-            assert!(path_index < codex_index);
+            let executable_index = command
+                .find(&expected_executable)
+                .expect("PTY command should launch the resolved workspace executable");
+            assert!(path_index < executable_index);
         }
         _ => panic!("expected pty session"),
     }
@@ -1530,6 +1918,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -1551,7 +1940,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -1640,7 +2029,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
 }
 
 #[test]
-fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider() {
+fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_setting() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-task-default-agent-provider-{}",
         std::process::id()
@@ -1648,6 +2037,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -1669,7 +2059,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -1704,6 +2094,8 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
     db.set_test_setting("defaultAgentProvider", "copilot")
         .unwrap();
 
+    // Executable discovery has dedicated coverage; keep this integration test
+    // focused on provider-source precedence by preparing PTY sessions.
     let prepared = prepare_task_for_api(
         &db,
         &config,
@@ -1716,42 +2108,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             base_ref: None,
             agent: None,
             agent_provider: None,
-            agent_type: None,
-            model: None,
-            permission_mode: None,
-            allowed_tools: None,
-            disallowed_tools: None,
-            max_turns: None,
-            max_budget_usd: None,
-            setup_cmds: None,
-            resume_session_id: None,
-            blocker_task_ids: None,
-            notify_task_id: None,
-
-            parent_task_id: None,
-        },
-    )
-    .unwrap();
-    let created_source = db
-        .get_task_stage_source(&prepared.created_task.task_id)
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(created_source.agent_provider.as_deref(), Some("copilot"));
-
-    let prepared = prepare_task_for_api(
-        &db,
-        &config,
-        CreateTaskRequest {
-            repo_id: "repo-1".to_string(),
-            prompt: "Use the explicit provider".to_string(),
-            display_name: None,
-            pipeline_name: None,
-            stage: None,
-            base_ref: None,
-            agent: None,
-            agent_provider: Some("codex".to_string()),
-            agent_type: None,
+            agent_type: Some("pty".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -1774,6 +2131,41 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
 
     assert_eq!(created_source.agent_provider.as_deref(), Some("codex"));
 
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use the explicit provider".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+
+            parent_task_id: None,
+        },
+    )
+    .unwrap();
+    let created_source = db
+        .get_task_stage_source(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(created_source.agent_provider.as_deref(), Some("claude"));
+
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
@@ -1781,6 +2173,18 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
 fn default_agent_provider_setting_falls_back_to_claude_when_unset() {
     let db_path = Db::test_db_path("default-agent-provider-unset");
     let db = Db::open_for_tests(&db_path).unwrap();
+
+    let provider = read_default_agent_provider_setting(&db).unwrap();
+
+    assert_eq!(provider.as_deref(), Some("claude"));
+}
+
+#[test]
+fn default_agent_provider_setting_falls_back_to_claude_when_invalid() {
+    let db_path = Db::test_db_path("default-agent-provider-invalid");
+    let db = Db::open_for_tests(&db_path).unwrap();
+    db.set_test_setting("defaultAgentProvider", "future-agent")
+        .unwrap();
 
     let provider = read_default_agent_provider_setting(&db).unwrap();
 

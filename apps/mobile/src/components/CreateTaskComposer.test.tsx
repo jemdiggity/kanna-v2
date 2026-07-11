@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 
 vi.mock("react-native", () => ({
   KeyboardAvoidingView: "KeyboardAvoidingView",
@@ -187,6 +188,8 @@ describe("CreateTaskComposer", () => {
     expect(findNodeByText(tree, "Online")).not.toBeNull();
     expect(findNodeByText(tree, "Claude")).not.toBeNull();
     expect(findNodeByText(tree, "Codex")).not.toBeNull();
+    expect(findNodeByText(tree, "OpenCode")).not.toBeNull();
+    expect(findNodeByText(tree, "Antigravity")).not.toBeNull();
     expect(findNodeByText(tree, "Laptop")).not.toBeNull();
     expect(findNodeByText(tree, "Offline")).not.toBeNull();
     expect(copilotOption).not.toBeNull();
@@ -196,6 +199,7 @@ describe("CreateTaskComposer", () => {
 
     expect(onSelectDesktop).toHaveBeenCalledWith("desktop-2");
     expect(onSelectAgentProvider).toHaveBeenCalledWith("copilot");
+    expect(AGENT_PROVIDERS).toHaveLength(5);
   });
 
   it("calls submit when the create button is enabled", () => {

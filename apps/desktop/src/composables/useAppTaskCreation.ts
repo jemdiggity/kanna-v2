@@ -10,6 +10,7 @@ import { parseRepoInput } from "../utils/parseRepoInput";
 import { defaultReposHome } from "../utils/reposHome";
 import { fileExistsSafe } from "../utils/invokeHelpers";
 import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
+import { fetchDesktopRepoAgentProviders } from "../services/desktopServerClient";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
 
@@ -61,6 +62,7 @@ export function useAppTaskCreation({
   onAgentChoiceUsed,
 }: UseAppTaskCreationOptions) {
   const cloningRepo = ref(false);
+  const availableAgentProviders = ref<AgentProvider[] | undefined>(undefined);
   let pendingNewTaskSubmit: Promise<void> | null = null;
 
   async function openNewTaskModal(repoId?: string) {
@@ -68,10 +70,11 @@ export function useAppTaskCreation({
 
     const targetRepoId = repoId ?? store.selectedRepoId ?? (sidebarRepos.value.length === 1 ? sidebarRepos.value[0]?.id : undefined);
     if (targetRepoId) store.selectedRepoId = targetRepoId;
-    const repoPath = store.repos.find((r) => r.id === targetRepoId)?.path;
+    const targetRepo = store.repos.find((r) => r.id === targetRepoId);
+    const repoPath = targetRepo?.path;
     if (repoPath) {
       const pipelinesDir = `${repoPath}/.kanna/pipelines`;
-      const [files, configContent, defaultBranch, baseBranches] = await Promise.all([
+      const [files, configContent, defaultBranch, baseBranches, repoAgentProviders] = await Promise.all([
         invoke<string[]>("list_dir", { path: pipelinesDir }).catch((error) => {
           console.debug("[App] no custom pipelines directory available for new task modal:", error);
           return [] as string[];
@@ -88,7 +91,12 @@ export function useAppTaskCreation({
           console.debug("[App] failed to list base branches for new task modal:", error);
           return [] as string[];
         }),
+        fetchDesktopRepoAgentProviders(targetRepo.id).catch((error) => {
+          console.debug("[App] failed to resolve repo agent providers for new task modal:", error);
+          return undefined;
+        }),
       ]);
+      availableAgentProviders.value = repoAgentProviders;
       availablePipelines.value = files
         .filter((f) => f.endsWith(".json") && f !== "schema.json")
         .map((f) => f.replace(/\.json$/, ""));
@@ -108,6 +116,7 @@ export function useAppTaskCreation({
       defaultBaseBranchName.value =
         getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined;
     } else if (isCloudOnlyRepoId(targetRepoId)) {
+      availableAgentProviders.value = undefined;
       const cloudRepo = remoteSnapshot.value.repos.find((repo) => repo.id === targetRepoId);
       const remoteUrl = cloudRepo?.remote_url ?? null;
       const baseBranches = remoteUrl
@@ -123,6 +132,7 @@ export function useAppTaskCreation({
       defaultBaseBranchName.value =
         getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined;
     } else {
+      availableAgentProviders.value = undefined;
       availablePipelines.value = [];
       defaultPipelineName.value = undefined;
       availableBaseBranches.value = [];
@@ -232,17 +242,6 @@ export function useAppTaskCreation({
     return sanitized.length > 0 ? sanitized : "repo";
   }
 
-  function firstSupportedAgentProvider(agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined): AgentProvider | undefined {
-    const providers = Array.isArray(agentProvider) ? agentProvider : [agentProvider];
-    return providers.find((provider): provider is AgentProvider =>
-      provider === "claude"
-      || provider === "copilot"
-      || provider === "codex"
-      || provider === "opencode"
-      || provider === "antigravity"
-    );
-  }
-
   async function launchSetupTask(repoId: string | null | undefined, repoPath: string) {
     if (!repoId) return;
     try {
@@ -253,7 +252,6 @@ export function useAppTaskCreation({
         SETUP_TASK_PROMPT,
         "pty",
         {
-          agentProvider: firstSupportedAgentProvider(agent.agent_provider),
           customTask: {
             name: "Set Up Repository",
             agent: "setup",
@@ -316,6 +314,7 @@ export function useAppTaskCreation({
 
   return {
     cloningRepo,
+    availableAgentProviders,
     currentBlockers,
     openNewTaskModal,
     handleNewTaskSubmit,

@@ -158,6 +158,16 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Check whether open tasks still depend on a task's branch
+    DependentTasksExist {
+        /// Task whose branch may still have dependent tasks
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Wait for a task to finish or close
     Wait {
         /// The task/pipeline_item ID

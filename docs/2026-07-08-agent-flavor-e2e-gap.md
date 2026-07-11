@@ -29,7 +29,7 @@ Narrower regression coverage added instead:
 - `apps/desktop/src/stores/pipelineAgentExtension.test.ts` verifies the
   frontend loader mirrors server-side flavor resolution, extension layering, and
   runtime variable reservation.
-- `tests/cli-contract/tests/agent-flavor-contracts.test.ts` verifies each
+- `tests/cli-contract/tests/offline/agent-flavor-contracts.test.ts` verifies each
   shipped flavor parses, renders, and only references tools present in
   `crates/kanna-tool-catalog`.
 - `packages/core/src/config/repo-config.test.ts` verifies `.kanna/config.json`

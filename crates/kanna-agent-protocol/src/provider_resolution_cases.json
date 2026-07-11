@@ -1,0 +1,51 @@
+[
+  {
+    "name": "explicit wins",
+    "explicit": ["codex"],
+    "stage": ["claude"],
+    "agent": ["copilot"],
+    "fallback": ["opencode"],
+    "available": ["codex", "claude"],
+    "expected": "codex"
+  },
+  {
+    "name": "stage wins over agent and fallback",
+    "stage": ["codex", "claude"],
+    "agent": ["copilot"],
+    "fallback": ["opencode"],
+    "available": ["claude", "copilot", "opencode"],
+    "expected": "claude"
+  },
+  {
+    "name": "agent wins over fallback",
+    "agent": ["copilot"],
+    "fallback": ["claude"],
+    "available": ["copilot", "claude"],
+    "expected": "copilot"
+  },
+  {
+    "name": "agent ordered fallback skips unavailable first candidate",
+    "agent": ["codex", "claude"],
+    "fallback": ["opencode"],
+    "available": ["claude", "opencode"],
+    "expected": "claude"
+  },
+  {
+    "name": "fallback is last",
+    "fallback": ["opencode"],
+    "available": ["opencode"],
+    "expected": "opencode"
+  },
+  {
+    "name": "selected source never falls through",
+    "stage": ["codex"],
+    "agent": ["claude"],
+    "available": ["claude"],
+    "error": "None of the configured agent providers are available: codex."
+  },
+  {
+    "name": "missing sources fail",
+    "available": ["claude"],
+    "error": "No agent provider configured for this request."
+  }
+]

@@ -47,6 +47,65 @@ async fn list_repos_route_returns_repo_summaries() {
 }
 
 #[tokio::test]
+async fn repo_agent_provider_route_uses_workspace_local_executables() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-provider-availability-{unique}"));
+    let provider_dir = repo_root.join(".kanna/provider-bin");
+    std::fs::create_dir_all(&provider_dir).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": { "path": { "prepend": [".kanna/provider-bin"] } }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let local_antigravity = provider_dir.join("agy");
+    std::fs::write(&local_antigravity, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut permissions = std::fs::metadata(&local_antigravity).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&local_antigravity, permissions).unwrap();
+
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+    });
+    let response = app
+        .oneshot(
+            Request::get("/v1/repos/repo-1/agent-providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert!(json["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|provider| {
+            provider["id"] == "antigravity"
+                && provider["executable"] == local_antigravity.to_string_lossy().as_ref()
+        }));
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
 async fn snapshot_route_returns_ui_hydration_payload() {
     let visible_worktree = std::env::temp_dir().join(format!(
         "kanna-snapshot-visible-worktree-{}",
