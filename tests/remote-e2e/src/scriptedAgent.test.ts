@@ -15,10 +15,20 @@ describe("scripted remote E2E agent", () => {
     expect(source).toContain("[ $((heartbeat % 4)) -eq 0 ]");
   });
 
-  it("keeps stdin open and exits deterministically on scripted input", () => {
+  it("simulates a menu whose cursor starts on the second option", () => {
     const source = scriptedAgentSource();
 
-    expect(source).toContain("while IFS= read -r line; do");
+    expect(source).toContain("SCRIPT_MENU_CURSOR:2");
+    expect(source).toContain("SCRIPT_MENU_OPTION_1_HIGHLIGHTED");
+    expect(source).toContain("SCRIPT_MENU_SELECTED:1");
+    expect(source).toContain("stty -icanon min 1 time 0 -echo");
+  });
+
+  it("keeps stdin open and exits deterministically on submitted scripted input", () => {
+    const source = scriptedAgentSource();
+
+    expect(source).toContain("read_char()");
+    expect(source).toContain("SCRIPT_INPUT:%s");
     expect(source).toContain("*exit-zero*)");
     expect(source).toContain("*exit-one*)");
     expect(source).toContain("wait \"$heartbeat_pid\"");
