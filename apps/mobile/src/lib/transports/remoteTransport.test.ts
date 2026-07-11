@@ -655,7 +655,6 @@ describe("remote transport", () => {
     const observeTaskAgent = vi.fn<RemoteTaskAgentObserver>(
       () => agentSubscription
     );
-    const sendTaskInput = vi.fn<RemoteTaskInputSender>().mockResolvedValue(undefined);
     const listCloudTasks = vi.fn().mockResolvedValue([]);
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
@@ -663,7 +662,6 @@ describe("remote transport", () => {
       invokeDesktop,
       observeTaskTerminal,
       observeTaskAgent,
-      sendTaskInput,
       listCloudTasks
     });
 
@@ -700,9 +698,11 @@ describe("remote transport", () => {
     };
     expect(observeTaskTerminal).toHaveBeenCalledWith(createdRoute, listener);
     expect(observeTaskAgent).toHaveBeenCalledWith(createdRoute, listener);
-    expect(sendTaskInput).toHaveBeenCalledWith({
-      ...createdRoute,
-      data: "continue"
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-created-here",
+      method: "POST",
+      path: "/v1/tasks/task-created/input",
+      body: { input: "continue" }
     });
     expect(invokeDesktop).toHaveBeenCalledWith({
       desktopId: "desktop-created-here",
