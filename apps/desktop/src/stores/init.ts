@@ -84,8 +84,10 @@ export function createInitApi(
 
   async function preserveExplicitSelectionAfterExternalRefresh(
     selectedItemIdBeforeRefresh: string | null,
+    selectionWasLocallyOwned: boolean,
   ): Promise<void> {
     if (!selectedItemIdBeforeRefresh) return;
+    if (!selectionWasLocallyOwned) return;
     if (context.state.selectedItemId.value !== selectedItemIdBeforeRefresh) return;
 
     const currentInitializingItem = context.state.initializingTaskItems.value.find((candidate) =>
@@ -321,8 +323,20 @@ export function createInitApi(
 
     await context.services.windowWorkspace?.onSharedInvalidation(async () => {
       const selectedItemIdBeforeRefresh = context.state.selectedItemId.value;
+      const selectedRepoIdBeforeRefresh = context.state.selectedRepoId.value;
+      const selectionWasLocallyOwned = selectedItemIdBeforeRefresh !== null && (
+        context.state.items.value.some((item) =>
+          item.id === selectedItemIdBeforeRefresh
+          && item.repo_id === selectedRepoIdBeforeRefresh)
+        || context.state.initializingTaskItems.value.some((item) =>
+          item.id === selectedItemIdBeforeRefresh
+          && item.repo_id === selectedRepoIdBeforeRefresh)
+      );
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-      await preserveExplicitSelectionAfterExternalRefresh(selectedItemIdBeforeRefresh);
+      await preserveExplicitSelectionAfterExternalRefresh(
+        selectedItemIdBeforeRefresh,
+        selectionWasLocallyOwned,
+      );
     });
 
     if (isTauri) {

@@ -886,6 +886,49 @@ describe("createInitApi", () => {
     });
   });
 
+  it("preserves an existing remote workspace selection across shared snapshot invalidation", async () => {
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [mockState.makeItem({ id: "task-local" })];
+    const reloadSnapshot = vi.fn(async () => {});
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      windowWorkspace: { onSharedInvalidation, persistSelection },
+    } as never);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+
+    const cloudRepoId = "cloud:repo-remote";
+    const cloudTaskId = "cloud:lan:peer-primary:repo-remote:task-remote";
+    state.selectedRepoId.value = cloudRepoId;
+    state.selectedItemId.value = cloudTaskId;
+    state.lastSelectedItemByRepo.value = { [cloudRepoId]: cloudTaskId };
+    persistSelection.mockClear();
+
+    await getSharedInvalidationHandler(onSharedInvalidation)();
+
+    expect(reloadSnapshot).toHaveBeenCalled();
+    expect(state.selectedRepoId.value).toBe(cloudRepoId);
+    expect(state.selectedItemId.value).toBe(cloudTaskId);
+    expect(state.lastSelectedItemByRepo.value).toEqual({ [cloudRepoId]: cloudTaskId });
+    expect(persistSelection).not.toHaveBeenCalled();
+  });
+
   it("loads valid theme preferences from settings", async () => {
     const state = createStoreState();
     const services = {

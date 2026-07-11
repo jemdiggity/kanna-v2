@@ -612,6 +612,60 @@ describe("kanna query snapshot regressions", () => {
     });
   });
 
+  it("preserves a cloud-only selection while retiring a hidden local repo", async () => {
+    const retiredRepo = mockState.makeRepo({
+      id: "repo-retired",
+      path: "/tmp/repo-retired",
+      name: "repo-retired",
+    });
+    const survivingRepo = mockState.makeRepo({
+      id: "repo-surviving",
+      path: "/tmp/repo-surviving",
+      name: "repo-surviving",
+    });
+    const retiredItem = mockState.makeItem({
+      id: "item-retired",
+      repo_id: retiredRepo.id,
+    });
+    const survivingItem = mockState.makeItem({
+      id: "item-surviving",
+      repo_id: survivingRepo.id,
+    });
+    const cloudRepoId = "cloud:repo-remote";
+    const cloudTaskId = "cloud:lan:peer-primary:repo-remote:task-remote";
+    const persistSelection = vi.fn(async () => {});
+    const { state, queries } = createDirectQueryHarness(
+      async () => ({
+        entries: [{ repo: survivingRepo, items: [survivingItem] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      }),
+      persistSelection,
+    );
+
+    state.repos.value = [retiredRepo, survivingRepo];
+    state.items.value = [retiredItem, survivingItem];
+    state.selectedRepoId.value = cloudRepoId;
+    state.selectedItemId.value = cloudTaskId;
+    state.lastSelectedItemByRepo.value = {
+      [retiredRepo.id]: retiredItem.id,
+      [survivingRepo.id]: survivingItem.id,
+      [cloudRepoId]: cloudTaskId,
+    };
+
+    await expect(queries.reloadSnapshot()).resolves.toEqual({ status: "applied" });
+
+    expect(state.repos.value.map((repo) => repo.id)).toEqual([survivingRepo.id]);
+    expect(state.selectedRepoId.value).toBe(cloudRepoId);
+    expect(state.selectedItemId.value).toBe(cloudTaskId);
+    expect(state.lastSelectedItemByRepo.value).toEqual({
+      [survivingRepo.id]: survivingItem.id,
+      [cloudRepoId]: cloudTaskId,
+    });
+    expect(persistSelection).not.toHaveBeenCalled();
+  });
+
   it("clears pending initialization state when an applied snapshot removes its repo", async () => {
     const survivingRepo = mockState.makeRepo({
       id: "repo-2",

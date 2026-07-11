@@ -692,6 +692,7 @@ describe("App", () => {
     store.sortedItemsForCurrentRepo = [];
     store.sortedItemsAllRepos = [];
     store.taskBlockers = [];
+    store.lastSelectedItemByRepo = {};
     store.getStageOrder.mockReturnValue(["in progress", "pr", "merge"]);
     store.appTheme = "dark";
     store.codeTheme = "match";
@@ -1726,6 +1727,120 @@ describe("App", () => {
       previousItemId: durableItem.id,
     });
     wrapper.unmount();
+  });
+
+  it("restores a remembered initializer after navigating away and back without mounting its terminal", async () => {
+    const repoOneTask = createPipelineItem({
+      id: "task-repo-one",
+      repo_id: "repo-1",
+      prompt: "Repo one task",
+      display_name: "Repo one task",
+    });
+    const repoTwoReadyTask = createPipelineItem({
+      id: "task-repo-two-ready",
+      repo_id: "repo-2",
+      prompt: "Repo two ready task",
+      display_name: "Repo two ready task",
+    });
+    const initializingItem: InitializingTaskItem = {
+      id: "create:repo-two-held",
+      state: "initializing",
+      taskId: null,
+      repo_id: "repo-2",
+      prompt: "Repo two initializing task",
+      display_name: null,
+      pipeline: "default",
+      stage: "in progress",
+      agent_type: "pty",
+      agent_provider: "claude",
+      created_at: "2026-05-18T00:02:00.000Z",
+    };
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.items = [repoOneTask, repoTwoReadyTask];
+    store.selectedRepoId = "repo-2";
+    store.selectedItemId = initializingItem.id;
+    store.selectedItemIdForPersistence = null;
+    store.selectedRepo = store.repos[1];
+    store.initializingTaskItems = [initializingItem];
+    store.currentInitializingItem = initializingItem;
+    store.currentItem = null;
+    store.sortedItemsForCurrentRepo = [repoTwoReadyTask];
+    store.sortedItemsAllRepos = [repoOneTask, repoTwoReadyTask];
+    store.lastSelectedItemByRepo = {
+      "repo-1": repoOneTask.id,
+      "repo-2": initializingItem.id,
+    };
+    activeStore = reactive(store);
+
+    function applySelectedItem(itemId: string | null) {
+      const initializer = activeStore.initializingTaskItems.find((item) => item.id === itemId) ?? null;
+      const readyTask = activeStore.items.find((item) => item.id === itemId) ?? null;
+      activeStore.selectedItemId = itemId;
+      activeStore.selectedItemIdForPersistence = initializer?.taskId ?? readyTask?.id ?? null;
+      activeStore.currentInitializingItem = initializer;
+      activeStore.currentItem = initializer ? null : readyTask;
+      if (initializer) {
+        activeStore.selectedRepoId = initializer.repo_id;
+        activeStore.lastSelectedItemByRepo[initializer.repo_id] = initializer.id;
+      } else if (readyTask) {
+        activeStore.selectedRepoId = readyTask.repo_id;
+        activeStore.lastSelectedItemByRepo[readyTask.repo_id] = readyTask.id;
+      }
+      activeStore.selectedRepo = activeStore.repos.find((repo) => repo.id === activeStore.selectedRepoId) ?? null;
+    }
+    store.selectItem.mockImplementation(async (itemId: string) => {
+      applySelectedItem(itemId);
+    });
+    store.selectRepo.mockImplementation(async (repoId: string) => {
+      activeStore.selectedRepoId = repoId;
+      activeStore.selectedRepo = activeStore.repos.find((repo) => repo.id === repoId) ?? null;
+      applySelectedItem(activeStore.lastSelectedItemByRepo[repoId] ?? null);
+    });
+
+    const TerminalTabsStub = defineComponent({
+      name: "TerminalTabs",
+      props: { sessionId: String },
+      template: '<div data-testid="terminal-tabs" :data-session-id="sessionId" />',
+    });
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: false,
+      TaskHeader: true,
+      TerminalTabs: TerminalTabsStub,
+    });
+
+    try {
+      expect(wrapper.find(".setup-placeholder").exists()).toBe(true);
+      expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
+
+      await capturedKeyboardActions?.navigateRepoUp();
+      await flushPromises();
+      expect(activeStore.selectedRepoId).toBe("repo-1");
+      expect(wrapper.get('[data-testid="terminal-tabs"]').attributes("data-session-id"))
+        .toBe(repoOneTask.id);
+
+      await capturedKeyboardActions?.navigateRepoDown();
+      await flushPromises();
+
+      expect(activeStore.selectedRepoId).toBe("repo-2");
+      expect(activeStore.selectedItemId).toBe(initializingItem.id);
+      expect(activeStore.lastSelectedItemByRepo["repo-2"]).toBe(initializingItem.id);
+      expect(activeStore.currentInitializingItem).toEqual(initializingItem);
+      expect(activeStore.currentItem).toBeNull();
+      expect(activeStore.selectedItemIdForPersistence).toBeNull();
+      expect(activeStore.items.some((item) => item.id.startsWith("create:"))).toBe(false);
+      expect(wrapper.find(".setup-placeholder").exists()).toBe(true);
+      expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
+      expect(store.spawnPtySession.mock.calls.some(([sessionId]) =>
+        typeof sessionId === "string" && sessionId.startsWith("create:"),
+      )).toBe(false);
+    } finally {
+      store.selectRepo.mockReset();
+      store.selectItem.mockReset();
+      wrapper.unmount();
+    }
   });
 
   it("renders the modal with the preferred existing base branch selected", async () => {

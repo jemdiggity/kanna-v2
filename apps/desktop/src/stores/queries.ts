@@ -70,10 +70,15 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   async function reconcileMissingRepoState(
     loadedRepos: readonly Repo[],
     loadedItems: readonly PipelineItem[],
+    previousLocalRepoIds: ReadonlySet<string>,
+    previousLocalItemIds: ReadonlySet<string>,
   ): Promise<void> {
     const visibleRepoIds = new Set(loadedRepos.map((repo) => repo.id));
+    const retiredLocalRepoIds = new Set(
+      [...previousLocalRepoIds].filter((repoId) => !visibleRepoIds.has(repoId)),
+    );
     const retiredItems = context.state.initializingTaskItems.value.filter(
-      (item) => !visibleRepoIds.has(item.repo_id),
+      (item) => retiredLocalRepoIds.has(item.repo_id),
     );
     for (const initializingItem of retiredItems) {
       const taskId = initializingItem.taskId;
@@ -89,15 +94,15 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     }
 
     const rememberedSelections = Object.entries(context.state.lastSelectedItemByRepo.value);
-    if (rememberedSelections.some(([repoId]) => !visibleRepoIds.has(repoId))) {
+    if (rememberedSelections.some(([repoId]) => retiredLocalRepoIds.has(repoId))) {
       context.state.lastSelectedItemByRepo.value = Object.fromEntries(
-        rememberedSelections.filter(([repoId]) => visibleRepoIds.has(repoId)),
+        rememberedSelections.filter(([repoId]) => !retiredLocalRepoIds.has(repoId)),
       );
     }
 
     const selectedRepoId = context.state.selectedRepoId.value;
     const selectedItemId = context.state.selectedItemId.value;
-    const selectedRepoIsMissing = selectedRepoId !== null && !visibleRepoIds.has(selectedRepoId);
+    const selectedRepoIsMissing = selectedRepoId !== null && retiredLocalRepoIds.has(selectedRepoId);
     const selectedItemStillVisible = selectedItemId !== null && (
       loadedItems.some((item) => item.id === selectedItemId)
       || context.state.initializingTaskItems.value.some(
@@ -105,7 +110,12 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       )
     );
     const selectionNeedsReconciliation = selectedRepoIsMissing
-      || (selectedRepoId === null && selectedItemId !== null && !selectedItemStillVisible);
+      || (
+        selectedRepoId === null
+        && selectedItemId !== null
+        && previousLocalItemIds.has(selectedItemId)
+        && !selectedItemStillVisible
+      );
     if (!selectionNeedsReconciliation) return;
 
     const reconcileSelection = context.services.reconcileSelection;
@@ -203,10 +213,20 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
       );
 
+      const previousLocalRepoIds = new Set(context.state.repos.value.map((repo) => repo.id));
+      const previousLocalItemIds = new Set([
+        ...context.state.items.value.map((item) => item.id),
+        ...context.state.initializingTaskItems.value.map((item) => item.id),
+      ]);
       baseSnapshot.value = snapshot;
       applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot();
-      await reconcileMissingRepoState(loadedRepos, loadedItems);
+      await reconcileMissingRepoState(
+        loadedRepos,
+        loadedItems,
+        previousLocalRepoIds,
+        previousLocalItemIds,
+      );
       if (runId !== refreshRunId.value) return { status: "superseded" };
       await reconcileHydratedInitializingItems(loadedItems);
       if (runId !== refreshRunId.value) return { status: "superseded" };

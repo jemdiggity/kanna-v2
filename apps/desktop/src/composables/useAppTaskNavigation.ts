@@ -155,8 +155,11 @@ export function useAppTaskNavigation({
   }
 
   // Navigation
-  async function selectSidebarItem(item: Pick<AppSidebarItem, "id" | "repo_id">, previousItemId?: string | null) {
-    const selectionIntent = ++selectionIntentVersion;
+  async function selectSidebarItem(
+    item: Pick<AppSidebarItem, "id" | "repo_id">,
+    previousItemId?: string | null,
+    selectionIntent = ++selectionIntentVersion,
+  ) {
     if (item.repo_id !== store.selectedRepoId) {
       const previous = previousItemId !== undefined ? previousItemId : store.selectedItemId;
       const initializingTarget = store.initializingTaskItems.find(
@@ -231,11 +234,20 @@ export function useAppTaskNavigation({
     const previousItemId = store.selectedItemId;
 
     // Restore last-selected task for this repo, or fall back to first task.
+    const visibleItems = visibleNavigableItemsForRepo(nextRepo.id);
     const lastItemId = store.lastSelectedItemByRepo[nextRepo.id];
     const lastItem = lastItemId
-      ? sidebarItems.value.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.closed_at == null)
+      ? visibleItems.find((item) => item.id === lastItemId)
       : undefined;
-    const targetItem = lastItem ?? visibleSidebarItemsForRepo(nextRepo.id)[0];
+    const targetItem = lastItem ?? visibleItems[0];
+    const targetIsInitializing = targetItem
+      ? store.initializingTaskItems.some((item) => item.id === targetItem.id)
+      : false;
+
+    if (targetItem && targetIsInitializing) {
+      await selectSidebarItem(targetItem, previousItemId, selectionIntent);
+      return;
+    }
 
     if (targetItem && !nextRepo.id.startsWith("cloud:")) {
       store.selectedRepoId = nextRepo.id;
