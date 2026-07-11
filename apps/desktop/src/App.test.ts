@@ -90,6 +90,7 @@ const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseTaskMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseMock = vi.hoisted(() => vi.fn());
+const openLatestTerminalFileLinkMock = vi.hoisted(() => vi.fn(async () => true));
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
   select: dbSelectMock,
@@ -299,6 +300,7 @@ vi.mock("./i18n", () => ({
       locale: {
         value: "en",
       },
+      t: (key: string) => key,
     },
   },
 }));
@@ -354,6 +356,10 @@ vi.mock("./composables/useToast", () => ({
     info: toastInfoMock,
     warning: toastWarningMock,
   }),
+}));
+
+vi.mock("./composables/terminalFileLinkRegistry", () => ({
+  openLatestTerminalFileLink: openLatestTerminalFileLinkMock,
 }));
 
 vi.mock("./services/desktopAuthSdk", () => ({
@@ -659,6 +665,8 @@ describe("App", () => {
     relayAdvanceStageMock.mockClear();
     relayCloseTaskMock.mockClear();
     relayCloseMock.mockClear();
+    openLatestTerminalFileLinkMock.mockReset();
+    openLatestTerminalFileLinkMock.mockResolvedValue(true);
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
     store.selectedRepoId = "repo-1";
     store.selectedItemId = null;
@@ -3754,6 +3762,55 @@ describe("App", () => {
     await flushPromises();
 
     expect(wrapper.find(".action-bar").exists()).toBe(false);
+  });
+
+  it("opens the latest terminal file link for the selected task", async () => {
+    store.currentItem = {
+      id: "task-1",
+      stage: "in progress",
+      branch: "task-1",
+      prompt: "Fix handoff",
+      tags: "[]",
+    };
+    store.selectedItemId = "task-1";
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    await capturedKeyboardActions?.openLatestFileLink();
+
+    expect(openLatestTerminalFileLinkMock).toHaveBeenCalledWith("task-1");
+    expect(toastInfoMock).not.toHaveBeenCalledWith("toasts.noTerminalFileLink");
+    wrapper.unmount();
+  });
+
+  it("shows info feedback when the selected terminal has no file link", async () => {
+    openLatestTerminalFileLinkMock.mockResolvedValue(false);
+    store.currentItem = {
+      id: "task-1",
+      stage: "in progress",
+      branch: "task-1",
+      prompt: "Fix handoff",
+      tags: "[]",
+    };
+    store.selectedItemId = "task-1";
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    await capturedKeyboardActions?.openLatestFileLink();
+
+    expect(toastInfoMock).toHaveBeenCalledWith("toasts.noTerminalFileLink");
+    wrapper.unmount();
+  });
+
+  it("shows the latest-file shortcut hint only once when a terminal link becomes available", async () => {
+    localStorage.removeItem("kanna:terminal-file-link-shortcut-hint:v1");
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    document.dispatchEvent(new CustomEvent("terminal-file-link-available", { bubbles: true }));
+    document.dispatchEvent(new CustomEvent("terminal-file-link-available", { bubbles: true }));
+
+    expect(toastInfoMock).toHaveBeenCalledTimes(1);
+    expect(toastInfoMock).toHaveBeenCalledWith("toasts.latestAgentFileHint");
+    expect(localStorage.getItem("kanna:terminal-file-link-shortcut-hint:v1")).toBe("1");
+    wrapper.unmount();
   });
 
   it("dismiss closes the entire file flow after preview-local dismiss is exhausted", async () => {

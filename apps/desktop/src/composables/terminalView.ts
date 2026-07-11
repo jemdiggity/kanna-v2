@@ -11,6 +11,7 @@ import { isAppShortcut } from "./useKeyboardShortcuts"
 import { shouldPushKittyKeyboardOnFreshAttach, shouldSupportKittyKeyboard } from "./terminalSessionRecovery"
 import type { TerminalOptions } from "./terminalTypes"
 import { createTerminalFileLinkProvider, type TerminalFileLinkProvider } from "./terminalFileLinks"
+import { registerTerminalFileLinkProvider } from "./terminalFileLinkRegistry"
 import { createTerminalDropBridge, type TerminalDropBridge } from "./terminalDropBridge"
 
 export interface InitializedTerminalView {
@@ -18,6 +19,8 @@ export interface InitializedTerminalView {
   cleanupContainerEvents: (() => void) | null
   stopThemeWatch: () => void
   unregisterE2ETerminalBuffer: () => void
+  unregisterFileLinkProvider: () => void
+  stopFileLinkAvailabilityWatch: () => void
   fileLinkProvider: TerminalFileLinkProvider
   dropBridge: TerminalDropBridge
 }
@@ -70,6 +73,18 @@ export function initializeTerminalView(params: {
     getContainer: params.getContainer,
   })
   fileLinkProvider.register()
+  const unregisterFileLinkProvider = params.options?.worktreePath && params.options?.agentTerminal
+    ? registerTerminalFileLinkProvider(params.sessionId, {
+        activateLatest: () => fileLinkProvider.activateLatest(),
+      })
+    : () => {}
+  const stopFileLinkAvailabilityWatch = params.options?.worktreePath && params.options?.agentTerminal
+    ? fileLinkProvider.watchForFirstLink(() => {
+        params.getContainer()?.dispatchEvent(new CustomEvent("terminal-file-link-available", {
+          bubbles: true,
+        }))
+      })
+    : () => {}
 
   term.open(params.el)
 
@@ -160,6 +175,8 @@ export function initializeTerminalView(params: {
     cleanupContainerEvents,
     stopThemeWatch,
     unregisterE2ETerminalBuffer,
+    unregisterFileLinkProvider,
+    stopFileLinkAvailabilityWatch,
     fileLinkProvider,
     dropBridge,
   }

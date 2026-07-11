@@ -104,6 +104,7 @@ class FakeTerminal {
     active: {
       baseY: 0,
       viewportY: 0,
+      length: 0,
       getLine: () => null,
     },
   };
@@ -117,6 +118,7 @@ class FakeTerminal {
   attachCustomKeyEventHandler = vi.fn();
   onData = vi.fn();
   onResize = vi.fn();
+  onWriteParsed = vi.fn(() => ({ dispose: vi.fn() }));
   registerLinkProvider = vi.fn();
   getSelection = vi.fn(() => "");
   scrollToLine = vi.fn();

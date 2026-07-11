@@ -15,6 +15,7 @@ import type { ShortcutContext } from "./useShortcutContext";
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
+import { openLatestTerminalFileLink } from "./terminalFileLinkRegistry";
 import type { WindowWorkspaceController } from "../windowWorkspace";
 
 interface SidebarRepoProjection {
@@ -181,6 +182,13 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       } else {
         showFilePickerOnTop();
       }
+    },
+    openLatestFileLink: async () => {
+      const sessionId = store.currentItem?.id;
+      const opened = sessionId
+        ? await openLatestTerminalFileLink(sessionId)
+        : false;
+      if (!opened) toast.info(t("toasts.noTerminalFileLink"));
     },
     toggleFilePreview: () => {
       if (showFilePreviewModal.value) {

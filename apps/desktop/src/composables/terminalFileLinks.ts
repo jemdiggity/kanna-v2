@@ -2,12 +2,23 @@ import { Terminal, type ILink } from "@xterm/xterm"
 import { fileExistsSafe } from "../utils/invokeHelpers"
 import type { TerminalOptions } from "./terminalTypes"
 
-// --- File link provider ---
 const FILE_PATH_RE = /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.[a-zA-Z][a-zA-Z0-9]*(?::\d+){0,2})/g
 const IMAGE_FILE_EXTENSION = /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i
 
+export interface ResolvedTerminalFileLink {
+  text: string
+  start: number
+  checkPath: string
+  previewPath: string
+  line?: number
+  image: boolean
+}
+
 export interface TerminalFileLinkProvider {
   register(): void
+  findLatest(): Promise<ResolvedTerminalFileLink | null>
+  activateLatest(): Promise<boolean>
+  watchForFirstLink(onAvailable: () => void): () => void
   clearFileExistsCache(): void
 }
 
@@ -30,41 +41,91 @@ export function createTerminalFileLinkProvider(params: {
     return { path: parts.join(":"), line: suffixes[0] }
   }
 
-  function resolveFileLink(raw: string): { checkPath: string; previewPath: string; line?: number } | null {
-    const worktreePath = params.options?.worktreePath
-    if (!worktreePath) return null
+  function resolveFileLink(
+    raw: string,
+    worktreePath: string,
+  ): Omit<ResolvedTerminalFileLink, "text" | "start"> | null {
     const { path, line } = parseFileLink(raw)
     const normalizedWorktreePath = worktreePath.replace(/\/+$/, "")
     if (path.startsWith("/")) {
       if (!path.startsWith(`${normalizedWorktreePath}/`)) return null
+      const previewPath = path.slice(normalizedWorktreePath.length + 1)
+      if (previewPath.split("/").includes("..")) return null
       return {
         checkPath: path,
-        previewPath: path.slice(normalizedWorktreePath.length + 1),
+        previewPath,
         line,
+        image: IMAGE_FILE_EXTENSION.test(path),
       }
     }
+    if (path.split("/").includes("..")) return null
+    const checkPath = `${normalizedWorktreePath}/${path}`
     return {
-      checkPath: `${normalizedWorktreePath}/${path}`,
+      checkPath,
       previewPath: path,
       line,
+      image: IMAGE_FILE_EXTENSION.test(checkPath),
     }
   }
 
-  function isImageFilePath(path: string): boolean {
-    return IMAGE_FILE_EXTENSION.test(path)
+  function detectLineLinks(lineText: string, worktreePath: string): ResolvedTerminalFileLink[] {
+    const matches: ResolvedTerminalFileLink[] = []
+    FILE_PATH_RE.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = FILE_PATH_RE.exec(lineText)) !== null) {
+      const fullMatch = match[0]
+      const pathMatch = match[1]
+      const resolved = resolveFileLink(pathMatch, worktreePath)
+      if (!resolved) continue
+      matches.push({
+        text: pathMatch,
+        start: match.index + (fullMatch.length - pathMatch.length),
+        ...resolved,
+      })
+    }
+    return matches
   }
 
   async function checkFileExists(checkPath: string): Promise<boolean> {
     if (fileExistsCache.has(checkPath)) return fileExistsCache.get(checkPath)!
     const exists = await fileExistsSafe(checkPath)
-    fileExistsCache.set(checkPath, exists)
+    if (exists) fileExistsCache.set(checkPath, true)
     return exists
   }
 
-  function register(): void {
-    if (!params.options?.worktreePath) {
+  function activateResolvedLink(link: ResolvedTerminalFileLink): void {
+    if (link.image) {
+      params.getContainer()?.dispatchEvent(new CustomEvent("image-link-activate", {
+        bubbles: true,
+        detail: { url: link.checkPath },
+      }))
       return
     }
+    params.getContainer()?.dispatchEvent(new CustomEvent("file-link-activate", {
+      bubbles: true,
+      detail: { path: link.previewPath, line: link.line },
+    }))
+  }
+
+  async function findLatest(): Promise<ResolvedTerminalFileLink | null> {
+    const worktreePath = params.options?.worktreePath
+    if (!worktreePath) return null
+    const buffer = params.term.buffer.active
+    for (let row = buffer.length - 1; row >= 0; row -= 1) {
+      const lineText = buffer.getLine(row)?.translateToString(true)
+      if (!lineText) continue
+      const matches = detectLineLinks(lineText, worktreePath)
+      for (let index = matches.length - 1; index >= 0; index -= 1) {
+        const match = matches[index]
+        if (match && await checkFileExists(match.checkPath)) return match
+      }
+    }
+    return null
+  }
+
+  function register(): void {
+    const worktreePath = params.options?.worktreePath
+    if (!worktreePath) return
 
     let tooltipEl: HTMLElement | null = null
 
@@ -72,50 +133,19 @@ export function createTerminalFileLinkProvider(params: {
       provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void) {
         const line = params.term.buffer.active.getLine(bufferLineNumber - 1)
         if (!line) { callback(undefined); return }
-        const lineText = line.translateToString(true)
-
-        const matches: {
-          text: string
-          start: number
-          checkPath: string
-          previewPath: string
-          line?: number
-        }[] = []
-        FILE_PATH_RE.lastIndex = 0
-        let m: RegExpExecArray | null
-        while ((m = FILE_PATH_RE.exec(lineText)) !== null) {
-          const fullMatch = m[0]
-          const pathMatch = m[1]
-          const startOffset = m.index + (fullMatch.length - pathMatch.length)
-          const resolved = resolveFileLink(pathMatch)
-          if (!resolved) continue
-          matches.push({ text: pathMatch, start: startOffset, ...resolved })
-        }
-
+        const matches = detectLineLinks(line.translateToString(true), worktreePath)
         if (matches.length === 0) { callback(undefined); return }
 
         Promise.all(matches.map(async (match) => {
-          const exists = await checkFileExists(match.checkPath)
-          if (!exists) return null
+          if (!await checkFileExists(match.checkPath)) return null
           const link: ILink = {
             range: {
               start: { x: match.start + 1, y: bufferLineNumber },
-              end: { x: match.start + match.text.length + 1, y: bufferLineNumber },
+              end: { x: match.start + match.text.length, y: bufferLineNumber },
             },
             text: match.text,
             activate(event: MouseEvent) {
-              if (!event.metaKey) return
-              if (isImageFilePath(match.checkPath)) {
-                params.getContainer()?.dispatchEvent(new CustomEvent("image-link-activate", {
-                  bubbles: true,
-                  detail: { url: match.checkPath },
-                }))
-                return
-              }
-              params.getContainer()?.dispatchEvent(new CustomEvent("file-link-activate", {
-                bubbles: true,
-                detail: { path: match.previewPath, line: match.line },
-              }))
+              if (event.metaKey) activateResolvedLink(match)
             },
             hover(event: MouseEvent) {
               if (!params.term.element) return
@@ -145,7 +175,7 @@ export function createTerminalFileLinkProvider(params: {
           }
           return link
         })).then((links) => {
-          const valid = links.filter((l): l is ILink => l !== null)
+          const valid = links.filter((link): link is ILink => link !== null)
           callback(valid.length > 0 ? valid : undefined)
         })
       },
@@ -154,6 +184,37 @@ export function createTerminalFileLinkProvider(params: {
 
   return {
     register,
+    findLatest,
+    async activateLatest() {
+      const link = await findLatest()
+      if (!link) return false
+      activateResolvedLink(link)
+      return true
+    },
+    watchForFirstLink(onAvailable) {
+      let disposed = false
+      let announced = false
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const parsedDisposable = params.term.onWriteParsed(() => {
+        if (disposed || announced) return
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = null
+          void findLatest().then((link) => {
+            if (disposed || announced || !link) return
+            announced = true
+            parsedDisposable.dispose()
+            onAvailable()
+          })
+        }, 250)
+      })
+      return () => {
+        if (disposed) return
+        disposed = true
+        if (timer) clearTimeout(timer)
+        parsedDisposable.dispose()
+      }
+    },
     clearFileExistsCache() {
       fileExistsCache.clear()
     },

@@ -26,6 +26,7 @@ function englishTranslate(key: string): string {
     "shortcuts.filePicker": "File Picker",
     "shortcuts.filePreview": "File Preview",
     "shortcuts.openInIDE": "Open in IDE",
+    "shortcuts.openLatestAgentFile": "Open Latest Agent File",
     "shortcuts.shellRepoRoot": "Shell at Repo Root",
     "shortcuts.shellTerminal": "Shell Terminal",
     "shortcuts.treeExplorer": "Tree Explorer",
@@ -84,6 +85,7 @@ describe("getShortcutGroups", () => {
       "shortcuts.filePicker",
       "shortcuts.filePreview",
       "shortcuts.openInIDE",
+      "shortcuts.openLatestAgentFile",
       "shortcuts.shellRepoRoot",
       "shortcuts.shellTerminal",
       "shortcuts.treeExplorer",
@@ -114,6 +116,7 @@ describe("getShortcutGroups", () => {
       "File Picker",
       "File Preview",
       "Open in IDE",
+      "Open Latest Agent File",
       "Shell at Repo Root",
       "Shell Terminal",
       "Tree Explorer",
@@ -161,6 +164,13 @@ describe("isAppShortcut", () => {
       metaKey: true,
     }))).toBe(true);
   });
+
+  it("matches Command+L for the latest agent file", () => {
+    expect(isAppShortcut(new KeyboardEvent("keydown", {
+      key: "l",
+      metaKey: true,
+    }))).toBe(true);
+  });
 });
 
 describe("shortcut contexts", () => {
@@ -169,6 +179,13 @@ describe("shortcut contexts", () => {
 
     expect(openFileShortcut?.context).toContain("file");
   });
+
+  it("maps Command+L to the latest agent file action", () => {
+    const shortcut = shortcuts.find((entry) => entry.action === "openLatestFileLink");
+
+    expect(shortcut).toMatchObject({ key: "l", meta: true, display: "⌘L" });
+    expect(shortcut?.context).toContain("file");
+  });
 });
 
 describe("useKeyboardShortcuts", () => {
@@ -176,6 +193,7 @@ describe("useKeyboardShortcuts", () => {
     "newTask",
     "newWindow",
     "openFile",
+    "openLatestFileLink",
     "toggleFilePreview",
     "advanceStage",
     "requestChanges",
@@ -276,6 +294,7 @@ describe("useKeyboardShortcuts", () => {
       event: { key: string; meta?: boolean; shift?: boolean };
     }> = [
       { action: "openFile", event: { key: "p", meta: true } },
+      { action: "openLatestFileLink", event: { key: "l", meta: true } },
       { action: "showDiff", event: { key: "d", meta: true } },
       { action: "showCommitGraph", event: { key: "g", meta: true } },
       { action: "openShell", event: { key: "j", meta: true } },

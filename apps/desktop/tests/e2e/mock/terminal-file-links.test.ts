@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
+import { execDb } from "../helpers/vue";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
 
 const execFileAsync = promisify(execFile);
@@ -17,6 +18,7 @@ async function git(repoPath: string, args: string[]): Promise<void> {
 describe("terminal file links", () => {
   const client = new WebDriverClient();
   let fixtureRepoPath = "";
+  let repoId = "";
 
   beforeAll(async () => {
     await client.createSession();
@@ -39,7 +41,7 @@ describe("terminal file links", () => {
     await git(fixtureRepoPath, ["commit", "-m", "test: add terminal file link target"]);
     await git(fixtureRepoPath, ["push", "origin", "main"]);
 
-    await importTestRepo(client, fixtureRepoPath, "terminal-file-links-fixture");
+    repoId = await importTestRepo(client, fixtureRepoPath, "terminal-file-links-fixture");
   });
 
   afterAll(async () => {
@@ -114,6 +116,122 @@ describe("terminal file links", () => {
     );
     throw new Error(`image preview modal did not decode a data URL image: ${JSON.stringify(imageState)}`);
   }
+
+  async function createAndSelectAgentTerminal(taskId: string, branch: string): Promise<void> {
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item
+         (id, repo_id, issue_number, issue_title, prompt, stage, branch, agent_type, agent_provider, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        taskId,
+        repoId,
+        701,
+        "Latest terminal file shortcut",
+        "Mention fixture files",
+        "in progress",
+        branch,
+        "pty",
+        "claude",
+        "2026-07-12T10:00:00.000Z",
+        "2026-07-12T10:00:00.000Z",
+      ],
+    );
+
+    const selected = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       Promise.resolve(ctx.refreshAllItems())
+         .then(function() { return ctx.store.selectRepo(${JSON.stringify(repoId)}); })
+         .then(function() { return ctx.store.selectItem(${JSON.stringify(taskId)}); })
+         .then(function() { cb("ok"); })
+         .catch(function(error) { cb("err:" + error); });`,
+    );
+    expect(selected).toBe("ok");
+    await client.waitForElement(".terminal-container .xterm-helper-textarea", 10_000);
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const registered = await client.executeSync<boolean>(
+        `return window.__KANNA_E2E__.terminalBuffers?.sessionIds().includes(${JSON.stringify(taskId)}) === true;`,
+      );
+      if (registered) return;
+      await sleep(100);
+    }
+    throw new Error(`terminal buffer ${taskId} was not registered`);
+  }
+
+  it("opens the newest valid agent file with Cmd+L while the terminal has focus", async () => {
+    const taskId = "e2e-latest-terminal-file";
+    const branch = "task-e2e-latest-terminal-file";
+    const worktreePath = join(fixtureRepoPath, ".kanna-worktrees", branch);
+    await mkdir(join(worktreePath, "apps", "desktop", "src"), { recursive: true });
+    await writeFile(
+      join(worktreePath, "apps", "desktop", "src", "Older.vue"),
+      "<!-- older valid mention -->\n",
+      "utf8",
+    );
+    await writeFile(
+      join(worktreePath, "apps", "desktop", "src", "Newest.vue"),
+      Array.from({ length: 24 }, (_, index) => index === 18
+        ? "<!-- newest valid line target -->"
+        : `<!-- newest fixture line ${index + 1} -->`).join("\n"),
+      "utf8",
+    );
+    await createAndSelectAgentTerminal(taskId, branch);
+
+    await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
+    const output = [
+      "Changed apps/desktop/src/Older.vue:1",
+      "Design captured at apps/desktop/src/Newest.vue:19",
+      "Ignore missing apps/desktop/src/DoesNotExist.vue:7",
+    ].join("\r\n");
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       window.__KANNA_E2E__.terminalBuffers.write(
+         ${JSON.stringify(taskId)},
+         ${JSON.stringify(output)},
+         function() { cb("ok"); }
+       );`,
+    );
+
+    const terminalInput = await client.findElement(".terminal-container .xterm-helper-textarea");
+    await client.click(terminalInput);
+    await client.pressShortcut(["Meta", "l"]);
+
+    await waitForPreviewVisible();
+    expect(await previewedFilePath()).toBe("apps/desktop/src/Newest.vue");
+    await waitForLineTarget(19);
+    await waitForPreviewText("newest valid line target");
+
+    const existenceChecks = await client.executeSync<string[]>(
+      `return window.__KANNA_E2E__.invokes.getAll()
+         .filter(function(call) { return call.cmd === "file_exists"; })
+         .map(function(call) { return call.args.path; });`,
+    );
+    expect(existenceChecks.some((path) => path.endsWith("/apps/desktop/src/DoesNotExist.vue"))).toBe(true);
+    expect(existenceChecks.some((path) => path.endsWith("/apps/desktop/src/Newest.vue"))).toBe(true);
+  });
+
+  it("shows feedback when Cmd+L finds no file mention in the focused agent terminal", async () => {
+    const taskId = "e2e-terminal-without-file";
+    const branch = "task-e2e-terminal-without-file";
+    const worktreePath = join(fixtureRepoPath, ".kanna-worktrees", branch);
+    await mkdir(join(worktreePath, "apps", "desktop", "src"), { recursive: true });
+    await writeFile(
+      join(worktreePath, "apps", "desktop", "src", "App.vue"),
+      Array.from({ length: 40 }, (_, index) => index === 30
+        ? "<!-- line 31 target from terminal file link -->"
+        : `<!-- fixture line ${index + 1} -->`).join("\n"),
+      "utf8",
+    );
+    await createAndSelectAgentTerminal(taskId, branch);
+
+    const terminalInput = await client.findElement(".terminal-container .xterm-helper-textarea");
+    await client.click(terminalInput);
+    await client.pressShortcut(["Meta", "l"]);
+
+    await client.waitForText(".toast.info", "No file link found", 5_000);
+  });
 
   it("opens the preview for a Copilot-style terminal file link activation", async () => {
     const activation = await client.executeSync<{
