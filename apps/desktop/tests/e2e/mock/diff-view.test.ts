@@ -256,7 +256,11 @@ async function installStageActionRecorder(
            }
            await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["in progress", item.id]);
          } else if (item && url.endsWith("/actions/advance-stage")) {
-           await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id]);
+           if (item.stage === "pr") {
+             await db.execute("UPDATE pipeline_item SET closed_at = ? WHERE id = ?", [new Date().toISOString(), item.id]);
+           } else {
+             await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id]);
+           }
          }
          return new Response(JSON.stringify({ taskId: item?.id || "unknown" }), {
            status: 200,
@@ -1623,6 +1627,68 @@ describe("diff view", () => {
     const callsAfterApprove = await waitForRecordedStageActions(client, 2);
     expect(callsAfterApprove[1].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`);
     expect(callsAfterApprove[1].method).toBe("POST");
+  });
+
+  it("approves a pr-stage task through the closing advance that runs the merge-queue post", async () => {
+    const task = await client.executeSync<{ id: string; branch: string | null }>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const item = ctx.selectedItem();
+       return { id: item.id, branch: item.branch };`
+    );
+    expect(task.branch).toBeTruthy();
+
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const item = ctx.selectedItem();
+       db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    await installStageActionRecorder(client);
+
+    await openDiffModal(client);
+    await client.waitForElement(".verdict-bar .approve", 2_000);
+    const approveLabel = await client.executeSync<string>(
+      `return document.querySelector(".verdict-bar .approve").textContent.trim();`
+    );
+    expect(approveLabel).toBe("Approve & Merge");
+    await client.click(await client.findElement(".verdict-bar .approve"));
+
+    const calls = await waitForRecordedStageActions(client, 1);
+    expect(calls[0].url).toContain(`/v1/tasks/${encodeURIComponent(task.id)}/actions/advance-stage`);
+    expect(calls[0].method).toBe("POST");
+
+    // The pr-stage advance closes the task. Wait for the close to land in the
+    // store, then reopen the task so later tests keep their shared fixture.
+    const restoreResult = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const taskId = ${JSON.stringify(task.id)};
+       // Snapshot reloads may drop closed tasks from the store entirely, so a
+       // missing item counts as closed — same as the stage-advance machinery.
+       const isClosed = () => {
+         const items = ctx.items?.__v_isRef ? ctx.items.value : ctx.items;
+         const item = (items || []).find((candidate) => candidate.id === taskId);
+         return !item || item.closed_at != null;
+       };
+       const wait = () => new Promise((resolve) => setTimeout(resolve, 100));
+       (async () => {
+         const deadline = Date.now() + 10000;
+         while (!isClosed() && Date.now() < deadline) await wait();
+         const closedBeforeRestore = isClosed();
+         await db.execute(
+           "UPDATE pipeline_item SET closed_at = NULL, stage = ?, pr_url = NULL WHERE id = ?",
+           ["in progress", taskId],
+         );
+         await ctx.refreshAllItems();
+         cb(closedBeforeRestore ? "closed-then-restored" : "never-closed");
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(restoreResult).toBe("closed-then-restored");
   });
 
   it("keeps pending review comments and summary draft when request-revision fails", async () => {

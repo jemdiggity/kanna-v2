@@ -252,6 +252,7 @@
     "pendingCommentCount": "未送信コメント {count} 件",
     "requestChanges": "変更を依頼",
     "approve": "承認",
+    "approveMerge": "承認してマージ",
     "summaryPlaceholder": "任意の概要...",
     "sendRequestChanges": "依頼を送信",
     "shortcutClose": "閉じる"

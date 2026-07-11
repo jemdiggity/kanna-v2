@@ -18,6 +18,7 @@ const diffViewRef = ref<InstanceType<typeof DiffView> | null>(null);
 const summaryComposerOpen = ref(false);
 const summaryDraft = ref("");
 const sendingRevision = ref(false);
+const approving = ref(false);
 
 const props = defineProps<{
   repoPath: string;
@@ -47,6 +48,10 @@ const comments = computed(() => props.reviewComments ?? []);
 const reviewEnabled = computed(() =>
   Boolean(props.taskId) && (props.reviewStage === "review" || props.reviewStage === "pr")
 );
+// At the final pr stage, approving means "ship it": advancing runs the
+// pipeline's approve post, which queues the branch on the repo's Merge
+// Master before the transition closes the task.
+const approveMergesTask = computed(() => props.reviewStage === "pr");
 const currentHeadCommit = computed(() => props.reviewHeadCommit ?? "HEAD");
 const baseRefLabel = computed(() => props.baseRef ?? "main");
 
@@ -89,9 +94,14 @@ async function submitRequestChanges() {
   }
 }
 
-function approveReview() {
-  if (!props.taskId) return;
-  void store.advanceStage(props.taskId);
+async function approveReview() {
+  if (!props.taskId || approving.value) return;
+  approving.value = true;
+  try {
+    await store.advanceStage(props.taskId);
+  } finally {
+    approving.value = false;
+  }
 }
 
 function dismiss(): boolean {
@@ -123,8 +133,8 @@ onMounted(() => {
         <button type="button" :disabled="comments.length === 0" @click="openRequestChangesComposer">
           {{ $t('diffView.requestChanges') }}
         </button>
-        <button type="button" class="approve" @click="approveReview">
-          {{ $t('diffView.approve') }}
+        <button type="button" class="approve" :disabled="approving" @click="approveReview">
+          {{ approveMergesTask ? $t('diffView.approveMerge') : $t('diffView.approve') }}
         </button>
       </div>
       <DiffView

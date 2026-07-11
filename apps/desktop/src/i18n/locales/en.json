@@ -255,6 +255,7 @@
     "pendingCommentCount": "Pending comments: {count}",
     "requestChanges": "Request Changes",
     "approve": "Approve",
+    "approveMerge": "Approve & Merge",
     "summaryPlaceholder": "Optional summary...",
     "sendRequestChanges": "Send Request",
     "shortcutClose": "Close"

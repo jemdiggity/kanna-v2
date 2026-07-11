@@ -255,6 +255,7 @@
     "pendingCommentCount": "보류 중인 댓글 {count}개",
     "requestChanges": "변경 요청",
     "approve": "승인",
+    "approveMerge": "승인 후 머지",
     "summaryPlaceholder": "선택 요약...",
     "sendRequestChanges": "요청 보내기",
     "shortcutClose": "닫기"
