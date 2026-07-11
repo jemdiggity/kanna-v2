@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BUFFY_UID, waitForBuffyIdToken } from "./firebaseAuth";
+import { BUFFY_UID } from "./firebaseAuth";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
 
 interface PairingSessionResponse {
@@ -12,29 +12,13 @@ interface PairingSessionResponse {
   desktopName: string;
 }
 
-interface CreatePairingCodeResponse {
-  pairingCode: string;
-  pairingCodeId: string;
-  desktopId: string;
-  desktopSecret: string;
-  desktopClaimToken: string;
-  expiresAt: string;
-}
-
-interface ClaimPairingCodeResponse {
-  desktopId: string;
-  uid: string;
-}
-
 interface FirestoreDocument {
   fields?: Record<string, FirestoreValue>;
 }
 
 interface FirestoreValue {
   stringValue?: string;
-  integerValue?: string;
   nullValue?: null;
-  booleanValue?: boolean;
 }
 
 interface DesktopDescriptor {
@@ -50,9 +34,8 @@ interface AuthAttempt {
 }
 
 const DESKTOP_NAME = "Remote E2E Desktop";
-const DEVICE_TOKEN = "e2e-token";
 
-describe("remote cloud pairing, auth, and discovery E2E", () => {
+describe("remote desktop credential auth and discovery E2E", () => {
   let harness: RemoteHarness;
 
   beforeAll(async () => {
@@ -63,7 +46,7 @@ describe("remote cloud pairing, auth, and discovery E2E", () => {
     await harness?.stop();
   }, 30_000);
 
-  it("pairs a desktop through cloud functions and reconnects kanna-server with the issued desktop credentials", async () => {
+  it("publishes Buffy-owned desktop credentials and reconnects kanna-server with desktop secret relay auth", async () => {
     const localPairing = asPairingSession(await harness.client.invokeDesktop({
       desktopId: harness.desktopId,
       method: "POST",
@@ -76,70 +59,43 @@ describe("remote cloud pairing, auth, and discovery E2E", () => {
     });
     expect(localPairing.code).toMatch(/^[0-9A-F]{6}$/);
 
-    const created = asCreatePairingCodeResponse(await callFunction(harness, "createPairingCode", {
-      desktopName: localPairing.desktopName
-    }));
-    expect(created).toMatchObject({
-      pairingCode: expect.stringMatching(/^[0-9A-Z]{6}$/),
-      pairingCodeId: expect.any(String),
-      desktopId: expect.stringMatching(/^desktop-/),
-      desktopSecret: expect.stringMatching(/^[0-9a-f]{64}$/),
-      desktopClaimToken: expect.stringMatching(/^[0-9a-f]{64}$/),
-      expiresAt: expect.any(String)
+    const desktopId = `desktop-cloud-bootstrap-${Date.now()}`;
+    const desktopSecret = sha256Hex(`${desktopId}:secret`);
+    await publishDesktopCredentialAsBuffy(harness, {
+      desktopId,
+      desktopSecret,
+      displayName: localPairing.desktopName
     });
 
-    const pairingCodeDoc = await readFirestoreDocument(harness, `pairingCodes/${created.pairingCodeId}`);
-    expect(stringField(pairingCodeDoc, "pairingCode")).toBe(created.pairingCode);
-    expect(stringField(pairingCodeDoc, "desktopId")).toBe(created.desktopId);
-    expect(stringField(pairingCodeDoc, "status")).toBe("pending");
-    expect(stringField(pairingCodeDoc, "desktopClaimTokenHash")).toBe(sha256Hex(created.desktopClaimToken));
-
-    const pendingDesktopDoc = await readFirestoreDocument(harness, `pendingDesktops/${created.desktopId}`);
-    expect(stringField(pendingDesktopDoc, "pairingCodeId")).toBe(created.pairingCodeId);
-    expect(stringField(pendingDesktopDoc, "desktopName")).toBe(localPairing.desktopName);
-    expect(stringField(pendingDesktopDoc, "desktopSecretHash")).toBe(sha256Hex(created.desktopSecret));
-    expect(stringField(pendingDesktopDoc, "desktopSecret")).toBeNull();
-
-    const idToken = await waitForBuffyIdToken(harness.ports.auth, 10_000);
-    const claimed = asClaimPairingCodeResponse(await callFunction(harness, "claimPairingCode", {
-      pairingCode: created.pairingCode
-    }, idToken));
-    expect(claimed).toEqual({
-      desktopId: created.desktopId,
-      uid: BUFFY_UID
-    });
-
-    const desktopDoc = await readFirestoreDocument(harness, `users/${BUFFY_UID}/desktops/${created.desktopId}`);
-    expect(stringField(desktopDoc, "desktopId")).toBe(created.desktopId);
+    const idToken = await harness.getIdToken();
+    const desktopDoc = await readFirestoreDocument(
+      harness,
+      `users/${BUFFY_UID}/desktops/${desktopDocId(desktopId)}`,
+      idToken
+    );
+    expect(stringField(desktopDoc, "desktopId")).toBe(desktopId);
     expect(stringField(desktopDoc, "displayName")).toBe(localPairing.desktopName);
-    expect(stringField(desktopDoc, "desktopSecretHash")).toBe(sha256Hex(created.desktopSecret));
+    expect(stringField(desktopDoc, "desktopSecretHash")).toBe(sha256Hex(desktopSecret));
     expect(stringField(desktopDoc, "desktopSecret")).toBeNull();
 
-    await expect(callFunction(harness, "claimPairingCode", {
-      pairingCode: created.pairingCode
-    }, idToken)).rejects.toThrow(/already claimed|claimed|unavailable/i);
-
-    await harness.restartServerWithIdentity({
-      desktopId: created.desktopId,
-      desktopSecret: created.desktopSecret
-    });
-    await harness.waitForDesktop(created.desktopId);
+    await harness.restartServerWithIdentity({ desktopId, desktopSecret });
+    await harness.waitForDesktop(desktopId);
 
     const status = await harness.client.invokeDesktop({
-      desktopId: created.desktopId,
+      desktopId,
       method: "GET",
       path: "/v1/status",
       body: null
     });
     expect(status).toMatchObject({
-      desktopId: created.desktopId,
+      desktopId,
       desktopName: localPairing.desktopName,
       state: "running"
     });
 
     const serverToml = await readFile(harness.paths.configPath, "utf8");
-    expect(serverToml).toContain(`desktop_id = "${created.desktopId}"`);
-    expect(serverToml).toContain(`desktop_secret = "${created.desktopSecret}"`);
+    expect(serverToml).toContain(`desktop_id = "${desktopId}"`);
+    expect(serverToml).toContain(`desktop_secret = "${desktopSecret}"`);
     expect(serverToml).toContain("pairing_store_path = ");
   }, 90_000);
 
@@ -160,7 +116,7 @@ describe("remote cloud pairing, auth, and discovery E2E", () => {
 
     const phoneAuth = await attemptRelayAuth(harness, {
       type: "auth",
-      id_token: await waitForBuffyIdToken(harness.ports.auth, 10_000)
+      id_token: await harness.getIdToken()
     });
     expect(phoneAuth).toEqual({ outcome: "auth_ok", userId: BUFFY_UID });
 
@@ -173,7 +129,7 @@ describe("remote cloud pairing, auth, and discovery E2E", () => {
 
     const desktopId = `desktop-auth-matrix-${Date.now()}`;
     const desktopSecret = sha256Hex(`${desktopId}:secret`);
-    await seedDesktopCredential(harness, {
+    await publishDesktopCredentialAsBuffy(harness, {
       desktopId,
       desktopSecret,
       displayName: DESKTOP_NAME
@@ -201,7 +157,7 @@ describe("remote cloud pairing, auth, and discovery E2E", () => {
 
     const revokedDesktopId = `${desktopId}-revoked`;
     const revokedSecret = sha256Hex(`${desktopId}:revoked`);
-    await seedDesktopCredential(harness, {
+    await publishDesktopCredentialAsBuffy(harness, {
       desktopId: revokedDesktopId,
       desktopSecret: revokedSecret,
       displayName: "Revoked Desktop",
@@ -224,7 +180,7 @@ describe("remote cloud pairing, auth, and discovery E2E", () => {
   it("lists desktops through the relay and observes relay presence flip as kanna-server disconnects and reconnects", async () => {
     const desktopId = `desktop-discovery-${Date.now()}`;
     const desktopSecret = sha256Hex(`${desktopId}:secret`);
-    await seedDesktopCredential(harness, {
+    await publishDesktopCredentialAsBuffy(harness, {
       desktopId,
       desktopSecret,
       displayName: DESKTOP_NAME
@@ -257,51 +213,13 @@ describe("remote cloud pairing, auth, and discovery E2E", () => {
   }, 90_000);
 });
 
-async function callFunction(
+async function readFirestoreDocument(
   harness: RemoteHarness,
-  name: "createPairingCode" | "claimPairingCode",
-  data: Record<string, unknown>,
-  idToken?: string
-): Promise<unknown> {
-  const urls = [
-    `http://127.0.0.1:${harness.ports.functions}/kanna-local/us-central1/${name}`,
-    `http://127.0.0.1:${harness.ports.functions}/kanna-local/us-central1/${name}/`,
-    `http://127.0.0.1:${harness.ports.functions}/${name}`,
-    `http://127.0.0.1:${harness.ports.functions}/${name}/`
-  ];
-  let lastFailure = "";
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    for (const url of urls) {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {})
-        },
-        body: JSON.stringify({ data })
-      });
-      const body = await response.json().catch(() => null) as unknown;
-      if (!response.ok) {
-        lastFailure = `${response.status}: ${JSON.stringify(body)}`;
-        if (response.status === 404) {
-          continue;
-        }
-        throw new Error(`function ${name} failed with ${lastFailure}`);
-      }
-      if (!isRecord(body) || !("result" in body)) {
-        throw new Error(`function ${name} returned invalid callable body: ${JSON.stringify(body)}`);
-      }
-      return body.result;
-    }
-    await sleep(250);
-  }
-  throw new Error(`function ${name} failed with ${lastFailure}`);
-}
-
-async function readFirestoreDocument(harness: RemoteHarness, path: string): Promise<FirestoreDocument> {
+  path: string,
+  idToken: string
+): Promise<FirestoreDocument> {
   const response = await fetch(`${firestoreBaseUrl(harness)}/${path}`, {
-    headers: { Authorization: "Bearer owner" }
+    headers: { Authorization: `Bearer ${idToken}` }
   });
   const body = await response.json().catch(() => null) as unknown;
   if (!response.ok) {
@@ -313,7 +231,7 @@ async function readFirestoreDocument(harness: RemoteHarness, path: string): Prom
   return body as FirestoreDocument;
 }
 
-async function seedDesktopCredential(
+async function publishDesktopCredentialAsBuffy(
   harness: RemoteHarness,
   input: {
     desktopId: string;
@@ -322,6 +240,7 @@ async function seedDesktopCredential(
     revokedAt?: string;
   }
 ): Promise<void> {
+  const idToken = await harness.getIdToken();
   const body = {
     fields: {
       desktopId: { stringValue: input.desktopId },
@@ -331,16 +250,19 @@ async function seedDesktopCredential(
       ...(input.revokedAt ? { revokedAt: { stringValue: input.revokedAt } } : {})
     }
   };
-  const response = await fetch(`${firestoreBaseUrl(harness)}/users/${BUFFY_UID}/desktops/${input.desktopId}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: "Bearer owner",
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
+  const response = await fetch(
+    `${firestoreBaseUrl(harness)}/users/${BUFFY_UID}/desktops/${desktopDocId(input.desktopId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }
+  );
   if (!response.ok) {
-    throw new Error(`failed to seed desktop credential: ${response.status} ${await response.text()}`);
+    throw new Error(`failed to publish desktop credential as Buffy: ${response.status} ${await response.text()}`);
   }
 }
 
@@ -395,6 +317,10 @@ function firestoreBaseUrl(harness: RemoteHarness): string {
   return `http://127.0.0.1:${harness.ports.firestore}/v1/projects/kanna-local/databases/(default)/documents`;
 }
 
+function desktopDocId(desktopId: string): string {
+  return desktopId.replace(/\//g, "_");
+}
+
 function asPairingSession(value: unknown): PairingSessionResponse {
   if (!isRecord(value)) {
     throw new Error("pairing session response was not an object");
@@ -403,30 +329,6 @@ function asPairingSession(value: unknown): PairingSessionResponse {
   const desktopId = requiredString(value, "desktopId");
   const desktopName = requiredString(value, "desktopName");
   return { code, desktopId, desktopName };
-}
-
-function asCreatePairingCodeResponse(value: unknown): CreatePairingCodeResponse {
-  if (!isRecord(value)) {
-    throw new Error("createPairingCode response was not an object");
-  }
-  return {
-    pairingCode: requiredString(value, "pairingCode"),
-    pairingCodeId: requiredString(value, "pairingCodeId"),
-    desktopId: requiredString(value, "desktopId"),
-    desktopSecret: requiredString(value, "desktopSecret"),
-    desktopClaimToken: requiredString(value, "desktopClaimToken"),
-    expiresAt: requiredString(value, "expiresAt")
-  };
-}
-
-function asClaimPairingCodeResponse(value: unknown): ClaimPairingCodeResponse {
-  if (!isRecord(value)) {
-    throw new Error("claimPairingCode response was not an object");
-  }
-  return {
-    desktopId: requiredString(value, "desktopId"),
-    uid: requiredString(value, "uid")
-  };
 }
 
 function asDesktopDescriptors(value: unknown): DesktopDescriptor[] {

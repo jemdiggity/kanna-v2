@@ -178,7 +178,6 @@ describe("remote task terminal flow E2E", () => {
     try {
       await waitForTerminalOutput(events, "SCRIPT_HEARTBEAT");
       await harness.stopRelay();
-
       await expect(harness.client.invokeDesktop({
         desktopId: harness.desktopId,
         method: "GET",
