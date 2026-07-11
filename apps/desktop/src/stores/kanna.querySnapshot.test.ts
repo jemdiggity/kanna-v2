@@ -2,6 +2,17 @@ import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
+import { createQueriesApi } from "./queries";
+import { createSelectionApi } from "./selection";
+import {
+  createStoreContext,
+  createStoreState,
+  type StoreServices,
+} from "./state";
+import {
+  buildInitializingTaskItem,
+  initializeTaskItem,
+} from "./taskInitialization";
 
 const beginTaskSwitchMock = vi.hoisted(() => vi.fn());
 const invalidateSharedDataMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -368,6 +379,40 @@ async function createStore(db: DbHandle = createDb()) {
   return store;
 }
 
+function createDirectQueryHarness(
+  fetchSnapshot: NonNullable<StoreServices["fetchSnapshot"]>,
+  persistSelection = vi.fn(async () => {}),
+) {
+  const state = createStoreState();
+  const services: StoreServices = {
+    fetchSnapshot,
+    windowWorkspace: {
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+      loadSnapshot: vi.fn(async () => ({ windows: [] })),
+      saveSnapshot: vi.fn(async () => {}),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection,
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData: vi.fn(async () => {}),
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    },
+  };
+  const context = createStoreContext(state, {
+    error: vi.fn(),
+    warning: vi.fn(),
+  } as never, services);
+  const queries = createQueriesApi(context);
+  const selection = createSelectionApi(context);
+  services.reloadSnapshot = queries.reloadSnapshot;
+  services.persistSelection = selection.persistSelection;
+  services.reconcileSelection = selection.reconcileSelection;
+  return { state, queries, persistSelection };
+}
+
 describe("kanna query snapshot regressions", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -531,5 +576,144 @@ describe("kanna query snapshot regressions", () => {
     await store.hideRepo("repo-2");
 
     expect(invalidateSharedDataMock).toHaveBeenCalledWith("hideRepo");
+  });
+
+  it("reconciles a hydrated selection when its repo disappears from the applied snapshot", async () => {
+    const store = await createStore();
+    const persistSelection = vi.fn(async () => {});
+    store.attachWindowWorkspace({
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+      loadSnapshot: vi.fn(async () => ({ windows: [] })),
+      saveSnapshot: vi.fn(async () => {}),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection,
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData: vi.fn(async () => {}),
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    });
+    await store.selectRepo("repo-1");
+    await store.selectItem("item-1");
+    persistSelection.mockClear();
+
+    await store.hideRepo("repo-1");
+    await flushStore();
+
+    expect(store.selectedRepoId).toBe("repo-2");
+    expect(store.selectedItemId).toBe("item-2");
+    expect(store.currentItem?.id).toBe("item-2");
+    expect(store.lastSelectedItemByRepo["repo-1"]).toBeUndefined();
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-2",
+      selectedItemId: "item-2",
+    });
+  });
+
+  it("clears pending initialization state when an applied snapshot removes its repo", async () => {
+    const survivingRepo = mockState.makeRepo({
+      id: "repo-2",
+      path: "/tmp/repo-2",
+      name: "repo-2",
+    });
+    const survivingItem = mockState.makeItem({
+      id: "item-2",
+      repo_id: survivingRepo.id,
+    });
+    const initializingItemId = "create:repo-removed";
+    const durableTaskId = "task-repo-removed";
+    const initializingItem = initializeTaskItem([
+      buildInitializingTaskItem({
+        id: initializingItemId,
+        repoId: "repo-1",
+        prompt: "This repo is no longer visible",
+        agentType: "pty",
+      }),
+    ], initializingItemId, durableTaskId)[0]!;
+    const persistSelection = vi.fn(async () => {});
+    const { state, queries } = createDirectQueryHarness(
+      async () => ({
+        entries: [{ repo: survivingRepo, items: [survivingItem] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      }),
+      persistSelection,
+    );
+
+    state.repos.value = [mockState.makeRepo(), survivingRepo];
+    state.items.value = [survivingItem];
+    state.initializingTaskItems.value = [initializingItem];
+    state.pendingCreateVisibility.set(initializingItemId, { bumpAt: 1 });
+    state.pendingCreateVisibility.set(durableTaskId, { bumpAt: 1 });
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = initializingItemId;
+    state.lastSelectedItemByRepo.value = { "repo-1": initializingItemId };
+
+    await expect(queries.reloadSnapshot()).resolves.toEqual({ status: "applied" });
+
+    expect(state.initializingTaskItems.value).toEqual([]);
+    expect(state.pendingCreateVisibility.size).toBe(0);
+    expect(state.lastSelectedItemByRepo.value["repo-1"]).toBeUndefined();
+    expect(state.selectedRepoId.value).toBe(survivingRepo.id);
+    expect(state.selectedItemId.value).toBe(survivingItem.id);
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: survivingRepo.id,
+      selectedItemId: survivingItem.id,
+    });
+  });
+
+  it("reports a reload as superseded when a newer snapshot applies during selection persistence", async () => {
+    const survivingRepo = mockState.makeRepo({
+      id: "repo-2",
+      path: "/tmp/repo-2",
+      name: "repo-2",
+    });
+    const survivingItem = mockState.makeItem({
+      id: "item-2",
+      repo_id: survivingRepo.id,
+    });
+    let releaseFirstPersistence = () => {};
+    const firstPersistenceGate = new Promise<void>((resolve) => {
+      releaseFirstPersistence = resolve;
+    });
+    let persistenceCalls = 0;
+    const persistSelection = vi.fn(async () => {
+      persistenceCalls += 1;
+      if (persistenceCalls === 1) await firstPersistenceGate;
+    });
+    const { state, queries } = createDirectQueryHarness(
+      async () => ({
+        entries: [{ repo: survivingRepo, items: [survivingItem] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      }),
+      persistSelection,
+    );
+    const initializingItemId = "create:superseded-persistence";
+    state.repos.value = [mockState.makeRepo(), survivingRepo];
+    state.items.value = [survivingItem];
+    state.initializingTaskItems.value = initializeTaskItem([
+      buildInitializingTaskItem({
+        id: initializingItemId,
+        repoId: "repo-1",
+        prompt: "Wait while persisting",
+        agentType: "pty",
+      }),
+    ], initializingItemId, "task-superseded-persistence");
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = initializingItemId;
+    state.lastSelectedItemByRepo.value = { "repo-1": initializingItemId };
+
+    const olderReload = queries.reloadSnapshot();
+    await vi.waitFor(() => expect(persistSelection).toHaveBeenCalledTimes(1));
+
+    await expect(queries.reloadSnapshot()).resolves.toEqual({ status: "applied" });
+    releaseFirstPersistence();
+
+    await expect(olderReload).resolves.toEqual({ status: "superseded" });
   });
 });

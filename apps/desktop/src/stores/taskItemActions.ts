@@ -249,6 +249,9 @@ export function createTaskItemActions(
       void publishDesktopLanTaskSnapshot(context.requireDb());
       publishCreatedTaskSnapshot(createdTaskId, hydratedItem, createdRepo);
     };
+    const isCreatedTaskReconciliationLive = () => context.state.initializingTaskItems.value.some(
+      (candidate) => candidate.id === initializingItemId && candidate.taskId === createdTaskId,
+    );
     const stopReconciliationIfTaskClosed = async (): Promise<boolean> => {
       let taskIsClosed = false;
       try {
@@ -273,6 +276,9 @@ export function createTaskItemActions(
     };
 
     for (let attempt = 0; attempt <= CREATE_SNAPSHOT_RETRY_DELAYS_MS.length; attempt += 1) {
+      createdItem = await handoffHydratedCreatedTask();
+      if (createdItem || !isCreatedTaskReconciliationLive()) break;
+
       let reloadWasSuperseded = false;
       try {
         const reloadResult = await reloadSnapshot();
@@ -285,7 +291,7 @@ export function createTaskItemActions(
       }
 
       createdItem = await handoffHydratedCreatedTask();
-      if (createdItem || reloadWasSuperseded) break;
+      if (createdItem || reloadWasSuperseded || !isCreatedTaskReconciliationLive()) break;
 
       const retryDelay = CREATE_SNAPSHOT_RETRY_DELAYS_MS[attempt];
       if (retryDelay === undefined) break;
@@ -303,17 +309,20 @@ export function createTaskItemActions(
             publishHydratedCreatedTask(alreadyHydrated);
             return;
           }
-          if (!context.state.initializingTaskItems.value.some(
-            (candidate) => candidate.id === initializingItemId && candidate.taskId === createdTaskId,
-          )) {
-            return;
-          }
+          if (!isCreatedTaskReconciliationLive()) return;
 
           const retryDelay = CREATE_BACKGROUND_SNAPSHOT_RETRY_DELAYS_MS[
             Math.min(retryIndex, CREATE_BACKGROUND_SNAPSHOT_RETRY_DELAYS_MS.length - 1)
           ];
           await sleep(retryDelay);
           retryIndex += 1;
+
+          const hydratedAfterSleep = await handoffHydratedCreatedTask();
+          if (hydratedAfterSleep) {
+            publishHydratedCreatedTask(hydratedAfterSleep);
+            return;
+          }
+          if (!isCreatedTaskReconciliationLive()) return;
 
           let reloadApplied = false;
           try {
@@ -322,6 +331,13 @@ export function createTaskItemActions(
           } catch (error) {
             console.error("[store] background created task snapshot retry failed:", error);
           }
+
+          const hydratedAfterReload = await handoffHydratedCreatedTask();
+          if (hydratedAfterReload) {
+            publishHydratedCreatedTask(hydratedAfterReload);
+            return;
+          }
+          if (!isCreatedTaskReconciliationLive()) return;
           if (reloadApplied && await stopReconciliationIfTaskClosed()) return;
         }
       };

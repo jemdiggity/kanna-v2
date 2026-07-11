@@ -67,6 +67,62 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     context.state.snapshotSettings.value = { ...mergedSnapshot.value.settings };
   }
 
+  async function reconcileMissingRepoState(
+    loadedRepos: readonly Repo[],
+    loadedItems: readonly PipelineItem[],
+  ): Promise<void> {
+    const visibleRepoIds = new Set(loadedRepos.map((repo) => repo.id));
+    const retiredItems = context.state.initializingTaskItems.value.filter(
+      (item) => !visibleRepoIds.has(item.repo_id),
+    );
+    for (const initializingItem of retiredItems) {
+      const taskId = initializingItem.taskId;
+      context.state.pendingCreateVisibility.delete(initializingItem.id);
+      if (taskId) {
+        context.state.pendingCreateVisibility.delete(taskId);
+      }
+
+      context.state.initializingTaskItems.value = removeInitializingTaskItem(
+        context.state.initializingTaskItems.value,
+        initializingItem.id,
+      );
+    }
+
+    const rememberedSelections = Object.entries(context.state.lastSelectedItemByRepo.value);
+    if (rememberedSelections.some(([repoId]) => !visibleRepoIds.has(repoId))) {
+      context.state.lastSelectedItemByRepo.value = Object.fromEntries(
+        rememberedSelections.filter(([repoId]) => visibleRepoIds.has(repoId)),
+      );
+    }
+
+    const selectedRepoId = context.state.selectedRepoId.value;
+    const selectedItemId = context.state.selectedItemId.value;
+    const selectedRepoIsMissing = selectedRepoId !== null && !visibleRepoIds.has(selectedRepoId);
+    const selectedItemStillVisible = selectedItemId !== null && (
+      loadedItems.some((item) => item.id === selectedItemId)
+      || context.state.initializingTaskItems.value.some(
+        (item) => item.id === selectedItemId && visibleRepoIds.has(item.repo_id),
+      )
+    );
+    const selectionNeedsReconciliation = selectedRepoIsMissing
+      || (selectedRepoId === null && selectedItemId !== null && !selectedItemStillVisible);
+    if (!selectionNeedsReconciliation) return;
+
+    const reconcileSelection = context.services.reconcileSelection;
+    if (reconcileSelection) {
+      reconcileSelection();
+    } else {
+      context.state.selectedRepoId.value = loadedRepos[0]?.id ?? null;
+      context.state.selectedItemId.value = null;
+    }
+
+    try {
+      await context.services.persistSelection?.();
+    } catch (error) {
+      console.error("[store] failed to persist selection after selected repo disappeared:", error);
+    }
+  }
+
   async function reconcileHydratedInitializingItems(loadedItems: readonly PipelineItem[]): Promise<void> {
     const loadedIds = new Set(loadedItems.map((item) => item.id));
     const hydratedItems = context.state.initializingTaskItems.value.filter(
@@ -150,7 +206,10 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       baseSnapshot.value = snapshot;
       applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot();
+      await reconcileMissingRepoState(loadedRepos, loadedItems);
+      if (runId !== refreshRunId.value) return { status: "superseded" };
       await reconcileHydratedInitializingItems(loadedItems);
+      if (runId !== refreshRunId.value) return { status: "superseded" };
 
       for (const item of loadedItems) {
         const pending = context.state.pendingCreateVisibility.get(item.id);

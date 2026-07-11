@@ -43,6 +43,31 @@ interface TaskHandoffResult extends TaskHandoffSnapshot {
   daemonSessionIds: string[];
 }
 
+interface RepoHideRaceSnapshot {
+  createStarted: boolean;
+  createdTaskId: string | null;
+  heldSnapshotCount: number;
+  heldSnapshotRepoIds: string[][];
+  postHideSnapshotRepoIds: string[] | null;
+  snapshotRequests: number;
+  repoIds: string[];
+  selectedRepoId: string | null;
+  selectedItemId: string | null;
+  selectedItemIdForPersistence: string | null;
+  currentItemId: string | null;
+  initializingTaskItems: Array<{
+    id: string;
+    taskId: string | null;
+  }>;
+  rememberedSelection: string | null;
+  initializingDomCount: number;
+}
+
+interface PersistedWindowSelection {
+  selectedRepoId: string | null;
+  selectedItemId: string | null;
+}
+
 async function git(repoPath: string, args: string[]): Promise<void> {
   await execFileAsync("git", ["-C", repoPath, ...args]);
 }
@@ -246,6 +271,174 @@ async function restoreTaskHandoffTrace(
   ).catch(() => undefined);
 }
 
+async function installRepoHideSnapshotGate(
+  client: WebDriverClient,
+  repoId: string,
+): Promise<void> {
+  const result = await client.executeSync<string>(
+    `window.__KANNA_E2E_REPO_HIDE_GATE__?.restore?.();
+     const originalFetch = window.fetch.bind(window);
+     let releaseHeldSnapshots;
+     const heldSnapshots = new Promise((resolve) => {
+       releaseHeldSnapshots = resolve;
+     });
+     const state = {
+       repoId: ${JSON.stringify(repoId)},
+       createStarted: false,
+       createdTaskId: null,
+       hidePatchApplied: false,
+       heldSnapshotCount: 0,
+       heldSnapshotRepoIds: [],
+       postHideSnapshotRepoIds: null,
+       snapshotRequests: 0,
+       released: false,
+       release() {
+         if (state.released) return;
+         state.released = true;
+         releaseHeldSnapshots();
+       },
+       restore() {
+         state.release();
+         window.fetch = originalFetch;
+       },
+     };
+     const responseRepoIds = async (response) => {
+       try {
+         const payload = await response.clone().json();
+         return Array.from(payload?.entries ?? []).map((entry) => entry?.repo?.id).filter(Boolean);
+       } catch {
+         return [];
+       }
+     };
+     window.fetch = async function(input, init) {
+       const url = String(input instanceof Request ? input.url : input);
+       const method = String(init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+       const pathname = (() => {
+         try {
+           return new URL(url, window.location.href).pathname;
+         } catch {
+           return url;
+         }
+       })();
+
+       if (method === "POST" && pathname === "/v1/tasks") {
+         state.createStarted = true;
+         const response = await originalFetch(input, init);
+         try {
+           const payload = await response.clone().json();
+           state.createdTaskId = payload?.taskId ?? null;
+         } catch {
+           state.createdTaskId = null;
+         }
+         return response;
+       }
+
+       if (method === "PATCH" && pathname === "/v1/repos/" + encodeURIComponent(state.repoId)) {
+         const response = await originalFetch(input, init);
+         if (response.ok) state.hidePatchApplied = true;
+         return response;
+       }
+
+       if (method === "GET" && pathname === "/v1/snapshot") {
+         state.snapshotRequests += 1;
+         const holdResponse = state.createStarted && !state.hidePatchApplied;
+         const response = await originalFetch(input, init);
+         const repoIds = await responseRepoIds(response);
+         if (holdResponse) {
+           state.heldSnapshotCount += 1;
+           state.heldSnapshotRepoIds.push(repoIds);
+           await heldSnapshots;
+         } else if (state.hidePatchApplied) {
+           state.postHideSnapshotRepoIds = repoIds;
+         }
+         return response;
+       }
+
+       return originalFetch(input, init);
+     };
+     window.__KANNA_E2E_REPO_HIDE_GATE__ = state;
+     return "ok";`,
+  );
+  expect(result).toBe("ok");
+}
+
+async function captureRepoHideRaceSnapshot(
+  client: WebDriverClient,
+  repoId: string,
+): Promise<RepoHideRaceSnapshot> {
+  return client.executeSync<RepoHideRaceSnapshot>(
+    `const ctx = window.__KANNA_E2E__?.setupState;
+     const store = ctx?.store;
+     const gate = window.__KANNA_E2E_REPO_HIDE_GATE__;
+     const unwrap = (value) => value?.__v_isRef ? value.value : value;
+     const initializingTaskItems = Array.from(unwrap(store?.initializingTaskItems) ?? []);
+     const repos = Array.from(unwrap(store?.repos) ?? []);
+     const lastSelected = unwrap(store?.lastSelectedItemByRepo) ?? {};
+     const currentItem = unwrap(store?.currentItem);
+     return {
+       createStarted: Boolean(gate?.createStarted),
+       createdTaskId: gate?.createdTaskId ?? null,
+       heldSnapshotCount: gate?.heldSnapshotCount ?? 0,
+       heldSnapshotRepoIds: gate?.heldSnapshotRepoIds ?? [],
+       postHideSnapshotRepoIds: gate?.postHideSnapshotRepoIds ?? null,
+       snapshotRequests: gate?.snapshotRequests ?? 0,
+       repoIds: repos.map((repo) => repo.id),
+       selectedRepoId: unwrap(store?.selectedRepoId) ?? null,
+       selectedItemId: unwrap(store?.selectedItemId) ?? null,
+       selectedItemIdForPersistence: unwrap(store?.selectedItemIdForPersistence) ?? null,
+       currentItemId: currentItem?.id ?? null,
+       initializingTaskItems: initializingTaskItems.map((item) => ({
+         id: item.id,
+         taskId: item.taskId ?? null,
+       })),
+       rememberedSelection: lastSelected[${JSON.stringify(repoId)}] ?? null,
+       initializingDomCount: document.querySelectorAll(
+         ${JSON.stringify(`.repo-section[data-repo-id="${repoId}"] .initializing-item`)},
+       ).length,
+     };`,
+  );
+}
+
+async function releaseRepoHideSnapshotGate(client: WebDriverClient): Promise<void> {
+  await client.executeSync("window.__KANNA_E2E_REPO_HIDE_GATE__?.release?.();");
+}
+
+async function restoreRepoHideSnapshotGate(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `window.__KANNA_E2E_REPO_HIDE_GATE__?.restore?.();
+     delete window.__KANNA_E2E_REPO_HIDE_GATE__;`,
+  ).catch(() => undefined);
+}
+
+async function readPersistedWindowSelection(
+  client: WebDriverClient,
+): Promise<PersistedWindowSelection | null> {
+  const windowId = await client.executeSync<string>(
+    "return window.__KANNA_E2E__?.setupState?.windowWorkspace?.bootstrap?.windowId ?? '';",
+  );
+  const rows = await queryDb(
+    client,
+    "SELECT value FROM settings WHERE key = ?",
+    ["window_workspace_v1"],
+  ) as Array<{ value?: string | null }>;
+  const raw = rows[0]?.value;
+  if (!raw) return null;
+  const snapshot = JSON.parse(raw) as {
+    windows?: Array<{
+      windowId?: string;
+      selectedRepoId?: string | null;
+      selectedItemId?: string | null;
+    }>;
+  };
+  const entry = snapshot.windows?.find((candidate) => candidate.windowId === windowId);
+  return entry
+    ? {
+        selectedRepoId: entry.selectedRepoId ?? null,
+        selectedItemId: entry.selectedItemId ?? null,
+      }
+    : null;
+}
+
 async function waitForDurableTaskHandoff(
   client: WebDriverClient,
   taskId: string,
@@ -384,6 +577,7 @@ describe("new task modal", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
   let testRepoPath = "";
+  let testRepoId = "";
 
   beforeAll(async () => {
     await client.createSession();
@@ -437,7 +631,7 @@ describe("new task modal", () => {
     await git(testRepoPath, ["commit", "-m", "test: add new task modal fixtures"]);
     await git(testRepoPath, ["push", "origin", "main"]);
 
-    await importTestRepo(client, testRepoPath, "new-task-modal-test");
+    testRepoId = await importTestRepo(client, testRepoPath, "new-task-modal-test");
   });
 
   afterAll(async () => {
@@ -699,6 +893,156 @@ describe("new task modal", () => {
       expect(newToasts.filter((toast) => toast.kind === "error")).toEqual([]);
     } finally {
       await restoreTaskHandoffTrace(client);
+    }
+  }, 90_000);
+
+  it("retires an acknowledged initializer when the repo is hidden before hydration", async () => {
+    const isolation = await client.executeSync<{ cloudSyncStopped: boolean; streamReset: boolean }>(
+      `const ctx = window.__KANNA_E2E__?.setupState;
+       const disposeCloudWorkspace = ctx?.disposeDesktopCloudWorkspace;
+       const resetStreamClient = window.__KANNA_E2E__?.resetStreamClient;
+       if (typeof disposeCloudWorkspace === "function") disposeCloudWorkspace();
+       if (typeof resetStreamClient === "function") resetStreamClient();
+       return {
+         cloudSyncStopped: typeof disposeCloudWorkspace === "function",
+         streamReset: typeof resetStreamClient === "function",
+       };`,
+    );
+    expect(isolation).toEqual({ cloudSyncStopped: true, streamReset: true });
+
+    await resetDefaultAgentPreference(client);
+    await openNewTaskModal(client);
+    await cycleToAgentChoice(client, "claude");
+
+    const baseline = await captureTaskHandoffSnapshot(client);
+    await installTaskHandoffTrace(client);
+    await installRepoHideSnapshotGate(client, testRepoId);
+    const prompt = "Hide the repository after create acknowledgement but before hydration";
+
+    try {
+      await submitTaskFromModal(client, prompt, { waitForInitialization: false });
+
+      const acknowledgedDeadline = Date.now() + 30_000;
+      let acknowledged = await captureRepoHideRaceSnapshot(client, testRepoId);
+      while (Date.now() < acknowledgedDeadline) {
+        const taskId = acknowledged.createdTaskId;
+        if (
+          taskId
+          && acknowledged.heldSnapshotCount > 0
+          && acknowledged.initializingTaskItems.some((item) => item.taskId === taskId)
+        ) {
+          break;
+        }
+        await sleep(100);
+        acknowledged = await captureRepoHideRaceSnapshot(client, testRepoId);
+      }
+
+      expect(acknowledged.createStarted).toBe(true);
+      expect(acknowledged.createdTaskId).toMatch(/^[0-9a-f-]+$/);
+      expect(acknowledged.heldSnapshotCount).toBeGreaterThan(0);
+      expect(acknowledged.heldSnapshotRepoIds.every((repoIds) => repoIds.includes(testRepoId))).toBe(true);
+      expect(acknowledged.initializingTaskItems).toEqual([
+        expect.objectContaining({
+          id: expect.stringMatching(/^create:/),
+          taskId: acknowledged.createdTaskId,
+        }),
+      ]);
+      expect(acknowledged.selectedItemId).toMatch(/^create:/);
+      expect(acknowledged.selectedItemIdForPersistence).toBe(acknowledged.createdTaskId);
+      expect(acknowledged.rememberedSelection).toBe(acknowledged.selectedItemId);
+
+      const createdTask = await waitForTaskCreated(client, prompt, 20_000);
+      expect(createdTask.id).toBe(acknowledged.createdTaskId);
+
+      const hideClicked = await client.executeSync<boolean>(
+        `const button = document.querySelector(
+           ${JSON.stringify(`.repo-section[data-repo-id="${testRepoId}"] .btn-hide-repo`)},
+         );
+         if (!(button instanceof HTMLButtonElement)) return false;
+         button.click();
+         return true;`,
+      );
+      expect(hideClicked).toBe(true);
+
+      const retiredDeadline = Date.now() + 15_000;
+      let retired = await captureRepoHideRaceSnapshot(client, testRepoId);
+      while (Date.now() < retiredDeadline) {
+        if (
+          retired.postHideSnapshotRepoIds !== null
+          && !retired.postHideSnapshotRepoIds.includes(testRepoId)
+          && !retired.repoIds.includes(testRepoId)
+          && retired.initializingTaskItems.length === 0
+        ) {
+          break;
+        }
+        await sleep(100);
+        retired = await captureRepoHideRaceSnapshot(client, testRepoId);
+      }
+
+      expect(retired.postHideSnapshotRepoIds).not.toContain(testRepoId);
+      expect(retired.repoIds).not.toContain(testRepoId);
+      expect(retired.initializingTaskItems).toEqual([]);
+      expect(retired.initializingDomCount).toBe(0);
+      expect(retired.selectedRepoId).toBeNull();
+      expect(retired.selectedItemId).toBeNull();
+      expect(retired.selectedItemIdForPersistence).toBeNull();
+      expect(retired.currentItemId).toBeNull();
+      expect(retired.rememberedSelection).toBeNull();
+
+      const persistenceDeadline = Date.now() + 5_000;
+      let persistedSelection = await readPersistedWindowSelection(client);
+      while (
+        Date.now() < persistenceDeadline
+        && (
+          persistedSelection?.selectedRepoId !== null
+          || persistedSelection?.selectedItemId !== null
+        )
+      ) {
+        await sleep(100);
+        persistedSelection = await readPersistedWindowSelection(client);
+      }
+      expect(persistedSelection).toEqual({ selectedRepoId: null, selectedItemId: null });
+
+      await releaseRepoHideSnapshotGate(client);
+
+      let settled = await captureRepoHideRaceSnapshot(client, testRepoId);
+      let stableSince = Date.now();
+      const settleDeadline = Date.now() + 5_000;
+      while (Date.now() < settleDeadline && Date.now() - stableSince < 1_000) {
+        await sleep(100);
+        const next = await captureRepoHideRaceSnapshot(client, testRepoId);
+        if (next.snapshotRequests !== settled.snapshotRequests) {
+          stableSince = Date.now();
+        }
+        settled = next;
+      }
+
+      const settledSnapshotRequests = settled.snapshotRequests;
+      await sleep(5_500);
+      const afterRetryWindow = await captureRepoHideRaceSnapshot(client, testRepoId);
+      expect(afterRetryWindow.snapshotRequests).toBe(settledSnapshotRequests);
+      expect(afterRetryWindow.initializingTaskItems).toEqual([]);
+
+      const finalHandoff = await captureTaskHandoffSnapshot(client);
+      const newVisibleToasts = withoutBaselineToasts(finalHandoff.toasts, baseline.toasts);
+      const newToasts = [...finalHandoff.observedToasts, ...newVisibleToasts];
+      expect(newToasts.filter((toast) => (
+        toast.kind === "warning"
+        && toast.text.toLowerCase().includes("terminal session could not be reattached")
+      ))).toEqual([]);
+      expect(newToasts.filter((toast) => toast.kind === "error")).toEqual([]);
+    } finally {
+      await releaseRepoHideSnapshotGate(client);
+      await restoreRepoHideSnapshotGate(client);
+      await restoreTaskHandoffTrace(client);
+      const restoredRepoId = await callVueMethod(
+        client,
+        "store.importRepo",
+        testRepoPath,
+        "new-task-modal-test",
+        "main",
+      );
+      expect(restoredRepoId).toBe(testRepoId);
     }
   }, 90_000);
 });
