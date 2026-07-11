@@ -3,6 +3,7 @@ import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
 const RELAY_TASK_TITLE = "Hybrid duplicate from LAN";
 const HYBRID_DUPLICATE_CLOUD_TITLE = "Hybrid duplicate from cloud";
 const HYBRID_CLOUD_ONLY_TITLE = "Hybrid cloud-only task";
+const HYBRID_CLOUD_ONLY_REFRESHED_TITLE = "Hybrid cloud-only task refreshed";
 const HYBRID_LAN_ONLY_TITLE = "Hybrid LAN-only task";
 const HYBRID_CLOUD_ONLY_DESKTOP_ID = "mobile-hybrid-cloud-only-desktop";
 const HYBRID_CLOUD_ONLY_REPO_ID = "mobile-hybrid-cloud-only-repo";
@@ -83,12 +84,14 @@ export interface MobileRelayHarness {
   lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
   terminalEvents: TerminalEventCollector;
+  publishHybridCloudRefresh(): Promise<void>;
   stop(): Promise<void>;
   waitForInput(timeoutMs?: number): Promise<string>;
 }
 
 export interface MobileHybridFixture {
   cloudOnly: {
+    refreshedTitle: string;
     taskId: string;
     title: string;
   };
@@ -151,6 +154,7 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
     };
     const hybridFixture: MobileHybridFixture = {
       cloudOnly: {
+        refreshedTitle: HYBRID_CLOUD_ONLY_REFRESHED_TITLE,
         taskId: cloudOnlyTaskId,
         title: HYBRID_CLOUD_ONLY_TITLE
       },
@@ -192,6 +196,8 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
       lanOnlyTask,
       localTask,
       terminalEvents,
+      publishHybridCloudRefresh: () =>
+        publishHybridCloudRefresh({ auth, harness }),
       async stop() {
         terminalEvents?.close();
         await harness.stop();
@@ -209,6 +215,29 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
     await harness.stop();
     throw error;
   }
+}
+
+async function publishHybridCloudRefresh(input: {
+  auth: AuthSession;
+  harness: RemoteHarness;
+}): Promise<void> {
+  await setFirestoreDocument(
+    input.harness.ports.firestore,
+    [
+      "users",
+      input.auth.uid,
+      "desktops",
+      HYBRID_CLOUD_ONLY_DESKTOP_ID,
+      "tasks",
+      HYBRID_CLOUD_ONLY_LOCAL_TASK_ID
+    ],
+    input.auth.idToken,
+    {
+      title: stringValue(HYBRID_CLOUD_ONLY_REFRESHED_TITLE),
+      displayName: stringValue(HYBRID_CLOUD_ONLY_REFRESHED_TITLE),
+      updatedAt: stringValue(new Date().toISOString())
+    }
+  );
 }
 
 async function loadRemoteHarnessModules(): Promise<{

@@ -19,6 +19,7 @@ interface HybridCredentials {
 interface HybridTaskFlowOptions {
   credentials: HybridCredentials;
   fixture: MobileHybridFixture;
+  publishCloudRefresh(): Promise<void>;
   stopRelay(): Promise<void>;
 }
 
@@ -124,6 +125,23 @@ function sameTaskIds(left: string[], right: string[]): boolean {
   );
 }
 
+function expectedRefreshedSnapshotMarker(
+  fixture: MobileHybridFixture
+): string[] {
+  return [
+    `${fixture.cloudOnly.taskId}:${fixture.cloudOnly.refreshedTitle}`,
+    `${fixture.duplicate.displayTaskId}:${fixture.duplicate.lanTitle}`,
+    `${fixture.lanOnly.taskId}:${fixture.lanOnly.title}`
+  ].sort();
+}
+
+function markerEntries(marker: string | null): string[] {
+  return (marker ?? "")
+    .split("\n")
+    .filter((entry) => entry.length > 0)
+    .sort();
+}
+
 async function waitForStableExactTaskRows(
   driver: Browser,
   expectedTaskIds: string[]
@@ -161,7 +179,8 @@ async function waitForStableExactTaskRows(
 
 async function assertHybridTaskPresentation(
   driver: Browser,
-  fixture: MobileHybridFixture
+  fixture: MobileHybridFixture,
+  cloudOnlyTitle = fixture.cloudOnly.title
 ): Promise<void> {
   const duplicate = await driver.$(
     `~mobile.task-row.${fixture.duplicate.displayTaskId}`
@@ -170,7 +189,7 @@ async function assertHybridTaskPresentation(
   const pageSource = await driver.getPageSource();
   const renderedText = `${rowText}\n${pageSource}`;
   for (const title of [
-    fixture.cloudOnly.title,
+    cloudOnlyTitle,
     fixture.duplicate.lanTitle,
     fixture.lanOnly.title
   ]) {
@@ -214,6 +233,93 @@ export async function runHybridTaskFlow(
   );
   await assertHybridTaskPresentation(driver, options.fixture);
 
+  await openPtyFixtureTask(
+    {
+      getTaskRowById: async (taskId) =>
+        await driver.$(`~mobile.task-row.${taskId}`),
+      waitUntil: (condition, waitOptions) =>
+        driver.waitUntil(condition, waitOptions)
+    },
+    options.fixture.lanOnly.taskId
+  );
+  await waitForTaskTerminalLive({
+    getAgentMessageView: async () =>
+      await driver.$(selectors.agentMessageView),
+    getAgentMessageReady: async () =>
+      await driver.$(selectors.agentMessageReady),
+    getTaskDetailScreen: async () =>
+      await driver.$(selectors.taskDetailScreen),
+    getTerminalOverlay: async () =>
+      await driver.$(selectors.terminalOverlay),
+    waitUntil: (condition, waitOptions) =>
+      driver.waitUntil(condition, waitOptions)
+  });
+
+  await options.publishCloudRefresh();
+  await driver.waitUntil(
+    async () => {
+      const [taskDetail, snapshotMarker] = await Promise.all([
+        driver.$(selectors.taskDetailScreen),
+        driver.$(selectors.taskSnapshotMarker)
+      ]);
+      if (!(await taskDetail.isExisting()) || !(await snapshotMarker.isExisting())) {
+        return false;
+      }
+      const marker = await snapshotMarker.getAttribute("label").catch(() => null);
+      return sameTaskIds(
+        markerEntries(marker),
+        expectedRefreshedSnapshotMarker(options.fixture)
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected the selected LAN-only detail to acknowledge the refreshed cloud snapshot"
+    }
+  );
+  const selectedLanOnlyDetail = await driver.$(selectors.taskDetailScreen);
+  if (!(await selectedLanOnlyDetail.isExisting())) {
+    throw new Error(
+      "Expected a second cloud snapshot to preserve the selected LAN-only task detail and stream"
+    );
+  }
+  const selectedLanOnlyTitle = await driver.$(selectors.taskDetailTitle);
+  const selectedTitleText = await selectedLanOnlyTitle.getText().catch(() => "");
+  if (selectedTitleText !== options.fixture.lanOnly.title) {
+    throw new Error(
+      `Expected selected LAN-only detail title to remain ${options.fixture.lanOnly.title}, received ${selectedTitleText}`
+    );
+  }
+  await waitForTaskTerminalLive({
+    getAgentMessageView: async () =>
+      await driver.$(selectors.agentMessageView),
+    getAgentMessageReady: async () =>
+      await driver.$(selectors.agentMessageReady),
+    getTaskDetailScreen: async () =>
+      await driver.$(selectors.taskDetailScreen),
+    getTerminalOverlay: async () =>
+      await driver.$(selectors.terminalOverlay),
+    waitUntil: (condition, waitOptions) =>
+      driver.waitUntil(condition, waitOptions)
+  });
+
+  const backButton = await driver.$(selectors.taskBackButton);
+  await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await backButton.click();
+  const recentAfterRefresh = await driver.$(selectors.recentTab);
+  await recentAfterRefresh.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await recentAfterRefresh.click();
+  await waitForStableExactTaskRows(
+    driver,
+    options.fixture.expectedDisplayTaskIds
+  );
+  await assertHybridTaskPresentation(
+    driver,
+    options.fixture,
+    options.fixture.cloudOnly.refreshedTitle
+  );
+
   // If the duplicate were accidentally routed through the relay, opening it
   // below would fail after this point. A healthy trusted-LAN route keeps the
   // exact cloud display id while streaming the local task's PTY.
@@ -230,6 +336,10 @@ export async function runHybridTaskFlow(
   await waitForTaskTerminalLive({
     getAgentMessageView: async () =>
       await driver.$(selectors.agentMessageView),
+    getAgentMessageReady: async () =>
+      await driver.$(selectors.agentMessageReady),
+    getTaskDetailScreen: async () =>
+      await driver.$(selectors.taskDetailScreen),
     getTerminalOverlay: async () =>
       await driver.$(selectors.terminalOverlay),
     waitUntil: (condition, waitOptions) =>

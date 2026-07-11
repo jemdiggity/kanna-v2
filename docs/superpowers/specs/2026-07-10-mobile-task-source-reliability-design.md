@@ -38,6 +38,7 @@ Cloud and trusted LAN are independent capabilities.
 
 - The cloud source is active whenever Firebase auth is signed in and a relay URL is configured. It owns the durable cross-desktop task projection and keeps the controller in remote/live mode even when the cloud list is empty.
 - The LAN source is active when Bonjour resolves a reachable endpoint whose `/v1/status.desktopId` matches a persisted trusted desktop. It exposes direct local tasks and a lower-latency route to that desktop.
+- Bonjour service changes enqueue the same complete-snapshot publication used by cloud and relay-presence callbacks. Once `/v1/status` validates an endpoint, the remaining reads in that snapshot use the validated base URL; a second discovery miss cannot turn a healthy LAN snapshot into an authoritative empty list.
 - `forceCloud` disables LAN contribution and routing, but it does not change cloud subscription semantics.
 
 No decision may be based on whether either source currently contains at least one task. An empty cloud snapshot is valid data, not permission to replace the whole workspace with LAN data.
@@ -56,6 +57,7 @@ For a duplicate:
 
 - retain the cloud ID and cloud owner/routing fields as the displayed identity,
 - retain the cloud repository identity used by the cloud workspace,
+- when cloud omitted `ownerLocalRepoId`, record the matched LAN repository ID in that owner field so a later enriched cloud projection remains the same duplicate,
 - prefer LAN values for mutable owner data such as title, stage, snippet, and agent type when LAN supplies them,
 - use cloud values for metadata LAN does not expose, such as owner identity, repo name, and agent provider.
 
@@ -73,10 +75,12 @@ Desktop lists are merged by desktop ID. A desktop visible through both sources k
 
 The composed client maintains an atomically replaced route table from displayed task ID to source-specific IDs.
 
+Same-turn recent, repository, and search collection requests share one composed task-read batch, which keeps controller `Promise.all` reads paired with one route table without letting a hung incidental read poison later retries. Authoritative live publications never join an incidental batch: they start a fresh composed read, while incidental callers arriving during that publication use the accepted last-good snapshot until the replacement is complete.
+
 - A duplicate cloud/LAN task uses the LAN local task ID while that trusted endpoint is reachable.
 - A LAN-only task uses LAN.
 - A cloud-only task uses its cloud route through the relay.
-- If a later successful refresh no longer reaches LAN, the duplicate route returns to cloud.
+- A failed or timed-out LAN reprobe preserves each last-good LAN-backed display identity, mutable metadata, and route. Fresh unrelated cloud rows may still join the collection, but cloud membership changes cannot rename or reroute preserved LAN rows. Explicit LAN disablement or a complete replacement snapshot may replace them.
 
 The route applies to terminal/agent streams, input, permissions, interrupt, stage advance, close, and merge actions. A mutation that fails after being sent over LAN is reported; it is not transparently retried through cloud because the first attempt may already have executed.
 
@@ -120,7 +124,7 @@ Task documents are validated at the read boundary. A malformed document is skipp
 
 ## Controller State Ownership
 
-Live subscription updates receive an epoch and are the sole writers for task collections in signed-in remote mode. They update recent tasks, derive repositories, select a valid repository, update the repo-scoped slice, refresh active search results, and reconcile the selected task only after the complete snapshot arrives.
+Live subscription updates receive an epoch and are the sole writers for task collections in signed-in remote mode. They update recent tasks, derive repositories, select a valid repository, update the repo-scoped slice, refresh active search results, and reconcile the selected task only after the complete snapshot arrives. Merged publications use a single-flight drain with one trailing-latest slot: callbacks that arrive during a LAN probe coalesce without invalidating the complete snapshot already in flight, so sustained callbacks make bounded progress without publishing a partial cloud phase.
 
 LAN polling reads use a task revision guard so an older read cannot commit after a newer controller update. Desktop refresh has its own single-flight state and does not determine task-source ownership.
 
@@ -140,7 +144,7 @@ That one boolean controls detail rendering, shell styling, the top bar/account b
 
 - Cloud listener/read failure with cached tasks: keep the last good tasks and report the failure.
 - Cloud failure with reachable LAN: keep LAN tasks visible.
-- LAN read failure: keep cloud tasks and cloud routes; do not treat LAN tasks as absent.
+- LAN read failure: keep the last-good LAN-backed display IDs, rows, metadata, and routes while retaining fresh unrelated cloud rows; cached LAN absence never suppresses a fresh cloud row or recomputes a LAN display identity.
 - Both sources unavailable with no cached data: surface a connection error while leaving account access visible.
 - Obsolete auth, bootstrap, source-read, or listener callbacks: ignore without mutating current state.
 - Failed mutation: show the original route error and do not cross-retry.
@@ -162,10 +166,14 @@ All race tests use deferred promises or captured callbacks; no timing sleeps are
 
 - Cloud-only, LAN-only, and duplicate tasks are all visible.
 - Duplicate matching uses owner desktop, owner-local repo when available, and owner-local task ID; it never uses cloud ID equality.
+- A matched duplicate whose first cloud row omitted the owner-local repository records the LAN repository and remains one row if a later cloud callback supplies that repository.
 - LAN metadata wins mutable fields while cloud identity and routing fields remain.
 - Successful LAN absence suppresses stale same-owner cloud rows; rejected LAN reads preserve them.
 - Mixed tasks independently route streams and actions to the correct raw IDs.
-- Routes return to cloud after LAN becomes unavailable.
+- Failed or timed-out LAN reprobes retain established LAN-backed display IDs and routes even when duplicate or collision membership changes; explicit LAN disablement replaces them with cloud routes.
+- A LAN success that arrives after its optional timeout but before the same read's cloud result remains authoritative and cannot be overwritten by that read's fallback phase.
+- Sustained cloud and presence callbacks coalesce behind one complete read and a trailing-latest read rather than starving publication.
+- Same-turn recent/repository/search readers share one route-backed source snapshot, while a later authoritative publication bypasses an incidental or hung read and cannot be consumed as the older cloud generation.
 - Task creation routes by the explicit destination desktop.
 - Cloud route snapshots atomically remove obsolete routes.
 

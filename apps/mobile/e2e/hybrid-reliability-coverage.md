@@ -10,14 +10,35 @@ The Appium flow asserts the exact stable three-row display-id set, LAN metadata
 on the duplicate, absence of the duplicate local-id row, and the visible task
 list/account/toolbar shell after seeding an intentionally absent selection ID.
 The component integration test proves that ID remains unresolved internally.
-The Appium flow then stops the relay and opens the
-duplicate by its cloud display id, proving the selected terminal still routes
-over trusted LAN when the native terminal overlay becomes live. It never opens
-an arbitrary first row. Byte-level xterm WebView inspection remains in the
+After the stable snapshot, Appium opens the LAN-only task, updates the
+cloud-only Firestore child document through the relay harness, and waits for an
+E2E-only marker on the still-open detail screen to include the refreshed cloud
+title. That marker is derived from the controller's accepted recent-task
+collection, so it causally acknowledges mobile callback processing rather than
+relying on a timing sleep. The selected LAN-only detail and stream must still be
+open after that acknowledgment. Returning to the list must show the same three
+display IDs, the refreshed cloud-only title, and the LAN-preferred duplicate
+metadata. The flow then stops the relay and opens the duplicate by its cloud
+display id, proving the selected terminal still routes over trusted LAN when
+task detail mounts and its terminal loading overlay clears. It never opens an
+arbitrary first row. Byte-level xterm WebView inspection remains in the
 dedicated PTY smoke/relay coverage: XCUITest intermittently exposes only the
 `NATIVE_APP` context after this lane deliberately stops relay, so requiring a
 WebView context here would test Appium remote-debugger timing rather than route
 selection.
+
+The real hybrid lane does not currently expose a barrier that can pause only a
+direct LAN `/v1/tasks/recent` probe while leaving the KSP stream and relay
+desktop running. Consequently Appium proves the permanent user-facing
+regression (row, selection, and stream continuity) plus the accepted route
+after the replacement snapshot, but it cannot sample the route table during an
+arbitrarily held in-flight probe. Making that transient assertion deterministic
+would require E2E-only arm/wait/release controls around direct LAN recent-task
+reads, with relay-originated requests explicitly bypassing the gate. The
+deferred-probe integration in `src/appModel.cloudFallback.test.ts` provides
+that narrower barrier. It drives both a Firestore callback and deferred relay
+presence convergence, then asserts the established LAN route before failure and
+before the complete replacement is released.
 
 Two lifecycle branches are intentionally kept out of this Appium flow:
 

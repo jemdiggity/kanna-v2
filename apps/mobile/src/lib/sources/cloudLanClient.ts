@@ -45,7 +45,6 @@ export interface MergedTaskSnapshot {
 }
 
 export interface CloudLanClient extends KannaClient {
-  listCurrentCloudTasks(): Promise<TaskSummary[]>;
   listRecentTasksWithSupplement(
     onSupplement: (tasks: TaskSummary[]) => void
   ): Promise<TaskSummary[]>;
@@ -55,16 +54,23 @@ type SettledRead<T> =
   | { status: "fulfilled"; value: T }
   | { status: "rejected"; reason: unknown };
 
+interface TaskReadEntry {
+  promise: Promise<TaskSummary[]>;
+  supplements: Set<(tasks: TaskSummary[]) => void>;
+}
+
 const DEFAULT_OPTIONAL_LAN_WAIT_MS = 1_000;
 
 export function mergeCloudAndLanTasks({
   cloudTasks,
   lan,
-  lanAuthoritative = true
+  lanAuthoritative = true,
+  preferLanRoutes = lanAuthoritative
 }: {
   cloudTasks: TaskSummary[];
   lan: LanTaskSnapshot | null;
   lanAuthoritative?: boolean;
+  preferLanRoutes?: boolean;
 }): MergedTaskSnapshot {
   const routes = new Map<string, DisplayTaskRoute>();
   const usedLanTaskIndexes = new Set<number>();
@@ -91,6 +97,9 @@ export function mergeCloudAndLanTasks({
         title: lanTask.title ?? cloudTask.title,
         stage: lanTask.stage ?? cloudTask.stage
       };
+      if (mergedTask.ownerLocalRepoId === undefined) {
+        mergedTask.ownerLocalRepoId = lanTask.repoId;
+      }
       if (lanTask.snippet !== null && lanTask.snippet !== undefined) {
         mergedTask.snippet = lanTask.snippet;
       }
@@ -101,7 +110,7 @@ export function mergeCloudAndLanTasks({
       usedDisplayTaskIds.add(cloudTask.id);
       routes.set(
         cloudTask.id,
-        lanAuthoritative
+        preferLanRoutes
           ? {
               source: "lan",
               taskId: lanTask.id,
@@ -153,6 +162,111 @@ export function mergeCloudAndLanTasks({
   return { tasks, routes };
 }
 
+function mergeCloudWithPreservedLanProjection(
+  cloudTasks: TaskSummary[],
+  accepted: MergedTaskSnapshot
+): MergedTaskSnapshot {
+  const acceptedTasksById = new Map(
+    accepted.tasks.map((task) => [task.id, task] as const)
+  );
+  const preservedLanEntries = Array.from(accepted.routes.entries()).flatMap(
+    ([displayTaskId, route]) => {
+      if (route.source !== "lan") return [];
+      const task = acceptedTasksById.get(displayTaskId);
+      return task ? [{ displayTaskId, route, task }] : [];
+    }
+  );
+  const preservedLanByDisplayId = new Map(
+    preservedLanEntries.map((entry) => [entry.displayTaskId, entry] as const)
+  );
+  const reservedLanDisplayIds = new Set(preservedLanByDisplayId.keys());
+  const usedPreservedDisplayIds = new Set<string>();
+  const usedDisplayTaskIds = new Set<string>();
+  const tasks: TaskSummary[] = [];
+  const routes = new Map<string, DisplayTaskRoute>();
+
+  const appendPreserved = (
+    entry: (typeof preservedLanEntries)[number]
+  ) => {
+    if (usedPreservedDisplayIds.has(entry.displayTaskId)) return;
+    usedPreservedDisplayIds.add(entry.displayTaskId);
+    usedDisplayTaskIds.add(entry.displayTaskId);
+    tasks.push(entry.task);
+    routes.set(entry.displayTaskId, entry.route);
+  };
+
+  for (const cloudTask of cloudTasks) {
+    const ownerMatch =
+      cloudTask.ownerDesktopId && cloudTask.ownerLocalTaskId
+        ? preservedLanEntries.find(
+            (entry) =>
+              entry.route.desktopId === cloudTask.ownerDesktopId &&
+              entry.route.taskId === cloudTask.ownerLocalTaskId &&
+              (cloudTask.ownerLocalRepoId === undefined ||
+                cloudTask.ownerLocalRepoId ===
+                  (entry.task.ownerLocalRepoId ?? entry.task.repoId))
+          )
+        : undefined;
+    if (ownerMatch) {
+      appendPreserved(ownerMatch);
+      continue;
+    }
+
+    const reservedIdMatch = preservedLanByDisplayId.get(cloudTask.id);
+    if (reservedIdMatch) {
+      appendPreserved(reservedIdMatch);
+      const displayTaskId = collisionSafeCloudTaskId(
+        cloudTask.id,
+        new Set([...reservedLanDisplayIds, ...usedDisplayTaskIds])
+      );
+      usedDisplayTaskIds.add(displayTaskId);
+      tasks.push({ ...cloudTask, id: displayTaskId });
+      routes.set(displayTaskId, { source: "cloud", taskId: cloudTask.id });
+      continue;
+    }
+
+    const displayTaskId = collisionSafeCloudTaskId(
+      cloudTask.id,
+      new Set([...reservedLanDisplayIds, ...usedDisplayTaskIds])
+    );
+    usedDisplayTaskIds.add(displayTaskId);
+    tasks.push(
+      displayTaskId === cloudTask.id
+        ? cloudTask
+        : { ...cloudTask, id: displayTaskId }
+    );
+    routes.set(displayTaskId, { source: "cloud", taskId: cloudTask.id });
+  }
+
+  for (const entry of preservedLanEntries) {
+    appendPreserved(entry);
+  }
+
+  return { tasks, routes };
+}
+
+function collisionSafeCloudTaskId(
+  taskId: string,
+  usedDisplayTaskIds: ReadonlySet<string>
+): string {
+  if (!usedDisplayTaskIds.has(taskId)) return taskId;
+
+  const baseId = `cloud:${taskId}`;
+  let displayTaskId = baseId;
+  let suffix = 2;
+  while (usedDisplayTaskIds.has(displayTaskId)) {
+    displayTaskId = `${baseId}:${suffix}`;
+    suffix += 1;
+  }
+  return displayTaskId;
+}
+
+function hasLanRoutes(snapshot: MergedTaskSnapshot | undefined): boolean {
+  return snapshot
+    ? Array.from(snapshot.routes.values()).some((route) => route.source === "lan")
+    : false;
+}
+
 function collisionSafeLanTaskId(
   desktopId: string,
   taskId: string,
@@ -181,9 +295,12 @@ export function createCloudLanClient(
     options.optionalLanWaitMs
   );
   let latestReadEpoch = 0;
+  let ordinaryTaskReadBatch: TaskReadEntry | undefined;
+  let authoritativeTaskReadInFlight: TaskReadEntry | undefined;
   let latestRepoReadEpoch = 0;
   let latestDesktopReadEpoch = 0;
   let snapshotTaskRoutes = new Map<string, DisplayTaskRoute>();
+  let acceptedTaskSnapshot: MergedTaskSnapshot | undefined;
   const provisionalTaskRoutes = new Map<string, DisplayTaskRoute>();
   let lastCloudTasks: TaskSummary[] | undefined;
   let lastLanTaskSnapshot: LanTaskSnapshot | undefined;
@@ -195,10 +312,11 @@ export function createCloudLanClient(
   const acceptMergedTaskSnapshot = (
     readEpoch: number,
     merged: MergedTaskSnapshot
-  ) => {
-    if (readEpoch !== latestReadEpoch) {
-      return;
+  ): MergedTaskSnapshot => {
+    if (readEpoch !== latestReadEpoch && acceptedTaskSnapshot) {
+      return acceptedTaskSnapshot;
     }
+    acceptedTaskSnapshot = merged;
     snapshotTaskRoutes = merged.routes;
     for (const [displayTaskId, provisionalRoute] of provisionalTaskRoutes) {
       const isPublished = Array.from(merged.routes.values()).some(
@@ -212,6 +330,7 @@ export function createCloudLanClient(
         provisionalTaskRoutes.delete(displayTaskId);
       }
     }
+    return merged;
   };
 
   const lanClientForDesktop = (desktopId: string): KannaClient | null => {
@@ -236,36 +355,42 @@ export function createCloudLanClient(
         `No LAN client is available for desktop ${status.desktopId}.`
       );
     }
+    const tasks = await desktopLan.listRecentTasks();
     return {
       desktopId: status.desktopId,
-      tasks: await desktopLan.listRecentTasks()
+      tasks
     };
   };
 
-  const readRecentTasks = async (
-    onSupplement?: (tasks: TaskSummary[]) => void
+  const performRecentTaskRead = async (
+    readEpoch: number,
+    supplements: Set<(tasks: TaskSummary[]) => void>
   ): Promise<TaskSummary[]> => {
-    const readEpoch = ++latestReadEpoch;
     const lanEnabled = options.isLanEnabled();
     let cloudTasksForRead: TaskSummary[] | undefined;
+    let lateLanSnapshotForRead: LanTaskSnapshot | undefined;
+    let primarySnapshotReady = false;
     const cloudRead = settleRead(() => cloud.listRecentTasks());
     const lanRead = lanEnabled
       ? settleOptionalLanRead(
           loadLanTaskSnapshot,
           optionalLanWaitMs,
           (lateSnapshot) => {
+            lateLanSnapshotForRead = lateSnapshot;
             if (
               readEpoch === latestReadEpoch &&
               options.isLanEnabled()
             ) {
               lastLanTaskSnapshot = lateSnapshot;
-              if (onSupplement) {
+              if (primarySnapshotReady && supplements.size > 0) {
                 const merged = mergeCloudAndLanTasks({
                   cloudTasks: cloudTasksForRead ?? lastCloudTasks ?? [],
                   lan: lateSnapshot
                 });
-                acceptMergedTaskSnapshot(readEpoch, merged);
-                onSupplement(merged.tasks);
+                const accepted = acceptMergedTaskSnapshot(readEpoch, merged);
+                for (const publishSupplement of supplements) {
+                  publishSupplement(accepted.tasks);
+                }
               }
             }
           }
@@ -278,54 +403,106 @@ export function createCloudLanClient(
         : lastCloudTasks;
     const lanResult = lanRead ? await lanRead : null;
     const isLatestRead = readEpoch === latestReadEpoch;
+    const canEstablishSnapshot =
+      isLatestRead || acceptedTaskSnapshot === undefined;
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
 
-    if (isLatestRead && cloudResult.status === "fulfilled") {
+    if (canEstablishSnapshot && cloudResult.status === "fulfilled") {
       lastCloudTasks = cloudResult.value;
     }
     if (
-      isLatestRead &&
+      canEstablishSnapshot &&
       lanStillEnabled &&
       lanResult?.status === "fulfilled"
     ) {
       lastLanTaskSnapshot = lanResult.value;
+    }
+    if (canEstablishSnapshot && !lanStillEnabled) {
+      lastLanTaskSnapshot = undefined;
     }
 
     const cloudTasks =
       cloudResult.status === "fulfilled"
         ? cloudResult.value
         : lastCloudTasks;
-    const currentLanSnapshot =
-      lanResult?.status === "fulfilled" ? lanResult.value : undefined;
+    const currentLanSnapshot = lanStillEnabled
+      ? lanResult?.status === "fulfilled"
+        ? lanResult.value
+        : lateLanSnapshotForRead
+      : undefined;
     const lanSnapshot = lanStillEnabled
       ? currentLanSnapshot ?? lastLanTaskSnapshot
       : undefined;
 
     if (cloudTasks === undefined && lanSnapshot === undefined) {
+      primarySnapshotReady = true;
       throw firstReadFailure(cloudResult, lanResult);
     }
 
-    const merged = mergeCloudAndLanTasks({
-      cloudTasks: cloudTasks ?? [],
-      lan: lanSnapshot ?? null,
-      lanAuthoritative: currentLanSnapshot !== undefined
-    });
+    const merged =
+      currentLanSnapshot !== undefined
+        ? mergeCloudAndLanTasks({
+            cloudTasks: cloudTasks ?? [],
+            lan: currentLanSnapshot
+          })
+        : lanStillEnabled && hasLanRoutes(acceptedTaskSnapshot)
+          ? mergeCloudWithPreservedLanProjection(
+              cloudTasks ?? [],
+              acceptedTaskSnapshot!
+            )
+          : mergeCloudAndLanTasks({
+              cloudTasks: cloudTasks ?? [],
+              lan: lanSnapshot ?? null,
+              lanAuthoritative: false,
+              preferLanRoutes: lanSnapshot !== undefined
+            });
 
-    if (isLatestRead) acceptMergedTaskSnapshot(readEpoch, merged);
-    return merged.tasks;
+    primarySnapshotReady = true;
+    return acceptMergedTaskSnapshot(readEpoch, merged).tasks;
   };
 
-  const listRecentTasks = (): Promise<TaskSummary[]> => readRecentTasks();
-
-  const listCurrentCloudTasks = async (): Promise<TaskSummary[]> => {
+  const startTaskRead = (
+    supplements: Set<(tasks: TaskSummary[]) => void>
+  ): Promise<TaskSummary[]> => {
     const readEpoch = ++latestReadEpoch;
-    const cloudTasks = await cloud.listRecentTasks();
-    const merged = mergeCloudAndLanTasks({ cloudTasks, lan: null });
-    if (readEpoch === latestReadEpoch) {
-      lastCloudTasks = cloudTasks;
-      acceptMergedTaskSnapshot(readEpoch, merged);
+    return performRecentTaskRead(readEpoch, supplements);
+  };
+
+  const listRecentTasks = (): Promise<TaskSummary[]> => {
+    if (authoritativeTaskReadInFlight) {
+      return acceptedTaskSnapshot
+        ? Promise.resolve(acceptedTaskSnapshot.tasks)
+        : authoritativeTaskReadInFlight.promise;
     }
-    return merged.tasks;
+    if (ordinaryTaskReadBatch) {
+      return ordinaryTaskReadBatch.promise;
+    }
+
+    const supplements = new Set<(tasks: TaskSummary[]) => void>();
+    const batch = { promise: startTaskRead(supplements), supplements };
+    ordinaryTaskReadBatch = batch;
+    void Promise.resolve().then(() => {
+      if (ordinaryTaskReadBatch === batch) {
+        ordinaryTaskReadBatch = undefined;
+      }
+    });
+    return batch.promise;
+  };
+
+  const listRecentTasksWithSupplement = (
+    onSupplement: (tasks: TaskSummary[]) => void
+  ): Promise<TaskSummary[]> => {
+    ordinaryTaskReadBatch = undefined;
+    const supplements = new Set([onSupplement]);
+    let inFlight!: TaskReadEntry;
+    const promise = startTaskRead(supplements).finally(() => {
+      if (authoritativeTaskReadInFlight === inFlight) {
+        authoritativeTaskReadInFlight = undefined;
+      }
+    });
+    inFlight = { promise, supplements };
+    authoritativeTaskReadInFlight = inFlight;
+    return promise;
   };
 
   type ResolvedTaskRoute =
@@ -581,9 +758,7 @@ export function createCloudLanClient(
     listRepoTasks: async (repoId) =>
       (await listRecentTasks()).filter((task) => task.repoId === repoId),
     listRecentTasks,
-    listRecentTasksWithSupplement: (onSupplement) =>
-      readRecentTasks(onSupplement),
-    listCurrentCloudTasks,
+    listRecentTasksWithSupplement,
     searchTasks: async (query) => {
       const normalizedQuery = query.toLowerCase();
       return (await listRecentTasks()).filter(

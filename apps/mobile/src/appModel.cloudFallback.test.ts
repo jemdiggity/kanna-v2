@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { createAppModel } from "./appModel";
 import type { TaskAgentSubscription } from "./lib/api/client";
 import type { TaskSummary } from "./lib/api/types";
-import { createStaticBonjourBrowser } from "./lib/discovery/bonjour";
+import {
+  createStaticBonjourBrowser,
+  type BonjourBrowser,
+  type BonjourService
+} from "./lib/discovery/bonjour";
 import type { MobileAuthSession, MobileAuthState } from "./lib/firebase/auth";
 import type {
   CloudTaskIndex,
@@ -14,10 +18,12 @@ import type { RelayDesktopClient } from "./lib/transports/relayClient";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function cloudTask(
@@ -146,9 +152,35 @@ function createLanFixture(
     if (/\/v1\/repos\/[^/]+\/tasks$/.test(url)) {
       return response(await listRecentTasks());
     }
+    if (/\/v1\/tasks\/[^/]+\/input$/.test(url)) {
+      return response(undefined);
+    }
     throw new Error(`Unexpected LAN request: ${url}`);
   }) as FetchLike;
   return { bonjourBrowser, fetchImpl };
+}
+
+function createMutableBonjourBrowser(initialServices: BonjourService[] = []): {
+  browser: BonjourBrowser;
+  setServices(services: BonjourService[]): void;
+} {
+  let services = initialServices;
+  const listeners = new Set<() => void>();
+  return {
+    browser: {
+      getServices: () => services,
+      start: vi.fn(),
+      stop: vi.fn(),
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }
+    },
+    setServices(nextServices) {
+      services = nextServices;
+      for (const listener of listeners) listener();
+    }
+  };
 }
 
 function createTwoDesktopLanFixture() {
@@ -812,7 +844,7 @@ describe("createAppModel cloud routing", () => {
     ]);
   });
 
-  it("publishes rapid cloud callbacks while an optional LAN probe is hanging", async () => {
+  it("serializes rapid cloud callbacks and publishes the newest trailing complete snapshot", async () => {
     vi.useFakeTimers();
     try {
       const { authSession } = createMutableAuthSession(signedInState());
@@ -846,17 +878,213 @@ describe("createAppModel cloud routing", () => {
       pushCloudTasks?.([cloudTask({ id: "cloud:first", title: "First" })]);
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(app.sessionStore.getState().recentTasks).toEqual([
-        expect.objectContaining({ id: "cloud:first", title: "First" })
-      ]);
+      expect(app.sessionStore.getState().recentTasks).toEqual([]);
 
       pushCloudTasks?.([cloudTask({ id: "cloud:second", title: "Second" })]);
       await vi.advanceTimersByTimeAsync(0);
 
+      expect(app.sessionStore.getState().recentTasks).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud:first", title: "First" })
+      ]);
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(app.sessionStore.getState().recentTasks).toEqual([
         expect.objectContaining({ id: "cloud:second", title: "Second" })
       ]);
       expect(hangingLanRead).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts a fresh authoritative merge when a cloud callback lands during an incidental task read", async () => {
+    vi.useFakeTimers();
+    try {
+      const { authSession } = createMutableAuthSession(signedInState());
+      let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+      const taskIndex: CloudTaskIndex = {
+        listDesktops: vi.fn().mockResolvedValue([]),
+        listRecentTasks: vi.fn().mockResolvedValue([]),
+        subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+          pushCloudTasks = onUpdate;
+          return vi.fn();
+        })
+      };
+      const incidentalLanRead = deferred<TaskSummary[]>();
+      const lanOnlyTask: TaskSummary = {
+        id: "lan-only",
+        repoId: "repo-lan",
+        title: "LAN-only task",
+        stage: "review"
+      };
+      const lanRead = vi
+        .fn<() => Promise<TaskSummary[]>>()
+        .mockResolvedValueOnce([lanOnlyTask])
+        .mockImplementationOnce(() => incidentalLanRead.promise)
+        .mockImplementationOnce(
+          () => new Promise<TaskSummary[]>(() => undefined)
+        );
+      const lan = createLanFixture(lanRead);
+      const app = createAppModel({
+        authSession,
+        fetchImpl: lan.fetchImpl,
+        persistence: createTrustedPersistence(),
+        options: {
+          forceCloud: false,
+          relayUrl: "wss://relay.test",
+          taskIndex,
+          bonjourBrowser: lan.bonjourBrowser,
+          createRelayClient: () => createRelayClientMock()
+        }
+      });
+      await app.initialize();
+      const firstCloudTask = cloudTask({
+        id: "cloud:first",
+        title: "First cloud snapshot"
+      });
+      const secondCloudTask = cloudTask({
+        id: "cloud:second",
+        title: "Second cloud snapshot"
+      });
+
+      pushCloudTasks?.([firstCloudTask]);
+      await vi.waitFor(() => {
+        expect(app.sessionStore.getState().recentTasks).toEqual([
+          expect.objectContaining({ id: firstCloudTask.id }),
+          lanOnlyTask
+        ]);
+      });
+
+      const incidentalSearch = app.client.searchTasks("cloud snapshot");
+      await vi.waitFor(() => expect(lanRead).toHaveBeenCalledTimes(2));
+      pushCloudTasks?.([secondCloudTask]);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(lanRead).toHaveBeenCalledTimes(3);
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: secondCloudTask.id,
+          title: secondCloudTask.title
+        }),
+        lanOnlyTask
+      ]);
+
+      incidentalLanRead.resolve([lanOnlyTask]);
+      await incidentalSearch;
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: secondCloudTask.id }),
+        lanOnlyTask
+      ]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("restarts the publication drain when a callback lands during settlement", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const firstPublication = deferred<void>();
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () =>
+          createRelayClientMock(
+            vi.fn(() => new Promise<Set<string>>(() => undefined))
+          )
+      }
+    });
+    app.sessionStore.subscribe(() => {
+      if (
+        app.sessionStore.getState().recentTasks.some(
+          (task) => task.id === "cloud:first"
+        )
+      ) {
+        firstPublication.resolve();
+      }
+    });
+    void firstPublication.promise.then(() => {
+      // This extra microtask runs after the worker observes an empty queue but
+      // before its promise finalizer releases ownership.
+      void Promise.resolve().then(() => {
+        pushCloudTasks?.([cloudTask({ id: "cloud:second", title: "Second" })]);
+      });
+    });
+    await app.initialize();
+
+    pushCloudTasks?.([cloudTask({ id: "cloud:first", title: "First" })]);
+
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud:second", title: "Second" })
+      ]);
+    });
+  });
+
+  it("publishes complete snapshots without starvation while cloud callbacks keep arriving", async () => {
+    vi.useFakeTimers();
+    try {
+      const { authSession } = createMutableAuthSession(signedInState());
+      let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+      const taskIndex: CloudTaskIndex = {
+        listDesktops: vi.fn().mockResolvedValue([]),
+        listRecentTasks: vi.fn().mockResolvedValue([]),
+        subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+          pushCloudTasks = onUpdate;
+          return vi.fn();
+        })
+      };
+      const hangingLanRead = vi.fn(
+        () => new Promise<TaskSummary[]>(() => undefined)
+      );
+      const lan = createLanFixture(hangingLanRead);
+      const app = createAppModel({
+        authSession,
+        fetchImpl: lan.fetchImpl,
+        persistence: createTrustedPersistence(),
+        options: {
+          forceCloud: false,
+          relayUrl: "wss://relay.test",
+          taskIndex,
+          bonjourBrowser: lan.bonjourBrowser,
+          createRelayClient: () => createRelayClientMock()
+        }
+      });
+      await app.initialize();
+
+      pushCloudTasks?.([cloudTask({ id: "cloud:first", title: "First" })]);
+      await vi.advanceTimersByTimeAsync(400);
+      pushCloudTasks?.([cloudTask({ id: "cloud:second", title: "Second" })]);
+      await vi.advanceTimersByTimeAsync(400);
+      pushCloudTasks?.([cloudTask({ id: "cloud:third", title: "Third" })]);
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud:first", title: "First" })
+      ]);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud:third", title: "Third" })
+      ]);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -901,14 +1129,15 @@ describe("createAppModel cloud routing", () => {
 
       pushCloudTasks?.([duplicate]);
       await vi.advanceTimersByTimeAsync(0);
+      expect(app.sessionStore.getState().recentTasks).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(app.sessionStore.getState().recentTasks).toEqual([
         expect.objectContaining({
           id: duplicate.id,
           title: "Cloud duplicate"
         })
       ]);
-
-      await vi.advanceTimersByTimeAsync(1_000);
       lateLanRead.resolve([
         {
           id: "local-duplicate",
@@ -939,6 +1168,380 @@ describe("createAppModel cloud routing", () => {
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
+    }
+  });
+
+  it("republishes the complete workspace when trusted LAN discovery arrives after cloud", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const mutableBonjour = createMutableBonjourBrowser();
+    const lan = createLanFixture(async () => [
+      {
+        id: "local-duplicate",
+        repoId: "repo-lan",
+        title: "LAN duplicate",
+        stage: "review"
+      },
+      {
+        id: "lan-only",
+        repoId: "repo-lan",
+        title: "LAN-only task",
+        stage: "in progress"
+      }
+    ]);
+    const app = createAppModel({
+      authSession,
+      fetchImpl: lan.fetchImpl,
+      persistence: createTrustedPersistence(),
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: mutableBonjour.browser,
+        createRelayClient: () =>
+          createRelayClientMock(
+            vi.fn().mockResolvedValue(new Set(["desktop-lan"]))
+          )
+      }
+    });
+    await app.initialize();
+    const duplicate = cloudTask({
+      id: "cloud:duplicate",
+      title: "Cloud duplicate",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-lan",
+      ownerLocalTaskId: "local-duplicate"
+    });
+    const cloudOnly = cloudTask({
+      id: "cloud:only",
+      title: "Cloud-only task",
+      ownerDesktopId: "desktop-cloud",
+      ownerLocalTaskId: "cloud-only"
+    });
+
+    pushCloudTasks?.([duplicate, cloudOnly]);
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: duplicate.id, title: "Cloud duplicate" }),
+        expect.objectContaining({ id: cloudOnly.id, title: "Cloud-only task" })
+      ]);
+    });
+
+    mutableBonjour.setServices([
+      {
+        name: "LAN Mac",
+        type: "_kanna-mobile._tcp.",
+        host: "desktop.lan",
+        port: 48120,
+        txt: { desktopId: "desktop-lan" }
+      }
+    ]);
+
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: duplicate.id, title: "LAN duplicate" }),
+        expect.objectContaining({ id: cloudOnly.id, title: "Cloud-only task" }),
+        expect.objectContaining({ id: "lan-only", title: "LAN-only task" })
+      ]);
+    });
+  });
+
+  it("uses the endpoint validated by LAN status for the rest of the snapshot", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const service: BonjourService = {
+      name: "LAN Mac",
+      type: "_kanna-mobile._tcp.",
+      host: "desktop.lan",
+      port: 48120,
+      txt: { desktopId: "desktop-lan" }
+    };
+    let exposeOneServiceRead = false;
+    let serviceReads = 0;
+    const bonjourBrowser: BonjourBrowser = {
+      getServices: () =>
+        exposeOneServiceRead && serviceReads++ === 0 ? [service] : [],
+      start: vi.fn(),
+      stop: vi.fn(),
+      subscribe: () => vi.fn()
+    };
+    const lan = createLanFixture(async () => [
+      {
+        id: "local-duplicate",
+        repoId: "repo-lan",
+        title: "LAN duplicate",
+        stage: "review"
+      },
+      {
+        id: "lan-only",
+        repoId: "repo-lan",
+        title: "LAN-only task",
+        stage: "in progress"
+      }
+    ]);
+    const app = createAppModel({
+      authSession,
+      fetchImpl: lan.fetchImpl,
+      persistence: createTrustedPersistence(),
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser,
+        createRelayClient: () =>
+          createRelayClientMock(
+            vi.fn(() => new Promise<Set<string>>(() => undefined))
+          )
+      }
+    });
+    await app.initialize();
+    exposeOneServiceRead = true;
+    const duplicate = cloudTask({
+      id: "cloud:duplicate",
+      title: "Cloud duplicate",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-lan",
+      ownerLocalTaskId: "local-duplicate"
+    });
+
+    pushCloudTasks?.([
+      duplicate,
+      cloudTask({
+        id: "cloud:only",
+        title: "Cloud-only task",
+        ownerDesktopId: "desktop-cloud",
+        ownerLocalTaskId: "cloud-only"
+      })
+    ]);
+
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: duplicate.id, title: "LAN duplicate" }),
+        expect.objectContaining({ id: "cloud:only", title: "Cloud-only task" }),
+        expect.objectContaining({ id: "lan-only", title: "LAN-only task" })
+      ]);
+    });
+  });
+
+  it("keeps the last complete hybrid workspace authoritative while a newer LAN probe is pending", async () => {
+    const auth = createMutableAuthSession(signedInState());
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const nextLanRead = deferred<TaskSummary[]>();
+    const presenceLanRead = deferred<TaskSummary[]>();
+    const duplicateLanTask: TaskSummary = {
+      id: "local-duplicate",
+      repoId: "repo-lan",
+      title: "LAN duplicate",
+      stage: "review",
+      agentType: "pty"
+    };
+    const lanOnlyTask: TaskSummary = {
+      id: "lan-only",
+      repoId: "repo-lan",
+      title: "LAN-only task",
+      stage: "in progress",
+      agentType: "agent"
+    };
+    const lanRead = vi
+      .fn<() => Promise<TaskSummary[]>>()
+      .mockResolvedValueOnce([duplicateLanTask, lanOnlyTask])
+      .mockImplementationOnce(() => nextLanRead.promise)
+      .mockImplementationOnce(() => presenceLanRead.promise);
+    const lan = createLanFixture(lanRead);
+    const pendingPresence = deferred<Set<string>>();
+    const relayClient = createRelayClientMock(() => pendingPresence.promise);
+    const sockets: Array<{
+      close: ReturnType<typeof vi.fn>;
+      onopen: (() => void) | null;
+      onmessage: ((event: { data: string }) => void) | null;
+      send: ReturnType<typeof vi.fn>;
+    }> = [];
+    class TestWebSocket {
+      close = vi.fn();
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onopen: (() => void) | null = null;
+      send = vi.fn();
+
+      constructor(_url: string) {
+        sockets.push(this);
+      }
+    }
+    vi.stubGlobal("WebSocket", TestWebSocket);
+
+    try {
+      const app = createAppModel({
+        authSession: auth.authSession,
+        fetchImpl: lan.fetchImpl,
+        persistence: createTrustedPersistence(),
+        options: {
+          forceCloud: false,
+          relayUrl: "wss://relay.test",
+          taskIndex,
+          bonjourBrowser: lan.bonjourBrowser,
+          createRelayClient: () => relayClient
+        }
+      });
+      await app.initialize();
+      const duplicateCloudTask = cloudTask({
+        id: "cloud:duplicate",
+        title: "Cloud duplicate",
+        ownerDesktopId: "desktop-lan",
+        ownerLocalRepoId: "repo-lan",
+        ownerLocalTaskId: duplicateLanTask.id,
+        agentType: "pty"
+      });
+      const cloudOnlyTask = cloudTask({
+        id: "cloud:only",
+        title: "Cloud-only task"
+      });
+
+      pushCloudTasks?.([duplicateCloudTask, cloudOnlyTask]);
+      await vi.waitFor(() => {
+        expect(app.sessionStore.getState().recentTasks).toEqual([
+          expect.objectContaining({
+            id: duplicateCloudTask.id,
+            title: duplicateLanTask.title
+          }),
+          expect.objectContaining({ id: cloudOnlyTask.id }),
+          lanOnlyTask
+        ]);
+      });
+
+      app.controller.openTask(lanOnlyTask.id);
+      expect(sockets).toHaveLength(1);
+      sockets[0]!.onopen?.();
+      sockets[0]!.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+      sockets[0]!.onmessage?.({
+        data: JSON.stringify({
+          type: "agent_snapshot",
+          task_id: lanOnlyTask.id,
+          events: [],
+          next_seq: 0
+        })
+      });
+      expect(app.sessionStore.getState()).toMatchObject({
+        selectedTaskId: lanOnlyTask.id,
+        taskAgentTaskId: lanOnlyTask.id,
+        taskAgentStatus: "live"
+      });
+
+      const updatedCloudOnlyTask = {
+        ...cloudOnlyTask,
+        title: "Cloud-only task after refresh"
+      };
+      pushCloudTasks?.([updatedCloudOnlyTask]);
+      await vi.waitFor(() => expect(lanRead).toHaveBeenCalledTimes(2));
+      pendingPresence.resolve(new Set(["desktop-lan"]));
+      await flushAsyncWork(12);
+
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: duplicateCloudTask.id,
+          title: duplicateLanTask.title
+        }),
+        expect.objectContaining({ id: cloudOnlyTask.id }),
+        lanOnlyTask
+      ]);
+      expect(app.sessionStore.getState()).toMatchObject({
+        selectedTaskId: lanOnlyTask.id,
+        taskAgentTaskId: lanOnlyTask.id,
+        taskAgentStatus: "live"
+      });
+      expect(sockets[0]!.close).not.toHaveBeenCalled();
+
+      await app.client.sendTaskInput(duplicateCloudTask.id, "keep using LAN");
+      expect(lan.fetchImpl).toHaveBeenCalledWith(
+        "http://desktop.lan:48120/v1/tasks/local-duplicate/input",
+        expect.objectContaining({ method: "POST" })
+      );
+      expect(relayClient.sendTaskInput).not.toHaveBeenCalled();
+
+      nextLanRead.reject(new Error("LAN reprobe failed"));
+      await vi.waitFor(() => expect(lanRead).toHaveBeenCalledTimes(3));
+      await vi.waitFor(() => {
+        expect(app.sessionStore.getState().recentTasks).toEqual([
+          expect.objectContaining({
+            id: updatedCloudOnlyTask.id,
+            title: updatedCloudOnlyTask.title
+          }),
+          expect.objectContaining({
+            id: duplicateCloudTask.id,
+            title: duplicateLanTask.title
+          }),
+          lanOnlyTask
+        ]);
+      });
+      expect(app.sessionStore.getState()).toMatchObject({
+        selectedTaskId: lanOnlyTask.id,
+        taskAgentTaskId: lanOnlyTask.id,
+        taskAgentStatus: "live"
+      });
+      expect(sockets[0]!.close).not.toHaveBeenCalled();
+
+      await app.client.sendTaskInput(
+        duplicateCloudTask.id,
+        "keep using LAN after failure"
+      );
+      expect(lan.fetchImpl).toHaveBeenCalledWith(
+        "http://desktop.lan:48120/v1/tasks/local-duplicate/input",
+        expect.objectContaining({ method: "POST" })
+      );
+      expect(relayClient.sendTaskInput).not.toHaveBeenCalled();
+
+      presenceLanRead.resolve([
+        { ...duplicateLanTask, title: "LAN duplicate after refresh" },
+        lanOnlyTask
+      ]);
+      await vi.waitFor(() => {
+        expect(app.sessionStore.getState().recentTasks).toEqual([
+          expect.objectContaining({
+            id: updatedCloudOnlyTask.id,
+            title: updatedCloudOnlyTask.title
+          }),
+          expect.objectContaining({
+            id: duplicateLanTask.id,
+            title: "LAN duplicate after refresh"
+          }),
+          lanOnlyTask
+        ]);
+      });
+      expect(app.sessionStore.getState()).toMatchObject({
+        selectedTaskId: lanOnlyTask.id,
+        taskAgentTaskId: lanOnlyTask.id,
+        taskAgentStatus: "live"
+      });
+      expect(sockets[0]!.close).not.toHaveBeenCalled();
+
+      auth.setState({ status: "signedOut" });
+      expect(sockets[0]!.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 
@@ -1260,9 +1863,7 @@ describe("createAppModel cloud routing", () => {
 
     pushCloudTasks?.([cloudTask({ id: "cloud-before-force" })]);
     await vi.waitFor(() => expect(lanRead).toHaveBeenCalledOnce());
-    expect(app.sessionStore.getState().recentTasks).toEqual([
-      expect.objectContaining({ id: "cloud-before-force" })
-    ]);
+    expect(app.sessionStore.getState().recentTasks).toEqual([]);
     const publicationsBeforeForce = emittedTaskIds.length;
     app.setForceCloud(true);
     staleLanRead.resolve([
@@ -1769,9 +2370,7 @@ describe("createAppModel cloud routing", () => {
 
     pushCloudError?.({ scope: "root", error: new Error("snapshot failed") });
     await vi.waitFor(() => expect(lanRead).toHaveBeenCalledOnce());
-    expect(app.sessionStore.getState().recentTasks).toEqual([
-      expect.objectContaining({ id: recoveredCloudTask.id })
-    ]);
+    expect(app.sessionStore.getState().recentTasks).toEqual([]);
     const publicationsBeforeForce = emittedTaskIds.length;
     app.setForceCloud(true);
     recoveryMerge.resolve([

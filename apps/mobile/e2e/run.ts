@@ -284,6 +284,7 @@ async function main(): Promise<void> {
       await runHybridTaskFlow(driver, {
         credentials: relayHarness.credentials,
         fixture: relayHarness.hybridFixture,
+        publishCloudRefresh: () => relayHarness!.publishHybridCloudRefresh(),
         stopRelay: () => relayHarness!.harness.stopRelay()
       });
     } else if (mode === "cloud") {

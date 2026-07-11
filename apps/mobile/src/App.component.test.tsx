@@ -178,6 +178,23 @@ function renderedTypes(node: unknown): unknown[] {
   ];
 }
 
+function renderedElementByType(
+  node: unknown,
+  type: unknown
+): React.ReactElement<Record<string, unknown>> | null {
+  if (!React.isValidElement(node)) return null;
+  const element = node as React.ReactElement<{
+    children?: unknown;
+    [key: string]: unknown;
+  }>;
+  if (element.type === type) return element;
+  for (const child of React.Children.toArray(element.props.children)) {
+    const match = renderedElementByType(child, type);
+    if (match) return match;
+  }
+  return null;
+}
+
 function runEffects(): void {
   const effects = [...harness.effects];
   harness.effects.length = 0;
@@ -185,6 +202,41 @@ function runEffects(): void {
 }
 
 describe("App component wiring", () => {
+  it("exposes the accepted task snapshot to detail-only E2E synchronization", () => {
+    const previous = process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED;
+    process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED = "1";
+    try {
+      const { model } = createModel("connected");
+      model.sessionStore.setRecentTasks([
+        {
+          id: "cloud-only",
+          repoId: "repo-cloud",
+          title: "Cloud task refreshed",
+          stage: "in progress"
+        },
+        {
+          id: "lan-only",
+          repoId: "repo-lan",
+          title: "LAN-only task",
+          stage: "review"
+        }
+      ]);
+      model.sessionStore.setSelectedTask("lan-only");
+
+      const taskScreen = renderedElementByType(renderApp(), "TaskScreen");
+
+      expect(taskScreen?.props.e2eTaskSnapshotMarker).toContain(
+        "cloud-only:Cloud task refreshed"
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED;
+      } else {
+        process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED = previous;
+      }
+    }
+  });
+
   it.each(["connected", "idle", "error"] as const)(
     "keeps shell controls visible for an unresolved selection while %s",
     (connectionState) => {

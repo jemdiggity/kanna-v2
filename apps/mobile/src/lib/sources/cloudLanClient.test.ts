@@ -481,43 +481,355 @@ describe("createCloudLanClient", () => {
     }
   });
 
-  it("returns the current cloud phase without waiting for LAN and replaces stale LAN routes", async () => {
-    const duplicate = task({
-      id: "cloud-duplicate",
-      ownerDesktopId: "desktop-lan",
-      ownerLocalTaskId: "local-duplicate"
-    });
-    const cloud = createClientMock({
-      listRecentTasks: vi.fn().mockResolvedValue([duplicate])
-    });
-    const hangingStatus = new Promise<MobileServerStatus>(() => undefined);
-    const lan = createClientMock({
-      getStatus: vi
-        .fn<KannaClient["getStatus"]>()
-        .mockResolvedValueOnce(runningStatus())
-        .mockReturnValue(hangingStatus),
-      listRecentTasks: vi.fn().mockResolvedValue([
-        task({ id: "local-duplicate", title: "Fresh LAN duplicate" })
-      ])
-    });
-    const client = createCloudLanClient(cloud, lan, {
-      isLanEnabled: () => true
-    });
+  it("does not overwrite a late successful LAN snapshot when the cloud read settles afterward", async () => {
+    vi.useFakeTimers();
+    try {
+      const pendingCloud = deferred<TaskSummary[]>();
+      const pendingLan = deferred<TaskSummary[]>();
+      const staleCloudTask = task({
+        id: "cloud-stale",
+        ownerDesktopId: "desktop-lan",
+        ownerLocalTaskId: "local-closed"
+      });
+      const cloud = createClientMock({
+        listRecentTasks: vi.fn(() => pendingCloud.promise)
+      });
+      const lan = createClientMock({
+        listRecentTasks: vi.fn(() => pendingLan.promise)
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+      const onSupplement = vi.fn();
 
-    await client.listRecentTasks();
-    await client.sendTaskInput("cloud-duplicate", "use learned LAN route");
-    expect(lan.sendTaskInput).toHaveBeenLastCalledWith(
-      "local-duplicate",
-      "use learned LAN route"
-    );
+      const read = client.listRecentTasksWithSupplement(onSupplement);
+      await vi.advanceTimersByTimeAsync(25);
+      pendingLan.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
 
-    await expect(client.listCurrentCloudTasks()).resolves.toEqual([duplicate]);
-    await client.sendTaskInput("cloud-duplicate", "use current cloud route");
+      expect(onSupplement).not.toHaveBeenCalled();
 
-    expect(cloud.sendTaskInput).toHaveBeenLastCalledWith(
-      "cloud-duplicate",
-      "use current cloud route"
-    );
+      pendingCloud.resolve([staleCloudTask]);
+      await expect(read).resolves.toEqual([]);
+      expect(onSupplement).not.toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the last-good LAN snapshot and routes when the next probe times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const duplicate = task({
+        id: "cloud-duplicate",
+        title: "Cloud duplicate",
+        ownerDesktopId: "desktop-lan",
+        ownerLocalTaskId: "local-duplicate"
+      });
+      const updatedDuplicate = {
+        ...duplicate,
+        title: "Newer cloud duplicate"
+      };
+      const localDuplicate = task({
+        id: "local-duplicate",
+        title: "Fresh LAN duplicate"
+      });
+      const lanOnly = task({ id: "lan-only", title: "LAN-only task" });
+      const cloud = createClientMock({
+        listRecentTasks: vi
+          .fn<KannaClient["listRecentTasks"]>()
+          .mockResolvedValueOnce([duplicate])
+          .mockResolvedValueOnce([updatedDuplicate])
+      });
+      const hangingStatus = new Promise<MobileServerStatus>(() => undefined);
+      const lan = createClientMock({
+        getStatus: vi
+          .fn<KannaClient["getStatus"]>()
+          .mockResolvedValueOnce(runningStatus())
+          .mockReturnValueOnce(hangingStatus),
+        listRecentTasks: vi.fn().mockResolvedValue([localDuplicate, lanOnly])
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+
+      await client.listRecentTasks();
+      const replacement = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(0);
+
+      await client.sendTaskInput("cloud-duplicate", "during pending probe");
+      await client.sendTaskInput("lan-only", "during pending probe");
+      expect(lan.sendTaskInput).toHaveBeenCalledWith(
+        "local-duplicate",
+        "during pending probe"
+      );
+      expect(lan.sendTaskInput).toHaveBeenCalledWith(
+        "lan-only",
+        "during pending probe"
+      );
+      expect(cloud.sendTaskInput).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(replacement).resolves.toEqual([
+        {
+          ...updatedDuplicate,
+          ownerLocalRepoId: localDuplicate.repoId,
+          title: localDuplicate.title,
+          stage: localDuplicate.stage
+        },
+        lanOnly
+      ]);
+
+      await client.sendTaskInput("cloud-duplicate", "after timed-out probe");
+      await client.sendTaskInput("lan-only", "after timed-out probe");
+      expect(lan.sendTaskInput).toHaveBeenCalledWith(
+        "local-duplicate",
+        "after timed-out probe"
+      );
+      expect(lan.sendTaskInput).toHaveBeenCalledWith(
+        "lan-only",
+        "after timed-out probe"
+      );
+      expect(cloud.sendTaskInput).not.toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves last-good LAN-backed display ids and routes when cloud membership changes during a timed-out probe", async () => {
+    vi.useFakeTimers();
+    try {
+      const duplicate = task({
+        id: "cloud-duplicate",
+        title: "Cloud duplicate",
+        ownerDesktopId: "desktop-lan",
+        ownerLocalTaskId: "local-duplicate"
+      });
+      const collidingCloudTask = task({
+        id: "shared-id",
+        title: "Cloud collision",
+        ownerDesktopId: "desktop-other",
+        ownerLocalTaskId: "other-shared-id"
+      });
+      const newCloudTask = task({
+        id: "cloud-new",
+        title: "New cloud task",
+        ownerDesktopId: "desktop-other",
+        ownerLocalTaskId: "new-local-task"
+      });
+      const localDuplicate = task({
+        id: "local-duplicate",
+        title: "LAN duplicate"
+      });
+      const collidingLanTask = task({
+        id: "shared-id",
+        title: "LAN collision"
+      });
+      const cloud = createClientMock({
+        listRecentTasks: vi
+          .fn<KannaClient["listRecentTasks"]>()
+          .mockResolvedValueOnce([duplicate, collidingCloudTask])
+          .mockResolvedValueOnce([newCloudTask])
+      });
+      const hangingStatus = new Promise<MobileServerStatus>(() => undefined);
+      const lan = createClientMock({
+        getStatus: vi
+          .fn<KannaClient["getStatus"]>()
+          .mockResolvedValueOnce(runningStatus())
+          .mockReturnValueOnce(hangingStatus),
+        listRecentTasks: vi
+          .fn<KannaClient["listRecentTasks"]>()
+          .mockResolvedValueOnce([localDuplicate, collidingLanTask])
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+
+      const initial = await client.listRecentTasks();
+      expect(initial.map(({ id }) => id)).toEqual([
+        "cloud-duplicate",
+        "shared-id",
+        "lan:desktop-lan:shared-id"
+      ]);
+
+      const replacement = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(25);
+      const tasks = await replacement;
+
+      expect(tasks).toEqual([
+        newCloudTask,
+        expect.objectContaining({
+          id: "cloud-duplicate",
+          title: "LAN duplicate"
+        }),
+        expect.objectContaining({
+          id: "lan:desktop-lan:shared-id",
+          title: "LAN collision"
+        })
+      ]);
+
+      await client.sendTaskInput("cloud-duplicate", "duplicate input");
+      await client.sendTaskInput(
+        "lan:desktop-lan:shared-id",
+        "collision input"
+      );
+      expect(lan.sendTaskInput).toHaveBeenCalledWith(
+        "local-duplicate",
+        "duplicate input"
+      );
+      expect(lan.sendTaskInput).toHaveBeenCalledWith(
+        "shared-id",
+        "collision input"
+      );
+      expect(cloud.sendTaskInput).not.toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a different-repository cloud task when a timed-out probe preserves the old LAN projection", async () => {
+    vi.useFakeTimers();
+    try {
+      const originalDuplicate = task({
+        id: "cloud-repo-a",
+        repoId: "cloud-repo-a",
+        title: "Cloud repo A",
+        ownerDesktopId: "desktop-lan",
+        ownerLocalRepoId: "local-repo-a",
+        ownerLocalTaskId: "shared-local-task"
+      });
+      const differentRepoCloudTask = task({
+        id: "cloud-repo-b",
+        repoId: "cloud-repo-b",
+        title: "Cloud repo B",
+        ownerDesktopId: "desktop-lan",
+        ownerLocalRepoId: "local-repo-b",
+        ownerLocalTaskId: "shared-local-task"
+      });
+      const localTask = task({
+        id: "shared-local-task",
+        repoId: "local-repo-a",
+        title: "LAN repo A"
+      });
+      const cloud = createClientMock({
+        listRecentTasks: vi
+          .fn<KannaClient["listRecentTasks"]>()
+          .mockResolvedValueOnce([originalDuplicate])
+          .mockResolvedValueOnce([differentRepoCloudTask])
+      });
+      const hangingStatus = new Promise<MobileServerStatus>(() => undefined);
+      const lan = createClientMock({
+        getStatus: vi
+          .fn<KannaClient["getStatus"]>()
+          .mockResolvedValueOnce(runningStatus())
+          .mockReturnValueOnce(hangingStatus),
+        listRecentTasks: vi.fn().mockResolvedValueOnce([localTask])
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+
+      await expect(client.listRecentTasks()).resolves.toEqual([
+        expect.objectContaining({
+          id: "cloud-repo-a",
+          title: "LAN repo A"
+        })
+      ]);
+
+      const replacement = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(replacement).resolves.toEqual([
+        differentRepoCloudTask,
+        expect.objectContaining({
+          id: "cloud-repo-a",
+          title: "LAN repo A"
+        })
+      ]);
+
+      await client.sendTaskInput("cloud-repo-a", "use preserved LAN route");
+      await client.sendTaskInput("cloud-repo-b", "use fresh cloud route");
+      expect(lan.sendTaskInput).toHaveBeenCalledWith(
+        "shared-local-task",
+        "use preserved LAN route"
+      );
+      expect(cloud.sendTaskInput).toHaveBeenCalledWith(
+        "cloud-repo-b",
+        "use fresh cloud route"
+      );
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("matches an enriched owner repository to a preserved LAN projection after a timed-out probe", async () => {
+    vi.useFakeTimers();
+    try {
+      const duplicateWithoutOwnerRepo = task({
+        id: "cloud-duplicate",
+        repoId: "cloud-repo",
+        title: "Cloud duplicate",
+        ownerDesktopId: "desktop-lan",
+        ownerLocalTaskId: "local-duplicate"
+      });
+      const enrichedDuplicate = {
+        ...duplicateWithoutOwnerRepo,
+        ownerLocalRepoId: "local-repo"
+      };
+      const localDuplicate = task({
+        id: "local-duplicate",
+        repoId: "local-repo",
+        title: "LAN duplicate"
+      });
+      const cloud = createClientMock({
+        listRecentTasks: vi
+          .fn<KannaClient["listRecentTasks"]>()
+          .mockResolvedValueOnce([duplicateWithoutOwnerRepo])
+          .mockResolvedValueOnce([enrichedDuplicate])
+      });
+      const hangingStatus = new Promise<MobileServerStatus>(() => undefined);
+      const lan = createClientMock({
+        getStatus: vi
+          .fn<KannaClient["getStatus"]>()
+          .mockResolvedValueOnce(runningStatus())
+          .mockReturnValueOnce(hangingStatus),
+        listRecentTasks: vi.fn().mockResolvedValueOnce([localDuplicate])
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+
+      await client.listRecentTasks();
+      const replacement = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(replacement).resolves.toEqual([
+        expect.objectContaining({
+          id: "cloud-duplicate",
+          ownerLocalRepoId: "local-repo",
+          title: "LAN duplicate"
+        })
+      ]);
+
+      await client.sendTaskInput("cloud-duplicate", "use preserved LAN route");
+      expect(lan.sendTaskInput).toHaveBeenCalledWith(
+        "local-duplicate",
+        "use preserved LAN route"
+      );
+      expect(cloud.sendTaskInput).not.toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("routes mixed task streams and mutations to the correct client and raw id", async () => {
@@ -803,57 +1115,118 @@ describe("createCloudLanClient", () => {
     expect(cloud.closeTask).not.toHaveBeenCalled();
   });
 
-  it("keeps routes from the newest read when an older LAN-success read finishes late", async () => {
-    const cloudDuplicate = task({
-      id: "cloud-duplicate",
+  it("shares one route-backed snapshot across overlapping task collection reads", async () => {
+    const firstCloudRead = deferred<TaskSummary[]>();
+    const firstLanStatus = deferred<MobileServerStatus>();
+    const firstCloudTask = task({
+      id: "cloud-old",
+      title: "First cloud task",
       ownerDesktopId: "desktop-lan",
-      ownerLocalTaskId: "local-task"
+      ownerLocalTaskId: "local-old"
     });
-    const localTask = task({ id: "local-task" });
-    const oldCloud = deferred<TaskSummary[]>();
-    const oldLanStatus = deferred<MobileServerStatus>();
+    const secondCloudTask = task({
+      id: "cloud-new",
+      title: "Second cloud task",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalTaskId: "local-new"
+    });
+    const firstLanTask = task({
+      id: "local-old",
+      title: "First LAN task",
+      stage: "review"
+    });
+    const secondLanTask = task({
+      id: "local-new",
+      title: "Second LAN task",
+      stage: "pr"
+    });
     const cloudLists = vi
       .fn<KannaClient["listRecentTasks"]>()
-      .mockResolvedValueOnce([cloudDuplicate])
-      .mockReturnValueOnce(oldCloud.promise)
-      .mockResolvedValueOnce([cloudDuplicate]);
+      .mockReturnValueOnce(firstCloudRead.promise)
+      .mockResolvedValueOnce([secondCloudTask]);
+    const cloud = createClientMock({ listRecentTasks: cloudLists });
     const lanStatuses = vi
       .fn<KannaClient["getStatus"]>()
-      .mockResolvedValueOnce(runningStatus())
-      .mockReturnValueOnce(oldLanStatus.promise)
-      .mockRejectedValueOnce(new Error("LAN unavailable"));
-    const cloud = createClientMock({ listRecentTasks: cloudLists });
+      .mockReturnValueOnce(firstLanStatus.promise)
+      .mockResolvedValueOnce(runningStatus());
     const lan = createClientMock({
       getStatus: lanStatuses,
       listRecentTasks: vi
         .fn<KannaClient["listRecentTasks"]>()
-        .mockResolvedValueOnce([localTask])
-        .mockResolvedValueOnce([localTask])
+        .mockResolvedValueOnce([firstLanTask])
+        .mockResolvedValueOnce([secondLanTask])
     });
     const client = createCloudLanClient(cloud, lan, {
       isLanEnabled: () => true
     });
 
-    await client.listRecentTasks();
-    await client.sendTaskInput("cloud-duplicate", "initial LAN route");
+    const recentRead = client.listRecentTasks();
+    const searchRead = client.searchTasks("");
+
+    expect(cloudLists).toHaveBeenCalledTimes(1);
+    expect(lanStatuses).toHaveBeenCalledTimes(1);
+
+    firstCloudRead.resolve([firstCloudTask]);
+    firstLanStatus.resolve(runningStatus());
+    const firstTasks = [
+      {
+        ...firstCloudTask,
+        ownerLocalRepoId: firstLanTask.repoId,
+        title: firstLanTask.title,
+        stage: firstLanTask.stage
+      }
+    ];
+
+    await expect(recentRead).resolves.toEqual(firstTasks);
+    await expect(searchRead).resolves.toEqual(firstTasks);
+
+    const secondTasks = [
+      {
+        ...secondCloudTask,
+        ownerLocalRepoId: secondLanTask.repoId,
+        title: secondLanTask.title,
+        stage: secondLanTask.stage
+      }
+    ];
+    await expect(client.listRecentTasks()).resolves.toEqual(secondTasks);
+
+    await client.sendTaskInput("cloud-new", "route through accepted snapshot");
     expect(lan.sendTaskInput).toHaveBeenCalledWith(
-      "local-task",
-      "initial LAN route"
+      "local-new",
+      "route through accepted snapshot"
     );
+    expect(cloud.sendTaskInput).not.toHaveBeenCalled();
+  });
 
-    const olderRead = client.listRecentTasks();
-    const newerRead = client.listRecentTasks();
+  it("lets an authoritative publication bypass a hung incidental cloud read", async () => {
+    const incidentalCloudRead = deferred<TaskSummary[]>();
+    const initialTask = task({ id: "cloud-initial", title: "Initial" });
+    const staleIncidentalTask = task({ id: "cloud-stale", title: "Stale" });
+    const freshPublishedTask = task({ id: "cloud-fresh", title: "Fresh" });
+    const cloudLists = vi
+      .fn<KannaClient["listRecentTasks"]>()
+      .mockResolvedValueOnce([initialTask])
+      .mockReturnValueOnce(incidentalCloudRead.promise)
+      .mockResolvedValueOnce([freshPublishedTask]);
+    const cloud = createClientMock({ listRecentTasks: cloudLists });
+    const client = createCloudLanClient(cloud, createClientMock(), {
+      isLanEnabled: () => false
+    });
 
-    await expect(newerRead).resolves.toEqual([cloudDuplicate]);
-    oldCloud.resolve([cloudDuplicate]);
-    oldLanStatus.resolve(runningStatus());
-    await expect(olderRead).resolves.toEqual([
-      { ...cloudDuplicate, title: localTask.title, stage: localTask.stage }
-    ]);
+    await expect(client.listRecentTasks()).resolves.toEqual([initialTask]);
+    const incidentalRead = client.searchTasks("");
+    const authoritativeRead = client.listRecentTasksWithSupplement(vi.fn());
 
-    await client.closeTask("cloud-duplicate");
-    expect(cloud.closeTask).toHaveBeenCalledWith("cloud-duplicate");
-    expect(lan.closeTask).not.toHaveBeenCalled();
+    expect(cloudLists).toHaveBeenCalledTimes(3);
+    await expect(authoritativeRead).resolves.toEqual([freshPublishedTask]);
+
+    incidentalCloudRead.resolve([staleIncidentalTask]);
+    await expect(incidentalRead).resolves.toEqual([freshPublishedTask]);
+    await client.sendTaskInput("cloud-fresh", "use fresh route");
+    expect(cloud.sendTaskInput).toHaveBeenCalledWith(
+      "cloud-fresh",
+      "use fresh route"
+    );
   });
 
   it("routes task creation to LAN only for its currently reachable desktop", async () => {

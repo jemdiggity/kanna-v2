@@ -136,11 +136,35 @@ describe("PTY fixture selection", () => {
 });
 
 describe("waitForTaskTerminalLive", () => {
+  it("does not treat an absent overlay as live before task detail mounts", async () => {
+    const taskDetail = createElement(() => false);
+    const agentMessageView = createElement(() => false);
+    const overlay = createElement(() => false);
+    const ui = {
+      getTaskDetailScreen: vi.fn(async () => taskDetail),
+      getAgentMessageView: vi.fn(async () => agentMessageView),
+      getTerminalOverlay: vi.fn(async () => overlay),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) {
+          return;
+        }
+
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await expect(waitForTaskTerminalLive(ui)).rejects.toThrow(
+      "Expected the mobile task terminal"
+    );
+  });
+
   it("waits for the terminal overlay to disappear after opening a task", async () => {
     let overlayVisible = true;
+    const taskDetail = createElement(() => true);
     const agentMessageView = createElement(() => false);
     const overlay = createElement(() => overlayVisible);
     const ui = {
+      getTaskDetailScreen: vi.fn(async () => taskDetail),
       getAgentMessageView: vi.fn(async () => agentMessageView),
       getTerminalOverlay: vi.fn(async () => overlay),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
@@ -161,11 +185,39 @@ describe("waitForTaskTerminalLive", () => {
     expect(ui.getTerminalOverlay).toHaveBeenCalled();
   });
 
-  it("accepts an agent message view after opening a task", async () => {
+  it("does not accept an agent message view until its stream is ready", async () => {
+    const taskDetail = createElement(() => true);
     const agentMessageView = createElement(() => true);
+    const agentMessageReady = createElement(() => false);
+    const overlay = createElement(() => false);
+    const ui = {
+      getTaskDetailScreen: vi.fn(async () => taskDetail),
+      getAgentMessageView: vi.fn(async () => agentMessageView),
+      getAgentMessageReady: vi.fn(async () => agentMessageReady),
+      getTerminalOverlay: vi.fn(async () => overlay),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        await condition();
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await expect(waitForTaskTerminalLive(ui)).rejects.toThrow(
+      "Expected the mobile task terminal"
+    );
+
+    expect(ui.getAgentMessageReady).toHaveBeenCalled();
+    expect(ui.getTerminalOverlay).not.toHaveBeenCalled();
+  });
+
+  it("accepts an agent message view after its stream is ready", async () => {
+    const taskDetail = createElement(() => true);
+    const agentMessageView = createElement(() => true);
+    const agentMessageReady = createElement(() => true);
     const overlay = createElement(() => true);
     const ui = {
+      getTaskDetailScreen: vi.fn(async () => taskDetail),
       getAgentMessageView: vi.fn(async () => agentMessageView),
+      getAgentMessageReady: vi.fn(async () => agentMessageReady),
       getTerminalOverlay: vi.fn(async () => overlay),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (await condition()) {
@@ -178,7 +230,7 @@ describe("waitForTaskTerminalLive", () => {
 
     await waitForTaskTerminalLive(ui);
 
-    expect(ui.getAgentMessageView).toHaveBeenCalled();
+    expect(ui.getAgentMessageReady).toHaveBeenCalled();
     expect(ui.getTerminalOverlay).not.toHaveBeenCalled();
   });
 });

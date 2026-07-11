@@ -210,11 +210,11 @@ export interface MergedTaskSnapshot {
 }
 ```
 
-Match owner desktop/task and owner-local repo when present. Preserve cloud ID/repository/owner fields, overlay non-null LAN title/stage/snippet/agent type, suppress proven stale same-owner cloud rows, and append unused LAN rows.
+Match owner desktop/task and owner-local repo when present. Preserve cloud ID/repository/owner fields, fill a missing owner-local repo from the matched LAN task, overlay non-null LAN title/stage/snippet/agent type, suppress proven stale same-owner cloud rows, and append unused LAN rows.
 
 - [ ] **Step 5: Write failing composed-client routing tests**
 
-After `listRecentTasks`, assert duplicates and LAN-only tasks route streams/actions to raw LAN IDs, cloud-only tasks route cloud, later LAN unavailability replaces duplicate routes with cloud, failed mutations are not cross-retried, and `createTask` uses LAN only when `input.desktopId` matches its reachable desktop.
+After `listRecentTasks`, assert duplicates and LAN-only tasks route streams/actions to raw LAN IDs, cloud-only tasks route cloud, failed/timed-out LAN reprobes retain last-good display IDs and routes even when cloud duplicate/collision membership changes, repository mismatches remain separate, a later cloud owner-repo enrichment still matches a projection first learned from LAN, same-turn task collection readers share one route-backed snapshot, an authoritative publication bypasses a hung incidental read, a late successful LAN result cannot be downgraded by the same read, explicit LAN disablement replaces preserved routes with cloud, failed mutations are not cross-retried, and `createTask` uses LAN only when `input.desktopId` matches its reachable desktop.
 
 ```ts
 client.observeTaskAgent("cloud-task", listener);
@@ -233,7 +233,7 @@ export function createCloudLanClient(
 ): KannaClient;
 ```
 
-Load cloud tasks and, when enabled, a LAN status/full recent-task snapshot with `Promise.allSettled`. Tolerate one failed read source, reject when both fail and no cached source exists, and atomically replace the route map only for the newest read epoch. Filter merged recent tasks for repo/search views; merge repo/desktop lists by ID. Mutations select exactly one route.
+Load cloud tasks and, when enabled, a LAN status/full recent-task snapshot with `Promise.allSettled`. Tolerate one failed read source, reject when both fail and no cached source exists, and atomically replace the route map only for the newest read epoch. Coalesce same-turn recent/repository/search calls into one composed batch, but always give `listRecentTasksWithSupplement` a fresh authoritative read so a Firestore callback cannot join an older or hung incidental snapshot. Incidental calls during an authoritative replacement use the accepted last-good projection. Filter the merged snapshot for repo/search views; merge repo/desktop lists by ID. Mutations select exactly one route.
 
 - [ ] **Step 7: Write and fix the stale relay-route regression**
 
@@ -298,7 +298,7 @@ Keep disconnected and signed-out LAN-only paths.
 
 - [ ] **Step 5: Version subscription merges and recover errors**
 
-Extend the controller adapter with `onError`. Each Firestore callback updates cache and loads `activeClient.listRecentTasks`; apply only the current subscription epoch and newest update revision. On task-index error retain cache, surface `onError`, and attempt the same versioned one-shot merged read. Invalidate before unsubscribe/clear.
+Extend the controller adapter with `onError`. Each Firestore callback updates cache and queues `activeClient.listRecentTasks` through a single-flight drain with one trailing-latest slot; relay-presence and Bonjour service changes enter the same drain. Reuse the endpoint validated by LAN status for the rest of that snapshot. Apply only the current subscription epoch and client generation. On task-index error retain cache, surface `onError`, clear queued publication, and attempt the same versioned one-shot merged read. Invalidate before unsubscribe/clear.
 
 ```ts
 const revision = ++updateRevision;

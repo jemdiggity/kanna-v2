@@ -75,6 +75,12 @@ export default function App() {
     state.recentTasks.find((task) => task.id === state.selectedTaskId) ??
     state.searchResults.find((task) => task.id === state.selectedTaskId) ??
     null;
+  const e2eTaskSnapshotMarker =
+    process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1"
+      ? state.recentTasks
+          .map((task) => `${task.id}:${task.title ?? ""}`)
+          .join("\n")
+      : undefined;
   const taskDetailVisible = isTaskDetailVisible(
     state.connectionState,
     selectedTask !== null,
@@ -150,6 +156,7 @@ export default function App() {
     if (selectedTask && taskDetailVisible) {
       return (
         <TaskScreen
+          e2eTaskSnapshotMarker={e2eTaskSnapshotMarker}
           task={selectedTask}
           terminalErrorMessage={state.taskTerminalErrorMessage}
           terminalOutput={state.taskTerminalOutput}

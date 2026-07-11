@@ -44,8 +44,10 @@ interface RelayUi {
   getAccountSignInButton(): Promise<RelayElement>;
   getAccountSignOutButton(): Promise<RelayElement>;
   getAgentMessageView(): Promise<RelayElement>;
+  getAgentMessageReady(): Promise<RelayElement>;
   getBackButton(): Promise<RelayElement>;
   getTaskInput(): Promise<RelayElement>;
+  getTaskDetailScreen(): Promise<RelayElement>;
   getTaskRowById(taskId: string): Promise<RelayElement>;
   getTaskRows(): Promise<RelayElement[]>;
   getTaskSendButton(): Promise<RelayElement>;
@@ -126,11 +128,17 @@ function createRelayUi(driver: Browser): RelayUi {
     async getAgentMessageView() {
       return driver.$(selectors.agentMessageView);
     },
+    async getAgentMessageReady() {
+      return driver.$(selectors.agentMessageReady);
+    },
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
     async getTaskInput() {
       return driver.$(selectors.taskInput);
+    },
+    async getTaskDetailScreen() {
+      return driver.$(selectors.taskDetailScreen);
     },
     async getTaskRowById(taskId) {
       return driver.$(`~mobile.task-row.${taskId}`);

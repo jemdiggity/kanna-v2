@@ -75,7 +75,6 @@ interface AppModelOptions {
 
 interface ResolvedAppClient {
   client: KannaClient;
-  listCurrentCloudTasks?: () => Promise<TaskSummary[]>;
   listRecentTasksWithSupplement?: (
     onSupplement: (tasks: TaskSummary[]) => void
   ) => Promise<TaskSummary[]>;
@@ -157,6 +156,19 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let clientGeneration = 0;
   let currentLiveTaskRepublish: (() => Promise<void>) | null = null;
   let activeAuthUid = signedInUid(authSession.getState());
+  // Native discovery can settle after the first cloud snapshot and relay
+  // presence read. Feed it through the same complete-snapshot drain so the
+  // newly reachable LAN source is incorporated without publishing a partial
+  // workspace or waiting for an unrelated cloud callback.
+  bonjourBrowser.subscribe(() => {
+    if (
+      forceCloud ||
+      !hasTrustedLanPeer(sessionStore.getState().trustedDesktops)
+    ) {
+      return;
+    }
+    void currentLiveTaskRepublish?.();
+  });
   const invalidateLiveCloudState = () => {
     liveSubscriptionEpoch += 1;
     liveCloudTasks = [];
@@ -207,6 +219,8 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       let taskIndexUnsubscribe: (() => void) | null = null;
       let taskIndexRestartTimer: ReturnType<typeof setTimeout> | null = null;
       let presenceRepublishPending = false;
+      let livePublicationPendingGeneration: number | null = null;
+      let livePublicationDrain: Promise<void> | null = null;
       let currentTaskRecovery: {
         revision: number;
         readSucceeded: boolean;
@@ -225,14 +239,6 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         const source = activeClient;
         let published = false;
         try {
-          if (source.listCurrentCloudTasks) {
-            const cloudTasks = await source.listCurrentCloudTasks();
-            if (!isCurrent(revision, generation)) return false;
-            onUpdate(cloudTasks);
-            published = true;
-            if (!isCurrent(revision, generation)) return published;
-          }
-
           const tasks = await (
             source.listRecentTasksWithSupplement
               ? source.listRecentTasksWithSupplement((supplement) => {
@@ -249,6 +255,45 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         }
         return published;
       };
+      const drainLivePublicationQueue = (): Promise<void> => {
+        if (livePublicationDrain) return livePublicationDrain;
+        const drain = (async () => {
+          while (livePublicationPendingGeneration !== null) {
+            const generation = livePublicationPendingGeneration;
+            livePublicationPendingGeneration = null;
+            if (
+              epoch !== liveSubscriptionEpoch ||
+              liveCloudTasksUid !== uid ||
+              !liveCloudTasksReady ||
+              generation !== clientGeneration
+            ) {
+              continue;
+            }
+            const revision = ++updateRevision;
+            await publishCurrentTasks(revision);
+          }
+        })().finally(() => {
+          if (livePublicationDrain === drain) {
+            livePublicationDrain = null;
+            if (livePublicationPendingGeneration !== null) {
+              void drainLivePublicationQueue();
+            }
+          }
+        });
+        livePublicationDrain = drain;
+        return drain;
+      };
+      const enqueueCurrentLiveTasks = (): Promise<void> => {
+        if (
+          epoch !== liveSubscriptionEpoch ||
+          liveCloudTasksUid !== uid ||
+          !liveCloudTasksReady
+        ) {
+          return Promise.resolve();
+        }
+        livePublicationPendingGeneration = clientGeneration;
+        return drainLivePublicationQueue();
+      };
       const republishCurrentLiveTasks = async () => {
         if (
           epoch !== liveSubscriptionEpoch ||
@@ -262,8 +307,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
           return;
         }
         presenceRepublishPending = false;
-        const revision = ++updateRevision;
-        await publishCurrentTasks(revision);
+        await enqueueCurrentLiveTasks();
       };
       currentLiveTaskRepublish = republishCurrentLiveTasks;
       const clearTaskIndexRestartTimer = () => {
@@ -295,6 +339,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         }
         stopTaskIndexSubscription();
         onError?.(formatCloudTaskIndexError(indexError));
+        livePublicationPendingGeneration = null;
         const revision = ++updateRevision;
         const generation = clientGeneration;
         const recovery = {
@@ -350,11 +395,10 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
             if (!isCurrentSubscription()) return;
             presenceRepublishPending = false;
             currentLiveTaskRepublish = republishCurrentLiveTasks;
-            const revision = ++updateRevision;
             liveCloudTasks = tasks;
             liveCloudTasksUid = uid;
             liveCloudTasksReady = true;
-            void publishCurrentTasks(revision);
+            void enqueueCurrentLiveTasks();
           },
           (indexError) => {
             if (isCurrentSubscription()) recoverCurrentTasks(indexError);
@@ -368,6 +412,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       };
       startTaskIndexSubscription();
       return () => {
+        livePublicationPendingGeneration = null;
         if (currentLiveTaskRepublish === republishCurrentLiveTasks) {
           currentLiveTaskRepublish = null;
         }
@@ -566,7 +611,6 @@ function createClientForMode({
 
     return {
       client: composedClient,
-      listCurrentCloudTasks: () => composedClient.listCurrentCloudTasks(),
       listRecentTasksWithSupplement: (onSupplement) =>
         composedClient.listRecentTasksWithSupplement(onSupplement),
       dispose() {
@@ -722,11 +766,17 @@ function createTrustedLanFallbackClient({
   return {
     client,
     clientForDesktop(desktopId) {
-      return getTrustedDesktops().some(
-        (desktop) => desktop.desktopId === desktopId
-      )
-        ? createResolvingClient(desktopId)
-        : null;
+      if (
+        !getTrustedDesktops().some(
+          (desktop) => desktop.desktopId === desktopId
+        )
+      ) {
+        return null;
+      }
+      const validatedBaseUrl = validatedBaseUrls.get(desktopId);
+      return validatedBaseUrl
+        ? clientForBaseUrl(validatedBaseUrl)
+        : createResolvingClient(desktopId);
     }
   };
 }
