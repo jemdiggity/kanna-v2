@@ -5,10 +5,11 @@
   "main": "dist/src/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm exec vitest run --exclude dist/**"
+    "test": "pnpm exec vitest run --exclude 'dist/**'"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "firebase-admin": "^13.8.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.4"
   }
