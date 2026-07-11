@@ -39,7 +39,7 @@ fn provider_resolution_cases_match_shared_contract() {
         let available = case.available.clone();
         let result = resolve_agent_provider_with(
             joined(&case.explicit).as_deref(),
-            joined(&case.stage).as_deref(),
+            (!case.stage.is_empty()).then_some(case.stage.as_slice()),
             agent.as_ref(),
             joined(&case.fallback).as_deref(),
             |provider| available.iter().any(|value| value == provider.as_str()),
@@ -260,6 +260,51 @@ fn stored_pipeline_definition_accepts_legacy_null_provider_and_omits_it_on_reser
     let serialized = serde_json::to_value(pipeline).unwrap();
 
     assert!(serialized["stages"][0].get("agent_provider").is_none());
+}
+
+#[test]
+fn stored_pipeline_definition_normalizes_legacy_csv_and_preserves_provider_lists() {
+    for post_key in ["post", "post_action"] {
+        let mut stage = serde_json::json!({
+            "name": "review",
+            "agent": "review",
+            "prompt": "$TASK_PROMPT",
+            "agent_provider": "codex,claude",
+            "environment": null,
+            "policy": { "transition": "manual" },
+        });
+        stage[post_key] = serde_json::json!({
+            "name": "commit",
+            "agent": "commit",
+            "prompt": null,
+            "agent_provider": "codex,claude",
+        });
+        let snapshot = serde_json::json!({
+            "name": "qa",
+            "stages": [stage],
+            "environments": null,
+        })
+        .to_string();
+
+        let pipeline = super::super::definitions::read_task_pipeline_definition(
+            "/unused",
+            "qa",
+            Some(&snapshot),
+        )
+        .expect("durable pipeline snapshots should remain readable");
+        let serialized = serde_json::to_value(pipeline).unwrap();
+
+        assert_eq!(
+            serialized["stages"][0]["agent_provider"],
+            serde_json::json!(["codex", "claude"]),
+            "{post_key} stage providers"
+        );
+        assert_eq!(
+            serialized["stages"][0]["post"]["agent_provider"],
+            serde_json::json!(["codex", "claude"]),
+            "{post_key} providers"
+        );
+    }
 }
 
 #[test]

@@ -45,7 +45,7 @@ pub(super) struct PipelineStage {
     pub(super) agent: Option<String>,
     pub(super) prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) agent_provider: Option<String>,
+    pub(super) agent_provider: Option<Vec<String>>,
     pub(super) environment: Option<String>,
     pub(super) policy: PipelineStagePolicy,
     pub(super) post: Option<PipelinePost>,
@@ -61,7 +61,7 @@ pub(super) struct PipelinePost {
     pub(super) agent: Option<String>,
     pub(super) prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) agent_provider: Option<String>,
+    pub(super) agent_provider: Option<Vec<String>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -154,7 +154,7 @@ struct RawPipelineStage {
     agent: Option<String>,
     prompt: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
-    agent_provider: Option<String>,
+    agent_provider: Option<Vec<String>>,
     environment: Option<String>,
     policy: Option<RawPipelineStagePolicy>,
     transition: Option<PipelineStageTransition>,
@@ -175,7 +175,7 @@ struct RawPipelinePost {
     agent: Option<String>,
     prompt: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
-    agent_provider: Option<String>,
+    agent_provider: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -184,7 +184,7 @@ struct RawPipelinePostAction {
     agent: Option<String>,
     prompt: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
-    agent_provider: Option<String>,
+    agent_provider: Option<Vec<String>>,
     #[allow(dead_code)]
     transition: Option<PipelineStageTransition>,
 }
@@ -661,7 +661,9 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
     })
 }
 
-fn deserialize_optional_provider_list<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_optional_provider_list<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -671,7 +673,15 @@ where
         // unset optional field as null. Continue reading those durable task
         // snapshots while omitting the field from newly serialized snapshots.
         serde_json::Value::Null => return Ok(None),
-        serde_json::Value::String(provider) => vec![provider],
+        // Provider selection was historically accepted as a scalar, and one
+        // buggy snapshot format joined ordered candidates into a CSV scalar.
+        // Decode both forms into the durable structural representation.
+        serde_json::Value::String(provider) => provider
+            .split(',')
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
         serde_json::Value::Array(values) => {
             if values.is_empty() || !values.iter().all(serde_json::Value::is_string) {
                 return Err(serde::de::Error::custom(
@@ -680,7 +690,7 @@ where
             }
             values
                 .into_iter()
-                .filter_map(|value| value.as_str().map(str::to_string))
+                .filter_map(|value| value.as_str().map(str::trim).map(str::to_string))
                 .collect()
         }
         _ => {
@@ -690,12 +700,17 @@ where
         }
     };
 
+    if providers.is_empty() || providers.iter().any(|provider| provider.is_empty()) {
+        return Err(serde::de::Error::custom(
+            "agent_provider must include at least one non-empty provider",
+        ));
+    }
     for provider in &providers {
         AgentProvider::from_str(provider).map_err(|error| {
             serde::de::Error::custom(format!("invalid agent_provider: {error}"))
         })?;
     }
-    Ok(Some(providers.join(",")))
+    Ok(Some(providers))
 }
 
 fn deserialize_optional_yaml_value<'de, D>(deserializer: D) -> Result<Option<YamlValue>, D::Error>

@@ -12,6 +12,10 @@
     "test": {
       "dependsOn": ["^build"]
     },
+    "@kanna/kd#test": {
+      "dependsOn": ["^build"],
+      "cache": false
+    },
     "lint": {}
   }
 }

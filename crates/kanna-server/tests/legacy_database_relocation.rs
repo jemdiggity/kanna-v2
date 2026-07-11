@@ -4,10 +4,107 @@ use reqwest::Client;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::net::TcpListener;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::process::{Child, Command};
+
+const CRASH_DB_ENV: &str = "KANNA_TEST_CRASH_LEGACY_DB";
+const CRASH_READY_ENV: &str = "KANNA_TEST_CRASH_LEGACY_READY";
+
+struct TestRoot {
+    path: Option<PathBuf>,
+}
+
+impl TestRoot {
+    fn new() -> Self {
+        let path = unique_test_root();
+        std::fs::create_dir_all(&path).expect("test root should be created");
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &Path {
+        self.path.as_deref().expect("test root should be present")
+    }
+
+    fn cleanup(&mut self) -> std::io::Result<()> {
+        let Some(path) = self.path.take() else {
+            return Ok(());
+        };
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            self.path = Some(path);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    fn spawn(command: &mut Command, label: &str) -> Self {
+        let child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("{label} should spawn: {error}"));
+        Self { child: Some(child) }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("child should still be owned")
+            .try_wait()
+    }
+
+    fn kill_and_reap(&mut self) -> std::io::Result<ExitStatus> {
+        if let Some(status) = self
+            .child
+            .as_mut()
+            .expect("child should still be owned")
+            .try_wait()?
+        {
+            self.child.take();
+            return Ok(status);
+        }
+        self.child
+            .as_mut()
+            .expect("child should still be owned")
+            .kill()?;
+        let status = self
+            .child
+            .as_mut()
+            .expect("child should still be owned")
+            .wait()?;
+        self.child.take();
+        Ok(status)
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        self.child.take();
+    }
+}
 
 fn unique_test_root() -> PathBuf {
     let suffix = SystemTime::now()
@@ -37,22 +134,128 @@ fn app_support_root(test_root: &Path) -> (PathBuf, PathBuf) {
     (home, data_root)
 }
 
-fn seed_legacy_database(path: &Path) {
+fn bootstrap_legacy_database(path: &Path) {
     std::fs::create_dir_all(path.parent().expect("legacy DB should have a parent"))
         .expect("legacy DB directory should be created");
     let connection = Connection::open(path).expect("legacy DB should open");
     connection
         .execute_batch(
             r#"
-            PRAGMA journal_mode = WAL;
             CREATE TABLE settings (
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
             );
-            INSERT INTO settings (key, value) VALUES ('legacySeed', 'from-legacy');
             "#,
         )
-        .expect("legacy DB should be seeded");
+        .expect("legacy DB schema should be bootstrapped");
+}
+
+fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = database_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+#[test]
+#[ignore = "spawned by the relocation integration test"]
+fn crash_residual_wal_writer() {
+    let (Some(db_path), Some(ready_path)) = (
+        std::env::var_os(CRASH_DB_ENV),
+        std::env::var_os(CRASH_READY_ENV),
+    ) else {
+        // This helper is also discoverable by `cargo test -- --ignored`.
+        // Without its parent-provided fixture paths, it has nothing to do.
+        return;
+    };
+    let connection = Connection::open(db_path).expect("legacy DB should open in crash writer");
+    connection
+        .execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA wal_autocheckpoint = 0;
+            BEGIN;
+            INSERT INTO settings (key, value) VALUES ('legacySeed', 'from-legacy');
+            COMMIT;
+            "#,
+        )
+        .expect("crash writer should commit the WAL-only seed");
+    std::fs::write(ready_path, b"ready").expect("crash writer should signal readiness");
+    loop {
+        std::thread::park();
+    }
+}
+
+fn spawn_crash_residual_writer(db_path: &Path, ready_path: &Path) -> ChildGuard {
+    let executable = std::env::current_exe().expect("integration test executable should resolve");
+    let mut command = Command::new(executable);
+    command
+        .args([
+            "--ignored",
+            "--exact",
+            "crash_residual_wal_writer",
+            "--nocapture",
+        ])
+        .env(CRASH_DB_ENV, db_path)
+        .env(CRASH_READY_ENV, ready_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    ChildGuard::spawn(&mut command, "crash writer")
+}
+
+async fn wait_for_crash_writer_ready(child: &mut ChildGuard, ready_path: &Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if ready_path.exists() {
+            return;
+        }
+        if let Some(status) = child
+            .try_wait()
+            .expect("crash writer process status should be readable")
+        {
+            panic!("crash writer exited before becoming ready: {status}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "crash writer did not create ready marker {}",
+        ready_path.display()
+    );
+}
+
+fn assert_nonempty_file(path: &Path) {
+    assert!(
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0),
+        "expected non-empty crash residual {}",
+        path.display()
+    );
+}
+
+fn prove_seed_is_absent_from_main_file_only(legacy_db_path: &Path, copy_path: &Path) {
+    std::fs::copy(legacy_db_path, copy_path).expect("legacy main-file-only copy should succeed");
+    let copy = Connection::open(copy_path).expect("main-file-only copy should open");
+    let settings_tables: i64 = copy
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'settings'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("main-file-only copy should expose the bootstrapped schema");
+    assert_eq!(
+        settings_tables, 1,
+        "settings schema should be in the main DB"
+    );
+    let seed_rows: i64 = copy
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'legacySeed'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("main-file-only copy should query settings");
+    assert_eq!(
+        seed_rows, 0,
+        "legacySeed must be committed only in the residual WAL"
+    );
 }
 
 fn write_server_config(
@@ -81,7 +284,7 @@ fn write_server_config(
     std::fs::write(path, config).expect("server config should be written");
 }
 
-async fn start_server(config_path: &Path, home: &Path, data_root: &Path, port: u16) -> Child {
+async fn start_server(config_path: &Path, home: &Path, data_root: &Path, port: u16) -> ChildGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_kanna-server"));
     command
         .env("KANNA_SERVER_CONFIG", config_path)
@@ -89,9 +292,8 @@ async fn start_server(config_path: &Path, home: &Path, data_root: &Path, port: u
         .env("XDG_DATA_HOME", data_root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let mut child = command.spawn().expect("kanna-server should spawn");
+        .stderr(Stdio::null());
+    let mut child = ChildGuard::spawn(&mut command, "kanna-server");
     let status_url = format!("http://127.0.0.1:{port}/v1/status");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
 
@@ -114,9 +316,10 @@ async fn start_server(config_path: &Path, home: &Path, data_root: &Path, port: u
     panic!("kanna-server did not become ready at {status_url}");
 }
 
-async fn stop_server(child: &mut Child) {
-    child.kill().await.expect("kanna-server should stop");
-    child.wait().await.expect("kanna-server should be reaped");
+fn stop_server(child: &mut ChildGuard) {
+    child
+        .kill_and_reap()
+        .expect("kanna-server should stop and be reaped");
 }
 
 async fn get_setting(client: &Client, port: u16, key: &str) -> Value {
@@ -132,21 +335,56 @@ async fn get_setting(client: &Client, port: u16, key: &str) -> Value {
         .expect("setting response should be JSON")
 }
 
+async fn put_setting(client: &Client, port: u16, key: &str, value: &str) {
+    let response = client
+        .put(format!("http://127.0.0.1:{port}/v1/settings/{key}"))
+        .json(&json!({ "value": value }))
+        .send()
+        .await
+        .expect("setting write should reach kanna-server");
+    assert!(
+        response.status().is_success(),
+        "setting write failed: {}",
+        response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable response>".to_string())
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_only_database_is_relocated_before_serving_and_persists_after_restart() {
-    let root = unique_test_root();
-    let (home, data_root) = app_support_root(&root);
+    let mut root = TestRoot::new();
+    let (home, data_root) = app_support_root(root.path());
     let legacy_db_path =
         kanna_runtime_defaults::legacy_desktop_db_path_for_app_support_root(&data_root);
     let canonical_db_path =
         kanna_runtime_defaults::canonical_desktop_db_path_for_app_support_root(&data_root);
-    let config_path = root.join("server.toml");
-    let daemon_dir = root.join("daemon");
-    let pairing_store_path = root.join("pairings.json");
+    let legacy_wal_path = sqlite_sidecar_path(&legacy_db_path, "-wal");
+    let legacy_shm_path = sqlite_sidecar_path(&legacy_db_path, "-shm");
+    let config_path = root.path().join("server.toml");
+    let daemon_dir = root.path().join("daemon");
+    let pairing_store_path = root.path().join("pairings.json");
+    let ready_path = root.path().join("crash-writer.ready");
+    let main_only_copy_path = root.path().join("legacy-main-only.db");
     let port = free_loopback_port();
     let client = Client::new();
 
-    seed_legacy_database(&legacy_db_path);
+    bootstrap_legacy_database(&legacy_db_path);
+    let mut crash_writer = spawn_crash_residual_writer(&legacy_db_path, &ready_path);
+    wait_for_crash_writer_ready(&mut crash_writer, &ready_path).await;
+    let crash_status = crash_writer
+        .kill_and_reap()
+        .expect("crash writer should be SIGKILLed and reaped");
+    assert_eq!(
+        crash_status.signal(),
+        Some(9),
+        "crash writer should terminate via SIGKILL"
+    );
+    assert_nonempty_file(&legacy_wal_path);
+    assert_nonempty_file(&legacy_shm_path);
+    prove_seed_is_absent_from_main_file_only(&legacy_db_path, &main_only_copy_path);
+
     write_server_config(
         &config_path,
         &canonical_db_path,
@@ -169,46 +407,34 @@ async fn legacy_only_database_is_relocated_before_serving_and_persists_after_res
         "startup should stop serving from {}",
         legacy_db_path.display()
     );
+    assert!(
+        !legacy_wal_path.exists(),
+        "startup should remove checkpointed legacy WAL {}",
+        legacy_wal_path.display()
+    );
+    assert!(
+        !legacy_shm_path.exists(),
+        "startup should remove checkpointed legacy SHM {}",
+        legacy_shm_path.display()
+    );
     assert_eq!(
         get_setting(&client, port, "legacySeed").await,
         json!({ "key": "legacySeed", "value": "from-legacy" })
     );
 
-    let write_response = client
-        .put(format!(
-            "http://127.0.0.1:{port}/v1/settings/relocationProbe"
-        ))
-        .json(&json!({ "value": "written-through-http" }))
-        .send()
-        .await
-        .expect("setting write should reach kanna-server");
-    assert!(
-        write_response.status().is_success(),
-        "setting write failed: {}",
-        write_response
-            .text()
-            .await
-            .unwrap_or_else(|_| "<unreadable response>".to_string())
-    );
-    stop_server(&mut first_server).await;
-
-    let canonical = Connection::open(&canonical_db_path).expect("canonical DB should open");
-    let persisted_value: String = canonical
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'relocationProbe'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("HTTP write should be stored in canonical DB");
-    assert_eq!(persisted_value, "written-through-http");
-    drop(canonical);
+    put_setting(&client, port, "relocationProbe", "written-through-http").await;
+    stop_server(&mut first_server);
 
     let mut second_server = start_server(&config_path, &home, &data_root, port).await;
+    assert_eq!(
+        get_setting(&client, port, "legacySeed").await,
+        json!({ "key": "legacySeed", "value": "from-legacy" })
+    );
     assert_eq!(
         get_setting(&client, port, "relocationProbe").await,
         json!({ "key": "relocationProbe", "value": "written-through-http" })
     );
-    stop_server(&mut second_server).await;
+    stop_server(&mut second_server);
 
-    std::fs::remove_dir_all(root).expect("test root should be removed");
+    root.cleanup().expect("test root should be removed");
 }

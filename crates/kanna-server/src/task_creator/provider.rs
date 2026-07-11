@@ -31,7 +31,7 @@ pub(super) fn normalize_agent_type(agent_type: Option<&str>) -> Option<&str> {
 
 pub(super) fn resolve_agent_provider(
     explicit_provider: Option<&str>,
-    stage_provider: Option<&str>,
+    stage_provider: Option<&[String]>,
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
     search_path: Option<&str>,
@@ -51,34 +51,33 @@ pub(super) fn resolve_agent_provider(
 
 pub(super) fn resolve_agent_provider_with(
     explicit_provider: Option<&str>,
-    stage_provider: Option<&str>,
+    stage_provider: Option<&[String]>,
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
     is_available: impl Fn(AgentProvider) -> bool,
 ) -> Result<AgentProvider, String> {
-    let string_source = explicit_provider
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| stage_provider.filter(|value| !value.trim().is_empty()));
-
-    let raw_candidates = if let Some(source) = string_source {
-        source
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    } else if let Some(agent) = agent.filter(|agent| !agent.agent_providers.is_empty()) {
-        agent.agent_providers.clone()
-    } else if let Some(source) = fallback_provider.filter(|value| !value.trim().is_empty()) {
-        source
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let raw_candidates =
+        if let Some(source) = explicit_provider.filter(|value| !value.trim().is_empty()) {
+            source
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        } else if let Some(providers) = stage_provider.filter(|providers| !providers.is_empty()) {
+            providers.to_vec()
+        } else if let Some(agent) = agent.filter(|agent| !agent.agent_providers.is_empty()) {
+            agent.agent_providers.clone()
+        } else if let Some(source) = fallback_provider.filter(|value| !value.trim().is_empty()) {
+            source
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
     if raw_candidates.is_empty() {
         return Err("No agent provider configured for this request.".to_string());

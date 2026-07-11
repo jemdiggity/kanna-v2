@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -32,6 +33,15 @@ interface PackageManifest {
   devDependencies?: Record<string, string>;
 }
 
+interface TurboDryRun {
+  tasks: Array<{
+    taskId: string;
+    resolvedTaskDefinition: {
+      cache: boolean;
+    };
+  }>;
+}
+
 function testFilesUnder(directory: string, prefix = ""): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -59,6 +69,26 @@ const vitestUnitPackages = [
 ];
 
 describe("test orchestration", () => {
+  it("runs uncached because kd tests inspect repository-wide inputs", () => {
+    const output = execFileSync(
+      "pnpm",
+      ["exec", "turbo", "run", "test", "--dry=json", "--filter=@kanna/kd"],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 30_000,
+      },
+    );
+    const plan = JSON.parse(output) as TurboDryRun;
+    const kdTestTask = plan.tasks.find((task) => task.taskId === "@kanna/kd#test");
+
+    expect(kdTestTask).toBeDefined();
+    if (!kdTestTask) return;
+
+    expect(kdTestTask.resolvedTaskDefinition.cache).toBe(false);
+  });
+
   it("keeps root unit tests bounded and heavy suites explicit", () => {
     const root = manifest("package.json");
     const remote = manifest("tests/remote-e2e/package.json");
