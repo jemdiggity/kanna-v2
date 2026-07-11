@@ -10,7 +10,6 @@ import { invoke } from "../invoke";
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
 import { requireService, type AdvanceStageOptions, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
-import { pinnedPipelineDefinition } from "../utils/pinnedStage";
 
 const LOCAL_SERVER_ACTION_TIMEOUT_MS = 30_000;
 const LOCAL_SERVER_ACTION_RETRY_DELAY_MS = 250;
@@ -131,22 +130,28 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       requestedItemId: itemId,
       selectedBefore: context.state.selectedItemId.value,
     });
+    const clearedSlotId = context.state.selectedItemId.value;
+    const clearedRepoId = context.state.selectedRepoId.value;
     context.state.selectedItemId.value = null;
+    if (
+      clearedRepoId
+      && context.state.lastSelectedItemByRepo.value[clearedRepoId] === clearedSlotId
+    ) {
+      const { [clearedRepoId]: _removed, ...remaining } = context.state.lastSelectedItemByRepo.value;
+      context.state.lastSelectedItemByRepo.value = remaining;
+    }
+    await requireService(context.services.persistSelection, "persistSelection")();
   }
 
   async function resolveStageAdvanceProjection(item: {
     repo_id: string;
     pipeline: string;
-    pipeline_def: string | null;
     stage: string;
   }): Promise<StageAdvanceProjection> {
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
     if (!repo) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
     try {
-      // The pinned snapshot is what the engine executes for this task; the
-      // repo's live pipeline file may have diverged since the task pinned it.
-      const pipeline =
-        pinnedPipelineDefinition(item) ?? (await loadPipeline(repo.path, item.pipeline || "default"));
+      const pipeline = await loadPipeline(repo.path, item.pipeline || "default");
       const currentIndex = pipeline.stages.findIndex((stage) => stage.name === item.stage);
       if (currentIndex === -1) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
       const currentStage = pipeline.stages[currentIndex];
@@ -380,7 +385,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       context.toast.warning(context.tt("toasts.stagePostRunning"));
       return;
     }
-    const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
+    const sourceTaskIsSelected = requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
     const { nextStageName, pendingPostName, closesOnSuccess } = await resolveStageAdvanceProjection(item);
     debugLog("[pipeline:advanceStage] selection policy", {

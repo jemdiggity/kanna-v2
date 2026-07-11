@@ -1,7 +1,12 @@
-import type { PipelineItem } from "../types/kanna";
-
 export interface TaskSearchResult {
   score: number;
+}
+
+export interface TaskSearchable {
+  display_name: string | null;
+  issue_title: string | null;
+  branch: string | null;
+  prompt: string | null;
 }
 
 interface SearchField {
@@ -59,7 +64,7 @@ function scoreTermAgainstField(term: string, field: SearchField): number {
   return 0;
 }
 
-function searchableFields(item: PipelineItem): SearchField[] {
+function searchableFields(item: TaskSearchable): SearchField[] {
   return [
     { text: item.display_name ?? "", weight: 1.35 },
     { text: item.issue_title ?? "", weight: 1.2 },
@@ -68,7 +73,7 @@ function searchableFields(item: PipelineItem): SearchField[] {
   ].filter((field) => field.text.trim().length > 0);
 }
 
-export function taskSearchMatch(query: string, item: PipelineItem): TaskSearchResult | null {
+export function taskSearchMatch(query: string, item: TaskSearchable): TaskSearchResult | null {
   const normalizedQuery = normalizeText(query);
   if (!normalizedQuery) return null;
 

@@ -104,6 +104,81 @@ async function getAppInvokeMetrics(client: WebDriverClient): Promise<{
   );
 }
 
+interface TaskCreationE2eState {
+  createResponseHeld: boolean;
+  createResponseReleased: boolean;
+  responseTaskId: string | null;
+  snapshotResponsesHeld: number;
+  snapshotResponsesHeldAfterCreateRelease: number;
+  creationStatus: "pending" | "fulfilled" | "rejected";
+  creationError: string | null;
+  createdTaskId: string | null;
+  slotId: string | null;
+  rowCount: number;
+  repoCount: string;
+  rowText: string;
+  dataTaskId: string | null;
+  ariaBusy: string | null;
+  selected: boolean;
+  sameNode: boolean;
+  selectedItemId: string | null;
+  selectedTaskId: string | null;
+  currentSlotState: string | null;
+  currentSlotTaskId: string | null;
+  currentSlotHasTask: boolean;
+  durableItemPresent: boolean;
+  observerSamples: number;
+  observerViolations: string[];
+}
+
+async function getTaskCreationE2eState(
+  client: WebDriverClient,
+  repoId: string,
+): Promise<TaskCreationE2eState> {
+  return client.executeSync<TaskCreationE2eState>(
+    `const gate = window.__KANNA_TASK_CREATION_GATE__;
+     const ctx = window.__KANNA_E2E__.setupState;
+     const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+     const store = ctx.store;
+     const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
+     const rows = repo ? Array.from(repo.querySelectorAll(".pipeline-item")) : [];
+     const row = gate?.slotId
+       ? rows.find((candidate) => candidate.dataset.slotId === gate.slotId) ?? null
+       : rows[0] ?? null;
+     const items = Array.from(unwrap(store?.items) ?? []);
+     const currentSlot = unwrap(store?.currentTaskSlot) ?? null;
+     gate?.record?.();
+     return {
+       createResponseHeld: gate?.createResponseHeld === true,
+       createResponseReleased: gate?.createResponseReleased === true,
+       responseTaskId: gate?.responseTaskId ?? null,
+       snapshotResponsesHeld: gate?.snapshotResponsesHeld ?? 0,
+       snapshotResponsesHeldAfterCreateRelease: gate?.snapshotResponsesHeldAfterCreateRelease ?? 0,
+       creationStatus: gate?.creationStatus ?? "pending",
+       creationError: gate?.creationError ?? null,
+       createdTaskId: gate?.createdTaskId ?? null,
+       slotId: gate?.slotId ?? null,
+       rowCount: rows.length,
+       repoCount: repo?.querySelector(".repo-count")?.textContent?.trim() ?? "",
+       rowText: row?.textContent?.trim() ?? "",
+       dataTaskId: row?.getAttribute("data-task-id") || null,
+       ariaBusy: row?.getAttribute("aria-busy") ?? null,
+       selected: row?.classList.contains("selected") ?? false,
+       sameNode: Boolean(row && gate?.originalRow && row === gate.originalRow),
+       selectedItemId: unwrap(store?.selectedItemId) ?? null,
+       selectedTaskId: unwrap(store?.selectedTaskId) ?? null,
+       currentSlotState: currentSlot?.state ?? null,
+       currentSlotTaskId: currentSlot?.task_id ?? null,
+       currentSlotHasTask: Boolean(currentSlot?.task),
+       durableItemPresent: Boolean(
+         gate?.responseTaskId && items.some((item) => item.id === gate.responseTaskId)
+       ),
+       observerSamples: gate?.samples?.length ?? 0,
+       observerViolations: Array.from(gate?.violations ?? []),
+     };`,
+  );
+}
+
 describe("task lifecycle", () => {
   const client = new WebDriverClient();
   let repoId = "";
@@ -129,19 +204,313 @@ describe("task lifecycle", () => {
   it("creates a task that appears in sidebar", async () => {
     // Internal setup only: lifecycle assertions need deterministic SDK-mode
     // tasks so closing behavior can be tested without launching a real agent.
-    const result = await client.executeAsync<string>(
-      `const cb = arguments[arguments.length - 1];
-       try {
-         const ctx = window.__KANNA_E2E__.setupState;
-         ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(testRepoPath)}, "Say OK", "agent")
-           .then(function() { cb("ok"); })
-           .catch(function(e) { cb("err:" + e); });
-       } catch(e) { cb("outer:" + e); }`
+    await waitForCondition(
+      async () => client.executeSync<boolean>(
+        `const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
+         const rows = repo ? Array.from(repo.querySelectorAll(".pipeline-item")) : [];
+         return rows.length > 0 && rows.every((row) => row.getAttribute("aria-busy") !== "true");`,
+      ),
+      "repository setup task to settle before the creation handoff test",
+      30_000,
     );
-    expect(result).toBe("ok");
+    const baseline = await client.executeSync<{ rowCount: number; repoCount: string }>(
+      `const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
+       return {
+         rowCount: repo?.querySelectorAll(".pipeline-item").length ?? 0,
+         repoCount: repo?.querySelector(".repo-count")?.textContent?.trim() ?? "",
+       };`,
+    );
+    expect(baseline.repoCount).toBe(String(baseline.rowCount));
+    const expectedRowCount = baseline.rowCount + 1;
+    const expectedRepoCount = String(expectedRowCount);
 
-    const el = await client.waitForText(".sidebar", "Say OK");
-    expect(el).toBeTruthy();
+    try {
+      await client.executeSync(
+        `const originalFetch = globalThis.fetch;
+       const callOriginalFetch = originalFetch.bind(globalThis);
+       let releaseCreateResponse;
+       let releaseSnapshotResponses;
+       const createResponseGate = new Promise((resolve) => { releaseCreateResponse = resolve; });
+       const snapshotResponseGate = new Promise((resolve) => { releaseSnapshotResponses = resolve; });
+       const gate = {
+         originalFetch,
+         createResponseHeld: false,
+         createResponseReleased: false,
+         responseTaskId: null,
+         snapshotResponsesHeld: 0,
+         snapshotResponsesHeldAfterCreateRelease: 0,
+         snapshotResponsesReleased: false,
+         creationStatus: "pending",
+         creationError: null,
+         createdTaskId: null,
+         creationPromise: null,
+         slotId: null,
+         expectedRowCount: ${expectedRowCount},
+         expectedRepoCount: ${JSON.stringify(expectedRepoCount)},
+         originalRow: null,
+         observer: null,
+         record: null,
+         samples: [],
+         violations: [],
+         releaseCreateResponse() {
+           if (this.createResponseReleased) return;
+           this.createResponseReleased = true;
+           releaseCreateResponse();
+         },
+         releaseSnapshotResponses() {
+           if (this.snapshotResponsesReleased) return;
+           this.snapshotResponsesReleased = true;
+           releaseSnapshotResponses();
+         },
+       };
+       window.__KANNA_TASK_CREATION_GATE__ = gate;
+       globalThis.fetch = async (input, init) => {
+         const url = typeof input === "string"
+           ? input
+           : input instanceof URL
+             ? input.href
+             : input.url;
+         const method = String(
+           init?.method ?? (input instanceof Request ? input.method : "GET")
+         ).toUpperCase();
+         const path = new URL(url, window.location.href).pathname;
+         let requestBody = null;
+         if (method === "POST" && path === "/v1/tasks" && typeof init?.body === "string") {
+           try {
+             requestBody = JSON.parse(init.body);
+           } catch {
+             requestBody = null;
+           }
+         }
+         const isTargetCreate = method === "POST"
+           && path === "/v1/tasks"
+           && requestBody?.repoId === ${JSON.stringify(repoId)}
+           && requestBody?.prompt === "Say OK";
+         const snapshotStartedAfterCreateRelease = gate.createResponseReleased;
+         const shouldHoldSnapshot = method === "GET"
+           && path === "/v1/snapshot";
+         const response = await callOriginalFetch(input, init);
+
+         if (isTargetCreate) {
+           const body = await response.clone().json().catch(() => null);
+           gate.responseTaskId = typeof body?.taskId === "string" ? body.taskId : null;
+           gate.createResponseHeld = true;
+           await createResponseGate;
+         } else if (shouldHoldSnapshot) {
+           gate.snapshotResponsesHeld += 1;
+           if (snapshotStartedAfterCreateRelease) {
+             gate.snapshotResponsesHeldAfterCreateRelease += 1;
+           }
+           await snapshotResponseGate;
+         }
+
+         return response;
+       };
+       return true;`,
+      );
+
+      await client.executeSync(
+        `const gate = window.__KANNA_TASK_CREATION_GATE__;
+         const ctx = window.__KANNA_E2E__.setupState;
+         gate.creationPromise = Promise.resolve(
+           ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(testRepoPath)}, "Say OK", "agent")
+         ).then((taskId) => {
+           gate.creationStatus = "fulfilled";
+           gate.createdTaskId = taskId;
+           return taskId;
+         }).catch((error) => {
+           gate.creationStatus = "rejected";
+           gate.creationError = error?.message || String(error);
+           throw error;
+         });
+         void gate.creationPromise.catch(() => undefined);
+         return true;`,
+      );
+
+      await waitForCondition(
+        async () => client.executeSync<boolean>(
+          `const gate = window.__KANNA_TASK_CREATION_GATE__;
+           const ctx = window.__KANNA_E2E__.setupState;
+           const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+           const selectedSlotId = unwrap(ctx.store?.selectedItemId) ?? null;
+           const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
+           const rows = repo ? Array.from(repo.querySelectorAll(".pipeline-item")) : [];
+           const row = rows.find((candidate) => candidate.dataset.slotId === selectedSlotId) ?? null;
+           return rows.length === gate.expectedRowCount && Boolean(row?.dataset.slotId);`,
+        ),
+        "optimistic task sidebar slot",
+        30_000,
+      );
+
+      const captured = await client.executeSync<{ slotId: string; rowCount: number; repoCount: string }>(
+        `const gate = window.__KANNA_TASK_CREATION_GATE__;
+         const ctx = window.__KANNA_E2E__.setupState;
+         const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+         const selectedSlotId = unwrap(ctx.store?.selectedItemId) ?? null;
+         const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
+         const rows = repo ? Array.from(repo.querySelectorAll(".pipeline-item")) : [];
+         const row = rows.find((candidate) => candidate.dataset.slotId === selectedSlotId) ?? null;
+         if (!repo || rows.length !== gate.expectedRowCount || !row?.dataset.slotId) {
+           throw new Error("expected one additional selected optimistic task slot before capturing its DOM identity");
+         }
+         gate.slotId = row.dataset.slotId;
+         gate.originalRow = row;
+         gate.record = () => {
+           const currentRows = Array.from(repo.querySelectorAll(".pipeline-item"));
+           const repoCount = repo.querySelector(".repo-count")?.textContent?.trim() ?? "";
+           const currentRow = currentRows.find(
+             (candidate) => candidate.dataset.slotId === gate.slotId
+           ) ?? null;
+           const sample = {
+             rowCount: currentRows.length,
+             repoCount,
+             sameNode: currentRow === gate.originalRow,
+             dataTaskId: currentRow?.getAttribute("data-task-id") || null,
+           };
+           gate.samples.push(sample);
+           const noteViolation = (message) => {
+             if (!gate.violations.includes(message)) gate.violations.push(message);
+           };
+           if (sample.rowCount !== gate.expectedRowCount) noteViolation("row-count:" + sample.rowCount);
+           if (sample.repoCount !== gate.expectedRepoCount) noteViolation("repo-count:" + sample.repoCount);
+           if (!sample.sameNode) noteViolation("slot-dom-node-replaced");
+         };
+         gate.observer = new MutationObserver(() => gate.record());
+         gate.observer.observe(repo, {
+           attributes: true,
+           characterData: true,
+           childList: true,
+           subtree: true,
+         });
+         gate.record();
+         return {
+           slotId: gate.slotId,
+           rowCount: rows.length,
+           repoCount: repo.querySelector(".repo-count")?.textContent?.trim() ?? "",
+         };`,
+      );
+      expect(captured.slotId).toMatch(/^create:/);
+      expect(captured.rowCount).toBe(expectedRowCount);
+      expect(captured.repoCount).toBe(expectedRepoCount);
+
+      await waitForCondition(
+        async () => {
+          const state = await getTaskCreationE2eState(client, repoId);
+          return state.createResponseHeld || state.creationStatus === "rejected";
+        },
+        "completed server response held before frontend acknowledgement",
+        30_000,
+      );
+
+      const optimistic = await getTaskCreationE2eState(client, repoId);
+      expect(optimistic.creationError).toBeNull();
+      expect(optimistic.createResponseHeld).toBe(true);
+      expect(optimistic.responseTaskId).toBeTruthy();
+      expect(optimistic.rowCount).toBe(expectedRowCount);
+      expect(optimistic.repoCount).toBe(expectedRepoCount);
+      expect(optimistic.rowText).toContain("Say OK");
+      expect(optimistic.slotId).toBe(captured.slotId);
+      expect(optimistic.dataTaskId).toBeNull();
+      expect(optimistic.ariaBusy).toBe("true");
+      expect(optimistic.selected).toBe(true);
+      expect(optimistic.sameNode).toBe(true);
+      expect(optimistic.selectedItemId).toBe(captured.slotId);
+      expect(optimistic.selectedTaskId).toBeNull();
+      expect(optimistic.currentSlotState).toBe("creating");
+      expect(optimistic.currentSlotTaskId).toBeNull();
+      expect(optimistic.currentSlotHasTask).toBe(false);
+
+      await client.executeSync(
+        `window.__KANNA_TASK_CREATION_GATE__.releaseCreateResponse(); return true;`,
+      );
+
+      await waitForCondition(
+        async () => {
+          const state = await getTaskCreationE2eState(client, repoId);
+          return state.creationStatus === "rejected" || (
+            state.dataTaskId === state.responseTaskId
+            && state.currentSlotState === "creating"
+            && state.snapshotResponsesHeldAfterCreateRelease > 0
+          );
+        },
+        "acknowledged creating slot with its hydration snapshot held",
+        15_000,
+      );
+
+      const acknowledged = await getTaskCreationE2eState(client, repoId);
+      expect(acknowledged.creationError).toBeNull();
+      expect(acknowledged.creationStatus).toBe("pending");
+      expect(acknowledged.rowCount).toBe(expectedRowCount);
+      expect(acknowledged.repoCount).toBe(expectedRepoCount);
+      expect(acknowledged.slotId).toBe(captured.slotId);
+      expect(acknowledged.dataTaskId).toBe(acknowledged.responseTaskId);
+      expect(acknowledged.ariaBusy).toBe("true");
+      expect(acknowledged.selected).toBe(true);
+      expect(acknowledged.sameNode).toBe(true);
+      expect(acknowledged.selectedItemId).toBe(captured.slotId);
+      expect(acknowledged.selectedTaskId).toBe(acknowledged.responseTaskId);
+      expect(acknowledged.currentSlotState).toBe("creating");
+      expect(acknowledged.currentSlotTaskId).toBe(acknowledged.responseTaskId);
+      expect(acknowledged.currentSlotHasTask).toBe(false);
+      expect(acknowledged.snapshotResponsesHeldAfterCreateRelease).toBeGreaterThan(0);
+
+      await client.executeSync(
+        `window.__KANNA_TASK_CREATION_GATE__.releaseSnapshotResponses(); return true;`,
+      );
+
+      await waitForCondition(
+        async () => {
+          const state = await getTaskCreationE2eState(client, repoId);
+          return state.creationStatus === "rejected" || (
+            state.creationStatus === "fulfilled"
+            && state.currentSlotState === "ready"
+            && state.currentSlotHasTask
+          );
+        },
+        "hydrated durable task in the original sidebar slot",
+        15_000,
+      );
+
+      const hydrated = await getTaskCreationE2eState(client, repoId);
+      expect(hydrated.creationError).toBeNull();
+      expect(hydrated.creationStatus).toBe("fulfilled");
+      expect(hydrated.createdTaskId).toBe(hydrated.responseTaskId);
+      expect(hydrated.rowCount).toBe(expectedRowCount);
+      expect(hydrated.repoCount).toBe(expectedRepoCount);
+      expect(hydrated.rowText).toContain("Say OK");
+      expect(hydrated.slotId).toBe(captured.slotId);
+      expect(hydrated.dataTaskId).toBe(hydrated.responseTaskId);
+      expect(hydrated.ariaBusy).toBeNull();
+      expect(hydrated.selected).toBe(true);
+      expect(hydrated.sameNode).toBe(true);
+      expect(hydrated.selectedItemId).toBe(captured.slotId);
+      expect(hydrated.selectedTaskId).toBe(hydrated.responseTaskId);
+      expect(hydrated.currentSlotState).toBe("ready");
+      expect(hydrated.currentSlotTaskId).toBe(hydrated.responseTaskId);
+      expect(hydrated.currentSlotHasTask).toBe(true);
+      expect(hydrated.durableItemPresent).toBe(true);
+      expect(hydrated.observerSamples).toBeGreaterThan(0);
+      expect(hydrated.observerViolations).toEqual([]);
+    } finally {
+      await client.executeSync(
+        `const gate = window.__KANNA_TASK_CREATION_GATE__;
+         if (gate) {
+           gate.observer?.disconnect();
+           gate.releaseCreateResponse?.();
+           gate.releaseSnapshotResponses?.();
+           globalThis.fetch = gate.originalFetch;
+         }
+         return true;`,
+      ).catch(() => undefined);
+      await client.executeAsync<string>(
+        `const cb = arguments[arguments.length - 1];
+         const promise = window.__KANNA_TASK_CREATION_GATE__?.creationPromise;
+         Promise.resolve(promise).catch(() => undefined).then(() => cb("settled"));`,
+      ).catch(() => undefined);
+      await client.executeSync(
+        `delete window.__KANNA_TASK_CREATION_GATE__; return true;`,
+      ).catch(() => undefined);
+    }
   });
 
   it("shows task header with prompt text", async () => {

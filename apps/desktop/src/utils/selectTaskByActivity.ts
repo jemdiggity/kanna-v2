@@ -1,5 +1,4 @@
 export interface SelectableTask {
-  id: string;
   activity: "working" | "unread" | "idle" | null;
   created_at: string;
 }

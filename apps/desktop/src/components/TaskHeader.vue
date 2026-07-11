@@ -1,21 +1,32 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { PipelineItem } from "../types/kanna";
 import { useI18n } from "vue-i18n";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isTauri } from "../tauri-mock";
 
 const { t } = useI18n();
 
+interface TaskHeaderPresentation {
+  display_name: string | null;
+  issue_title: string | null;
+  prompt: string | null;
+  stage: string;
+  branch: string | null;
+  port_env: string | null;
+  issue_number: number | null;
+  pr_number: number | null;
+  pr_url: string | null;
+}
+
 const props = defineProps<{
-  item: PipelineItem;
+  item: TaskHeaderPresentation;
 }>();
 
-function title(item: PipelineItem): string {
+function title(item: TaskHeaderPresentation): string {
   return item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
 }
 
-function taskPromptTooltip(item: PipelineItem): string | undefined {
+function taskPromptTooltip(item: TaskHeaderPresentation): string | undefined {
   return item.prompt || undefined;
 }
 

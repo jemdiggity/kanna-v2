@@ -5,7 +5,7 @@ function makeTask(
   id: string,
   createdAt: string,
   activity: SelectableTask["activity"],
-): SelectableTask {
+): SelectableTask & { id: string } {
   return {
     id,
     created_at: createdAt,

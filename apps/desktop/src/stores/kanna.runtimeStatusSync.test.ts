@@ -249,10 +249,6 @@ vi.mock("./agent-provider", () => ({
   resolveAgentProvider: vi.fn((provider?: string | string[]) => Array.isArray(provider) ? provider[0] : (provider ?? "claude")),
 }));
 
-vi.mock("./taskCreationPlaceholder", () => ({
-  buildPendingTaskPlaceholder: vi.fn(),
-}));
-
 vi.mock("./portAllocationLog", () => ({
   formatTaskPortAllocationLog: vi.fn(() => ""),
 }));

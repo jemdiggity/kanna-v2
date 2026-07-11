@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { PipelineItem, TaskBlocker } from "../types/kanna";
+import type { SidebarTaskItem } from "../types/taskUi";
 
 import {
   groupedSidebarItemsByStage,
+  groupedSidebarTaskItemsByStage,
   sidebarChildItems,
+  sidebarTaskChildItems,
   sidebarSubtreeRows,
+  sidebarTaskSubtreeRows,
   sortSidebarItemsForRepo,
+  sortSidebarTaskItemsForRepo,
 } from "./sidebarOrdering";
 
 const ORDER = ["merge", "pr", "review", "in progress"];
@@ -47,7 +52,106 @@ function item(overrides: Partial<PipelineItem>): PipelineItem {
   };
 }
 
+function sidebarItem(overrides: Partial<SidebarTaskItem> = {}): SidebarTaskItem {
+  const durable = item({ id: "task-1" });
+  const { id: taskId, ...presentation } = durable;
+  return {
+    ...presentation,
+    slot_id: "slot-1",
+    task_id: taskId,
+    state: "ready",
+    ...overrides,
+  } as SidebarTaskItem;
+}
+
 describe("sidebarOrdering", () => {
+  it("uses slot identity for rows and durable identity for blockers and parents", () => {
+    const parent = sidebarItem({
+      slot_id: "slot-parent",
+      task_id: "task-parent",
+      stage: "in progress",
+    });
+    const child = sidebarItem({
+      slot_id: "slot-child",
+      task_id: "task-child",
+      parent_task_id: "task-parent",
+      stage: "merge",
+    });
+    const blocked = sidebarItem({
+      slot_id: "slot-blocked",
+      task_id: "task-blocked",
+      stage: "in progress",
+    });
+    const blocker = sidebarItem({
+      slot_id: "slot-blocker",
+      task_id: "task-blocker",
+      stage: "review",
+    });
+    const options = {
+      repoId: "repo-1",
+      items: [parent, child, blocked, blocker],
+      blockers: [{ blocked_item_id: "task-blocked", blocker_item_id: "task-blocker" }],
+      getStageOrder,
+    };
+
+    expect(sidebarTaskChildItems(options, "task-parent").map((entry) => entry.slot_id)).toEqual([
+      "slot-child",
+    ]);
+    expect(sidebarTaskSubtreeRows(options, parent).map((row) => [row.item.slot_id, row.depth])).toEqual([
+      ["slot-parent", 0],
+      ["slot-child", 1],
+    ]);
+    expect(sortSidebarTaskItemsForRepo(options).map((entry) => entry.slot_id)).toEqual([
+      "slot-blocker",
+      "slot-parent",
+      "slot-child",
+      "slot-blocked",
+    ]);
+  });
+
+  it("keeps distinct slots even when duplicate durable task identities reach ordering", () => {
+    const items = [
+      sidebarItem({
+        slot_id: "create:stable",
+        task_id: "task-1",
+        created_at: "2026-05-31T00:00:02.000Z",
+      }),
+      sidebarItem({
+        slot_id: "task-1",
+        task_id: "task-1",
+        created_at: "2026-05-31T00:00:01.000Z",
+      }),
+    ];
+
+    expect(sortSidebarTaskItemsForRepo({
+      repoId: "repo-1",
+      items,
+      getStageOrder,
+    }).map((entry) => entry.slot_id)).toEqual(["create:stable", "task-1"]);
+  });
+
+  it("does not give creating rows durable blocker or parent identity", () => {
+    const parent = sidebarItem({ slot_id: "slot-parent", task_id: "task-parent" });
+    const creating = sidebarItem({
+      slot_id: "create:new",
+      task_id: null,
+      state: "creating",
+      parent_task_id: "task-parent",
+      stage: "merge",
+    });
+    const options = {
+      repoId: "repo-1",
+      items: [parent, creating],
+      blockers: [{ blocked_item_id: "create:new", blocker_item_id: "task-parent" }],
+      getStageOrder,
+    };
+
+    expect(sidebarTaskChildItems(options, "task-parent")).toEqual([]);
+    expect(groupedSidebarTaskItemsByStage(options)
+      .flatMap((group) => group.items)
+      .map((entry) => entry.slot_id)).toContain("create:new");
+  });
+
   it("excludes closed rows even when their stage is still active", () => {
     const sorted = sortSidebarItemsForRepo({
       repoId: "repo-1",

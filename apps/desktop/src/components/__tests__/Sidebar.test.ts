@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
 
 import type { PipelineItem, Repo } from "../../types/kanna";
+import type { SidebarTaskItem } from "../../types/taskUi";
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { h, nextTick } from "vue";
+import { cloneVNode, h, nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "../Sidebar.vue";
 
@@ -23,6 +24,12 @@ function translate(key: string, params?: Record<string, string>) {
   if (key === "sidebar.remoteTaskTooltip") {
     return "Remote task";
   }
+  if (key === "sidebar.awaitingVerdictShort") {
+    return "Review";
+  }
+  if (key === "sidebar.awaitingVerdictBadge") {
+    return `Awaiting ${params?.stage ?? ""} verdict`;
+  }
   return key;
 }
 
@@ -39,16 +46,32 @@ vi.mock("vue-i18n", () => ({
 }));
 
 const draggableStub = {
-  props: ["modelValue", "class", "disabled"],
+  props: ["modelValue", "class", "disabled", "itemKey", "move"],
   emits: ["change"],
   setup(
-    props: { modelValue: Array<PipelineItem | Repo>; class?: string; disabled?: boolean },
-    { slots }: { slots: { item?: (scope: { element: PipelineItem | Repo }) => unknown } },
+    props: {
+      modelValue: Array<SidebarTaskItem | Repo>;
+      class?: string;
+      disabled?: boolean;
+      itemKey?: string;
+      move?: (event: unknown) => boolean;
+    },
+    { slots }: { slots: { item?: (scope: { element: SidebarTaskItem | Repo }) => ReturnType<typeof h>[] } },
   ) {
     return () => h(
       "div",
-      { class: props.class, "data-disabled": String(Boolean(props.disabled)) },
-      (props.modelValue ?? []).map((element) => slots.item?.({ element })),
+      {
+        class: props.class,
+        "data-disabled": String(Boolean(props.disabled)),
+        "data-has-move-guard": String(typeof props.move === "function"),
+      },
+      (props.modelValue ?? []).flatMap((element) => {
+        const nodes = slots.item?.({ element }) ?? [];
+        const identity = props.itemKey && props.itemKey in element
+          ? String((element as unknown as Record<string, unknown>)[props.itemKey])
+          : undefined;
+        return nodes.map((node) => cloneVNode(node, { key: identity }));
+      }),
     );
   },
 };
@@ -68,9 +91,13 @@ const repo: Repo = {
   last_opened_at: "2026-01-01T00:00:00.000Z",
 };
 
-function item(id: string, overrides: Partial<PipelineItem>): PipelineItem {
+function item(
+  taskId: string,
+  overrides: Partial<PipelineItem> & { remote_task?: boolean } = {},
+  slotId = `slot:${taskId}`,
+): SidebarTaskItem {
   const base: PipelineItem = {
-    id,
+    id: taskId,
     repo_id: repo.id,
     issue_number: null,
     issue_title: null,
@@ -103,19 +130,38 @@ function item(id: string, overrides: Partial<PipelineItem>): PipelineItem {
     updated_at: "2026-01-01T00:00:00.000Z",
   };
 
-  return {
+  const { id: _id, ...task } = {
     ...base,
     ...overrides,
   };
+  return {
+    ...task,
+    slot_id: slotId,
+    task_id: taskId,
+    state: "ready",
+  };
 }
 
-function mountSidebar(pipelineItems: PipelineItem[], selectedItemId: string | null = "task-1") {
+function creatingItem(
+  slotId: string,
+  taskId: string | null = null,
+  overrides: Partial<PipelineItem> = {},
+): SidebarTaskItem {
+  return {
+    ...item(taskId ?? "draft", overrides, slotId),
+    slot_id: slotId,
+    task_id: taskId,
+    state: "creating",
+  };
+}
+
+function mountSidebar(taskSlots: SidebarTaskItem[], selectedSlotId: string | null = "slot:task-1") {
   return mount(Sidebar, {
     props: {
       repos: [repo],
-      pipelineItems,
+      taskSlots,
       selectedRepoId: repo.id,
-      selectedItemId,
+      selectedSlotId,
       blockerNames: {},
     },
     global: {
@@ -137,16 +183,16 @@ function mountSidebar(pipelineItems: PipelineItem[], selectedItemId: string | nu
 
 function mountSidebarWithRepos(
   repos: Repo[],
-  pipelineItems: PipelineItem[],
-  selectedItemId: string | null = "task-1",
+  taskSlots: SidebarTaskItem[],
+  selectedSlotId: string | null = "slot:task-1",
   selectedRepoId: string | null = repos[0]?.id ?? null,
 ) {
   return mount(Sidebar, {
     props: {
       repos,
-      pipelineItems,
+      taskSlots,
       selectedRepoId,
-      selectedItemId,
+      selectedSlotId,
       blockerNames: {},
     },
     global: {
@@ -177,6 +223,147 @@ describe("Sidebar", () => {
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
   });
 
+  it("keeps one selected DOM row when a creating slot hydrates into its durable task", async () => {
+    const slotId = "create:stable";
+    const wrapper = mountSidebar([
+      creatingItem(slotId, null, {
+        display_name: "Stable task row",
+        prompt: "Keep this task row stable while setup completes",
+      }),
+    ], slotId);
+
+    const creatingRow = wrapper.get<HTMLElement>(`.pipeline-item[data-slot-id="${slotId}"]`);
+    const originalElement = creatingRow.element;
+    expect(wrapper.findAll(".pipeline-item")).toHaveLength(1);
+    expect(wrapper.get(".repo-count").text()).toBe("1");
+    expect(creatingRow.classes()).toContain("selected");
+    expect(creatingRow.classes()).toContain("initializing-item");
+    expect(creatingRow.attributes("aria-busy")).toBe("true");
+    expect(creatingRow.attributes("data-task-id")).toBeUndefined();
+
+    await wrapper.setProps({
+      taskSlots: [item("durable-task", {
+        display_name: "Stable task row",
+        prompt: "Keep this task row stable while setup completes",
+      }, slotId)],
+    });
+    await nextTick();
+
+    const readyRow = wrapper.get<HTMLElement>(`.pipeline-item[data-slot-id="${slotId}"]`);
+    expect(wrapper.findAll(".pipeline-item")).toHaveLength(1);
+    expect(wrapper.get(".repo-count").text()).toBe("1");
+    expect(readyRow.element).toBe(originalElement);
+    expect(readyRow.classes()).toContain("selected");
+    expect(readyRow.classes()).not.toContain("initializing-item");
+    expect(readyRow.attributes("aria-busy")).toBeUndefined();
+    expect(readyRow.attributes("data-task-id")).toBe("durable-task");
+  });
+
+  it("selects acknowledged creating rows by slot id while keeping them busy", async () => {
+    const wrapper = mountSidebar([
+      creatingItem("create:acknowledged", "durable-pending", {
+        display_name: "Acknowledged task",
+      }),
+    ], "create:acknowledged");
+
+    const row = wrapper.get<HTMLElement>('[data-slot-id="create:acknowledged"]');
+    await row.trigger("click");
+
+    expect(row.classes()).toContain("selected");
+    expect(row.classes()).toContain("initializing-item");
+    expect(row.attributes("aria-busy")).toBe("true");
+    expect(row.attributes("data-task-id")).toBe("durable-pending");
+    expect(wrapper.get(".repo-count").text()).toBe("1");
+    expect(wrapper.emitted("select-item")).toEqual([["create:acknowledged"]]);
+  });
+
+  it("emits slot ids for selection and durable ids for ready mutations", async () => {
+    const task = item("durable-ready", {
+      display_name: "Ready task",
+    }, "slot:ready-distinct");
+    const wrapper = mountSidebar([task], "slot:ready-distinct");
+
+    await wrapper.get('[data-slot-id="slot:ready-distinct"]').trigger("click");
+    expect(wrapper.emitted("select-item")).toEqual([["slot:ready-distinct"]]);
+
+    await wrapper.get('[data-slot-id="slot:ready-distinct"]').trigger("dblclick");
+    const input = wrapper.get<HTMLInputElement>(".rename-input");
+    await input.setValue("Renamed ready task");
+    await input.trigger("keydown.enter");
+    expect(wrapper.emitted("rename-item")).toEqual([["durable-ready", "Renamed ready task"]]);
+
+    const vm = wrapper.vm as {
+      onPinnedChange(repoId: string, event: {
+        added: { element: SidebarTaskItem; newIndex: number };
+      }): void;
+    };
+    vm.onPinnedChange(repo.id, { added: { element: task, newIndex: 0 } });
+
+    expect(wrapper.emitted("pin-item")).toEqual([["durable-ready", 0]]);
+    expect(wrapper.emitted("reorder-pinned")).toEqual([[repo.id, ["durable-ready"]]]);
+  });
+
+  it("blocks every task mutation while an acknowledged slot is still creating", async () => {
+    const pending = creatingItem("create:pending", "durable-pending", {
+      display_name: "Pending task",
+      pinned: 1,
+      pin_order: 0,
+      parent_task_id: "durable-parent",
+    });
+    const wrapper = mountSidebar([pending], "create:pending");
+    const vm = wrapper.vm as {
+      renameSelectedItem(): void;
+      commitRename(slotId: string): void;
+      onPinnedChange(repoId: string, event: {
+        added?: { element: SidebarTaskItem; newIndex: number };
+        moved?: { oldIndex: number; newIndex: number };
+      }): void;
+      onUnpinnedChange(repoId: string, event: {
+        added: { element: SidebarTaskItem; newIndex: number };
+      }): void;
+      onTaskDragStart(event: { item?: HTMLElement }): void;
+      onTaskDragEnd(event: { originalEvent?: Event }): void;
+      detachSubtask(item: SidebarTaskItem): void;
+      canMoveTask(event: {
+        draggedContext: { element: SidebarTaskItem };
+        relatedContext: { element: SidebarTaskItem };
+      }): boolean;
+    };
+
+    await wrapper.get('[data-slot-id="create:pending"]').trigger("dblclick");
+    vm.renameSelectedItem();
+    vm.commitRename("create:pending");
+    vm.onPinnedChange(repo.id, { added: { element: pending, newIndex: 0 } });
+    vm.onPinnedChange(repo.id, { moved: { oldIndex: 0, newIndex: 0 } });
+    vm.onUnpinnedChange(repo.id, { added: { element: pending, newIndex: 0 } });
+    vm.detachSubtask(pending);
+
+    const syntheticDragRow = document.createElement("div");
+    syntheticDragRow.dataset.taskId = "durable-pending";
+    vm.onTaskDragStart({ item: syntheticDragRow });
+    vm.onTaskDragEnd({ originalEvent: new MouseEvent("mouseup") });
+
+    const forgedReadyEventItem = {
+      ...pending,
+      state: "ready",
+      task_id: pending.slot_id,
+    } as SidebarTaskItem;
+    vm.onPinnedChange(repo.id, { added: { element: forgedReadyEventItem, newIndex: 0 } });
+    vm.onUnpinnedChange(repo.id, { added: { element: forgedReadyEventItem, newIndex: 0 } });
+    vm.detachSubtask(forgedReadyEventItem);
+
+    expect(vm.canMoveTask({
+      draggedContext: { element: forgedReadyEventItem },
+      relatedContext: { element: forgedReadyEventItem },
+    })).toBe(false);
+    expect(wrapper.find(".rename-input").exists()).toBe(false);
+    expect(wrapper.emitted("rename-item")).toBeUndefined();
+    expect(wrapper.emitted("pin-item")).toBeUndefined();
+    expect(wrapper.emitted("unpin-item")).toBeUndefined();
+    expect(wrapper.emitted("reorder-pinned")).toBeUndefined();
+    expect(wrapper.emitted("set-parent")).toBeUndefined();
+  });
+
   it("renders task titles without retired post-action prefixes", () => {
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
     const wrapper = mountSidebar([
@@ -204,6 +391,30 @@ describe("Sidebar", () => {
     const title = wrapper.get(".pipeline-item .item-title");
     expect(title.text()).toBe("... Commit generated changes");
     expect(title.attributes("title")).toBe("... Commit generated changes");
+  });
+
+  it("renders an awaiting-verdict badge next to parked manual-stage tasks", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        activity: "unread",
+        display_name: "Create the pull request",
+        pipeline_def: JSON.stringify({
+          name: "default",
+          stages: [
+            { name: "in progress", policy: { transition: "manual" } },
+            { name: "review", policy: { transition: "auto" } },
+            { name: "pr", policy: { transition: "manual" } },
+          ],
+        }),
+        stage: "pr",
+      }),
+    ]);
+
+    const badge = wrapper.get('[data-testid="awaiting-verdict-badge-slot:task-1"]');
+    expect(badge.text()).toBe("Review");
+    expect(badge.attributes("aria-label")).toBe("Awaiting pr verdict");
+    expect(badge.attributes("title")).toBe("Awaiting pr verdict");
+    expect(wrapper.get(".pipeline-item .item-title").text()).toBe("Create the pull request");
   });
 
   it("renders pinned task titles without retired post-action prefixes", () => {
@@ -295,7 +506,7 @@ describe("Sidebar", () => {
       }),
     ]);
 
-    await wrapper.get('[data-testid="detach-subtask-task-2"]').trigger("click");
+    await wrapper.get('[data-testid="detach-subtask-slot:task-2"]').trigger("click");
 
     expect(wrapper.emitted("set-parent")).toEqual([["task-2", null]]);
   });
@@ -393,7 +604,7 @@ describe("Sidebar", () => {
     try {
       vm.onTaskDragStart({ item: dragged });
       vm.onTaskDragPointerMove(new PointerEvent("pointermove", { clientX: 12, clientY: 34 }));
-      vm.onUnpinnedChange(repo.id, { added: { element: wrapper.props("pipelineItems")[0]!, newIndex: 0 } });
+      vm.onUnpinnedChange(repo.id, { added: { element: wrapper.props("taskSlots")[0]!, newIndex: 0 } });
       vm.onTaskDragEnd({ originalEvent: new MouseEvent("mouseup", { clientX: 12, clientY: 34 }) });
     } finally {
       elementFromPoint.mockRestore();
@@ -626,12 +837,12 @@ describe("Sidebar", () => {
           display_name: "Second task",
           created_at: "2026-01-01T10:00:00.000Z",
         }),
-      ], "task-1");
+      ], "slot:task-1");
 
       await flushPromises();
       scrollIntoView.mockClear();
 
-      await wrapper.setProps({ selectedItemId: "task-2" });
+      await wrapper.setProps({ selectedSlotId: "slot:task-2" });
       await flushPromises();
 
       const selected = wrapper.get(".pipeline-item.selected");
@@ -670,7 +881,7 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "task-2");
+    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "slot:task-2");
 
     const headers = wrapper.findAll(".repo-header");
     expect(headers[0]?.classes()).not.toContain("contains-selected-task");
@@ -695,7 +906,7 @@ describe("Sidebar", () => {
       }),
     ];
 
-    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "task-1", "repo-2");
+    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "slot:task-1", "repo-2");
 
     const highlightedHeaders = wrapper.findAll(".repo-header").filter((header) =>
       header.classes().includes("selected") || header.classes().includes("contains-selected-task")
@@ -787,13 +998,13 @@ describe("Sidebar", () => {
           stage: "pr",
           closed_at: "2026-06-03T01:05:00.000Z",
         }),
-      ], "task-closed");
+      ], "slot:task-closed");
 
       await flushPromises();
       scrollIntoView.mockClear();
 
       await wrapper.setProps({
-        pipelineItems: [
+        taskSlots: [
           item("task-closed", {
             display_name: "Closed task",
             stage: "pr",

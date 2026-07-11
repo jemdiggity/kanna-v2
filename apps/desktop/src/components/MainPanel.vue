@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { PipelineItem } from "../types/kanna";
+import type { TaskUiSlot } from "../types/taskUi";
 import { isBlockerResolved } from "../utils/blockerResolution";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
@@ -8,14 +9,13 @@ import TerminalTabs from "./TerminalTabs.vue";
 import CloudTerminalView from "./CloudTerminalView.vue";
 
 const props = defineProps<{
-  item: PipelineItem | null;
+  uiSlot: TaskUiSlot | null;
   repoPath?: string;
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
   recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
   maximized?: boolean;
   blockers?: PipelineItem[];
   hasRepos?: boolean;
-  pendingSetup?: boolean;
   cloudTask?: boolean;
   cloudTerminalRef?: {
     ownerDesktopId: string;
@@ -30,6 +30,23 @@ const emit = defineEmits<{
 
 const isMobile = __KANNA_MOBILE__;
 const COMMAND_HINT_STORAGE_KEY = "kanna:hide-command-hint";
+const item = computed(() => props.uiSlot?.task ?? null);
+const headerItem = computed(() => {
+  const slot = props.uiSlot;
+  if (!slot) return null;
+  const task = slot.task;
+  return {
+    display_name: task?.display_name ?? slot.draft.display_name,
+    issue_title: task?.issue_title ?? null,
+    prompt: task?.prompt ?? slot.draft.prompt,
+    stage: task?.stage ?? slot.draft.stage,
+    branch: task?.branch ?? null,
+    port_env: task?.port_env ?? null,
+    issue_number: task?.issue_number ?? null,
+    pr_number: task?.pr_number ?? null,
+    pr_url: task?.pr_url ?? null,
+  };
+});
 
 const isBlocked = computed(() => {
   if (!props.blockers || props.blockers.length === 0) return false;
@@ -187,13 +204,18 @@ function dismissCommandHint() {
 
 <template>
   <main class="main-panel">
-    <template v-if="item">
+    <template v-if="uiSlot">
       <div v-if="isMobile" class="mobile-back-bar" @click="emit('back')">
         <span class="mobile-back-arrow">&larr;</span>
         <span>Tasks</span>
       </div>
-      <TaskHeader v-if="!maximized" :item="item" />
-      <template v-if="isBlocked">
+      <TaskHeader v-if="!maximized && headerItem" :item="headerItem" />
+      <template v-if="uiSlot.state !== 'ready' || !item">
+        <div class="setup-placeholder">
+          <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
+        </div>
+      </template>
+      <template v-else-if="isBlocked">
         <div class="blocked-placeholder">
           <p class="blocked-title">{{ $t('mainPanel.taskBlocked') }}</p>
           <p class="blocked-hint">{{ $t('mainPanel.taskBlockedHint') }}</p>
@@ -207,11 +229,6 @@ function dismissCommandHint() {
               <span class="blocker-name">{{ b.display_name || (b.prompt ? b.prompt.slice(0, 60) : $t('tasks.untitled')) }}</span>
             </div>
           </div>
-        </div>
-      </template>
-      <template v-else-if="pendingSetup">
-        <div class="setup-placeholder">
-          <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
         </div>
       </template>
       <template v-else-if="cloudTask">

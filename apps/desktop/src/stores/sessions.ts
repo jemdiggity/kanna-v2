@@ -114,7 +114,10 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       return;
     }
 
-    if (shouldIgnoreRuntimeStatusDuringSetup(status, context.state.pendingSetupIds.value.includes(item.id))) {
+    const isPendingSetup = context.state.taskUiSlots.value.some(
+      (slot) => slot.task_id === item.id && slot.state === "creating",
+    );
+    if (shouldIgnoreRuntimeStatusDuringSetup(status, isPendingSetup)) {
       return;
     }
 

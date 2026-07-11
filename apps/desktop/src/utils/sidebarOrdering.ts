@@ -1,48 +1,88 @@
 import type { PipelineItem, TaskBlocker } from "../types/kanna";
+import type { SidebarTaskItem } from "../types/taskUi";
 import { isBlockerResolved } from "./blockerResolution";
-import { taskSearchMatch } from "./taskSearch";
+import { taskSearchMatch, type TaskSearchable } from "./taskSearch";
 
-export interface SidebarItemGroup {
-  stageName: string;
-  items: PipelineItem[];
+interface OrderingItem extends TaskSearchable {
+  repo_id: string;
+  closed_at: string | null;
+  pinned: number;
+  pin_order: number | null;
+  stage: string;
+  pr_url: string | null;
+  parent_task_id: string | null;
+  created_at: string;
 }
 
-/** A task row paired with its nesting depth (0 = top-level parent, 1 = subtask, ...). */
-export interface SidebarTreeRow {
-  item: PipelineItem;
-  depth: number;
+interface ItemIdentity<T> {
+  rowId: (item: T) => string;
+  taskId: (item: T) => string | null;
 }
 
-interface SidebarOrderingOptions {
+interface OrderingOptions<T extends OrderingItem> {
   repoId: string;
-  items: readonly PipelineItem[];
+  items: readonly T[];
   blockers?: readonly TaskBlocker[];
   getStageOrder: (repoId: string) => readonly string[];
   searchQuery?: string;
 }
 
+interface ItemGroup<T> {
+  stageName: string;
+  items: T[];
+}
+
+interface TreeRow<T> {
+  item: T;
+  depth: number;
+}
+
+interface SidebarOrderingOptions extends OrderingOptions<PipelineItem> {}
+
+export interface SidebarItemGroup extends ItemGroup<PipelineItem> {}
+
+/** A durable task row paired with its nesting depth (0 = top-level parent, 1 = subtask, ...). */
+export interface SidebarTreeRow extends TreeRow<PipelineItem> {}
+
+export interface SidebarTaskOrderingOptions extends OrderingOptions<SidebarTaskItem> {}
+
+export interface SidebarTaskItemGroup extends ItemGroup<SidebarTaskItem> {}
+
+/** A presentation slot paired with its nesting depth (0 = top-level parent, 1 = subtask, ...). */
+export interface SidebarTaskTreeRow extends TreeRow<SidebarTaskItem> {}
+
+const DURABLE_IDENTITY: ItemIdentity<PipelineItem> = {
+  rowId: (item) => item.id,
+  taskId: (item) => item.id,
+};
+
+const SLOT_IDENTITY: ItemIdentity<SidebarTaskItem> = {
+  rowId: (item) => item.slot_id,
+  taskId: (item) => item.task_id,
+};
+
 function isHidden(item: { closed_at?: string | null }): boolean {
   return item.closed_at != null;
 }
 
-function matchesSearch(query: string, item: PipelineItem): boolean {
+function matchesSearch(query: string, item: TaskSearchable): boolean {
   if (!query) return true;
   return taskSearchMatch(query, item) !== null;
 }
 
-function searchScore(query: string, item: PipelineItem): number {
+function searchScore(query: string, item: TaskSearchable): number {
   if (!query) return 0;
   return taskSearchMatch(query, item)?.score ?? 0;
 }
 
-function compareBySearchScore(query: string, left: PipelineItem, right: PipelineItem): number {
+function compareBySearchScore<T extends OrderingItem>(query: string, left: T, right: T): number {
   const scoreLeft = searchScore(query, left);
   const scoreRight = searchScore(query, right);
   if (scoreLeft !== scoreRight) return scoreRight - scoreLeft;
   return right.created_at.localeCompare(left.created_at);
 }
 
-function sortByCreatedAt(items: PipelineItem[]): PipelineItem[] {
+function sortByCreatedAt<T extends OrderingItem>(items: readonly T[]): T[] {
   return [...items].sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
 
@@ -58,11 +98,19 @@ function normalizedSearchQuery(query: string | undefined): string {
  * task_blocker rows persist until the blocker closes. A blocker row whose
  * task is not in `items` cannot be judged and counts as unresolved.
  */
-function blockedItemIds(options: SidebarOrderingOptions): Set<string> {
-  const itemsById = new Map(options.items.map((item) => [item.id, item]));
+function blockedTaskIds<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  identity: ItemIdentity<T>,
+): Set<string> {
+  const itemsByTaskId = new Map<string, T>();
+  for (const item of options.items) {
+    const taskId = identity.taskId(item);
+    if (taskId !== null) itemsByTaskId.set(taskId, item);
+  }
+
   const blocked = new Set<string>();
   for (const blocker of options.blockers ?? []) {
-    const blockerItem = itemsById.get(blocker.blocker_item_id);
+    const blockerItem = itemsByTaskId.get(blocker.blocker_item_id);
     if (!blockerItem || !isBlockerResolved(blockerItem)) {
       blocked.add(blocker.blocked_item_id);
     }
@@ -70,60 +118,84 @@ function blockedItemIds(options: SidebarOrderingOptions): Set<string> {
   return blocked;
 }
 
-/** Ids of visible (non-hidden) tasks in the repo — used to resolve subtask parents. */
-function presentItemIds(options: SidebarOrderingOptions): Set<string> {
-  return new Set(
-    options.items
-      .filter((item) => item.repo_id === options.repoId && !isHidden(item))
-      .map((item) => item.id),
-  );
+/** Durable ids of visible tasks in the repo, used to resolve subtask parents. */
+function presentTaskIds<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  identity: ItemIdentity<T>,
+): Set<string> {
+  const present = new Set<string>();
+  for (const item of options.items) {
+    if (item.repo_id !== options.repoId || isHidden(item)) continue;
+    const taskId = identity.taskId(item);
+    if (taskId !== null) present.add(taskId);
+  }
+  return present;
 }
 
 /**
- * A task nests under a parent (and is therefore hidden from the flat stage/pinned/blocked
- * sections) only when its parent is itself a visible task in the same repo. Nesting is
- * suppressed during an active search so that every match stays visible in its own section.
+ * A task nests under a parent only when both rows have durable identities.
+ * Nesting is suppressed during search so every match remains independently visible.
  */
-function makeNestedChildPredicate(options: SidebarOrderingOptions): (item: PipelineItem) => boolean {
+function makeNestedChildPredicate<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  identity: ItemIdentity<T>,
+): (item: T) => boolean {
   const query = normalizedSearchQuery(options.searchQuery);
   if (query) return () => false;
-  const present = presentItemIds(options);
-  return (item) =>
-    item.parent_task_id != null
-    && item.parent_task_id !== item.id
-    && present.has(item.parent_task_id);
+  const present = presentTaskIds(options, identity);
+  return (item) => {
+    const taskId = identity.taskId(item);
+    return taskId !== null
+      && item.parent_task_id !== null
+      && item.parent_task_id !== taskId
+      && present.has(item.parent_task_id);
+  };
 }
 
-/** Direct subtasks of a parent, ordered oldest-first so they read in creation order. */
-export function sidebarChildItems(options: SidebarOrderingOptions, parentId: string): PipelineItem[] {
+function childItems<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  parentTaskId: string,
+  identity: ItemIdentity<T>,
+): T[] {
   if (normalizedSearchQuery(options.searchQuery)) return [];
   return options.items
-    .filter((item) =>
-      item.repo_id === options.repoId
-      && !isHidden(item)
-      && item.id !== parentId
-      && item.parent_task_id === parentId
-    )
+    .filter((item) => {
+      const taskId = identity.taskId(item);
+      return item.repo_id === options.repoId
+        && !isHidden(item)
+        && taskId !== null
+        && taskId !== parentTaskId
+        && item.parent_task_id === parentTaskId;
+    })
     .sort((left, right) => left.created_at.localeCompare(right.created_at));
 }
 
-/** A task and all of its descendants, depth-annotated, for nested sidebar rendering. */
-export function sidebarSubtreeRows(options: SidebarOrderingOptions, root: PipelineItem): SidebarTreeRow[] {
-  const rows: SidebarTreeRow[] = [];
-  const seen = new Set<string>();
-  const walk = (item: PipelineItem, depth: number) => {
-    if (seen.has(item.id)) return;
-    seen.add(item.id);
+function subtreeRows<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  root: T,
+  identity: ItemIdentity<T>,
+): Array<TreeRow<T>> {
+  const rows: Array<TreeRow<T>> = [];
+  const seenRowIds = new Set<string>();
+  const walk = (item: T, depth: number) => {
+    const rowId = identity.rowId(item);
+    if (seenRowIds.has(rowId)) return;
+    seenRowIds.add(rowId);
     rows.push({ item, depth });
-    for (const child of sidebarChildItems(options, item.id)) walk(child, depth + 1);
+    const taskId = identity.taskId(item);
+    if (taskId === null) return;
+    for (const child of childItems(options, taskId, identity)) walk(child, depth + 1);
   };
   walk(root, 0);
   return rows;
 }
 
-export function sortedSidebarPinnedItems(options: SidebarOrderingOptions): PipelineItem[] {
+function sortedPinnedItems<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  identity: ItemIdentity<T>,
+): T[] {
   const query = normalizedSearchQuery(options.searchQuery);
-  const isNestedChild = makeNestedChildPredicate(options);
+  const isNestedChild = makeNestedChildPredicate(options, identity);
   return options.items
     .filter((item) =>
       item.repo_id === options.repoId
@@ -138,36 +210,47 @@ export function sortedSidebarPinnedItems(options: SidebarOrderingOptions): Pipel
     });
 }
 
-export function sortedSidebarBlockedItems(options: SidebarOrderingOptions): PipelineItem[] {
+function sortedBlockedItems<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  identity: ItemIdentity<T>,
+): T[] {
   const query = normalizedSearchQuery(options.searchQuery);
-  const isNestedChild = makeNestedChildPredicate(options);
-  const blockedIds = blockedItemIds(options);
-  const items = options.items.filter((item) =>
-    item.repo_id === options.repoId
-    && blockedIds.has(item.id)
-    && !isHidden(item)
-    && !item.pinned
-    && !isNestedChild(item)
-    && matchesSearch(query, item)
-  );
-  return query ? [...items].sort((left, right) => compareBySearchScore(query, left, right)) : sortByCreatedAt(items);
+  const isNestedChild = makeNestedChildPredicate(options, identity);
+  const blockedIds = blockedTaskIds(options, identity);
+  const items = options.items.filter((item) => {
+    const taskId = identity.taskId(item);
+    return item.repo_id === options.repoId
+      && taskId !== null
+      && blockedIds.has(taskId)
+      && !isHidden(item)
+      && !item.pinned
+      && !isNestedChild(item)
+      && matchesSearch(query, item);
+  });
+  return query
+    ? [...items].sort((left, right) => compareBySearchScore(query, left, right))
+    : sortByCreatedAt(items);
 }
 
-export function groupedSidebarItemsByStage(options: SidebarOrderingOptions): SidebarItemGroup[] {
+function groupedItemsByStage<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  identity: ItemIdentity<T>,
+): Array<ItemGroup<T>> {
   const query = normalizedSearchQuery(options.searchQuery);
-  const isNestedChild = makeNestedChildPredicate(options);
-  const blockedIds = blockedItemIds(options);
+  const isNestedChild = makeNestedChildPredicate(options, identity);
+  const blockedIds = blockedTaskIds(options, identity);
 
-  const stageItems = options.items.filter((item) =>
-    item.repo_id === options.repoId
-    && !isHidden(item)
-    && !item.pinned
-    && !blockedIds.has(item.id)
-    && !isNestedChild(item)
-    && matchesSearch(query, item)
-  );
+  const stageItems = options.items.filter((item) => {
+    const taskId = identity.taskId(item);
+    return item.repo_id === options.repoId
+      && !isHidden(item)
+      && !item.pinned
+      && (taskId === null || !blockedIds.has(taskId))
+      && !isNestedChild(item)
+      && matchesSearch(query, item);
+  });
 
-  const groups = new Map<string, PipelineItem[]>();
+  const groups = new Map<string, T[]>();
   for (const item of stageItems) {
     if (!groups.has(item.stage)) groups.set(item.stage, []);
     groups.get(item.stage)!.push(item);
@@ -194,35 +277,103 @@ export function groupedSidebarItemsByStage(options: SidebarOrderingOptions): Sid
     .filter((group) => group.items.length > 0);
 }
 
-export function sortSidebarItemsForRepo(options: SidebarOrderingOptions): PipelineItem[] {
+function sortItemsForRepo<T extends OrderingItem>(
+  options: OrderingOptions<T>,
+  identity: ItemIdentity<T>,
+): T[] {
   const topLevel = [
-    ...sortedSidebarPinnedItems(options),
-    ...groupedSidebarItemsByStage(options).flatMap((group) => group.items),
-    ...sortedSidebarBlockedItems(options),
+    ...sortedPinnedItems(options, identity),
+    ...groupedItemsByStage(options, identity).flatMap((group) => group.items),
+    ...sortedBlockedItems(options, identity),
   ];
 
-  // Re-attach subtasks directly beneath their parent so display order, task counts, and
-  // keyboard navigation all agree. During an active search nesting is suppressed, so the
-  // section lists already contain every match and the subtree walk is a no-op.
-  const ordered: PipelineItem[] = [];
-  const seen = new Set<string>();
+  const ordered: T[] = [];
+  const seenRowIds = new Set<string>();
   for (const root of topLevel) {
-    for (const row of sidebarSubtreeRows(options, root)) {
-      if (seen.has(row.item.id)) continue;
-      seen.add(row.item.id);
+    for (const row of subtreeRows(options, root, identity)) {
+      const rowId = identity.rowId(row.item);
+      if (seenRowIds.has(rowId)) continue;
+      seenRowIds.add(rowId);
       ordered.push(row.item);
     }
   }
 
-  // Safety net for pathological parent cycles: surface any visible, search-matching task the
-  // subtree walk could not reach rather than dropping it from the sidebar entirely.
+  // Safety net for pathological parent cycles: surface visible matching rows that no root reached.
   const query = normalizedSearchQuery(options.searchQuery);
   for (const item of options.items) {
-    if (item.repo_id !== options.repoId || isHidden(item) || seen.has(item.id)) continue;
+    const rowId = identity.rowId(item);
+    if (item.repo_id !== options.repoId || isHidden(item) || seenRowIds.has(rowId)) continue;
     if (!matchesSearch(query, item)) continue;
-    seen.add(item.id);
+    seenRowIds.add(rowId);
     ordered.push(item);
   }
 
   return ordered;
+}
+
+// Durable adapters retained for snapshot/store consumers until they migrate to UI slots.
+export function sidebarChildItems(options: SidebarOrderingOptions, parentId: string): PipelineItem[] {
+  return childItems(options, parentId, DURABLE_IDENTITY);
+}
+
+export function sidebarSubtreeRows(
+  options: SidebarOrderingOptions,
+  root: PipelineItem,
+): SidebarTreeRow[] {
+  return subtreeRows(options, root, DURABLE_IDENTITY);
+}
+
+export function sortedSidebarPinnedItems(options: SidebarOrderingOptions): PipelineItem[] {
+  return sortedPinnedItems(options, DURABLE_IDENTITY);
+}
+
+export function sortedSidebarBlockedItems(options: SidebarOrderingOptions): PipelineItem[] {
+  return sortedBlockedItems(options, DURABLE_IDENTITY);
+}
+
+export function groupedSidebarItemsByStage(options: SidebarOrderingOptions): SidebarItemGroup[] {
+  return groupedItemsByStage(options, DURABLE_IDENTITY);
+}
+
+export function sortSidebarItemsForRepo(options: SidebarOrderingOptions): PipelineItem[] {
+  return sortItemsForRepo(options, DURABLE_IDENTITY);
+}
+
+// Slot-aware APIs keep UI row identity separate from nullable durable task identity.
+export function sidebarTaskChildItems(
+  options: SidebarTaskOrderingOptions,
+  parentTaskId: string,
+): SidebarTaskItem[] {
+  return childItems(options, parentTaskId, SLOT_IDENTITY);
+}
+
+export function sidebarTaskSubtreeRows(
+  options: SidebarTaskOrderingOptions,
+  root: SidebarTaskItem,
+): SidebarTaskTreeRow[] {
+  return subtreeRows(options, root, SLOT_IDENTITY);
+}
+
+export function sortedSidebarTaskPinnedItems(
+  options: SidebarTaskOrderingOptions,
+): SidebarTaskItem[] {
+  return sortedPinnedItems(options, SLOT_IDENTITY);
+}
+
+export function sortedSidebarTaskBlockedItems(
+  options: SidebarTaskOrderingOptions,
+): SidebarTaskItem[] {
+  return sortedBlockedItems(options, SLOT_IDENTITY);
+}
+
+export function groupedSidebarTaskItemsByStage(
+  options: SidebarTaskOrderingOptions,
+): SidebarTaskItemGroup[] {
+  return groupedItemsByStage(options, SLOT_IDENTITY);
+}
+
+export function sortSidebarTaskItemsForRepo(
+  options: SidebarTaskOrderingOptions,
+): SidebarTaskItem[] {
+  return sortItemsForRepo(options, SLOT_IDENTITY);
 }

@@ -84,6 +84,7 @@ const mockState = vi.hoisted(() => {
   let taskBlockers: TaskBlocker[] = [];
   let worktreeRows: Array<{ pipeline_item_id: string; path: string; branch: string }> = [];
   let blockCleanupGate: Promise<void> | null = null;
+  let createTaskResponseGate: Promise<void> | null = null;
   let failingCommands: Record<string, string> = {};
   let commandGates: Record<string, Promise<void>> = {};
   const listBlockersForItemMock = vi.fn(async (_db?: DbHandle, _itemId?: string) => [] as PipelineItem[]);
@@ -285,6 +286,7 @@ const mockState = vi.hoisted(() => {
     taskBlockers = [];
     worktreeRows = [];
     blockCleanupGate = null;
+    createTaskResponseGate = null;
     failingCommands = {};
     commandGates = {};
     invokeMock.mockClear();
@@ -421,6 +423,12 @@ const mockState = vi.hoisted(() => {
     set blockCleanupGate(value: Promise<void> | null) {
       blockCleanupGate = value;
     },
+    get createTaskResponseGate() {
+      return createTaskResponseGate;
+    },
+    set createTaskResponseGate(value: Promise<void> | null) {
+      createTaskResponseGate = value;
+    },
     get failingCommands() {
       return failingCommands;
     },
@@ -532,6 +540,9 @@ vi.mock("./kannaCleanup", () => ({
 }));
 
 vi.mock("./agent-provider", () => ({
+  normalizeAgentProviderCandidates: vi.fn((provider?: string | string[]) =>
+    provider == null ? [] : (Array.isArray(provider) ? provider : [provider])
+  ),
   getPreferredAgentProviders: vi.fn((options: {
     explicit?: string | string[];
     stage?: string | string[];
@@ -540,33 +551,6 @@ vi.mock("./agent-provider", () => ({
   }) => options.explicit ?? options.stage ?? options.agent ?? options.item ?? "claude"),
   requireResolvedAgentProvider: vi.fn((provider?: string) => provider ?? "claude"),
   resolveAgentProvider: vi.fn((provider?: string | string[]) => Array.isArray(provider) ? provider[0] : (provider ?? "claude")),
-}));
-
-vi.mock("./taskCreationPlaceholder", () => ({
-  buildPendingTaskPlaceholder: vi.fn((options: {
-    id: string;
-    repoId: string;
-    prompt: string;
-    branch: string;
-    agentType: string;
-    requestedAgentProviders?: string | string[];
-    pipelineName?: string;
-    stage?: string;
-    displayName?: string | null;
-  }) => mockState.makeItem({
-    id: options.id,
-    repo_id: options.repoId,
-    prompt: options.prompt,
-    branch: options.branch,
-    agent_type: options.agentType,
-    agent_provider: Array.isArray(options.requestedAgentProviders)
-      ? (options.requestedAgentProviders[0] ?? "claude")
-      : (options.requestedAgentProviders ?? "claude"),
-    pipeline: options.pipelineName ?? "default",
-    stage: options.stage ?? "in progress",
-    activity: "working",
-    display_name: options.displayName ?? null,
-  })),
 }));
 
 vi.mock("./taskRuntimeStatus", () => ({
@@ -1047,6 +1031,9 @@ describe("kanna store task base branch integration", () => {
           await spawnTask(taskId, worktreePath, worktreeConfig, portEnv);
         } catch {
           mockState.pipelineItems = mockState.pipelineItems.filter((item) => item.id !== taskId);
+        }
+        if (mockState.createTaskResponseGate) {
+          await mockState.createTaskResponseGate;
         }
         return {
           taskId,
@@ -1875,9 +1862,12 @@ describe("kanna store task base branch integration", () => {
     });
   });
 
-  it("clears pending setup before selecting a spawned PTY task so setup output is visible", async () => {
+  it("keeps one selected UI slot from submission through durable hydration", async () => {
+    const worktreeAddGate = mockState.defer();
     const selectionGate = mockState.defer();
+    const persistSelection = vi.fn(async () => selectionGate.promise);
     const store = await createStore();
+    mockState.commandGates = { git_worktree_add: worktreeAddGate.promise };
     store.attachWindowWorkspace({
       bootstrap: { windowId: "test-window", selectedRepoId: null, selectedItemId: null },
       loadSnapshot: vi.fn(async () => ({ windows: [] })),
@@ -1885,7 +1875,7 @@ describe("kanna store task base branch integration", () => {
       openWindow: vi.fn(async () => {}),
       closeWindow: vi.fn(async () => {}),
       forgetCurrentWindow: vi.fn(async () => {}),
-      persistSelection: vi.fn(async () => selectionGate.promise),
+      persistSelection,
       persistSidebarHidden: vi.fn(async () => {}),
       persistSidebarWidth: vi.fn(async () => {}),
       invalidateSharedData: vi.fn(async () => {}),
@@ -1893,31 +1883,7 @@ describe("kanna store task base branch integration", () => {
       onSharedInvalidation: vi.fn(async () => vi.fn()),
     });
 
-    const createPromise = store.createItem("repo-1", "/tmp/repo", "Show setup output", "pty", {
-      agentProvider: "claude",
-    });
-
-    await vi.waitFor(() => {
-      expect(mockState.invokeMock).toHaveBeenCalledWith(
-        "spawn_session",
-        expect.objectContaining({
-          agentProvider: "claude",
-        }),
-      );
-      expect(store.selectedItemId).toMatch(/^[0-9a-f-]+$/);
-    });
-
-    expect(store.pendingSetupIds).not.toContain(store.selectedItemId);
-    selectionGate.resolve();
-    await createPromise;
-  });
-
-  it("selects the pending task placeholder immediately while creation continues", async () => {
-    const worktreeAddGate = mockState.defer();
-    const store = await createStore();
-    mockState.commandGates = { git_worktree_add: worktreeAddGate.promise };
-
-    const createPromise = store.createItem("repo-1", "/tmp/repo", "Show the new task now", "pty", {
+    const createPromise = store.createItem("repo-1", "/tmp/repo", "Show one stable task", "pty", {
       agentProvider: "claude",
     });
     await vi.waitFor(() => {
@@ -1928,13 +1894,355 @@ describe("kanna store task base branch integration", () => {
     });
 
     expect(mockState.insertPipelineItemMock).not.toHaveBeenCalled();
-    expect(store.selectedItemId).toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
-    expect(store.currentItem?.id).toBe(store.selectedItemId);
-    expect(store.currentItem?.prompt).toBe("Show the new task now");
-    expect(store.sortedItemsForCurrentRepo[0]?.id).toBe(store.selectedItemId);
+    expect(store.currentTaskSlot).toMatchObject({
+      slot_id: expect.stringMatching(/^create:/),
+      task_id: null,
+      state: "creating",
+      task: null,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Show one stable task",
+        agent_type: "pty",
+        agent_provider: "claude",
+      },
+    });
+    const slotId = store.currentTaskSlot!.slot_id;
+    expect(store.items.some((item) => item.id === slotId)).toBe(false);
+    expect(store.selectedItemId).toBe(slotId);
+    expect(store.selectedTaskId).toBeNull();
+    expect(store.taskUiSlots).toHaveLength(1);
+    expect(persistSelection).toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
 
     worktreeAddGate.resolve();
-    await createPromise;
+    await vi.waitFor(() => {
+      expect(store.currentTaskSlot).toMatchObject({
+        slot_id: slotId,
+        task_id: expect.stringMatching(/^[0-9a-f-]+$/),
+        state: "ready",
+        task: { id: expect.stringMatching(/^[0-9a-f-]+$/) },
+      });
+    });
+
+    expect(store.items.some((item) => item.id === slotId)).toBe(false);
+    expect(store.selectedItemId).toBe(slotId);
+    expect(store.selectedTaskId).toBe(store.currentTaskSlot?.task_id);
+    expect(store.taskUiSlots.filter((slot) => slot.draft.prompt === "Show one stable task")).toHaveLength(1);
+
+    selectionGate.resolve();
+    const taskId = await createPromise;
+    expect(taskId).toBe(store.currentTaskSlot?.task_id);
+    await vi.waitFor(() => {
+      expect(persistSelection).toHaveBeenCalledWith({
+        selectedRepoId: "repo-1",
+        selectedItemId: taskId,
+      });
+    });
+  });
+
+  it("keeps one slot when a snapshot arrives before the create response and hydrates it on acknowledgement", async () => {
+    const responseGate = mockState.defer();
+    const store = await createStore();
+    mockState.createTaskResponseGate = responseGate.promise;
+
+    const createPromise = store.createItem(
+      "repo-1",
+      "/tmp/repo",
+      "Snapshot before acknowledgement",
+      "pty",
+      { agentProvider: "claude" },
+    );
+    await vi.waitFor(() => {
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "spawn_session",
+        expect.objectContaining({ agentProvider: "claude" }),
+      );
+    });
+    const durableItem = mockState.pipelineItems.find(
+      (item) => item.prompt === "Snapshot before acknowledgement",
+    );
+    expect(durableItem).toBeDefined();
+
+    await store.init(createDb());
+
+    expect(store.items.some((item) => item.id === durableItem!.id)).toBe(true);
+    expect(store.taskUiSlots.filter(
+      (slot) => slot.draft.prompt === "Snapshot before acknowledgement",
+    )).toEqual([
+      expect.objectContaining({
+        slot_id: expect.stringMatching(/^create:/),
+        task_id: null,
+        state: "creating",
+        task: null,
+      }),
+    ]);
+    const slotId = store.selectedItemId;
+
+    let failNextSnapshot = true;
+    setDesktopSnapshotFetcherForTests(async () => {
+      if (failNextSnapshot) {
+        failNextSnapshot = false;
+        throw new Error("post-ack snapshot unavailable");
+      }
+      return {
+        entries: mockState.repos.map((repo) => ({
+          repo,
+          items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+        })),
+        taskBlockers: mockState.taskBlockers,
+        worktreePaths: {},
+        settings: {},
+      };
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    responseGate.resolve();
+    const taskId = await createPromise;
+
+    expect(taskId).toBe(durableItem!.id);
+    expect(store.selectedItemId).toBe(slotId);
+    expect(store.currentTaskSlot).toMatchObject({
+      slot_id: slotId,
+      task_id: taskId,
+      state: "ready",
+      task: { id: taskId },
+    });
+    expect(store.taskUiSlots.filter((slot) => slot.task_id === taskId)).toHaveLength(1);
+    consoleError.mockRestore();
+  });
+
+  it("retains an acknowledged slot when task snapshot hydration fails", async () => {
+    const store = await createStore();
+    const slotCountBeforeCreate = store.taskUiSlots.length;
+    let failNextSnapshot = true;
+    setDesktopSnapshotFetcherForTests(async () => {
+      if (failNextSnapshot) {
+        failNextSnapshot = false;
+        throw new Error("snapshot temporarily unavailable");
+      }
+      return {
+        entries: mockState.repos.map((repo) => ({
+          repo,
+          items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+        })),
+        taskBlockers: mockState.taskBlockers,
+        worktreePaths: {},
+        settings: {},
+      };
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const taskId = await store.createItem(
+      "repo-1",
+      "/tmp/repo",
+      "Hydrate later",
+      "pty",
+      { agentProvider: "claude" },
+    );
+
+    expect(store.currentTaskSlot).toMatchObject({
+      slot_id: expect.stringMatching(/^create:/),
+      task_id: taskId,
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+    });
+    const slotId = store.currentTaskSlot!.slot_id;
+    expect(store.selectedItemId).toBe(slotId);
+    expect(store.items.some((item) => item.id === taskId)).toBe(false);
+    expect(store.taskUiSlots).toHaveLength(slotCountBeforeCreate + 1);
+    expect(publishDesktopTaskSnapshotMock).not.toHaveBeenCalled();
+
+    await store.init(createDb());
+
+    expect(store.currentTaskSlot).toMatchObject({
+      slot_id: slotId,
+      task_id: taskId,
+      state: "ready",
+      task: { id: taskId },
+    });
+    expect(store.taskUiSlots.filter((slot) => slot.task_id === taskId)).toHaveLength(1);
+    consoleError.mockRestore();
+  });
+
+  it("removes only the creating slot and restores selection when creation fails before acknowledgement", async () => {
+    mockState.pipelineItems = [mockState.makeItem({
+      id: "item-existing",
+      branch: "task-item-existing",
+      prompt: "Keep this task",
+    })];
+    mockState.baseBranchResponse = ["feature/no-default"];
+    const store = await createStore();
+    await store.selectItem("item-existing");
+    const persistSelection = vi.fn(() => new Promise<void>(() => {}));
+    store.attachWindowWorkspace({
+      bootstrap: { windowId: "test-window", selectedRepoId: "repo-1", selectedItemId: "item-existing" },
+      loadSnapshot: vi.fn(async () => ({ windows: [] })),
+      saveSnapshot: vi.fn(async () => {}),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection,
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData: vi.fn(async () => {}),
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    });
+    const createPromise = store.createItem(
+      "repo-1",
+      "/tmp/repo",
+      "Fail before acknowledgement",
+      "pty",
+      { agentProvider: "claude" },
+    );
+    let outcome: {
+      status: "pending" | "resolved" | "rejected";
+      error: unknown;
+    } = { status: "pending", error: null };
+    void createPromise.then(
+      () => {
+        outcome = { status: "resolved", error: null };
+      },
+      (error: unknown) => {
+        outcome = { status: "rejected", error };
+      },
+    );
+    await vi.waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith("No valid base branch selected");
+    });
+    await Promise.resolve();
+
+    expect(outcome.status).toBe("rejected");
+    expect(outcome.error).toEqual(new Error("No valid base branch selected"));
+
+    expect(store.taskUiSlots).toHaveLength(1);
+    expect(store.taskUiSlots[0]).toMatchObject({
+      slot_id: "item-existing",
+      task_id: "item-existing",
+      state: "ready",
+    });
+    expect(store.taskUiSlots.some((slot) => slot.draft.prompt === "Fail before acknowledgement")).toBe(false);
+    expect(store.selectedItemId).toBe("item-existing");
+    expect(store.lastSelectedItemByRepo["repo-1"]).toBe("item-existing");
+    expect(persistSelection).toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+    expect(persistSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it("materializes a deferred same-repo snapshot task immediately when creation fails", async () => {
+    const baseBranchGate = mockState.defer();
+    mockState.baseBranchResponse = ["feature/no-default"];
+    const store = await createStore();
+    mockState.commandGates = {
+      git_list_base_branches: baseBranchGate.promise,
+    };
+
+    const createPromise = store.createItem(
+      "repo-1",
+      "/tmp/repo",
+      "Fail after another task arrives",
+      "pty",
+      { agentProvider: "claude" },
+    );
+    await vi.waitFor(() => {
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "git_list_base_branches",
+        { repoPath: "/tmp/repo" },
+      );
+    });
+
+    const arrivedItem = mockState.makeItem({
+      id: "item-arrived",
+      branch: "task-item-arrived",
+      prompt: "Arrived during creation",
+    });
+    mockState.pipelineItems = [arrivedItem];
+    await store.init(createDb());
+
+    expect(store.items.map((item) => item.id)).toEqual(["item-arrived"]);
+    expect(store.taskUiSlots).toEqual([
+      expect.objectContaining({
+        slot_id: expect.stringMatching(/^create:/),
+        task_id: null,
+        state: "creating",
+      }),
+    ]);
+
+    baseBranchGate.resolve();
+    await expect(createPromise).rejects.toThrow("No valid base branch selected");
+
+    expect(store.taskUiSlots).toEqual([
+      expect.objectContaining({
+        slot_id: "item-arrived",
+        task_id: "item-arrived",
+        state: "ready",
+        task: expect.objectContaining({ id: "item-arrived" }),
+      }),
+    ]);
+    expect(store.selectedItemId).toBe("item-arrived");
+    expect(store.lastSelectedItemByRepo["repo-1"]).toBe("item-arrived");
+  });
+
+  it("does not steal selection back when the user leaves a creating slot", async () => {
+    mockState.pipelineItems = [mockState.makeItem({
+      id: "item-existing",
+      branch: "task-item-existing",
+      prompt: "Stay here",
+    })];
+    const worktreeAddGate = mockState.defer();
+    const store = await createStore();
+    mockState.commandGates = { git_worktree_add: worktreeAddGate.promise };
+    const persistSelection = vi.fn(async () => {});
+    store.attachWindowWorkspace({
+      bootstrap: { windowId: "test-window", selectedRepoId: "repo-1", selectedItemId: "item-existing" },
+      loadSnapshot: vi.fn(async () => ({ windows: [] })),
+      saveSnapshot: vi.fn(async () => {}),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection,
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData: vi.fn(async () => {}),
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    });
+    await store.selectItem("item-existing");
+
+    const createPromise = store.createItem(
+      "repo-1",
+      "/tmp/repo",
+      "Create without stealing focus",
+      "pty",
+      { agentProvider: "claude" },
+    );
+    await vi.waitFor(() => {
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "git_worktree_add",
+        expect.objectContaining({ repoPath: "/tmp/repo" }),
+      );
+    });
+    const creatingSlotId = store.currentTaskSlot!.slot_id;
+    expect(creatingSlotId).toMatch(/^create:/);
+
+    await store.selectItem("item-existing");
+    worktreeAddGate.resolve();
+    const taskId = await createPromise;
+
+    expect(store.selectedItemId).toBe("item-existing");
+    expect(store.selectedTaskId).toBe("item-existing");
+    expect(store.lastSelectedItemByRepo["repo-1"]).toBe("item-existing");
+    expect(store.taskUiSlots.filter((slot) => slot.task_id === taskId)).toEqual([
+      expect.objectContaining({ slot_id: creatingSlotId, state: "ready" }),
+    ]);
+    expect(persistSelection).not.toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: taskId,
+    });
   });
 
   it("keeps a custom task PTY provider ahead of the real E2E override", async () => {

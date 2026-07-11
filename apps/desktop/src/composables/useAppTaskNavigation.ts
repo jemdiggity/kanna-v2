@@ -1,4 +1,4 @@
-import { computed, type ComputedRef, type Ref } from "vue";
+import { computed, watch, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
 import type { AgentProvider, PipelineItem } from "../types/kanna";
 import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
@@ -7,10 +7,10 @@ import type { CustomTaskConfig } from "@kanna/core";
 import Sidebar from "../components/Sidebar.vue";
 import { isBlockerResolved } from "../utils/blockerResolution";
 import { selectTaskByActivity } from "../utils/selectTaskByActivity";
-import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
+import { sortSidebarTaskItemsForRepo } from "../utils/sidebarOrdering";
 import { isTaskTearingDown } from "../stores/taskStages";
+import type { SidebarTaskItem } from "../types/taskUi";
 import type { WorkspaceTask } from "../workspace/types";
-import type { AppSidebarItem } from "./useAppCloudWorkspace";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
 import type { WindowWorkspaceController } from "../windowWorkspace";
@@ -43,6 +43,31 @@ interface PaletteExtraCommand {
   shortcut: string;
 }
 
+function canonicalSidebarTaskItem(item: PipelineItem, fallbackRepoId?: string): SidebarTaskItem {
+  const { id, ...presentation } = item;
+  return {
+    ...presentation,
+    repo_id: item.repo_id ?? fallbackRepoId ?? "",
+    closed_at: item.closed_at ?? null,
+    pinned: item.pinned ?? 0,
+    pin_order: item.pin_order ?? null,
+    stage: item.stage ?? "in progress",
+    pr_url: item.pr_url ?? null,
+    parent_task_id: item.parent_task_id ?? null,
+    created_at: item.created_at ?? "",
+    slot_id: id,
+    task_id: id,
+    state: "ready",
+  };
+}
+
+function canonicalSidebarTaskItems(
+  items: readonly PipelineItem[],
+  fallbackRepoId?: string,
+): SidebarTaskItem[] {
+  return items.map((item) => canonicalSidebarTaskItem(item, fallbackRepoId));
+}
+
 interface UseAppTaskNavigationOptions {
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
@@ -50,7 +75,7 @@ interface UseAppTaskNavigationOptions {
   windowWorkspace: WindowWorkspaceController;
   sidebarRef: Ref<InstanceType<typeof Sidebar> | null>;
   sidebarRepos: ComputedRef<SidebarRepoProjection[]>;
-  sidebarItems: ComputedRef<AppSidebarItem[]>;
+  sidebarItems: ComputedRef<SidebarTaskItem[]>;
   workspaceTasksByItemId: ComputedRef<Map<string, WorkspaceTask>>;
   selectedCloudRepoId: Ref<string | null>;
   selectedCloudItemId: Ref<string | null>;
@@ -91,7 +116,10 @@ export function useAppTaskNavigation({
   openPeerPicker,
   openPairPeerPicker,
 }: UseAppTaskNavigationOptions) {
-  function visibleSidebarItemsForRepo(repoId: string, options: { currentRepoScope?: boolean } = {}) {
+  function visibleSidebarItemsForRepo(
+    repoId: string,
+    options: { currentRepoScope?: boolean } = {},
+  ): SidebarTaskItem[] {
     const workspaceItems = sidebarItems.value.filter((item) => item.repo_id === repoId);
     const searchQuery = sidebarRef.value?.searchQuery ?? "";
     const sortOptions = {
@@ -100,23 +128,25 @@ export function useAppTaskNavigation({
       getStageOrder: store.getStageOrder,
       searchQuery,
     };
-    const withRepoId = (items: typeof workspaceItems) => items.map((item) => ({
-      ...item,
-      repo_id: item.repo_id ?? repoId,
-    }));
-    if (workspaceItems.length === 0 && options.currentRepoScope && repoId === store.selectedRepoId && !repoId.startsWith("cloud:")) {
-      return sortSidebarItemsForRepo({ ...sortOptions, items: withRepoId(store.sortedItemsForCurrentRepo) });
+    if (workspaceItems.length === 0 && !repoId.startsWith("cloud:")) {
+      const fallbackItems = options.currentRepoScope && repoId === store.selectedRepoId
+        ? store.sortedItemsForCurrentRepo
+        : store.sortedItemsAllRepos.filter((item) => item.repo_id === repoId);
+      if (fallbackItems.length === 0) return [];
+      return sortSidebarTaskItemsForRepo({
+        ...sortOptions,
+        items: canonicalSidebarTaskItems(fallbackItems, repoId),
+      });
     }
-    if (options.currentRepoScope && repoId === store.selectedRepoId && !repoId.startsWith("cloud:")) {
-      return sortSidebarItemsForRepo({ ...sortOptions, items: workspaceItems });
-    }
-    return sortSidebarItemsForRepo({ ...sortOptions, items: workspaceItems });
+    return sortSidebarTaskItemsForRepo({ ...sortOptions, items: workspaceItems });
   }
 
-  function visibleSidebarItemsAllRepos() {
+  function visibleSidebarItemsAllRepos(): SidebarTaskItem[] {
     const workspaceItems = sidebarRepos.value.flatMap((repo) => visibleSidebarItemsForRepo(repo.id));
     if (workspaceItems.length > 0) return workspaceItems;
-    if (store.sortedItemsAllRepos.length > 0) return store.sortedItemsAllRepos;
+    if (store.sortedItemsAllRepos.length > 0) {
+      return canonicalSidebarTaskItems(store.sortedItemsAllRepos);
+    }
     const repoId = store.selectedRepoId;
     return repoId ? visibleSidebarItemsForRepo(repoId, { currentRepoScope: true }) : [];
   }
@@ -126,19 +156,45 @@ export function useAppTaskNavigation({
     return repoId ? visibleSidebarItemsForRepo(repoId, { currentRepoScope: true }) : [];
   }
 
+  function sidebarItemForSelection(
+    selectionId: string | null | undefined,
+    items: readonly SidebarTaskItem[] = sidebarItems.value,
+  ): SidebarTaskItem | null {
+    if (!selectionId) return null;
+    return items.find((item) =>
+      item.slot_id === selectionId || item.task_id === selectionId,
+    ) ?? null;
+  }
+
+  function presentationSlotIdForSelection(items: readonly SidebarTaskItem[]): string | null {
+    const selectionId = selectedCloudItemId.value ?? store.selectedItemId;
+    if (!selectionId) return null;
+    const direct = sidebarItemForSelection(selectionId, items);
+    if (direct) return direct.slot_id;
+
+    const selectedWorkspace = workspaceTasksByItemId.value.get(selectionId);
+    if (!selectedWorkspace) return selectionId;
+    return items.find((item) =>
+      workspaceTasksByItemId.value.get(item.slot_id) === selectedWorkspace,
+    )?.slot_id ?? selectionId;
+  }
+
   // Navigation
-  async function selectSidebarItem(item: Pick<AppSidebarItem, "id" | "repo_id">, previousItemId?: string | null) {
+  async function selectSidebarItem(
+    item: Pick<SidebarTaskItem, "slot_id" | "task_id" | "repo_id">,
+    previousItemId?: string | null,
+  ) {
     if (item.repo_id !== store.selectedRepoId) {
       const previous = previousItemId !== undefined ? previousItemId : store.selectedItemId;
       await handleSelectRepo(item.repo_id);
-      await handleSelectItem(item.id, previous);
+      await handleSelectItem(item.slot_id, previous);
       return;
     }
 
     if (previousItemId !== undefined) {
-      await handleSelectItem(item.id, previousItemId);
+      await handleSelectItem(item.slot_id, previousItemId);
     } else {
-      await handleSelectItem(item.id);
+      await handleSelectItem(item.slot_id);
     }
   }
 
@@ -146,7 +202,10 @@ export function useAppTaskNavigation({
     const allItems = visibleSidebarItemsAllRepos();
     const visibleItems = allItems;
     if (visibleItems.length === 0) return;
-    const currentIndex = visibleItems.findIndex((i) => i.id === store.selectedItemId);
+    const selectedPresentationSlotId = presentationSlotIdForSelection(visibleItems);
+    const currentIndex = visibleItems.findIndex((item) =>
+      item.slot_id === selectedPresentationSlotId,
+    );
     let nextIndex: number;
     if (currentIndex === -1) {
       nextIndex = 0;
@@ -156,7 +215,7 @@ export function useAppTaskNavigation({
       if (nextIndex >= visibleItems.length) nextIndex = visibleItems.length - 1;
     }
     const nextItem = visibleItems[nextIndex];
-    if (nextItem.id !== store.selectedItemId) {
+    if (nextItem.slot_id !== selectedPresentationSlotId) {
       const previousItemId = store.selectedItemId;
       await selectSidebarItem(nextItem, previousItemId);
     }
@@ -180,24 +239,22 @@ export function useAppTaskNavigation({
     // Restore last-selected task for this repo, or fall back to first task.
     const lastItemId = store.lastSelectedItemByRepo[nextRepo.id];
     const lastItem = lastItemId
-      ? sidebarItems.value.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.closed_at == null)
+      ? sidebarItems.value.find((item) =>
+        (item.slot_id === lastItemId || item.task_id === lastItemId)
+        && item.repo_id === nextRepo.id
+        && item.closed_at == null,
+      )
       : undefined;
     const targetItem = lastItem ?? visibleSidebarItemsForRepo(nextRepo.id)[0];
 
-    if (targetItem && !nextRepo.id.startsWith("cloud:")) {
-      store.selectedRepoId = nextRepo.id;
-      await handleSelectItem(targetItem.id, previousItemId);
-      await store.selectRepo(nextRepo.id);
-      return;
-    }
-
     await handleSelectRepo(nextRepo.id);
     if (targetItem) {
-      await handleSelectItem(targetItem.id, previousItemId);
+      await handleSelectItem(targetItem.slot_id, previousItemId);
     }
   }
 
-  function isBlocked(itemId: string): boolean {
+  function isBlocked(itemId: string | null): boolean {
+    if (itemId === null) return false;
     // Optimistic resolution: a blocker parked at `pr` with a PR created no
     // longer blocks (see isBlockerResolved). A blocker row whose task is
     // unknown counts as unresolved.
@@ -213,7 +270,7 @@ export function useAppTaskNavigation({
       visibleSidebarItemsForCurrentRepo().filter((item) =>
         isActivityShortcutCandidate(item)
         && isUnpinnedActivityShortcutCandidate(item)
-        && !isBlocked(item.id)
+        && !isBlocked(item.task_id)
       ),
       mode,
       "idle",
@@ -575,13 +632,16 @@ export function useAppTaskNavigation({
 
   async function handleSelectRepo(repoId: string) {
     if (repoId.startsWith("cloud:")) {
+      const rememberedSelectionId = store.lastSelectedItemByRepo[repoId] ?? null;
+      const rememberedItem = sidebarItemForSelection(rememberedSelectionId);
+      const presentationSlotId = rememberedItem?.slot_id ?? null;
       selectedCloudRepoId.value = repoId;
       store.selectedRepoId = repoId;
-      store.selectedItemId = store.lastSelectedItemByRepo[repoId] ?? null;
-      selectedCloudItemId.value = store.selectedItemId;
+      store.selectedItemId = presentationSlotId;
+      selectedCloudItemId.value = presentationSlotId;
       await windowWorkspace.persistSelection({
         selectedRepoId: store.selectedRepoId,
-        selectedItemId: store.selectedItemId,
+        selectedItemId: rememberedItem?.task_id ?? null,
       });
       return;
     }
@@ -590,28 +650,69 @@ export function useAppTaskNavigation({
     await store.selectRepo(repoId);
   }
 
-  async function handleSelectItem(itemId: string, previousItemId?: string | null) {
-    const workspaceTask = workspaceTasksByItemId.value.get(itemId);
+  async function handleSelectItem(presentationSlotId: string, previousItemId?: string | null) {
+    const fallbackItem = store.items.find((item) => item.id === presentationSlotId);
+    const projectedItem = sidebarItemForSelection(presentationSlotId)
+      ?? (fallbackItem ? canonicalSidebarTaskItem(fallbackItem) : null);
+    const workspaceTask = workspaceTasksByItemId.value.get(projectedItem?.slot_id ?? presentationSlotId)
+      ?? (projectedItem?.task_id
+        ? workspaceTasksByItemId.value.get(projectedItem.task_id)
+        : undefined)
+      ?? workspaceTasksByItemId.value.get(presentationSlotId);
     if (workspaceTask && workspaceTask.owner.kind !== "local") {
+      const stablePresentationSlotId = projectedItem?.slot_id ?? presentationSlotId;
+      const durableTaskId = projectedItem?.task_id ?? workspaceTask.item.id;
       selectedCloudRepoId.value = workspaceTask.repoKey;
-      selectedCloudItemId.value = itemId;
+      selectedCloudItemId.value = stablePresentationSlotId;
       store.selectedRepoId = workspaceTask.repoKey;
-      store.selectedItemId = itemId;
-      store.lastSelectedItemByRepo[workspaceTask.repoKey] = itemId;
+      store.selectedItemId = stablePresentationSlotId;
+      store.lastSelectedItemByRepo[workspaceTask.repoKey] = stablePresentationSlotId;
       await windowWorkspace.persistSelection({
         selectedRepoId: store.selectedRepoId,
-        selectedItemId: store.selectedItemId,
+        selectedItemId: durableTaskId,
       });
       return;
     }
     selectedCloudRepoId.value = null;
     selectedCloudItemId.value = null;
+    const localSelectionId = workspaceTask
+      ? workspaceTask.localTaskId ?? projectedItem?.task_id ?? workspaceTask.item.id
+      : projectedItem?.state === "creating"
+        ? projectedItem.slot_id
+        : projectedItem?.task_id ?? presentationSlotId;
     if (previousItemId !== undefined) {
-      await store.selectItem(itemId, { previousItemId });
+      await store.selectItem(localSelectionId, { previousItemId });
     } else {
-      await store.selectItem(itemId);
+      await store.selectItem(localSelectionId);
     }
   }
+
+  watch(
+    () => {
+      const presentationSlotId = selectedCloudItemId.value;
+      if (!presentationSlotId) return null;
+      const workspaceTask = workspaceTasksByItemId.value.get(presentationSlotId);
+      return workspaceTask?.owner.kind === "local"
+        ? { presentationSlotId, workspaceTask }
+        : null;
+    },
+    (localSelection) => {
+      if (!localSelection) return;
+      const projectedItem = sidebarItemForSelection(localSelection.presentationSlotId);
+      const localTaskId = localSelection.workspaceTask.localTaskId
+        ?? projectedItem?.task_id
+        ?? localSelection.workspaceTask.item.id;
+      const normalizeSelection = store.selectItem(localTaskId);
+      if (selectedCloudItemId.value === localSelection.presentationSlotId) {
+        selectedCloudRepoId.value = null;
+        selectedCloudItemId.value = null;
+      }
+      void normalizeSelection.catch((error) => {
+        console.error("[App] failed to normalize remote task selection to local owner:", error);
+      });
+    },
+    { flush: "sync" },
+  );
 
   return {
     visibleSidebarItemsForRepo,

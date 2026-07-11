@@ -52,10 +52,8 @@ export function createInitApi(
   }
 
   function resolveFocusedTaskIdBeforeExternalRefresh(): string | null {
-    const selectedItem = context.state.selectedItemId.value
-      ? context.state.items.value.find((candidate) => candidate.id === context.state.selectedItemId.value)
-      : null;
-    if (isVisibleItemInSelectedRepo(selectedItem)) return selectedItem.id;
+    const selectedSlot = requireService(context.services.currentTaskSlot, "currentTaskSlot").value;
+    if (isVisibleItemInSelectedRepo(selectedSlot?.task)) return selectedSlot.task.id;
 
     const currentItem = context.services.currentItem?.value ?? null;
     if (isVisibleItemInSelectedRepo(currentItem)) return currentItem.id;
@@ -66,16 +64,13 @@ export function createInitApi(
   async function preserveFocusedTaskAfterExternalRefresh(taskId: string | null): Promise<void> {
     if (!taskId) return;
 
-    const selectedItem = context.state.selectedItemId.value
-      ? context.state.items.value.find((candidate) => candidate.id === context.state.selectedItemId.value)
-      : null;
-    if (isVisibleItemInSelectedRepo(selectedItem)) return;
+    const selectedSlot = requireService(context.services.currentTaskSlot, "currentTaskSlot").value;
+    if (isVisibleItemInSelectedRepo(selectedSlot?.task) && selectedSlot.task.id === taskId) return;
 
     const focusedItem = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!isVisibleItemInSelectedRepo(focusedItem)) return;
 
-    context.state.selectedItemId.value = focusedItem.id;
-    context.state.lastSelectedItemByRepo.value[focusedItem.repo_id] = focusedItem.id;
+    requireService(context.services.restoreSelection, "restoreSelection")(focusedItem.id);
     await context.services.windowWorkspace?.persistSelection({
       selectedRepoId: context.state.selectedRepoId.value,
       selectedItemId: focusedItem.id,
@@ -83,16 +78,23 @@ export function createInitApi(
   }
 
   async function preserveExplicitSelectionAfterExternalRefresh(
-    selectedItemIdBeforeRefresh: string | null,
+    selectedTaskIdBeforeRefresh: string | null,
+    selectedSlotIdBeforeRefresh: string | null,
   ): Promise<void> {
-    if (!selectedItemIdBeforeRefresh) return;
+    if (!selectedTaskIdBeforeRefresh) return;
 
-    const selectedItem = context.state.items.value.find((candidate) => candidate.id === selectedItemIdBeforeRefresh);
-    if (isVisibleItemInSelectedRepo(selectedItem)) return;
+    const selectedSlot = requireService(context.services.currentTaskSlot, "currentTaskSlot").value;
+    if (selectedSlot?.task_id === selectedTaskIdBeforeRefresh) return;
+
+    const selectedItem = context.state.items.value.find((candidate) => candidate.id === selectedTaskIdBeforeRefresh);
+    if (isVisibleItemInSelectedRepo(selectedItem)) {
+      requireService(context.services.restoreSelection, "restoreSelection")(selectedItem.id);
+      return;
+    }
 
     const selectedRepoId = context.state.selectedRepoId.value;
     context.state.selectedItemId.value = null;
-    if (selectedRepoId && context.state.lastSelectedItemByRepo.value[selectedRepoId] === selectedItemIdBeforeRefresh) {
+    if (selectedRepoId && context.state.lastSelectedItemByRepo.value[selectedRepoId] === selectedSlotIdBeforeRefresh) {
       const { [selectedRepoId]: _removed, ...remaining } = context.state.lastSelectedItemByRepo.value;
       context.state.lastSelectedItemByRepo.value = remaining;
     }
@@ -311,9 +313,16 @@ export function createInitApi(
     }
 
     await context.services.windowWorkspace?.onSharedInvalidation(async () => {
-      const selectedItemIdBeforeRefresh = context.state.selectedItemId.value;
+      const selectedTaskIdBeforeRefresh = requireService(
+        context.services.selectedTaskId,
+        "selectedTaskId",
+      ).value;
+      const selectedSlotIdBeforeRefresh = context.state.selectedItemId.value;
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-      await preserveExplicitSelectionAfterExternalRefresh(selectedItemIdBeforeRefresh);
+      await preserveExplicitSelectionAfterExternalRefresh(
+        selectedTaskIdBeforeRefresh,
+        selectedSlotIdBeforeRefresh,
+      );
     });
 
     if (isTauri) {
@@ -386,7 +395,7 @@ export function createInitApi(
           invoke("kill_session", { sessionId: `shell-wt-${item.id}` }).catch((error: unknown) =>
             reportCloseSessionError("[store] kill shell session failed:", error)),
         ]);
-        if (context.state.selectedItemId.value === item.id) {
+        if (requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id) {
           await requireService(
             context.services.selectReplacementAfterItemRemoval,
             "selectReplacementAfterItemRemoval",

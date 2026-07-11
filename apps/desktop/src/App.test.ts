@@ -4,6 +4,8 @@ import { computed, defineComponent, h, nextTick, reactive, ref } from "vue";
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyboardActions } from "./composables/useKeyboardShortcuts";
+import type { PipelineItem } from "./types/kanna";
+import type { TaskUiSlot } from "./types/taskUi";
 import {
   WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
   WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT,
@@ -51,6 +53,26 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+function readyTaskSlot(slotId: string, task: { id: string; repo_id: string; [key: string]: unknown }): TaskUiSlot {
+  const pipelineTask = task as unknown as PipelineItem;
+  return {
+    slot_id: slotId,
+    task_id: task.id,
+    state: "ready",
+    task: pipelineTask,
+    draft: {
+      repo_id: task.repo_id,
+      prompt: pipelineTask.prompt ?? "",
+      display_name: pipelineTask.display_name ?? null,
+      pipeline: pipelineTask.pipeline ?? "default",
+      stage: pipelineTask.stage ?? "in progress",
+      agent_type: pipelineTask.agent_type === "agent" || pipelineTask.agent_type === "sdk" ? "agent" : "pty",
+      agent_provider: pipelineTask.agent_provider ?? "claude",
+      created_at: pipelineTask.created_at ?? "2026-01-01T00:00:00.000Z",
+    },
+  };
+}
+
 const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
@@ -66,6 +88,7 @@ const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
+const relayCloseTaskMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseMock = vi.hoisted(() => vi.fn());
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
@@ -76,10 +99,13 @@ const dbMock = {
 const store = {
   repos: [{ id: "repo-1", path: "/tmp/repo", name: "repo" }],
   items: [],
+  taskUiSlots: [] as TaskUiSlot[],
   selectedRepoId: "repo-1" as string | null,
   selectedItemId: null,
+  selectedTaskId: null as string | null,
   selectedRepo: { id: "repo-1", path: "/tmp/repo", name: "repo" } as { id: string; path: string; name: string } | null,
   currentItem: null,
+  currentTaskSlot: null as TaskUiSlot | null,
   sortedItemsForCurrentRepo: [],
   sortedItemsAllRepos: [],
   taskBlockers: [] as Array<{ blocked_item_id: string; blocker_item_id: string }>,
@@ -357,6 +383,7 @@ vi.mock("./services/desktopCloudPublisher", () => ({
 vi.mock("./services/desktopRelayTerminal", () => ({
   createConfiguredDesktopRelayTerminalClient: vi.fn(async () => ({
     advanceStage: relayAdvanceStageMock,
+    closeTask: relayCloseTaskMock,
     close: relayCloseMock,
   })),
 }));
@@ -364,6 +391,7 @@ vi.mock("./services/desktopRelayTerminal", () => ({
 vi.mock("./services/desktopLanTerminal", () => ({
   createConfiguredDesktopLanTerminalClient: vi.fn(async () => ({
     advanceStage: relayAdvanceStageMock,
+    closeTask: relayCloseTaskMock,
     close: relayCloseMock,
   })),
 }));
@@ -629,13 +657,18 @@ describe("App", () => {
     store.selectItem.mockClear();
     store.advanceStage.mockClear();
     relayAdvanceStageMock.mockClear();
+    relayCloseTaskMock.mockClear();
     relayCloseMock.mockClear();
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
     store.selectedRepoId = "repo-1";
     store.selectedItemId = null;
+    store.lastSelectedItemByRepo = {};
     store.selectedRepo = { id: "repo-1", path: "/tmp/repo", name: "repo" };
     store.currentItem = null;
+    store.currentTaskSlot = null;
+    store.selectedTaskId = null;
     store.items = [];
+    store.taskUiSlots = [];
     store.sortedItemsForCurrentRepo = [];
     store.sortedItemsAllRepos = [];
     store.taskBlockers = [];
@@ -1055,17 +1088,17 @@ describe("App", () => {
       name: "Sidebar",
       props: {
         repos: { type: Array, default: () => [] },
-        pipelineItems: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
       },
       emits: ["select-repo", "select-item"],
       template: `
         <div data-testid="sidebar">
           <button
-            v-for="item in pipelineItems"
-            :key="item.id"
+            v-for="item in taskSlots"
+            :key="item.slot_id"
             data-testid="cloud-task"
             type="button"
-            @click="$emit('select-repo', item.repo_id); $emit('select-item', item.id)"
+            @click="$emit('select-repo', item.repo_id); $emit('select-item', item.slot_id)"
           >
             {{ item.display_name }}
           </button>
@@ -1076,12 +1109,14 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        item: Object,
+        uiSlot: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-slot-id">{{ uiSlot?.slot_id || "" }}</span>
+          <span data-testid="main-task-id">{{ uiSlot?.task_id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiSlot?.task?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1097,7 +1132,407 @@ describe("App", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-remote:task-remote");
+    expect(wrapper.get('[data-testid="main-task-id"]').text()).toBe("cloud:repo-remote:task-remote");
+    const presentationSlotId = wrapper.get('[data-testid="main-slot-id"]').text();
+    expect(presentationSlotId).not.toBe("cloud:repo-remote:task-remote");
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: "cloud:repo-remote:task-remote",
+    });
     expect(wrapper.get('[data-testid="main-repo-path"]').text()).toBe("cloud");
+
+    wrapper.unmount();
+  });
+
+  it("clears and persists a remote selection after closing its stable presentation slot", async () => {
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-remote",
+        repo_id: "cloud:repo-remote",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+      terminalRefs: {
+        "cloud:repo-remote:task-remote": {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-owner",
+          ownerLocalTaskId: "task-owner",
+          transport: "cloud",
+        },
+      },
+    });
+
+    const SidebarRemoteCloseStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["select-item"],
+      template: `
+        <button
+          v-for="item in taskSlots"
+          :key="item.slot_id"
+          data-testid="remote-close-task"
+          type="button"
+          @click="$emit('select-item', item.slot_id)"
+        >
+          {{ item.display_name }}
+        </button>
+      `,
+    });
+
+    const wrapper = await mountApp(SidebarRemoteCloseStub);
+    await flushPromises();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="remote-close-task"]').trigger("click");
+    await flushPromises();
+
+    const presentationSlotId = store.selectedItemId;
+    expect(presentationSlotId).toMatch(/^remote:/);
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBe(presentationSlotId);
+    mockWindowWorkspace.persistSelection.mockClear();
+
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(relayCloseTaskMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-owner",
+    });
+    expect(store.selectedItemId).toBeNull();
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBeUndefined();
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: null,
+    });
+    expect(wrapper.find('[data-testid="remote-close-task"]').exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it("normalizes a retained remote presentation slot to its local task slot without losing the highlight", async () => {
+    const localTask: PipelineItem = {
+      id: "task-owner",
+      repo_id: "repo-1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "Task that arrives locally",
+      pipeline: "default",
+      pipeline_def: null,
+      stage: "in progress",
+      pr_number: null,
+      pr_url: null,
+      branch: "task-owner",
+      closed_at: null,
+      agent_type: "pty",
+      agent_provider: "claude",
+      activity: "working",
+      activity_changed_at: "2026-05-18T00:00:00.000Z",
+      unread_at: null,
+      port_offset: null,
+      display_name: "Local owner task",
+      last_output_preview: null,
+      port_env: null,
+      pinned: 0,
+      pin_order: null,
+      base_ref: "origin/main",
+      agent_session_id: null,
+      teardown_started_at: null,
+      parent_task_id: null,
+      notify_task_id: null,
+      notified_at: null,
+      created_at: "2026-05-18T00:00:00.000Z",
+      updated_at: "2026-05-18T00:00:00.000Z",
+    };
+    const localItems = reactive<PipelineItem[]>([]);
+    store.items = localItems;
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "repo-1",
+        path: "cloud",
+        name: "repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        ...localTask,
+        id: "cloud:repo-1:task-owner",
+        pipeline: "cloud",
+        display_name: "Remote presentation",
+      }],
+      terminalRefs: {
+        "cloud:repo-1:task-owner": {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-1",
+          ownerLocalTaskId: "task-owner",
+          transport: "cloud",
+        },
+      },
+    });
+    store.selectItem.mockImplementation(async (taskId: string) => {
+      const slot = store.taskUiSlots.find((candidate) => candidate.task_id === taskId) ?? null;
+      store.selectedItemId = slot?.slot_id ?? taskId;
+      store.selectedTaskId = slot?.task_id ?? taskId;
+      store.currentTaskSlot = slot;
+      store.currentItem = slot?.task ?? null;
+    });
+
+    const SidebarOwnershipStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+        selectedSlotId: String,
+      },
+      emits: ["select-item"],
+      template: `
+        <div data-testid="ownership-sidebar">
+          <button
+            v-for="item in taskSlots"
+            :key="item.slot_id"
+            data-testid="ownership-task"
+            :data-slot-id="item.slot_id"
+            @click="$emit('select-item', item.slot_id)"
+          >{{ item.display_name }}</button>
+          <span data-testid="ownership-selected-slot">{{ selectedSlotId || "" }}</span>
+          <span data-testid="ownership-row-count">{{ taskSlots.length }}</span>
+        </div>
+      `,
+    });
+    const MainPanelOwnershipStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        cloudTask: Boolean,
+      },
+      template: '<div data-testid="ownership-cloud-task">{{ String(cloudTask) }}</div>',
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarOwnershipStub, {
+      MainPanel: MainPanelOwnershipStub,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const presentationSlotId = wrapper.get('[data-testid="ownership-task"]').attributes("data-slot-id");
+    expect(presentationSlotId).toMatch(/^remote:/);
+    await wrapper.get('[data-testid="ownership-task"]').trigger("click");
+    await flushPromises();
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    expect(wrapper.get('[data-testid="ownership-cloud-task"]').text()).toBe("true");
+
+    store.taskUiSlots = [readyTaskSlot("slot:local-owner", localTask)];
+    localItems.push(localTask);
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    expect(store.selectItem).toHaveBeenCalledWith("task-owner");
+    expect(store.selectedItemId).toBe("slot:local-owner");
+    expect(wrapper.get('[data-testid="ownership-row-count"]').text()).toBe("1");
+    expect(wrapper.get('[data-testid="ownership-task"]').attributes("data-slot-id")).toBe(presentationSlotId);
+    expect(wrapper.get('[data-testid="ownership-selected-slot"]').text()).toBe(presentationSlotId);
+    expect(wrapper.get('[data-testid="ownership-cloud-task"]').text()).toBe("false");
+
+    wrapper.unmount();
+  });
+
+  it("passes stable slot props through and keeps a local creating slot ahead of a matching cloud route", async () => {
+    const creatingSlot: TaskUiSlot = {
+      slot_id: "create:stable-local",
+      task_id: "durable-pending",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Keep the local creation view stable",
+        display_name: "Stable local task",
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-05-18T00:00:00.000Z",
+      },
+    };
+    store.taskUiSlots = [creatingSlot];
+    store.currentTaskSlot = creatingSlot;
+    store.selectedItemId = creatingSlot.slot_id;
+    store.selectedTaskId = creatingSlot.task_id;
+    cloudTasksMock.mockResolvedValue({
+      repos: [],
+      items: [{
+        id: "cloud:repo-1:durable-pending",
+        repo_id: "repo-1",
+        prompt: creatingSlot.draft.prompt,
+        pipeline: "cloud",
+        stage: "in progress",
+        pipeline_def: null,
+        pr_number: null,
+        pr_url: null,
+        branch: "task-durable-pending",
+        activity: "working",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Cloud copy that must not win",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "claude",
+        agent_type: "pty",
+        teardown_started_at: null,
+        last_output_preview: null,
+        parent_task_id: null,
+        notify_task_id: null,
+        notified_at: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+      terminalRefs: {
+        "cloud:repo-1:durable-pending": {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-1",
+          ownerLocalTaskId: "durable-pending",
+          transport: "cloud",
+        },
+      },
+    });
+
+    const SidebarSlotStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+        selectedSlotId: String,
+      },
+      template: `
+        <div data-testid="slot-sidebar">
+          <span data-testid="selected-slot-id">{{ selectedSlotId }}</span>
+          <span data-testid="projected-slot-id">{{ taskSlots[0]?.slot_id || "" }}</span>
+        </div>
+      `,
+    });
+    const MainPanelSlotStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        uiSlot: Object,
+        cloudTask: Boolean,
+      },
+      template: `
+        <div data-testid="slot-main-panel">
+          <span data-testid="panel-slot-id">{{ uiSlot?.slot_id || "" }}</span>
+          <span data-testid="panel-slot-state">{{ uiSlot?.state || "" }}</span>
+          <span data-testid="panel-task-id">{{ uiSlot?.task?.id || "" }}</span>
+          <span data-testid="panel-cloud-task">{{ String(cloudTask) }}</span>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarSlotStub, {
+      MainPanel: MainPanelSlotStub,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="selected-slot-id"]').text()).toBe("create:stable-local");
+    expect(wrapper.get('[data-testid="projected-slot-id"]').text()).toBe("create:stable-local");
+    expect(wrapper.get('[data-testid="panel-slot-id"]').text()).toBe("create:stable-local");
+    expect(wrapper.get('[data-testid="panel-slot-state"]').text()).toBe("creating");
+    expect(wrapper.get('[data-testid="panel-task-id"]').text()).toBe("");
+    expect(wrapper.get('[data-testid="panel-cloud-task"]').text()).toBe("true");
+
+    wrapper.unmount();
+  });
+
+  it("selects an unacknowledged creating row by slot id without a workspace alias", async () => {
+    const creatingSlot: TaskUiSlot = {
+      slot_id: "create:without-workspace",
+      task_id: null,
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 0,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Select me before acknowledgement",
+        display_name: "Creating without workspace",
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-05-18T00:00:00.000Z",
+      },
+    };
+    store.taskUiSlots = [creatingSlot];
+
+    const SidebarCreatingStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["select-item"],
+      template: `
+        <button
+          v-for="item in taskSlots"
+          :key="item.slot_id"
+          data-testid="creating-without-workspace"
+          @click="$emit('select-item', item.slot_id)"
+        >{{ item.display_name }}</button>
+      `,
+    });
+
+    const wrapper = await mountApp(SidebarCreatingStub);
+    await wrapper.get('[data-testid="creating-without-workspace"]').trigger("click");
+    await flushPromises();
+
+    expect(store.selectItem).toHaveBeenCalledWith("create:without-workspace");
+    expect(mockWindowWorkspace.persistSelection).not.toHaveBeenCalledWith(expect.objectContaining({
+      selectedItemId: "create:without-workspace",
+    }));
 
     wrapper.unmount();
   });
@@ -1156,12 +1591,12 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        item: Object,
+        uiSlot: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiSlot?.task?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1237,12 +1672,12 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        item: Object,
+        uiSlot: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiSlot?.task?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1327,12 +1762,12 @@ describe("App", () => {
     const SidebarCaptureStub = defineComponent({
       name: "Sidebar",
       props: {
-        pipelineItems: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
       },
       template: `
         <div data-testid="sidebar-items">
-          <span v-for="item in pipelineItems" :key="item.id" data-testid="sidebar-item">
-            {{ item.id }}:{{ String(item.remote_task) }}
+          <span v-for="item in taskSlots" :key="item.slot_id" data-testid="sidebar-item">
+            {{ item.task_id }}:{{ String(item.remote_task) }}
           </span>
         </div>
       `,
@@ -1450,17 +1885,17 @@ describe("App", () => {
     const SidebarMixedStub = defineComponent({
       name: "Sidebar",
       props: {
-        pipelineItems: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
       },
       emits: ["select-item"],
       template: `
         <div data-testid="sidebar">
           <button
-            v-for="item in pipelineItems"
-            :key="item.id"
-            :data-testid="\`task-\${item.id}\`"
+            v-for="item in taskSlots"
+            :key="item.slot_id"
+            :data-testid="\`task-\${item.task_id}\`"
             type="button"
-            @click="$emit('select-item', item.id)"
+            @click="$emit('select-item', item.slot_id)"
           >
             {{ item.display_name }}
           </button>
@@ -1471,9 +1906,9 @@ describe("App", () => {
     const MainPanelTaskStub = defineComponent({
       name: "MainPanel",
       props: {
-        item: Object,
+        uiSlot: Object,
       },
-      template: '<div data-testid="main-item-id">{{ item?.id || "" }}</div>',
+      template: '<div data-testid="main-item-id">{{ uiSlot?.task?.id || "" }}</div>',
     });
 
     const wrapper = await mountAppWithOverrides(SidebarMixedStub, {
@@ -1878,6 +2313,7 @@ describe("App", () => {
   it("opens a new window through the workspace controller using the current selection", async () => {
     store.selectedRepoId = "repo-1";
     store.selectedItemId = "task-1";
+    store.selectedTaskId = "task-1";
 
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
@@ -1902,6 +2338,7 @@ describe("App", () => {
   it("opens a new window when the native window-open event arrives", async () => {
     store.selectedRepoId = "repo-1";
     store.selectedItemId = "task-1";
+    store.selectedTaskId = "task-1";
 
     await mountApp(SidebarWithRepoStub);
     expect(listenHandlers.has(WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT)).toBe(false);
@@ -1973,7 +2410,6 @@ describe("App", () => {
 
   it("navigates task shortcuts in the same order the sidebar renders stage groups", async () => {
     store.selectedRepoId = "repo-1";
-    store.selectedItemId = "task-progress";
     store.items = [
       {
         id: "task-pr",
@@ -1998,13 +2434,27 @@ describe("App", () => {
         updated_at: "2026-04-17T10:00:00.000Z",
       },
     ];
+    store.taskUiSlots = [
+      readyTaskSlot("slot:pr", store.items[0]),
+      readyTaskSlot("slot:progress", store.items[1]),
+    ];
+    store.selectedItemId = "slot:progress";
+    store.selectedTaskId = "task-progress";
+    store.currentTaskSlot = store.taskUiSlots[1];
+    store.selectItem.mockImplementationOnce(async (taskId: string) => {
+      const slot = store.taskUiSlots.find((candidate) => candidate.task_id === taskId) ?? null;
+      store.selectedItemId = slot?.slot_id ?? taskId;
+      store.selectedTaskId = slot?.task_id ?? taskId;
+      store.currentTaskSlot = slot;
+    });
 
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.navigateDown();
 
-    expect(store.selectItem).toHaveBeenCalledWith("task-pr", { previousItemId: "task-progress" });
+    expect(store.selectItem).toHaveBeenCalledWith("task-pr", { previousItemId: "slot:progress" });
+    expect(store.selectedItemId).toBe("slot:pr");
   });
 
   it("navigates task shortcuts across repo boundaries in sidebar order", async () => {
@@ -2013,7 +2463,6 @@ describe("App", () => {
       { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
     ];
     store.selectedRepoId = "repo-1";
-    store.selectedItemId = "task-one";
     store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
     store.items = [
       {
@@ -2039,6 +2488,13 @@ describe("App", () => {
         updated_at: "2026-04-17T10:01:00.000Z",
       },
     ];
+    store.taskUiSlots = [
+      readyTaskSlot("slot:one", store.items[0]),
+      readyTaskSlot("slot:two", store.items[1]),
+    ];
+    store.selectedItemId = "slot:one";
+    store.selectedTaskId = "task-one";
+    store.currentTaskSlot = store.taskUiSlots[0];
 
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
@@ -2047,7 +2503,7 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.selectRepo).toHaveBeenCalledWith("repo-2");
-    expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "task-one" });
+    expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "slot:one" });
   });
 
   it("keeps unread task shortcuts scoped to the selected repo before falling back to read tasks", async () => {
@@ -2168,7 +2624,10 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("task-current");
   });
 
-  it("navigates repos when the native repo-navigation event arrives", async () => {
+  it.each([
+    { label: "presentation slot", rememberedSelection: "slot:two" },
+    { label: "durable task id", rememberedSelection: "task-two" },
+  ])("navigates repos when the native event remembers a $label", async ({ rememberedSelection }) => {
     store.repos = [
       { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
       { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
@@ -2178,11 +2637,12 @@ describe("App", () => {
     store.items = [
       { id: "task-two", repo_id: "repo-2", stage: "in progress" },
     ];
+    store.taskUiSlots = [readyTaskSlot("slot:two", store.items[0])];
     store.sortedItemsAllRepos = [
       { id: "task-one", repo_id: "repo-1" },
       { id: "task-two", repo_id: "repo-2" },
     ];
-    store.lastSelectedItemByRepo = {};
+    store.lastSelectedItemByRepo = { "repo-2": rememberedSelection };
 
     await mountApp(SidebarWithRepoStub);
     expect(listenHandlers.has(WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT)).toBe(false);

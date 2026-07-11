@@ -2,10 +2,27 @@ import { createPinia, setActivePinia } from "pinia";
 import { nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
+import {
+  createStoreContext,
+  createStoreState,
+  type KannaSnapshot,
+  type StoreServices,
+} from "./state";
+import { createQueriesApi } from "./queries";
 
 const beginTaskSwitchMock = vi.hoisted(() => vi.fn());
 const invalidateSharedDataMock = vi.hoisted(() => vi.fn(async () => {}));
 const onSharedInvalidationMock = vi.hoisted(() => vi.fn(async () => () => undefined));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-17T00:00:00.000Z";
@@ -226,10 +243,6 @@ vi.mock("./agent-provider", () => ({
   getPreferredAgentProviders: vi.fn(() => "claude"),
   requireResolvedAgentProvider: vi.fn((provider?: string) => provider ?? "claude"),
   resolveAgentProvider: vi.fn((provider?: string | string[]) => Array.isArray(provider) ? provider[0] : (provider ?? "claude")),
-}));
-
-vi.mock("./taskCreationPlaceholder", () => ({
-  buildPendingTaskPlaceholder: vi.fn(),
 }));
 
 vi.mock("./portAllocationLog", () => ({
@@ -730,6 +743,182 @@ describe("kanna query snapshot regressions", () => {
     expect(mockState.getSettingMock).not.toHaveBeenCalled();
     expect(mockState.getUnblockedItemsMock).not.toHaveBeenCalled();
     expect(db["select"]).not.toHaveBeenCalled();
+  });
+
+  it("hydrates a durable task into its acknowledged UI slot without changing its slot ID", async () => {
+    const store = await createStore();
+    store.taskUiSlots.splice(0, store.taskUiSlots.length, {
+      slot_id: "create:slot-1",
+      task_id: "item-1",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Ship it",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-04-17T00:00:00.000Z",
+      },
+    });
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "create:slot-1";
+
+    await store.init(createDb());
+
+    expect(store.taskUiSlots).toEqual([
+      expect.objectContaining({
+        slot_id: "create:slot-1",
+        task_id: "item-1",
+        state: "ready",
+        task: expect.objectContaining({ id: "item-1" }),
+      }),
+      expect.objectContaining({
+        slot_id: "item-2",
+        task_id: "item-2",
+        state: "ready",
+        task: expect.objectContaining({ id: "item-2" }),
+      }),
+    ]);
+    expect(store.selectedItemId).toBe("create:slot-1");
+    expect(store.currentTaskSlot).toMatchObject({
+      slot_id: "create:slot-1",
+      task_id: "item-1",
+      state: "ready",
+    });
+  });
+
+  it("counts only successful authoritative reloads against acknowledged-slot miss grace", async () => {
+    const state = createStoreState();
+    state.taskUiSlots.value = [{
+      slot_id: "create:missing-slot",
+      task_id: "missing-task",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Hydrate or expire",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-04-17T00:00:00.000Z",
+      },
+    }];
+    const missingSnapshot: KannaSnapshot = {
+      entries: [{ repo: mockState.makeRepo(), items: [] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    };
+    const services: StoreServices = {
+      fetchSnapshot: vi.fn(async () => missingSnapshot),
+    };
+    const context = createStoreContext(state, {} as never, services);
+    const queries = createQueriesApi(context);
+
+    await queries.withOptimisticItemOverlay({
+      key: "test:no-op-overlay",
+      apply: (snapshot) => snapshot,
+      run: async () => {},
+      reconcile: async () => {},
+    });
+
+    expect(state.taskUiSlots.value).toEqual([
+      expect.objectContaining({ authoritative_miss_grace_remaining: 1 }),
+    ]);
+
+    await queries.reloadSnapshot();
+
+    expect(state.taskUiSlots.value).toEqual([
+      expect.objectContaining({ authoritative_miss_grace_remaining: 0 }),
+    ]);
+
+    await queries.withOptimisticItemOverlay({
+      key: "test:second-no-op-overlay",
+      apply: (snapshot) => snapshot,
+      run: async () => {},
+      reconcile: async () => {},
+    });
+
+    expect(state.taskUiSlots.value).toEqual([
+      expect.objectContaining({ authoritative_miss_grace_remaining: 0 }),
+    ]);
+
+    await queries.reloadSnapshot();
+
+    expect(state.taskUiSlots.value).toEqual([]);
+  });
+
+  it("ignores an older snapshot that resolves after a newer slot hydration", async () => {
+    const store = await createStore();
+    const item2Slot = store.taskUiSlots.find((slot) => slot.task_id === "item-2");
+    expect(item2Slot).toBeDefined();
+    store.taskUiSlots.splice(0, store.taskUiSlots.length, {
+      slot_id: "create:slot-1",
+      task_id: "item-1",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Ship it",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-04-17T00:00:00.000Z",
+      },
+    }, item2Slot!);
+    await store.selectItem("item-1");
+
+    const olderResponse = deferred<KannaSnapshot>();
+    const newerResponse = deferred<KannaSnapshot>();
+    let requestCount = 0;
+    setDesktopSnapshotFetcherForTests(() => {
+      requestCount += 1;
+      return requestCount === 1 ? olderResponse.promise : newerResponse.promise;
+    });
+    const snapshot = (items: PipelineItem[]): KannaSnapshot => ({
+      entries: mockState.visibleRepos.map((repo) => ({
+        repo,
+        items: items.filter((item) => item.repo_id === repo.id),
+      })),
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    });
+
+    const olderReload = store.init(createDb());
+    const newerReload = store.init(createDb());
+    expect(requestCount).toBe(2);
+
+    const newerItem = mockState.makeItem({
+      id: "item-1",
+      repo_id: "repo-1",
+      display_name: "Newest task",
+    });
+    newerResponse.resolve(snapshot([newerItem, mockState.makeItem({ id: "item-2", repo_id: "repo-2" })]));
+    await newerReload;
+    olderResponse.resolve(snapshot([mockState.makeItem({ id: "item-2", repo_id: "repo-2" })]));
+    await olderReload;
+    await flushStore();
+
+    expect(store.items.map((item) => item.id)).toEqual(["item-1", "item-2"]);
+    expect(store.items.find((item) => item.id === "item-1")?.display_name).toBe("Newest task");
+    expect(store.selectedItemId).toBe("create:slot-1");
+    expect(store.currentTaskSlot).toMatchObject({
+      slot_id: "create:slot-1",
+      task_id: "item-1",
+      state: "ready",
+      task: expect.objectContaining({ id: "item-1", display_name: "Newest task" }),
+    });
   });
 
   it("restores an unhidden repo with its tasks from the same refresh path", async () => {
