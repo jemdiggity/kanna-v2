@@ -9,6 +9,11 @@ import {
   type StoreServices,
 } from "./state";
 import { createQueriesApi } from "./queries";
+import { useKannaStore } from "./kanna";
+import {
+  setDesktopSnapshotFetcherForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 
 const beginTaskSwitchMock = vi.hoisted(() => vi.fn());
 const invalidateSharedDataMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -346,13 +351,6 @@ vi.mock("@kanna/" + "db", () => ({
   deleteTaskPortsForItem: vi.fn(async () => {}),
 }));
 
-import { useKannaStore } from "./kanna";
-import { createQueriesApi } from "./queries";
-import { createStoreContext, createStoreState, type KannaSnapshot } from "./state";
-import {
-  setDesktopSnapshotFetcherForTests,
-  updateDesktopServerClientHandlersForTests,
-} from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -366,20 +364,6 @@ async function flushStore(): Promise<void> {
   await nextTick();
   await Promise.resolve();
   await nextTick();
-}
-
-function deferred<T>(): {
-  promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-} {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
 }
 
 async function createStore(db: DbHandle = createDb()) {

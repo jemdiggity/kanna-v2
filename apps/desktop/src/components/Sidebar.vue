@@ -16,7 +16,6 @@ import {
 import { useKannaStore } from "../stores/kanna";
 import { isTaskTearingDown } from "../stores/taskStages";
 import { macOsTextInputAttrs } from "../utils/textInput";
-import { reviewAwaitingVerdictStage } from "../utils/reviewInbox";
 
 const { t } = useI18n();
 const store = useKannaStore();
@@ -76,10 +75,6 @@ const selectedTaskRepoId = computed(() => {
     : null;
   return item && item.closed_at == null ? item.repo_id : null;
 });
-const awaitingVerdictStagesById = computed(() => {
-  return new Map(props.taskSlots.map((item) => [item.slot_id, reviewAwaitingVerdictStage(item)]));
-});
-
 function isSearchActive(): boolean {
   return searchQuery.value.trim().length > 0;
 }
@@ -199,16 +194,6 @@ function itemTitle(item: SidebarTaskItem): string {
 
 function itemTooltip(item: SidebarTaskItem): string | undefined {
   return itemTitle(item);
-}
-
-function awaitingVerdictStage(item: SidebarTaskItem): string | null {
-  return awaitingVerdictStagesById.value.get(item.slot_id) ?? null;
-}
-
-function awaitingVerdictLabel(item: SidebarTaskItem): string {
-  return t("sidebar.awaitingVerdictBadge", {
-    stage: awaitingVerdictStage(item) ?? item.stage,
-  });
 }
 
 function isRemoteTask(item: SidebarTaskItem): boolean {
@@ -733,13 +718,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     :title="itemTooltip(row.item)"
                   >
                     <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
-                  <span
-                    v-if="awaitingVerdictStage(row.item)"
-                    class="awaiting-verdict-badge"
-                    :title="awaitingVerdictLabel(row.item)"
-                    :aria-label="awaitingVerdictLabel(row.item)"
-                    :data-testid="`awaiting-verdict-badge-${row.item.slot_id}`"
-                  >{{ t('sidebar.awaitingVerdictShort') }}</span>
                   <button
                     v-if="row.depth > 0 && row.item.state === 'ready' && editingSlotId !== row.item.slot_id"
                     type="button"
@@ -824,13 +802,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       :title="itemTooltip(row.item)"
                     >
                       <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
-                    <span
-                      v-if="awaitingVerdictStage(row.item)"
-                      class="awaiting-verdict-badge"
-                      :title="awaitingVerdictLabel(row.item)"
-                      :aria-label="awaitingVerdictLabel(row.item)"
-                      :data-testid="`awaiting-verdict-badge-${row.item.slot_id}`"
-                    >{{ t('sidebar.awaitingVerdictShort') }}</span>
                     <button
                       v-if="row.depth > 0 && row.item.state === 'ready' && editingSlotId !== row.item.slot_id"
                       type="button"
@@ -893,13 +864,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     :title="itemTooltip(row.item)"
                   >
                     <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
-                  <span
-                    v-if="awaitingVerdictStage(row.item)"
-                    class="awaiting-verdict-badge"
-                    :title="awaitingVerdictLabel(row.item)"
-                    :aria-label="awaitingVerdictLabel(row.item)"
-                    :data-testid="`awaiting-verdict-badge-${row.item.slot_id}`"
-                  >{{ t('sidebar.awaitingVerdictShort') }}</span>
                   <span
                     v-if="row.item.task_id && blockerNames?.[row.item.task_id]"
                     class="blocked-by-text"

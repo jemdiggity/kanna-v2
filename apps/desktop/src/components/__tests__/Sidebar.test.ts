@@ -393,30 +393,6 @@ describe("Sidebar", () => {
     expect(title.attributes("title")).toBe("... Commit generated changes");
   });
 
-  it("renders an awaiting-verdict badge next to parked manual-stage tasks", () => {
-    const wrapper = mountSidebar([
-      item("task-1", {
-        activity: "unread",
-        display_name: "Create the pull request",
-        pipeline_def: JSON.stringify({
-          name: "default",
-          stages: [
-            { name: "in progress", policy: { transition: "manual" } },
-            { name: "review", policy: { transition: "auto" } },
-            { name: "pr", policy: { transition: "manual" } },
-          ],
-        }),
-        stage: "pr",
-      }),
-    ]);
-
-    const badge = wrapper.get('[data-testid="awaiting-verdict-badge-slot:task-1"]');
-    expect(badge.text()).toBe("Review");
-    expect(badge.attributes("aria-label")).toBe("Awaiting pr verdict");
-    expect(badge.attributes("title")).toBe("Awaiting pr verdict");
-    expect(wrapper.get(".pipeline-item .item-title").text()).toBe("Create the pull request");
-  });
-
   it("renders pinned task titles without retired post-action prefixes", () => {
     const wrapper = mountSidebar([
       item("task-1", {
