@@ -21,7 +21,7 @@ describe("scripted remote E2E agent", () => {
     expect(source).toContain("SCRIPT_MENU_CURSOR:2");
     expect(source).toContain("SCRIPT_MENU_OPTION_1_HIGHLIGHTED");
     expect(source).toContain("SCRIPT_MENU_SELECTED:1");
-    expect(source).toContain("stty -icanon min 1 time 0 -echo");
+    expect(source).toContain("stty -icanon min 1 time 0 -echo -icrnl");
   });
 
   it("keeps stdin open and exits deterministically on submitted scripted input", () => {

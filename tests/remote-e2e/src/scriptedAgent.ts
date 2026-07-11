@@ -28,7 +28,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 original_tty=$(stty -g)
-stty -icanon min 1 time 0 -echo
+stty -icanon min 1 time 0 -echo -icrnl
 
 cleanup() {
   stty "$original_tty" 2>/dev/null || true
