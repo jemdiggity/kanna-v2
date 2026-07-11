@@ -71,6 +71,7 @@
     "nextRepo": "次のリポジトリ",
     "filePicker": "ファイル検索",
     "filePreview": "ファイルプレビュー",
+    "openLatestAgentFile": "最新のエージェントファイルを開く",
     "commandPalette": "コマンドパレット",
     "viewDiff": "差分表示",
     "commitGraph": "コミットグラフ",
@@ -163,7 +164,9 @@
     "taskAtFinalStage": "タスクは最終ステージにあります",
     "stageTeardownFailed": "ステージのティアダウンスクリプトが失敗しました",
     "stageSetupFailed": "ステージのセットアップスクリプトが失敗しました",
-    "stageNotFound": "パイプラインにステージが見つかりません"
+    "stageNotFound": "パイプラインにステージが見つかりません",
+    "latestAgentFileHint": "ヒント: ⌘Lでエージェントが言及した最新のファイルを開けます。",
+    "noTerminalFileLink": "このターミナルにファイルリンクが見つかりません。"
   },
   "tags": {
     "inProgress": "進行中",

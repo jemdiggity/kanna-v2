@@ -106,7 +106,7 @@ The app-level listener owns the versioned local-storage flag and informational t
 - A candidate deleted after validation falls through to the preview's existing read error state.
 - An async scan invalidated by terminal disposal returns no activation.
 - Repeated `⌘L` presses are safe; each press rescans current buffer order and opens the newest still-valid candidate.
-- A stale negative existence cache retains current terminal-link semantics and lasts only for that terminal instance.
+- Positive existence results are cached for the terminal instance. Missing paths are rechecked so an early discovery scan cannot hide a file that the agent creates later.
 
 ## Localization
 

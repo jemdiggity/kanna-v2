@@ -71,6 +71,7 @@
     "nextRepo": "다음 리포지토리",
     "filePicker": "파일 검색",
     "filePreview": "파일 미리보기",
+    "openLatestAgentFile": "최신 에이전트 파일 열기",
     "commandPalette": "명령 팔레트",
     "viewDiff": "차이 보기",
     "commitGraph": "커밋 그래프",
@@ -163,7 +164,9 @@
     "taskAtFinalStage": "작업이 마지막 단계에 있습니다",
     "stageTeardownFailed": "단계 종료 스크립트 실패",
     "stageSetupFailed": "단계 설정 스크립트 실패",
-    "stageNotFound": "파이프라인에서 단계를 찾을 수 없습니다"
+    "stageNotFound": "파이프라인에서 단계를 찾을 수 없습니다",
+    "latestAgentFileHint": "팁: ⌘L을 눌러 에이전트가 언급한 최신 파일을 여세요.",
+    "noTerminalFileLink": "이 터미널에서 파일 링크를 찾을 수 없습니다."
   },
   "tags": {
     "inProgress": "진행 중",

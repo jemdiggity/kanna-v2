@@ -35,6 +35,7 @@ import type { useAppPreferences } from "./useAppPreferences";
 import { parseRecentAgentChoices } from "../utils/agentChoiceUsage";
 import type { useAppUpdate } from "./useAppUpdate";
 import type { useToast } from "./useToast";
+import { showTerminalFileLinkHintOnce } from "./terminalFileLinkHint";
 
 type AppPreferences = ReturnType<typeof useAppPreferences>["preferences"];
 type AppUpdateController = ReturnType<typeof useAppUpdate>;
@@ -170,6 +171,14 @@ export function useAppLifecycle({
     if (detail.url) openImageUrlPreview(detail.url);
   }
 
+  function handleTerminalFileLinkAvailable() {
+    showTerminalFileLinkHintOnce(
+      window.localStorage,
+      toast.info,
+      i18n.global.t("toasts.latestAgentFileHint"),
+    );
+  }
+
   // Restore focus after native macOS fullscreen exit.
   // WKWebView loses first-responder status during the exit animation, breaking
   // terminal input and keyboard shortcuts. The Rust side calls
@@ -195,6 +204,7 @@ export function useAppLifecycle({
     window.addEventListener("drop", suppressFileDropNavigation);
     document.addEventListener("file-link-activate", handleFileLinkActivate);
     document.addEventListener("image-link-activate", handleImageLinkActivate);
+    document.addEventListener("terminal-file-link-available", handleTerminalFileLinkAvailable);
 
     await restoreSidebarWidth();
     await store.init(db);
@@ -468,6 +478,7 @@ export function useAppLifecycle({
     window.removeEventListener("drop", suppressFileDropNavigation);
     document.removeEventListener("file-link-activate", handleFileLinkActivate);
     document.removeEventListener("image-link-activate", handleImageLinkActivate);
+    document.removeEventListener("terminal-file-link-available", handleTerminalFileLinkAvailable);
     stopSystemThemeListener();
     appUpdate.dispose();
   });

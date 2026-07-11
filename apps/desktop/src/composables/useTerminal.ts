@@ -102,6 +102,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       agentProvider: options?.agentProvider ?? null,
     })
     state.stopThemeWatch?.()
+    state.terminalView?.stopFileLinkAvailabilityWatch()
+    state.terminalView?.unregisterFileLinkProvider()
     state.terminalView?.unregisterE2ETerminalBuffer()
     state.terminalView = initializeTerminalView({
       el,

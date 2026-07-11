@@ -71,6 +71,7 @@
     "nextRepo": "Next Repo",
     "filePicker": "File Picker",
     "filePreview": "File Preview",
+    "openLatestAgentFile": "Open Latest Agent File",
     "commandPalette": "Command Palette",
     "viewDiff": "View Diff",
     "commitGraph": "Commit Graph",
@@ -163,7 +164,9 @@
     "taskAtFinalStage": "Task is at the final stage",
     "stageTeardownFailed": "Stage teardown script failed",
     "stageSetupFailed": "Stage setup script failed",
-    "stageNotFound": "Stage not found in pipeline"
+    "stageNotFound": "Stage not found in pipeline",
+    "latestAgentFileHint": "Tip: Press ⌘L to open the latest file mentioned by the agent.",
+    "noTerminalFileLink": "No file link found in this terminal."
   },
   "tags": {
     "inProgress": "In Progress",

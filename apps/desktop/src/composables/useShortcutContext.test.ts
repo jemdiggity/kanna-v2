@@ -81,6 +81,7 @@ describe("useShortcutContext", () => {
         const result = getContextShortcuts(ctx);
         const actions = result.map((s) => s.action);
         expect(actions).toContain("shortcuts.filePicker");
+        expect(actions).toContain("shortcuts.openLatestAgentFile");
       }
     });
 
@@ -114,6 +115,7 @@ describe("useShortcutContext", () => {
       const actions = result.map((s) => s.action);
 
       expect(actions).toContain("shortcuts.filePreview");
+      expect(actions).toContain("shortcuts.openLatestAgentFile");
       expect(actions).toContain("shortcuts.treeExplorer");
       expect(actions).toContain("shortcuts.viewDiff");
       expect(actions).toContain("shortcuts.shellTerminal");
