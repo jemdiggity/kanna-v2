@@ -33,6 +33,8 @@ const props = defineProps<{
   reviewStage?: string;
   reviewComments?: PendingReviewComment[];
   reviewHeadCommit?: string;
+  approveSignalsMerge?: boolean;
+  hasRunningPost?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -48,10 +50,16 @@ const comments = computed(() => props.reviewComments ?? []);
 const reviewEnabled = computed(() =>
   Boolean(props.taskId) && (props.reviewStage === "review" || props.reviewStage === "pr")
 );
-// At the final pr stage, approving means "ship it": advancing runs the
-// pipeline's approve post, which queues the branch on the repo's Merge
-// Master before the transition closes the task.
-const approveMergesTask = computed(() => props.reviewStage === "pr");
+// "Approve & Merge" is only truthful when the task's pinned current stage
+// declares the merge-signaling approve post (approveSignalsMerge comes from
+// the pinned pipeline_def). Pre-change snapshots and custom pipelines whose
+// final stage has no such post get the generic "Approve".
+const approveMergesTask = computed(() => props.approveSignalsMerge === true);
+// Approval is single-flight for the full post lifetime: the local flag
+// covers the request, hasRunningPost covers the running approve post. An
+// ordinary repeated approval must never reach the backend's running-post
+// override, which would close the task before the post finishes.
+const approveDisabled = computed(() => approving.value || props.hasRunningPost === true);
 const currentHeadCommit = computed(() => props.reviewHeadCommit ?? "HEAD");
 const baseRefLabel = computed(() => props.baseRef ?? "main");
 
@@ -95,7 +103,7 @@ async function submitRequestChanges() {
 }
 
 async function approveReview() {
-  if (!props.taskId || approving.value) return;
+  if (!props.taskId || approveDisabled.value) return;
   approving.value = true;
   try {
     await store.advanceStage(props.taskId);
@@ -133,7 +141,7 @@ onMounted(() => {
         <button type="button" :disabled="comments.length === 0" @click="openRequestChangesComposer">
           {{ $t('diffView.requestChanges') }}
         </button>
-        <button type="button" class="approve" :disabled="approving" @click="approveReview">
+        <button type="button" class="approve" :disabled="approveDisabled" @click="approveReview">
           {{ approveMergesTask ? $t('diffView.approveMerge') : $t('diffView.approve') }}
         </button>
       </div>

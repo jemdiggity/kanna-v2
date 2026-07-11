@@ -10,6 +10,7 @@ import { invoke } from "../invoke";
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
 import { requireService, type AdvanceStageOptions, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
+import { pinnedPipelineDefinition } from "../utils/pinnedStage";
 
 const LOCAL_SERVER_ACTION_TIMEOUT_MS = 30_000;
 const LOCAL_SERVER_ACTION_RETRY_DELAY_MS = 250;
@@ -136,12 +137,16 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
   async function resolveStageAdvanceProjection(item: {
     repo_id: string;
     pipeline: string;
+    pipeline_def: string | null;
     stage: string;
   }): Promise<StageAdvanceProjection> {
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
     if (!repo) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
     try {
-      const pipeline = await loadPipeline(repo.path, item.pipeline || "default");
+      // The pinned snapshot is what the engine executes for this task; the
+      // repo's live pipeline file may have diverged since the task pinned it.
+      const pipeline =
+        pinnedPipelineDefinition(item) ?? (await loadPipeline(repo.path, item.pipeline || "default"));
       const currentIndex = pipeline.stages.findIndex((stage) => stage.name === item.stage);
       if (currentIndex === -1) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
       const currentStage = pipeline.stages[currentIndex];
@@ -367,6 +372,14 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item) return;
     if (item.closed_at != null) return;
+    // Single-flight: while a post (e.g. approve) runs, an ordinary repeated
+    // advance would hit the backend's running-post override and transition
+    // the stage before the post finishes its work. Only the post's own
+    // completion may move the task.
+    if (item.has_running_post) {
+      context.toast.warning(context.tt("toasts.stagePostRunning"));
+      return;
+    }
     const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
     const { nextStageName, pendingPostName, closesOnSuccess } = await resolveStageAdvanceProjection(item);

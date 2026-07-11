@@ -295,6 +295,7 @@ export async function resetDatabase(client: WebDriverClient): Promise<void> {
   await execDb(client, "DELETE FROM terminal_session");
   await execDb(client, "DELETE FROM worktree");
   await execDb(client, "DELETE FROM agent_run");
+  await execDb(client, "DELETE FROM stage_run");
   await execDb(client, "DELETE FROM pipeline_item");
   await execDb(client, "DELETE FROM repo");
   await execDb(client, "DELETE FROM settings");

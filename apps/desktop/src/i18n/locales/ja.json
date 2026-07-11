@@ -148,6 +148,7 @@
     "prAgentFailed": "PRエージェントの開始に失敗しました",
     "closeSourceTaskFailed": "元タスクのクローズに失敗しました",
     "mergeAgentFailed": "マージエージェントの開始に失敗しました",
+    "stagePostRunning": "ステージのポスト処理が実行中です。完了までお待ちください",
     "blockedWorktreeFailed": "ブロックタスクのワークツリー作成に失敗しました",
     "blockTaskFailed": "タスクのブロックに失敗しました",
     "selectRepoFirst": "リポジトリを先に選択してください",

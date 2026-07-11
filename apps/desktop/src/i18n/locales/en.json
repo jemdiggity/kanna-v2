@@ -148,6 +148,7 @@
     "prAgentFailed": "Failed to start PR agent",
     "closeSourceTaskFailed": "Failed to close source task",
     "mergeAgentFailed": "Failed to start merge agent",
+    "stagePostRunning": "A stage post is still running — wait for it to finish",
     "blockedWorktreeFailed": "Failed to create worktree for blocked task",
     "blockTaskFailed": "Failed to block task",
     "selectRepoFirst": "Select a repository first",
