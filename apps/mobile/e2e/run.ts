@@ -282,6 +282,7 @@ async function main(): Promise<void> {
         selectedTaskId: relayHarness.hybridFixture.unresolvedTaskId
       });
       await runHybridTaskFlow(driver, {
+        bundleId: env.bundleId,
         credentials: relayHarness.credentials,
         fixture: relayHarness.hybridFixture,
         publishCloudRefresh: () => relayHarness!.publishHybridCloudRefresh(),

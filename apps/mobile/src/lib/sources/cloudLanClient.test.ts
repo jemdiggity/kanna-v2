@@ -481,6 +481,109 @@ describe("createCloudLanClient", () => {
     }
   });
 
+  it("shares an unresolved optional LAN task probe across timeout reads and refreshes after settlement", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstLanTasks = deferred<TaskSummary[]>();
+      const secondLanTasks = deferred<TaskSummary[]>();
+      const cloudTask = task({ id: "cloud-only" });
+      const cloud = createClientMock({
+        listRecentTasks: vi.fn().mockResolvedValue([cloudTask])
+      });
+      const lan = createClientMock({
+        getStatus: vi.fn().mockResolvedValue(runningStatus()),
+        listRecentTasks: vi
+          .fn<KannaClient["listRecentTasks"]>()
+          .mockReturnValueOnce(firstLanTasks.promise)
+          .mockReturnValueOnce(secondLanTasks.promise)
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+
+      const firstRead = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(firstRead).resolves.toEqual([cloudTask]);
+
+      const repeatedRead = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(repeatedRead).resolves.toEqual([cloudTask]);
+      expect(lan.getStatus).toHaveBeenCalledTimes(1);
+      expect(lan.listRecentTasks).toHaveBeenCalledTimes(1);
+
+      firstLanTasks.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const freshRead = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(freshRead).resolves.toEqual([cloudTask]);
+      expect(lan.getStatus).toHaveBeenCalledTimes(2);
+      expect(lan.listRecentTasks).toHaveBeenCalledTimes(2);
+
+      const repeatedFreshRead = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(repeatedFreshRead).resolves.toEqual([cloudTask]);
+      expect(lan.getStatus).toHaveBeenCalledTimes(2);
+      expect(lan.listRecentTasks).toHaveBeenCalledTimes(2);
+
+      secondLanTasks.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not adopt a shared stale LAN probe as a later authoritative supplement", async () => {
+    vi.useFakeTimers();
+    try {
+      const staleLanTasks = deferred<TaskSummary[]>();
+      const freshLanTask = task({ id: "fresh-lan-only" });
+      const cloudTask = task({ id: "cloud-only" });
+      const cloud = createClientMock({
+        listRecentTasks: vi.fn().mockResolvedValue([cloudTask])
+      });
+      const lan = createClientMock({
+        getStatus: vi.fn().mockResolvedValue(runningStatus()),
+        listRecentTasks: vi
+          .fn<KannaClient["listRecentTasks"]>()
+          .mockReturnValueOnce(staleLanTasks.promise)
+          .mockResolvedValueOnce([freshLanTask])
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+      const staleSupplement = vi.fn();
+      const currentSupplement = vi.fn();
+
+      const staleRead = client.listRecentTasksWithSupplement(staleSupplement);
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(staleRead).resolves.toEqual([cloudTask]);
+
+      await expect(
+        client.listRecentTasksWithSupplement(currentSupplement)
+      ).resolves.toEqual([cloudTask]);
+      expect(lan.listRecentTasks).toHaveBeenCalledTimes(1);
+
+      staleLanTasks.resolve([task({ id: "stale-lan-only" })]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(staleSupplement).not.toHaveBeenCalled();
+      expect(currentSupplement).not.toHaveBeenCalled();
+
+      await expect(client.listRecentTasks()).resolves.toEqual([
+        cloudTask,
+        freshLanTask
+      ]);
+      expect(lan.listRecentTasks).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not overwrite a late successful LAN snapshot when the cloud read settles afterward", async () => {
     vi.useFakeTimers();
     try {
@@ -1508,7 +1611,16 @@ describe("createCloudLanClient", () => {
     const listener = vi.fn();
 
     await client.listRecentTasks();
+    expect(JSON.parse(client.getTaskRouteIdentity!("cloud-duplicate"))).toEqual([
+      "lan",
+      "desktop-lan",
+      "local-task"
+    ]);
     lanEnabled = false;
+    expect(JSON.parse(client.getTaskRouteIdentity!("cloud-duplicate"))).toEqual([
+      "cloud",
+      "cloud-duplicate"
+    ]);
     await client.closeTask("cloud-duplicate");
     client.observeTaskTerminal("cloud-duplicate", listener);
 
@@ -1535,6 +1647,11 @@ describe("createCloudLanClient", () => {
 
     await client.listRecentTasks();
     lanEnabled = false;
+    expect(JSON.parse(client.getTaskRouteIdentity!("lan-only"))).toEqual([
+      "unavailable",
+      "desktop-lan",
+      "lan-only"
+    ]);
 
     await expect(client.runMergeAgent("lan-only")).rejects.toThrow(
       /LAN route.*lan-only.*unavailable/i
@@ -1821,6 +1938,57 @@ describe("createCloudLanClient", () => {
     }
   });
 
+  it("shares an unresolved optional LAN repository probe across timeout reads and refreshes after settlement", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstLanRepos = deferred<Array<{ id: string; name: string }>>();
+      const secondLanRepos = deferred<Array<{ id: string; name: string }>>();
+      const cloudRepo = { id: "cloud-repo", name: "Cloud Repo" };
+      const cloud = createClientMock({
+        listRepos: vi.fn().mockResolvedValue([cloudRepo]),
+        listRecentTasks: vi.fn().mockResolvedValue([])
+      });
+      const lan = createClientMock({
+        listRepos: vi
+          .fn<KannaClient["listRepos"]>()
+          .mockReturnValueOnce(firstLanRepos.promise)
+          .mockReturnValueOnce(secondLanRepos.promise)
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+
+      const firstRead = client.listRepos();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(firstRead).resolves.toEqual([cloudRepo]);
+
+      const repeatedRead = client.listRepos();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(repeatedRead).resolves.toEqual([cloudRepo]);
+      expect(lan.listRepos).toHaveBeenCalledTimes(1);
+
+      firstLanRepos.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const freshRead = client.listRepos();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(freshRead).resolves.toEqual([cloudRepo]);
+      expect(lan.listRepos).toHaveBeenCalledTimes(2);
+
+      const repeatedFreshRead = client.listRepos();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(repeatedFreshRead).resolves.toEqual([cloudRepo]);
+      expect(lan.listRepos).toHaveBeenCalledTimes(2);
+
+      secondLanRepos.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores and does not cache LAN repositories that finish after disable", async () => {
     let lanEnabled = true;
     const pendingLanRepos = deferred<Array<{ id: string; name: string }>>();
@@ -1943,6 +2111,63 @@ describe("createCloudLanClient", () => {
 
       expect(readSettled).toBe(true);
       await expect(read).resolves.toEqual([cloudDesktop]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("shares an unresolved optional LAN desktop probe across timeout reads and refreshes after settlement", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstLanDesktops = deferred<DesktopSummary[]>();
+      const secondLanDesktops = deferred<DesktopSummary[]>();
+      const cloudDesktop: DesktopSummary = {
+        id: "desktop-cloud",
+        name: "Cloud Desktop",
+        online: true,
+        mode: "remote",
+        reachableViaRelay: true,
+        connectionMode: "internet"
+      };
+      const cloud = createClientMock({
+        listDesktops: vi.fn().mockResolvedValue([cloudDesktop])
+      });
+      const lan = createClientMock({
+        listDesktops: vi
+          .fn<KannaClient["listDesktops"]>()
+          .mockReturnValueOnce(firstLanDesktops.promise)
+          .mockReturnValueOnce(secondLanDesktops.promise)
+      });
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 25
+      });
+
+      const firstRead = client.listDesktops();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(firstRead).resolves.toEqual([cloudDesktop]);
+
+      const repeatedRead = client.listDesktops();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(repeatedRead).resolves.toEqual([cloudDesktop]);
+      expect(lan.listDesktops).toHaveBeenCalledTimes(1);
+
+      firstLanDesktops.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const freshRead = client.listDesktops();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(freshRead).resolves.toEqual([cloudDesktop]);
+      expect(lan.listDesktops).toHaveBeenCalledTimes(2);
+
+      const repeatedFreshRead = client.listDesktops();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(repeatedFreshRead).resolves.toEqual([cloudDesktop]);
+      expect(lan.listDesktops).toHaveBeenCalledTimes(2);
+
+      secondLanDesktops.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();

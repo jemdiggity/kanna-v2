@@ -278,6 +278,14 @@ export function createRemoteTransport({
   };
 
   return {
+    getTaskRouteIdentity(taskId: string): string {
+      const route = taskRouteForId(taskId);
+      return JSON.stringify([
+        "remote",
+        route?.desktopId ?? getSelectedDesktopId(),
+        route?.taskId ?? taskId
+      ]);
+    },
     async getStatus(): Promise<MobileServerStatus> {
       if (listCloudTasks) {
         return {

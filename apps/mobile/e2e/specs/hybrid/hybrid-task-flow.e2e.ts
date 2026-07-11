@@ -10,6 +10,7 @@ import { openProfileConnectionSheet } from "../smoke/profile-connection.e2e";
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
 const STABILITY_SETTLE_MS = 1_000;
+const IOS_APP_STATE_NOT_RUNNING = 1;
 
 interface HybridCredentials {
   email: string;
@@ -17,6 +18,7 @@ interface HybridCredentials {
 }
 
 interface HybridTaskFlowOptions {
+  bundleId: string;
   credentials: HybridCredentials;
   fixture: MobileHybridFixture;
   publishCloudRefresh(): Promise<void>;
@@ -98,6 +100,26 @@ async function signInToHybridCloud(
         "Expected the hybrid mobile fixture to sign into the Auth emulator"
     }
   );
+
+  const closeButton = await driver.$(selectors.accountCloseButton);
+  await closeButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await closeButton.click();
+}
+
+async function assertRestoredHybridSignIn(driver: Browser): Promise<void> {
+  await openProfileConnectionSheet({
+    getAccountButton: async () => await driver.$(selectors.accountButton),
+    getAccountSheet: async () => await driver.$(selectors.accountSheet)
+  });
+
+  const signOutButton = await driver.$(selectors.accountSignOutButton);
+  await signOutButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const signInButton = await driver.$(selectors.accountSignInButton);
+  if (await signInButton.isExisting()) {
+    throw new Error(
+      "Expected Firebase auth to restore after relaunch without interactive sign-in"
+    );
+  }
 
   const closeButton = await driver.$(selectors.accountCloseButton);
   await closeButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
@@ -232,6 +254,35 @@ export async function runHybridTaskFlow(
     options.fixture.expectedDisplayTaskIds
   );
   await assertHybridTaskPresentation(driver, options.fixture);
+
+  // Relaunch the same installed app without resetting its sandbox. This keeps
+  // both Firebase Auth persistence and the trusted-LAN record, exercising the
+  // restored-auth startup path instead of another interactive sign-in.
+  await driver.terminateApp(undefined, options.bundleId);
+  await driver.waitUntil(
+    async () =>
+      await driver.queryAppState(undefined, options.bundleId) ===
+        IOS_APP_STATE_NOT_RUNNING,
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected ${options.bundleId} to terminate before relaunch`
+    }
+  );
+  await driver.activateApp(undefined, options.bundleId);
+  await dismissSavePasswordPrompt(driver);
+
+  const relaunchedShell = await driver.$(selectors.appShell);
+  await relaunchedShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const relaunchedRecentTab = await driver.$(selectors.recentTab);
+  await relaunchedRecentTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await relaunchedRecentTab.click();
+  await waitForStableExactTaskRows(
+    driver,
+    options.fixture.expectedDisplayTaskIds
+  );
+  await assertHybridTaskPresentation(driver, options.fixture);
+  await assertRestoredHybridSignIn(driver);
 
   await openPtyFixtureTask(
     {

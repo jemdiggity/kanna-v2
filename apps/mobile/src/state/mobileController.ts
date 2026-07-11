@@ -37,12 +37,19 @@ export interface MobileController {
 
 const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
 
+export interface CloudTaskPublication {
+  cloudAuthoritative: boolean;
+}
+
 export interface MobileControllerOptions {
   // Live cloud task subscription (onSnapshot). When provided and signed in,
   // the controller reads tasks via this push stream instead of polling.
   subscribeCloudTasks?: (
     uid: string,
-    onUpdate: (tasks: TaskSummary[]) => void,
+    onUpdate: (
+      tasks: TaskSummary[],
+      publication?: CloudTaskPublication
+    ) => void,
     onError?: (error: unknown) => void,
   ) => () => void;
 }
@@ -56,15 +63,19 @@ export function createMobileController(
   let activeTaskTerminal:
     | {
         taskId: string;
+        routeIdentity: string;
         subscription: TaskTerminalSubscription;
       }
     | null = null;
   let activeTaskAgent:
     | {
         taskId: string;
+        routeIdentity: string;
         subscription: TaskAgentSubscription;
       }
     | null = null;
+  let taskTerminalGeneration = 0;
+  let taskAgentGeneration = 0;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
   let backgroundRefreshMode: "collections" | "desktops" = "collections";
@@ -82,11 +93,15 @@ export function createMobileController(
   let unownedErrorMessage: string | null = null;
   let taskCollectionsRevision = 0;
   let liveRepositoryRevision = 0;
+  let lastExplicitRepos: RepoSummary[] = [];
   let desktopCollectionsRevision = 0;
   let refreshDesktopsInFlight: Promise<void> | null = null;
-  const pendingActionTaskIdentities = new Map<
+  const pendingTaskIdentities = new Map<
     string,
-    { ownerDesktopId: string | null }
+    {
+      ownerDesktopId: string | null;
+      ownerLocalRepoId: string | null;
+    }
   >();
 
   const publishOwnedErrorMessage = () => {
@@ -120,36 +135,94 @@ export function createMobileController(
     );
   };
 
-  const resolveTaskActionDisplayId = (
+  const resolveCanonicalTaskDisplayId = (
     responseTaskId: string,
-    ownerDesktopId: string | null
+    ownerDesktopId: string | null,
+    ownerLocalRepoId: string | null,
+    tasks: readonly TaskSummary[]
   ): string | null => {
-    const state = store.getState();
     const candidates = new Map<string, TaskSummary>();
-    for (const task of [
-      ...state.repoTasks,
-      ...state.recentTasks,
-      ...state.searchResults
-    ]) {
+    const exactRepoCandidates = new Map<string, TaskSummary>();
+    for (const task of tasks) {
       if (task.id === responseTaskId) continue;
       if (task.ownerLocalTaskId !== responseTaskId) continue;
       if (ownerDesktopId && task.ownerDesktopId !== ownerDesktopId) continue;
       candidates.set(task.id, task);
+      if (
+        ownerLocalRepoId &&
+        task.ownerLocalRepoId === ownerLocalRepoId
+      ) {
+        exactRepoCandidates.set(task.id, task);
+      }
+    }
+
+    if (ownerLocalRepoId && exactRepoCandidates.size === 1) {
+      return exactRepoCandidates.values().next().value!.id;
+    }
+    if (ownerLocalRepoId && exactRepoCandidates.size > 1) {
+      return null;
     }
     if (candidates.size === 1) {
-      return candidates.values().next().value!.id;
+      const candidate = candidates.values().next().value!;
+      if (!ownerLocalRepoId || candidate.ownerLocalRepoId == null) {
+        return candidate.id;
+      }
+    }
+
+    return null;
+  };
+
+  const resolveTaskActionDisplayId = (
+    responseTaskId: string,
+    ownerDesktopId: string | null,
+    ownerLocalRepoId: string | null = null
+  ): string | null => {
+    const state = store.getState();
+    const canonicalTaskId = resolveCanonicalTaskDisplayId(
+      responseTaskId,
+      ownerDesktopId,
+      ownerLocalRepoId,
+      [...state.repoTasks, ...state.recentTasks, ...state.searchResults]
+    );
+    if (canonicalTaskId) {
+      return canonicalTaskId;
     }
     return findTask(responseTaskId)?.id ?? null;
   };
 
+  const pruneResolvedPendingTaskIdentities = () => {
+    const state = store.getState();
+    const tasks = [
+      ...state.repoTasks,
+      ...state.recentTasks,
+      ...state.searchResults
+    ];
+    for (const [rawTaskId, pendingIdentity] of pendingTaskIdentities) {
+      if (
+        resolveCanonicalTaskDisplayId(
+          rawTaskId,
+          pendingIdentity.ownerDesktopId,
+          pendingIdentity.ownerLocalRepoId,
+          tasks
+        )
+      ) {
+        pendingTaskIdentities.delete(rawTaskId);
+      }
+    }
+  };
+
   const stopTaskTerminal = () => {
-    activeTaskTerminal?.subscription.close();
+    const subscription = activeTaskTerminal?.subscription;
     activeTaskTerminal = null;
+    taskTerminalGeneration += 1;
+    subscription?.close();
   };
 
   const stopTaskAgent = () => {
-    activeTaskAgent?.subscription.close();
+    const subscription = activeTaskAgent?.subscription;
     activeTaskAgent = null;
+    taskAgentGeneration += 1;
+    subscription?.close();
   };
 
   const stopTaskSession = () => {
@@ -160,30 +233,35 @@ export function createMobileController(
   const reconcileSelectedTask = () => {
     const selectedTaskId = store.getState().selectedTaskId;
     if (!selectedTaskId) {
+      pruneResolvedPendingTaskIdentities();
       return;
     }
 
-    const pendingIdentity = pendingActionTaskIdentities.get(selectedTaskId);
+    const pendingIdentity = pendingTaskIdentities.get(selectedTaskId);
     if (pendingIdentity) {
       const displayTaskId = resolveTaskActionDisplayId(
         selectedTaskId,
-        pendingIdentity.ownerDesktopId
+        pendingIdentity.ownerDesktopId,
+        pendingIdentity.ownerLocalRepoId
       );
       if (displayTaskId) {
         if (displayTaskId !== selectedTaskId) {
-          pendingActionTaskIdentities.delete(selectedTaskId);
+          pendingTaskIdentities.delete(selectedTaskId);
           store.setSelectedTask(displayTaskId);
         }
       }
+      pruneResolvedPendingTaskIdentities();
       return;
     }
 
     if (findTask(selectedTaskId)) {
+      pruneResolvedPendingTaskIdentities();
       return;
     }
 
     stopTaskSession();
     store.reconcileSelectedTask();
+    pruneResolvedPendingTaskIdentities();
   };
 
   const refreshSearchResults = async (): Promise<boolean> => {
@@ -253,16 +331,24 @@ export function createMobileController(
   };
 
   const startTaskTerminal = (taskId: string) => {
-    if (activeTaskTerminal?.taskId === taskId) {
+    const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
+    if (
+      activeTaskTerminal?.taskId === taskId &&
+      activeTaskTerminal.routeIdentity === routeIdentity
+    ) {
       return;
     }
 
     stopTaskTerminal();
+    const generation = taskTerminalGeneration;
 
     store.beginTaskTerminal(taskId, "");
 
     try {
       const subscription = client.observeTaskTerminal(taskId, (event) => {
+        if (generation !== taskTerminalGeneration) {
+          return;
+        }
         switch (event.type) {
           case "ready":
             if (event.cols && event.rows) {
@@ -282,28 +368,52 @@ export function createMobileController(
         }
       });
 
-      activeTaskTerminal = { taskId, subscription };
+      if (generation !== taskTerminalGeneration) {
+        subscription.close();
+        return;
+      }
+      activeTaskTerminal = { taskId, routeIdentity, subscription };
     } catch (error) {
+      if (generation !== taskTerminalGeneration) {
+        return;
+      }
+      taskTerminalGeneration += 1;
       setTerminalStartupError(taskId, error);
     }
   };
 
   const startTaskAgent = (taskId: string) => {
-    if (activeTaskAgent?.taskId === taskId) {
+    const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
+    if (
+      activeTaskAgent?.taskId === taskId &&
+      activeTaskAgent.routeIdentity === routeIdentity
+    ) {
       return;
     }
 
     stopTaskSession();
+    const generation = taskAgentGeneration;
     store.clearTaskTerminal();
     store.beginTaskAgent(taskId);
 
     try {
       const subscription = client.observeTaskAgent(taskId, (event) => {
+        if (generation !== taskAgentGeneration) {
+          return;
+        }
         store.applyTaskAgentStreamEvent(taskId, event);
       });
 
-      activeTaskAgent = { taskId, subscription };
+      if (generation !== taskAgentGeneration) {
+        subscription.close();
+        return;
+      }
+      activeTaskAgent = { taskId, routeIdentity, subscription };
     } catch (error) {
+      if (generation !== taskAgentGeneration) {
+        return;
+      }
+      taskAgentGeneration += 1;
       const message =
         error instanceof Error ? error.message : "Agent stream failed to start";
       store.applyTaskAgentStreamEvent(taskId, { type: "error", message });
@@ -347,6 +457,7 @@ export function createMobileController(
     const [repos, recentTasks] = collections;
 
     taskCollectionsRevision += 1;
+    lastExplicitRepos = repos;
     store.setRepos(mergeReposWithTaskRepos(repos, recentTasks));
     store.setRecentTasks(recentTasks);
     if (!(await loadRepoTasks(store.getState().selectedRepoId))) {
@@ -432,7 +543,11 @@ export function createMobileController(
     reconcileSelectedTask();
   };
 
-  const applyLiveCloudTasks = (tasks: TaskSummary[], subscriptionEpoch: number) => {
+  const applyLiveCloudTasks = (
+    tasks: TaskSummary[],
+    subscriptionEpoch: number,
+    cloudAuthoritative: boolean
+  ) => {
     tasks = uniqueTasksById(tasks);
     taskCollectionsRevision += 1;
     const repositoryRevision = ++liveRepositoryRevision;
@@ -450,7 +565,10 @@ export function createMobileController(
       : false;
     store.setRepos(
       mergeReposWithTaskRepos(
-        selectedRepo && !selectedRepoHasTask ? [selectedRepo] : [],
+        [
+          ...lastExplicitRepos,
+          ...(selectedRepo && !selectedRepoHasTask ? [selectedRepo] : [])
+        ],
         tasks
       )
     );
@@ -463,7 +581,7 @@ export function createMobileController(
     store.setSearchResults(searchQuery, filterTasksForQuery(tasks, searchQuery));
     reconcileSelectedTask();
     const ownedError = cloudSubscriptionError;
-    if (ownedError?.epoch === subscriptionEpoch) {
+    if (cloudAuthoritative && ownedError?.epoch === subscriptionEpoch) {
       cloudSubscriptionError = null;
       publishOwnedErrorMessage();
     }
@@ -479,6 +597,7 @@ export function createMobileController(
       ) {
         return;
       }
+      lastExplicitRepos = repos;
       store.setRepos(mergeReposWithTaskRepos(repos, tasks));
       const currentRepoId = store.getState().selectedRepoId;
       store.setRepoTasks(
@@ -569,11 +688,15 @@ export function createMobileController(
     const epoch = cloudSubscriptionEpoch;
     const unsubscribe = options.subscribeCloudTasks(
       uid,
-      (tasks) => {
+      (tasks, publication) => {
         if (epoch !== cloudSubscriptionEpoch) {
           return;
         }
-        applyLiveCloudTasks(tasks, epoch);
+        applyLiveCloudTasks(
+          tasks,
+          epoch,
+          publication?.cloudAuthoritative !== false
+        );
       },
       (error) => {
         if (epoch !== cloudSubscriptionEpoch) {
@@ -610,11 +733,12 @@ export function createMobileController(
     stopTaskSession();
     store.setSelectedTask(null);
     store.setDesktops([]);
+    lastExplicitRepos = [];
     store.setRepos([]);
     store.setRecentTasks([]);
     store.setRepoTasks([]);
     store.setSearchResults(store.getState().searchQuery, []);
-    pendingActionTaskIdentities.clear();
+    pendingTaskIdentities.clear();
     desktopMetadataError = null;
     setUnownedErrorMessage(null);
   };
@@ -947,6 +1071,10 @@ export function createMobileController(
           agentProvider: state.composerAgentProvider,
           agentType: "pty"
         });
+        pendingTaskIdentities.set(created.taskId, {
+          ownerDesktopId: composerDesktopId,
+          ownerLocalRepoId: created.repoId
+        });
         taskCollectionsRevision += 1;
         const createdTask = mapCreatedTask(created);
         const recentTasks = [
@@ -980,22 +1108,28 @@ export function createMobileController(
 
     async runMergeAgent(taskId) {
       try {
+        const sourceTask = findTask(taskId);
         const ownerDesktopId =
-          findTask(taskId)?.ownerDesktopId ??
+          sourceTask?.ownerDesktopId ??
           store.getState().selectedDesktopId;
+        const ownerLocalRepoId = sourceTask?.ownerLocalRepoId ?? null;
         const response = await client.runMergeAgent(taskId);
         if (response.taskId !== taskId) {
-          pendingActionTaskIdentities.set(response.taskId, { ownerDesktopId });
+          pendingTaskIdentities.set(response.taskId, {
+            ownerDesktopId,
+            ownerLocalRepoId
+          });
         }
         taskCollectionsRevision += 1;
         await refreshTaskCollections();
         setUnownedErrorMessage(null);
         const displayTaskId = resolveTaskActionDisplayId(
           response.taskId,
-          ownerDesktopId
+          ownerDesktopId,
+          ownerLocalRepoId
         );
         if (displayTaskId && displayTaskId !== response.taskId) {
-          pendingActionTaskIdentities.delete(response.taskId);
+          pendingTaskIdentities.delete(response.taskId);
         }
         this.openTask(displayTaskId ?? response.taskId);
       } catch (error) {
@@ -1005,22 +1139,28 @@ export function createMobileController(
 
     async advanceDesktopTaskStage(taskId) {
       try {
+        const sourceTask = findTask(taskId);
         const ownerDesktopId =
-          findTask(taskId)?.ownerDesktopId ??
+          sourceTask?.ownerDesktopId ??
           store.getState().selectedDesktopId;
+        const ownerLocalRepoId = sourceTask?.ownerLocalRepoId ?? null;
         const response = await client.advanceTaskStage(taskId);
         if (response.taskId !== taskId) {
-          pendingActionTaskIdentities.set(response.taskId, { ownerDesktopId });
+          pendingTaskIdentities.set(response.taskId, {
+            ownerDesktopId,
+            ownerLocalRepoId
+          });
         }
         taskCollectionsRevision += 1;
         await refreshTaskCollections();
         setUnownedErrorMessage(null);
         const displayTaskId = resolveTaskActionDisplayId(
           response.taskId,
-          ownerDesktopId
+          ownerDesktopId,
+          ownerLocalRepoId
         );
         if (displayTaskId && displayTaskId !== response.taskId) {
-          pendingActionTaskIdentities.delete(response.taskId);
+          pendingTaskIdentities.delete(response.taskId);
         }
         this.openTask(displayTaskId ?? response.taskId);
       } catch (error) {
@@ -1063,6 +1203,7 @@ export function createMobileController(
     async closeDesktopTask(taskId) {
       try {
         await client.closeTask(taskId);
+        pendingTaskIdentities.delete(taskId);
         taskCollectionsRevision += 1;
         stopTaskSession();
         await refreshTaskCollections();

@@ -13,6 +13,7 @@ import { createKannaClient } from "../lib/api/client";
 import type { TaskSummary } from "../lib/api/types";
 import { createCloudLanClient } from "../lib/sources/cloudLanClient";
 import { createRemoteTransport, type RemoteDesktopInvoker } from "../lib/transports/remoteTransport";
+import { mapCloudTaskSnapshot } from "../lib/firebase/taskIndex";
 
 function createDeferred<T>(): {
   promise: Promise<T>;
@@ -643,6 +644,62 @@ describe("createMobileController", () => {
         { id: "empty-repo", name: "Empty Repo" },
         { id: "repo-with-task", name: "Repo With Task" }
       ]);
+    });
+  });
+
+  it("preserves the last successful explicit repositories until a current live supplement succeeds", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const cloudTask: TaskSummary = {
+      id: "cloud-task",
+      repoId: "repo-a",
+      repoName: "Repo A",
+      title: "Cloud task",
+      stage: "in progress"
+    };
+    const repoA = { id: "repo-a", name: "Repo A" };
+    const repoB = { id: "repo-b", name: "Repo B" };
+    const repoC = { id: "repo-c", name: "Repo C" };
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listRepos
+      .mockResolvedValueOnce([repoA, repoB])
+      .mockRejectedValueOnce(new Error("repository supplement unavailable"))
+      .mockResolvedValueOnce([repoC]);
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    liveUpdate?.([cloudTask]);
+    await vi.waitFor(() => {
+      expect(store.getState().repos).toEqual([repoA, repoB]);
+    });
+
+    liveUpdate?.([cloudTask]);
+    expect(store.getState().repos).toEqual([repoA, repoB]);
+    await flushMicrotasks();
+    expect(store.getState().repos).toEqual([repoA, repoB]);
+
+    liveUpdate?.([cloudTask]);
+    expect(store.getState().repos).toEqual([repoA, repoB]);
+    await vi.waitFor(() => {
+      expect(store.getState().repos).toEqual([repoC, repoA]);
     });
   });
 
@@ -1804,6 +1861,238 @@ describe("createMobileController", () => {
     expect(store.getState().composerPrompt).toBe("");
   });
 
+  it.each([
+    {
+      description: "when the publisher includes the local repository identity",
+      localRepoId: "repo-local" as string | undefined,
+      canonicalId: "cloud:desktop-a:repo-local:task-created"
+    },
+    {
+      description: "when the publisher omits the optional local repository identity",
+      localRepoId: undefined,
+      canonicalId: "cloud:desktop-a:repo-cloud:task-created"
+    }
+  ])(
+    "migrates a created local task to its publisher-derived cloud identity $description",
+    async ({ localRepoId, canonicalId }) => {
+      const store = createSessionStore();
+      const client = createClientMock();
+      const auth = createAuthSessionMock();
+      auth.getState = vi.fn(() => ({
+        status: "signedIn",
+        user: { uid: "user-1", email: "u@example.com", displayName: null }
+      }));
+      client.getStatus.mockResolvedValueOnce({
+        state: "running",
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      });
+      client.listDesktops.mockResolvedValueOnce([
+        { id: "desktop-a", name: "Desktop A", online: true, mode: "remote" }
+      ]);
+      client.listRepos.mockResolvedValue([
+        { id: "repo-cloud", name: "Repo" }
+      ]);
+      client.createTask.mockResolvedValueOnce({
+        taskId: "task-created",
+        repoId: "repo-local",
+        title: "Created task",
+        stage: "in progress",
+        agentType: "agent"
+      });
+      const rawSubscription = createAgentSubscriptionMock().subscription;
+      const canonicalSubscription = createAgentSubscriptionMock().subscription;
+      client.observeTaskAgent
+        .mockReturnValueOnce(rawSubscription)
+        .mockReturnValueOnce(canonicalSubscription);
+      let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
+      const controller = createMobileController(client, store, auth, {
+        subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+          publishTasks = onUpdate;
+          return vi.fn();
+        })
+      });
+
+      await controller.bootstrap();
+      store.selectRepo("repo-cloud");
+      controller.openComposer();
+      controller.selectComposerDesktop("desktop-a");
+      controller.updateComposerPrompt("Created task");
+      await controller.createTask();
+
+      expect(store.getState()).toMatchObject({
+        selectedTaskId: "task-created",
+        taskAgentTaskId: "task-created"
+      });
+      expect(client.observeTaskAgent).toHaveBeenCalledWith(
+        "task-created",
+        expect.any(Function)
+      );
+
+      publishTasks?.([
+        {
+          id: "task-created",
+          repoId: "repo-local",
+          title: "Created task",
+          stage: "in progress",
+          agentType: "agent"
+        }
+      ]);
+      expect(store.getState().selectedTaskId).toBe("task-created");
+      expect(rawSubscription.close).not.toHaveBeenCalled();
+
+      const canonical = mapCloudTaskSnapshot({
+        ...(localRepoId ? { localRepoId } : {}),
+        ownerDesktopId: "desktop-a",
+        ownerLocalTaskId: "task-created",
+        title: "Created task",
+        stage: "in progress",
+        repo: { cloudRepoId: "repo-cloud", name: "Repo" },
+        agent: { provider: "claude", type: "agent" },
+        updatedAt: "2026-07-11T00:00:00.000Z"
+      });
+      expect(canonical.id).toBe(canonicalId);
+
+      publishTasks?.([canonical]);
+
+      expect(store.getState()).toMatchObject({
+        selectedTaskId: canonical.id,
+        taskAgentTaskId: canonical.id
+      });
+      expect(rawSubscription.close).toHaveBeenCalledOnce();
+      expect(client.observeTaskAgent).toHaveBeenNthCalledWith(
+        2,
+        canonical.id,
+        expect.any(Function)
+      );
+      expect(canonicalSubscription.close).not.toHaveBeenCalled();
+
+      publishTasks?.([{ ...canonical, title: "Created task metadata refresh" }]);
+
+      expect(client.observeTaskAgent).toHaveBeenCalledTimes(2);
+      expect(rawSubscription.close).toHaveBeenCalledOnce();
+      expect(canonicalSubscription.close).not.toHaveBeenCalled();
+    }
+  );
+
+  it("prunes a resolved raw create alias when its detail is no longer selected", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops.mockResolvedValueOnce([
+      { id: "desktop-a", name: "Desktop A", online: true, mode: "remote" }
+    ]);
+    client.createTask.mockResolvedValueOnce({
+      taskId: "task-created",
+      repoId: "repo-local",
+      title: "Created task",
+      stage: "in progress"
+    });
+    let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        publishTasks = onUpdate;
+        return vi.fn();
+      })
+    });
+    const canonical = mapCloudTaskSnapshot({
+      localRepoId: "repo-local",
+      ownerDesktopId: "desktop-a",
+      ownerLocalTaskId: "task-created",
+      title: "Created task",
+      stage: "in progress",
+      repo: { cloudRepoId: "repo-cloud", name: "Repo" },
+      updatedAt: "2026-07-11T00:00:00.000Z"
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-cloud");
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-a");
+    controller.updateComposerPrompt("Created task");
+    await controller.createTask();
+    controller.closeTask();
+
+    publishTasks?.([canonical]);
+    controller.openTask("task-created");
+    publishTasks?.([{ ...canonical, title: "Current canonical task" }]);
+
+    expect(store.getState().selectedTaskId).toBeNull();
+  });
+
+  it("does not resurrect a raw create alias after explicitly closing that task", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops.mockResolvedValueOnce([
+      { id: "desktop-a", name: "Desktop A", online: true, mode: "remote" }
+    ]);
+    client.createTask.mockResolvedValueOnce({
+      taskId: "task-created",
+      repoId: "repo-local",
+      title: "Created task",
+      stage: "in progress"
+    });
+    let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        publishTasks = onUpdate;
+        return vi.fn();
+      })
+    });
+    const canonical = mapCloudTaskSnapshot({
+      localRepoId: "repo-local",
+      ownerDesktopId: "desktop-a",
+      ownerLocalTaskId: "task-created",
+      title: "Created task",
+      stage: "in progress",
+      repo: { cloudRepoId: "repo-cloud", name: "Repo" },
+      updatedAt: "2026-07-11T00:00:00.000Z"
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-cloud");
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-a");
+    controller.updateComposerPrompt("Created task");
+    await controller.createTask();
+    client.listRecentTasks.mockResolvedValue([]);
+    client.listRepoTasks.mockResolvedValue([]);
+
+    await controller.closeDesktopTask("task-created");
+    controller.openTask("task-created");
+    publishTasks?.([canonical]);
+
+    expect(store.getState().selectedTaskId).toBeNull();
+  });
+
   it("creates a task with the selected composer agent provider", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -2231,6 +2520,55 @@ describe("createMobileController", () => {
     });
   });
 
+  it("ignores buffered terminal events from the previous route after rebinding", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    let routeIdentity = "owner-a";
+    const streams: Array<{
+      listener: (event: TaskTerminalStreamEvent) => void;
+      close: ReturnType<typeof vi.fn>;
+    }> = [];
+    client.getTaskRouteIdentity = vi.fn(() => routeIdentity);
+    client.observeTaskTerminal.mockImplementation((_taskId, listener) => {
+      const close = vi.fn();
+      streams.push({ listener, close });
+      return { close };
+    });
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    controller.openTask("task-1");
+    expect(streams).toHaveLength(1);
+
+    routeIdentity = "owner-b";
+    controller.openTask("task-1");
+    expect(streams).toHaveLength(2);
+    expect(streams[0]!.close).toHaveBeenCalledOnce();
+
+    streams[1]!.listener({
+      type: "output",
+      taskId: "task-1",
+      dataB64: "owner-b-output"
+    });
+    streams[0]!.listener({
+      type: "output",
+      taskId: "task-1",
+      dataB64: "late-owner-a-output"
+    });
+    streams[0]!.listener({
+      type: "exit",
+      taskId: "task-1",
+      code: 0
+    });
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalTaskId: "task-1",
+      taskTerminalOutput: "owner-b-output\n",
+      taskTerminalStatus: "live"
+    });
+  });
+
   it("opens an agent stream instead of a terminal stream for agent tasks", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -2283,6 +2621,77 @@ describe("createMobileController", () => {
       { seq: 0, event: { type: "user_message", text: "hello" } },
       { seq: 1, event: { type: "assistant_text", text: "hi", truncated: false } }
     ]);
+  });
+
+  it("ignores buffered agent events from the previous route after rebinding", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const agentTask: TaskSummary = {
+      id: "task-agent",
+      repoId: "repo-1",
+      title: "Themed task",
+      stage: "in progress",
+      agentType: "agent"
+    };
+    client.listRecentTasks.mockResolvedValueOnce([agentTask]);
+    client.listRepoTasks.mockResolvedValueOnce([agentTask]);
+    let routeIdentity = "owner-a";
+    const streams: Array<{
+      listener: (event: TaskAgentStreamEvent) => void;
+      subscription: TaskAgentSubscription;
+    }> = [];
+    client.getTaskRouteIdentity = vi.fn(() => routeIdentity);
+    client.observeTaskAgent.mockImplementation((_taskId, listener) => {
+      const subscription: TaskAgentSubscription = {
+        close: vi.fn(),
+        sendInput: vi.fn(),
+        sendPermission: vi.fn(),
+        interrupt: vi.fn()
+      };
+      streams.push({ listener, subscription });
+      return subscription;
+    });
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask(agentTask.id);
+    controller.openTask(agentTask.id);
+    expect(streams).toHaveLength(1);
+
+    routeIdentity = "owner-b";
+    controller.openTask(agentTask.id);
+    expect(streams).toHaveLength(2);
+    expect(streams[0]!.subscription.close).toHaveBeenCalledOnce();
+
+    streams[1]!.listener({
+      type: "snapshot",
+      taskId: agentTask.id,
+      events: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "owner B", truncated: false }
+      }],
+      nextSeq: 1
+    });
+    streams[0]!.listener({
+      type: "event",
+      taskId: agentTask.id,
+      seq: 1,
+      event: { type: "assistant_text", text: "late owner A", truncated: false }
+    });
+    streams[0]!.listener({
+      type: "exit",
+      taskId: agentTask.id,
+      code: 0
+    });
+
+    expect(store.getState()).toMatchObject({
+      taskAgentTaskId: agentTask.id,
+      taskAgentStatus: "live",
+      taskAgentEvents: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "owner B", truncated: false }
+      }]
+    });
   });
 
   it("opens a signed-in live cloud agent task through the agent stream", async () => {

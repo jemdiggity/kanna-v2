@@ -26,6 +26,10 @@ import {
   sortCloudTasks
 } from "./taskIndex";
 import type { CloudTaskIndexError } from "./taskIndex";
+import { createAppModel } from "../../appModel";
+import { createStaticBonjourBrowser } from "../discovery/bonjour";
+import type { MobileAuthSession } from "./auth";
+import type { RelayDesktopClient } from "../transports/relayClient";
 
 interface TestDocument {
   id: string;
@@ -134,6 +138,45 @@ function captureSnapshotListeners(
     registrationCount(): number {
       return firestoreMocks.onSnapshot.mock.calls.length;
     },
+  };
+}
+
+function createSignedInAuthSession(): MobileAuthSession {
+  const state = {
+    status: "signedIn" as const,
+    user: {
+      uid: "user-1",
+      email: "user-1@kanna.test",
+      displayName: null
+    }
+  };
+  return {
+    initialize: vi.fn().mockResolvedValue(undefined),
+    getState: vi.fn(() => state),
+    subscribe: vi.fn((listener) => {
+      listener(state);
+      return vi.fn();
+    }),
+    signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+    signOut: vi.fn().mockResolvedValue(undefined),
+    getIdToken: vi.fn().mockResolvedValue("id-token"),
+    notifyAuthExpired: vi.fn()
+  };
+}
+
+function createRelayClientMock(): RelayDesktopClient {
+  return {
+    close: vi.fn(),
+    invokeDesktop: vi.fn().mockResolvedValue(null),
+    listActiveDesktopIds: vi.fn().mockResolvedValue(new Set<string>()),
+    observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+    observeTaskAgent: vi.fn(() => ({
+      close: vi.fn(),
+      sendInput: vi.fn(),
+      sendPermission: vi.fn(),
+      interrupt: vi.fn()
+    })),
+    sendTaskInput: vi.fn().mockResolvedValue(undefined)
   };
 }
 
@@ -391,6 +434,86 @@ describe("cloud task index", () => {
       expect.objectContaining({ id: "cloud-task-a" }),
     ]);
     expect(firestoreMocks.getDocs).not.toHaveBeenCalled();
+  });
+
+  it("publishes only the complete initial Firestore aggregate through the app model", async () => {
+    const listeners = captureSnapshotListeners();
+    firestoreMocks.getDocs.mockResolvedValue({ docs: [] });
+    const taskIndex = createFirestoreTaskIndex({ kind: "firestore" } as never);
+    const model = createAppModel({
+      authSession: createSignedInAuthSession(),
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => createRelayClientMock()
+      }
+    });
+    await model.initialize();
+    model.sessionStore.setRecentTasks([
+      {
+        id: "previous-task",
+        repoId: "previous-repo",
+        title: "Previously accepted task",
+        stage: "review"
+      }
+    ]);
+    const acceptedTaskHistory: Array<Array<{ id: string; title: string }>> = [[
+      { id: "previous-task", title: "Previously accepted task" }
+    ]];
+    let resolveFirstNonEmptyPublication!: () => void;
+    const firstNonEmptyPublication = new Promise<void>((resolve) => {
+      resolveFirstNonEmptyPublication = resolve;
+    });
+    let previousTasks = model.sessionStore.getState().recentTasks;
+    model.sessionStore.subscribe(() => {
+      const tasks = model.sessionStore.getState().recentTasks;
+      if (tasks === previousTasks) return;
+      previousTasks = tasks;
+      acceptedTaskHistory.push(
+        tasks.map(({ id, title }) => ({ id, title }))
+      );
+      if (tasks.length > 0) {
+        resolveFirstNonEmptyPublication();
+      }
+    });
+
+    listeners.root().onNext({
+      docs: [desktopDocument("desktop-a"), desktopDocument("desktop-b")]
+    });
+    listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+      cloudTaskId: "cloud-task-a",
+      ownerDesktopId: "desktop-a",
+      ownerLocalTaskId: "task-a",
+      title: "Task A",
+      updatedAt: "2026-07-11T00:02:00.000Z"
+    })));
+
+    expect(acceptedTaskHistory).toEqual([[
+      { id: "previous-task", title: "Previously accepted task" }
+    ]]);
+
+    listeners.child("desktop-b").onNext(taskSnapshot(validTask({
+      cloudTaskId: "cloud-task-b",
+      ownerDesktopId: "desktop-b",
+      ownerLocalTaskId: "task-b",
+      title: "Task B",
+      updatedAt: "2026-07-11T00:01:00.000Z"
+    })));
+
+    await firstNonEmptyPublication;
+    expect(acceptedTaskHistory).toEqual([
+      [{ id: "previous-task", title: "Previously accepted task" }],
+      [
+        { id: "cloud-task-a", title: "Task A" },
+        { id: "cloud-task-b", title: "Task B" }
+      ]
+    ]);
   });
 
   it("normalizes SQLite, ISO, date-only, and Timestamp-like values before sorting", () => {

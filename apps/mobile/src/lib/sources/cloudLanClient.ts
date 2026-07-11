@@ -361,6 +361,9 @@ export function createCloudLanClient(
       tasks
     };
   };
+  const readLanTaskSnapshot = shareWhilePending(loadLanTaskSnapshot);
+  const readLanRepos = shareWhilePending(() => lan.listRepos());
+  const readLanDesktops = shareWhilePending(() => lan.listDesktops());
 
   const performRecentTaskRead = async (
     readEpoch: number,
@@ -373,7 +376,7 @@ export function createCloudLanClient(
     const cloudRead = settleRead(() => cloud.listRecentTasks());
     const lanRead = lanEnabled
       ? settleOptionalLanRead(
-          loadLanTaskSnapshot,
+          readLanTaskSnapshot,
           optionalLanWaitMs,
           (lateSnapshot) => {
             lateLanSnapshotForRead = lateSnapshot;
@@ -613,7 +616,7 @@ export function createCloudLanClient(
     const cloudRead = settleRead(() => cloud.listRepos());
     const lanRead = lanEnabled
       ? settleOptionalLanRead(
-          () => lan.listRepos(),
+          readLanRepos,
           optionalLanWaitMs,
           (lateRepos) => {
             if (
@@ -680,7 +683,7 @@ export function createCloudLanClient(
     const cloudRead = settleRead(() => cloud.listDesktops());
     const lanRead = lanEnabled
       ? settleOptionalLanRead(
-          () => lan.listDesktops(),
+          readLanDesktops,
           optionalLanWaitMs,
           (lateDesktops) => {
             if (
@@ -752,6 +755,25 @@ export function createCloudLanClient(
   };
 
   return {
+    getTaskRouteIdentity(taskId: string): string {
+      const route = routeForTask(taskId);
+      if (route.source === "cloud") {
+        return route.client.getTaskRouteIdentity?.(route.taskId) ??
+          JSON.stringify(["cloud", route.taskId]);
+      }
+      if (route.source === "lan") {
+        return JSON.stringify([
+          "lan",
+          route.desktopId,
+          route.taskId
+        ]);
+      }
+      return JSON.stringify([
+        "unavailable",
+        route.desktopId,
+        route.taskId
+      ]);
+    },
     getStatus: () => cloud.getStatus(),
     listDesktops,
     listRepos,
@@ -873,12 +895,51 @@ async function settleRead<T>(read: () => Promise<T>): Promise<SettledRead<T>> {
   }
 }
 
+interface SharedPendingRead<T> {
+  promise: Promise<T>;
+  started: boolean;
+}
+
+function shareWhilePending<T>(
+  read: () => Promise<T>
+): () => SharedPendingRead<T> {
+  let inFlight: Promise<T> | null = null;
+  return () => {
+    if (inFlight) {
+      return { promise: inFlight, started: false };
+    }
+
+    let raw: Promise<T>;
+    try {
+      raw = Promise.resolve(read());
+    } catch (error) {
+      raw = Promise.reject(error);
+    }
+    let current!: Promise<T>;
+    current = raw.finally(() => {
+      if (inFlight === current) {
+        inFlight = null;
+      }
+    });
+    inFlight = current;
+    return { promise: current, started: true };
+  };
+}
+
 function settleOptionalLanRead<T>(
-  read: () => Promise<T>,
+  read: () => SharedPendingRead<T>,
   waitMs: number,
   onLateFulfilled: (value: T) => void
 ): Promise<SettledRead<T>> {
-  const settledRead = settleRead(read);
+  const pendingRead = read();
+  if (!pendingRead.started) {
+    return Promise.resolve({
+      status: "rejected",
+      reason: new Error("Optional LAN read is already in flight.")
+    });
+  }
+
+  const settledRead = settleRead(() => pendingRead.promise);
   return new Promise((resolve) => {
     let timedOut = false;
     const timeout = setTimeout(() => {

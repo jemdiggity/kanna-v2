@@ -375,13 +375,28 @@ describe("remote transport", () => {
       ]);
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
-      getSelectedDesktopId: () => null,
+      getSelectedDesktopId: () => "desktop-selected",
       invokeDesktop,
       listCloudTasks
     });
 
+    expect(JSON.parse(transport.getTaskRouteIdentity!("cloud-task-1"))).toEqual([
+      "remote",
+      "desktop-selected",
+      "cloud-task-1"
+    ]);
     await transport.listRecentTasks();
+    expect(JSON.parse(transport.getTaskRouteIdentity!("cloud-task-1"))).toEqual([
+      "remote",
+      "desktop-old-owner",
+      "local-task-old"
+    ]);
     await transport.listRecentTasks();
+    expect(JSON.parse(transport.getTaskRouteIdentity!("cloud-task-1"))).toEqual([
+      "remote",
+      "desktop-new-owner",
+      "local-task-new"
+    ]);
     await transport.advanceTaskStage("cloud-task-1");
 
     expect(invokeDesktop).toHaveBeenCalledWith({

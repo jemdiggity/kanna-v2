@@ -39,7 +39,8 @@ import { readKannaExpoExtra } from "./mobileEnvironment";
 import type { TaskSummary } from "./lib/api/types";
 
 const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
-const CLOUD_TASK_RECOVERY_RETRY_MS = 1_000;
+const CLOUD_TASK_RECOVERY_INITIAL_RETRY_MS = 1_000;
+const CLOUD_TASK_RECOVERY_MAX_RETRY_MS = 30_000;
 
 interface ExpoPublicEnv {
   EXPO_PUBLIC_KANNA_RELAY_URL?: string;
@@ -152,9 +153,11 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let liveCloudTasks: TaskSummary[] = [];
   let liveCloudTasksUid: string | null = null;
   let liveCloudTasksReady = false;
+  let liveCloudTasksReadError: unknown | null = null;
   let liveSubscriptionEpoch = 0;
   let clientGeneration = 0;
   let currentLiveTaskRepublish: (() => Promise<void>) | null = null;
+  let currentLiveTaskRecoveryInvalidation: (() => void) | null = null;
   let activeAuthUid = signedInUid(authSession.getState());
   // Native discovery can settle after the first cloud snapshot and relay
   // presence read. Feed it through the same complete-snapshot drain so the
@@ -174,6 +177,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     liveCloudTasks = [];
     liveCloudTasksUid = null;
     liveCloudTasksReady = false;
+    liveCloudTasksReadError = null;
   };
   const getCloudTaskIndex = () =>
     (cloudTaskIndex ??= options.taskIndex ?? createFirestoreTaskIndex());
@@ -188,6 +192,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       getTrustedDesktops: () => sessionStore.getState().trustedDesktops,
       getLiveCloudTasks: () => liveCloudTasks,
       getLiveCloudTasksUid: () => liveCloudTasksUid,
+      getLiveCloudTasksReadError: () => liveCloudTasksReadError,
       isLiveCloudTasksReady: () => liveCloudTasksReady,
       onActiveDesktopIdsChanged: () => {
         if (generation === clientGeneration) {
@@ -203,6 +208,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   const replaceActiveClient = () => {
     const previousClient = activeClient;
     const nextGeneration = clientGeneration + 1;
+    currentLiveTaskRecoveryInvalidation?.();
     currentLiveTaskRepublish = null;
     const nextClient = resolveClient(nextGeneration);
     clientGeneration = nextGeneration;
@@ -218,12 +224,12 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       let taskIndexSubscriptionRevision = 0;
       let taskIndexUnsubscribe: (() => void) | null = null;
       let taskIndexRestartTimer: ReturnType<typeof setTimeout> | null = null;
+      let taskIndexRestartAttempt = 0;
       let presenceRepublishPending = false;
       let livePublicationPendingGeneration: number | null = null;
       let livePublicationDrain: Promise<void> | null = null;
       let currentTaskRecovery: {
         revision: number;
-        readSucceeded: boolean;
         succeeded: boolean;
       } | null = null;
       liveCloudTasks = [];
@@ -234,7 +240,11 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         revision === updateRevision &&
         generation === clientGeneration &&
         liveCloudTasksUid === uid;
-      const publishCurrentTasks = async (revision: number): Promise<boolean> => {
+      const publishCurrentTasks = async (
+        revision: number,
+        cloudAuthoritative = true,
+        reportError = true
+      ): Promise<boolean> => {
         const generation = clientGeneration;
         const source = activeClient;
         let published = false;
@@ -242,16 +252,18 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
           const tasks = await (
             source.listRecentTasksWithSupplement
               ? source.listRecentTasksWithSupplement((supplement) => {
-                  if (isCurrent(revision, generation)) onUpdate(supplement);
+                  if (isCurrent(revision, generation)) {
+                    onUpdate(supplement, { cloudAuthoritative });
+                  }
                 })
               : source.client.listRecentTasks()
           );
           if (isCurrent(revision, generation)) {
-            onUpdate(tasks);
+            onUpdate(tasks, { cloudAuthoritative });
             published = true;
           }
         } catch (error) {
-          if (isCurrent(revision, generation)) onError?.(error);
+          if (reportError && isCurrent(revision, generation)) onError?.(error);
         }
         return published;
       };
@@ -322,14 +334,33 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         taskIndexUnsubscribe = null;
         unsubscribe?.();
       };
-      let startTaskIndexSubscription: () => void = () => undefined;
-      const scheduleTaskIndexSubscriptionRestart = () => {
+      const invalidateTaskIndexRecovery = () => {
         clearTaskIndexRestartTimer();
-        if (epoch !== liveSubscriptionEpoch || liveCloudTasksUid !== uid) return;
-        taskIndexRestartTimer = setTimeout(() => {
+        recoveryRevision += 1;
+        currentTaskRecovery = null;
+        presenceRepublishPending = false;
+      };
+      currentLiveTaskRecoveryInvalidation = invalidateTaskIndexRecovery;
+      let startTaskIndexSubscription: (generation: number) => void = () => undefined;
+      const isTaskIndexOwnerCurrent = (generation: number) =>
+        epoch === liveSubscriptionEpoch &&
+        liveCloudTasksUid === uid &&
+        generation === clientGeneration;
+      const scheduleTaskIndexSubscriptionRestart = (generation: number) => {
+        clearTaskIndexRestartTimer();
+        if (!isTaskIndexOwnerCurrent(generation)) return;
+        const delay = Math.min(
+          CLOUD_TASK_RECOVERY_INITIAL_RETRY_MS * 2 ** taskIndexRestartAttempt,
+          CLOUD_TASK_RECOVERY_MAX_RETRY_MS
+        );
+        taskIndexRestartAttempt += 1;
+        const restartTimer = setTimeout(() => {
+          if (taskIndexRestartTimer !== restartTimer) return;
           taskIndexRestartTimer = null;
-          startTaskIndexSubscription();
-        }, CLOUD_TASK_RECOVERY_RETRY_MS);
+          if (!isTaskIndexOwnerCurrent(generation)) return;
+          startTaskIndexSubscription(generation);
+        }, delay);
+        taskIndexRestartTimer = restartTimer;
       };
       const recoverCurrentTasks = (indexError: CloudTaskIndexError) => {
         if (epoch !== liveSubscriptionEpoch || liveCloudTasksUid !== uid) return;
@@ -344,36 +375,37 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         const generation = clientGeneration;
         const recovery = {
           revision: ++recoveryRevision,
-          readSucceeded: false,
           succeeded: false
         };
         currentTaskRecovery = recovery;
+        const isCurrentRecovery = () =>
+          currentTaskRecovery === recovery &&
+          recovery.revision === recoveryRevision &&
+          isCurrent(revision, generation);
         void getCloudTaskIndex().listRecentTasks(uid).then((tasks) => {
-          recovery.readSucceeded = true;
-          if (
-            currentTaskRecovery !== recovery ||
-            recovery.revision !== recoveryRevision ||
-            !isCurrent(revision, generation)
-          ) {
+          if (!isCurrentRecovery()) {
             return false;
           }
           liveCloudTasks = tasks;
           liveCloudTasksUid = uid;
           liveCloudTasksReady = true;
+          liveCloudTasksReadError = null;
           return publishCurrentTasks(revision);
-        }).then((published) => {
-          if (!published || !isCurrent(revision, generation)) return;
-          recovery.succeeded = published;
         }).catch((error) => {
-          if (isCurrent(revision, generation)) onError?.(error);
+          if (!isCurrentRecovery()) {
+            return false;
+          }
+          liveCloudTasksReadError = error;
+          return publishCurrentTasks(revision, false, false);
+        }).then((published) => {
+          if (!published || !isCurrentRecovery()) return;
+          recovery.succeeded = published;
         }).finally(() => {
           if (currentTaskRecovery === recovery) {
             currentTaskRecovery = null;
-            if (recovery.readSucceeded) {
-              startTaskIndexSubscription();
-            } else {
-              scheduleTaskIndexSubscriptionRestart();
-            }
+            // A one-shot read can repair the data snapshot, but only a live
+            // listener callback proves listener health and resets backoff.
+            scheduleTaskIndexSubscriptionRestart(generation);
             if (recovery.succeeded && presenceRepublishPending) {
               presenceRepublishPending = false;
               void republishCurrentLiveTasks();
@@ -381,8 +413,8 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
           }
         });
       };
-      startTaskIndexSubscription = () => {
-        if (epoch !== liveSubscriptionEpoch || liveCloudTasksUid !== uid) return;
+      startTaskIndexSubscription = (generation) => {
+        if (!isTaskIndexOwnerCurrent(generation)) return;
         clearTaskIndexRestartTimer();
         const subscriptionRevision = ++taskIndexSubscriptionRevision;
         const isCurrentSubscription = () =>
@@ -398,6 +430,8 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
             liveCloudTasks = tasks;
             liveCloudTasksUid = uid;
             liveCloudTasksReady = true;
+            liveCloudTasksReadError = null;
+            taskIndexRestartAttempt = 0;
             void enqueueCurrentLiveTasks();
           },
           (indexError) => {
@@ -410,9 +444,15 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
           unsubscribe();
         }
       };
-      startTaskIndexSubscription();
+      startTaskIndexSubscription(clientGeneration);
       return () => {
         livePublicationPendingGeneration = null;
+        invalidateTaskIndexRecovery();
+        if (
+          currentLiveTaskRecoveryInvalidation === invalidateTaskIndexRecovery
+        ) {
+          currentLiveTaskRecoveryInvalidation = null;
+        }
         if (currentLiveTaskRepublish === republishCurrentLiveTasks) {
           currentLiveTaskRepublish = null;
         }
@@ -503,6 +543,7 @@ function createClientForMode({
   getTrustedDesktops,
   getLiveCloudTasks,
   getLiveCloudTasksUid,
+  getLiveCloudTasksReadError,
   isLiveCloudTasksReady,
   onActiveDesktopIdsChanged,
   relayUrl,
@@ -521,6 +562,7 @@ function createClientForMode({
   getTrustedDesktops(): readonly TrustedDesktopRecord[];
   getLiveCloudTasks(): TaskSummary[];
   getLiveCloudTasksUid(): string | null;
+  getLiveCloudTasksReadError(): unknown | null;
   isLiveCloudTasksReady(): boolean;
   onActiveDesktopIdsChanged(): Promise<void> | void;
   relayUrl: string | null;
@@ -568,10 +610,19 @@ function createClientForMode({
     const resolvedTaskIndex = taskIndex ?? createFirestoreTaskIndex();
     const listCloudTasksForRouting = async () => {
       refreshActiveDesktopIds();
-      const tasks =
-        isLiveCloudTasksReady() && getLiveCloudTasksUid() === authState.user.uid
-        ? getLiveCloudTasks()
-        : await resolvedTaskIndex.listRecentTasks(authState.user.uid);
+      let tasks: TaskSummary[];
+      if (
+        isLiveCloudTasksReady() &&
+        getLiveCloudTasksUid() === authState.user.uid
+      ) {
+        tasks = getLiveCloudTasks();
+      } else {
+        const readError = getLiveCloudTasksReadError();
+        if (readError !== null) {
+          throw readError;
+        }
+        tasks = await resolvedTaskIndex.listRecentTasks(authState.user.uid);
+      }
       return preferActiveCloudTaskRoutes(tasks, lastActiveDesktopIds);
     };
     const listCloudDesktopRecords = async () => {
@@ -881,6 +932,8 @@ function mapCloudDesktopRecord(
 
 function createDelegatingClient(getClient: () => KannaClient): KannaClient {
   return {
+    getTaskRouteIdentity: (taskId) =>
+      getClient().getTaskRouteIdentity?.(taskId) ?? taskId,
     getStatus: () => getClient().getStatus(),
     listDesktops: () => getClient().listDesktops(),
     listRepos: () => getClient().listRepos(),

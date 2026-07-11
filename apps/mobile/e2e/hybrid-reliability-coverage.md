@@ -10,6 +10,12 @@ The Appium flow asserts the exact stable three-row display-id set, LAN metadata
 on the duplicate, absence of the duplicate local-id row, and the visible task
 list/account/toolbar shell after seeding an intentionally absent selection ID.
 The component integration test proves that ID remains unresolved internally.
+After the first signed-in hybrid snapshot, Appium terminates and reactivates the
+same simulator app without clearing its sandbox. It then requires the exact
+cloud-only, deduplicated cloud/LAN, and LAN-only rows to return and opens the
+account sheet to verify that the persisted Firebase session restored directly
+to the signed-in state. This also retains the trusted-LAN record and proves the
+relaunch does not need another interactive sign-in.
 After the stable snapshot, Appium opens the LAN-only task, updates the
 cloud-only Firestore child document through the relay harness, and waits for an
 E2E-only marker on the still-open detail screen to include the refreshed cloud
