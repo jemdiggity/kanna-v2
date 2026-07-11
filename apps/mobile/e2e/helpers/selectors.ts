@@ -20,7 +20,21 @@ export const selectors = {
   accountPasswordToggle: `~${MOBILE_E2E_IDS.accountPasswordToggle}`,
   accountSignInButton: `~${MOBILE_E2E_IDS.accountSignInButton}`,
   accountSignOutButton: `~${MOBILE_E2E_IDS.accountSignOutButton}`,
+  tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
+  recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
   updateInfoOtaValue: `~${MOBILE_E2E_IDS.updateInfoOtaValue}`,
   taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]'
 } as const;
+
+const TASK_ROW_PREFIX = "mobile.task-row.";
+
+export function extractTaskRowId(
+  accessibilityName: string | null
+): string | null {
+  if (!accessibilityName?.startsWith(TASK_ROW_PREFIX)) {
+    return null;
+  }
+  const taskId = accessibilityName.slice(TASK_ROW_PREFIX.length);
+  return taskId || null;
+}

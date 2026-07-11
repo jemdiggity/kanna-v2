@@ -2,6 +2,7 @@ import type { Browser } from "webdriverio";
 import { selectors } from "../../helpers/selectors";
 import {
   ensureTaskListVisible,
+  openPtyFixtureTask,
   inspectTerminalWebView,
   waitForRenderedPtyTerminal,
   waitForTaskTerminalLive,
@@ -202,31 +203,7 @@ async function closeAccountSheet(driver: Browser, ui: RelayUi): Promise<void> {
 }
 
 async function openRelayFixtureTask(ui: RelayUi, taskId: string): Promise<void> {
-  const taskById = await ui.getTaskRowById(taskId);
-  const exactTaskVisible = await taskById
-    .waitForDisplayed({ timeout: 5_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (exactTaskVisible) {
-    await taskById.click();
-    return;
-  }
-
-  await ui.waitUntil(
-    async () => {
-      const taskRows = await ui.getTaskRows();
-      return taskRows.length > 0;
-    },
-    {
-      interval: POLL_INTERVAL_MS,
-      timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: `Expected relay fixture task row ${taskId} in the mobile task list`
-    }
-  );
-
-  const [firstTaskRow] = await ui.getTaskRows();
-  await firstTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await firstTaskRow.click();
+  await openPtyFixtureTask(ui, taskId);
 }
 
 async function returnToTaskListShell(ui: RelayUi): Promise<void> {

@@ -53,17 +53,21 @@ export async function seedTrustedDesktopFromUrl(
   }
 
   const persistence = await input.getPersistence();
+  const seededAt = new Date().toISOString();
+  const lanBaseUrl = parsed.searchParams.get("lanBaseUrl")?.trim() || null;
   await persistence.save({
     selectedDesktopId: desktopId,
-    selectedRepoId: null,
-    selectedTaskId: null,
+    selectedRepoId: parsed.searchParams.get("selectedRepoId")?.trim() || null,
+    selectedTaskId: parsed.searchParams.get("selectedTaskId")?.trim() || null,
     activeView: "tasks",
     trustedDesktops: [
       {
         desktopId,
         displayName,
-        lanEndpoints: [],
-        lastSeenAt: new Date().toISOString()
+        lanEndpoints: lanBaseUrl
+          ? [{ baseUrl: lanBaseUrl, lastSeenAt: seededAt }]
+          : [],
+        lastSeenAt: seededAt
       }
     ]
   });

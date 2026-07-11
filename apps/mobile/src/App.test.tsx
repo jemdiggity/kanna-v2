@@ -9,6 +9,14 @@ import type { MobileAuthSession } from "./lib/firebase/auth";
 import type { CloudTaskIndex } from "./lib/firebase/taskIndex";
 import type { FetchLike } from "./lib/transports/lanTransport";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function createFetchMock(): FetchLike {
   return vi.fn(async (input) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -840,5 +848,205 @@ describe("createAppModel", () => {
         authUser: null
       })
     );
+  });
+
+  it("hydrates the full hybrid model and rejects obsolete startup composition work", async () => {
+    const authSession = createSignedInAuthSession();
+    const subscriptions: Array<{
+      onUpdate: Parameters<CloudTaskIndex["subscribeRecentTasks"]>[1];
+      unsubscribe: ReturnType<typeof vi.fn>;
+    }> = [];
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        const unsubscribe = vi.fn();
+        subscriptions.push({ onUpdate, unsubscribe });
+        return unsubscribe;
+      })
+    };
+    const obsoleteLanRead = deferred<
+      Array<{ id: string; repoId: string; title: string; stage: string }>
+    >();
+    let recentTaskReadCount = 0;
+    const freshLanTasks = [
+      {
+        id: "local-duplicate",
+        repoId: "repo-trusted",
+        title: "Fresh LAN duplicate",
+        stage: "review"
+      },
+      {
+        id: "lan-only",
+        repoId: "repo-trusted",
+        title: "LAN-only task",
+        stage: "in progress"
+      }
+    ];
+    const fetchImpl = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/status")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            state: "running",
+            desktopId: "desktop-trusted",
+            desktopName: "Trusted Mac",
+            lanHost: "0.0.0.0",
+            lanPort: 48120,
+            pairingCode: null
+          })
+        } as Response;
+      }
+      if (url.endsWith("/v1/desktops")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: "desktop-trusted",
+              name: "Trusted Mac",
+              online: true,
+              mode: "lan"
+            }
+          ]
+        } as Response;
+      }
+      if (url.endsWith("/v1/repos")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ id: "repo-trusted", name: "Trusted Repo" }]
+        } as Response;
+      }
+      if (url.endsWith("/v1/tasks/recent")) {
+        recentTaskReadCount += 1;
+        const tasks = recentTaskReadCount === 1
+          ? await obsoleteLanRead.promise
+          : freshLanTasks;
+        return { ok: true, status: 200, json: async () => tasks } as Response;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as FetchLike;
+    const model = createAppModel({
+      authSession,
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-trusted",
+          selectedRepoId: "repo-trusted",
+          selectedTaskId: "stale-persisted-task",
+          activeView: "tasks",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-trusted",
+              displayName: "Trusted Mac",
+              lanEndpoints: [
+                {
+                  baseUrl: "http://trusted.lan:48120",
+                  lastSeenAt: "2026-07-10T00:00:00.000Z"
+                }
+              ],
+              lastSeenAt: "2026-07-10T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        bonjourBrowser: createBonjourForDesktop(
+          "desktop-trusted",
+          "Trusted Mac",
+          "trusted.lan",
+          48120
+        )
+      }
+    });
+
+    await model.initialize();
+    expect(subscriptions).toHaveLength(1);
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      selectedRepoId: "repo-trusted",
+      selectedTaskId: "stale-persisted-task"
+    });
+
+    subscriptions[0].onUpdate([
+      {
+        id: "cloud-obsolete",
+        repoId: "repo-obsolete",
+        repoName: "Obsolete Repo",
+        title: "Obsolete cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-other",
+        ownerLocalTaskId: "obsolete-local",
+        ownerOnline: true
+      }
+    ]);
+    await vi.waitFor(() => expect(recentTaskReadCount).toBe(1));
+
+    await model.controller.refresh();
+    expect(subscriptions).toHaveLength(2);
+    expect(subscriptions[0].unsubscribe).toHaveBeenCalledOnce();
+    subscriptions[1].onUpdate([
+      {
+        id: "cloud-only",
+        repoId: "repo-cloud-only",
+        repoName: "Cloud-only Repo",
+        title: "Cloud-only task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-cloud",
+        ownerLocalTaskId: "local-cloud-only",
+        ownerOnline: true
+      },
+      {
+        id: "cloud-duplicate",
+        repoId: "repo-cloud-duplicate",
+        repoName: "Duplicate Repo",
+        title: "Stale cloud duplicate",
+        stage: "pr",
+        ownerDesktopId: "desktop-trusted",
+        ownerLocalRepoId: "repo-trusted",
+        ownerLocalTaskId: "local-duplicate",
+        ownerOnline: true
+      }
+    ]);
+
+    await vi.waitFor(() => {
+      expect(model.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud-only" }),
+        expect.objectContaining({
+          id: "cloud-duplicate",
+          title: "Fresh LAN duplicate",
+          stage: "review"
+        }),
+        expect.objectContaining({ id: "lan-only" })
+      ]);
+    });
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      selectedRepoId: "repo-trusted",
+      selectedTaskId: null
+    });
+    const acceptedState = model.sessionStore.getState();
+
+    obsoleteLanRead.resolve([
+      {
+        id: "obsolete-lan-only",
+        repoId: "repo-obsolete",
+        title: "Obsolete LAN task",
+        stage: "review"
+      }
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(model.sessionStore.getState()).toEqual(acceptedState);
   });
 });

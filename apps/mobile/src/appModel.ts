@@ -39,6 +39,7 @@ import { readKannaExpoExtra } from "./mobileEnvironment";
 import type { TaskSummary } from "./lib/api/types";
 
 const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
+const CLOUD_TASK_RECOVERY_RETRY_MS = 1_000;
 
 interface ExpoPublicEnv {
   EXPO_PUBLIC_KANNA_RELAY_URL?: string;
@@ -74,6 +75,10 @@ interface AppModelOptions {
 
 interface ResolvedAppClient {
   client: KannaClient;
+  listCurrentCloudTasks?: () => Promise<TaskSummary[]>;
+  listRecentTasksWithSupplement?: (
+    onSupplement: (tasks: TaskSummary[]) => void
+  ) => Promise<TaskSummary[]>;
   dispose(): void;
 }
 
@@ -198,11 +203,14 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       const epoch = ++liveSubscriptionEpoch;
       let updateRevision = 0;
       let recoveryRevision = 0;
+      let taskIndexSubscriptionRevision = 0;
+      let taskIndexUnsubscribe: (() => void) | null = null;
+      let taskIndexRestartTimer: ReturnType<typeof setTimeout> | null = null;
       let presenceRepublishPending = false;
       let currentTaskRecovery: {
         revision: number;
+        readSucceeded: boolean;
         succeeded: boolean;
-        superseded: boolean;
       } | null = null;
       liveCloudTasks = [];
       liveCloudTasksUid = uid;
@@ -212,14 +220,34 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         revision === updateRevision &&
         generation === clientGeneration &&
         liveCloudTasksUid === uid;
-      const publishMergedTasks = (revision: number): Promise<void> => {
+      const publishCurrentTasks = async (revision: number): Promise<boolean> => {
         const generation = clientGeneration;
-        const sourceClient = activeClient.client;
-        return sourceClient.listRecentTasks().then((tasks) => {
-          if (isCurrent(revision, generation)) onUpdate(tasks);
-        }).catch((error) => {
+        const source = activeClient;
+        let published = false;
+        try {
+          if (source.listCurrentCloudTasks) {
+            const cloudTasks = await source.listCurrentCloudTasks();
+            if (!isCurrent(revision, generation)) return false;
+            onUpdate(cloudTasks);
+            published = true;
+            if (!isCurrent(revision, generation)) return published;
+          }
+
+          const tasks = await (
+            source.listRecentTasksWithSupplement
+              ? source.listRecentTasksWithSupplement((supplement) => {
+                  if (isCurrent(revision, generation)) onUpdate(supplement);
+                })
+              : source.client.listRecentTasks()
+          );
+          if (isCurrent(revision, generation)) {
+            onUpdate(tasks);
+            published = true;
+          }
+        } catch (error) {
           if (isCurrent(revision, generation)) onError?.(error);
-        });
+        }
+        return published;
       };
       const republishCurrentLiveTasks = async () => {
         if (
@@ -229,53 +257,78 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         ) {
           return;
         }
-        if (currentTaskRecovery && !currentTaskRecovery.superseded) {
+        if (currentTaskRecovery) {
           presenceRepublishPending = true;
           return;
         }
         presenceRepublishPending = false;
         const revision = ++updateRevision;
-        await publishMergedTasks(revision);
+        await publishCurrentTasks(revision);
       };
       currentLiveTaskRepublish = republishCurrentLiveTasks;
+      const clearTaskIndexRestartTimer = () => {
+        if (taskIndexRestartTimer === null) return;
+        clearTimeout(taskIndexRestartTimer);
+        taskIndexRestartTimer = null;
+      };
+      const stopTaskIndexSubscription = () => {
+        clearTaskIndexRestartTimer();
+        taskIndexSubscriptionRevision += 1;
+        const unsubscribe = taskIndexUnsubscribe;
+        taskIndexUnsubscribe = null;
+        unsubscribe?.();
+      };
+      let startTaskIndexSubscription: () => void = () => undefined;
+      const scheduleTaskIndexSubscriptionRestart = () => {
+        clearTaskIndexRestartTimer();
+        if (epoch !== liveSubscriptionEpoch || liveCloudTasksUid !== uid) return;
+        taskIndexRestartTimer = setTimeout(() => {
+          taskIndexRestartTimer = null;
+          startTaskIndexSubscription();
+        }, CLOUD_TASK_RECOVERY_RETRY_MS);
+      };
       const recoverCurrentTasks = (indexError: CloudTaskIndexError) => {
         if (epoch !== liveSubscriptionEpoch || liveCloudTasksUid !== uid) return;
+        if (indexError.scope === "document") {
+          onError?.(formatCloudTaskIndexError(indexError));
+          return;
+        }
+        stopTaskIndexSubscription();
         onError?.(formatCloudTaskIndexError(indexError));
         const revision = ++updateRevision;
         const generation = clientGeneration;
-        if (currentTaskRecovery) {
-          currentTaskRecovery.superseded = true;
-        }
         const recovery = {
           revision: ++recoveryRevision,
-          succeeded: false,
-          superseded: false
+          readSucceeded: false,
+          succeeded: false
         };
         currentTaskRecovery = recovery;
         void getCloudTaskIndex().listRecentTasks(uid).then((tasks) => {
+          recovery.readSucceeded = true;
           if (
             currentTaskRecovery !== recovery ||
             recovery.revision !== recoveryRevision ||
-            recovery.superseded ||
             !isCurrent(revision, generation)
           ) {
-            return null;
+            return false;
           }
           liveCloudTasks = tasks;
           liveCloudTasksUid = uid;
           liveCloudTasksReady = true;
-          return activeClient.client.listRecentTasks();
-        }).then((tasks) => {
-          if (!tasks || !isCurrent(revision, generation)) return;
-          if (!presenceRepublishPending) {
-            onUpdate(tasks);
-          }
-          recovery.succeeded = true;
+          return publishCurrentTasks(revision);
+        }).then((published) => {
+          if (!published || !isCurrent(revision, generation)) return;
+          recovery.succeeded = published;
         }).catch((error) => {
           if (isCurrent(revision, generation)) onError?.(error);
         }).finally(() => {
           if (currentTaskRecovery === recovery) {
             currentTaskRecovery = null;
+            if (recovery.readSucceeded) {
+              startTaskIndexSubscription();
+            } else {
+              scheduleTaskIndexSubscriptionRestart();
+            }
             if (recovery.succeeded && presenceRepublishPending) {
               presenceRepublishPending = false;
               void republishCurrentLiveTasks();
@@ -283,24 +336,37 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
           }
         });
       };
-      const unsubscribe = getCloudTaskIndex().subscribeRecentTasks(
-        uid,
-        (tasks) => {
-          if (epoch !== liveSubscriptionEpoch) return;
-          recoveryRevision += 1;
-          if (currentTaskRecovery) {
-            currentTaskRecovery.superseded = true;
+      startTaskIndexSubscription = () => {
+        if (epoch !== liveSubscriptionEpoch || liveCloudTasksUid !== uid) return;
+        clearTaskIndexRestartTimer();
+        const subscriptionRevision = ++taskIndexSubscriptionRevision;
+        const isCurrentSubscription = () =>
+          epoch === liveSubscriptionEpoch &&
+          liveCloudTasksUid === uid &&
+          subscriptionRevision === taskIndexSubscriptionRevision;
+        const unsubscribe = getCloudTaskIndex().subscribeRecentTasks(
+          uid,
+          (tasks) => {
+            if (!isCurrentSubscription()) return;
+            presenceRepublishPending = false;
+            currentLiveTaskRepublish = republishCurrentLiveTasks;
+            const revision = ++updateRevision;
+            liveCloudTasks = tasks;
+            liveCloudTasksUid = uid;
+            liveCloudTasksReady = true;
+            void publishCurrentTasks(revision);
+          },
+          (indexError) => {
+            if (isCurrentSubscription()) recoverCurrentTasks(indexError);
           }
-          presenceRepublishPending = false;
-          currentLiveTaskRepublish = republishCurrentLiveTasks;
-          const revision = ++updateRevision;
-          liveCloudTasks = tasks;
-          liveCloudTasksUid = uid;
-          liveCloudTasksReady = true;
-          void publishMergedTasks(revision);
-        },
-        recoverCurrentTasks
-      );
+        );
+        if (isCurrentSubscription()) {
+          taskIndexUnsubscribe = unsubscribe;
+        } else {
+          unsubscribe();
+        }
+      };
+      startTaskIndexSubscription();
       return () => {
         if (currentLiveTaskRepublish === republishCurrentLiveTasks) {
           currentLiveTaskRepublish = null;
@@ -308,7 +374,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         if (epoch === liveSubscriptionEpoch) {
           invalidateLiveCloudState();
         }
-        unsubscribe();
+        stopTaskIndexSubscription();
       };
     },
   });
@@ -488,12 +554,21 @@ function createClientForMode({
       getTrustedDesktops
     });
 
-    return {
-      client: createCloudLanClient(cloudClient, trustedLanClient.client, {
+    const composedClient = createCloudLanClient(
+      cloudClient,
+      trustedLanClient.client,
+      {
         isLanEnabled: () =>
           !forceCloud && hasTrustedLanPeer(getTrustedDesktops()),
         lanClientForDesktop: trustedLanClient.clientForDesktop
-      }),
+      }
+    );
+
+    return {
+      client: composedClient,
+      listCurrentCloudTasks: () => composedClient.listCurrentCloudTasks(),
+      listRecentTasksWithSupplement: (onSupplement) =>
+        composedClient.listRecentTasksWithSupplement(onSupplement),
       dispose() {
         if (disposed) return;
         disposed = true;

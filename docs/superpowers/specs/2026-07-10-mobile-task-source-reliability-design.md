@@ -108,10 +108,10 @@ The nested desktop/task listener publishes atomic user-level snapshots.
 
 - The root desktop callback records the complete current desktop set before installing any child listener. This prevents synchronous child callbacks from exposing a partial list.
 - Each child listener has a generation token. Callbacks from a removed, re-added, replaced, or unsubscribed generation are ignored.
-- The first aggregate is withheld until every desktop in that root generation has produced an initial snapshot or an explicit error.
+- The first aggregate is withheld until every desktop in that root generation has produced an initial snapshot.
 - Subsequent child updates replace that desktop's complete slice and emit one aggregate.
 - Removing a desktop removes its tasks and emits after any new-desktop hydration barrier is satisfied.
-- Child errors retain that desktop's last good tasks; initial child errors settle the barrier and surface a scoped error.
+- Child errors retain that desktop's last good tasks but keep the desktop in the hydration barrier, so healthy siblings cannot publish a partial or stale aggregate. The scoped error makes the app-model owner replace the subscription, perform one complete one-shot recovery, and restart the live subscription only after that read succeeds.
 - A root error retains the last good aggregate and surfaces a subscription error.
 
 The redundant `getDocs()` prime is removed. Firestore's child `onSnapshot` already produces an initial snapshot, and a second writer for the same per-desktop cache is the source of the stale-prime race.

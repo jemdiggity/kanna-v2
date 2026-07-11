@@ -38,17 +38,32 @@ import {
   runProfileDisconnectedConnectionSmoke
 } from "./specs/smoke/profile-connection.e2e";
 import { runCloudTaskFlow } from "./specs/cloud/cloud-task-flow.e2e";
+import { runHybridTaskFlow } from "./specs/hybrid/hybrid-task-flow.e2e";
 import { runRelayTaskFlow } from "./specs/relay/relay-task-flow.e2e";
 import { startMobileRelayHarness } from "./helpers/relay-harness";
 
 export const smokeSpecPaths = [
   "specs/cloud/cloud-task-flow.e2e.ts",
+  "specs/hybrid/hybrid-task-flow.e2e.ts",
   "specs/relay/relay-task-flow.e2e.ts",
   "specs/smoke/list-detail-back.e2e.ts",
   "specs/smoke/profile-connection.e2e.ts"
 ];
 export const supportedSmokeTargets = ["simulator", "device"] as const;
-export const supportedSmokeModes = ["smoke", "profile-disconnected", "cloud", "relay"] as const;
+export const supportedSmokeModes = [
+  "smoke",
+  "profile-disconnected",
+  "cloud",
+  "relay",
+  "hybrid"
+] as const;
+
+export function resolveSmokeModeAppEnv(
+  mode: string,
+  configuredAppEnv: string | undefined
+): string | undefined {
+  return mode === "hybrid" ? "dev" : configuredAppEnv;
+}
 
 interface StoppedDesktopServerHandle {
   baseUrl: string;
@@ -125,8 +140,15 @@ async function main(): Promise<void> {
   if (!supportedSmokeModes.includes(mode as (typeof supportedSmokeModes)[number])) {
     throw new Error(`Unsupported mobile E2E mode: ${mode}`);
   }
-  if (mode === "relay" && !process.env.KANNA_E2E_DESKTOP_SERVER_URL) {
+  if (
+    (mode === "relay" || mode === "hybrid") &&
+    !process.env.KANNA_E2E_DESKTOP_SERVER_URL
+  ) {
     process.env.KANNA_E2E_DESKTOP_SERVER_URL = "http://127.0.0.1:1";
+  }
+  const modeAppEnv = resolveSmokeModeAppEnv(mode, process.env.KANNA_APP_ENV);
+  if (modeAppEnv) {
+    process.env.KANNA_APP_ENV = modeAppEnv;
   }
 
   const env = resolveRequiredMobileE2eEnv(
@@ -136,6 +158,11 @@ async function main(): Promise<void> {
     env.desktopServerUrl,
     env.target
   );
+  if (mode === "hybrid" && env.target !== "simulator") {
+    throw new Error(
+      "The mobile hybrid E2E mode is simulator-only; it must not install or launch a physical device."
+    );
+  }
   await assertXcuitestDriverInstalled(process.env as Record<string, string | undefined>);
   const appiumServer = startLocalAppiumServer(
     env.appiumPort,
@@ -180,6 +207,7 @@ async function main(): Promise<void> {
       await assertSimulatorAppInstalled(device, env.bundleId);
       capabilities = createSimulatorCapabilities({
         appiumPort: env.appiumPort,
+        autoAcceptAlerts: mode === "hybrid",
         bundleId: env.bundleId,
         deviceName: device.name,
         reservedPorts: env.reservedPorts
@@ -199,13 +227,15 @@ async function main(): Promise<void> {
     if (mode === "smoke") {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
-    if (mode === "relay") {
+    if (mode === "relay" || mode === "hybrid") {
       relayHarness = await startMobileRelayHarness();
     }
 
     expoServer = await ensureExpoServer({
       env:
-        mode === "relay" && relayHarness
+        mode === "hybrid" && relayHarness
+          ? relayHarness.hybridEnv
+          : mode === "relay" && relayHarness
           ? relayHarness.env
           :
         mode === "cloud"
@@ -215,7 +245,8 @@ async function main(): Promise<void> {
             }
           : { KANNA_APP_ENV: env.appEnv },
       metroPort: env.metroPort,
-      projectRoot
+      projectRoot,
+      requireExactEnvironment: mode === "hybrid"
     });
 
     driver = await createMobileSession({
@@ -239,6 +270,22 @@ async function main(): Promise<void> {
         input: relayHarness.inputMarker
       });
       await relayHarness.waitForInput();
+    } else if (mode === "hybrid" && relayHarness) {
+      await seedTrustedDesktopThroughDeepLink({
+        bundleId: env.bundleId,
+        driver,
+        desktop: {
+          desktopId: relayHarness.hybridFixture.desktop.desktopId,
+          displayName: relayHarness.hybridFixture.desktop.displayName,
+          lanBaseUrl: relayHarness.hybridFixture.desktop.lanBaseUrl
+        },
+        selectedTaskId: relayHarness.hybridFixture.unresolvedTaskId
+      });
+      await runHybridTaskFlow(driver, {
+        credentials: relayHarness.credentials,
+        fixture: relayHarness.hybridFixture,
+        stopRelay: () => relayHarness!.harness.stopRelay()
+      });
     } else if (mode === "cloud") {
       await runCloudTaskFlow(driver, {
         email: env.cloudEmail,

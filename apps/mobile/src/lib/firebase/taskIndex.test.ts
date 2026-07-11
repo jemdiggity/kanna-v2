@@ -517,7 +517,7 @@ describe("cloud task index", () => {
     ]);
   });
 
-  it("settles the initial barrier on child error and retains the last good slice", () => {
+  it("does not publish a partial aggregate after an initial child error", () => {
     const onUpdate = vi.fn();
     const onError = vi.fn<(error: CloudTaskIndexError) => void>();
     const listeners = captureSnapshotListeners();
@@ -542,10 +542,38 @@ describe("cloud task index", () => {
       desktopId: "desktop-b",
       error: initialError,
     });
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+      cloudTaskId: "cloud-task-a-new",
+      ownerDesktopId: "desktop-a",
+      updatedAt: "2026-05-14T00:03:00.000Z",
+    })));
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("withholds healthy sibling updates after a later child error", () => {
+    const onUpdate = vi.fn();
+    const onError = vi.fn<(error: CloudTaskIndexError) => void>();
+    const listeners = captureSnapshotListeners();
+    createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
+      "user-1",
+      onUpdate,
+      onError,
+    );
+    listeners.root().onNext({
+      docs: [desktopDocument("desktop-a"), desktopDocument("desktop-b")],
+    });
+    listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+      cloudTaskId: "cloud-task-a",
+      ownerDesktopId: "desktop-a",
+    })));
+    listeners.child("desktop-b").onNext(taskSnapshot(validTask({
+      cloudTaskId: "cloud-task-b",
+      ownerDesktopId: "desktop-b",
+      ownerLocalTaskId: "task-b",
+    })));
     expect(onUpdate).toHaveBeenCalledTimes(1);
-    expect(onUpdate).toHaveBeenLastCalledWith([
-      expect.objectContaining({ id: "cloud-task-a" }),
-    ]);
 
     const laterError = new Error("desktop-a listener failed");
     listeners.child("desktop-a").onError(laterError);
@@ -554,6 +582,14 @@ describe("cloud task index", () => {
       desktopId: "desktop-a",
       error: laterError,
     });
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+
+    listeners.child("desktop-b").onNext(taskSnapshot(validTask({
+      cloudTaskId: "cloud-task-b-new",
+      ownerDesktopId: "desktop-b",
+      ownerLocalTaskId: "task-b",
+      updatedAt: "2026-05-14T00:03:00.000Z",
+    })));
     expect(onUpdate).toHaveBeenCalledTimes(1);
   });
 

@@ -76,14 +76,31 @@ export function createMobileController(
   let cloudSubscriptionError:
     | { epoch: number; message: string }
     | null = null;
+  let desktopMetadataError:
+    | { revision: number; message: string }
+    | null = null;
+  let unownedErrorMessage: string | null = null;
   let taskCollectionsRevision = 0;
   let liveRepositoryRevision = 0;
   let desktopCollectionsRevision = 0;
   let refreshDesktopsInFlight: Promise<void> | null = null;
+  const pendingActionTaskIdentities = new Map<
+    string,
+    { ownerDesktopId: string | null }
+  >();
+
+  const publishOwnedErrorMessage = () => {
+    store.setErrorMessage(
+      unownedErrorMessage ??
+      cloudSubscriptionError?.message ??
+      desktopMetadataError?.message ??
+      null
+    );
+  };
 
   const setUnownedErrorMessage = (message: string | null) => {
-    cloudSubscriptionError = null;
-    store.setErrorMessage(message);
+    unownedErrorMessage = message;
+    publishOwnedErrorMessage();
   };
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
@@ -103,6 +120,28 @@ export function createMobileController(
     );
   };
 
+  const resolveTaskActionDisplayId = (
+    responseTaskId: string,
+    ownerDesktopId: string | null
+  ): string | null => {
+    const state = store.getState();
+    const candidates = new Map<string, TaskSummary>();
+    for (const task of [
+      ...state.repoTasks,
+      ...state.recentTasks,
+      ...state.searchResults
+    ]) {
+      if (task.id === responseTaskId) continue;
+      if (task.ownerLocalTaskId !== responseTaskId) continue;
+      if (ownerDesktopId && task.ownerDesktopId !== ownerDesktopId) continue;
+      candidates.set(task.id, task);
+    }
+    if (candidates.size === 1) {
+      return candidates.values().next().value!.id;
+    }
+    return findTask(responseTaskId)?.id ?? null;
+  };
+
   const stopTaskTerminal = () => {
     activeTaskTerminal?.subscription.close();
     activeTaskTerminal = null;
@@ -120,7 +159,26 @@ export function createMobileController(
 
   const reconcileSelectedTask = () => {
     const selectedTaskId = store.getState().selectedTaskId;
-    if (!selectedTaskId || findTask(selectedTaskId)) {
+    if (!selectedTaskId) {
+      return;
+    }
+
+    const pendingIdentity = pendingActionTaskIdentities.get(selectedTaskId);
+    if (pendingIdentity) {
+      const displayTaskId = resolveTaskActionDisplayId(
+        selectedTaskId,
+        pendingIdentity.ownerDesktopId
+      );
+      if (displayTaskId) {
+        if (displayTaskId !== selectedTaskId) {
+          pendingActionTaskIdentities.delete(selectedTaskId);
+          store.setSelectedTask(displayTaskId);
+        }
+      }
+      return;
+    }
+
+    if (findTask(selectedTaskId)) {
       return;
     }
 
@@ -311,10 +369,19 @@ export function createMobileController(
           const desktops = await client.listDesktops();
           if (desktopCollectionsRevision === readRevision) {
             store.setDesktops(desktops);
+            desktopMetadataError = null;
+            publishOwnedErrorMessage();
           }
         } catch (error) {
           if (desktopCollectionsRevision === readRevision) {
-            throw error;
+            desktopMetadataError = {
+              revision: readRevision,
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Desktop metadata refresh failed"
+            };
+            publishOwnedErrorMessage();
           }
         }
       })();
@@ -398,9 +465,7 @@ export function createMobileController(
     const ownedError = cloudSubscriptionError;
     if (ownedError?.epoch === subscriptionEpoch) {
       cloudSubscriptionError = null;
-      if (store.getState().errorMessage === ownedError.message) {
-        store.setErrorMessage(null);
-      }
+      publishOwnedErrorMessage();
     }
     const selectedTaskId = store.getState().selectedTaskId;
     if (selectedTaskId && findTask(selectedTaskId)) {
@@ -517,7 +582,7 @@ export function createMobileController(
         const message =
           error instanceof Error ? error.message : "Cloud task subscription failed";
         cloudSubscriptionError = { epoch, message };
-        store.setErrorMessage(message);
+        publishOwnedErrorMessage();
       }
     );
     if (epoch !== cloudSubscriptionEpoch) {
@@ -531,14 +596,8 @@ export function createMobileController(
   const stopCloudTaskSubscription = () => {
     const unsubscribe = cloudTasksUnsubscribe;
     cloudTasksUnsubscribe = null;
-    const ownedError = cloudSubscriptionError;
-    if (
-      ownedError &&
-      store.getState().errorMessage === ownedError.message
-    ) {
-      store.setErrorMessage(null);
-    }
     cloudSubscriptionError = null;
+    publishOwnedErrorMessage();
     cloudSubscriptionEpoch += 1;
     liveRepositoryRevision += 1;
     unsubscribe?.();
@@ -555,6 +614,8 @@ export function createMobileController(
     store.setRecentTasks([]);
     store.setRepoTasks([]);
     store.setSearchResults(store.getState().searchQuery, []);
+    pendingActionTaskIdentities.clear();
+    desktopMetadataError = null;
     setUnownedErrorMessage(null);
   };
 
@@ -919,11 +980,24 @@ export function createMobileController(
 
     async runMergeAgent(taskId) {
       try {
+        const ownerDesktopId =
+          findTask(taskId)?.ownerDesktopId ??
+          store.getState().selectedDesktopId;
         const response = await client.runMergeAgent(taskId);
+        if (response.taskId !== taskId) {
+          pendingActionTaskIdentities.set(response.taskId, { ownerDesktopId });
+        }
         taskCollectionsRevision += 1;
         await refreshTaskCollections();
         setUnownedErrorMessage(null);
-        this.openTask(response.taskId);
+        const displayTaskId = resolveTaskActionDisplayId(
+          response.taskId,
+          ownerDesktopId
+        );
+        if (displayTaskId && displayTaskId !== response.taskId) {
+          pendingActionTaskIdentities.delete(response.taskId);
+        }
+        this.openTask(displayTaskId ?? response.taskId);
       } catch (error) {
         fail(error);
       }
@@ -931,11 +1005,24 @@ export function createMobileController(
 
     async advanceDesktopTaskStage(taskId) {
       try {
+        const ownerDesktopId =
+          findTask(taskId)?.ownerDesktopId ??
+          store.getState().selectedDesktopId;
         const response = await client.advanceTaskStage(taskId);
+        if (response.taskId !== taskId) {
+          pendingActionTaskIdentities.set(response.taskId, { ownerDesktopId });
+        }
         taskCollectionsRevision += 1;
         await refreshTaskCollections();
         setUnownedErrorMessage(null);
-        this.openTask(response.taskId);
+        const displayTaskId = resolveTaskActionDisplayId(
+          response.taskId,
+          ownerDesktopId
+        );
+        if (displayTaskId && displayTaskId !== response.taskId) {
+          pendingActionTaskIdentities.delete(response.taskId);
+        }
+        this.openTask(displayTaskId ?? response.taskId);
       } catch (error) {
         fail(error);
       }

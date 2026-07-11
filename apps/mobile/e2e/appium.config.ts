@@ -1,5 +1,6 @@
 export interface SimulatorCapabilityInput {
   appiumPort: number;
+  autoAcceptAlerts?: boolean;
   bundleId: string;
   deviceName: string;
   platformVersion?: string;
@@ -50,7 +51,9 @@ export function createSimulatorCapabilities(input: SimulatorCapabilityInput) {
     ),
     "appium:newCommandTimeout": 120,
     "appium:noReset": false,
-    "appium:autoDismissAlerts": true,
+    ...(input.autoAcceptAlerts
+      ? { "appium:autoAcceptAlerts": true }
+      : { "appium:autoDismissAlerts": true }),
     "appium:includeSafariInWebviews": true,
     "appium:webviewConnectTimeout": 15_000,
     ...(input.platformVersion

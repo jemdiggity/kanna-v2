@@ -1038,7 +1038,14 @@ describe("remote transport", () => {
   });
 
   it("routes cloud task actions to the owner desktop and local task id", async () => {
-    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockImplementation(
+      async ({ path }) =>
+        path.endsWith("/actions/run-merge-agent")
+          ? { taskId: "local-task-1", followTask: true }
+          : path.endsWith("/actions/advance-stage")
+            ? { taskId: "local-task-1" }
+            : null
+    );
     const subscription = { close: vi.fn() };
     const observeTaskTerminal = vi.fn<RemoteTaskTerminalObserver>(() => subscription);
     const transport = createRemoteTransport({
@@ -1065,8 +1072,13 @@ describe("remote transport", () => {
     expect(transport.observeTaskTerminal("cloud-task-1", listener)).toBe(subscription);
     await expect(transport.sendTaskInput("cloud-task-1", "continue")).resolves.toBeUndefined();
     await expect(transport.closeTask("cloud-task-1")).resolves.toBeUndefined();
-    await expect(transport.runMergeAgent("cloud-task-1")).resolves.toBeNull();
-    await expect(transport.advanceTaskStage("cloud-task-1")).resolves.toBeNull();
+    await expect(transport.runMergeAgent("cloud-task-1")).resolves.toEqual({
+      taskId: "cloud-task-1",
+      followTask: true
+    });
+    await expect(transport.advanceTaskStage("cloud-task-1")).resolves.toEqual({
+      taskId: "cloud-task-1"
+    });
 
     expect(observeTaskTerminal).toHaveBeenCalledWith(
       {
@@ -1097,6 +1109,48 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-task-1/actions/advance-stage",
+      body: null
+    });
+  });
+
+  it("keeps a genuinely new action response on the same owner desktop", async () => {
+    const invokeDesktop = vi
+      .fn<RemoteDesktopInvoker>()
+      .mockResolvedValueOnce({ taskId: "local-next" })
+      .mockResolvedValueOnce({ taskId: "local-next" });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+    await transport.listRecentTasks();
+
+    await expect(transport.advanceTaskStage("cloud-task-1")).resolves.toEqual({
+      taskId: "local-next"
+    });
+    await transport.advanceTaskStage("local-next");
+
+    expect(invokeDesktop).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/advance-stage",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-next/actions/advance-stage",
       body: null
     });
   });

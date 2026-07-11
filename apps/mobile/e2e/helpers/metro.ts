@@ -20,6 +20,7 @@ interface EnsureExpoServerOptions {
   env?: Record<string, string>;
   metroPort: number;
   projectRoot: string;
+  requireExactEnvironment?: boolean;
 }
 
 export function extractEnvVarFromCommandLine(commandLine: string): Record<string, string> {
@@ -42,6 +43,7 @@ export function shouldReuseExpoServer(
   expected: {
     env?: Record<string, string>;
     projectRoot: string;
+    requireExactEnvironment?: boolean;
   }
 ): boolean {
   if (existing.cwd !== expected.projectRoot) {
@@ -52,7 +54,10 @@ export function shouldReuseExpoServer(
     return false;
   }
 
-  if (existing.commandLine.includes("--dev-client")) {
+  if (
+    existing.commandLine.includes("--dev-client") &&
+    !expected.requireExactEnvironment
+  ) {
     return true;
   }
 
@@ -73,14 +78,19 @@ export function buildExpoStartCommand(port: number): string[] {
 export async function ensureExpoServer(
   options: EnsureExpoServerOptions
 ): Promise<ExpoServerHandle> {
+  const expoEnv = {
+    EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED: "1",
+    ...options.env
+  };
   const existingPid = await findListeningProcessPid(options.metroPort);
   if (existingPid !== null) {
     const existing = await inspectRunningExpoProcess(existingPid);
     if (
       existing &&
       shouldReuseExpoServer(existing, {
-        env: options.env,
-        projectRoot: options.projectRoot
+        env: expoEnv,
+        projectRoot: options.projectRoot,
+        requireExactEnvironment: options.requireExactEnvironment
       })
     ) {
       await waitForExpoServer(options.metroPort);
@@ -101,8 +111,7 @@ export async function ensureExpoServer(
     env: {
       ...process.env,
       CI: "1",
-      EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED: "1",
-      ...options.env
+      ...expoEnv
     },
     stdio: "inherit"
   });

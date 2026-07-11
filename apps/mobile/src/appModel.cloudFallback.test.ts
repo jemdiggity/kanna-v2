@@ -514,6 +514,197 @@ describe("createAppModel cloud routing", () => {
     await flushAsyncWork();
   });
 
+  it("publishes a complete one-shot recovery when an initial child listener fails", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    const subscriptions: Array<{
+      onUpdate: (tasks: CloudTaskSummary[]) => void;
+      onError: (error: CloudTaskIndexError) => void;
+      unsubscribe: ReturnType<typeof vi.fn>;
+    }> = [];
+    const taskA = cloudTask({
+      id: "cloud:task-a",
+      ownerDesktopId: "desktop-a",
+      ownerLocalTaskId: "task-a"
+    });
+    const recoveredTaskB = cloudTask({
+      id: "cloud:task-b",
+      ownerDesktopId: "desktop-b",
+      ownerLocalTaskId: "task-b"
+    });
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([taskA, recoveredTaskB]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate, onError) => {
+        const unsubscribe = vi.fn();
+        subscriptions.push({
+          onUpdate,
+          onError: onError ?? (() => undefined),
+          unsubscribe
+        });
+        return unsubscribe;
+      })
+    };
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => createRelayClientMock()
+      }
+    });
+    await app.initialize();
+    expect(subscriptions).toHaveLength(1);
+
+    subscriptions[0].onError({
+      scope: "desktop",
+      desktopId: "desktop-b",
+      error: new Error("desktop-b initial read failed")
+    });
+    subscriptions[0].onUpdate([taskA]);
+
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks.map(({ id }) => id)).toEqual([
+        taskA.id,
+        recoveredTaskB.id
+      ]);
+    });
+    expect(subscriptions[0].unsubscribe).toHaveBeenCalledOnce();
+    expect(subscriptions).toHaveLength(2);
+  });
+
+  it("reports malformed documents without restarting a healthy listener generation", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    let pushCloudError: ((error: CloudTaskIndexError) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate, onError) => {
+        pushCloudTasks = onUpdate;
+        pushCloudError = onError ?? null;
+        return vi.fn();
+      })
+    };
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => createRelayClientMock()
+      }
+    });
+    await app.initialize();
+    vi.mocked(taskIndex.listRecentTasks).mockClear();
+    const validPeer = cloudTask({ id: "cloud:valid-peer" });
+
+    pushCloudError?.({
+      scope: "document",
+      desktopId: "desktop-a",
+      error: new Error("malformed task document")
+    });
+    pushCloudTasks?.([validPeer]);
+
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: validPeer.id })
+      ]);
+    });
+    expect(taskIndex.subscribeRecentTasks).toHaveBeenCalledOnce();
+    expect(taskIndex.listRecentTasks).not.toHaveBeenCalled();
+  });
+
+  it("does not let a healthy sibling callback restore an errored child's stale slice", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    const subscriptions: Array<{
+      onUpdate: (tasks: CloudTaskSummary[]) => void;
+      onError: (error: CloudTaskIndexError) => void;
+      unsubscribe: ReturnType<typeof vi.fn>;
+    }> = [];
+    const staleTaskA = cloudTask({
+      id: "cloud:task-a",
+      title: "Stale A",
+      ownerDesktopId: "desktop-a",
+      ownerLocalTaskId: "task-a"
+    });
+    const freshTaskA = { ...staleTaskA, title: "Fresh A" };
+    const taskB = cloudTask({
+      id: "cloud:task-b",
+      title: "B before sibling update",
+      ownerDesktopId: "desktop-b",
+      ownerLocalTaskId: "task-b"
+    });
+    const freshTaskB = { ...taskB, title: "B after sibling update" };
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([freshTaskA, taskB]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate, onError) => {
+        const unsubscribe = vi.fn();
+        subscriptions.push({
+          onUpdate,
+          onError: onError ?? (() => undefined),
+          unsubscribe
+        });
+        return unsubscribe;
+      })
+    };
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => createRelayClientMock()
+      }
+    });
+    await app.initialize();
+    subscriptions[0].onUpdate([staleTaskA, taskB]);
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks[0]?.title).toBe("Stale A");
+    });
+
+    subscriptions[0].onError({
+      scope: "desktop",
+      desktopId: "desktop-a",
+      error: new Error("desktop-a listener failed")
+    });
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks[0]?.title).toBe("Fresh A");
+    });
+    expect(subscriptions).toHaveLength(2);
+
+    subscriptions[0].onUpdate([staleTaskA, freshTaskB]);
+    await flushAsyncWork(12);
+    expect(app.sessionStore.getState().recentTasks).toEqual([
+      expect.objectContaining({ id: freshTaskA.id, title: "Fresh A" }),
+      expect.objectContaining({ id: taskB.id, title: taskB.title })
+    ]);
+
+    subscriptions[1].onUpdate([freshTaskA, freshTaskB]);
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: freshTaskA.id, title: "Fresh A" }),
+        expect.objectContaining({ id: freshTaskB.id, title: "B after sibling update" })
+      ]);
+    });
+  });
+
   it("treats a ready empty live snapshot as authoritative across client re-resolution", async () => {
     const { authSession } = createMutableAuthSession(signedInState());
     let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
@@ -619,6 +810,136 @@ describe("createAppModel cloud routing", () => {
       expect.objectContaining({ id: "cloud-b", title: "Cloud B" }),
       lanTaskB
     ]);
+  });
+
+  it("publishes rapid cloud callbacks while an optional LAN probe is hanging", async () => {
+    vi.useFakeTimers();
+    try {
+      const { authSession } = createMutableAuthSession(signedInState());
+      let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+      const taskIndex: CloudTaskIndex = {
+        listDesktops: vi.fn().mockResolvedValue([]),
+        listRecentTasks: vi.fn().mockResolvedValue([]),
+        subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+          pushCloudTasks = onUpdate;
+          return vi.fn();
+        })
+      };
+      const hangingLanRead = vi.fn(
+        () => new Promise<TaskSummary[]>(() => undefined)
+      );
+      const lan = createLanFixture(hangingLanRead);
+      const app = createAppModel({
+        authSession,
+        fetchImpl: lan.fetchImpl,
+        persistence: createTrustedPersistence(),
+        options: {
+          forceCloud: false,
+          relayUrl: "wss://relay.test",
+          taskIndex,
+          bonjourBrowser: lan.bonjourBrowser,
+          createRelayClient: () => createRelayClientMock()
+        }
+      });
+      await app.initialize();
+
+      pushCloudTasks?.([cloudTask({ id: "cloud:first", title: "First" })]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud:first", title: "First" })
+      ]);
+
+      pushCloudTasks?.([cloudTask({ id: "cloud:second", title: "Second" })]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud:second", title: "Second" })
+      ]);
+      expect(hangingLanRead).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("publishes a guarded LAN supplement when the probe succeeds after the optional timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const { authSession } = createMutableAuthSession(signedInState());
+      let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+      const taskIndex: CloudTaskIndex = {
+        listDesktops: vi.fn().mockResolvedValue([]),
+        listRecentTasks: vi.fn().mockResolvedValue([]),
+        subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+          pushCloudTasks = onUpdate;
+          return vi.fn();
+        })
+      };
+      const lateLanRead = deferred<TaskSummary[]>();
+      const lan = createLanFixture(() => lateLanRead.promise);
+      const app = createAppModel({
+        authSession,
+        fetchImpl: lan.fetchImpl,
+        persistence: createTrustedPersistence(),
+        options: {
+          forceCloud: false,
+          relayUrl: "wss://relay.test",
+          taskIndex,
+          bonjourBrowser: lan.bonjourBrowser,
+          createRelayClient: () => createRelayClientMock()
+        }
+      });
+      await app.initialize();
+      const duplicate = cloudTask({
+        id: "cloud:duplicate",
+        title: "Cloud duplicate",
+        ownerDesktopId: "desktop-lan",
+        ownerLocalRepoId: "repo-lan",
+        ownerLocalTaskId: "local-duplicate"
+      });
+
+      pushCloudTasks?.([duplicate]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: duplicate.id,
+          title: "Cloud duplicate"
+        })
+      ]);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      lateLanRead.resolve([
+        {
+          id: "local-duplicate",
+          repoId: "repo-lan",
+          title: "Fresh LAN duplicate",
+          stage: "review"
+        },
+        {
+          id: "lan-only",
+          repoId: "repo-lan",
+          title: "Late LAN-only task",
+          stage: "in progress"
+        }
+      ]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: duplicate.id,
+          title: "Fresh LAN duplicate",
+          stage: "review"
+        }),
+        expect.objectContaining({
+          id: "lan-only",
+          title: "Late LAN-only task"
+        })
+      ]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("invalidates obsolete callbacks and merges when auth replaces a subscription", async () => {
@@ -939,12 +1260,16 @@ describe("createAppModel cloud routing", () => {
 
     pushCloudTasks?.([cloudTask({ id: "cloud-before-force" })]);
     await vi.waitFor(() => expect(lanRead).toHaveBeenCalledOnce());
+    expect(app.sessionStore.getState().recentTasks).toEqual([
+      expect.objectContaining({ id: "cloud-before-force" })
+    ]);
+    const publicationsBeforeForce = emittedTaskIds.length;
     app.setForceCloud(true);
     staleLanRead.resolve([
       { id: "lan-after-force", repoId: "repo-lan", title: "Late LAN", stage: "review" }
     ]);
     await flushAsyncWork(12);
-    expect(emittedTaskIds.flat()).not.toContain("cloud-before-force");
+    expect(emittedTaskIds).toHaveLength(publicationsBeforeForce);
     expect(emittedTaskIds.flat()).not.toContain("lan-after-force");
 
     const currentTask = cloudTask({ id: "cloud-after-force" });
@@ -1206,7 +1531,7 @@ describe("createAppModel cloud routing", () => {
     });
   });
 
-  it("lets a newer live snapshot supersede current task-index recovery", async () => {
+  it("ignores callbacks from the failed listener generation while recovery is pending", async () => {
     const { authSession } = createMutableAuthSession(signedInState());
     const recovery = deferred<CloudTaskSummary[]>();
     let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
@@ -1243,19 +1568,19 @@ describe("createAppModel cloud routing", () => {
       title: "Newer live snapshot"
     });
     pushCloudTasks?.([currentTask]);
+    await flushAsyncWork();
+    expect(app.sessionStore.getState().recentTasks).toEqual([]);
+
+    const recoveredTask = cloudTask({
+      id: "cloud:recovered-snapshot",
+      title: "Recovered snapshot"
+    });
+    recovery.resolve([recoveredTask]);
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().recentTasks).toEqual([
-        expect.objectContaining({ id: currentTask.id })
+        expect.objectContaining({ id: recoveredTask.id })
       ]);
     });
-
-    recovery.resolve([
-      cloudTask({ id: "cloud:obsolete-recovery", title: "Obsolete recovery" })
-    ]);
-    await flushAsyncWork(12);
-    expect(app.sessionStore.getState().recentTasks).toEqual([
-      expect.objectContaining({ id: currentTask.id })
-    ]);
   });
 
   it("retains last-good tasks while recovering current subscription errors", async () => {
@@ -1323,6 +1648,88 @@ describe("createAppModel cloud routing", () => {
     expect(app.sessionStore.getState().recentTasks).toEqual([]);
   });
 
+  it("restarts the live subscription after a transient recovery read failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const auth = createMutableAuthSession(signedInState());
+      const subscriptions: Array<{
+        onUpdate: (tasks: CloudTaskSummary[]) => void;
+        onError: (error: CloudTaskIndexError) => void;
+      }> = [];
+      const taskIndex: CloudTaskIndex = {
+        listDesktops: vi.fn().mockResolvedValue([]),
+        listRecentTasks: vi.fn().mockRejectedValue(
+          new Error("transient recovery failure")
+        ),
+        subscribeRecentTasks: vi.fn((_uid, onUpdate, onError) => {
+          subscriptions.push({
+            onUpdate,
+            onError: onError ?? (() => undefined)
+          });
+          return vi.fn();
+        })
+      };
+      const app = createAppModel({
+        authSession: auth.authSession,
+        persistence: {
+          load: vi.fn().mockResolvedValue(null),
+          save: vi.fn().mockResolvedValue(undefined)
+        },
+        options: {
+          forceCloud: true,
+          relayUrl: "wss://relay.test",
+          taskIndex,
+          bonjourBrowser: createStaticBonjourBrowser([]),
+          createRelayClient: () => createRelayClientMock()
+        }
+      });
+      await app.initialize();
+      expect(subscriptions).toHaveLength(1);
+
+      subscriptions[0]!.onError({
+        scope: "root",
+        error: new Error("snapshot failed")
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(taskIndex.listRecentTasks).toHaveBeenCalledOnce();
+      expect(subscriptions).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(subscriptions).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(subscriptions).toHaveLength(2);
+
+      const recovered = cloudTask({
+        id: "cloud:listener-recovered",
+        title: "Listener recovered"
+      });
+      subscriptions[1]!.onUpdate([recovered]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: recovered.id,
+          title: recovered.title
+        })
+      ]);
+
+      subscriptions[1]!.onError({
+        scope: "root",
+        error: new Error("snapshot failed again")
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(taskIndex.listRecentTasks).toHaveBeenCalledTimes(2);
+
+      auth.setState({ status: "signedOut" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(subscriptions).toHaveLength(2);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores recovery merged data completed after force-cloud replaces its client", async () => {
     const { authSession } = createMutableAuthSession(signedInState());
     let pushCloudError: ((error: CloudTaskIndexError) => void) | null = null;
@@ -1362,6 +1769,10 @@ describe("createAppModel cloud routing", () => {
 
     pushCloudError?.({ scope: "root", error: new Error("snapshot failed") });
     await vi.waitFor(() => expect(lanRead).toHaveBeenCalledOnce());
+    expect(app.sessionStore.getState().recentTasks).toEqual([
+      expect.objectContaining({ id: recoveredCloudTask.id })
+    ]);
+    const publicationsBeforeForce = emittedTaskIds.length;
     app.setForceCloud(true);
     recoveryMerge.resolve([
       {
@@ -1373,7 +1784,7 @@ describe("createAppModel cloud routing", () => {
     ]);
     await flushAsyncWork(12);
 
-    expect(emittedTaskIds.flat()).not.toContain(recoveredCloudTask.id);
+    expect(emittedTaskIds).toHaveLength(publicationsBeforeForce);
     expect(emittedTaskIds.flat()).not.toContain("lan-old-recovery");
   });
 

@@ -9,6 +9,10 @@ export async function createMobileSession(options: {
     hostname: options.hostname || "127.0.0.1",
     path: "/",
     port: options.port,
+    // A clean simulator may need to build WebDriverAgent before Appium can
+    // answer POST /session. WebdriverIO's 120s default can abort that healthy
+    // first launch while xcodebuild is still running.
+    connectionRetryTimeout: 300_000,
     capabilities: options.capabilities
   });
 }

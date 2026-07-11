@@ -9,7 +9,10 @@ import type {
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../lib/api/client";
+import { createKannaClient } from "../lib/api/client";
 import type { TaskSummary } from "../lib/api/types";
+import { createCloudLanClient } from "../lib/sources/cloudLanClient";
+import { createRemoteTransport, type RemoteDesktopInvoker } from "../lib/transports/remoteTransport";
 
 function createDeferred<T>(): {
   promise: Promise<T>;
@@ -2614,6 +2617,95 @@ describe("createMobileController", () => {
     ]);
   });
 
+  it("keeps a healthy live task connection while desktop metadata retries", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const liveTask: TaskSummary = {
+      id: "cloud-display",
+      repoId: "repo-cloud",
+      repoName: "Cloud Repo",
+      title: "Healthy live task",
+      stage: "in progress",
+      agentType: "agent",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalTaskId: "local-task"
+    };
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops
+      .mockRejectedValueOnce(new Error("desktop metadata unavailable"))
+      .mockResolvedValueOnce([
+        {
+          id: "desktop-owner",
+          name: "Studio Mac",
+          online: true,
+          mode: "remote"
+        }
+      ]);
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        onUpdate([liveTask]);
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: "desktop metadata unavailable",
+      recentTasks: [liveTask]
+    });
+    controller.openTask(liveTask.id);
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: liveTask.id,
+      taskAgentTaskId: liveTask.id
+    });
+    liveUpdate?.([{ ...liveTask, title: "Updated while metadata is down" }]);
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: "desktop metadata unavailable",
+      recentTasks: [
+        expect.objectContaining({
+          id: liveTask.id,
+          title: "Updated while metadata is down"
+        })
+      ]
+    });
+
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(client.listDesktops).toHaveBeenCalledTimes(2);
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: null,
+      selectedTaskId: liveTask.id,
+      recentTasks: [
+        expect.objectContaining({
+          id: liveTask.id,
+          title: "Updated while metadata is down"
+        })
+      ],
+      desktops: [
+        expect.objectContaining({ id: "desktop-owner", name: "Studio Mac" })
+      ]
+    });
+  });
+
   it("keeps terminal stream errors scoped to the selected task", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -2858,6 +2950,79 @@ describe("createMobileController", () => {
     expect(store.getState().refreshStatus).toBe("updated");
   });
 
+  it.each(["idle", "error"] as const)(
+    "recovers live task ownership when foreground refresh starts from %s",
+    async (initialState) => {
+      const store = createSessionStore();
+      const client = createClientMock();
+      const auth = createAuthSessionMock();
+      const lastGoodTask: TaskSummary = {
+        id: "last-good",
+        repoId: "repo-1",
+        title: "Last good task",
+        stage: "in progress"
+      };
+      const recoveredTask: TaskSummary = {
+        id: "cloud-recovered",
+        repoId: "repo-cloud",
+        repoName: "Cloud Repo",
+        title: "Recovered cloud task",
+        stage: "in progress"
+      };
+      store.setRecentTasks([lastGoodTask]);
+      store.setRepoTasks([lastGoodTask]);
+      auth.getState = vi.fn(() => ({
+        status: "signedIn",
+        user: { uid: "user-1", email: "u@example.com", displayName: null }
+      }));
+      const cloudStatus = {
+        state: "running" as const,
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      };
+      if (initialState === "idle") {
+        client.getStatus
+          .mockResolvedValueOnce({
+            state: "stopped",
+            desktopId: "none",
+            desktopName: "No desktop",
+            lanHost: "none",
+            lanPort: 0,
+            pairingCode: null
+          })
+          .mockResolvedValueOnce(cloudStatus);
+      } else {
+        client.getStatus
+          .mockRejectedValueOnce(new Error("temporary status failure"))
+          .mockResolvedValueOnce(cloudStatus);
+      }
+      let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+      const controller = createMobileController(client, store, auth, {
+        subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+          liveUpdate = onUpdate;
+          return vi.fn();
+        })
+      });
+      await controller.bootstrap();
+      expect(store.getState().connectionState).toBe(initialState);
+      expect(store.getState().recentTasks).toEqual([lastGoodTask]);
+
+      await controller.refresh();
+      liveUpdate?.([recoveredTask]);
+
+      expect(store.getState()).toMatchObject({
+        connectionState: "connected",
+        connectionMode: "remote",
+        errorMessage: null,
+        recentTasks: [recoveredTask],
+        refreshStatus: "updated"
+      });
+    }
+  );
+
   it("sends task input as a bracketed paste and Claude Kitty enter sequence", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -2966,6 +3131,200 @@ describe("createMobileController", () => {
     expect(client.advanceTaskStage).toHaveBeenCalledWith("task-1");
     expect(store.getState().selectedTaskId).toBe("task-pr");
     expect(store.getState().recentTasks[0]?.id).toBe("task-pr");
+  });
+
+  it("keeps display identities after routed merge and advance responses", async () => {
+    const cloudOnly: TaskSummary = {
+      id: "cloud-only",
+      repoId: "repo-cloud",
+      repoName: "Cloud Repo",
+      title: "Cloud-only task",
+      stage: "merge",
+      ownerDesktopId: "desktop-cloud",
+      ownerLocalTaskId: "local-cloud"
+    };
+    const duplicate: TaskSummary = {
+      id: "cloud-duplicate",
+      repoId: "repo-cloud",
+      repoName: "Cloud Repo",
+      title: "Cloud duplicate",
+      stage: "review",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-lan",
+      ownerLocalTaskId: "local-duplicate"
+    };
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async ({ path }) => {
+      if (path.endsWith("/actions/run-merge-agent")) {
+        return { taskId: "local-cloud" };
+      }
+      throw new Error(`Unexpected remote invocation: ${path}`);
+    });
+    const cloud = createKannaClient(createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+      listCloudTasks: async () => [cloudOnly, duplicate]
+    }));
+    const lan = createClientMock();
+    lan.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-lan",
+      desktopName: "LAN Mac",
+      lanHost: "192.168.1.10",
+      lanPort: 48120,
+      pairingCode: null
+    });
+    lan.listRecentTasks.mockResolvedValue([
+      {
+        id: "local-duplicate",
+        repoId: "repo-lan",
+        title: "Fresh LAN duplicate",
+        stage: "review"
+      },
+      {
+        id: "lan-only",
+        repoId: "repo-lan",
+        title: "LAN-only task",
+        stage: "in progress"
+      }
+    ]);
+    lan.listRepos.mockResolvedValue([{ id: "repo-lan", name: "LAN Repo" }]);
+    lan.advanceTaskStage.mockResolvedValue({ taskId: "local-duplicate" });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+    const liveTasks = await client.listRecentTasks();
+    const auth = createAuthSessionMock();
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    const store = createSessionStore();
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        onUpdate(liveTasks);
+        return vi.fn();
+      })
+    });
+    await controller.bootstrap();
+
+    await controller.runMergeAgent(cloudOnly.id);
+    expect(store.getState().selectedTaskId).toBe(cloudOnly.id);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-cloud",
+      method: "POST",
+      path: "/v1/tasks/local-cloud/actions/run-merge-agent",
+      body: null
+    });
+
+    await controller.advanceDesktopTaskStage(duplicate.id);
+    expect(store.getState().selectedTaskId).toBe(duplicate.id);
+    expect(lan.advanceTaskStage).toHaveBeenCalledWith("local-duplicate");
+  });
+
+  it("opens a newly projected cloud display identity after a routed action returns its local id", async () => {
+    const sourceTask: TaskSummary = {
+      id: "cloud-source",
+      repoId: "repo-cloud",
+      repoName: "Cloud Repo",
+      title: "Source task",
+      stage: "merge",
+      agentType: "agent",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-lan",
+      ownerLocalTaskId: "local-source"
+    };
+    const projectedTask: TaskSummary = {
+      id: "cloud-merge-result",
+      repoId: "repo-cloud",
+      repoName: "Cloud Repo",
+      title: "Projected merge result",
+      stage: "merge",
+      agentType: "agent",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-lan",
+      ownerLocalTaskId: "local-merge-result"
+    };
+    let cloudTasks = [sourceTask];
+    let lanTasks: TaskSummary[] = [
+      {
+        id: "local-source",
+        repoId: "repo-lan",
+        title: "LAN source",
+        stage: "merge",
+        agentType: "agent"
+      }
+    ];
+    const cloud = createKannaClient(createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop: vi.fn(),
+      listCloudTasks: async () => cloudTasks
+    }));
+    const lan = createClientMock();
+    lan.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-lan",
+      desktopName: "LAN Mac",
+      lanHost: "192.168.1.10",
+      lanPort: 48120,
+      pairingCode: null
+    });
+    lan.listRecentTasks.mockImplementation(async () => lanTasks);
+    lan.listRepos.mockResolvedValue([{ id: "repo-lan", name: "LAN Repo" }]);
+    lan.runMergeAgent.mockImplementation(async () => {
+      cloudTasks = [];
+      lanTasks = [
+        {
+          id: "local-merge-result",
+          repoId: "repo-lan",
+          title: "LAN merge result",
+          stage: "merge",
+          agentType: "agent"
+        }
+      ];
+      return { taskId: "local-merge-result", followTask: true };
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+    const initialTasks = await client.listRecentTasks();
+    const auth = createAuthSessionMock();
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    const store = createSessionStore();
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        onUpdate(initialTasks);
+        return vi.fn();
+      })
+    });
+    await controller.bootstrap();
+    controller.openTask(sourceTask.id);
+
+    await controller.runMergeAgent(sourceTask.id);
+
+    expect(lan.runMergeAgent).toHaveBeenCalledWith("local-source");
+    expect(store.getState().recentTasks).toEqual([
+      expect.objectContaining({ id: "local-merge-result" })
+    ]);
+    expect(store.getState().selectedTaskId).toBe("local-merge-result");
+
+    cloudTasks = [projectedTask];
+    liveUpdate?.(await client.listRecentTasks());
+
+    expect(store.getState().recentTasks).toEqual([
+      expect.objectContaining({
+        id: projectedTask.id,
+        ownerLocalTaskId: "local-merge-result"
+      })
+    ]);
+    expect(store.getState().selectedTaskId).toBe(projectedTask.id);
   });
 
   it("mirrors auth session state into the mobile store during bootstrap", async () => {

@@ -481,6 +481,45 @@ describe("createCloudLanClient", () => {
     }
   });
 
+  it("returns the current cloud phase without waiting for LAN and replaces stale LAN routes", async () => {
+    const duplicate = task({
+      id: "cloud-duplicate",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalTaskId: "local-duplicate"
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([duplicate])
+    });
+    const hangingStatus = new Promise<MobileServerStatus>(() => undefined);
+    const lan = createClientMock({
+      getStatus: vi
+        .fn<KannaClient["getStatus"]>()
+        .mockResolvedValueOnce(runningStatus())
+        .mockReturnValue(hangingStatus),
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "local-duplicate", title: "Fresh LAN duplicate" })
+      ])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRecentTasks();
+    await client.sendTaskInput("cloud-duplicate", "use learned LAN route");
+    expect(lan.sendTaskInput).toHaveBeenLastCalledWith(
+      "local-duplicate",
+      "use learned LAN route"
+    );
+
+    await expect(client.listCurrentCloudTasks()).resolves.toEqual([duplicate]);
+    await client.sendTaskInput("cloud-duplicate", "use current cloud route");
+
+    expect(cloud.sendTaskInput).toHaveBeenLastCalledWith(
+      "cloud-duplicate",
+      "use current cloud route"
+    );
+  });
+
   it("routes mixed task streams and mutations to the correct client and raw id", async () => {
     const duplicate = task({
       id: "cloud-duplicate",
@@ -558,6 +597,74 @@ describe("createCloudLanClient", () => {
     expect(lan.closeTask).toHaveBeenCalledWith("lan-only");
     expect(cloud.advanceTaskStage).toHaveBeenCalledWith("cloud-only");
     expect(lan.runMergeAgent).toHaveBeenCalledWith("local-duplicate");
+  });
+
+  it("translates routed action responses back to the displayed task identity", async () => {
+    const duplicate = task({
+      id: "cloud-duplicate",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalTaskId: "local-duplicate"
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([duplicate])
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "local-duplicate" })
+      ]),
+      runMergeAgent: vi.fn().mockResolvedValue({
+        taskId: "local-duplicate",
+        followTask: true
+      }),
+      advanceTaskStage: vi.fn().mockResolvedValue({
+        taskId: "local-duplicate"
+      })
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+    await client.listRecentTasks();
+
+    await expect(client.runMergeAgent("cloud-duplicate")).resolves.toEqual({
+      taskId: "cloud-duplicate",
+      followTask: true
+    });
+    await expect(client.advanceTaskStage("cloud-duplicate")).resolves.toEqual({
+      taskId: "cloud-duplicate"
+    });
+  });
+
+  it("pins a genuinely new routed action identity to the same LAN desktop", async () => {
+    const duplicate = task({
+      id: "cloud-duplicate",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalTaskId: "local-duplicate"
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([duplicate])
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "local-duplicate" })
+      ]),
+      advanceTaskStage: vi
+        .fn()
+        .mockResolvedValueOnce({ taskId: "local-next" })
+        .mockResolvedValueOnce({ taskId: "local-next" })
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+    await client.listRecentTasks();
+
+    await expect(client.advanceTaskStage("cloud-duplicate")).resolves.toEqual({
+      taskId: "local-next"
+    });
+    await client.advanceTaskStage("local-next");
+
+    expect(lan.advanceTaskStage).toHaveBeenNthCalledWith(1, "local-duplicate");
+    expect(lan.advanceTaskStage).toHaveBeenNthCalledWith(2, "local-next");
+    expect(cloud.advanceTaskStage).not.toHaveBeenCalled();
   });
 
   it("pins every learned LAN route to the client for its owner desktop", async () => {

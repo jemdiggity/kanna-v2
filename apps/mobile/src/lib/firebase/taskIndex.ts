@@ -157,9 +157,13 @@ export function createFirestoreTaskIndex(
               },
               (error) => {
                 if (!isCurrent()) return;
-                const wasPending = pendingDesktopIds.delete(desktopId);
+                // Firestore listener errors are terminal. Keep this desktop in
+                // the readiness barrier so healthy siblings cannot publish an
+                // aggregate containing a missing or retained stale slice. The
+                // app-model recovery owner replaces this subscription after a
+                // complete one-shot read succeeds.
+                pendingDesktopIds.add(desktopId);
                 onError?.({ scope: "desktop", desktopId, error });
-                if (wasPending) emit();
               },
             );
             if (isCurrent()) {

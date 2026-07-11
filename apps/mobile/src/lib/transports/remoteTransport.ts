@@ -245,6 +245,38 @@ export function createRemoteTransport({
     return request<T>(method, buildPath(taskId), body);
   };
 
+  const requestTaskAction = async (
+    taskId: string,
+    buildPath: (localTaskId: string) => string
+  ): Promise<TaskActionResponse> => {
+    const route = await resolveCloudTaskRoute(taskId);
+    if (!route) {
+      return request<TaskActionResponse>("POST", buildPath(taskId), null);
+    }
+
+    const response = await requestDesktop<TaskActionResponse>(
+      route.desktopId,
+      "POST",
+      buildPath(route.taskId),
+      null
+    );
+    const responseTaskId = (
+      response as TaskActionResponse | null | undefined
+    )?.taskId;
+    if (typeof responseTaskId !== "string") {
+      return response;
+    }
+    if (responseTaskId === route.taskId) {
+      return { ...response, taskId };
+    }
+
+    provisionalTaskRoutes.set(responseTaskId, {
+      desktopId: route.desktopId,
+      taskId: responseTaskId
+    });
+    return response;
+  };
+
   return {
     async getStatus(): Promise<MobileServerStatus> {
       if (listCloudTasks) {
@@ -336,20 +368,16 @@ export function createRemoteTransport({
       return request<CreateTaskResponse>("POST", "/v1/tasks", taskInput);
     },
     runMergeAgent: (taskId: string) =>
-      requestTask<TaskActionResponse>(
+      requestTaskAction(
         taskId,
-        "POST",
         (localTaskId) =>
-          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/run-merge-agent`,
-        null
+          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/run-merge-agent`
       ),
     advanceTaskStage: (taskId: string) =>
-      requestTask<TaskActionResponse>(
+      requestTaskAction(
         taskId,
-        "POST",
         (localTaskId) =>
-          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/advance-stage`,
-        null
+          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/advance-stage`
       ),
     closeTask: async (taskId: string) => {
       const closingRoute = taskRouteForId(taskId);

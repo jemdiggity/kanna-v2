@@ -43,4 +43,44 @@ describe("seedTrustedDesktopFromUrl", () => {
 
     expect(reload).toHaveBeenCalledTimes(1);
   });
+
+  it("persists a trusted LAN endpoint and unresolved task selection for hybrid startup", async () => {
+    const persistence = createSessionPersistence(createMemoryStorage());
+    const reload = vi.fn(async () => {
+      const reloaded = await persistence.load();
+      expect(reloaded).toMatchObject({
+        selectedDesktopId: "desktop-hybrid",
+        selectedRepoId: "repo-restored",
+        selectedTaskId: "task-unresolved",
+        activeView: "tasks",
+        trustedDesktops: [
+          {
+            desktopId: "desktop-hybrid",
+            displayName: "Hybrid LAN Desktop",
+            lanEndpoints: [
+              {
+                baseUrl: "http://127.0.0.1:48120",
+                lastSeenAt: expect.any(String)
+              }
+            ],
+            lastSeenAt: expect.any(String)
+          }
+        ]
+      });
+    });
+
+    await seedTrustedDesktopFromUrl(
+      "kanna://e2e-trust?desktopId=desktop-hybrid" +
+        "&displayName=Hybrid%20LAN%20Desktop" +
+        "&lanBaseUrl=http%3A%2F%2F127.0.0.1%3A48120" +
+        "&selectedRepoId=repo-restored" +
+        "&selectedTaskId=task-unresolved",
+      {
+        getPersistence: async () => persistence,
+        reload
+      }
+    );
+
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
 });

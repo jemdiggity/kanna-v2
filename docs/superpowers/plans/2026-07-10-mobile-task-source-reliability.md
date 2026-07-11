@@ -97,7 +97,7 @@ Expected: all auth tests pass and diff check is silent.
 
 - [ ] **Step 1: Write failing listener-order tests**
 
-Capture root and child callbacks. Prove that two initial desktops emit nothing after only the first child settles, a removed child's late callback cannot resurrect tasks, child/root errors retain last-good data, and unsubscribe rejects every late callback.
+Capture root and child callbacks. Prove that two initial desktops emit nothing after only the first child settles, a removed child's late callback cannot resurrect tasks, child/root errors retain last-good data without publishing partial or stale aggregates, and unsubscribe rejects every late callback.
 
 ```ts
 expect(onUpdate).not.toHaveBeenCalled();
@@ -148,7 +148,7 @@ const isCurrent = () =>
   !cancelled && childGenerations.get(desktopId) === generation;
 ```
 
-On child success replace that desktop's full slice, settle it, and emit. On child error retain its slice, settle it, and call `onError`. Invalidate the generation before remove/re-add/unsubscribe. Give the root listener an error callback that leaves the aggregate intact.
+On child success replace that desktop's full slice, settle it, and emit. On child error retain its slice, keep that desktop pending in the hydration barrier, and call `onError`; the app-model recovery owner then replaces the subscription with a complete one-shot read before restarting live listeners. Invalidate the generation before remove/re-add/unsubscribe. Give the root listener an error callback that leaves the aggregate intact.
 
 - [ ] **Step 5: Validate documents and stabilize sorting**
 
