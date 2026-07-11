@@ -15,6 +15,10 @@ import {
   type CodeThemePreference,
 } from "../theme/theme";
 import type { AgentExecutionType } from "./agentExecutionType";
+import {
+  DEFAULT_MARKDOWN_PREVIEW_MODE,
+  type MarkdownPreviewMode,
+} from "./markdownPreviewMode";
 import type { RequestRevisionOptions } from "./pipeline";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
@@ -125,6 +129,7 @@ export interface StoreState {
   appTheme: Ref<AppThemePreference>;
   codeTheme: Ref<CodeThemePreference>;
   agentMessageAppearance: Ref<AgentMessageAppearance>;
+  markdownPreviewMode: Ref<MarkdownPreviewMode>;
   lastHiddenRepoId: Ref<string | null>;
   pendingSetupIds: Ref<string[]>;
   pipelineCache: Map<string, PipelineDefinition>;
@@ -283,6 +288,7 @@ export function createStoreState(): StoreState {
   const appTheme = ref<AppThemePreference>(DEFAULT_APP_THEME);
   const codeTheme = ref<CodeThemePreference>(DEFAULT_CODE_THEME);
   const agentMessageAppearance = ref<AgentMessageAppearance>("chat");
+  const markdownPreviewMode = ref<MarkdownPreviewMode>(DEFAULT_MARKDOWN_PREVIEW_MODE);
   const lastHiddenRepoId = ref<string | null>(null);
   const pendingSetupIds = ref<string[]>([]);
   const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
@@ -309,6 +315,7 @@ export function createStoreState(): StoreState {
     appTheme,
     codeTheme,
     agentMessageAppearance,
+    markdownPreviewMode,
     lastHiddenRepoId,
     pendingSetupIds,
     pipelineCache,
