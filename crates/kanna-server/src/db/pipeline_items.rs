@@ -603,6 +603,24 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_pipeline_item_agent_binding(
+        &self,
+        id: &str,
+        agent_provider: &str,
+        agent_type: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET agent_provider = ?, agent_type = ?, updated_at = datetime('now')
+             WHERE id = ? AND closed_at IS NULL",
+            (agent_provider, agent_type, id),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
     pub fn list_closed_task_identities(
         &self,
     ) -> Result<Vec<super::ClosedTaskIdentity>, rusqlite::Error> {

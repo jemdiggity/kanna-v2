@@ -37,25 +37,28 @@ pub(super) fn resolve_agent_provider(
     search_path: Option<&str>,
     workspace_root: &str,
 ) -> Result<AgentProvider, String> {
-    resolve_agent_provider_with(
+    let candidates = resolve_agent_provider_candidates(
         explicit_provider,
         stage_provider,
         agent,
         fallback_provider,
-        |provider| {
-            super::environment::resolve_provider_executable(provider, search_path, workspace_root)
+    )?;
+    candidates
+        .iter()
+        .copied()
+        .find(|provider| {
+            super::environment::resolve_provider_executable(*provider, search_path, workspace_root)
                 .is_ok()
-        },
-    )
+        })
+        .ok_or_else(|| unavailable_provider_error(&candidates))
 }
 
-pub(super) fn resolve_agent_provider_with(
+pub(super) fn resolve_agent_provider_candidates(
     explicit_provider: Option<&str>,
     stage_provider: Option<&[String]>,
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
-    is_available: impl Fn(AgentProvider) -> bool,
-) -> Result<AgentProvider, String> {
+) -> Result<Vec<AgentProvider>, String> {
     let raw_candidates =
         if let Some(source) = explicit_provider.filter(|value| !value.trim().is_empty()) {
             source
@@ -83,24 +86,40 @@ pub(super) fn resolve_agent_provider_with(
         return Err("No agent provider configured for this request.".to_string());
     }
 
-    let candidates = raw_candidates
+    raw_candidates
         .iter()
         .map(|candidate| AgentProvider::from_str(candidate))
-        .collect::<Result<Vec<_>, _>>()?;
-    if let Some(provider) = candidates
-        .iter()
-        .copied()
-        .find(|provider| is_available(*provider))
-    {
-        return Ok(provider);
-    }
+        .collect::<Result<Vec<_>, _>>()
+}
 
-    Err(format!(
+fn unavailable_provider_error(candidates: &[AgentProvider]) -> String {
+    format!(
         "None of the configured agent providers are available: {}.",
         candidates
             .iter()
             .map(|provider| provider.as_str())
             .collect::<Vec<_>>()
             .join(", ")
-    ))
+    )
+}
+
+#[cfg(test)]
+pub(super) fn resolve_agent_provider_with(
+    explicit_provider: Option<&str>,
+    stage_provider: Option<&[String]>,
+    agent: Option<&AgentDefinition>,
+    fallback_provider: Option<&str>,
+    is_available: impl Fn(AgentProvider) -> bool,
+) -> Result<AgentProvider, String> {
+    let candidates = resolve_agent_provider_candidates(
+        explicit_provider,
+        stage_provider,
+        agent,
+        fallback_provider,
+    )?;
+    candidates
+        .iter()
+        .copied()
+        .find(|provider| is_available(*provider))
+        .ok_or_else(|| unavailable_provider_error(&candidates))
 }

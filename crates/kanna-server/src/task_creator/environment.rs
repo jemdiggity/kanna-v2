@@ -373,6 +373,12 @@ fn resolve_binary_from_candidates(
     path: Option<&str>,
 ) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
+        #[cfg(test)]
+        if let Ok(test_path) = std::env::var("KANNA_TEST_PROVIDER_LOOKUP_PATH") {
+            return resolve_binary_from_path(name, &test_path)
+                .ok_or_else(|| format!("binary '{name}' not found in test provider PATH"));
+        }
+
         if let Some(path) = path {
             if let Some(binary) = resolve_binary_from_path(name, path) {
                 return Ok(binary);

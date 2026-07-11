@@ -1,8 +1,30 @@
 use super::*;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 
 const INSTALL_CODEX: &str = "mkdir -p .kanna/setup-bin && printf '#!/bin/sh\\ntouch .kanna/setup-bin/codex-ran\\nexit 0\\n' > .kanna/setup-bin/codex && chmod +x .kanna/setup-bin/codex";
+
+struct ProviderLookupPathGuard;
+
+impl ProviderLookupPathGuard {
+    fn without_host_providers() -> Self {
+        // The executable resolver intentionally falls back to the user's login
+        // shell in production. Setup-only tests must prove the workspace setup
+        // itself supplies the provider rather than accidentally using Codex
+        // installed on the test host.
+        unsafe {
+            std::env::set_var("KANNA_TEST_PROVIDER_LOOKUP_PATH", "/usr/bin:/bin");
+        }
+        Self
+    }
+}
+
+impl Drop for ProviderLookupPathGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("KANNA_TEST_PROVIDER_LOOKUP_PATH");
+        }
+    }
+}
 
 fn write_setup_repo(
     label: &str,
@@ -60,14 +82,6 @@ fn write_setup_repo(
         .unwrap()
         .success());
     repo_root
-}
-
-fn write_source_only_codex(workspace: &std::path::Path) {
-    let bin_dir = workspace.join(".kanna/setup-bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    let codex = bin_dir.join("codex");
-    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]
@@ -163,7 +177,6 @@ fn seed_source_task(
             [agent_type],
         )
         .unwrap();
-    write_source_only_codex(&source_worktree);
     db.upsert_worktree(
         "wt-task-1",
         "task-1",
@@ -177,10 +190,10 @@ fn seed_source_task(
 #[tokio::test]
 async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() {
     let _sidecar_guard = crate::test_sidecar_guard();
+    let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
     let repo_root = write_setup_repo("setup-provider-initial", INSTALL_CODEX, false);
-    write_source_only_codex(&repo_root);
     let mut config = test_config("setup-provider-initial");
     config.kanna_cli_path = Some(kanna_cli.path().to_string_lossy().to_string());
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -251,6 +264,7 @@ async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() 
 #[tokio::test]
 async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
     let _sidecar_guard = crate::test_sidecar_guard();
+    let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
     let repo_root = write_setup_repo("setup-provider-stage-fork", INSTALL_CODEX, true);
@@ -274,8 +288,8 @@ async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
         "workspace-local provider directory must lead PATH"
     );
     assert!(
-        !expected.exists(),
-        "PTY setup should remain deferred until daemon process launch"
+        expected.exists(),
+        "provider setup must complete in the fork before provider selection"
     );
     let (pty_executable, pty_args) = match &run.session {
         PreparedSessionSpawn::Pty {
@@ -286,11 +300,13 @@ async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
         } => {
             assert_eq!(*agent_provider, DaemonAgentProvider::Codex);
             let command = args.last().expect("PTY command");
-            let setup_index = command.find(".kanna/setup-bin/codex").unwrap();
-            let agent_index = command.rfind("'codex'").unwrap();
             assert!(
-                setup_index < agent_index,
-                "setup must run before Codex: {command}"
+                command.contains(expected.to_string_lossy().as_ref()),
+                "expected resolved setup-created Codex command: {command}"
+            );
+            assert!(
+                !command.contains("chmod +x .kanna/setup-bin/codex"),
+                "setup must not run twice in the agent PTY command: {command}"
             );
             (executable.clone(), args.clone())
         }
@@ -361,9 +377,14 @@ async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
         } => {
             assert_eq!(*agent_provider, Some(DaemonAgentProvider::Codex));
             let command = args.last().expect("PTY command");
-            let setup_index = command.find(".kanna/setup-bin/codex").unwrap();
-            let agent_index = command.rfind("'codex'").unwrap();
-            assert!(setup_index < agent_index, "setup must precede Codex");
+            assert!(
+                command.contains(expected.to_string_lossy().as_ref()),
+                "expected resolved setup-created Codex command: {command}"
+            );
+            assert!(
+                !command.contains("chmod +x .kanna/setup-bin/codex"),
+                "setup must not run twice in the daemon PTY command: {command}"
+            );
         }
         _ => unreachable!(),
     }

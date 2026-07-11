@@ -150,6 +150,37 @@ fn bootstrap_legacy_database(path: &Path) {
         .expect("legacy DB schema should be bootstrapped");
 }
 
+fn put_setting_direct(path: &Path, key: &str, value: &str) {
+    let connection = Connection::open(path).expect("database should open for fixture write");
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            [key, value],
+        )
+        .expect("fixture setting should be written");
+}
+
+fn legacy_recovery_archive(canonical_db_path: &Path) -> PathBuf {
+    let parent = canonical_db_path
+        .parent()
+        .expect("canonical database should have a parent");
+    let file_name = canonical_db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("canonical database should have a filename");
+    let prefix = format!("{file_name}.legacy-recovery-");
+    std::fs::read_dir(parent)
+        .expect("canonical directory should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .unwrap_or_else(|| panic!("expected a legacy recovery archive beginning {prefix}"))
+}
+
 fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
     let mut path = database_path.as_os_str().to_os_string();
     path.push(suffix);
@@ -435,6 +466,125 @@ async fn legacy_only_database_is_relocated_before_serving_and_persists_after_res
         json!({ "key": "relocationProbe", "value": "written-through-http" })
     );
     stop_server(&mut second_server);
+
+    root.cleanup().expect("test root should be removed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canonical_database_wins_and_legacy_state_is_archived_when_both_paths_exist() {
+    let mut root = TestRoot::new();
+    let (home, data_root) = app_support_root(root.path());
+    let legacy_db_path =
+        kanna_runtime_defaults::legacy_desktop_db_path_for_app_support_root(&data_root);
+    let canonical_db_path =
+        kanna_runtime_defaults::canonical_desktop_db_path_for_app_support_root(&data_root);
+    let config_path = root.path().join("server.toml");
+    let daemon_dir = root.path().join("daemon");
+    let pairing_store_path = root.path().join("pairings.json");
+    let port = free_loopback_port();
+    let client = Client::new();
+
+    bootstrap_legacy_database(&legacy_db_path);
+    put_setting_direct(&legacy_db_path, "legacyOnly", "must-not-win");
+    bootstrap_legacy_database(&canonical_db_path);
+    put_setting_direct(&canonical_db_path, "canonicalOnly", "must-win");
+    write_server_config(
+        &config_path,
+        &canonical_db_path,
+        &daemon_dir,
+        &pairing_store_path,
+        port,
+    );
+
+    let mut server = start_server(&config_path, &home, &data_root, port).await;
+    assert_eq!(
+        get_setting(&client, port, "canonicalOnly").await,
+        json!({ "key": "canonicalOnly", "value": "must-win" })
+    );
+    let missing_legacy = client
+        .get(format!("http://127.0.0.1:{port}/v1/settings/legacyOnly"))
+        .send()
+        .await
+        .expect("legacy setting request should reach server");
+    assert_eq!(missing_legacy.status(), reqwest::StatusCode::NOT_FOUND);
+    stop_server(&mut server);
+
+    assert!(
+        !legacy_db_path.exists(),
+        "legacy candidate must be removed after its recovery archive is written"
+    );
+    let archive = legacy_recovery_archive(&canonical_db_path);
+    let archived_value: String = Connection::open(&archive)
+        .expect("legacy recovery archive should open")
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'legacyOnly'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy recovery archive should retain legacy state");
+    assert_eq!(archived_value, "must-not-win");
+
+    root.cleanup().expect("test root should be removed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canonical_database_wins_while_archiving_legacy_wal_only_writes() {
+    let mut root = TestRoot::new();
+    let (home, data_root) = app_support_root(root.path());
+    let legacy_db_path =
+        kanna_runtime_defaults::legacy_desktop_db_path_for_app_support_root(&data_root);
+    let canonical_db_path =
+        kanna_runtime_defaults::canonical_desktop_db_path_for_app_support_root(&data_root);
+    let config_path = root.path().join("server.toml");
+    let daemon_dir = root.path().join("daemon");
+    let pairing_store_path = root.path().join("pairings.json");
+    let ready_path = root.path().join("crash-writer.ready");
+    let port = free_loopback_port();
+    let client = Client::new();
+
+    bootstrap_legacy_database(&legacy_db_path);
+    std::fs::create_dir_all(canonical_db_path.parent().unwrap()).unwrap();
+    std::fs::copy(&legacy_db_path, &canonical_db_path)
+        .expect("canonical point-in-time copy should be created before the legacy WAL write");
+    put_setting_direct(&canonical_db_path, "canonicalOnly", "must-win");
+    let mut crash_writer = spawn_crash_residual_writer(&legacy_db_path, &ready_path);
+    wait_for_crash_writer_ready(&mut crash_writer, &ready_path).await;
+    assert_eq!(
+        crash_writer.kill_and_reap().unwrap().signal(),
+        Some(9),
+        "crash writer should leave a recoverable WAL"
+    );
+
+    write_server_config(
+        &config_path,
+        &canonical_db_path,
+        &daemon_dir,
+        &pairing_store_path,
+        port,
+    );
+    let mut server = start_server(&config_path, &home, &data_root, port).await;
+    assert_eq!(
+        get_setting(&client, port, "canonicalOnly").await,
+        json!({ "key": "canonicalOnly", "value": "must-win" })
+    );
+    let missing_legacy = client
+        .get(format!("http://127.0.0.1:{port}/v1/settings/legacySeed"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_legacy.status(), reqwest::StatusCode::NOT_FOUND);
+    stop_server(&mut server);
+
+    let archive = legacy_recovery_archive(&canonical_db_path);
+    let archived_value: String = Connection::open(&archive)
+        .unwrap()
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'legacySeed'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("checkpointed recovery archive should retain the WAL-only write");
+    assert_eq!(archived_value, "from-legacy");
 
     root.cleanup().expect("test root should be removed");
 }

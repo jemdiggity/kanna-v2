@@ -101,11 +101,16 @@ fn normalize_db_path_with_candidates(configured: &Path, canonical: &Path, legacy
 pub(crate) fn legacy_database_relocation_paths(db_path: &str) -> Option<(PathBuf, PathBuf)> {
     let canonical = PathBuf::from(db_path);
     let data_root = canonical.parent()?.parent()?;
-    if canonical != canonical_db_path_for_root(data_root) {
+    let canonical_dir = data_root.join("build.kanna");
+    if canonical.parent()? != canonical_dir {
         return None;
     }
 
-    Some((legacy_db_path_for_root(data_root), canonical))
+    let database_name = canonical.file_name()?;
+    Some((
+        data_root.join("com.kanna.app").join(database_name),
+        canonical,
+    ))
 }
 
 fn load_from_path(
@@ -165,7 +170,10 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_db_path_for_root, load_from_path, normalize_db_path_with_candidates};
+    use super::{
+        canonical_db_path_for_root, legacy_database_relocation_paths, load_from_path,
+        normalize_db_path_with_candidates,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -260,6 +268,20 @@ mod tests {
         let normalized = normalize_db_path_with_candidates(&custom, &canonical, &legacy);
 
         assert_eq!(normalized, custom.display().to_string());
+    }
+
+    #[test]
+    fn legacy_relocation_keeps_alternate_database_names_in_the_matching_app_roots() {
+        let root = unique_test_dir("alternate-db-name");
+        let canonical = root.join("build.kanna").join("kanna-worktree.db");
+
+        assert_eq!(
+            legacy_database_relocation_paths(canonical.to_str().unwrap()),
+            Some((
+                root.join("com.kanna.app").join("kanna-worktree.db"),
+                canonical,
+            ))
+        );
     }
 
     #[test]

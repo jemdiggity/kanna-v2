@@ -69,11 +69,7 @@ describe("useBackup", () => {
     it("parses a valid backup filename", () => {
       const ts = parseBackupTimestamp("kanna-v2.db.backup-2026-03-21T10-30-00");
       expect(ts).toBeInstanceOf(Date);
-      expect(ts!.getFullYear()).toBe(2026);
-      expect(ts!.getMonth()).toBe(2); // March = 2
-      expect(ts!.getDate()).toBe(21);
-      expect(ts!.getHours()).toBe(10);
-      expect(ts!.getMinutes()).toBe(30);
+      expect(ts!.toISOString()).toBe("2026-03-21T10:30:00.000Z");
     });
 
     it("parses a valid backup filename with a collision suffix", () => {
@@ -118,11 +114,11 @@ describe("useBackup", () => {
       expect(liveCopyCall).toBeUndefined();
     });
 
-    it("skips backup if DB file does not exist", async () => {
-      testState.invokeResults.file_exists = false;
+    it("uses the server-owned database path even when it is outside app data", async () => {
       await createBackup("kanna-v2.db");
 
-      expect(testState.desktopBackupCalls).toBe(0);
+      expect(testState.desktopBackupCalls).toBe(1);
+      expect(testState.invokeCalls.some((call) => call.cmd === "file_exists")).toBe(false);
     });
 
     it("does not truncate WAL while an independent server writer may be active", async () => {
