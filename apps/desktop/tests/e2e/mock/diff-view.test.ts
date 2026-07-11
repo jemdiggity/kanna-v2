@@ -207,6 +207,22 @@ interface StageActionRecorderOptions {
   requestRevisionBody?: string;
 }
 
+interface DiffLineViewportSnapshot {
+  filePath: string;
+  lineNumber: string;
+  lineType: string | null;
+  viewportOffset: number;
+  scrollTop: number;
+  scrollHeight: number;
+  wrapperIndex: number;
+  wrapperCount: number;
+}
+
+interface SettledDiffLineViewportSnapshot extends DiffLineViewportSnapshot {
+  renderedFileCount: number;
+  timedOut?: boolean;
+}
+
 async function installStageActionRecorder(
   client: WebDriverClient,
   options: StageActionRecorderOptions = {},
@@ -663,6 +679,228 @@ describe("diff view", () => {
 
     const allLinesState = await getContextToggleState(client);
     expect(allLinesState).toEqual({ text: "All lines", active: true });
+  });
+
+  it("keeps a later file line fixed while real all-lines content renders above it", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    const targetFile = "e2e-scroll-anchor-14.txt";
+    const fileCount = 18;
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "file_index=1",
+        "while [ \"$file_index\" -le 18 ]; do",
+        "  file_number=$(printf '%02d' \"$file_index\")",
+        "  file_path=\"e2e-scroll-anchor-${file_number}.txt\"",
+        "  : > \"$file_path\"",
+        "  line_number=1",
+        "  while [ \"$line_number\" -le 120 ]; do",
+        "    printf 'anchor file %s line %03d original\\n' \"$file_number\" \"$line_number\" >> \"$file_path\"",
+        "    line_number=$((line_number + 1))",
+        "  done",
+        "  file_index=$((file_index + 1))",
+        "done",
+        "git add e2e-scroll-anchor-*.txt",
+        "git commit -m 'add e2e scroll anchor fixtures'",
+        "file_index=1",
+        "while [ \"$file_index\" -le 18 ]; do",
+        "  file_number=$(printf '%02d' \"$file_index\")",
+        "  file_path=\"e2e-scroll-anchor-${file_number}.txt\"",
+        "  awk -v file_number=\"$file_number\" '",
+        "    NR == 60 { printf \"anchor file %s line 060 changed\\n\", file_number; next }",
+        "    { print }",
+        "  ' \"$file_path\" > \"${file_path}.tmp\"",
+        "  mv \"${file_path}.tmp\" \"$file_path\"",
+        "  file_index=$((file_index + 1))",
+        "done",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Working");
+
+    const compactText = await waitForDiffText(
+      client,
+      `return text.includes("anchor file 01 line 060 changed")
+        && text.includes("anchor file 14 line 060 changed")
+        && text.includes("anchor file 18 line 060 changed");`,
+      20_000,
+    );
+    expect(compactText).toContain("anchor file 14 line 060 changed");
+
+    const before = await client.executeAsync<DiffLineViewportSnapshot | null>(
+      `const cb = arguments[arguments.length - 1];
+       const targetFile = ${JSON.stringify(targetFile)};
+       let scrolled = false;
+       let done = false;
+       const finish = (value) => {
+         if (done) return;
+         done = true;
+         clearInterval(interval);
+         clearTimeout(timeout);
+         cb(value);
+       };
+       const findTarget = () => {
+         const container = document.querySelector(".diff-container");
+         if (!(container instanceof HTMLElement)) return null;
+         const wrappers = Array.from(container.querySelectorAll(".diff-file"));
+         const wrapperIndex = wrappers.findIndex((candidate) => {
+           const header = candidate.querySelector(".diff-file-header");
+           return (header?.getAttribute("title") || header?.textContent || "") === targetFile;
+         });
+         const wrapper = wrappers[wrapperIndex];
+         if (!(wrapper instanceof HTMLElement)) return null;
+         const lines = Array.from(wrapper.querySelectorAll("diffs-container"))
+           .flatMap((host) => host.shadowRoot
+             ? Array.from(host.shadowRoot.querySelectorAll("[data-line]"))
+             : []);
+         if (lines.length === 0) return null;
+         return { container, wrappers, wrapper, wrapperIndex, lines };
+       };
+       const capture = () => {
+         const target = findTarget();
+         if (!target) return;
+         const { container, wrappers, wrapper, wrapperIndex, lines } = target;
+         if (!scrolled) {
+           container.scrollTop = Math.min(
+             wrapper.offsetTop + 20,
+             Math.max(0, container.scrollHeight - container.clientHeight),
+           );
+           container.dispatchEvent(new Event("scroll", { bubbles: true }));
+           scrolled = true;
+           return;
+         }
+         const containerRect = container.getBoundingClientRect();
+         const line = lines.find((candidate) => {
+           const rect = candidate.getBoundingClientRect();
+           return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+         });
+         if (!(line instanceof HTMLElement)) return;
+         const lineNumber = line.getAttribute("data-line");
+         if (lineNumber == null) return;
+         finish({
+           filePath: targetFile,
+           lineNumber,
+           lineType: line.getAttribute("data-line-type"),
+           viewportOffset: line.getBoundingClientRect().top - containerRect.top,
+           scrollTop: container.scrollTop,
+           scrollHeight: container.scrollHeight,
+           wrapperIndex,
+           wrapperCount: wrappers.length,
+         });
+       };
+       const interval = setInterval(capture, 50);
+       const timeout = setTimeout(() => finish(null), 10_000);
+       capture();`
+    );
+
+    expect(before).not.toBeNull();
+    expect(before!.filePath).toBe(targetFile);
+    expect(before!.wrapperIndex).toBeGreaterThan(10);
+    expect(before!.wrapperCount).toBeGreaterThanOrEqual(fileCount);
+    expect(before!.scrollTop).toBeGreaterThan(0);
+
+    await clickDiffToolbarButton(client, "Context");
+
+    const allLinesText = await waitForDiffText(
+      client,
+      `return text.includes("anchor file 01 line 001 original")
+        && text.includes("anchor file 14 line 001 original")
+        && text.includes("anchor file 18 line 120 original");`,
+      30_000,
+    );
+    expect(allLinesText).toContain("anchor file 14 line 001 original");
+
+    const after = await client.executeAsync<SettledDiffLineViewportSnapshot>(
+      `const cb = arguments[arguments.length - 1];
+       const expected = ${JSON.stringify(before)};
+       const expectedFileCount = ${before!.wrapperCount};
+       let done = false;
+       let stableSamples = 0;
+       let previous = null;
+       const finish = (value) => {
+         if (done) return;
+         done = true;
+         clearInterval(interval);
+         clearTimeout(timeout);
+         cb(value);
+       };
+       const read = () => {
+         const container = document.querySelector(".diff-container");
+         if (!(container instanceof HTMLElement)) return null;
+         const wrappers = Array.from(container.querySelectorAll(".diff-file"));
+         const wrapperIndex = wrappers.findIndex((candidate) => {
+           const header = candidate.querySelector(".diff-file-header");
+           return (header?.getAttribute("title") || header?.textContent || "") === expected.filePath;
+         });
+         const wrapper = wrappers[wrapperIndex];
+         if (!(wrapper instanceof HTMLElement)) return null;
+         const renderedFileCount = wrappers.filter((candidate) =>
+           Array.from(candidate.querySelectorAll("diffs-container"))
+             .some((host) => Boolean(host.shadowRoot?.querySelector("[data-line]")))
+         ).length;
+         const lines = Array.from(wrapper.querySelectorAll("diffs-container"))
+           .flatMap((host) => host.shadowRoot
+             ? Array.from(host.shadowRoot.querySelectorAll("[data-line]"))
+             : []);
+         const line = lines.find((candidate) =>
+           candidate.getAttribute("data-line") === expected.lineNumber
+             && candidate.getAttribute("data-line-type") === expected.lineType
+         );
+         if (!(line instanceof HTMLElement)) return null;
+         return {
+           filePath: expected.filePath,
+           lineNumber: line.getAttribute("data-line"),
+           lineType: line.getAttribute("data-line-type"),
+           viewportOffset:
+             line.getBoundingClientRect().top - container.getBoundingClientRect().top,
+           scrollTop: container.scrollTop,
+           scrollHeight: container.scrollHeight,
+           wrapperIndex,
+           wrapperCount: wrappers.length,
+           renderedFileCount,
+         };
+       };
+       const check = () => {
+         const current = read();
+         if (!current || current.renderedFileCount !== expectedFileCount) {
+           stableSamples = 0;
+           previous = current;
+           return;
+         }
+         const stable = previous
+           && Math.abs(current.viewportOffset - previous.viewportOffset) <= 0.25
+           && Math.abs(current.scrollTop - previous.scrollTop) <= 0.25
+           && current.scrollHeight === previous.scrollHeight;
+         stableSamples = stable ? stableSamples + 1 : 0;
+         previous = current;
+         if (stableSamples >= 3) finish(current);
+       };
+       const interval = setInterval(check, 50);
+       const timeout = setTimeout(() => {
+         finish({
+           ...(read() || expected),
+           renderedFileCount: read()?.renderedFileCount || 0,
+           timedOut: true,
+         });
+       }, 30_000);
+       check();`
+    );
+
+    if (after.timedOut) {
+      throw new Error(`timed out waiting for anchored all-lines geometry: ${JSON.stringify(after)}`);
+    }
+
+    const allLinesState = await getContextToggleState(client);
+    expect(allLinesState).toEqual({ text: "All lines", active: true });
+    expect(after.filePath).toBe(before!.filePath);
+    expect(after.lineNumber).toBe(before!.lineNumber);
+    expect(after.lineType).toBe(before!.lineType);
+    expect(Math.abs(after.viewportOffset - before!.viewportOffset)).toBeLessThanOrEqual(2);
+    expect(after.scrollTop).toBeGreaterThan(before!.scrollTop + 1_000);
+    expect(after.scrollHeight).toBeGreaterThan(before!.scrollHeight);
   });
 
   it("expands Branch diff hidden context lines with the keyboard shortcut", async () => {

@@ -170,6 +170,85 @@ async function waitForTimerTurn() {
   await flushPromises();
 }
 
+type TestDiffScrollPositions = Partial<Record<"branch" | "working", number>>;
+
+function setupAnchoredDiffGeometry(documentTops: number[]) {
+  diffMocks.parsePatchFilesMock.mockReturnValue([
+    {
+      files: [
+        {
+          name: "anchored-context.txt",
+          __searchRows: [{ lineIndex: "anchor", text: "changed anchor" }],
+          hunks: [],
+        },
+      ],
+    },
+  ]);
+
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "git_diff") return "diff --git a/anchored-context.txt b/anchored-context.txt";
+    return "";
+  });
+
+  const makeRect = (top: number, height: number): DOMRect => ({
+    x: 0,
+    y: top,
+    top,
+    right: 800,
+    bottom: top + height,
+    left: 0,
+    width: 800,
+    height,
+    toJSON: () => ({}),
+  }) as DOMRect;
+  const containerTop = 100;
+  let renderCount = 0;
+  let activeContainer!: HTMLElement;
+
+  renderMock.mockImplementation(({ containerWrapper }: { containerWrapper?: HTMLElement }) => {
+    const line = containerWrapper
+      ?.querySelector("diffs-container")
+      ?.shadowRoot
+      ?.querySelector<HTMLElement>('[data-content] [data-line-index="anchor"]');
+    if (!line) return;
+    const documentTop = documentTops[renderCount] ?? documentTops.at(-1)!;
+    renderCount += 1;
+    line.setAttribute("data-line", "8");
+    line.setAttribute("data-line-type", "change-addition");
+    line.getBoundingClientRect = () => makeRect(
+      containerTop + documentTop - activeContainer.scrollTop,
+      20,
+    );
+  });
+
+  function mountDiff(initialScrollPositions?: TestDiffScrollPositions) {
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "working",
+        initialScrollPositions,
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+    activeContainer = wrapper.get(".diff-container").element as HTMLElement;
+    activeContainer.getBoundingClientRect = () => makeRect(containerTop, 400);
+    activeContainer.scrollTo = ({ top }: ScrollToOptions) => {
+      activeContainer.scrollTop = top ?? 0;
+    };
+    return wrapper;
+  }
+
+  return {
+    mountDiff,
+    getContainer: () => activeContainer,
+  };
+}
+
 describe("DiffView", () => {
   afterEach(() => {
     invokeMock.mockReset();
@@ -1134,6 +1213,98 @@ describe("DiffView", () => {
       wrapper?.unmount();
       vi.useRealTimers();
     }
+  });
+
+  it("restores the compact scroll position after an immediate all-lines round trip", async () => {
+    const harness = setupAnchoredDiffGeometry([280, 700, 280]);
+    const wrapper = harness.mountDiff();
+    await flushPromises();
+    await flushPromises();
+
+    const container = harness.getContainer();
+    container.scrollTop = 200;
+    container.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+
+    const contextButton = wrapper.get(".context-toggle");
+    await contextButton.trigger("click");
+    await flushPromises();
+    await flushPromises();
+    expect(container.scrollTop).toBe(620);
+
+    await contextButton.trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(contextButton.text()).toBe("Context");
+    expect(container.scrollTop).toBe(200);
+
+    wrapper.unmount();
+  });
+
+  it("remounts with the compact scroll position after all-lines anchoring", async () => {
+    const harness = setupAnchoredDiffGeometry([280, 700, 280]);
+    const firstWrapper = harness.mountDiff();
+    await flushPromises();
+    await flushPromises();
+
+    harness.getContainer().scrollTop = 200;
+    harness.getContainer().dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+
+    await firstWrapper.get(".context-toggle").trigger("click");
+    await flushPromises();
+    await flushPromises();
+    expect(harness.getContainer().scrollTop).toBe(620);
+
+    harness.getContainer().dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+
+    const savedPositions = firstWrapper.emitted("scroll-state-change")?.at(-1)?.[0] as
+      | TestDiffScrollPositions
+      | undefined;
+    expect(savedPositions).toBeDefined();
+    firstWrapper.unmount();
+
+    const secondWrapper = harness.mountDiff(savedPositions);
+    await flushPromises();
+    await flushPromises();
+
+    expect(secondWrapper.get(".context-toggle").text()).toBe("Context");
+    expect(harness.getContainer().scrollTop).toBe(200);
+
+    secondWrapper.unmount();
+  });
+
+  it("keeps the current all-lines anchor across a same-mode reload", async () => {
+    const harness = setupAnchoredDiffGeometry([280, 700, 900, 280]);
+    const wrapper = harness.mountDiff();
+    await flushPromises();
+    await flushPromises();
+
+    const container = harness.getContainer();
+    container.scrollTop = 200;
+    container.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+
+    const contextButton = wrapper.get(".context-toggle");
+    await contextButton.trigger("click");
+    await flushPromises();
+    await flushPromises();
+    expect(container.scrollTop).toBe(620);
+
+    await (wrapper.vm as unknown as { refresh: () => Promise<void> }).refresh();
+    await flushPromises();
+    await flushPromises();
+
+    expect(container.scrollTop).toBe(820);
+
+    await contextButton.trigger("click");
+    await flushPromises();
+    await flushPromises();
+    expect(container.scrollTop).toBe(200);
+
+    wrapper.unmount();
   });
 
   it("restores the previous scroll position when switching diff scopes", async () => {

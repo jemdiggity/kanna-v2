@@ -433,7 +433,7 @@ function updateScrollPosition(scopeName: DiffScope, top: number) {
 }
 
 function saveCurrentScrollPosition() {
-  if (!containerRef.value) return;
+  if (!containerRef.value || allLines.value) return;
   updateScrollPosition(scope.value, containerRef.value.scrollTop);
 }
 
@@ -455,7 +455,6 @@ function restoreScrollAnchor(activeAnchor: ActiveDiffScrollAnchor): boolean {
     container.scrollTop + lineRect.top - containerRect.top - anchor.viewportOffset,
   );
   container.scrollTo({ top, behavior: "auto" });
-  updateScrollPosition(scope.value, container.scrollTop);
   return true;
 }
 
@@ -492,6 +491,11 @@ function syncViewStateFromProps() {
 }
 
 async function loadDiff(options: LoadDiffOptions = {}) {
+  const scrollAnchor = options.scrollAnchor === undefined
+    && options.preserveCurrentScroll !== false
+    && allLines.value
+      ? captureScrollAnchor()
+      : options.scrollAnchor ?? null;
   if (options.preserveCurrentScroll !== false) {
     saveCurrentScrollPosition();
   }
@@ -500,8 +504,8 @@ async function loadDiff(options: LoadDiffOptions = {}) {
   const path = props.worktreePath || props.repoPath;
   const loadId = ++nextDiffLoadId;
   activeDiffLoadId = loadId;
-  activeDiffScrollAnchor = options.scrollAnchor
-    ? { loadId, anchor: options.scrollAnchor, lineElement: null }
+  activeDiffScrollAnchor = scrollAnchor
+    ? { loadId, anchor: scrollAnchor, lineElement: null }
     : null;
   const loadStartedAt = performance.now();
   const renderContext: DiffRenderContext = {
@@ -698,9 +702,13 @@ function cycleBranchInclude() {
 }
 
 function toggleContextLines() {
-  const scrollAnchor = allLines.value ? null : captureScrollAnchor();
+  const expanding = !allLines.value;
+  const scrollAnchor = expanding ? captureScrollAnchor() : null;
+  if (expanding) {
+    saveCurrentScrollPosition();
+  }
   contextMode.value = allLines.value ? "compact" : "all";
-  void loadDiff({ scrollAnchor });
+  void loadDiff({ preserveCurrentScroll: false, scrollAnchor });
 }
 
 function refreshBranchDiffOnWindowFocus() {

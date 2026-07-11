@@ -4,7 +4,7 @@
 
 **Goal:** Keep the same rendered code line at the same viewport offset when the diff viewer expands from compact Context mode to All lines.
 
-**Architecture:** Capture a one-load viewport anchor from the existing `@pierre/diffs` shadow DOM before expansion, keyed by file path, source line, line type, and viewport offset. Route existing render-time restoration callbacks through anchor-aware logic, with the current numeric `scrollTop` as a fallback and the existing load-id guards protecting against stale renders.
+**Architecture:** Capture a one-load viewport anchor from the existing `@pierre/diffs` shadow DOM before expansion, keyed by file path, source line, line type, and viewport offset. Route existing render-time restoration callbacks through anchor-aware logic while keeping the persisted per-scope numeric `scrollTop` explicitly compact-only; anchor-derived all-lines pixels remain render-local, and existing load-id guards protect against stale renders.
 
 **Tech Stack:** Vue 3 Composition API, TypeScript, `@pierre/diffs`, Vitest, Vue Test Utils, happy-dom.
 
@@ -270,7 +270,6 @@ function restoreScrollAnchor(anchor: DiffScrollAnchor): boolean {
     container.scrollTop + lineRect.top - containerRect.top - anchor.viewportOffset,
   );
   container.scrollTo({ top, behavior: "auto" });
-  updateScrollPosition(scope.value, container.scrollTop);
   return true;
 }
 
@@ -338,13 +337,26 @@ Replace `toggleContextLines` with:
 
 ```ts
 function toggleContextLines() {
-  const scrollAnchor = allLines.value ? null : captureScrollAnchor();
+  const expanding = !allLines.value;
+  const scrollAnchor = expanding ? captureScrollAnchor() : null;
+  if (expanding) {
+    saveCurrentScrollPosition();
+  }
   contextMode.value = allLines.value ? "compact" : "all";
-  void loadDiff({ scrollAnchor });
+  void loadDiff({ preserveCurrentScroll: false, scrollAnchor });
 }
 ```
 
-This intentionally leaves all-to-compact behavior on the numeric fallback because an unchanged anchored line can disappear in compact mode.
+Guard `saveCurrentScrollPosition` so all-lines geometry cannot overwrite compact recall state:
+
+```ts
+function saveCurrentScrollPosition() {
+  if (!containerRef.value || allLines.value) return;
+  updateScrollPosition(scope.value, containerRef.value.scrollTop);
+}
+```
+
+This intentionally leaves all-to-compact behavior on the compact numeric fallback because an unchanged all-lines row may not be rendered in compact mode.
 
 - [ ] **Step 6: Run the focused test and verify GREEN**
 
@@ -391,4 +403,76 @@ git diff --check
 git status --short
 ```
 
-Expected: no whitespace errors; only the approved spec, plan, component test, and component implementation are changed.
+Expected: no whitespace errors; only the approved spec, plan, component implementation/tests, and diff-view E2E test are changed.
+
+### Task 4: Add reverse and remount regressions
+
+**Files:**
+- Modify: `apps/desktop/src/components/__tests__/DiffView.test.ts`
+
+- [ ] **Step 1: Add the immediate round-trip test**
+
+Reuse the existing mocked shadow-DOM geometry to render compact, all-lines, then compact documents. Scroll compact mode to `200`, expand until the semantic anchor moves the live viewport to `620`, toggle back without a manual scroll, and assert the compact viewport is `200`.
+
+- [ ] **Step 2: Add the close/remount test**
+
+Mount at compact `200`, expand to anchored all-lines geometry, dispatch the browser-style scroll event caused by restoration, then unmount. Mount a fresh `DiffView` with the last emitted `scroll-state-change` payload and assert its compact viewport restores to `200`, not the all-lines coordinate.
+
+- [ ] **Step 3: Verify RED**
+
+Run:
+
+```bash
+pnpm --dir apps/desktop exec vitest run src/components/__tests__/DiffView.test.ts -t "restores the compact scroll position|remounts with the compact scroll position"
+```
+
+Expected: both tests fail with an all-lines coordinate such as `620` because the current implementation emits and reloads that coordinate.
+
+### Task 5: Keep anchor-derived pixels render-local
+
+**Files:**
+- Modify: `apps/desktop/src/components/DiffView.vue`
+- Verify: `apps/desktop/src/components/__tests__/DiffView.test.ts`
+
+- [ ] **Step 1: Stop persisting anchor restoration**
+
+Remove `updateScrollPosition(scope.value, container.scrollTop)` from `restoreScrollAnchor`; the semantic anchor remains associated with the active load and continues to reapply during progressive callbacks.
+
+- [ ] **Step 2: Save only compact geometry**
+
+Make `saveCurrentScrollPosition` return while `allLines.value` is true. In `toggleContextLines`, save compact position before switching into All lines, then call `loadDiff({ preserveCurrentScroll: false, scrollAnchor })` for both directions so the old DOM is never recorded under the new mode. When a reload remains in All-lines mode, recapture the current semantic line before replacing the DOM and carry that transient anchor into the new load without persisting its pixel coordinate.
+
+- [ ] **Step 3: Verify GREEN**
+
+Run:
+
+```bash
+pnpm --dir apps/desktop exec vitest run src/components/__tests__/DiffView.test.ts
+```
+
+Expected: all focused component tests pass, including forward anchoring, immediate reverse, remount recall, same-mode reload, numeric fallback, and stale-load guards.
+
+### Task 6: Add real-renderer WebDriver coverage
+
+**Files:**
+- Modify: `apps/desktop/tests/e2e/mock/diff-view.test.ts`
+
+- [ ] **Step 1: Build a long real diff through the Tauri git path**
+
+Create multiple zero-padded tracked text files with at least 100 lines each, commit their baseline, and change a middle line in each file. Use a later file as the anchor target so earlier progressive renders can change its geometry.
+
+- [ ] **Step 2: Capture and compare the real semantic line**
+
+Traverse each real `diffs-container.shadowRoot`, choose the first intersecting `[data-line]` in the target file, and record `{ filePath, lineNumber, lineType, viewportOffset }`. Toggle the real toolbar to All lines, wait until every expected shadow root has rendered and geometry is stable for three consecutive samples, then locate the same selector and assert the viewport offset differs by at most two pixels.
+
+- [ ] **Step 3: Run the required browser check**
+
+Run:
+
+```bash
+./kd dev up
+pnpm --dir apps/desktop test:e2e -- mock/diff-view.test.ts
+./kd dev down
+```
+
+Expected: the diff-view WebDriver file passes through the real renderer, real scroll geometry, Tauri invoke path, toolbar, and progressive rendering.
