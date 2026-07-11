@@ -65,6 +65,7 @@ export function createMobileController(
         taskId: string;
         routeIdentity: string;
         subscription: TaskTerminalSubscription;
+        retagTaskId(taskId: string): void;
       }
     | null = null;
   let activeTaskAgent:
@@ -72,6 +73,7 @@ export function createMobileController(
         taskId: string;
         routeIdentity: string;
         subscription: TaskAgentSubscription;
+        retagTaskId(taskId: string): void;
       }
     | null = null;
   let taskTerminalGeneration = 0;
@@ -99,10 +101,24 @@ export function createMobileController(
   const pendingTaskIdentities = new Map<
     string,
     {
-      ownerDesktopId: string | null;
-      ownerLocalRepoId: string | null;
+      ownerDesktopId: string;
+      ownerLocalRepoId: string;
+      ownerLocalTaskId: string;
     }
   >();
+
+  const getClientResolvedTaskRoute = (response: {
+    ownerDesktopId?: string;
+    ownerLocalRepoId?: string;
+    ownerLocalTaskId?: string;
+  }) => {
+    const ownerDesktopId = response.ownerDesktopId?.trim();
+    const ownerLocalRepoId = response.ownerLocalRepoId?.trim();
+    const ownerLocalTaskId = response.ownerLocalTaskId?.trim();
+    return ownerDesktopId && ownerLocalRepoId && ownerLocalTaskId
+      ? { ownerDesktopId, ownerLocalRepoId, ownerLocalTaskId }
+      : null;
+  };
 
   const publishOwnedErrorMessage = () => {
     store.setErrorMessage(
@@ -197,17 +213,34 @@ export function createMobileController(
       ...state.recentTasks,
       ...state.searchResults
     ];
-    for (const [rawTaskId, pendingIdentity] of pendingTaskIdentities) {
+    for (const [displayTaskId, pendingIdentity] of pendingTaskIdentities) {
       if (
         resolveCanonicalTaskDisplayId(
-          rawTaskId,
+          pendingIdentity.ownerLocalTaskId,
           pendingIdentity.ownerDesktopId,
           pendingIdentity.ownerLocalRepoId,
           tasks
         )
       ) {
-        pendingTaskIdentities.delete(rawTaskId);
+        pendingTaskIdentities.delete(displayTaskId);
       }
+    }
+  };
+
+  const rememberActionTaskSummary = (task: TaskSummary) => {
+    taskCollectionsRevision += 1;
+    const state = store.getState();
+    const recentTasks = [
+      task,
+      ...state.recentTasks.filter((candidate) => candidate.id !== task.id)
+    ];
+    store.setRepos(mergeReposWithTaskRepos(state.repos, recentTasks));
+    store.setRecentTasks(recentTasks);
+    if (state.selectedRepoId === task.repoId) {
+      store.setRepoTasks([
+        task,
+        ...state.repoTasks.filter((candidate) => candidate.id !== task.id)
+      ]);
     }
   };
 
@@ -230,6 +263,50 @@ export function createMobileController(
     stopTaskAgent();
   };
 
+  const clearTaskSessionIfMissing = (taskId: string) => {
+    if (findTask(taskId)) {
+      return;
+    }
+    stopTaskSession();
+    store.clearTaskTerminal();
+    store.clearTaskAgent();
+  };
+
+  const selectMigratedTaskIdentity = (
+    previousTaskId: string,
+    nextTaskId: string
+  ) => {
+    const nextTask = findTask(nextTaskId);
+    const nextRouteIdentity =
+      client.getTaskRouteIdentity?.(nextTaskId) ?? nextTaskId;
+    let retainedSession = false;
+
+    if (
+      nextTask?.agentType !== "agent" &&
+      activeTaskTerminal?.taskId === previousTaskId &&
+      activeTaskTerminal.routeIdentity === nextRouteIdentity
+    ) {
+      activeTaskTerminal.taskId = nextTaskId;
+      activeTaskTerminal.retagTaskId(nextTaskId);
+      retainedSession = true;
+    }
+    if (
+      nextTask?.agentType === "agent" &&
+      activeTaskAgent?.taskId === previousTaskId &&
+      activeTaskAgent.routeIdentity === nextRouteIdentity
+    ) {
+      activeTaskAgent.taskId = nextTaskId;
+      activeTaskAgent.retagTaskId(nextTaskId);
+      retainedSession = true;
+    }
+
+    if (retainedSession) {
+      store.retagTaskIdentity(previousTaskId, nextTaskId);
+    } else {
+      store.setSelectedTask(nextTaskId);
+    }
+  };
+
   const reconcileSelectedTask = () => {
     const selectedTaskId = store.getState().selectedTaskId;
     if (!selectedTaskId) {
@@ -240,14 +317,14 @@ export function createMobileController(
     const pendingIdentity = pendingTaskIdentities.get(selectedTaskId);
     if (pendingIdentity) {
       const displayTaskId = resolveTaskActionDisplayId(
-        selectedTaskId,
+        pendingIdentity.ownerLocalTaskId,
         pendingIdentity.ownerDesktopId,
         pendingIdentity.ownerLocalRepoId
       );
       if (displayTaskId) {
         if (displayTaskId !== selectedTaskId) {
           pendingTaskIdentities.delete(selectedTaskId);
-          store.setSelectedTask(displayTaskId);
+          selectMigratedTaskIdentity(selectedTaskId, displayTaskId);
         }
       }
       pruneResolvedPendingTaskIdentities();
@@ -345,6 +422,7 @@ export function createMobileController(
     store.beginTaskTerminal(taskId, "");
 
     try {
+      let streamTaskId = taskId;
       const subscription = client.observeTaskTerminal(taskId, (event) => {
         if (generation !== taskTerminalGeneration) {
           return;
@@ -352,18 +430,18 @@ export function createMobileController(
         switch (event.type) {
           case "ready":
             if (event.cols && event.rows) {
-              store.setTaskTerminalDims(taskId, event.cols, event.rows);
+              store.setTaskTerminalDims(streamTaskId, event.cols, event.rows);
             }
-            store.setTaskTerminalStatus(taskId, "live");
+            store.setTaskTerminalStatus(streamTaskId, "live");
             break;
           case "output":
-            store.appendTaskTerminal(taskId, `${event.dataB64}\n`);
+            store.appendTaskTerminal(streamTaskId, `${event.dataB64}\n`);
             break;
           case "exit":
-            store.setTaskTerminalStatus(taskId, "closed");
+            store.setTaskTerminalStatus(streamTaskId, "closed");
             break;
           case "error":
-            store.setTaskTerminalError(taskId, event.message);
+            store.setTaskTerminalError(streamTaskId, event.message);
             break;
         }
       });
@@ -372,7 +450,14 @@ export function createMobileController(
         subscription.close();
         return;
       }
-      activeTaskTerminal = { taskId, routeIdentity, subscription };
+      activeTaskTerminal = {
+        taskId,
+        routeIdentity,
+        subscription,
+        retagTaskId(nextTaskId) {
+          streamTaskId = nextTaskId;
+        }
+      };
     } catch (error) {
       if (generation !== taskTerminalGeneration) {
         return;
@@ -397,18 +482,26 @@ export function createMobileController(
     store.beginTaskAgent(taskId);
 
     try {
+      let streamTaskId = taskId;
       const subscription = client.observeTaskAgent(taskId, (event) => {
         if (generation !== taskAgentGeneration) {
           return;
         }
-        store.applyTaskAgentStreamEvent(taskId, event);
+        store.applyTaskAgentStreamEvent(streamTaskId, event);
       });
 
       if (generation !== taskAgentGeneration) {
         subscription.close();
         return;
       }
-      activeTaskAgent = { taskId, routeIdentity, subscription };
+      activeTaskAgent = {
+        taskId,
+        routeIdentity,
+        subscription,
+        retagTaskId(nextTaskId) {
+          streamTaskId = nextTaskId;
+        }
+      };
     } catch (error) {
       if (generation !== taskAgentGeneration) {
         return;
@@ -1071,10 +1164,10 @@ export function createMobileController(
           agentProvider: state.composerAgentProvider,
           agentType: "pty"
         });
-        pendingTaskIdentities.set(created.taskId, {
-          ownerDesktopId: composerDesktopId,
-          ownerLocalRepoId: created.repoId
-        });
+        const createdRoute = getClientResolvedTaskRoute(created);
+        if (createdRoute) {
+          pendingTaskIdentities.set(created.taskId, createdRoute);
+        }
         taskCollectionsRevision += 1;
         const createdTask = mapCreatedTask(created);
         const recentTasks = [
@@ -1114,24 +1207,36 @@ export function createMobileController(
           store.getState().selectedDesktopId;
         const ownerLocalRepoId = sourceTask?.ownerLocalRepoId ?? null;
         const response = await client.runMergeAgent(taskId);
-        if (response.taskId !== taskId) {
-          pendingTaskIdentities.set(response.taskId, {
-            ownerDesktopId,
-            ownerLocalRepoId
-          });
+        const responseOwnerDesktopId =
+          response.ownerDesktopId ?? ownerDesktopId;
+        const responseOwnerLocalRepoId =
+          response.ownerLocalRepoId ?? ownerLocalRepoId;
+        const responseRoute = getClientResolvedTaskRoute(response);
+        if (response.taskId !== taskId && responseRoute) {
+          pendingTaskIdentities.set(response.taskId, responseRoute);
         }
         taskCollectionsRevision += 1;
         await refreshTaskCollections();
         setUnownedErrorMessage(null);
         const displayTaskId = resolveTaskActionDisplayId(
-          response.taskId,
-          ownerDesktopId,
-          ownerLocalRepoId
+          response.ownerLocalTaskId ??
+            response.task?.ownerLocalTaskId ??
+            response.taskId,
+          responseOwnerDesktopId,
+          responseOwnerLocalRepoId
         );
+        if (
+          response.task &&
+          (!displayTaskId || displayTaskId === response.taskId)
+        ) {
+          rememberActionTaskSummary(response.task);
+        }
         if (displayTaskId && displayTaskId !== response.taskId) {
           pendingTaskIdentities.delete(response.taskId);
         }
-        this.openTask(displayTaskId ?? response.taskId);
+        const taskIdToOpen = displayTaskId ?? response.taskId;
+        clearTaskSessionIfMissing(taskIdToOpen);
+        this.openTask(taskIdToOpen);
       } catch (error) {
         fail(error);
       }
@@ -1145,24 +1250,36 @@ export function createMobileController(
           store.getState().selectedDesktopId;
         const ownerLocalRepoId = sourceTask?.ownerLocalRepoId ?? null;
         const response = await client.advanceTaskStage(taskId);
-        if (response.taskId !== taskId) {
-          pendingTaskIdentities.set(response.taskId, {
-            ownerDesktopId,
-            ownerLocalRepoId
-          });
+        const responseOwnerDesktopId =
+          response.ownerDesktopId ?? ownerDesktopId;
+        const responseOwnerLocalRepoId =
+          response.ownerLocalRepoId ?? ownerLocalRepoId;
+        const responseRoute = getClientResolvedTaskRoute(response);
+        if (response.taskId !== taskId && responseRoute) {
+          pendingTaskIdentities.set(response.taskId, responseRoute);
         }
         taskCollectionsRevision += 1;
         await refreshTaskCollections();
         setUnownedErrorMessage(null);
         const displayTaskId = resolveTaskActionDisplayId(
-          response.taskId,
-          ownerDesktopId,
-          ownerLocalRepoId
+          response.ownerLocalTaskId ??
+            response.task?.ownerLocalTaskId ??
+            response.taskId,
+          responseOwnerDesktopId,
+          responseOwnerLocalRepoId
         );
+        if (
+          response.task &&
+          (!displayTaskId || displayTaskId === response.taskId)
+        ) {
+          rememberActionTaskSummary(response.task);
+        }
         if (displayTaskId && displayTaskId !== response.taskId) {
           pendingTaskIdentities.delete(response.taskId);
         }
-        this.openTask(displayTaskId ?? response.taskId);
+        const taskIdToOpen = displayTaskId ?? response.taskId;
+        clearTaskSessionIfMissing(taskIdToOpen);
+        this.openTask(taskIdToOpen);
       } catch (error) {
         fail(error);
       }

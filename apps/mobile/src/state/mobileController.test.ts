@@ -1861,6 +1861,155 @@ describe("createMobileController", () => {
     expect(store.getState().composerPrompt).toBe("");
   });
 
+  it("strictly removes a raw create result that is absent from the next live snapshot", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const seedTask: TaskSummary = {
+      id: "task-seed",
+      repoId: "repo-cloud",
+      title: "Seed task",
+      stage: "in progress",
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-seed"
+    };
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops.mockResolvedValueOnce([
+      { id: "desktop-a", name: "Desktop A", online: true, mode: "remote" }
+    ]);
+    client.createTask.mockResolvedValueOnce({
+      taskId: "task-created-raw",
+      repoId: "repo-cloud",
+      title: "Raw created task",
+      stage: "in progress",
+      agentType: "pty"
+    });
+    let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        publishTasks = onUpdate;
+        onUpdate([seedTask]);
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    controller.openComposer();
+    controller.selectComposerDesktop("desktop-a");
+    controller.updateComposerPrompt("Raw created task");
+    await controller.createTask();
+    client.__terminalStream.emit({
+      type: "output",
+      taskId: "task-created-raw",
+      dataB64: "cmF3LWNyZWF0ZQ=="
+    });
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-created-raw",
+      taskTerminalTaskId: "task-created-raw",
+      taskTerminalOutput: "cmF3LWNyZWF0ZQ==\n"
+    });
+
+    publishTasks?.([]);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      taskTerminalTaskId: null,
+      taskTerminalOutput: ""
+    });
+    expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
+  });
+
+  it("strictly removes a raw new-action result that is absent from the next live snapshot", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const sourceTask: TaskSummary = {
+      id: "cloud-source",
+      repoId: "repo-cloud",
+      title: "Source task",
+      stage: "merge",
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-source"
+    };
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops.mockResolvedValueOnce([
+      { id: "desktop-a", name: "Desktop A", online: true, mode: "remote" }
+    ]);
+    client.listRecentTasks.mockResolvedValue([sourceTask]);
+    client.listRepoTasks.mockResolvedValue([sourceTask]);
+    client.runMergeAgent.mockResolvedValueOnce({
+      taskId: "task-action-raw",
+      followTask: true,
+      task: {
+        id: "task-action-raw",
+        repoId: "repo-cloud",
+        title: "Raw merge task",
+        stage: "merge",
+        agentType: "agent"
+      }
+    });
+    let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        publishTasks = onUpdate;
+        onUpdate([sourceTask]);
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    await controller.runMergeAgent(sourceTask.id);
+    client.__agentStream.emit({
+      type: "snapshot",
+      taskId: "task-action-raw",
+      events: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "Raw action", truncated: false }
+      }],
+      nextSeq: 1
+    });
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-action-raw",
+      taskAgentTaskId: "task-action-raw",
+      taskAgentStatus: "live"
+    });
+
+    publishTasks?.([]);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      taskAgentTaskId: null,
+      taskAgentEvents: []
+    });
+    expect(client.__agentStream.subscription.close).toHaveBeenCalledOnce();
+  });
+
   it.each([
     {
       description: "when the publisher includes the local repository identity",
@@ -1873,11 +2022,12 @@ describe("createMobileController", () => {
       canonicalId: "cloud:desktop-a:repo-cloud:task-created"
     }
   ])(
-    "migrates a created local task to its publisher-derived cloud identity $description",
+    "migrates a route-qualified create result to its publisher-derived cloud identity $description",
     async ({ localRepoId, canonicalId }) => {
       const store = createSessionStore();
       const client = createClientMock();
       const auth = createAuthSessionMock();
+      const pendingTaskId = "cloud:desktop-a:repo-local:task-created";
       auth.getState = vi.fn(() => ({
         status: "signedIn",
         user: { uid: "user-1", email: "u@example.com", displayName: null }
@@ -1896,18 +2046,21 @@ describe("createMobileController", () => {
       client.listRepos.mockResolvedValue([
         { id: "repo-cloud", name: "Repo" }
       ]);
+      client.getTaskRouteIdentity = vi.fn(
+        () => "desktop-a:repo-local:task-created"
+      );
       client.createTask.mockResolvedValueOnce({
-        taskId: "task-created",
+        taskId: pendingTaskId,
         repoId: "repo-local",
         title: "Created task",
         stage: "in progress",
-        agentType: "agent"
+        agentType: "agent",
+        ownerDesktopId: "desktop-a",
+        ownerLocalRepoId: "repo-local",
+        ownerLocalTaskId: "task-created"
       });
-      const rawSubscription = createAgentSubscriptionMock().subscription;
-      const canonicalSubscription = createAgentSubscriptionMock().subscription;
-      client.observeTaskAgent
-        .mockReturnValueOnce(rawSubscription)
-        .mockReturnValueOnce(canonicalSubscription);
+      const pendingSubscription = createAgentSubscriptionMock().subscription;
+      client.observeTaskAgent.mockReturnValueOnce(pendingSubscription);
       let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
       const controller = createMobileController(client, store, auth, {
         subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
@@ -1924,25 +2077,13 @@ describe("createMobileController", () => {
       await controller.createTask();
 
       expect(store.getState()).toMatchObject({
-        selectedTaskId: "task-created",
-        taskAgentTaskId: "task-created"
+        selectedTaskId: pendingTaskId,
+        taskAgentTaskId: pendingTaskId
       });
       expect(client.observeTaskAgent).toHaveBeenCalledWith(
-        "task-created",
+        pendingTaskId,
         expect.any(Function)
       );
-
-      publishTasks?.([
-        {
-          id: "task-created",
-          repoId: "repo-local",
-          title: "Created task",
-          stage: "in progress",
-          agentType: "agent"
-        }
-      ]);
-      expect(store.getState().selectedTaskId).toBe("task-created");
-      expect(rawSubscription.close).not.toHaveBeenCalled();
 
       const canonical = mapCloudTaskSnapshot({
         ...(localRepoId ? { localRepoId } : {}),
@@ -1962,19 +2103,13 @@ describe("createMobileController", () => {
         selectedTaskId: canonical.id,
         taskAgentTaskId: canonical.id
       });
-      expect(rawSubscription.close).toHaveBeenCalledOnce();
-      expect(client.observeTaskAgent).toHaveBeenNthCalledWith(
-        2,
-        canonical.id,
-        expect.any(Function)
-      );
-      expect(canonicalSubscription.close).not.toHaveBeenCalled();
+      expect(pendingSubscription.close).not.toHaveBeenCalled();
+      expect(client.observeTaskAgent).toHaveBeenCalledTimes(1);
 
       publishTasks?.([{ ...canonical, title: "Created task metadata refresh" }]);
 
-      expect(client.observeTaskAgent).toHaveBeenCalledTimes(2);
-      expect(rawSubscription.close).toHaveBeenCalledOnce();
-      expect(canonicalSubscription.close).not.toHaveBeenCalled();
+      expect(client.observeTaskAgent).toHaveBeenCalledTimes(1);
+      expect(pendingSubscription.close).not.toHaveBeenCalled();
     }
   );
 
@@ -2461,6 +2596,156 @@ describe("createMobileController", () => {
     expect(client.runMergeAgent).toHaveBeenCalledWith("task-1");
     expect(store.getState().selectedTaskId).toBe("task-merge");
     expect(store.getState().recentTasks[0]?.id).toBe("task-merge");
+  });
+
+  it("opens an exact action-result agent summary while publication is pending", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const canonicalMergeTaskId =
+      "cloud:desktop-owner:repo-local:task-merge";
+    client.runMergeAgent.mockResolvedValue({
+      taskId: canonicalMergeTaskId,
+      followTask: true,
+      task: {
+        id: canonicalMergeTaskId,
+        repoId: "repo-1",
+        title: "Merge task",
+        stage: "merge",
+        agentType: "agent"
+      }
+    });
+    client.listRecentTasks
+      .mockResolvedValueOnce([
+        {
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Source task",
+          stage: "in progress",
+          agentType: "pty"
+        }
+      ])
+      .mockResolvedValueOnce([]);
+    client.listRepoTasks
+      .mockResolvedValueOnce([
+        {
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Source task",
+          stage: "in progress",
+          agentType: "pty"
+        }
+      ])
+      .mockResolvedValueOnce([]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    await controller.runMergeAgent("task-1");
+
+    expect(client.observeTaskAgent).toHaveBeenCalledWith(
+      canonicalMergeTaskId,
+      expect.any(Function)
+    );
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: canonicalMergeTaskId,
+      taskAgentTaskId: canonicalMergeTaskId,
+      activeView: "tasks"
+    });
+    expect(store.getState().recentTasks).toContainEqual(
+      expect.objectContaining({
+        id: canonicalMergeTaskId,
+        agentType: "agent"
+      })
+    );
+  });
+
+  it("waits without retaining the source stream when action metadata lookup misses", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const sourceTask: TaskSummary = {
+      id: "cloud-source",
+      repoId: "repo-cloud",
+      title: "Source task",
+      stage: "merge",
+      agentType: "pty",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-source"
+    };
+    const pendingTaskId =
+      "cloud:desktop-owner:repo-local:task-merge";
+    client.getTaskRouteIdentity = vi.fn((taskId) =>
+      taskId === pendingTaskId || taskId === "explicit-merge-task"
+        ? "desktop-owner:task-merge"
+        : "desktop-owner:task-source"
+    );
+    client.runMergeAgent.mockResolvedValue({
+      taskId: pendingTaskId,
+      followTask: true,
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-merge"
+    });
+    client.listRecentTasks.mockResolvedValue([sourceTask]);
+    client.listRepoTasks.mockResolvedValue([sourceTask]);
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops.mockResolvedValueOnce([
+      { id: "desktop-owner", name: "Owner", online: true, mode: "remote" }
+    ]);
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        publishTasks = onUpdate;
+        onUpdate([sourceTask]);
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    controller.openTask(sourceTask.id);
+    expect(client.observeTaskTerminal).toHaveBeenCalledWith(
+      sourceTask.id,
+      expect.any(Function)
+    );
+    await controller.runMergeAgent(sourceTask.id);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: pendingTaskId,
+      taskTerminalTaskId: null,
+      taskAgentTaskId: null
+    });
+    expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
+
+    publishTasks?.([{
+      id: "explicit-merge-task",
+      repoId: "repo-cloud",
+      title: "Published merge task",
+      stage: "merge",
+      agentType: "agent",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-merge"
+    }]);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "explicit-merge-task",
+      taskAgentTaskId: "explicit-merge-task"
+    });
+    expect(client.observeTaskAgent).toHaveBeenCalledWith(
+      "explicit-merge-task",
+      expect.any(Function)
+    );
   });
 
   it("opens a task terminal stream and accumulates live output", async () => {
@@ -3632,7 +3917,9 @@ describe("createMobileController", () => {
     expect(lan.advanceTaskStage).toHaveBeenCalledWith("local-duplicate");
   });
 
-  it("opens a newly projected cloud display identity after a routed action returns its local id", async () => {
+  it("moves a provisional canonical action identity to its published cloud identity", async () => {
+    const canonicalPendingTaskId =
+      "cloud:desktop-lan:repo-lan:local-merge-result";
     const sourceTask: TaskSummary = {
       id: "cloud-source",
       repoId: "repo-cloud",
@@ -3682,6 +3969,20 @@ describe("createMobileController", () => {
     });
     lan.listRecentTasks.mockImplementation(async () => lanTasks);
     lan.listRepos.mockResolvedValue([{ id: "repo-lan", name: "LAN Repo" }]);
+    const agentStreams: Array<{
+      listener: (event: TaskAgentStreamEvent) => void;
+      subscription: TaskAgentSubscription;
+    }> = [];
+    lan.observeTaskAgent.mockImplementation((_taskId, listener) => {
+      const subscription: TaskAgentSubscription = {
+        close: vi.fn(),
+        sendInput: vi.fn(),
+        sendPermission: vi.fn(),
+        interrupt: vi.fn()
+      };
+      agentStreams.push({ listener, subscription });
+      return subscription;
+    });
     lan.runMergeAgent.mockImplementation(async () => {
       cloudTasks = [];
       lanTasks = [
@@ -3720,9 +4021,25 @@ describe("createMobileController", () => {
 
     expect(lan.runMergeAgent).toHaveBeenCalledWith("local-source");
     expect(store.getState().recentTasks).toEqual([
-      expect.objectContaining({ id: "local-merge-result" })
+      expect.objectContaining({ id: canonicalPendingTaskId })
     ]);
-    expect(store.getState().selectedTaskId).toBe("local-merge-result");
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: canonicalPendingTaskId,
+      taskAgentTaskId: canonicalPendingTaskId
+    });
+    expect(agentStreams).toHaveLength(2);
+    expect(agentStreams[0]!.subscription.close).toHaveBeenCalledOnce();
+    expect(agentStreams[1]!.subscription.close).not.toHaveBeenCalled();
+
+    agentStreams[1]!.listener({
+      type: "snapshot",
+      taskId: "local-merge-result",
+      events: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "Before publish", truncated: false }
+      }],
+      nextSeq: 1
+    });
 
     cloudTasks = [projectedTask];
     liveUpdate?.(await client.listRecentTasks());
@@ -3733,7 +4050,35 @@ describe("createMobileController", () => {
         ownerLocalTaskId: "local-merge-result"
       })
     ]);
-    expect(store.getState().selectedTaskId).toBe(projectedTask.id);
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: projectedTask.id,
+      taskAgentTaskId: projectedTask.id,
+      taskAgentStatus: "live",
+      taskAgentEvents: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "Before publish", truncated: false }
+      }]
+    });
+    expect(agentStreams).toHaveLength(2);
+    expect(agentStreams[1]!.subscription.close).not.toHaveBeenCalled();
+
+    agentStreams[1]!.listener({
+      type: "event",
+      taskId: "local-merge-result",
+      seq: 1,
+      event: { type: "assistant_text", text: "After publish", truncated: false }
+    });
+
+    expect(store.getState().taskAgentEvents).toEqual([
+      {
+        seq: 0,
+        event: { type: "assistant_text", text: "Before publish", truncated: false }
+      },
+      {
+        seq: 1,
+        event: { type: "assistant_text", text: "After publish", truncated: false }
+      }
+    ]);
   });
 
   it("mirrors auth session state into the mobile store during bootstrap", async () => {

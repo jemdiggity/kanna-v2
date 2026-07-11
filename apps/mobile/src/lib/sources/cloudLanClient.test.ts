@@ -1050,6 +1050,8 @@ describe("createCloudLanClient", () => {
   });
 
   it("pins a genuinely new routed action identity to the same LAN desktop", async () => {
+    const canonicalNextTaskId =
+      "cloud:desktop-lan:repo-1:local-next";
     const duplicate = task({
       id: "cloud-duplicate",
       ownerDesktopId: "desktop-lan",
@@ -1073,9 +1075,12 @@ describe("createCloudLanClient", () => {
     await client.listRecentTasks();
 
     await expect(client.advanceTaskStage("cloud-duplicate")).resolves.toEqual({
-      taskId: "local-next"
+      taskId: canonicalNextTaskId,
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-1",
+      ownerLocalTaskId: "local-next"
     });
-    await client.advanceTaskStage("local-next");
+    await client.advanceTaskStage(canonicalNextTaskId);
 
     expect(lan.advanceTaskStage).toHaveBeenNthCalledWith(1, "local-duplicate");
     expect(lan.advanceTaskStage).toHaveBeenNthCalledWith(2, "local-next");
@@ -1146,7 +1151,7 @@ describe("createCloudLanClient", () => {
     expect(probeLan.observeTaskTerminal).not.toHaveBeenCalled();
     expect(probeLan.observeTaskAgent).not.toHaveBeenCalled();
     expect(probeLan.listRecentTasks).not.toHaveBeenCalled();
-    expect(desktopALan.listRecentTasks).toHaveBeenCalledTimes(1);
+    expect(desktopALan.listRecentTasks).toHaveBeenCalledTimes(3);
   });
 
   it("keeps unrelated equal cloud and LAN ids visible and independently routed", async () => {
@@ -1429,6 +1434,166 @@ describe("createCloudLanClient", () => {
     expect(cloud.closeTask).not.toHaveBeenCalled();
   });
 
+  it("returns and preserves a canonical identity for a LAN-created task before cloud publication", async () => {
+    let created = false;
+    const existingCloudTask = task({
+      id: "cloud-existing",
+      repoId: "repo-cloud",
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "existing-on-a"
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([existingCloudTask])
+    });
+    const probeLan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-a"))
+    });
+    const terminalSubscription: TaskTerminalSubscription = { close: vi.fn() };
+    const desktopALan = createClientMock({
+      createTask: vi.fn().mockImplementation(async () => {
+        created = true;
+        return {
+          taskId: "created-on-a",
+          repoId: "repo-local",
+          title: "Created on A",
+          stage: "in progress",
+          agentType: "pty" as const
+        };
+      }),
+      listRecentTasks: vi.fn().mockImplementation(async () =>
+        created
+          ? [
+              task({
+                id: "created-on-a",
+                repoId: "repo-local",
+                title: "Created on A",
+                agentType: "pty"
+              })
+            ]
+          : []
+      ),
+      observeTaskTerminal: vi.fn(() => terminalSubscription)
+    });
+    const client = createCloudLanClient(cloud, probeLan, {
+      isLanEnabled: () => true,
+      lanClientForDesktop: (desktopId) =>
+        desktopId === "desktop-a" ? desktopALan : null
+    });
+    const canonicalTaskId =
+      "cloud:desktop-a:repo-local:created-on-a";
+
+    await client.listRecentTasks();
+    const response = await client.createTask({
+      repoId: "repo-cloud",
+      prompt: "Create on desktop A",
+      desktopId: "desktop-a"
+    });
+
+    expect(response.taskId).toBe(canonicalTaskId);
+    expect(desktopALan.createTask).toHaveBeenCalledWith({
+      repoId: "repo-local",
+      prompt: "Create on desktop A",
+      desktopId: "desktop-a"
+    });
+    await expect(client.listRecentTasks()).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: canonicalTaskId,
+          repoId: "repo-cloud",
+          agentType: "pty"
+        })
+      ])
+    );
+    await expect(client.advanceTaskStage(canonicalTaskId)).resolves.toEqual({
+      taskId: "cloud:desktop-a:repo-local:task-advanced",
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-advanced"
+    });
+    expect(desktopALan.advanceTaskStage).toHaveBeenCalledWith("created-on-a");
+    expect(
+      client.observeTaskTerminal(canonicalTaskId, vi.fn())
+    ).toBe(terminalSubscription);
+    expect(desktopALan.observeTaskTerminal).toHaveBeenCalledWith(
+      "created-on-a",
+      expect.any(Function)
+    );
+  });
+
+  it("canonicalizes a new LAN action task with its exact session metadata", async () => {
+    let mergeCreated = false;
+    const sourceTask = task({
+      id: "cloud:desktop-a:repo-local:source-task",
+      repoId: "repo-cloud",
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "source-task",
+      agentType: "pty"
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([sourceTask])
+    });
+    const mergeAgentSubscription = agentSubscription();
+    const lan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-a")),
+      listRecentTasks: vi.fn().mockImplementation(async () => [
+        task({ id: "source-task", repoId: "repo-local", agentType: "pty" }),
+        ...(mergeCreated
+          ? [
+              task({
+                id: "merge-task",
+                repoId: "repo-local",
+                title: "Merge task",
+                stage: "merge",
+                agentType: "agent"
+              })
+            ]
+          : [])
+      ]),
+      runMergeAgent: vi.fn().mockImplementation(async () => {
+        mergeCreated = true;
+        return { taskId: "merge-task", followTask: true };
+      }),
+      observeTaskAgent: vi.fn(() => mergeAgentSubscription)
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+    await client.listRecentTasks();
+    const canonicalMergeTaskId =
+      "cloud:desktop-a:repo-local:merge-task";
+
+    await expect(client.runMergeAgent(sourceTask.id)).resolves.toEqual({
+      taskId: canonicalMergeTaskId,
+      followTask: true,
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "merge-task",
+      task: expect.objectContaining({
+        id: canonicalMergeTaskId,
+        repoId: "repo-cloud",
+        title: "Merge task",
+        agentType: "agent"
+      })
+    });
+    await expect(client.listRecentTasks()).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: canonicalMergeTaskId,
+          agentType: "agent"
+        })
+      ])
+    );
+    expect(
+      client.observeTaskAgent(canonicalMergeTaskId, vi.fn())
+    ).toBe(mergeAgentSubscription);
+    expect(lan.observeTaskAgent).toHaveBeenCalledWith(
+      "merge-task",
+      expect.any(Function)
+    );
+  });
+
   it("does not let a task snapshot started before LAN creation erase its provisional route", async () => {
     const pendingOldStatus = deferred<MobileServerStatus>();
     const cloud = createClientMock({
@@ -1498,14 +1663,14 @@ describe("createCloudLanClient", () => {
         desktopId === "desktop-a" ? desktopALan : null
     });
 
-    await client.createTask({
+    const created = await client.createTask({
       repoId: "repo-1",
       prompt: "Create with a future cloud ID collision",
       desktopId: "desktop-a"
     });
     await expect(client.listRecentTasks()).resolves.toEqual([cloudTask]);
 
-    await client.closeTask(sharedTaskId);
+    await client.closeTask(created.taskId);
     await client.closeTask(sharedTaskId);
 
     expect(desktopALan.closeTask).toHaveBeenCalledTimes(1);
@@ -1513,6 +1678,75 @@ describe("createCloudLanClient", () => {
     expect(cloud.closeTask).toHaveBeenCalledTimes(1);
     expect(cloud.closeTask).toHaveBeenCalledWith(sharedTaskId);
     expect(probeLan.closeTask).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      description: "the deterministic identity",
+      publishedTaskId: "cloud:desktop-a:repo-local:created-on-a"
+    },
+    {
+      description: "a different explicit identity",
+      publishedTaskId: "explicit-cloud-task"
+    }
+  ])("replaces a provisional LAN alias when $description publishes during a failed LAN read", async ({ publishedTaskId }) => {
+    let lanEnabled = true;
+    let cloudTasks: TaskSummary[] = [];
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockImplementation(async () => cloudTasks)
+    });
+    const probeLan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-a"))
+    });
+    const desktopALan = createClientMock({
+      createTask: vi.fn().mockResolvedValue({
+        taskId: "created-on-a",
+        repoId: "repo-local",
+        title: "Created on A",
+        stage: "in progress",
+        agentType: "pty"
+      }),
+      listRecentTasks: vi
+        .fn<KannaClient["listRecentTasks"]>()
+        .mockResolvedValueOnce([
+          task({ id: "created-on-a", repoId: "repo-local" })
+        ])
+        .mockRejectedValueOnce(new Error("LAN snapshot unavailable")),
+      advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "created-on-a" })
+    });
+    const client = createCloudLanClient(cloud, probeLan, {
+      isLanEnabled: () => lanEnabled,
+      lanClientForDesktop: (desktopId) =>
+        desktopId === "desktop-a" ? desktopALan : null
+    });
+    const created = await client.createTask({
+      repoId: "repo-local",
+      prompt: "Create before explicit publication",
+      desktopId: "desktop-a"
+    });
+    await client.listRecentTasks();
+
+    const publishedTask = task({
+      id: publishedTaskId,
+      repoId: "repo-local",
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "created-on-a"
+    });
+    cloudTasks = [publishedTask];
+
+    await expect(client.listRecentTasks()).resolves.toEqual([publishedTask]);
+    await expect(
+      client.advanceTaskStage(publishedTask.id)
+    ).resolves.toEqual({ taskId: publishedTask.id });
+    expect(desktopALan.advanceTaskStage).toHaveBeenCalledWith("created-on-a");
+    vi.mocked(desktopALan.advanceTaskStage).mockClear();
+
+    lanEnabled = false;
+    await client.advanceTaskStage(created.taskId);
+
+    expect(cloud.advanceTaskStage).toHaveBeenCalledWith(created.taskId);
+    expect(desktopALan.advanceTaskStage).not.toHaveBeenCalled();
   });
 
   it("retains a provisional LAN route when close fails so retry cannot cross-route", async () => {

@@ -12,6 +12,10 @@ import type {
   TaskActionResponse,
   TaskSummary
 } from "../api/types";
+import {
+  buildCloudTaskId,
+  canonicalizeTaskActionId
+} from "../api/taskIdentity";
 
 export type DisplayTaskRoute =
   | { source: "cloud"; taskId: string }
@@ -58,6 +62,11 @@ interface TaskReadEntry {
   promise: Promise<TaskSummary[]>;
   supplements: Set<(tasks: TaskSummary[]) => void>;
 }
+
+type ProvisionalTaskRoute = Extract<DisplayTaskRoute, { source: "lan" }> & {
+  localRepoId?: string;
+  displayRepoId?: string;
+};
 
 const DEFAULT_OPTIONAL_LAN_WAIT_MS = 1_000;
 
@@ -164,7 +173,8 @@ export function mergeCloudAndLanTasks({
 
 function mergeCloudWithPreservedLanProjection(
   cloudTasks: TaskSummary[],
-  accepted: MergedTaskSnapshot
+  accepted: MergedTaskSnapshot,
+  provisionalRoutes: ReadonlyMap<string, ProvisionalTaskRoute>
 ): MergedTaskSnapshot {
   const acceptedTasksById = new Map(
     accepted.tasks.map((task) => [task.id, task] as const)
@@ -195,6 +205,38 @@ function mergeCloudWithPreservedLanProjection(
     routes.set(entry.displayTaskId, entry.route);
   };
 
+  const mergePublishedWithPreservedLanState = (
+    cloudTask: TaskSummary,
+    preservedTask: TaskSummary,
+    displayTaskId: string
+  ): TaskSummary => {
+    const mergedTask: TaskSummary = {
+      ...cloudTask,
+      id: displayTaskId,
+      title: preservedTask.title ?? cloudTask.title,
+      stage: preservedTask.stage ?? cloudTask.stage
+    };
+    if (
+      mergedTask.ownerLocalRepoId === undefined &&
+      preservedTask.ownerLocalRepoId !== undefined
+    ) {
+      mergedTask.ownerLocalRepoId = preservedTask.ownerLocalRepoId;
+    }
+    if (
+      preservedTask.snippet !== null &&
+      preservedTask.snippet !== undefined
+    ) {
+      mergedTask.snippet = preservedTask.snippet;
+    }
+    if (
+      preservedTask.agentType !== null &&
+      preservedTask.agentType !== undefined
+    ) {
+      mergedTask.agentType = preservedTask.agentType;
+    }
+    return mergedTask;
+  };
+
   for (const cloudTask of cloudTasks) {
     const ownerMatch =
       cloudTask.ownerDesktopId && cloudTask.ownerLocalTaskId
@@ -204,11 +246,40 @@ function mergeCloudWithPreservedLanProjection(
               entry.route.taskId === cloudTask.ownerLocalTaskId &&
               (cloudTask.ownerLocalRepoId === undefined ||
                 cloudTask.ownerLocalRepoId ===
-                  (entry.task.ownerLocalRepoId ?? entry.task.repoId))
+                  (provisionalRoutes.get(entry.displayTaskId)?.localRepoId ??
+                    entry.task.ownerLocalRepoId ??
+                    entry.task.repoId))
           )
         : undefined;
     if (ownerMatch) {
-      appendPreserved(ownerMatch);
+      usedPreservedDisplayIds.add(ownerMatch.displayTaskId);
+      const reservedIdMatch = preservedLanByDisplayId.get(cloudTask.id);
+      if (
+        reservedIdMatch &&
+        reservedIdMatch.displayTaskId !== ownerMatch.displayTaskId
+      ) {
+        appendPreserved(reservedIdMatch);
+      }
+      const displayTaskId =
+        reservedIdMatch &&
+        reservedIdMatch.displayTaskId !== ownerMatch.displayTaskId
+          ? collisionSafeCloudTaskId(
+              cloudTask.id,
+              new Set([...reservedLanDisplayIds, ...usedDisplayTaskIds])
+            )
+          : cloudTask.id;
+      usedDisplayTaskIds.add(displayTaskId);
+      tasks.push(
+        mergePublishedWithPreservedLanState(
+          cloudTask,
+          ownerMatch.task,
+          displayTaskId
+        )
+      );
+      routes.set(displayTaskId, {
+        ...ownerMatch.route,
+        cloudFallbackTaskId: cloudTask.id
+      });
       continue;
     }
 
@@ -301,13 +372,67 @@ export function createCloudLanClient(
   let latestDesktopReadEpoch = 0;
   let snapshotTaskRoutes = new Map<string, DisplayTaskRoute>();
   let acceptedTaskSnapshot: MergedTaskSnapshot | undefined;
-  const provisionalTaskRoutes = new Map<string, DisplayTaskRoute>();
+  const provisionalTaskRoutes = new Map<string, ProvisionalTaskRoute>();
   let lastCloudTasks: TaskSummary[] | undefined;
   let lastLanTaskSnapshot: LanTaskSnapshot | undefined;
   let lastCloudRepos: RepoSummary[] | undefined;
   let lastLanRepos: RepoSummary[] | undefined;
   let lastCloudDesktops: DesktopSummary[] | undefined;
   let lastLanDesktops: DesktopSummary[] | undefined;
+
+  const projectProvisionalTaskIdentities = (
+    merged: MergedTaskSnapshot
+  ): MergedTaskSnapshot => {
+    const tasks = [...merged.tasks];
+    const routes = new Map(merged.routes);
+    for (const [displayTaskId, provisionalRoute] of provisionalTaskRoutes) {
+      const published = tasks.some(
+        (task) =>
+          task.ownerDesktopId === provisionalRoute.desktopId &&
+          task.ownerLocalTaskId === provisionalRoute.taskId &&
+          (!provisionalRoute.localRepoId ||
+            task.ownerLocalRepoId === provisionalRoute.localRepoId)
+      );
+      if (published) {
+        continue;
+      }
+      const matchingTaskIndex = tasks.findIndex((task) => {
+        const route = routes.get(task.id);
+        return (
+          route?.source === "lan" &&
+          route.desktopId === provisionalRoute.desktopId &&
+          route.taskId === provisionalRoute.taskId &&
+          (!provisionalRoute.localRepoId ||
+            task.repoId === provisionalRoute.localRepoId)
+        );
+      });
+      if (matchingTaskIndex < 0) {
+        continue;
+      }
+      const matchingTask = tasks[matchingTaskIndex];
+      const matchingRoute = routes.get(matchingTask.id);
+      if (matchingRoute?.source !== "lan") {
+        continue;
+      }
+      tasks[matchingTaskIndex] = {
+        ...matchingTask,
+        id: displayTaskId,
+        repoId: provisionalRoute.displayRepoId ?? matchingTask.repoId
+      };
+      if (matchingTask.id !== displayTaskId) {
+        routes.delete(matchingTask.id);
+      }
+      routes.set(displayTaskId, {
+        source: "lan",
+        taskId: matchingRoute.taskId,
+        desktopId: matchingRoute.desktopId,
+        ...(matchingRoute.cloudFallbackTaskId
+          ? { cloudFallbackTaskId: matchingRoute.cloudFallbackTaskId }
+          : {})
+      });
+    }
+    return { tasks, routes };
+  };
 
   const acceptMergedTaskSnapshot = (
     readEpoch: number,
@@ -316,15 +441,16 @@ export function createCloudLanClient(
     if (readEpoch !== latestReadEpoch && acceptedTaskSnapshot) {
       return acceptedTaskSnapshot;
     }
+    merged = projectProvisionalTaskIdentities(merged);
     acceptedTaskSnapshot = merged;
     snapshotTaskRoutes = merged.routes;
     for (const [displayTaskId, provisionalRoute] of provisionalTaskRoutes) {
-      const isPublished = Array.from(merged.routes.values()).some(
-        (route) =>
-          route.source === "lan" &&
-          provisionalRoute.source === "lan" &&
-          route.desktopId === provisionalRoute.desktopId &&
-          route.taskId === provisionalRoute.taskId
+      const isPublished = merged.tasks.some(
+        (task) =>
+          task.ownerDesktopId === provisionalRoute.desktopId &&
+          task.ownerLocalTaskId === provisionalRoute.taskId &&
+          (!provisionalRoute.localRepoId ||
+            task.ownerLocalRepoId === provisionalRoute.localRepoId)
       );
       if (isPublished) {
         provisionalTaskRoutes.delete(displayTaskId);
@@ -451,7 +577,8 @@ export function createCloudLanClient(
         : lanStillEnabled && hasLanRoutes(acceptedTaskSnapshot)
           ? mergeCloudWithPreservedLanProjection(
               cloudTasks ?? [],
-              acceptedTaskSnapshot!
+              acceptedTaskSnapshot!,
+              provisionalTaskRoutes
             )
           : mergeCloudAndLanTasks({
               cloudTasks: cloudTasks ?? [],
@@ -582,16 +709,73 @@ export function createCloudLanClient(
       return { ...response, taskId };
     }
 
-    provisionalTaskRoutes.set(
-      responseTaskId,
-      route.source === "lan"
-        ? {
-            source: "lan",
-            taskId: responseTaskId,
-            desktopId: route.desktopId
-          }
-        : { source: "cloud", taskId: responseTaskId }
-    );
+    if (route.source === "lan") {
+      const sourceTask = acceptedTaskSnapshot?.tasks.find(
+        (candidate) => candidate.id === taskId
+      );
+      const provisionalRoute = provisionalTaskRoutes.get(taskId);
+      const localRepoId =
+        provisionalRoute?.localRepoId ??
+        sourceTask?.ownerLocalRepoId ??
+        sourceTask?.repoId ??
+        null;
+      if (localRepoId) {
+        const canonicalTaskId = canonicalizeTaskActionId({
+          canonicalTaskId: taskId,
+          ownerDesktopId: route.desktopId,
+          localRepoId,
+          sourceLocalTaskId: route.taskId,
+          responseLocalTaskId: responseTaskId
+        });
+        const resolvedTask = await route.client
+          .listRecentTasks()
+          .then((tasks) =>
+            tasks.find(
+              (candidate) =>
+                candidate.id === responseTaskId &&
+                candidate.repoId === localRepoId
+            )
+          )
+          .catch(() => undefined);
+        provisionalTaskRoutes.set(canonicalTaskId, {
+          source: "lan",
+          taskId: responseTaskId,
+          desktopId: route.desktopId,
+          localRepoId,
+          displayRepoId:
+            provisionalRoute?.displayRepoId ??
+            sourceTask?.repoId ??
+            localRepoId
+        });
+        return {
+          ...response,
+          taskId: canonicalTaskId,
+          ownerDesktopId: route.desktopId,
+          ownerLocalRepoId: localRepoId,
+          ownerLocalTaskId: responseTaskId,
+          ...(resolvedTask
+            ? {
+                task: {
+                  ...resolvedTask,
+                  id: canonicalTaskId,
+                  repoId:
+                    provisionalRoute?.displayRepoId ??
+                    sourceTask?.repoId ??
+                    resolvedTask.repoId
+                }
+              }
+            : {})
+        };
+      }
+    }
+
+    if (route.source === "lan") {
+      provisionalTaskRoutes.set(responseTaskId, {
+        source: "lan",
+        taskId: responseTaskId,
+        desktopId: route.desktopId
+      });
+    }
     return response;
   };
 
@@ -741,13 +925,39 @@ export function createCloudLanClient(
       ) {
         const destinationLan = lanClientForDesktop(status.desktopId);
         if (destinationLan) {
-          const createdTask = await destinationLan.createTask(input);
-          provisionalTaskRoutes.set(createdTask.taskId, {
+          const localRepoId = [
+            ...(acceptedTaskSnapshot?.tasks ?? []),
+            ...(lastCloudTasks ?? [])
+          ].find(
+            (task) =>
+              task.repoId === input.repoId &&
+              task.ownerDesktopId === status.desktopId &&
+              task.ownerLocalRepoId
+          )?.ownerLocalRepoId ?? input.repoId;
+          const createdTask = await destinationLan.createTask({
+            ...input,
+            repoId: localRepoId
+          });
+          const canonicalTaskId = buildCloudTaskId({
+            ownerDesktopId: status.desktopId,
+            localRepoId: createdTask.repoId,
+            ownerLocalTaskId: createdTask.taskId
+          });
+          provisionalTaskRoutes.set(canonicalTaskId, {
             source: "lan",
             taskId: createdTask.taskId,
-            desktopId: status.desktopId
+            desktopId: status.desktopId,
+            localRepoId: createdTask.repoId,
+            displayRepoId: input.repoId
           });
-          return createdTask;
+          return {
+            ...createdTask,
+            taskId: canonicalTaskId,
+            repoId: input.repoId,
+            ownerDesktopId: status.desktopId,
+            ownerLocalRepoId: createdTask.repoId,
+            ownerLocalTaskId: createdTask.taskId
+          };
         }
       }
     }

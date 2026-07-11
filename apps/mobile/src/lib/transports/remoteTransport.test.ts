@@ -530,10 +530,10 @@ describe("remote transport", () => {
     expect(invokeDesktop).not.toHaveBeenCalled();
   });
 
-  it("creates tasks on an explicit desktop without forwarding the routing field", async () => {
+  it("maps a cloud repo to its owner-local repo on an explicit desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       taskId: "task-created",
-      repoId: "repo-1",
+      repoId: "repo-local",
       title: "Ship it",
       stage: "in progress"
     });
@@ -541,28 +541,91 @@ describe("remote transport", () => {
       listDesktopRecords: async () => [],
       getSelectedDesktopId: () => null,
       invokeDesktop,
-      listCloudTasks: async () => []
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-existing",
+          repoId: "repo-cloud",
+          title: "Existing task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-2",
+          ownerLocalRepoId: "repo-local",
+          ownerLocalTaskId: "task-existing"
+        }
+      ]
     });
 
     await expect(
       transport.createTask({
-        repoId: "repo-1",
+        repoId: "repo-cloud",
         prompt: "Ship it",
         desktopId: "desktop-2",
         agentProvider: "codex"
       })
     ).resolves.toEqual({
-      taskId: "task-created",
-      repoId: "repo-1",
+      taskId: "cloud:desktop-2:repo-local:task-created",
+      repoId: "repo-cloud",
       title: "Ship it",
-      stage: "in progress"
+      stage: "in progress",
+      ownerDesktopId: "desktop-2",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-created"
     });
     expect(invokeDesktop).toHaveBeenCalledWith({
       desktopId: "desktop-2",
       method: "POST",
       path: "/v1/tasks",
       body: {
+        repoId: "repo-local",
+        prompt: "Ship it",
+        agentProvider: "codex"
+      }
+    });
+  });
+
+  it("falls back to the selected desktop when a cloud repo has no owner mapping", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "task-created",
+      repoId: "repo-cloud",
+      title: "Ship it",
+      stage: "in progress"
+    });
+    const listCloudTasks = vi.fn().mockResolvedValue([
+      {
+        id: "other-desktop-task",
         repoId: "repo-1",
+        title: "Other desktop task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-other",
+        ownerLocalRepoId: "repo-local-other",
+        ownerLocalTaskId: "task-other"
+      }
+    ]);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-selected",
+      invokeDesktop,
+      listCloudTasks
+    });
+
+    await expect(
+      transport.createTask({
+        repoId: "repo-cloud",
+        prompt: "Ship it",
+        agentProvider: "codex"
+      })
+    ).resolves.toEqual({
+      taskId: "task-created",
+      repoId: "repo-cloud",
+      title: "Ship it",
+      stage: "in progress"
+    });
+    expect(listCloudTasks).toHaveBeenCalledTimes(1);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-selected",
+      method: "POST",
+      path: "/v1/tasks",
+      body: {
+        repoId: "repo-cloud",
         prompt: "Ship it",
         agentProvider: "codex"
       }
@@ -611,6 +674,19 @@ describe("remote transport", () => {
       desktopId: "desktop-created-here",
       agentProvider: "codex"
     });
+    expect(created.taskId).toBe(
+      "cloud:desktop-created-here:repo-1:task-created"
+    );
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-created-here",
+      method: "POST",
+      path: "/v1/tasks",
+      body: {
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentProvider: "codex"
+      }
+    });
     invokeDesktop.mockClear();
     const listener = vi.fn();
 
@@ -635,7 +711,7 @@ describe("remote transport", () => {
       path: "/v1/tasks/task-created/actions/advance-stage",
       body: null
     });
-    expect(listCloudTasks).not.toHaveBeenCalled();
+    expect(listCloudTasks).toHaveBeenCalledTimes(1);
   });
 
   it("preserves a created task route across absent and obsolete cloud snapshots", async () => {
@@ -707,7 +783,7 @@ describe("remote transport", () => {
     );
   });
 
-  it("retires a created task route after its canonical cloud identity appears", async () => {
+  it("replaces a provisional created route with its canonical cloud route", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
       request.path === "/v1/tasks"
         ? {
@@ -747,11 +823,83 @@ describe("remote transport", () => {
     await transport.advanceTaskStage(created.taskId);
 
     expect(invokeDesktop).toHaveBeenCalledWith({
-      desktopId: "desktop-selected-elsewhere",
+      desktopId: "desktop-created-here",
       method: "POST",
       path: "/v1/tasks/task-created/actions/advance-stage",
       body: null
     });
+  });
+
+  it("retires a provisional alias when its explicit cloud identity is published", async () => {
+    let cloudTasks: Array<{
+      id: string;
+      repoId: string;
+      title: string;
+      stage: string;
+      ownerDesktopId: string;
+      ownerLocalRepoId: string;
+      ownerLocalTaskId: string;
+    }> = [
+      {
+        id: "existing-cloud-task",
+        repoId: "repo-cloud",
+        title: "Existing task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-created-here",
+        ownerLocalRepoId: "repo-local",
+        ownerLocalTaskId: "task-existing"
+      }
+    ];
+    const listCloudTasks = vi.fn(async () => cloudTasks);
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) =>
+      request.path === "/v1/tasks"
+        ? {
+            taskId: "task-created",
+            repoId: "repo-local",
+            title: "Ship it",
+            stage: "in progress"
+          }
+        : { taskId: "task-created" }
+    );
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-selected-elsewhere",
+      invokeDesktop,
+      listCloudTasks
+    });
+
+    const created = await transport.createTask({
+      repoId: "repo-cloud",
+      prompt: "Ship it",
+      desktopId: "desktop-created-here",
+      agentProvider: "codex"
+    });
+    cloudTasks = [
+      {
+        id: "explicit-cloud-task-id",
+        repoId: "repo-cloud",
+        title: "Ship it",
+        stage: "in progress",
+        ownerDesktopId: "desktop-created-here",
+        ownerLocalRepoId: "repo-local",
+        ownerLocalTaskId: "task-created"
+      }
+    ];
+    await transport.listRecentTasks();
+    invokeDesktop.mockClear();
+
+    await transport.advanceTaskStage(created.taskId);
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-selected-elsewhere",
+      method: "POST",
+      path:
+        "/v1/tasks/cloud%3Adesktop-created-here%3Arepo-local%3Atask-created/actions/advance-stage",
+      body: null
+    });
+    expect(invokeDesktop).not.toHaveBeenCalledWith(
+      expect.objectContaining({ desktopId: "desktop-created-here" })
+    );
   });
 
   it("retires a created task route after successfully closing it", async () => {
@@ -786,7 +934,8 @@ describe("remote transport", () => {
     expect(invokeDesktop).toHaveBeenCalledWith({
       desktopId: "desktop-selected-elsewhere",
       method: "POST",
-      path: "/v1/tasks/task-created/actions/advance-stage",
+      path:
+        "/v1/tasks/cloud%3Adesktop-created-here%3Arepo-1%3Atask-created/actions/advance-stage",
       body: null
     });
   });
@@ -910,7 +1059,7 @@ describe("remote transport", () => {
       request.path === "/v1/tasks"
         ? {
             taskId: "task-created",
-            repoId: "repo-1",
+            repoId: "repo-local",
             title: "Ship it",
             stage: "in progress"
           }
@@ -922,33 +1071,36 @@ describe("remote transport", () => {
       invokeDesktop,
       listCloudTasks: async () => [
         {
-          id: "cloud:desktop-owner:repo-1:task-existing",
-          repoId: "repo-1",
+          id: "cloud-task-existing",
+          repoId: "repo-cloud",
           repoName: "Repo One",
           title: "Existing task",
           stage: "in progress",
           ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-local",
           ownerLocalTaskId: "task-existing"
         }
       ]
     });
 
-    await expect(
-      transport.createTask({
-        repoId: "repo-1",
-        prompt: "Ship it",
-        agentProvider: "claude"
-      })
-    ).resolves.toEqual({
-      taskId: "task-created",
-      repoId: "repo-1",
+    const created = await transport.createTask({
+      repoId: "repo-cloud",
+      prompt: "Ship it",
+      agentProvider: "claude"
+    });
+    expect(created).toEqual({
+      taskId: "cloud:desktop-owner:repo-local:task-created",
+      repoId: "repo-cloud",
       title: "Ship it",
-      stage: "in progress"
+      stage: "in progress",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-created"
     });
     await expect(
-      transport.advanceTaskStage("task-created")
+      transport.advanceTaskStage(created.taskId)
     ).resolves.toEqual({
-      taskId: "task-created"
+      taskId: "cloud:desktop-owner:repo-local:task-created"
     });
 
     expect(invokeDesktop).toHaveBeenCalledWith({
@@ -956,7 +1108,7 @@ describe("remote transport", () => {
       method: "POST",
       path: "/v1/tasks",
       body: {
-        repoId: "repo-1",
+        repoId: "repo-local",
         prompt: "Ship it",
         agentProvider: "claude"
       }
@@ -977,6 +1129,7 @@ describe("remote transport", () => {
         title: string;
         stage: string;
         ownerDesktopId: string;
+        ownerLocalRepoId: string;
         ownerLocalTaskId: string;
       }>
     >();
@@ -987,6 +1140,7 @@ describe("remote transport", () => {
         title: string;
         stage: string;
         ownerDesktopId: string;
+        ownerLocalRepoId: string;
         ownerLocalTaskId: string;
       }>
     >();
@@ -996,7 +1150,7 @@ describe("remote transport", () => {
       .mockReturnValueOnce(newerTasks.promise);
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       taskId: "task-created",
-      repoId: "repo-1",
+      repoId: "repo-local-new",
       title: "Ship it",
       stage: "in progress"
     });
@@ -1021,6 +1175,7 @@ describe("remote transport", () => {
         title: "New owner task",
         stage: "review",
         ownerDesktopId: "desktop-new-owner",
+        ownerLocalRepoId: "repo-local-new",
         ownerLocalTaskId: "task-new-owner"
       }
     ]);
@@ -1032,6 +1187,7 @@ describe("remote transport", () => {
         title: "Old owner task",
         stage: "in progress",
         ownerDesktopId: "desktop-old-owner",
+        ownerLocalRepoId: "repo-local-old",
         ownerLocalTaskId: "task-old-owner"
       }
     ]);
@@ -1042,7 +1198,7 @@ describe("remote transport", () => {
       method: "POST",
       path: "/v1/tasks",
       body: {
-        repoId: "repo-1",
+        repoId: "repo-local-new",
         prompt: "Ship it",
         agentProvider: "claude"
       }
@@ -1128,11 +1284,21 @@ describe("remote transport", () => {
     });
   });
 
-  it("keeps a genuinely new action response on the same owner desktop", async () => {
-    const invokeDesktop = vi
-      .fn<RemoteDesktopInvoker>()
-      .mockResolvedValueOnce({ taskId: "local-next" })
-      .mockResolvedValueOnce({ taskId: "local-next" });
+  it("canonicalizes a genuinely new action response on the same owner desktop", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (request.method === "GET" && request.path === "/v1/tasks/recent") {
+        return [
+          {
+            id: "local-next",
+            repoId: "repo-local",
+            title: "Next task",
+            stage: "merge",
+            agentType: "agent"
+          }
+        ];
+      }
+      return { taskId: "local-next" };
+    });
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
       getSelectedDesktopId: () => null,
@@ -1140,10 +1306,11 @@ describe("remote transport", () => {
       listCloudTasks: async () => [
         {
           id: "cloud-task-1",
-          repoId: "repo-1",
+          repoId: "repo-cloud",
           title: "Cloud task",
           stage: "in progress",
           ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-local",
           ownerLocalTaskId: "local-task-1",
           ownerOnline: true
         }
@@ -1151,10 +1318,22 @@ describe("remote transport", () => {
     });
     await transport.listRecentTasks();
 
+    const canonicalNextTaskId =
+      "cloud:desktop-owner:repo-local:local-next";
     await expect(transport.advanceTaskStage("cloud-task-1")).resolves.toEqual({
-      taskId: "local-next"
+      taskId: canonicalNextTaskId,
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "local-next",
+      task: {
+        id: canonicalNextTaskId,
+        repoId: "repo-cloud",
+        title: "Next task",
+        stage: "merge",
+        agentType: "agent"
+      }
     });
-    await transport.advanceTaskStage("local-next");
+    await transport.advanceTaskStage(canonicalNextTaskId);
 
     expect(invokeDesktop).toHaveBeenNthCalledWith(1, {
       desktopId: "desktop-owner",
@@ -1163,6 +1342,55 @@ describe("remote transport", () => {
       body: null
     });
     expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/tasks/recent",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(3, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-next/actions/advance-stage",
+      body: null
+    });
+  });
+
+  it("keeps a canonical action route when exact metadata lookup rejects", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (request.method === "GET" && request.path === "/v1/tasks/recent") {
+        throw new Error("recent tasks unavailable");
+      }
+      return { taskId: "local-next" };
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-cloud",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-local",
+          ownerLocalTaskId: "local-task-1"
+        }
+      ]
+    });
+    await transport.listRecentTasks();
+
+    const canonicalNextTaskId =
+      "cloud:desktop-owner:repo-local:local-next";
+    await expect(transport.advanceTaskStage("cloud-task-1")).resolves.toEqual({
+      taskId: canonicalNextTaskId,
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "local-next"
+    });
+    await transport.advanceTaskStage(canonicalNextTaskId);
+
+    expect(invokeDesktop).toHaveBeenLastCalledWith({
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-next/actions/advance-stage",

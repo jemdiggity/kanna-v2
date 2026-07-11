@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppModel } from "./appModel";
 import type { TaskAgentSubscription } from "./lib/api/client";
 import type { TaskSummary } from "./lib/api/types";
@@ -15,6 +15,10 @@ import type {
 } from "./lib/firebase/taskIndex";
 import type { FetchLike } from "./lib/transports/lanTransport";
 import type { RelayDesktopClient } from "./lib/transports/relayClient";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -373,6 +377,405 @@ async function rejectCloudRecovery(
 }
 
 describe("createAppModel cloud routing", () => {
+  it("keeps a default-production LAN create canonical through Firestore publication", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          updatedAt: "2026-07-11T00:00:00.000Z"
+        }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const service: BonjourService = {
+      name: "Owner Mac",
+      type: "_kanna-mobile._tcp.",
+      host: "owner.local",
+      port: 48120,
+      txt: { desktopId: "desktop-owner" }
+    };
+    let lanTaskCreated = false;
+    const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+      const url = new URL(input);
+      if (url.pathname === "/v1/status") {
+        return response({
+          state: "running",
+          desktopId: "desktop-owner",
+          desktopName: "Owner Mac",
+          lanHost: "owner.local",
+          lanPort: 48120,
+          pairingCode: null
+        });
+      }
+      if (url.pathname === "/v1/desktops") {
+        return response([
+          {
+            id: "desktop-owner",
+            name: "Owner Mac",
+            connectionMode: "local"
+          }
+        ]);
+      }
+      if (url.pathname === "/v1/repos") {
+        return response([{ id: "repo-1", name: "Repo One" }]);
+      }
+      if (
+        url.pathname === "/v1/tasks/recent" ||
+        url.pathname === "/v1/repos/repo-1/tasks"
+      ) {
+        return response(
+          lanTaskCreated
+            ? [
+                {
+                  id: "task-created",
+                  repoId: "repo-1",
+                  repoName: "Repo One",
+                  title: "Created task",
+                  stage: "in progress",
+                  agentType: "pty"
+                }
+              ]
+            : []
+        );
+      }
+      if (url.pathname === "/v1/tasks" && init?.method === "POST") {
+        lanTaskCreated = true;
+        return response({
+          taskId: "task-created",
+          repoId: "repo-1",
+          title: "Created task",
+          stage: "in progress",
+          agentType: "pty"
+        });
+      }
+      throw new Error(`Unexpected LAN request: ${input}`);
+    });
+    const sockets: MockLanWebSocket[] = [];
+    class MockLanWebSocket {
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      send = vi.fn();
+      close = vi.fn();
+
+      constructor(readonly url: string) {
+        sockets.push(this);
+      }
+    }
+    vi.stubGlobal("WebSocket", MockLanWebSocket);
+    const relayClient = createRelayClientMock(
+      vi.fn().mockResolvedValue(new Set(["desktop-owner"]))
+    );
+    const app = createAppModel({
+      fetchImpl,
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-owner",
+          selectedRepoId: "repo-1",
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-owner",
+              displayName: "Owner Mac",
+              lanEndpoints: [],
+              lastSeenAt: "2026-07-11T00:00:00.000Z"
+            }
+          ],
+          repoCreationProfiles: [
+            {
+              repoId: "repo-1",
+              desktopId: "desktop-owner",
+              agentProvider: "claude",
+              updatedAt: "2026-07-11T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([service]),
+        createRelayClient: () => relayClient
+      }
+    });
+
+    await app.initialize();
+    expect(taskIndex.subscribeRecentTasks).toHaveBeenCalledWith(
+      "user-1",
+      expect.any(Function),
+      expect.any(Function)
+    );
+    pushCloudTasks?.([]);
+    app.controller.openComposer();
+    app.controller.updateComposerPrompt("Create from mobile");
+    await app.controller.createTask();
+
+    const canonicalTaskId = "cloud:desktop-owner:repo-1:task-created";
+    expect(app.sessionStore.getState()).toMatchObject({
+      selectedTaskId: canonicalTaskId,
+      taskTerminalTaskId: canonicalTaskId,
+      activeView: "tasks"
+    });
+    expect(sockets).toHaveLength(1);
+    const terminalSocket = sockets[0];
+    terminalSocket.onopen?.();
+    terminalSocket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+
+    pushCloudTasks?.([]);
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().selectedTaskId).toBe(canonicalTaskId);
+    });
+    expect(terminalSocket.close).not.toHaveBeenCalled();
+
+    pushCloudTasks?.([
+      {
+        id: canonicalTaskId,
+        repoId: "repo-1",
+        repoName: "Repo One",
+        title: "Created task",
+        stage: "in progress",
+        agentType: "pty",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "repo-1",
+        ownerLocalTaskId: "task-created",
+        ownerOnline: true
+      }
+    ]);
+    await vi.waitFor(() => {
+      expect(
+        app.sessionStore.getState().recentTasks.find(
+          (task) => task.id === canonicalTaskId
+        )?.title
+      ).toBe("Created task");
+    });
+
+    expect(app.sessionStore.getState()).toMatchObject({
+      selectedTaskId: canonicalTaskId,
+      taskTerminalTaskId: canonicalTaskId,
+      activeView: "tasks"
+    });
+    expect(terminalSocket.close).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://owner.local:48120/v1/tasks",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(terminalSocket.send.mock.calls.map(([frame]) => JSON.parse(frame))).toContainEqual({
+      type: "attach",
+      task_id: "task-created",
+      kind: "terminal",
+      from_seq: 0
+    });
+    expect(relayClient.invokeDesktop).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "POST", path: "/v1/tasks" })
+    );
+  });
+
+  it("keeps a canonical merge action and agent stream stable through relay publication", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          updatedAt: "2026-07-11T00:00:00.000Z"
+        }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const terminalSubscription = { close: vi.fn() };
+    const mergeAgentSubscription: TaskAgentSubscription = {
+      close: vi.fn(),
+      sendInput: vi.fn(),
+      sendPermission: vi.fn(),
+      interrupt: vi.fn()
+    };
+    const observeTaskTerminal = vi.fn(() => terminalSubscription);
+    const observeTaskAgent = vi.fn(() => mergeAgentSubscription);
+    const invokeDesktop = vi.fn<RelayDesktopClient["invokeDesktop"]>(
+      async (request) => {
+        if (request.method === "POST" && request.path === "/v1/tasks") {
+          return {
+            taskId: "task-created",
+            repoId: "repo-1",
+            title: "Created task",
+            stage: "in progress",
+            agentType: "pty"
+          };
+        }
+        if (
+          request.method === "POST" &&
+          request.path === "/v1/tasks/task-created/actions/run-merge-agent"
+        ) {
+          return { taskId: "task-merge", followTask: true };
+        }
+        if (request.method === "GET" && request.path === "/v1/tasks/recent") {
+          return [
+            {
+              id: "task-merge",
+              repoId: "repo-1",
+              title: "Merge task",
+              stage: "merge",
+              agentType: "agent"
+            }
+          ];
+        }
+        return null;
+      }
+    );
+    const relayClient: RelayDesktopClient = {
+      close: vi.fn(),
+      invokeDesktop,
+      observeTaskTerminal,
+      observeTaskAgent,
+      sendTaskInput: vi.fn().mockResolvedValue(undefined),
+      listActiveDesktopIds: vi
+        .fn()
+        .mockResolvedValue(new Set(["desktop-owner"]))
+    };
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-owner",
+          selectedRepoId: "repo-1",
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: [],
+          repoCreationProfiles: [
+            {
+              repoId: "repo-1",
+              desktopId: "desktop-owner",
+              agentProvider: "claude",
+              updatedAt: "2026-07-11T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => relayClient
+      }
+    });
+
+    await app.initialize();
+    const existingTask: CloudTaskSummary = {
+      id: "cloud:desktop-owner:repo-1:task-existing",
+      repoId: "repo-1",
+      repoName: "Repo One",
+      title: "Existing task",
+      stage: "in progress",
+      agentType: "pty",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-1",
+      ownerLocalTaskId: "task-existing",
+      ownerOnline: true
+    };
+    pushCloudTasks?.([existingTask]);
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks).toContainEqual(
+        expect.objectContaining({ id: existingTask.id })
+      );
+    });
+
+    app.controller.openComposer();
+    app.controller.updateComposerPrompt("Create from mobile");
+    await app.controller.createTask();
+    const canonicalTaskId = "cloud:desktop-owner:repo-1:task-created";
+    expect(app.sessionStore.getState()).toMatchObject({
+      selectedTaskId: canonicalTaskId,
+      taskTerminalTaskId: canonicalTaskId,
+      activeView: "tasks"
+    });
+
+    pushCloudTasks?.([
+      existingTask,
+      {
+        id: canonicalTaskId,
+        repoId: "repo-1",
+        repoName: "Repo One",
+        title: "Created task",
+        stage: "in progress",
+        agentType: "pty",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "repo-1",
+        ownerLocalTaskId: "task-created",
+        ownerOnline: true
+      }
+    ]);
+    await app.controller.runMergeAgent(canonicalTaskId);
+
+    const canonicalMergeTaskId = "cloud:desktop-owner:repo-1:task-merge";
+    expect(app.sessionStore.getState()).toMatchObject({
+      selectedTaskId: canonicalMergeTaskId,
+      taskAgentTaskId: canonicalMergeTaskId,
+      activeView: "tasks"
+    });
+    expect(observeTaskAgent).toHaveBeenCalledWith(
+      { desktopId: "desktop-owner", taskId: "task-merge" },
+      expect.any(Function)
+    );
+    expect(terminalSubscription.close).toHaveBeenCalledTimes(1);
+    expect(mergeAgentSubscription.close).not.toHaveBeenCalled();
+
+    pushCloudTasks?.([{ ...existingTask, title: "Updated existing task" }]);
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().selectedTaskId).toBe(
+        canonicalMergeTaskId
+      );
+    });
+    expect(mergeAgentSubscription.close).not.toHaveBeenCalled();
+
+    pushCloudTasks?.([
+      existingTask,
+      {
+        id: canonicalMergeTaskId,
+        repoId: "repo-1",
+        repoName: "Repo One",
+        title: "Merge task",
+        stage: "merge",
+        agentType: "agent",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "repo-1",
+        ownerLocalTaskId: "task-merge",
+        ownerOnline: true
+      }
+    ]);
+    await vi.waitFor(() => {
+      expect(
+        app.sessionStore.getState().recentTasks.find(
+          (task) => task.id === canonicalMergeTaskId
+        )?.title
+      ).toBe("Merge task");
+    });
+    expect(app.sessionStore.getState()).toMatchObject({
+      selectedTaskId: canonicalMergeTaskId,
+      taskAgentTaskId: canonicalMergeTaskId,
+      activeView: "tasks"
+    });
+    expect(mergeAgentSubscription.close).not.toHaveBeenCalled();
+  });
+
   it("pins LAN task actions to the desktop learned by the merged snapshot", async () => {
     const { authSession } = createMutableAuthSession(signedInState());
     let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
