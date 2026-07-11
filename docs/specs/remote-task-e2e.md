@@ -1,7 +1,8 @@
 # Spec: Remote Task Interaction E2E Testing (v2)
 
-Status: active (v2 — resurrected 2026-07-09; v1 harness, flows 7–10, Layer A,
-kd wiring, and CI are landed on main)
+Status: implemented (v2 — dev flows 1–11 and Layers A–E are landed; staging
+headless smoke is implemented and credential-gated; physical-device checks
+remain human-gated)
 Owner: cloud / e2e
 Scope: end-to-end coverage of **remote task interaction** across the mobile
 app, the cloud relay, the **LAN transport**, and the desktop, in both **dev**
@@ -55,19 +56,22 @@ that crosses component or system boundaries must have E2E coverage.
   `kanna-server` for DB assertions from tests (with 404/403 regression
   coverage).
 
-### Remaining (v2 scope)
+### Landed (v2)
 
-1. Flows 1–3 (cloud pairing, auth matrix, discovery/presence) over the full
-   stack.
-2. Flows 4–6 (listing, creation, task actions) over the relay — against the
-   **current stage-graph semantics** (durable task ids, `task-{id}-{n}`
-   workspace forking, `complete-stage` auto-advance, `request-revision`
-   children, close snapshots WIP and removes worktrees but keeps branches).
-3. **LAN transport parity** — the same interaction loop over the LAN API
-   (new Layer E), plus LAN↔relay `connectionMode` semantics.
-4. Staging headless smoke (currently an intentional throw in
-   `tests/remote-e2e/src/run.ts`).
-5. Layer C (mobile Appium over the relay) and Layer D (desktop pairing UI).
+1. Flows 1–3 (cloud credential publication, auth matrix, and
+   discovery/presence) are covered by
+   `cloud-pairing-auth-discovery.e2e.test.ts`.
+2. Flows 4–6 (listing, creation, and task actions) are covered by
+   `task-listing-actions.e2e.test.ts` against the current stage-graph
+   semantics.
+3. Flow 11 and LAN↔relay task-state parity are covered by
+   `lan-layer.e2e.test.ts`.
+4. Staging headless smoke is implemented in
+   `staging-smoke.e2e.test.ts`; the runner selects it for `--staging` and
+   skips cleanly when credentials are absent.
+5. Layer C and Layer D have optional `--mobile-relay` and
+   `--desktop-pairing` runner entry points. Physical-device execution
+   remains human-gated.
 
 ## 2. Environments
 
@@ -83,9 +87,9 @@ Reuse existing config surfaces only: `server.toml` (`relay_url`,
 
 ## 3. Flows
 
-Status key: ✅ landed · ⬜ v2 scope.
+Status key: ✅ landed.
 
-1. ⬜ **Cloud credential provisioning** — the `createPairingCode` Cloud
+1. ✅ **Cloud credential provisioning** — the `createPairingCode` Cloud
    Function bootstrap is retired and must not be redeployed (see
    `docs/2026-06-12-relay-desktop-credential-bootstrap.md`; Kanna deploys no
    Cloud Functions). The current flow: desktop persists
@@ -96,31 +100,36 @@ Status key: ✅ landed · ⬜ v2 scope.
    secret against the hash (timing-safe). E2E: provision the doc the way the
    publisher does (as signed-in Buffy), assert relay auth succeeds with the
    right secret and rejects a wrong secret and a `revokedAt` doc. Pairing
-   codes remain LAN/local-trust only (`create_pairing_session`).
-2. ⬜ **Auth matrix (full stack)** — desktop via `device_token` AND via
+   codes grant LAN/local trust rather than cloud credentials; an authenticated
+   relay client may request their creation through `create_pairing_session`.
+2. ✅ **Auth matrix (full stack)** — desktop via `device_token` AND via
    `desktop_id`+`desktop_secret`; phone via Firebase `id_token`; bad/revoked
    creds rejected — asserted through the running kanna-server↔relay stack
    (Layer A already covers relay-only).
-3. ⬜ **Discovery/presence** — phone lists desktops (`GET /v1/desktops` and
-   the relay desktops listing) and observes `online`/`connectionMode`
-   (`lan`/`internet`/`both`) flip as kanna-server connects/disconnects.
-4. ⬜ **Task listing** — `GET /v1/repos`, `/v1/repos/{id}/tasks`,
+3. ✅ **Discovery/presence** — phone lists desktops through
+   `GET /v1/desktops`, verifies `connectionMode: "both"` while LAN and
+   relay are available, and observes the relay's active-desktop listing remove
+   and restore the desktop as kanna-server disconnects and reconnects.
+4. ✅ **Task listing** — `GET /v1/repos`, `/v1/repos/{id}/tasks`,
    `/v1/tasks/recent`, `/v1/tasks/search?query=` over the relay return the
    desktop's real seeded DB data.
-5. ⬜ **Task creation** — `POST /v1/tasks` over the relay creates worktree +
+5. ✅ **Task creation** — `POST /v1/tasks` over the relay creates worktree +
    `pipeline_item` + prepared spawn; visible in subsequent listings.
-6. ⬜ **Task actions** — over the relay: `advance-stage` (Spawn-new-workspace
-   vs Continue), `complete-stage` (`success` auto-advances / `failure`
-   retains), `request-revision` (creates child task, failure recorded on
-   source), `run-merge-agent`, `close` (WIP snapshot, worktrees removed,
-   branches kept, `closed_at` set). Assert DB truth via the E2E SQL route.
+6. ✅ **Task actions** — over the relay: `advance-stage` (forks the next
+   stage's workspace and branch), `complete-stage` (`success` auto-advances
+   / `failure` retains), `request-revision` (records the current run as
+   failed and transitions the same durable task to the target stage with
+   feedback and a new workspace), `run-merge-agent`, `close` (WIP snapshot,
+   worktrees removed, branches kept, `closed_at` set). Assert DB truth via
+   the E2E SQL route.
 7. ✅ **Terminal streaming** (relay observe_session).
 8. ✅ **Remote input**.
 9. ✅ **Completion notify** (once-only, remote observer sees session_exit).
 10. ✅ **Resilience** (relay reconnect: invokes + active observation recover).
-11. ⬜ **LAN transport loop** — the `lanTransport.ts` path against the
+11. ✅ **LAN transport loop** — the `lanTransport.ts` path against the
     kanna-server LAN API directly: `GET /v1/desktops`
-    (`connectionMode: "local"`), local pairing session
+    (`connectionMode: "both"` when LAN and relay are both available),
+    local pairing session
     (`POST /v1/pairing/sessions` → code + LAN host/port + expiry), listings,
     terminal streaming over `GET /v1/tasks/{id}/terminal` (WS:
     ready→output→exit), input. Parity: the same task observed over LAN and
@@ -130,30 +139,29 @@ Status key: ✅ landed · ⬜ v2 scope.
 
 - **A — Relay protocol** (`services/relay/test/`): ✅ landed; extend only
   when the protocol changes.
-- **B — Remote-loop harness** (`tests/remote-e2e/`): ✅ harness landed; v2
-  adds flow specs 1–6 as new `*.e2e.test.ts` files against
-  `startRemoteHarness()`. Keep harness edits minimal and additive — several
-  tasks build on it concurrently.
-- **C — Mobile Appium over relay** (`apps/mobile/e2e/`): ⬜ drive the real
-  mobile UI through the relay transport (not LAN) against the Layer B dev
-  stack: pair → list → open task → observe streaming → send input. Simulator
-  automated; physical device human-gated.
-- **D — Desktop pairing UI** (`apps/desktop/tests/e2e/`): ⬜ WebDriver test
-  driving the pairing UI; desktop registers with the local relay and reports
-  paired/online.
+- **B — Remote-loop harness** (`tests/remote-e2e/`): ✅ landed; the dev
+  runner executes flows 1–11 as focused `*.e2e.test.ts` files against
+  `startRemoteHarness()`.
+- **C — Mobile Appium over relay** (`apps/mobile/e2e/`): ✅ optional
+  `--mobile-relay` runner lane drives the real mobile UI through the relay
+  transport (not LAN) against the Layer B dev stack. Physical-device
+  execution remains human-gated.
+- **D — Desktop pairing UI** (`apps/desktop/tests/e2e/`): ✅ optional
+  `--desktop-pairing` runner lane delegates to the desktop WebDriver runner,
+  which starts its own isolated Firebase emulator and relay stack.
 - **E — LAN transport** (in `tests/remote-e2e/`, LAN client instead of relay
-  client): ⬜ flow 11. Bonjour/mDNS discovery is asserted only if it can be
-  made deterministic headless; otherwise document the gap and assert from the
-  advertised host/port config directly.
+  client): ✅ flow 11 covers the configured host/port path and LAN↔relay
+  parity. Bonjour/mDNS discovery remains outside the deterministic headless
+  assertion surface.
 
 ## 5. Staging strategy
 
-- **Headless smoke (automatable)**: replace the intentional gate in
-  `tests/remote-e2e/src/run.ts` — relay client + worktree `kanna-server`
-  pointed at staging, Buffy auth via `KANNA_E2E_DEVICE_TOKEN`; assert auth +
-  one invoke round-trip + one observe round-trip. Skip cleanly with a clear
-  message when creds are absent. Reuse the staging-relay verification
-  helpers already in `tools/kd`.
+- **Headless smoke (automatable)**: `tests/remote-e2e/src/run.ts --staging`
+  checks for the required staging Buffy credentials in the environment,
+  skips cleanly with a clear message when they are absent, and otherwise runs
+  `staging-smoke.e2e.test.ts` against the staging relay with a worktree
+  `kanna-server`. The smoke asserts authenticated status invocation and
+  terminal observation.
 - **Human-gated**: full mobile-UI staging run on a physical iPhone via
   `./kd mobile run --device --staging` with a reproducible runbook (Local
   Network permission, symptom→cause map). Never physical-device Appium from
@@ -163,30 +171,28 @@ Status key: ✅ landed · ⬜ v2 scope.
 
 All entry points stay on the canonical `kd` surface: `kd test remote-e2e
 [--dev|--staging]`, `kd doctor --remote [--staging]`, `kd dev up --remote`.
-New flow specs join the existing `remote-e2e.yml` CI lane; Layer C simulator
-runs where macOS CI allows, else nightly; staging smoke runs on a schedule
-with secrets, never per-PR.
+The path-filtered pull-request workflow runs dev Layer A and Layer B. The
+staging smoke runs on the scheduled and manually dispatched workflow when
+credentials are available. Layer C and Layer D remain optional runner lanes,
+not normal pull-request CI; physical-device execution remains human-gated.
 
 ## 7. Acceptance criteria (v2)
 
 - Flows 1–6 and 11 green under `kd test remote-e2e` in dev.
 - Task-action assertions match the stage-graph model (durable ids,
-  `task-{id}-{n}` workspaces, auto-advance, revision children, close
+  `task-{id}-{n}` workspaces, auto-advance, same-task revision runs, close
   semantics) — not the legacy one-task-per-stage model.
 - LAN and relay paths assert consistent task state for the same desktop.
 - Staging smoke passes with creds, skips cleanly without; physical-device
   runbook documented.
 - No `SKIP_AUTH` in auth assertions; fallbacks documented as fallbacks.
 
-## 8. Work breakdown (v2 — codex, PTY mode, parallel)
+## 8. Delivered work breakdown (v2)
 
-All tasks can start immediately (the harness is on main). Harness edits must
-be additive to minimize cross-task conflicts; merges are sequenced by review.
-
-1. **Cloud pairing + auth matrix + discovery** — flows 1–3 (Layer B).
-2. **Listing + creation + task actions** — flows 4–6 (Layer B, stage-graph
+1. ✅ **Cloud pairing + auth matrix + discovery** — flows 1–3 (Layer B).
+2. ✅ **Listing + creation + task actions** — flows 4–6 (Layer B, stage-graph
    semantics, E2E SQL assertions).
-3. **LAN transport loop + parity** — flow 11 (Layer E).
-4. **Staging headless smoke + doctor** — §5 automatable half.
-5. **Mobile Appium over relay + desktop pairing UI + physical runbook** —
-   Layers C + D + §5 human-gated half.
+3. ✅ **LAN transport loop + parity** — flow 11 (Layer E).
+4. ✅ **Staging headless smoke + doctor** — §5 automatable half.
+5. ✅ **Mobile Appium over relay + desktop pairing UI + physical runbook** —
+   Layers C + D plus the §5 human-gated physical-device runbook.
