@@ -20,6 +20,8 @@ interface SmokeElement {
 
 interface TaskTerminalLiveUi {
   getAgentMessageView(): Promise<SmokeElement>;
+  getAgentMessageReady?(): Promise<SmokeElement>;
+  getTaskDetailScreen(): Promise<SmokeElement>;
   getTerminalOverlay(): Promise<SmokeElement>;
   waitUntil(
     condition: () => Promise<boolean>,
@@ -110,6 +112,12 @@ function createSmokeUi(driver: Browser): SmokeUi {
   return {
     async getAgentMessageView() {
       return driver.$(selectors.agentMessageView);
+    },
+    async getAgentMessageReady() {
+      return driver.$(selectors.agentMessageReady);
+    },
+    async getTaskDetailScreen() {
+      return driver.$(selectors.taskDetailScreen);
     },
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
@@ -310,9 +318,17 @@ export async function inspectTerminalWebView(
 export async function waitForTaskTerminalLive(ui: TaskTerminalLiveUi): Promise<void> {
   await ui.waitUntil(
     async () => {
+      const taskDetailScreen = await ui.getTaskDetailScreen();
+      if (!(await taskDetailScreen.isExisting())) {
+        return false;
+      }
       const agentMessageView = await ui.getAgentMessageView();
       if (await agentMessageView.isExisting()) {
-        return true;
+        if (!ui.getAgentMessageReady) {
+          return false;
+        }
+        const agentMessageReady = await ui.getAgentMessageReady();
+        return agentMessageReady.isExisting();
       }
       const overlay = await ui.getTerminalOverlay();
       return !(await overlay.isExisting());

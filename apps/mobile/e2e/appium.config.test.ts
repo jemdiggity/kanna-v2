@@ -52,6 +52,27 @@ describe("mobile Appium config", () => {
     });
   });
 
+  it("accepts simulator permission alerts for the Bonjour-backed hybrid lane", () => {
+    expect(
+      createSimulatorCapabilities({
+        appiumPort: 4723,
+        deviceName: "iPhone 17 Pro",
+        bundleId: "build.kanna.app.dev",
+        autoAcceptAlerts: true
+      })
+    ).toMatchObject({
+      "appium:autoAcceptAlerts": true
+    });
+    expect(
+      createSimulatorCapabilities({
+        appiumPort: 4723,
+        deviceName: "iPhone 17 Pro",
+        bundleId: "build.kanna.app.dev",
+        autoAcceptAlerts: true
+      })
+    ).not.toHaveProperty("appium:autoDismissAlerts");
+  });
+
   it("builds real-device capabilities with the selected UDID", () => {
     expect(
       createPhysicalDeviceCapabilities({

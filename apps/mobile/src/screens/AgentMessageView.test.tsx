@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { FrameAgentEvent } from "@kanna/agent-protocol";
+import type { TaskTerminalStatus } from "../state/sessionStore";
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -26,7 +27,10 @@ interface ElementNode {
   };
 }
 
-function renderAgentView(events: FrameAgentEvent[]): ElementNode {
+function renderAgentView(
+  events: FrameAgentEvent[],
+  status: TaskTerminalStatus = "live"
+): ElementNode {
   if (!AgentMessageView) {
     throw new Error("AgentMessageView was not loaded");
   }
@@ -34,7 +38,7 @@ function renderAgentView(events: FrameAgentEvent[]): ElementNode {
   return AgentMessageView({
     errorMessage: null,
     events,
-    status: "live",
+    status,
     onInterrupt: vi.fn(),
     onResolvePermission: vi.fn()
   }) as ElementNode;
@@ -99,4 +103,22 @@ describe("AgentMessageView", () => {
     expect(text).toContain("Debug");
     expect(text).toContain("debug stderr");
   });
+
+  it.each(["live", "idle"] as const)(
+    "exposes agent stream readiness for the healthy %s state",
+    (status) => {
+      const tree = renderAgentView([], status);
+
+      expect(findByTestId(tree, "mobile.agent-message-ready")).not.toBeNull();
+    }
+  );
+
+  it.each(["connecting", "error", "closed"] as const)(
+    "does not expose agent stream readiness for the %s state",
+    (status) => {
+      const tree = renderAgentView([], status);
+
+      expect(findByTestId(tree, "mobile.agent-message-ready")).toBeNull();
+    }
+  );
 });

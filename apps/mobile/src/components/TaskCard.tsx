@@ -16,7 +16,7 @@ export function TaskCard({ isRecentView, repoName, task, onPress }: TaskCardProp
 
   return (
     <Pressable
-      accessibilityLabel={MOBILE_E2E_IDS.taskListItem(task.id)}
+      accessibilityLabel={`${task.title}, ${model.repoLabel}, ${model.stageLabel}`}
       accessible
       style={styles.card}
       testID={MOBILE_E2E_IDS.taskListItem(task.id)}

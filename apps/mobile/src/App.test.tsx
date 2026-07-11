@@ -5,8 +5,23 @@ import {
   resolveRelayUrl
 } from "./appModel";
 import { createStaticBonjourBrowser } from "./lib/discovery/bonjour";
-import type { MobileAuthSession } from "./lib/firebase/auth";
+import {
+  createMobileAuthSession,
+  type MobileAuthSdk,
+  type MobileAuthSession,
+  type MobileAuthUser
+} from "./lib/firebase/auth";
+import type { CloudTaskIndex } from "./lib/firebase/taskIndex";
 import type { FetchLike } from "./lib/transports/lanTransport";
+import type { RelayDesktopClient } from "./lib/transports/relayClient";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function createFetchMock(): FetchLike {
   return vi.fn(async (input) => {
@@ -74,7 +89,16 @@ function createFetchMock(): FetchLike {
   }) as FetchLike;
 }
 
-function createTrustedDesktopFetchMock(): FetchLike {
+function createTrustedDesktopFetchMock(
+  recentTasks = [
+    {
+      id: "task-trusted",
+      repoId: "repo-trusted",
+      title: "Trusted LAN task",
+      stage: "in progress"
+    }
+  ]
+): FetchLike {
   return vi.fn(async (input) => {
     const url = typeof input === "string" ? input : input.toString();
 
@@ -119,14 +143,7 @@ function createTrustedDesktopFetchMock(): FetchLike {
       return {
         ok: true,
         status: 200,
-        json: async () => [
-          {
-            id: "task-trusted",
-            repoId: "repo-trusted",
-            title: "Trusted LAN task",
-            stage: "in progress"
-          }
-        ]
+        json: async () => recentTasks
       } as Response;
     }
 
@@ -179,6 +196,22 @@ function createSignedOutAuthSession(): MobileAuthSession {
     signOut: vi.fn().mockResolvedValue(undefined),
     getIdToken: vi.fn().mockResolvedValue(null),
     notifyAuthExpired: vi.fn()
+  };
+}
+
+function createRelayClientMock(): RelayDesktopClient {
+  return {
+    close: vi.fn(),
+    invokeDesktop: vi.fn().mockResolvedValue(null),
+    listActiveDesktopIds: vi.fn().mockResolvedValue(new Set<string>()),
+    observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+    observeTaskAgent: vi.fn(() => ({
+      close: vi.fn(),
+      sendInput: vi.fn(),
+      sendPermission: vi.fn(),
+      interrupt: vi.fn()
+    })),
+    sendTaskInput: vi.fn().mockResolvedValue(undefined)
   };
 }
 
@@ -331,7 +364,7 @@ describe("createAppModel", () => {
     expect(taskIndex.listRecentTasks).toHaveBeenCalledWith("user-1");
   });
 
-  it("falls back to LAN tasks for signed-in users before cloud snapshots exist", async () => {
+  it("combines one-shot cloud and trusted LAN tasks before live snapshots exist", async () => {
     const authSession: MobileAuthSession = {
       initialize: vi.fn().mockResolvedValue(undefined),
       getState: vi.fn(() => ({
@@ -352,7 +385,18 @@ describe("createAppModel", () => {
     };
     const taskIndex = {
       listDesktops: vi.fn(async () => []),
-      listRecentTasks: vi.fn(async () => []),
+      listRecentTasks: vi.fn(async () => [
+        {
+          id: "cloud-task-before-live",
+          repoId: "repo-cloud",
+          repoName: "Cloud Repo",
+          title: "Cloud task before live",
+          stage: "in progress",
+          ownerDesktopId: "desktop-cloud",
+          ownerLocalTaskId: "task-cloud",
+          ownerOnline: false
+        }
+      ]),
       subscribeRecentTasks: vi.fn(() => () => {})
     };
     const model = createAppModel({
@@ -372,6 +416,10 @@ describe("createAppModel", () => {
     await model.initialize();
 
     await expect(model.client.listRecentTasks()).resolves.toEqual([
+      expect.objectContaining({
+        id: "cloud-task-before-live",
+        title: "Cloud task before live"
+      }),
       expect.objectContaining({ id: "task-1", title: "Refactor mobile shell" }),
       expect.objectContaining({ id: "task-2", title: "Review shell polish" })
     ]);
@@ -459,14 +507,33 @@ describe("createAppModel", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("falls back to a trusted Bonjour LAN endpoint when signed-in cloud has no tasks", async () => {
+  it("composes live cloud and trusted Bonjour LAN tasks for signed-in users", async () => {
     const authSession = createSignedInAuthSession();
+    let pushCloudTasks:
+      | ((tasks: Awaited<ReturnType<CloudTaskIndex["listRecentTasks"]>>) => void)
+      | null = null;
     const taskIndex = {
       listDesktops: vi.fn(async () => []),
       listRecentTasks: vi.fn(async () => []),
-      subscribeRecentTasks: vi.fn(() => () => {})
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return () => {};
+      })
     };
-    const fetchImpl = createTrustedDesktopFetchMock();
+    const fetchImpl = createTrustedDesktopFetchMock([
+      {
+        id: "task-trusted",
+        repoId: "repo-trusted",
+        title: "Trusted LAN task",
+        stage: "in progress"
+      },
+      {
+        id: "task-lan-only",
+        repoId: "repo-trusted",
+        title: "LAN-only task",
+        stage: "review"
+      }
+    ]);
     const model = createAppModel({
       fetchImpl,
       persistence: {
@@ -506,15 +573,206 @@ describe("createAppModel", () => {
 
     await model.initialize();
 
+    expect(pushCloudTasks).not.toBeNull();
+    pushCloudTasks?.([
+      {
+        id: "cloud:task-trusted",
+        repoId: "cloud-repo-trusted",
+        repoName: "Trusted Repo",
+        title: "Stale cloud title",
+        stage: "pr",
+        ownerDesktopId: "desktop-trusted",
+        ownerLocalRepoId: "repo-trusted",
+        ownerLocalTaskId: "task-trusted",
+        ownerOnline: true
+      },
+      {
+        id: "cloud:task-cloud-only",
+        repoId: "repo-cloud-only",
+        repoName: "Cloud-only Repo",
+        title: "Cloud-only task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-cloud-only",
+        ownerLocalTaskId: "task-cloud-only",
+        ownerOnline: true
+      }
+    ]);
+
+    await vi.waitFor(() => {
+      expect(model.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({
+          id: "cloud:task-trusted",
+          title: "Trusted LAN task",
+          stage: "in progress"
+        }),
+        expect.objectContaining({
+          id: "cloud:task-cloud-only",
+          title: "Cloud-only task"
+        }),
+        expect.objectContaining({
+          id: "task-lan-only",
+          title: "LAN-only task"
+        })
+      ]);
+    });
+
     expect(model.sessionStore.getState().errorMessage).toBeNull();
     expect(model.sessionStore.getState()).toMatchObject({
-      connectionMode: "lan",
+      connectionMode: "remote",
       connectionState: "connected",
-      desktopName: "Trusted Mac",
-      recentTasks: [
-        expect.objectContaining({ id: "task-trusted", title: "Trusted LAN task" })
-      ]
+      desktopName: "Kanna Cloud"
     });
+  });
+
+  it("waits for restored auth before publishing one complete hybrid task snapshot", async () => {
+    const restoredUser: MobileAuthUser = {
+      uid: "restored-user",
+      email: "restored@kanna.test",
+      displayName: null
+    };
+    let observeAuthState: ((user: MobileAuthUser | null) => void) | null = null;
+    const authObserverRegistered = deferred<void>();
+    const sdk: MobileAuthSdk = {
+      getCurrentUser: vi.fn(() => null),
+      onAuthStateChanged: vi.fn((listener) => {
+        observeAuthState = listener;
+        authObserverRegistered.resolve(undefined);
+        return vi.fn();
+      }),
+      signInWithEmailPassword: vi.fn().mockResolvedValue(restoredUser),
+      signOut: vi.fn().mockResolvedValue(undefined),
+      getIdToken: vi.fn().mockResolvedValue("restored-id-token")
+    };
+    const authSession = createMobileAuthSession({ sdk });
+    let pushCloudTasks:
+      | Parameters<CloudTaskIndex["subscribeRecentTasks"]>[1]
+      | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const fetchImpl = createTrustedDesktopFetchMock([
+      {
+        id: "local-duplicate",
+        repoId: "repo-trusted",
+        title: "Fresh LAN duplicate",
+        stage: "review"
+      },
+      {
+        id: "lan-only",
+        repoId: "repo-trusted",
+        title: "LAN-only task",
+        stage: "in progress"
+      }
+    ]);
+    const model = createAppModel({
+      authSession,
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-trusted",
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-trusted",
+              displayName: "Trusted Mac",
+              lanEndpoints: [
+                {
+                  baseUrl: "http://trusted.lan:48120",
+                  lastSeenAt: "2026-07-10T00:00:00.000Z"
+                }
+              ],
+              lastSeenAt: "2026-07-10T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        createRelayClient: () => createRelayClientMock(),
+        bonjourBrowser: createBonjourForDesktop(
+          "desktop-trusted",
+          "Trusted Mac",
+          "trusted.lan",
+          48120
+        )
+      }
+    });
+    const acceptedTaskHistory: Array<Array<{ id: string; title: string }>> = [
+      []
+    ];
+    const firstNonEmptyPublication = deferred<void>();
+    let previousTasks = model.sessionStore.getState().recentTasks;
+    model.sessionStore.subscribe(() => {
+      const tasks = model.sessionStore.getState().recentTasks;
+      if (tasks === previousTasks) return;
+      previousTasks = tasks;
+      acceptedTaskHistory.push(
+        tasks.map(({ id, title }) => ({ id, title }))
+      );
+      if (tasks.length > 0) {
+        firstNonEmptyPublication.resolve(undefined);
+      }
+    });
+
+    const initialization = model.initialize();
+    await authObserverRegistered.promise;
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(taskIndex.subscribeRecentTasks).not.toHaveBeenCalled();
+    expect(acceptedTaskHistory).toEqual([[]]);
+
+    observeAuthState?.(restoredUser);
+    await initialization;
+    expect(taskIndex.subscribeRecentTasks).toHaveBeenCalledWith(
+      restoredUser.uid,
+      expect.any(Function),
+      expect.any(Function)
+    );
+    expect(acceptedTaskHistory).toEqual([[]]);
+
+    pushCloudTasks?.([
+      {
+        id: "cloud-duplicate",
+        repoId: "repo-cloud-duplicate",
+        repoName: "Duplicate Repo",
+        title: "Stale cloud duplicate",
+        stage: "pr",
+        ownerDesktopId: "desktop-trusted",
+        ownerLocalRepoId: "repo-trusted",
+        ownerLocalTaskId: "local-duplicate",
+        ownerOnline: true
+      },
+      {
+        id: "cloud-only",
+        repoId: "repo-cloud-only",
+        repoName: "Cloud-only Repo",
+        title: "Cloud-only task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-cloud",
+        ownerLocalTaskId: "local-cloud-only",
+        ownerOnline: true
+      }
+    ]);
+
+    await firstNonEmptyPublication.promise;
+    expect(acceptedTaskHistory).toEqual([
+      [],
+      [
+        { id: "cloud-duplicate", title: "Fresh LAN duplicate" },
+        { id: "cloud-only", title: "Cloud-only task" },
+        { id: "lan-only", title: "LAN-only task" }
+      ]
+    ]);
+    expect(taskIndex.listRecentTasks).not.toHaveBeenCalled();
   });
 
   it("uses cloud instead of trusted LAN fallback when force-cloud is enabled", async () => {
@@ -763,5 +1021,218 @@ describe("createAppModel", () => {
         authUser: null
       })
     );
+  });
+
+  it("hydrates the full hybrid model and rejects obsolete startup composition work", async () => {
+    const authSession = createSignedInAuthSession();
+    const subscriptions: Array<{
+      onUpdate: Parameters<CloudTaskIndex["subscribeRecentTasks"]>[1];
+      unsubscribe: ReturnType<typeof vi.fn>;
+    }> = [];
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        const unsubscribe = vi.fn();
+        subscriptions.push({ onUpdate, unsubscribe });
+        return unsubscribe;
+      })
+    };
+    const obsoleteLanRead = deferred<
+      Array<{ id: string; repoId: string; title: string; stage: string }>
+    >();
+    let recentTaskReadCount = 0;
+    const freshLanTasks = [
+      {
+        id: "local-duplicate",
+        repoId: "repo-trusted",
+        title: "Fresh LAN duplicate",
+        stage: "review"
+      },
+      {
+        id: "lan-only",
+        repoId: "repo-trusted",
+        title: "LAN-only task",
+        stage: "in progress"
+      }
+    ];
+    const fetchImpl = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/status")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            state: "running",
+            desktopId: "desktop-trusted",
+            desktopName: "Trusted Mac",
+            lanHost: "0.0.0.0",
+            lanPort: 48120,
+            pairingCode: null
+          })
+        } as Response;
+      }
+      if (url.endsWith("/v1/desktops")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: "desktop-trusted",
+              name: "Trusted Mac",
+              online: true,
+              mode: "lan"
+            }
+          ]
+        } as Response;
+      }
+      if (url.endsWith("/v1/repos")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ id: "repo-trusted", name: "Trusted Repo" }]
+        } as Response;
+      }
+      if (url.endsWith("/v1/tasks/recent")) {
+        recentTaskReadCount += 1;
+        const tasks = recentTaskReadCount === 1
+          ? await obsoleteLanRead.promise
+          : freshLanTasks;
+        return { ok: true, status: 200, json: async () => tasks } as Response;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as FetchLike;
+    const model = createAppModel({
+      authSession,
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-trusted",
+          selectedRepoId: "repo-trusted",
+          selectedTaskId: "stale-persisted-task",
+          activeView: "tasks",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-trusted",
+              displayName: "Trusted Mac",
+              lanEndpoints: [
+                {
+                  baseUrl: "http://trusted.lan:48120",
+                  lastSeenAt: "2026-07-10T00:00:00.000Z"
+                }
+              ],
+              lastSeenAt: "2026-07-10T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        bonjourBrowser: createBonjourForDesktop(
+          "desktop-trusted",
+          "Trusted Mac",
+          "trusted.lan",
+          48120
+        )
+      }
+    });
+
+    await model.initialize();
+    expect(subscriptions).toHaveLength(1);
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      selectedRepoId: "repo-trusted",
+      selectedTaskId: "stale-persisted-task"
+    });
+
+    subscriptions[0].onUpdate([
+      {
+        id: "cloud-obsolete",
+        repoId: "repo-obsolete",
+        repoName: "Obsolete Repo",
+        title: "Obsolete cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-other",
+        ownerLocalTaskId: "obsolete-local",
+        ownerOnline: true
+      }
+    ]);
+    await vi.waitFor(() => expect(recentTaskReadCount).toBe(1));
+
+    await model.controller.refresh();
+    expect(subscriptions).toHaveLength(2);
+    expect(subscriptions[0].unsubscribe).toHaveBeenCalledOnce();
+    const currentCloudTasks = [
+      {
+        id: "cloud-only",
+        repoId: "repo-cloud-only",
+        repoName: "Cloud-only Repo",
+        title: "Cloud-only task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-cloud",
+        ownerLocalTaskId: "local-cloud-only",
+        ownerOnline: true
+      },
+      {
+        id: "cloud-duplicate",
+        repoId: "repo-cloud-duplicate",
+        repoName: "Duplicate Repo",
+        title: "Stale cloud duplicate",
+        stage: "pr",
+        ownerDesktopId: "desktop-trusted",
+        ownerLocalRepoId: "repo-trusted",
+        ownerLocalTaskId: "local-duplicate",
+        ownerOnline: true
+      }
+    ];
+    subscriptions[1].onUpdate(currentCloudTasks);
+
+    await vi.waitFor(() => {
+      expect(model.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud-only" }),
+        expect.objectContaining({
+          id: "cloud-duplicate",
+          title: "Stale cloud duplicate",
+          stage: "pr"
+        })
+      ]);
+    });
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      selectedRepoId: "repo-trusted",
+      selectedTaskId: null
+    });
+    const acceptedState = model.sessionStore.getState();
+
+    obsoleteLanRead.resolve([
+      {
+        id: "obsolete-lan-only",
+        repoId: "repo-obsolete",
+        title: "Obsolete LAN task",
+        stage: "review"
+      }
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(model.sessionStore.getState()).toEqual(acceptedState);
+
+    subscriptions[1].onUpdate(currentCloudTasks);
+    await vi.waitFor(() => {
+      expect(model.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud-only" }),
+        expect.objectContaining({
+          id: "cloud-duplicate",
+          title: "Fresh LAN duplicate",
+          stage: "review"
+        }),
+        expect.objectContaining({ id: "lan-only" })
+      ]);
+    });
+    expect(recentTaskReadCount).toBe(2);
   });
 });

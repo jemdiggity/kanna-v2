@@ -75,4 +75,8 @@ export interface TaskSummary {
   snippet?: string | null;
   agentProvider?: string | null;
   agentType?: "pty" | "agent" | null;
+  ownerDesktopId?: string;
+  ownerLocalRepoId?: string;
+  ownerLocalTaskId?: string;
+  ownerOnline?: boolean;
 }

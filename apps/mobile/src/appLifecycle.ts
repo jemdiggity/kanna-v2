@@ -7,6 +7,32 @@ export function shouldRefreshOnAppStateTransition(
   return previousState !== "active" && nextState === "active";
 }
 
+export type ForegroundTransitionAction = "none" | "refresh" | "reload";
+
+export interface ForegroundTransitionInput {
+  previousState: AppStateStatus;
+  nextState: AppStateStatus;
+  hasDownloadedUpdate: boolean;
+}
+
+export function getForegroundTransitionAction({
+  previousState,
+  nextState,
+  hasDownloadedUpdate
+}: ForegroundTransitionInput): ForegroundTransitionAction {
+  if (
+    hasDownloadedUpdate &&
+    previousState === "background" &&
+    nextState === "active"
+  ) {
+    return "reload";
+  }
+
+  return shouldRefreshOnAppStateTransition(previousState, nextState)
+    ? "refresh"
+    : "none";
+}
+
 export interface OtaForegroundCheckInput {
   previousState: AppStateStatus;
   nextState: AppStateStatus;

@@ -39,6 +39,7 @@ export interface TaskAgentSubscription {
 }
 
 export interface KannaTransport {
+  getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
@@ -62,6 +63,7 @@ export interface KannaTransport {
 }
 
 export interface KannaClient {
+  getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
@@ -86,6 +88,12 @@ export interface KannaClient {
 
 export function createKannaClient(transport: KannaTransport): KannaClient {
   return {
+    ...(transport.getTaskRouteIdentity
+      ? {
+          getTaskRouteIdentity: (taskId: string) =>
+            transport.getTaskRouteIdentity!(taskId)
+        }
+      : {}),
     getStatus: () => transport.getStatus(),
     listDesktops: () => transport.listDesktops(),
     listRepos: () => transport.listRepos(),

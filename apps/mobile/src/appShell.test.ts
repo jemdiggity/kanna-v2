@@ -7,29 +7,35 @@ import {
 } from "./appShell";
 
 describe("isTaskDetailVisible", () => {
-  it("treats a selected task outside More as the pushed detail screen", () => {
-    expect(isTaskDetailVisible("task-1", "tasks")).toBe(true);
-    expect(isTaskDetailVisible("task-1", "recent")).toBe(true);
-    expect(isTaskDetailVisible("task-1", "more")).toBe(false);
-    expect(isTaskDetailVisible(null, "tasks")).toBe(false);
-  });
+  it.each([
+    [false, "connected", false, "tasks"],
+    [false, "idle", true, "tasks"],
+    [false, "connecting", true, "tasks"],
+    [false, "error", true, "tasks"],
+    [true, "connected", true, "tasks"],
+    [true, "connected", true, "recent"],
+    [false, "connected", true, "more"]
+  ] as const)(
+    "returns %s for connection=%s, resolved=%s, view=%s",
+    (expected, connectionState, hasSelectedTask, activeView) => {
+      expect(
+        isTaskDetailVisible(connectionState, hasSelectedTask, activeView)
+      ).toBe(expected);
+    }
+  );
 });
 
 describe("shouldShowFloatingToolbar", () => {
-  it("hides the toolbar only while task detail is visible", () => {
-    expect(shouldShowFloatingToolbar("connected", "task-1", "tasks")).toBe(false);
-    expect(shouldShowFloatingToolbar("connected", "task-1", "more")).toBe(true);
-    expect(shouldShowFloatingToolbar("connected", null, "tasks")).toBe(true);
-    expect(shouldShowFloatingToolbar("idle", null, "tasks")).toBe(true);
-    expect(shouldShowFloatingToolbar("idle", "task-1", "tasks")).toBe(true);
+  it("is the inverse of resolved task detail visibility", () => {
+    expect(shouldShowFloatingToolbar(false)).toBe(true);
+    expect(shouldShowFloatingToolbar(true)).toBe(false);
   });
 });
 
 describe("shouldShowTopBar", () => {
-  it("keeps profile access visible on the disconnected task list", () => {
-    expect(shouldShowTopBar("idle", null, "tasks")).toBe(true);
-    expect(shouldShowTopBar("error", null, "tasks")).toBe(true);
-    expect(shouldShowTopBar("connected", "task-1", "tasks")).toBe(false);
+  it("is the inverse of resolved task detail visibility", () => {
+    expect(shouldShowTopBar(false)).toBe(true);
+    expect(shouldShowTopBar(true)).toBe(false);
   });
 });
 

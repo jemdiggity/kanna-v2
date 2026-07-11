@@ -4,12 +4,13 @@ import {
   type BonjourBrowser
 } from "./lib/discovery/bonjour";
 import { resolveTrustedBonjourEndpoint } from "./lib/discovery/trustedBonjour";
-import type { MobileAuthSession } from "./lib/firebase/auth";
+import type { MobileAuthSession, MobileAuthState } from "./lib/firebase/auth";
 import { createConfiguredMobileAuthSession } from "./lib/firebase/sdk";
 import {
   createFirestoreTaskIndex,
   type CloudDesktopRecord,
-  type CloudTaskIndex
+  type CloudTaskIndex,
+  type CloudTaskIndexError
 } from "./lib/firebase/taskIndex";
 import { createLanTransport, type FetchLike } from "./lib/transports/lanTransport";
 import {
@@ -20,6 +21,7 @@ import {
   createRemoteTransport,
   type RemoteDesktopRecord
 } from "./lib/transports/remoteTransport";
+import { createCloudLanClient } from "./lib/sources/cloudLanClient";
 import { readExpoConfig } from "./lib/expoConfig";
 import { createRootNavigator } from "./navigation/RootNavigator";
 import { installE2eTrustSeedHandler } from "./e2eTrustSeed";
@@ -34,9 +36,11 @@ import {
   type TrustedDesktopRecord
 } from "./state/sessionPersistence";
 import { readKannaExpoExtra } from "./mobileEnvironment";
-import type { RepoSummary, TaskSummary } from "./lib/api/types";
+import type { TaskSummary } from "./lib/api/types";
 
 const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
+const CLOUD_TASK_RECOVERY_INITIAL_RETRY_MS = 1_000;
+const CLOUD_TASK_RECOVERY_MAX_RETRY_MS = 30_000;
 
 interface ExpoPublicEnv {
   EXPO_PUBLIC_KANNA_RELAY_URL?: string;
@@ -68,6 +72,14 @@ interface AppModelOptions {
     getIdToken(forceRefresh?: boolean): Promise<string | null>;
     onAuthError(): void;
   }) => RelayDesktopClient;
+}
+
+interface ResolvedAppClient {
+  client: KannaClient;
+  listRecentTasksWithSupplement?: (
+    onSupplement: (tasks: TaskSummary[]) => void
+  ) => Promise<TaskSummary[]>;
+  dispose(): void;
 }
 
 export interface CreateAppModelInput {
@@ -110,6 +122,20 @@ export function resolveForceCloud(env: ExpoPublicEnv = readExpoPublicEnv()): boo
   return rawValue === "1" || rawValue === "true" || rawValue === "yes";
 }
 
+function signedInUid(authState: MobileAuthState): string | null {
+  return authState.status === "signedIn" ? authState.user.uid : null;
+}
+
+function formatCloudTaskIndexError(indexError: CloudTaskIndexError): Error {
+  const scope = indexError.desktopId
+    ? `${indexError.scope} (${indexError.desktopId})`
+    : indexError.scope;
+  const message = indexError.error instanceof Error
+    ? indexError.error.message
+    : String(indexError.error);
+  return new Error(`Cloud task index ${scope}: ${message}`);
+}
+
 export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   const fetchImpl = input.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   const persistence = input.persistence;
@@ -124,12 +150,38 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   // eagerly would call getFirestore() before any Firebase app exists in
   // LAN-only / no-Firebase paths.
   let cloudTaskIndex: ReturnType<typeof createFirestoreTaskIndex> | null = null;
-  let liveCloudHasTasks = false;
   let liveCloudTasks: TaskSummary[] = [];
-  let liveCloudSubscriptionActive = false;
+  let liveCloudTasksUid: string | null = null;
+  let liveCloudTasksReady = false;
+  let liveCloudTasksReadError: unknown | null = null;
+  let liveSubscriptionEpoch = 0;
+  let clientGeneration = 0;
+  let currentLiveTaskRepublish: (() => Promise<void>) | null = null;
+  let currentLiveTaskRecoveryInvalidation: (() => void) | null = null;
+  let activeAuthUid = signedInUid(authSession.getState());
+  // Native discovery can settle after the first cloud snapshot and relay
+  // presence read. Feed it through the same complete-snapshot drain so the
+  // newly reachable LAN source is incorporated without publishing a partial
+  // workspace or waiting for an unrelated cloud callback.
+  bonjourBrowser.subscribe(() => {
+    if (
+      forceCloud ||
+      !hasTrustedLanPeer(sessionStore.getState().trustedDesktops)
+    ) {
+      return;
+    }
+    void currentLiveTaskRepublish?.();
+  });
+  const invalidateLiveCloudState = () => {
+    liveSubscriptionEpoch += 1;
+    liveCloudTasks = [];
+    liveCloudTasksUid = null;
+    liveCloudTasksReady = false;
+    liveCloudTasksReadError = null;
+  };
   const getCloudTaskIndex = () =>
     (cloudTaskIndex ??= options.taskIndex ?? createFirestoreTaskIndex());
-  const resolveClient = () =>
+  const resolveClient = (generation: number) =>
     createClientForMode({
       authSession,
       bonjourBrowser,
@@ -139,28 +191,275 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       getSelectedDesktopId: () => sessionStore.getState().selectedDesktopId,
       getTrustedDesktops: () => sessionStore.getState().trustedDesktops,
       getLiveCloudTasks: () => liveCloudTasks,
-      hasLiveCloudTasks: () => liveCloudHasTasks,
-      isLiveCloudSubscriptionActive: () => liveCloudSubscriptionActive,
+      getLiveCloudTasksUid: () => liveCloudTasksUid,
+      getLiveCloudTasksReadError: () => liveCloudTasksReadError,
+      isLiveCloudTasksReady: () => liveCloudTasksReady,
+      onActiveDesktopIdsChanged: () => {
+        if (generation === clientGeneration) {
+          return currentLiveTaskRepublish?.();
+        }
+      },
       relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
         extraRelayUrl: extra?.relayUrl
       }),
       taskIndex: options.taskIndex
     });
-  let activeClient = resolveClient();
-  const client = createDelegatingClient(() => activeClient);
+  let activeClient = resolveClient(clientGeneration);
+  const replaceActiveClient = () => {
+    const previousClient = activeClient;
+    const nextGeneration = clientGeneration + 1;
+    currentLiveTaskRecoveryInvalidation?.();
+    currentLiveTaskRepublish = null;
+    const nextClient = resolveClient(nextGeneration);
+    clientGeneration = nextGeneration;
+    activeClient = nextClient;
+    previousClient.dispose();
+  };
+  const client = createDelegatingClient(() => activeClient.client);
   const controller = createMobileController(client, sessionStore, authSession, {
-    subscribeCloudTasks: (uid, onUpdate) => {
-      liveCloudSubscriptionActive = true;
-      const unsubscribe = getCloudTaskIndex().subscribeRecentTasks(uid, (tasks) => {
-        liveCloudTasks = tasks;
-        liveCloudHasTasks = tasks.length > 0;
-        onUpdate(tasks);
-      });
+    subscribeCloudTasks: (uid, onUpdate, onError) => {
+      const epoch = ++liveSubscriptionEpoch;
+      let updateRevision = 0;
+      let recoveryRevision = 0;
+      let taskIndexSubscriptionRevision = 0;
+      let taskIndexUnsubscribe: (() => void) | null = null;
+      let taskIndexRestartTimer: ReturnType<typeof setTimeout> | null = null;
+      let taskIndexRestartAttempt = 0;
+      let presenceRepublishPending = false;
+      let livePublicationPendingGeneration: number | null = null;
+      let livePublicationDrain: Promise<void> | null = null;
+      let currentTaskRecovery: {
+        revision: number;
+        succeeded: boolean;
+      } | null = null;
+      liveCloudTasks = [];
+      liveCloudTasksUid = uid;
+      liveCloudTasksReady = false;
+      const isCurrent = (revision: number, generation: number) =>
+        epoch === liveSubscriptionEpoch &&
+        revision === updateRevision &&
+        generation === clientGeneration &&
+        liveCloudTasksUid === uid;
+      const publishCurrentTasks = async (
+        revision: number,
+        cloudAuthoritative = true,
+        reportError = true
+      ): Promise<boolean> => {
+        const generation = clientGeneration;
+        const source = activeClient;
+        let published = false;
+        try {
+          const tasks = await (
+            source.listRecentTasksWithSupplement
+              ? source.listRecentTasksWithSupplement((supplement) => {
+                  if (isCurrent(revision, generation)) {
+                    onUpdate(supplement, { cloudAuthoritative });
+                  }
+                })
+              : source.client.listRecentTasks()
+          );
+          if (isCurrent(revision, generation)) {
+            onUpdate(tasks, { cloudAuthoritative });
+            published = true;
+          }
+        } catch (error) {
+          if (reportError && isCurrent(revision, generation)) onError?.(error);
+        }
+        return published;
+      };
+      const drainLivePublicationQueue = (): Promise<void> => {
+        if (livePublicationDrain) return livePublicationDrain;
+        const drain = (async () => {
+          while (livePublicationPendingGeneration !== null) {
+            const generation = livePublicationPendingGeneration;
+            livePublicationPendingGeneration = null;
+            if (
+              epoch !== liveSubscriptionEpoch ||
+              liveCloudTasksUid !== uid ||
+              !liveCloudTasksReady ||
+              generation !== clientGeneration
+            ) {
+              continue;
+            }
+            const revision = ++updateRevision;
+            await publishCurrentTasks(revision);
+          }
+        })().finally(() => {
+          if (livePublicationDrain === drain) {
+            livePublicationDrain = null;
+            if (livePublicationPendingGeneration !== null) {
+              void drainLivePublicationQueue();
+            }
+          }
+        });
+        livePublicationDrain = drain;
+        return drain;
+      };
+      const enqueueCurrentLiveTasks = (): Promise<void> => {
+        if (
+          epoch !== liveSubscriptionEpoch ||
+          liveCloudTasksUid !== uid ||
+          !liveCloudTasksReady
+        ) {
+          return Promise.resolve();
+        }
+        livePublicationPendingGeneration = clientGeneration;
+        return drainLivePublicationQueue();
+      };
+      const republishCurrentLiveTasks = async () => {
+        if (
+          epoch !== liveSubscriptionEpoch ||
+          liveCloudTasksUid !== uid ||
+          !liveCloudTasksReady
+        ) {
+          return;
+        }
+        if (currentTaskRecovery) {
+          presenceRepublishPending = true;
+          return;
+        }
+        presenceRepublishPending = false;
+        await enqueueCurrentLiveTasks();
+      };
+      currentLiveTaskRepublish = republishCurrentLiveTasks;
+      const clearTaskIndexRestartTimer = () => {
+        if (taskIndexRestartTimer === null) return;
+        clearTimeout(taskIndexRestartTimer);
+        taskIndexRestartTimer = null;
+      };
+      const stopTaskIndexSubscription = () => {
+        clearTaskIndexRestartTimer();
+        taskIndexSubscriptionRevision += 1;
+        const unsubscribe = taskIndexUnsubscribe;
+        taskIndexUnsubscribe = null;
+        unsubscribe?.();
+      };
+      const invalidateTaskIndexRecovery = () => {
+        clearTaskIndexRestartTimer();
+        recoveryRevision += 1;
+        currentTaskRecovery = null;
+        presenceRepublishPending = false;
+      };
+      currentLiveTaskRecoveryInvalidation = invalidateTaskIndexRecovery;
+      let startTaskIndexSubscription: (generation: number) => void = () => undefined;
+      const isTaskIndexOwnerCurrent = (generation: number) =>
+        epoch === liveSubscriptionEpoch &&
+        liveCloudTasksUid === uid &&
+        generation === clientGeneration;
+      const scheduleTaskIndexSubscriptionRestart = (generation: number) => {
+        clearTaskIndexRestartTimer();
+        if (!isTaskIndexOwnerCurrent(generation)) return;
+        const delay = Math.min(
+          CLOUD_TASK_RECOVERY_INITIAL_RETRY_MS * 2 ** taskIndexRestartAttempt,
+          CLOUD_TASK_RECOVERY_MAX_RETRY_MS
+        );
+        taskIndexRestartAttempt += 1;
+        const restartTimer = setTimeout(() => {
+          if (taskIndexRestartTimer !== restartTimer) return;
+          taskIndexRestartTimer = null;
+          if (!isTaskIndexOwnerCurrent(generation)) return;
+          startTaskIndexSubscription(generation);
+        }, delay);
+        taskIndexRestartTimer = restartTimer;
+      };
+      const recoverCurrentTasks = (indexError: CloudTaskIndexError) => {
+        if (epoch !== liveSubscriptionEpoch || liveCloudTasksUid !== uid) return;
+        if (indexError.scope === "document") {
+          onError?.(formatCloudTaskIndexError(indexError));
+          return;
+        }
+        stopTaskIndexSubscription();
+        onError?.(formatCloudTaskIndexError(indexError));
+        livePublicationPendingGeneration = null;
+        const revision = ++updateRevision;
+        const generation = clientGeneration;
+        const recovery = {
+          revision: ++recoveryRevision,
+          succeeded: false
+        };
+        currentTaskRecovery = recovery;
+        const isCurrentRecovery = () =>
+          currentTaskRecovery === recovery &&
+          recovery.revision === recoveryRevision &&
+          isCurrent(revision, generation);
+        void getCloudTaskIndex().listRecentTasks(uid).then((tasks) => {
+          if (!isCurrentRecovery()) {
+            return false;
+          }
+          liveCloudTasks = tasks;
+          liveCloudTasksUid = uid;
+          liveCloudTasksReady = true;
+          liveCloudTasksReadError = null;
+          return publishCurrentTasks(revision);
+        }).catch((error) => {
+          if (!isCurrentRecovery()) {
+            return false;
+          }
+          liveCloudTasksReadError = error;
+          return publishCurrentTasks(revision, false, false);
+        }).then((published) => {
+          if (!published || !isCurrentRecovery()) return;
+          recovery.succeeded = published;
+        }).finally(() => {
+          if (currentTaskRecovery === recovery) {
+            currentTaskRecovery = null;
+            // A one-shot read can repair the data snapshot, but only a live
+            // listener callback proves listener health and resets backoff.
+            scheduleTaskIndexSubscriptionRestart(generation);
+            if (recovery.succeeded && presenceRepublishPending) {
+              presenceRepublishPending = false;
+              void republishCurrentLiveTasks();
+            }
+          }
+        });
+      };
+      startTaskIndexSubscription = (generation) => {
+        if (!isTaskIndexOwnerCurrent(generation)) return;
+        clearTaskIndexRestartTimer();
+        const subscriptionRevision = ++taskIndexSubscriptionRevision;
+        const isCurrentSubscription = () =>
+          epoch === liveSubscriptionEpoch &&
+          liveCloudTasksUid === uid &&
+          subscriptionRevision === taskIndexSubscriptionRevision;
+        const unsubscribe = getCloudTaskIndex().subscribeRecentTasks(
+          uid,
+          (tasks) => {
+            if (!isCurrentSubscription()) return;
+            presenceRepublishPending = false;
+            currentLiveTaskRepublish = republishCurrentLiveTasks;
+            liveCloudTasks = tasks;
+            liveCloudTasksUid = uid;
+            liveCloudTasksReady = true;
+            liveCloudTasksReadError = null;
+            taskIndexRestartAttempt = 0;
+            void enqueueCurrentLiveTasks();
+          },
+          (indexError) => {
+            if (isCurrentSubscription()) recoverCurrentTasks(indexError);
+          }
+        );
+        if (isCurrentSubscription()) {
+          taskIndexUnsubscribe = unsubscribe;
+        } else {
+          unsubscribe();
+        }
+      };
+      startTaskIndexSubscription(clientGeneration);
       return () => {
-        liveCloudSubscriptionActive = false;
-        liveCloudTasks = [];
-        liveCloudHasTasks = false;
-        unsubscribe();
+        livePublicationPendingGeneration = null;
+        invalidateTaskIndexRecovery();
+        if (
+          currentLiveTaskRecoveryInvalidation === invalidateTaskIndexRecovery
+        ) {
+          currentLiveTaskRecoveryInvalidation = null;
+        }
+        if (currentLiveTaskRepublish === republishCurrentLiveTasks) {
+          currentLiveTaskRepublish = null;
+        }
+        if (epoch === liveSubscriptionEpoch) {
+          invalidateLiveCloudState();
+        }
+        stopTaskIndexSubscription();
       };
     },
   });
@@ -184,7 +483,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       sessionStore.hydrateContext(persistedContext);
       lastSavedContextJson = JSON.stringify(persistedContext);
     }
-    activeClient = resolveClient();
+    replaceActiveClient();
   };
   const persistContext = () => {
     const context = sessionStore.getPersistedContext();
@@ -198,8 +497,13 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   };
 
   sessionStore.subscribe(persistContext);
-  authSession.subscribe(() => {
-    activeClient = resolveClient();
+  authSession.subscribe((authState) => {
+    const nextAuthUid = signedInUid(authState);
+    if (nextAuthUid !== activeAuthUid) {
+      invalidateLiveCloudState();
+      activeAuthUid = nextAuthUid;
+      replaceActiveClient();
+    }
   });
 
   if (options.enableE2eTrustSeed) {
@@ -224,7 +528,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     sessionStore,
     setForceCloud(enabled) {
       forceCloud = enabled;
-      activeClient = resolveClient();
+      replaceActiveClient();
     }
   };
 }
@@ -238,8 +542,10 @@ function createClientForMode({
   getSelectedDesktopId,
   getTrustedDesktops,
   getLiveCloudTasks,
-  hasLiveCloudTasks,
-  isLiveCloudSubscriptionActive,
+  getLiveCloudTasksUid,
+  getLiveCloudTasksReadError,
+  isLiveCloudTasksReady,
+  onActiveDesktopIdsChanged,
   relayUrl,
   taskIndex,
 }: {
@@ -255,11 +561,13 @@ function createClientForMode({
   getSelectedDesktopId(): string | null;
   getTrustedDesktops(): readonly TrustedDesktopRecord[];
   getLiveCloudTasks(): TaskSummary[];
-  hasLiveCloudTasks(): boolean;
-  isLiveCloudSubscriptionActive(): boolean;
+  getLiveCloudTasksUid(): string | null;
+  getLiveCloudTasksReadError(): unknown | null;
+  isLiveCloudTasksReady(): boolean;
+  onActiveDesktopIdsChanged(): Promise<void> | void;
   relayUrl: string | null;
   taskIndex?: CloudTaskIndex;
-}): KannaClient {
+}): ResolvedAppClient {
   const authState = authSession.getState();
   if (authState.status === "signedIn" && relayUrl) {
     const relayClient = createRelayClient({
@@ -267,23 +575,61 @@ function createClientForMode({
       getIdToken: (forceRefresh) => authSession.getIdToken(forceRefresh),
       onAuthError: () => authSession.notifyAuthExpired(),
     });
+    let disposed = false;
+    let lastActiveDesktopIds: Set<string> | null = null;
+    let activeDesktopIdsRefresh: Promise<void> | null = null;
+    const refreshActiveDesktopIds = () => {
+      if (activeDesktopIdsRefresh) {
+        return;
+      }
+      let presenceRead: Promise<Set<string>>;
+      try {
+        presenceRead = relayClient.listActiveDesktopIds();
+      } catch {
+        return;
+      }
+      const refresh = presenceRead
+        .then((activeDesktopIds) => {
+          if (disposed) {
+            return;
+          }
+          const nextActiveDesktopIds = new Set(activeDesktopIds);
+          if (!areStringSetsEqual(lastActiveDesktopIds, nextActiveDesktopIds)) {
+            lastActiveDesktopIds = nextActiveDesktopIds;
+            return onActiveDesktopIdsChanged();
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (activeDesktopIdsRefresh === refresh) {
+            activeDesktopIdsRefresh = null;
+          }
+        });
+      activeDesktopIdsRefresh = refresh;
+    };
     const resolvedTaskIndex = taskIndex ?? createFirestoreTaskIndex();
     const listCloudTasksForRouting = async () => {
-      const activeDesktopIds = await relayClient.listActiveDesktopIds().catch(() => null);
-      const liveTasks = getLiveCloudTasks();
-      if (liveTasks.length > 0 || hasLiveCloudTasks()) {
-        return preferActiveCloudTaskRoutes(liveTasks, activeDesktopIds);
+      refreshActiveDesktopIds();
+      let tasks: TaskSummary[];
+      if (
+        isLiveCloudTasksReady() &&
+        getLiveCloudTasksUid() === authState.user.uid
+      ) {
+        tasks = getLiveCloudTasks();
+      } else {
+        const readError = getLiveCloudTasksReadError();
+        if (readError !== null) {
+          throw readError;
+        }
+        tasks = await resolvedTaskIndex.listRecentTasks(authState.user.uid);
       }
-      return preferActiveCloudTaskRoutes(
-        await resolvedTaskIndex.listRecentTasks(authState.user.uid),
-        activeDesktopIds
-      );
+      return preferActiveCloudTaskRoutes(tasks, lastActiveDesktopIds);
     };
     const listCloudDesktopRecords = async () => {
-      const activeDesktopIds = await relayClient.listActiveDesktopIds().catch(() => null);
+      refreshActiveDesktopIds();
       const records = await resolvedTaskIndex.listDesktops(authState.user.uid);
       return records.map((record) =>
-        mapCloudDesktopRecord(record, activeDesktopIds)
+        mapCloudDesktopRecord(record, lastActiveDesktopIds)
       );
     };
     const cloudClient = createKannaClient(
@@ -297,32 +643,48 @@ function createClientForMode({
         listCloudTasks: listCloudTasksForRouting,
       }),
     );
-    const lanClient = createTrustedLanFallbackClient({
+    const trustedLanClient = createTrustedLanFallbackClient({
       bonjourBrowser,
       fetchImpl,
       getSelectedDesktopId,
       getTrustedDesktops
     });
 
-    return createCloudWithLanFallbackClient(cloudClient, lanClient, {
-      getLiveCloudTasks,
-      hasLiveCloudTasks,
-      isLiveCloudSubscriptionActive,
-      isLanFallbackEnabled: () =>
-        !forceCloud && hasTrustedLanPeer(getTrustedDesktops())
-    });
+    const composedClient = createCloudLanClient(
+      cloudClient,
+      trustedLanClient.client,
+      {
+        isLanEnabled: () =>
+          !forceCloud && hasTrustedLanPeer(getTrustedDesktops()),
+        lanClientForDesktop: trustedLanClient.clientForDesktop
+      }
+    );
+
+    return {
+      client: composedClient,
+      listRecentTasksWithSupplement: (onSupplement) =>
+        composedClient.listRecentTasksWithSupplement(onSupplement),
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        relayClient.close();
+      }
+    };
   }
 
   if (hasTrustedLanPeer(getTrustedDesktops())) {
-    return createTrustedLanFallbackClient({
-      bonjourBrowser,
-      fetchImpl,
-      getSelectedDesktopId,
-      getTrustedDesktops
-    });
+    return {
+      client: createTrustedLanFallbackClient({
+        bonjourBrowser,
+        fetchImpl,
+        getSelectedDesktopId,
+        getTrustedDesktops
+      }).client,
+      dispose() {}
+    };
   }
 
-  return createDisconnectedClient();
+  return { client: createDisconnectedClient(), dispose() {} };
 }
 
 function normalizeOptionalString(value: string | null | undefined): string | null {
@@ -379,119 +741,6 @@ function createDisconnectedClient(): KannaClient {
   };
 }
 
-export interface CloudWithLanFallbackOptions {
-  getLiveCloudTasks?: () => TaskSummary[];
-  hasLiveCloudTasks?: () => boolean;
-  isLiveCloudSubscriptionActive?: () => boolean;
-  isLanFallbackEnabled(): boolean;
-}
-
-export function createCloudWithLanFallbackClient(
-  cloudClient: KannaClient,
-  lanClient: KannaClient,
-  options: CloudWithLanFallbackOptions
-): KannaClient {
-  const lanFallbackEnabled = () => options.isLanFallbackEnabled();
-  const liveCloudTasks = () => options.getLiveCloudTasks?.() ?? [];
-  const cloudHasVisibleTasks = () =>
-    liveCloudTasks().length > 0 || options.hasLiveCloudTasks?.() === true;
-  const liveCloudSubscriptionActive = () =>
-    options.isLiveCloudSubscriptionActive?.() === true;
-
-  const listRecentTasks = async () => {
-    const tasks = liveCloudTasks();
-    if (tasks.length > 0) {
-      return tasks;
-    }
-    if (liveCloudSubscriptionActive()) {
-      return lanFallbackEnabled() ? lanClient.listRecentTasks() : [];
-    }
-    if (!lanFallbackEnabled()) return cloudClient.listRecentTasks();
-    return lanClient.listRecentTasks();
-  };
-
-  const useLanFallback = () => lanFallbackEnabled() && !cloudHasVisibleTasks();
-
-  return {
-    getStatus: async () => {
-      if (!lanFallbackEnabled()) {
-        return cloudClient.getStatus();
-      }
-
-      try {
-        if (cloudHasVisibleTasks()) {
-          return cloudClient.getStatus();
-        }
-      } catch {
-      }
-
-      return lanClient.getStatus().catch(() => cloudClient.getStatus());
-    },
-    listDesktops: async () => {
-      const desktops = await cloudClient.listDesktops();
-      return desktops.length || !lanFallbackEnabled()
-        ? desktops
-        : lanClient.listDesktops().catch(() => desktops);
-    },
-    listRepos: async () => {
-      const repos = reposFromTasks(liveCloudTasks());
-      if (repos.length > 0) {
-        return repos;
-      }
-      if (liveCloudSubscriptionActive()) {
-        return lanFallbackEnabled() ? lanClient.listRepos() : [];
-      }
-      if (!lanFallbackEnabled()) return cloudClient.listRepos();
-      if (useLanFallback()) {
-        return lanClient.listRepos();
-      }
-      return [];
-    },
-    listRepoTasks: async (repoId) => {
-      const tasks = liveCloudTasks();
-      if (tasks.length > 0) {
-        return tasks.filter((task) => task.repoId === repoId);
-      }
-      if (liveCloudSubscriptionActive()) {
-        return lanFallbackEnabled() ? lanClient.listRepoTasks(repoId) : [];
-      }
-      if (!lanFallbackEnabled()) return cloudClient.listRepoTasks(repoId);
-      if (useLanFallback()) {
-        return lanClient.listRepoTasks(repoId);
-      }
-      return [];
-    },
-    listRecentTasks,
-    searchTasks: (query) =>
-      useLanFallback() ? lanClient.searchTasks(query) : cloudClient.searchTasks(query),
-    createTask: (input) =>
-      lanFallbackEnabled() ? lanClient.createTask(input) : cloudClient.createTask(input),
-    runMergeAgent: (taskId) =>
-      useLanFallback()
-        ? lanClient.runMergeAgent(taskId)
-        : cloudClient.runMergeAgent(taskId),
-    advanceTaskStage: (taskId) =>
-      useLanFallback()
-        ? lanClient.advanceTaskStage(taskId)
-        : cloudClient.advanceTaskStage(taskId),
-    closeTask: (taskId) =>
-      useLanFallback() ? lanClient.closeTask(taskId) : cloudClient.closeTask(taskId),
-    sendTaskInput: (taskId, input) =>
-      useLanFallback()
-        ? lanClient.sendTaskInput(taskId, input)
-        : cloudClient.sendTaskInput(taskId, input),
-    observeTaskTerminal: (taskId, listener) =>
-      useLanFallback()
-        ? lanClient.observeTaskTerminal(taskId, listener)
-        : cloudClient.observeTaskTerminal(taskId, listener),
-    observeTaskAgent: (taskId, listener) =>
-      useLanFallback()
-        ? lanClient.observeTaskAgent(taskId, listener)
-        : cloudClient.observeTaskAgent(taskId, listener),
-    createPairingSession: () => lanClient.createPairingSession()
-  };
-}
-
 function createTrustedLanFallbackClient({
   bonjourBrowser,
   fetchImpl,
@@ -502,44 +751,84 @@ function createTrustedLanFallbackClient({
   fetchImpl: FetchLike;
   getSelectedDesktopId(): string | null;
   getTrustedDesktops(): readonly TrustedDesktopRecord[];
-}): KannaClient {
-  let validatedBaseUrl: string | null = null;
+}): {
+  client: KannaClient;
+  clientForDesktop(desktopId: string): KannaClient | null;
+} {
+  const validatedBaseUrls = new Map<string, string>();
+  let lastValidatedDesktopId: string | null = null;
   const clientForBaseUrl = (resolvedBaseUrl: string) =>
     createKannaClient(createLanTransport(resolvedBaseUrl, fetchImpl));
-  const resolveClient = async () => {
+  const resolveClient = async (desktopId: string | null) => {
+    const trustedDesktops = desktopId
+      ? getTrustedDesktops().filter((desktop) => desktop.desktopId === desktopId)
+      : getTrustedDesktops();
+    const services = desktopId
+      ? bonjourBrowser
+          .getServices()
+          .filter((service) => service.txt.desktopId === desktopId)
+      : bonjourBrowser.getServices();
     const endpoint = await resolveTrustedBonjourEndpoint({
       fetchImpl,
-      services: bonjourBrowser.getServices(),
-      selectedDesktopId: getSelectedDesktopId(),
-      trustedDesktops: getTrustedDesktops()
+      services,
+      selectedDesktopId: desktopId ?? getSelectedDesktopId(),
+      trustedDesktops
     });
     if (!endpoint) {
       return createDisconnectedClient();
     }
-    validatedBaseUrl = endpoint.baseUrl;
+    validatedBaseUrls.set(endpoint.desktopId, endpoint.baseUrl);
+    lastValidatedDesktopId = endpoint.desktopId;
     return clientForBaseUrl(endpoint.baseUrl);
   };
-  const currentClient = () =>
-    validatedBaseUrl ? clientForBaseUrl(validatedBaseUrl) : createDisconnectedClient();
-
-  return {
-    getStatus: async () => (await resolveClient()).getStatus(),
-    listDesktops: async () => (await resolveClient()).listDesktops(),
-    listRepos: async () => (await resolveClient()).listRepos(),
-    listRepoTasks: async (repoId) => (await resolveClient()).listRepoTasks(repoId),
-    listRecentTasks: async () => (await resolveClient()).listRecentTasks(),
-    searchTasks: async (query) => (await resolveClient()).searchTasks(query),
-    createTask: async (input) => (await resolveClient()).createTask(input),
-    runMergeAgent: async (taskId) => (await resolveClient()).runMergeAgent(taskId),
-    advanceTaskStage: async (taskId) => (await resolveClient()).advanceTaskStage(taskId),
-    closeTask: async (taskId) => (await resolveClient()).closeTask(taskId),
+  const currentClient = (desktopId: string | null) => {
+    const cachedDesktopId = desktopId ?? lastValidatedDesktopId;
+    const baseUrl = cachedDesktopId
+      ? validatedBaseUrls.get(cachedDesktopId)
+      : undefined;
+    return baseUrl ? clientForBaseUrl(baseUrl) : createDisconnectedClient();
+  };
+  const createResolvingClient = (desktopId: string | null): KannaClient => ({
+    getStatus: async () => (await resolveClient(desktopId)).getStatus(),
+    listDesktops: async () => (await resolveClient(desktopId)).listDesktops(),
+    listRepos: async () => (await resolveClient(desktopId)).listRepos(),
+    listRepoTasks: async (repoId) =>
+      (await resolveClient(desktopId)).listRepoTasks(repoId),
+    listRecentTasks: async () => (await resolveClient(desktopId)).listRecentTasks(),
+    searchTasks: async (query) =>
+      (await resolveClient(desktopId)).searchTasks(query),
+    createTask: async (input) => (await resolveClient(desktopId)).createTask(input),
+    runMergeAgent: async (taskId) =>
+      (await resolveClient(desktopId)).runMergeAgent(taskId),
+    advanceTaskStage: async (taskId) =>
+      (await resolveClient(desktopId)).advanceTaskStage(taskId),
+    closeTask: async (taskId) =>
+      (await resolveClient(desktopId)).closeTask(taskId),
     sendTaskInput: async (taskId, input) =>
-      (await resolveClient()).sendTaskInput(taskId, input),
+      (await resolveClient(desktopId)).sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>
-      currentClient().observeTaskTerminal(taskId, listener),
+      currentClient(desktopId).observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>
-      currentClient().observeTaskAgent(taskId, listener),
-    createPairingSession: async () => (await resolveClient()).createPairingSession()
+      currentClient(desktopId).observeTaskAgent(taskId, listener),
+    createPairingSession: async () =>
+      (await resolveClient(desktopId)).createPairingSession()
+  });
+  const client = createResolvingClient(null);
+  return {
+    client,
+    clientForDesktop(desktopId) {
+      if (
+        !getTrustedDesktops().some(
+          (desktop) => desktop.desktopId === desktopId
+        )
+      ) {
+        return null;
+      }
+      const validatedBaseUrl = validatedBaseUrls.get(desktopId);
+      return validatedBaseUrl
+        ? clientForBaseUrl(validatedBaseUrl)
+        : createResolvingClient(desktopId);
+    }
   };
 }
 
@@ -549,26 +838,30 @@ function hasTrustedLanPeer(
   return trustedDesktops.length > 0;
 }
 
-function reposFromTasks(tasks: readonly TaskSummary[]): RepoSummary[] {
-  const reposById = new Map<string, string>();
-  for (const task of tasks) {
-    if (reposById.has(task.repoId)) continue;
-    reposById.set(task.repoId, task.repoName?.trim() || task.repoId);
+function areStringSetsEqual(
+  left: ReadonlySet<string> | null,
+  right: ReadonlySet<string>
+): boolean {
+  if (!left || left.size !== right.size) {
+    return false;
   }
-  return Array.from(reposById, ([id, name]) => ({ id, name }));
+  for (const value of left) {
+    if (!right.has(value)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function preferActiveCloudTaskRoutes<T extends TaskSummary>(
   tasks: T[],
   activeDesktopIds: Set<string> | null
 ): T[] {
-  if (!activeDesktopIds || activeDesktopIds.size === 0) {
-    return tasks;
-  }
-
   const tasksById = new Map<string, T>();
   for (const task of tasks) {
-    const candidate = markCloudTaskOwnerOnline(task, activeDesktopIds);
+    const candidate = activeDesktopIds
+      ? markCloudTaskOwnerOnline(task, activeDesktopIds)
+      : task;
     const existing = tasksById.get(task.id);
     if (!existing) {
       tasksById.set(task.id, candidate);
@@ -576,6 +869,7 @@ function preferActiveCloudTaskRoutes<T extends TaskSummary>(
     }
 
     if (
+      activeDesktopIds &&
       !isOwnedByActiveDesktop(existing, activeDesktopIds) &&
       isOwnedByActiveDesktop(candidate, activeDesktopIds)
     ) {
@@ -638,6 +932,8 @@ function mapCloudDesktopRecord(
 
 function createDelegatingClient(getClient: () => KannaClient): KannaClient {
   return {
+    getTaskRouteIdentity: (taskId) =>
+      getClient().getTaskRouteIdentity?.(taskId) ?? taskId,
     getStatus: () => getClient().getStatus(),
     listDesktops: () => getClient().listDesktops(),
     listRepos: () => getClient().listRepos(),

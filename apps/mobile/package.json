@@ -11,6 +11,7 @@
     "test:e2e:smoke": "pnpm exec tsx ./e2e/run.ts smoke",
     "test:e2e:cloud": "pnpm exec tsx ./e2e/run.ts cloud",
     "test:e2e:relay": "pnpm exec tsx ./e2e/run.ts relay",
+    "test:e2e:hybrid": "pnpm exec tsx ./e2e/run.ts hybrid",
     "test:e2e:profile-disconnected": "pnpm exec tsx ./e2e/run.ts profile-disconnected",
     "test:e2e:preflight": "pnpm exec tsx ./e2e/preflight.ts",
     "test:e2e:device:preflight": "KANNA_IOS_E2E_TARGET=device pnpm exec tsx ./e2e/preflight.ts",

@@ -1,30 +1,23 @@
 import type { ConnectionState, MobileView } from "./state/sessionStore";
 
 export function isTaskDetailVisible(
-  selectedTaskId: string | null,
-  activeView: MobileView
-): boolean {
-  return selectedTaskId !== null && activeView !== "more";
-}
-
-export function shouldShowFloatingToolbar(
   connectionState: ConnectionState,
-  selectedTaskId: string | null,
+  hasSelectedTask: boolean,
   activeView: MobileView
 ): boolean {
-  if (connectionState !== "connected") {
-    return true;
-  }
-
-  return !isTaskDetailVisible(selectedTaskId, activeView);
+  return (
+    connectionState === "connected" &&
+    hasSelectedTask &&
+    activeView !== "more"
+  );
 }
 
-export function shouldShowTopBar(
-  _connectionState: ConnectionState,
-  selectedTaskId: string | null,
-  activeView: MobileView
-): boolean {
-  return !isTaskDetailVisible(selectedTaskId, activeView);
+export function shouldShowFloatingToolbar(taskDetailVisible: boolean): boolean {
+  return !taskDetailVisible;
+}
+
+export function shouldShowTopBar(taskDetailVisible: boolean): boolean {
+  return !taskDetailVisible;
 }
 
 export function getShellTitle(activeView: MobileView): string {

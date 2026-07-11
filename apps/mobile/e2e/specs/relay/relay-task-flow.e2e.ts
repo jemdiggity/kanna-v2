@@ -2,6 +2,7 @@ import type { Browser } from "webdriverio";
 import { selectors } from "../../helpers/selectors";
 import {
   ensureTaskListVisible,
+  openPtyFixtureTask,
   inspectTerminalWebView,
   waitForRenderedPtyTerminal,
   waitForTaskTerminalLive,
@@ -43,8 +44,10 @@ interface RelayUi {
   getAccountSignInButton(): Promise<RelayElement>;
   getAccountSignOutButton(): Promise<RelayElement>;
   getAgentMessageView(): Promise<RelayElement>;
+  getAgentMessageReady(): Promise<RelayElement>;
   getBackButton(): Promise<RelayElement>;
   getTaskInput(): Promise<RelayElement>;
+  getTaskDetailScreen(): Promise<RelayElement>;
   getTaskRowById(taskId: string): Promise<RelayElement>;
   getTaskRows(): Promise<RelayElement[]>;
   getTaskSendButton(): Promise<RelayElement>;
@@ -125,11 +128,17 @@ function createRelayUi(driver: Browser): RelayUi {
     async getAgentMessageView() {
       return driver.$(selectors.agentMessageView);
     },
+    async getAgentMessageReady() {
+      return driver.$(selectors.agentMessageReady);
+    },
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
     async getTaskInput() {
       return driver.$(selectors.taskInput);
+    },
+    async getTaskDetailScreen() {
+      return driver.$(selectors.taskDetailScreen);
     },
     async getTaskRowById(taskId) {
       return driver.$(`~mobile.task-row.${taskId}`);
@@ -202,31 +211,7 @@ async function closeAccountSheet(driver: Browser, ui: RelayUi): Promise<void> {
 }
 
 async function openRelayFixtureTask(ui: RelayUi, taskId: string): Promise<void> {
-  const taskById = await ui.getTaskRowById(taskId);
-  const exactTaskVisible = await taskById
-    .waitForDisplayed({ timeout: 5_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (exactTaskVisible) {
-    await taskById.click();
-    return;
-  }
-
-  await ui.waitUntil(
-    async () => {
-      const taskRows = await ui.getTaskRows();
-      return taskRows.length > 0;
-    },
-    {
-      interval: POLL_INTERVAL_MS,
-      timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: `Expected relay fixture task row ${taskId} in the mobile task list`
-    }
-  );
-
-  const [firstTaskRow] = await ui.getTaskRows();
-  await firstTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await firstTaskRow.click();
+  await openPtyFixtureTask(ui, taskId);
 }
 
 async function returnToTaskListShell(ui: RelayUi): Promise<void> {

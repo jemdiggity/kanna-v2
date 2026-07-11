@@ -1,6 +1,14 @@
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
 
-const RELAY_TASK_TITLE = "Mobile relay Appium task";
+const RELAY_TASK_TITLE = "Hybrid duplicate from LAN";
+const HYBRID_DUPLICATE_CLOUD_TITLE = "Hybrid duplicate from cloud";
+const HYBRID_CLOUD_ONLY_TITLE = "Hybrid cloud-only task";
+const HYBRID_CLOUD_ONLY_REFRESHED_TITLE = "Hybrid cloud-only task refreshed";
+const HYBRID_LAN_ONLY_TITLE = "Hybrid LAN-only task";
+const HYBRID_CLOUD_ONLY_DESKTOP_ID = "mobile-hybrid-cloud-only-desktop";
+const HYBRID_CLOUD_ONLY_REPO_ID = "mobile-hybrid-cloud-only-repo";
+const HYBRID_CLOUD_ONLY_LOCAL_TASK_ID = "mobile-hybrid-cloud-only-task";
+const HYBRID_UNRESOLVED_TASK_ID = "mobile-hybrid-unresolved-selection";
 const RELAY_TASK_SENTINEL = "SCRIPT_READY";
 const RELAY_INPUT_MARKER = "mobile-relay-appium-input";
 const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
@@ -8,11 +16,13 @@ const BUFFY_PASSWORD = "password123";
 
 interface RemoteHarness {
   desktopId: string;
+  lanBaseUrl: string;
   ports: {
     auth: number;
     firestore: number;
     relay: number;
   };
+  stopRelay(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -27,7 +37,7 @@ interface TerminalEventCollector {
 }
 
 interface RemoteHarnessModule {
-  startRemoteHarness(): Promise<RemoteHarness>;
+  startRemoteHarness(options?: { lanHost?: string }): Promise<RemoteHarness>;
 }
 
 interface TerminalFlowModule {
@@ -68,32 +78,109 @@ export interface MobileRelayHarness {
   env: Record<string, string>;
   fixture: PtyTerminalFixture;
   harness: RemoteHarness;
+  hybridEnv: Record<string, string>;
+  hybridFixture: MobileHybridFixture;
   inputMarker: string;
+  lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
   terminalEvents: TerminalEventCollector;
+  publishHybridCloudRefresh(): Promise<void>;
   stop(): Promise<void>;
   waitForInput(timeoutMs?: number): Promise<string>;
 }
 
+export interface MobileHybridFixture {
+  cloudOnly: {
+    refreshedTitle: string;
+    taskId: string;
+    title: string;
+  };
+  desktop: {
+    desktopId: string;
+    displayName: string;
+    lanBaseUrl: string;
+  };
+  duplicate: {
+    cloudTitle: string;
+    displayTaskId: string;
+    lanTitle: string;
+    localTaskId: string;
+  };
+  expectedDisplayTaskIds: string[];
+  lanOnly: {
+    taskId: string;
+    title: string;
+  };
+  terminal: PtyTerminalFixture;
+  unresolvedTaskId: string;
+}
+
 export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
   const remote = await loadRemoteHarnessModules();
-  const harness = await remote.harness.startRemoteHarness();
+  const harness = await remote.harness.startRemoteHarness({
+    lanHost: "0.0.0.0"
+  });
   let terminalEvents: TerminalEventCollector | null = null;
 
   try {
     const localTask = await remote.terminal.createScriptedTask(harness, {
       displayName: RELAY_TASK_TITLE
     });
+    const lanOnlyTask = await remote.terminal.createScriptedTask(harness, {
+      displayName: HYBRID_LAN_ONLY_TITLE
+    });
+    await assertHybridLanFixture(harness, [localTask, lanOnlyTask]);
     terminalEvents = remote.terminal.collectTerminalEvents(harness, localTask.taskId);
     await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_TASK_SENTINEL);
     const cloudTaskId = cloudTaskIdFor(harness, localTask);
+    const cloudOnlyTaskId =
+      `cloud:${HYBRID_CLOUD_ONLY_DESKTOP_ID}:` +
+      `${HYBRID_CLOUD_ONLY_REPO_ID}:${HYBRID_CLOUD_ONLY_LOCAL_TASK_ID}`;
     const auth = await signInRelayUser(harness.ports.auth);
     await seedCloudDesktopSnapshot({
       auth,
       cloudTaskId,
+      cloudOnlyTaskId,
       harness,
       localTask
     });
+
+    const terminalFixture: PtyTerminalFixture = {
+      taskId: cloudTaskId,
+      sentinel: RELAY_TASK_SENTINEL,
+      expectedCols: 80,
+      expectedRows: 24,
+      minDecodedBytes: RELAY_TASK_SENTINEL.length
+    };
+    const hybridFixture: MobileHybridFixture = {
+      cloudOnly: {
+        refreshedTitle: HYBRID_CLOUD_ONLY_REFRESHED_TITLE,
+        taskId: cloudOnlyTaskId,
+        title: HYBRID_CLOUD_ONLY_TITLE
+      },
+      desktop: {
+        desktopId: harness.desktopId,
+        displayName: "Remote E2E Desktop",
+        lanBaseUrl: harness.lanBaseUrl
+      },
+      duplicate: {
+        cloudTitle: HYBRID_DUPLICATE_CLOUD_TITLE,
+        displayTaskId: cloudTaskId,
+        lanTitle: RELAY_TASK_TITLE,
+        localTaskId: localTask.taskId
+      },
+      expectedDisplayTaskIds: [
+        cloudOnlyTaskId,
+        cloudTaskId,
+        lanOnlyTask.taskId
+      ],
+      lanOnly: {
+        taskId: lanOnlyTask.taskId,
+        title: HYBRID_LAN_ONLY_TITLE
+      },
+      terminal: terminalFixture,
+      unresolvedTaskId: HYBRID_UNRESOLVED_TASK_ID
+    };
 
     return {
       credentials: {
@@ -101,17 +188,16 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
         password: BUFFY_PASSWORD
       },
       env: mobileRelayExpoEnv(harness),
-      fixture: {
-        taskId: cloudTaskId,
-        sentinel: RELAY_TASK_SENTINEL,
-        expectedCols: 80,
-        expectedRows: 24,
-        minDecodedBytes: RELAY_TASK_SENTINEL.length
-      },
+      fixture: terminalFixture,
       harness,
+      hybridEnv: mobileRelayExpoEnv(harness, { forceCloud: false }),
+      hybridFixture,
       inputMarker: RELAY_INPUT_MARKER,
+      lanOnlyTask,
       localTask,
       terminalEvents,
+      publishHybridCloudRefresh: () =>
+        publishHybridCloudRefresh({ auth, harness }),
       async stop() {
         terminalEvents?.close();
         await harness.stop();
@@ -129,6 +215,29 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
     await harness.stop();
     throw error;
   }
+}
+
+async function publishHybridCloudRefresh(input: {
+  auth: AuthSession;
+  harness: RemoteHarness;
+}): Promise<void> {
+  await setFirestoreDocument(
+    input.harness.ports.firestore,
+    [
+      "users",
+      input.auth.uid,
+      "desktops",
+      HYBRID_CLOUD_ONLY_DESKTOP_ID,
+      "tasks",
+      HYBRID_CLOUD_ONLY_LOCAL_TASK_ID
+    ],
+    input.auth.idToken,
+    {
+      title: stringValue(HYBRID_CLOUD_ONLY_REFRESHED_TITLE),
+      displayName: stringValue(HYBRID_CLOUD_ONLY_REFRESHED_TITLE),
+      updatedAt: stringValue(new Date().toISOString())
+    }
+  );
 }
 
 async function loadRemoteHarnessModules(): Promise<{
@@ -149,9 +258,12 @@ async function loadRemoteHarnessModules(): Promise<{
   };
 }
 
-function mobileRelayExpoEnv(harness: RemoteHarness): Record<string, string> {
+export function mobileRelayExpoEnv(
+  harness: Pick<RemoteHarness, "ports">,
+  options: { forceCloud: boolean } = { forceCloud: true }
+): Record<string, string> {
   return {
-    EXPO_PUBLIC_KANNA_FORCE_CLOUD: "1",
+    EXPO_PUBLIC_KANNA_FORCE_CLOUD: options.forceCloud ? "1" : "0",
     EXPO_PUBLIC_KANNA_RELAY_URL: `ws://127.0.0.1:${harness.ports.relay}`,
     EXPO_PUBLIC_KANNA_CLOUD_ENV: "local",
     EXPO_PUBLIC_FIREBASE_API_KEY: "kanna-local",
@@ -176,6 +288,7 @@ function cloudTaskIdFor(
 async function seedCloudDesktopSnapshot(input: {
   auth: AuthSession;
   cloudTaskId: string;
+  cloudOnlyTaskId: string;
   harness: RemoteHarness;
   localTask: ScriptedTask;
 }): Promise<void> {
@@ -207,10 +320,10 @@ async function seedCloudDesktopSnapshot(input: {
       localRepoId: stringValue(input.localTask.repoId),
       ownerDesktopId: stringValue(input.harness.desktopId),
       ownerLocalTaskId: stringValue(input.localTask.taskId),
-      title: stringValue(RELAY_TASK_TITLE),
+      title: stringValue(HYBRID_DUPLICATE_CLOUD_TITLE),
       promptSnippet: stringValue("Run deterministic scripted task"),
-      displayName: stringValue(RELAY_TASK_TITLE),
-      stage: stringValue("in progress"),
+      displayName: stringValue(HYBRID_DUPLICATE_CLOUD_TITLE),
+      stage: stringValue("review"),
       status: stringValue("working"),
       repo: mapValue({
         cloudRepoId: stringValue(input.localTask.repoId),
@@ -224,6 +337,78 @@ async function seedCloudDesktopSnapshot(input: {
       closedAt: nullValue()
     }
   );
+
+  await setFirestoreDocument(
+    input.harness.ports.firestore,
+    ["users", input.auth.uid, "desktops", HYBRID_CLOUD_ONLY_DESKTOP_ID],
+    input.auth.idToken,
+    {
+      desktopId: stringValue(HYBRID_CLOUD_ONLY_DESKTOP_ID),
+      displayName: stringValue("Cloud-only E2E Desktop"),
+      updatedAt: stringValue(updatedAt)
+    }
+  );
+
+  await setFirestoreDocument(
+    input.harness.ports.firestore,
+    [
+      "users",
+      input.auth.uid,
+      "desktops",
+      HYBRID_CLOUD_ONLY_DESKTOP_ID,
+      "tasks",
+      HYBRID_CLOUD_ONLY_LOCAL_TASK_ID
+    ],
+    input.auth.idToken,
+    {
+      cloudTaskId: stringValue(input.cloudOnlyTaskId),
+      localRepoId: stringValue(HYBRID_CLOUD_ONLY_REPO_ID),
+      ownerDesktopId: stringValue(HYBRID_CLOUD_ONLY_DESKTOP_ID),
+      ownerLocalTaskId: stringValue(HYBRID_CLOUD_ONLY_LOCAL_TASK_ID),
+      title: stringValue(HYBRID_CLOUD_ONLY_TITLE),
+      promptSnippet: stringValue("Visible only through the cloud task index"),
+      displayName: stringValue(HYBRID_CLOUD_ONLY_TITLE),
+      stage: stringValue("in progress"),
+      status: stringValue("idle"),
+      repo: mapValue({
+        cloudRepoId: stringValue(HYBRID_CLOUD_ONLY_REPO_ID),
+        name: stringValue("Hybrid cloud-only repo")
+      }),
+      agent: mapValue({
+        provider: stringValue("codex"),
+        type: stringValue("pty")
+      }),
+      updatedAt: stringValue(updatedAt),
+      closedAt: nullValue()
+    }
+  );
+}
+
+async function assertHybridLanFixture(
+  harness: RemoteHarness,
+  tasks: readonly ScriptedTask[]
+): Promise<void> {
+  const response = await fetch(`${harness.lanBaseUrl}/v1/tasks/recent`);
+  const body = await response.json().catch(() => null) as unknown;
+  if (!response.ok || !Array.isArray(body)) {
+    throw new Error(
+      `Hybrid LAN fixture preflight failed (${response.status}): ${JSON.stringify(body)}`
+    );
+  }
+
+  const rows = body.filter(isRecord);
+  for (const task of tasks) {
+    if (!rows.some((row) => row.id === task.taskId && row.repoId === task.repoId)) {
+      throw new Error(
+        `Hybrid LAN fixture is missing task ${task.taskId} in repo ${task.repoId}: ` +
+          JSON.stringify(body)
+      );
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 async function signInRelayUser(authPort: number): Promise<AuthSession> {
