@@ -238,6 +238,7 @@ describe("cloud task index", () => {
       snippet: "Fix mobile cloud",
       agentProvider: "claude",
       agentType: "agent",
+      activity: "working",
       ownerDesktopId: "desktop-1",
       ownerLocalRepoId: "local-repo-1",
       ownerLocalTaskId: "task-1",
@@ -245,22 +246,22 @@ describe("cloud task index", () => {
     });
   });
 
+  const legacySnapshot = {
+    ownerDesktopId: "desktop-1",
+    localRepoId: "repo-1",
+    ownerLocalTaskId: "task-1",
+    title: "Fix mobile cloud",
+    promptSnippet: null,
+    displayName: null,
+    stage: "in progress",
+    status: "active",
+    repo: { cloudRepoId: "repo-1", name: "kanna" },
+    updatedAt: "2026-05-14T00:01:00.000Z",
+    closedAt: null,
+  };
+
   it("uses owner identity as the mobile task id when cloudTaskId is absent", () => {
-    expect(
-      mapCloudTaskSnapshot({
-        ownerDesktopId: "desktop-1",
-        localRepoId: "repo-1",
-        ownerLocalTaskId: "task-1",
-        title: "Fix mobile cloud",
-        promptSnippet: null,
-        displayName: null,
-        stage: "in progress",
-        status: "active",
-        repo: { cloudRepoId: "repo-1", name: "kanna" },
-        updatedAt: "2026-05-14T00:01:00.000Z",
-        closedAt: null,
-      }),
-    ).toMatchObject({
+    expect(mapCloudTaskSnapshot(legacySnapshot)).toMatchObject({
       id: "cloud:desktop-1:repo-1:task-1",
       repoId: "repo-1",
       ownerDesktopId: "desktop-1",
@@ -268,6 +269,23 @@ describe("cloud task index", () => {
       ownerLocalTaskId: "task-1",
     });
   });
+
+  for (const { label, activity, expected } of [
+    { label: "working", activity: "working", expected: "working" },
+    { label: "unread", activity: "unread", expected: "unread" },
+    { label: "idle", activity: "idle", expected: "idle" },
+    { label: "null", activity: null, expected: "idle" },
+    { label: "missing", activity: undefined, expected: "idle" },
+    { label: "unrecognized", activity: "paused", expected: "idle" },
+  ] as const) {
+    it(`maps ${label} cloud activity to ${expected}`, () => {
+      const snapshot = activity === undefined
+        ? legacySnapshot
+        : { ...legacySnapshot, activity };
+
+      expect(mapCloudTaskSnapshot(snapshot).activity).toBe(expected);
+    });
+  }
 
   it("sorts newest updated cloud tasks first", () => {
     const tasks = sortCloudTasks([

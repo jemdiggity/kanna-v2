@@ -13,6 +13,12 @@ interface TaskCardProps {
 
 export function TaskCard({ isRecentView, repoName, task, onPress }: TaskCardProps) {
   const model = buildTaskListItemModel(task, repoName, isRecentView);
+  const titleActivityStyle =
+    task.activity === "unread"
+      ? styles.titleUnread
+      : task.activity === "working"
+        ? styles.titleWorking
+        : styles.titleIdle;
 
   return (
     <Pressable
@@ -27,7 +33,7 @@ export function TaskCard({ isRecentView, repoName, task, onPress }: TaskCardProp
         <Text style={styles.repoLabel}>{model.repoLabel}</Text>
       </View>
       <View style={styles.row}>
-        <Text style={styles.title}>{task.title}</Text>
+        <Text style={[styles.title, titleActivityStyle]}>{task.title}</Text>
         <View style={styles.stagePill}>
           <Text style={styles.stageLabel}>{model.stageLabel}</Text>
         </View>
@@ -73,8 +79,19 @@ const styles = StyleSheet.create({
   title: {
     color: "#F3F7FF",
     flex: 1,
-    fontSize: 17,
-    fontWeight: "700"
+    fontSize: 17
+  },
+  titleIdle: {
+    fontStyle: "normal",
+    fontWeight: "normal"
+  },
+  titleUnread: {
+    fontStyle: "normal",
+    fontWeight: "bold"
+  },
+  titleWorking: {
+    fontStyle: "italic",
+    fontWeight: "normal"
   },
   stagePill: {
     alignSelf: "flex-start",

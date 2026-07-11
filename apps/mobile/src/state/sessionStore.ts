@@ -184,6 +184,7 @@ export function createSessionStore(): SessionStore {
         task.repoId === other.repoId &&
         task.title === other.title &&
         task.stage === other.stage &&
+        (task.activity ?? "idle") === (other.activity ?? "idle") &&
         (task.snippet ?? null) === (other.snippet ?? null) &&
         (task.agentType ?? null) === (other.agentType ?? null)
       );

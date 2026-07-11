@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { TaskActivity, TaskSummary } from "../lib/api/types";
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -14,6 +15,84 @@ let TaskCard: typeof import("./TaskCard").TaskCard | null = null;
 beforeAll(async () => {
   TaskCard = (await import("./TaskCard")).TaskCard;
 });
+
+interface ElementNode {
+  type: unknown;
+  props?: {
+    children?: ElementChild | ElementChild[];
+    style?: unknown;
+    [key: string]: unknown;
+  };
+}
+
+type ElementChild = ElementNode | string | number | null | undefined | false;
+
+function flattenChildren(
+  children: ElementChild | ElementChild[]
+): ElementChild[] {
+  return (Array.isArray(children) ? children : [children]).filter(
+    (child) => child !== null && child !== undefined && child !== false
+  );
+}
+
+function textContent(node: ElementChild | ElementChild[]): string {
+  if (Array.isArray(node)) return node.map(textContent).join("");
+  if (node === null || node === undefined || node === false) return "";
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+  return flattenChildren(node.props?.children).map(textContent).join("");
+}
+
+function findTextNodeByCompleteText(
+  node: ElementChild,
+  expectedText: string
+): ElementNode | null {
+  if (!node || typeof node !== "object") return null;
+  if (node.type === "Text" && textContent(node) === expectedText) return node;
+
+  for (const child of flattenChildren(node.props?.children)) {
+    const match = findTextNodeByCompleteText(child, expectedText);
+    if (match) return match;
+  }
+
+  return null;
+}
+
+function flattenStyle(style: unknown): Record<string, unknown> {
+  if (Array.isArray(style)) {
+    return style.reduce<Record<string, unknown>>(
+      (effectiveStyle, item) => ({
+        ...effectiveStyle,
+        ...flattenStyle(item)
+      }),
+      {}
+    );
+  }
+
+  return style && typeof style === "object"
+    ? (style as Record<string, unknown>)
+    : {};
+}
+
+function renderTaskCard(activity?: TaskActivity): ElementNode {
+  if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+  const task: TaskSummary = {
+    id: "task-1",
+    repoId: "repo-1",
+    title: "Match desktop typography",
+    stage: "in progress",
+    ...(activity === undefined ? {} : { activity })
+  };
+
+  return TaskCard({
+    isRecentView: false,
+    repoName: "Kanna",
+    task,
+    onPress: vi.fn()
+  }) as ElementNode;
+}
 
 describe("TaskCard", () => {
   it("keeps the automation id separate from its human-readable accessibility label", () => {
@@ -35,4 +114,46 @@ describe("TaskCard", () => {
     expect(tree.props.accessibilityLabel).toContain("Repair cloud task sync");
     expect(tree.props.accessibilityLabel).not.toBe("mobile.task-row.task-1");
   });
+
+  it.each<{
+    activity: TaskActivity | undefined;
+    expectedFontWeight: "bold" | "normal";
+    expectedFontStyle: "italic" | "normal";
+  }>([
+    {
+      activity: "unread",
+      expectedFontWeight: "bold",
+      expectedFontStyle: "normal"
+    },
+    {
+      activity: "working",
+      expectedFontWeight: "normal",
+      expectedFontStyle: "italic"
+    },
+    {
+      activity: "idle",
+      expectedFontWeight: "normal",
+      expectedFontStyle: "normal"
+    },
+    {
+      activity: undefined,
+      expectedFontWeight: "normal",
+      expectedFontStyle: "normal"
+    }
+  ])(
+    "renders $activity activity with desktop-equivalent title typography",
+    ({ activity, expectedFontWeight, expectedFontStyle }) => {
+      const tree = renderTaskCard(activity);
+      const title = findTextNodeByCompleteText(
+        tree,
+        "Match desktop typography"
+      );
+
+      expect(title).not.toBeNull();
+      expect(flattenStyle(title?.props?.style)).toMatchObject({
+        fontWeight: expectedFontWeight,
+        fontStyle: expectedFontStyle
+      });
+    }
+  );
 });
