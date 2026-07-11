@@ -4,7 +4,6 @@ import {
   RemoteTransportError,
   type RemoteDesktopInvoker,
   type RemoteTaskAgentObserver,
-  type RemoteTaskInputSender,
   type RemoteTaskTerminalObserver
 } from "./remoteTransport";
 
@@ -1398,14 +1397,12 @@ describe("remote transport", () => {
     });
   });
 
-  it("sends cloud task input through the owner terminal command channel", async () => {
+  it("routes cloud task input through the owner server submission endpoint", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
-    const sendTaskInput = vi.fn<RemoteTaskInputSender>().mockResolvedValue(undefined);
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [],
       getSelectedDesktopId: () => null,
       invokeDesktop,
-      sendTaskInput,
       listCloudTasks: async () => [
         {
           id: "cloud-task-1",
@@ -1421,19 +1418,14 @@ describe("remote transport", () => {
 
     await transport.listRecentTasks();
     invokeDesktop.mockClear();
-    await expect(transport.sendTaskInput("cloud-task-1", "continue\n")).resolves.toBeUndefined();
+    await expect(transport.sendTaskInput("cloud-task-1", "1")).resolves.toBeUndefined();
 
-    expect(sendTaskInput).toHaveBeenCalledWith({
+    expect(invokeDesktop).toHaveBeenCalledWith({
       desktopId: "desktop-owner",
-      taskId: "local-task-1",
-      data: "continue\n"
+      method: "POST",
+      path: "/v1/tasks/local-task-1/input",
+      body: { input: "1" }
     });
-    expect(invokeDesktop).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        method: "POST",
-        path: "/v1/tasks/local-task-1/input"
-      })
-    );
   });
 
   it("resolves a cloud task route before observing an uncached terminal", async () => {

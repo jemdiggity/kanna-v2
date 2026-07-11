@@ -1286,16 +1286,17 @@ export function createMobileController(
     },
 
     async sendTaskInput(taskId, input) {
-      if (!input.trim()) {
+      const submittedInput = input.trim();
+      if (!submittedInput) {
         return;
       }
 
       try {
         const task = findTask(taskId);
         if (task?.agentType === "agent" && activeTaskAgent?.taskId === taskId) {
-          activeTaskAgent.subscription.sendInput(input.trim());
+          activeTaskAgent.subscription.sendInput(submittedInput);
         } else {
-          await client.sendTaskInput(taskId, encodeSubmittedTaskInput(input, task));
+          await client.sendTaskInput(taskId, submittedInput);
         }
         setUnownedErrorMessage(null);
       } catch (error) {
@@ -1345,12 +1346,6 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
     agentType: response.agentType ?? null
   };
 }
-
-function encodeSubmittedTaskInput(input: string, task: TaskSummary | null): string {
-  const submit = task?.agentProvider && task.agentProvider !== "claude" ? "\r" : "\x1b[13u";
-  return `\x1b[200~${input}\x1b[201~${submit}`;
-}
-
 function filterTasksForQuery(
   tasks: readonly TaskSummary[],
   query: string

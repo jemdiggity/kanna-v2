@@ -3717,19 +3717,23 @@ describe("createMobileController", () => {
     }
   );
 
-  it("sends task input as a bracketed paste and Claude Kitty enter sequence", async () => {
-    const store = createSessionStore();
-    const client = createClientMock();
-    const controller = createMobileController(client, store);
+  it.each([
+    ["digit input", "1"],
+    ["ordinary text", "continue"],
+    ["internal multiline text", "first\nsecond"]
+  ])(
+    "passes PTY %s to the server without terminal control sequences",
+    async (_caseName, input) => {
+      const store = createSessionStore();
+      const client = createClientMock();
+      const controller = createMobileController(client, store);
 
-    await controller.bootstrap();
-    await controller.sendTaskInput("task-1", "continue");
+      await controller.bootstrap();
+      await controller.sendTaskInput("task-1", input);
 
-    expect(client.sendTaskInput).toHaveBeenCalledWith(
-      "task-1",
-      "\x1b[200~continue\x1b[201~\x1b[13u"
-    );
-  });
+      expect(client.sendTaskInput).toHaveBeenCalledWith("task-1", input);
+    }
+  );
 
   it("sends agent task input as plain text through the active agent stream", async () => {
     const store = createSessionStore();

@@ -50,10 +50,6 @@ export type RemoteTaskAgentObserver = (
   listener: (event: TaskAgentStreamEvent) => void
 ) => TaskAgentSubscription;
 
-export type RemoteTaskInputSender = (
-  request: { desktopId: string; taskId: string; data: string }
-) => Promise<void>;
-
 export type RemoteTransportErrorCode =
   | "no_selected_desktop"
   | "remote_invocation_failed"
@@ -81,7 +77,6 @@ export interface RemoteTransportDependencies {
   invokeDesktop: RemoteDesktopInvoker;
   observeTaskTerminal?: RemoteTaskTerminalObserver;
   observeTaskAgent?: RemoteTaskAgentObserver;
-  sendTaskInput?: RemoteTaskInputSender;
   listCloudTasks?: () => Promise<CloudIndexedTaskSummary[]>;
 }
 
@@ -107,7 +102,6 @@ export function createRemoteTransport({
   invokeDesktop,
   observeTaskTerminal,
   observeTaskAgent,
-  sendTaskInput,
   listCloudTasks
 }: RemoteTransportDependencies): KannaTransport {
   let cloudTaskRoutes = new Map<string, CloudTaskRoute>();
@@ -507,16 +501,6 @@ export function createRemoteTransport({
       }
     },
     sendTaskInput: async (taskId: string, input: string) => {
-      const route = await resolveCloudTaskRoute(taskId);
-      if (route && sendTaskInput) {
-        await sendTaskInput({
-          desktopId: route.desktopId,
-          taskId: route.taskId,
-          data: input
-        });
-        return;
-      }
-
       await requestTask<void>(
         taskId,
         "POST",

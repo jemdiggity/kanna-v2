@@ -3208,7 +3208,6 @@ describe("createAppModel cloud routing", () => {
       invokeDesktop: vi.fn().mockResolvedValue(null),
       observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
       observeTaskAgent,
-      sendTaskInput: vi.fn().mockResolvedValue(undefined),
       listActiveDesktopIds: vi.fn().mockResolvedValue(new Set(["desktop-owner"]))
     };
     const app = createAppModel({
@@ -3439,7 +3438,6 @@ describe("createAppModel cloud routing", () => {
       invokeDesktop: vi.fn().mockResolvedValue(null),
       observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
       observeTaskAgent,
-      sendTaskInput: vi.fn().mockResolvedValue(undefined),
       listActiveDesktopIds: vi.fn().mockResolvedValue(new Set(["desktop-current"]))
     };
     const app = createAppModel({
@@ -3548,7 +3546,6 @@ describe("createAppModel cloud routing", () => {
         sendPermission: vi.fn(),
         interrupt: vi.fn()
       })),
-      sendTaskInput: vi.fn().mockResolvedValue(undefined),
       listActiveDesktopIds: vi.fn().mockResolvedValue(new Set(["desktop-owner"]))
     };
     const app = createAppModel({
