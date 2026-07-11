@@ -70,7 +70,7 @@ export function createTerminalFileLinkProvider(params: {
 
     params.term.registerLinkProvider({
       provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void) {
-        const line = params.term.buffer.active.getLine(bufferLineNumber)
+        const line = params.term.buffer.active.getLine(bufferLineNumber - 1)
         if (!line) { callback(undefined); return }
         const lineText = line.translateToString(true)
 
