@@ -93,6 +93,7 @@ const store = {
   appTheme: "dark",
   codeTheme: "match",
   agentMessageAppearance: "chat",
+  markdownPreviewMode: "rendered" as "raw" | "rendered",
   init: vi.fn(async () => {}),
   createItem: vi.fn(async () => {}),
   recordIncomingTransfer: vi.fn(async () => {}),
@@ -641,6 +642,8 @@ describe("App", () => {
     store.getStageOrder.mockReturnValue(["in progress", "pr", "merge"]);
     store.appTheme = "dark";
     store.codeTheme = "match";
+    store.markdownPreviewMode = "rendered";
+    store.savePreference.mockClear();
     nativeSetThemeMock.mockClear();
     listenHandlers.clear();
     currentWebviewWindowListenHandlers.clear();
@@ -3560,7 +3563,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-mode")).toBe("rendered");
   });
 
-  it("remembers markdown render mode when reopening a preview window", async () => {
+  it("opens Markdown rendered and persists a raw-mode choice", async () => {
     const MarkdownFilePickerModalTestStub = defineComponent({
       name: "FilePickerModal",
       emits: ["select"],
@@ -3592,7 +3595,7 @@ describe("App", () => {
       },
       template: `
         <div data-testid="file-preview-modal" :data-mode="initialMarkdownMode">
-          <button data-testid="toggle-markdown-render" @click="emit('update-markdown-mode', 'rendered')">rendered</button>
+          <button data-testid="toggle-markdown-raw" @click="emit('update-markdown-mode', 'raw')">raw</button>
         </div>
       `,
     });
@@ -3609,17 +3612,15 @@ describe("App", () => {
     await wrapper.get('[data-testid="file-picker-select"]').trigger("click");
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-mode")).toBe("raw");
-
-    await wrapper.get('[data-testid="toggle-markdown-render"]').trigger("click");
-    await flushPromises();
-
-    capturedKeyboardActions?.dismiss();
-    await flushPromises();
-    capturedKeyboardActions?.toggleFilePreview();
-    await flushPromises();
-
     expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-mode")).toBe("rendered");
+
+    await wrapper.get('[data-testid="toggle-markdown-raw"]').trigger("click");
+    await flushPromises();
+
+    expect(store.markdownPreviewMode).toBe("raw");
+    expect(store.savePreference).toHaveBeenCalledWith("markdownPreviewMode", "raw");
+
+    wrapper.unmount();
   });
 
   it("preserves file picker scroll state when preview hides and resumes the picker", async () => {

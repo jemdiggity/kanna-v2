@@ -48,6 +48,123 @@ describe("FilePreviewModal", () => {
     document.body.innerHTML = "";
   });
 
+  it("renders Markdown by default when no mode is provided", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "read_text_file") {
+        return "# Preview heading\n";
+      }
+      if (command === "run_script") {
+        return "";
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "README.md",
+        worktreePath: "/repo",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.find(".markdown-rendered h1").exists()).toBe(true);
+      });
+
+      expect(wrapper.get(".preview-content").classes()).toContain("markdown-rendered");
+      expect(wrapper.get(".mode-badge").text()).toBe("filePreview.rendered");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("keeps non-Markdown files raw when rendered mode is requested", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "read_text_file") {
+        return "const answer = 42;\n";
+      }
+      if (command === "run_script") {
+        return "";
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+    codeToHtmlMock.mockImplementation(
+      (code: string) => `<pre><code>${code}</code></pre>`,
+    );
+
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "example.ts",
+        worktreePath: "/repo",
+        initialMarkdownMode: "rendered",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.get(".preview-content").text()).toContain("const answer = 42;");
+      });
+
+      expect(wrapper.get(".preview-content").classes()).not.toContain("markdown-rendered");
+      expect(wrapper.find(".mode-badge").exists()).toBe(false);
+      expect(codeToHtmlMock).toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("keeps Markdown raw when raw mode is explicitly requested", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "read_text_file") {
+        return "# Raw heading\n";
+      }
+      if (command === "run_script") {
+        return "";
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+    codeToHtmlMock.mockImplementation(
+      (code: string) => `<pre><code>${code}</code></pre>`,
+    );
+
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "README.md",
+        worktreePath: "/repo",
+        initialMarkdownMode: "raw",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.get(".preview-content").text()).toContain("# Raw heading");
+      });
+
+      expect(wrapper.get(".preview-content").classes()).not.toContain("markdown-rendered");
+      expect(wrapper.get(".mode-badge").text()).toBe("filePreview.raw");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it("uses the effective light code theme for Shiki rendering", async () => {
     const { resetThemeRuntimeForTests, setSystemPrefersDark, setThemePreferences } = await import("../../theme/runtime");
     resetThemeRuntimeForTests();

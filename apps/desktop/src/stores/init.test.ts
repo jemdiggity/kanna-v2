@@ -999,3 +999,18 @@ describe("createInitApi", () => {
     expect(state.selectedItemId.value).toBe("task-current");
   });
 });
+
+describe("Markdown preview mode settings", () => {
+  it.each([
+    { settings: {}, expected: "rendered" },
+    { settings: { markdownPreviewMode: "raw" }, expected: "raw" },
+    { settings: { markdownPreviewMode: "rendered" }, expected: "rendered" },
+    { settings: { markdownPreviewMode: "invalid" }, expected: "rendered" },
+  ])("normalizes $settings to $expected", ({ settings, expected }) => {
+    const state = createStoreState();
+
+    applySnapshotSettingsToState(state, settings);
+
+    expect(state.markdownPreviewMode.value).toBe(expected);
+  });
+});

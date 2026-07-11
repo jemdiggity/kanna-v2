@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { nextTick } from "vue";
+import { nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
@@ -66,7 +66,7 @@ const mockState = vi.hoisted(() => {
   let allRepos: Repo[] = [];
   let pipelineItems: PipelineItem[] = [];
 
-  const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+  const invokeImplementation = async (command: string, args?: Record<string, unknown>) => {
     switch (command) {
       case "ensure_term_init":
       case "list_sessions":
@@ -95,7 +95,8 @@ const mockState = vi.hoisted(() => {
       default:
         throw new Error(`unexpected invoke: ${command}`);
     }
-  });
+  };
+  const invokeMock = vi.fn(invokeImplementation);
   const listReposMock = vi.fn(async () => allRepos.filter((repo) => !repo.hidden));
   const listPipelineItemsMock = vi.fn(async (_db: DbHandle, repoId: string) =>
     pipelineItems.filter((item) => item.repo_id === repoId),
@@ -113,7 +114,8 @@ const mockState = vi.hoisted(() => {
       makeItem({ id: "item-1", repo_id: "repo-1" }),
       makeItem({ id: "item-2", repo_id: "repo-2" }),
     ];
-    invokeMock.mockClear();
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(invokeImplementation);
     listReposMock.mockClear();
     listPipelineItemsMock.mockClear();
     listTaskBlockersMock.mockClear();
@@ -332,6 +334,8 @@ vi.mock("@kanna/" + "db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
+import { createQueriesApi } from "./queries";
+import { createStoreContext, createStoreState, type KannaSnapshot } from "./state";
 import {
   setDesktopSnapshotFetcherForTests,
   updateDesktopServerClientHandlersForTests,
@@ -349,6 +353,20 @@ async function flushStore(): Promise<void> {
   await nextTick();
   await Promise.resolve();
   await nextTick();
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 async function createStore(db: DbHandle = createDb()) {
@@ -433,6 +451,258 @@ describe("kanna query snapshot regressions", () => {
       settings: {},
     }));
     vi.useRealTimers();
+  });
+
+  it("keeps the newest snapshot when an older reload resolves last", async () => {
+    const older = deferred<KannaSnapshot>();
+    const newer = deferred<KannaSnapshot>();
+    const fetchSnapshot = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, { fetchSnapshot });
+    const queries = createQueriesApi(context);
+
+    const olderReload = queries.reloadSnapshot();
+    const newerReload = queries.reloadSnapshot();
+
+    newer.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: { markdownPreviewMode: "raw" },
+    });
+    await newerReload;
+    expect(state.markdownPreviewMode.value).toBe("raw");
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+
+    older.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: { markdownPreviewMode: "rendered" },
+    });
+    await olderReload;
+
+    expect(state.markdownPreviewMode.value).toBe("raw");
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+    expect(queries.snapshot.pending.value).toBe(false);
+    expect(queries.snapshot.error.value).toBeNull();
+  });
+
+  it("keeps a stale snapshot unpublished while the newer reload remains pending", async () => {
+    const older = deferred<KannaSnapshot>();
+    const newer = deferred<KannaSnapshot>();
+    const fetchSnapshot = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, { fetchSnapshot });
+    const queries = createQueriesApi(context);
+
+    const olderReload = queries.reloadSnapshot();
+    const newerReload = queries.reloadSnapshot();
+
+    older.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {
+        markdownPreviewMode: "raw",
+        snapshotOwner: "older",
+      },
+    });
+    await olderReload;
+
+    expect(state.markdownPreviewMode.value).toBe("rendered");
+    expect(state.snapshotSettings.value.snapshotOwner).toBeUndefined();
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBeUndefined();
+    expect(queries.snapshot.data.value.settings.snapshotOwner).toBeUndefined();
+    expect(queries.snapshot.pending.value).toBe(true);
+    expect(queries.snapshot.error.value).toBeNull();
+
+    newer.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {
+        markdownPreviewMode: "raw",
+        snapshotOwner: "newer",
+      },
+    });
+    await newerReload;
+
+    expect(state.markdownPreviewMode.value).toBe("raw");
+    expect(state.snapshotSettings.value.snapshotOwner).toBe("newer");
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+    expect(queries.snapshot.data.value.settings.snapshotOwner).toBe("newer");
+    expect(queries.snapshot.pending.value).toBe(false);
+    expect(queries.snapshot.error.value).toBeNull();
+  });
+
+  it("ignores an older reload failure while the newer reload remains pending", async () => {
+    const older = deferred<KannaSnapshot>();
+    const newer = deferred<KannaSnapshot>();
+    const fetchSnapshot = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, { fetchSnapshot });
+    const queries = createQueriesApi(context);
+
+    const olderReload = queries.reloadSnapshot();
+    const newerReload = queries.reloadSnapshot();
+
+    older.reject(new Error("older reload failed"));
+    await expect(olderReload).resolves.toBeUndefined();
+
+    expect(state.markdownPreviewMode.value).toBe("rendered");
+    expect(state.snapshotSettings.value.snapshotOwner).toBeUndefined();
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBeUndefined();
+    expect(queries.snapshot.error.value).toBeNull();
+    expect(queries.snapshot.pending.value).toBe(true);
+
+    newer.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {
+        markdownPreviewMode: "raw",
+        snapshotOwner: "newer",
+      },
+    });
+    await newerReload;
+
+    expect(state.markdownPreviewMode.value).toBe("raw");
+    expect(state.snapshotSettings.value.snapshotOwner).toBe("newer");
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+    expect(queries.snapshot.data.value.settings.snapshotOwner).toBe("newer");
+    expect(queries.snapshot.error.value).toBeNull();
+    expect(queries.snapshot.pending.value).toBe(false);
+  });
+
+  it("keeps the newest snapshot when an older reload resumes after reading repo config", async () => {
+    const older = deferred<KannaSnapshot>();
+    const newer = deferred<KannaSnapshot>();
+    const repoConfig = deferred<string>();
+    const configReadStarted = deferred<void>();
+    const fetchSnapshot = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, { fetchSnapshot });
+    const queries = createQueriesApi(context);
+    const olderRepo = mockState.makeRepo({
+      id: "repo-config-race",
+      path: "/tmp/repo-config-race",
+      name: "repo-config-race",
+    });
+    const originalInvoke = mockState.invokeMock.getMockImplementation();
+    if (!originalInvoke) throw new Error("invoke mock implementation is unavailable");
+
+    mockState.invokeMock.mockImplementation(async (command, args) => {
+      if (
+        command === "read_text_file"
+        && args?.path === `${olderRepo.path}/.kanna/config.json`
+      ) {
+        configReadStarted.resolve();
+        return repoConfig.promise;
+      }
+      return originalInvoke(command, args);
+    });
+
+    let olderReload: Promise<void> | undefined;
+    try {
+      olderReload = queries.reloadSnapshot();
+      older.resolve({
+        entries: [{ repo: olderRepo, items: [] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: { markdownPreviewMode: "rendered" },
+      });
+      await configReadStarted.promise;
+
+      const newerReload = queries.reloadSnapshot();
+      newer.resolve({
+        entries: [],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {
+          markdownPreviewMode: "raw",
+          snapshotOwner: "newer",
+        },
+      });
+      await newerReload;
+
+      repoConfig.resolve("{}");
+      await olderReload;
+
+      expect(state.markdownPreviewMode.value).toBe("raw");
+      expect(state.snapshotSettings.value.snapshotOwner).toBe("newer");
+      expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+      expect(queries.snapshot.data.value.settings.snapshotOwner).toBe("newer");
+      expect(queries.snapshot.pending.value).toBe(false);
+      expect(queries.snapshot.error.value).toBeNull();
+    } finally {
+      repoConfig.resolve("{}");
+      await olderReload?.catch(() => undefined);
+      mockState.invokeMock.mockReset();
+      mockState.invokeMock.mockImplementation(originalInvoke);
+    }
+  });
+
+  it("rejects and records the latest reload failure", async () => {
+    const current = deferred<KannaSnapshot>();
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, {
+      fetchSnapshot: () => current.promise,
+    });
+    const queries = createQueriesApi(context);
+    const failure = new Error("current reload failed");
+
+    const reload = queries.reloadSnapshot();
+    expect(queries.snapshot.pending.value).toBe(true);
+
+    current.reject(failure);
+    await expect(reload).rejects.toBe(failure);
+
+    expect(queries.snapshot.error.value).toBe(failure);
+    expect(queries.snapshot.pending.value).toBe(false);
   });
 
   it("removes a hidden repo and its tasks from the visible store state together", async () => {

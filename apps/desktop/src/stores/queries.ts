@@ -61,13 +61,15 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   }
 
   async function reloadSnapshot(): Promise<void> {
+    const runId = ++refreshRunId.value;
     snapshotPending.value = true;
     snapshotError.value = null;
     try {
-      const runId = ++refreshRunId.value;
       const refreshStart = performance.now();
 
       const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
+      if (runId !== refreshRunId.value) return;
+
       const loadedRepos = snapshot.entries.map((entry) => entry.repo);
       const loadedItems = flattenSnapshotItems(snapshot);
 
@@ -93,6 +95,8 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
       );
 
+      if (runId !== refreshRunId.value) return;
+
       baseSnapshot.value = snapshot;
       applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot();
@@ -106,10 +110,14 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         context.state.pendingCreateVisibility.delete(item.id);
       }
     } catch (error) {
+      if (runId !== refreshRunId.value) return;
+
       snapshotError.value = error;
       throw error;
     } finally {
-      snapshotPending.value = false;
+      if (runId === refreshRunId.value) {
+        snapshotPending.value = false;
+      }
     }
   }
 

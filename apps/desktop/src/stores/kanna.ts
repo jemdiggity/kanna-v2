@@ -139,6 +139,7 @@ Use this branch as the default when the user does not specify a target branch. B
     appTheme: state.appTheme,
     codeTheme: state.codeTheme,
     agentMessageAppearance: state.agentMessageAppearance,
+    markdownPreviewMode: state.markdownPreviewMode,
     pendingSetupIds: state.pendingSetupIds,
     lastHiddenRepoId: state.lastHiddenRepoId,
     selectedRepo: selection.selectedRepo,
