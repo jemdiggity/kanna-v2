@@ -35,6 +35,9 @@ export const useKannaStore = defineStore("kanna", () => {
   services.withOptimisticItemOverlay = queries.withOptimisticItemOverlay;
   services.selectedRepo = selection.selectedRepo;
   services.currentItem = selection.currentItem;
+  services.selectedTaskId = selection.selectedTaskId;
+  services.currentTaskSlot = selection.currentTaskSlot;
+  services.persistSelection = selection.persistSelection;
   services.sortedItemsForCurrentRepo = selection.sortedItemsForCurrentRepo;
   services.sortedItemsAllRepos = selection.sortedItemsAllRepos;
   services.isItemHidden = selection.isItemHidden;
@@ -125,6 +128,7 @@ Use this branch as the default when the user does not specify a target branch. B
   return {
     repos: state.repos,
     items: state.items,
+    taskUiSlots: state.taskUiSlots,
     taskBlockers: state.taskBlockers,
     selectedRepoId: state.selectedRepoId,
     selectedItemId: state.selectedItemId,
@@ -144,6 +148,8 @@ Use this branch as the default when the user does not specify a target branch. B
     lastHiddenRepoId: state.lastHiddenRepoId,
     selectedRepo: selection.selectedRepo,
     currentItem: selection.currentItem,
+    selectedTaskId: selection.selectedTaskId,
+    currentTaskSlot: selection.currentTaskSlot,
     sortedItemsForCurrentRepo: selection.sortedItemsForCurrentRepo,
     sortedItemsAllRepos: selection.sortedItemsAllRepos,
     getStageOrder: selection.getStageOrder,

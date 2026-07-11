@@ -21,7 +21,7 @@ export function createTaskCloseActions(
   };
 
   async function selectReplacementAfterTaskRemoval(item: PipelineItem): Promise<void> {
-    if (context.state.selectedItemId.value !== item.id) return;
+    if (requireService(context.services.selectedTaskId, "selectedTaskId").value !== item.id) return;
     await requireService(
       context.services.selectReplacementAfterItemRemoval,
       "selectReplacementAfterItemRemoval",
@@ -92,8 +92,6 @@ export function createTaskCloseActions(
           context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${spawnError instanceof Error ? spawnError.message : spawnError}`);
         }
       }
-
-      context.state.selectedItemId.value = reopenedItem.id;
     } catch (error) {
       console.error("[store] undo close failed:", error);
       context.toast.error(context.tt("toasts.undoCloseFailed"));

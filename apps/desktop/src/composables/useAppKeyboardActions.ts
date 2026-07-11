@@ -157,9 +157,13 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       openNewTaskModal().catch((e) => console.error("[App] openNewTaskModal failed:", e));
     },
     newWindow: async () => {
+      const workspaceTask = selectedWorkspaceTask.value;
+      const selectedTaskId = workspaceTask && workspaceTask.localTaskId === null
+        ? workspaceTask.item.id
+        : store.selectedTaskId;
       await windowWorkspace.openWindow({
         selectedRepoId: store.selectedRepoId,
-        selectedItemId: store.selectedItemId,
+        selectedItemId: selectedTaskId,
       });
     },
     closeWindow: async () => {
@@ -229,7 +233,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
 
       const item = store.currentItem;
       if (!item) return;
-      if (store.selectedItemId && item.id !== store.selectedItemId) return;
+      if (store.selectedTaskId && item.id !== store.selectedTaskId) return;
       void store.advanceStage(item.id);
     },
     requestChanges: () => {

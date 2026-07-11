@@ -20,6 +20,7 @@ import {
   type MarkdownPreviewMode,
 } from "./markdownPreviewMode";
 import type { RequestRevisionOptions } from "./pipeline";
+import type { TaskUiSlot } from "../types/taskUi";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
 
@@ -114,6 +115,7 @@ export interface StoreState {
   db: Ref<DbHandle | null>;
   repos: Ref<Repo[]>;
   items: Ref<PipelineItem[]>;
+  taskUiSlots: Ref<TaskUiSlot[]>;
   taskBlockers: Ref<TaskBlocker[]>;
   worktreePaths: Ref<Record<string, string>>;
   snapshotSettings: Ref<Record<string, string>>;
@@ -131,7 +133,6 @@ export interface StoreState {
   agentMessageAppearance: Ref<AgentMessageAppearance>;
   markdownPreviewMode: Ref<MarkdownPreviewMode>;
   lastHiddenRepoId: Ref<string | null>;
-  pendingSetupIds: Ref<string[]>;
   pipelineCache: Map<string, PipelineDefinition>;
   agentCache: Map<string, AgentDefinition>;
   stageOrderCache: Map<string, string[]>;
@@ -151,6 +152,9 @@ export interface StoreServices {
   }) => Promise<T>;
   selectedRepo?: ComputedRef<Repo | null>;
   currentItem?: ComputedRef<PipelineItem | null>;
+  selectedTaskId?: ComputedRef<string | null>;
+  currentTaskSlot?: ComputedRef<TaskUiSlot | null>;
+  persistSelection?: () => Promise<void>;
   sortedItemsForCurrentRepo?: ComputedRef<PipelineItem[]>;
   sortedItemsAllRepos?: ComputedRef<PipelineItem[]>;
   isItemHidden?: (item: PipelineItem) => boolean;
@@ -273,6 +277,7 @@ export function createStoreState(): StoreState {
   const db = ref<DbHandle | null>(null);
   const repos = ref<Repo[]>([]);
   const items = ref<PipelineItem[]>([]);
+  const taskUiSlots = ref<TaskUiSlot[]>([]);
   const taskBlockers = ref<TaskBlocker[]>([]);
   const worktreePaths = ref<Record<string, string>>({});
   const snapshotSettings = ref<Record<string, string>>({});
@@ -290,7 +295,6 @@ export function createStoreState(): StoreState {
   const agentMessageAppearance = ref<AgentMessageAppearance>("chat");
   const markdownPreviewMode = ref<MarkdownPreviewMode>(DEFAULT_MARKDOWN_PREVIEW_MODE);
   const lastHiddenRepoId = ref<string | null>(null);
-  const pendingSetupIds = ref<string[]>([]);
   const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
   const pipelineCache = new Map<string, PipelineDefinition>();
   const agentCache = new Map<string, AgentDefinition>();
@@ -300,6 +304,7 @@ export function createStoreState(): StoreState {
     db,
     repos,
     items,
+    taskUiSlots,
     taskBlockers,
     worktreePaths,
     snapshotSettings,
@@ -317,7 +322,6 @@ export function createStoreState(): StoreState {
     agentMessageAppearance,
     markdownPreviewMode,
     lastHiddenRepoId,
-    pendingSetupIds,
     pipelineCache,
     agentCache,
     stageOrderCache,

@@ -4,8 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
 import { createSelectionApi } from "./selection";
-import { createStoreContext, createStoreState } from "./state";
+import { createStoreContext, createStoreState, type StoreServices } from "./state";
 import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
+import {
+  acknowledgeTaskUiSlot,
+  buildCreatingTaskUiSlot,
+  reconcileTaskUiSlots,
+} from "./taskUiSlots";
 
 const mockState = vi.hoisted(() => {
   const insertOperatorEventMock = vi.fn(async () => {});
@@ -45,6 +50,16 @@ function createDb(): DbHandle {
     execute: vi.fn(async () => ({ rowsAffected: 1 })),
     select: vi.fn(async () => []),
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function createRepo(overrides: Partial<Repo> = {}): Repo {
@@ -120,6 +135,7 @@ describe("createSelectionApi", () => {
     state.db.value = createDb();
     state.repos.value = [createRepo()];
     state.items.value = [createItem()];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
     state.selectedRepoId.value = "repo-1";
 
     const persistSelection = vi.fn(async () => {});
@@ -152,6 +168,341 @@ describe("createSelectionApi", () => {
     );
   });
 
+  it("keeps slot selection stable while persisting only durable task IDs", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.selectedRepoId.value = "repo-1";
+    state.taskUiSlots.value = [
+      buildCreatingTaskUiSlot({
+        slotId: "create:slot-1",
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentType: "pty",
+        requestedAgentProviders: "claude",
+      }),
+    ];
+
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {
+        windowWorkspace: {
+          persistSelection,
+        },
+      } as never,
+    );
+    const selection = createSelectionApi(context);
+
+    await selection.selectItem("create:slot-1");
+
+    expect(state.selectedItemId.value).toBe("create:slot-1");
+    expect(selection.selectedTaskId.value).toBeNull();
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+
+    state.taskUiSlots.value = acknowledgeTaskUiSlot(
+      state.taskUiSlots.value,
+      "create:slot-1",
+      "durable-1",
+    );
+    await selection.persistSelection();
+
+    expect(state.selectedItemId.value).toBe("create:slot-1");
+    expect(selection.selectedTaskId.value).toBe("durable-1");
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: "durable-1",
+    });
+  });
+
+  it("serializes captured selection payloads so acknowledgement persists after the creating selection", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.selectedRepoId.value = "repo-1";
+    state.taskUiSlots.value = [
+      buildCreatingTaskUiSlot({
+        slotId: "create:slot-1",
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentType: "pty",
+        requestedAgentProviders: "claude",
+      }),
+    ];
+    const firstWrite = deferred<void>();
+    const persistSelection = vi.fn(async () => {
+      if (persistSelection.mock.calls.length === 1) {
+        await firstWrite.promise;
+      }
+    });
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      { windowWorkspace: { persistSelection } } as never,
+    );
+    const selection = createSelectionApi(context);
+
+    const creatingPersist = selection.selectItem("create:slot-1");
+    await vi.waitFor(() => expect(persistSelection).toHaveBeenCalledTimes(1));
+    expect(persistSelection).toHaveBeenNthCalledWith(1, {
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+
+    state.taskUiSlots.value = acknowledgeTaskUiSlot(
+      state.taskUiSlots.value,
+      "create:slot-1",
+      "durable-1",
+    );
+    const acknowledgedPersist = selection.persistSelection();
+    await Promise.resolve();
+
+    expect(persistSelection).toHaveBeenCalledTimes(1);
+
+    firstWrite.resolve();
+    await Promise.all([creatingPersist, acknowledgedPersist]);
+
+    expect(persistSelection).toHaveBeenNthCalledWith(2, {
+      selectedRepoId: "repo-1",
+      selectedItemId: "durable-1",
+    });
+    expect(persistSelection).toHaveBeenCalledTimes(2);
+  });
+
+  it("normalizes a durable task selection to its pre-existing stable slot ID", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.items.value = [createItem({ id: "durable-1" })];
+    state.taskUiSlots.value = reconcileTaskUiSlots(
+      acknowledgeTaskUiSlot(
+        [
+          buildCreatingTaskUiSlot({
+            slotId: "create:slot-1",
+            repoId: "repo-1",
+            prompt: "Ship it",
+            agentType: "agent",
+            requestedAgentProviders: "claude",
+          }),
+        ],
+        "create:slot-1",
+        "durable-1",
+      ),
+      state.items.value,
+    );
+
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {
+        windowWorkspace: {
+          persistSelection,
+        },
+      } as never,
+    );
+
+    await createSelectionApi(context).selectItem("durable-1");
+
+    expect(state.selectedItemId.value).toBe("create:slot-1");
+    expect(state.lastSelectedItemByRepo.value["repo-1"]).toBe("create:slot-1");
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: "durable-1",
+    });
+  });
+
+  it("does not fall back to another durable item while a creating slot is selected", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.items.value = [createItem({ id: "durable-1" })];
+    state.taskUiSlots.value = [
+      buildCreatingTaskUiSlot({
+        slotId: "create:slot-1",
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentType: "pty",
+        requestedAgentProviders: "claude",
+      }),
+      ...reconcileTaskUiSlots([], state.items.value),
+    ];
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {} as never,
+    );
+    const selection = createSelectionApi(context);
+
+    await selection.selectItem("create:slot-1");
+
+    expect(selection.currentTaskSlot.value?.slot_id).toBe("create:slot-1");
+    expect(selection.currentItem.value).toBeNull();
+  });
+
+  it("uses the first sorted durable item as the no-selection fallback", () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.items.value = [createItem()];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = null;
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {} as never,
+    );
+
+    const selection = createSelectionApi(context);
+
+    expect(selection.currentItem.value?.id).toBe("task-1");
+  });
+
+  it("keeps a creating slot reachable in Back history before hydration", async () => {
+    vi.useFakeTimers();
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    const durableItem = createItem({ id: "durable-1" });
+    state.items.value = [durableItem];
+    const creatingSlot = buildCreatingTaskUiSlot({
+      slotId: "create:slot-1",
+      repoId: "repo-1",
+      prompt: "Creating task",
+      agentType: "pty",
+      requestedAgentProviders: "claude",
+    });
+    const [readySlot] = reconcileTaskUiSlots(
+      acknowledgeTaskUiSlot([
+        buildCreatingTaskUiSlot({
+          slotId: "ready:slot-2",
+          repoId: "repo-1",
+          prompt: "Ready task",
+          agentType: "agent",
+          requestedAgentProviders: "claude",
+        }),
+      ], "ready:slot-2", "durable-1"),
+      [durableItem],
+    );
+    state.taskUiSlots.value = [creatingSlot, readySlot];
+    const services: StoreServices = {};
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      services,
+    );
+    const selection = createSelectionApi(context);
+    services.sortedItemsAllRepos = selection.sortedItemsAllRepos;
+
+    await selection.selectItem("create:slot-1");
+    await vi.advanceTimersByTimeAsync(1001);
+    await selection.selectItem("durable-1");
+    selection.goBack();
+
+    expect(state.selectedItemId.value).toBe("create:slot-1");
+    expect(selection.currentTaskSlot.value).toMatchObject({
+      slot_id: "create:slot-1",
+      state: "creating",
+    });
+  });
+
+  it("keeps a creating slot reachable in Forward history before hydration", async () => {
+    vi.useFakeTimers();
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    const durableItem = createItem({ id: "durable-1" });
+    state.items.value = [durableItem];
+    const creatingSlot = buildCreatingTaskUiSlot({
+      slotId: "create:slot-1",
+      repoId: "repo-1",
+      prompt: "Creating task",
+      agentType: "pty",
+      requestedAgentProviders: "claude",
+    });
+    const [readySlot] = reconcileTaskUiSlots(
+      acknowledgeTaskUiSlot([
+        buildCreatingTaskUiSlot({
+          slotId: "ready:slot-2",
+          repoId: "repo-1",
+          prompt: "Ready task",
+          agentType: "agent",
+          requestedAgentProviders: "claude",
+        }),
+      ], "ready:slot-2", "durable-1"),
+      [durableItem],
+    );
+    state.taskUiSlots.value = [creatingSlot, readySlot];
+    const services: StoreServices = {};
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      services,
+    );
+    const selection = createSelectionApi(context);
+    services.sortedItemsAllRepos = selection.sortedItemsAllRepos;
+
+    await selection.selectItem("durable-1");
+    await vi.advanceTimersByTimeAsync(1001);
+    await selection.selectItem("create:slot-1");
+    selection.goBack();
+    expect(state.selectedItemId.value).toBe("ready:slot-2");
+
+    selection.goForward();
+    expect(state.selectedItemId.value).toBe("create:slot-1");
+    expect(selection.currentTaskSlot.value).toMatchObject({
+      slot_id: "create:slot-1",
+      state: "creating",
+    });
+  });
+
   it("marks an unread selected task read and invalidates other windows", async () => {
     vi.useFakeTimers();
     const state = createStoreState();
@@ -163,6 +514,7 @@ describe("createSelectionApi", () => {
         activity_changed_at: "2026-04-29T00:00:00.000Z",
       }),
     ];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
     state.selectedRepoId.value = "repo-1";
 
     const persistSelection = vi.fn(async () => {});
@@ -209,6 +561,7 @@ describe("createSelectionApi", () => {
       }),
     ];
     state.items.value = [createItem()];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
     state.selectedRepoId.value = "repo-2";
     state.selectedItemId.value = null;
 
@@ -244,6 +597,7 @@ describe("createSelectionApi", () => {
     state.db.value = createDb();
     state.repos.value = [createRepo({ path: "/tmp/repo-1", name: "repo-1" })];
     state.items.value = [createItem()];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
     state.selectedRepoId.value = "repo-missing";
     state.selectedItemId.value = "task-missing";
 

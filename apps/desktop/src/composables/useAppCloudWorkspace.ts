@@ -1,6 +1,7 @@
-import { computed, ref, watch, type ComputedRef } from "vue";
+import { computed, ref, watch, watchEffect, type ComputedRef } from "vue";
 import { computedAsync } from "@vueuse/core";
 import type { DbHandle, PipelineItem } from "../types/kanna";
+import type { SidebarTaskItem } from "../types/taskUi";
 
 import { getConfiguredDesktopAuthSession } from "../services/desktopAuthSdk";
 import { runDesktopAutoSignIn } from "../services/desktopAutoSignIn";
@@ -20,13 +21,13 @@ import { fetchClosedTaskIdentities } from "../services/desktopServerClient";
 import { computeTaskSnapshotFingerprint } from "../utils/cloudTaskFingerprint";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
 import { buildWorkspace } from "../workspace/buildWorkspace";
+import { createWorkspaceSidebarProjector } from "../workspace/projectWorkspaceTasksForSidebar";
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
+import type { WindowWorkspaceController } from "../windowWorkspace";
 import type { useToast } from "./useToast";
 
-export type AppSidebarItem = PipelineItem & {
-  remote_task?: boolean;
-};
+export type AppSidebarItem = SidebarTaskItem;
 
 type LocalTaskIdentity = Pick<PipelineItem, "id" | "repo_id" | "stage" | "closed_at">;
 type ClosedLocalTaskIdentity = Pick<PipelineItem, "id" | "repo_id">;
@@ -35,11 +36,12 @@ interface UseAppCloudWorkspaceOptions {
   db: DbHandle;
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
+  windowWorkspace: WindowWorkspaceController;
 }
 
 const CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS = 30_000;
 
-export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceOptions) {
+export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseAppCloudWorkspaceOptions) {
   const desktopAuthSession = ref<DesktopAuthSession | null>(null);
   const desktopAuthState = ref<DesktopAuthState>({ status: "signedOut" });
   const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
@@ -54,6 +56,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
   let lastCloudBackendErrorToastAt: number | null = null;
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
+  const workspaceSidebarProjector = createWorkspaceSidebarProjector();
 
   const localReposForCloudMatching = computedAsync(async () => {
     return Promise.all(store.repos.map(async (repo) => {
@@ -126,15 +129,18 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
   }));
   const remoteTaskDiagnostics = computed(() => workspace.value.diagnostics);
-  const workspaceTasksByItemId = computed(() => {
-    const entries: Array<[string, WorkspaceTask]> = [];
-    for (const task of workspace.value.tasks) {
-      entries.push([task.item.id, task]);
-      if (task.localTaskId) entries.push([task.localTaskId, task]);
-      for (const remoteTaskId of task.remoteTaskIds) entries.push([remoteTaskId, task]);
-    }
-    return new Map(entries);
-  });
+  const workspaceSidebarProjection = computed(() => workspaceSidebarProjector.project({
+    taskUiSlots: store.taskUiSlots,
+    workspaceTasks: workspace.value.tasks,
+  }));
+  // Keep admission state ahead of task creation. Vue owns this effect's cleanup
+  // through the composable's active component scope.
+  watchEffect(() => {
+    void workspaceSidebarProjection.value;
+  }, { flush: "sync" });
+  const workspaceTasksByItemId = computed(
+    () => workspaceSidebarProjection.value.workspaceTasksByItemId,
+  );
   const sidebarRepos = computed(() => workspace.value.repos.map((repo) => ({
     id: repo.key,
     path: repo.path ?? "cloud",
@@ -147,12 +153,9 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     created_at: "",
     last_opened_at: "",
   })));
-  const sidebarItems = computed<AppSidebarItem[]>(() => workspace.value.tasks.map((task) => ({
-    ...task.item,
-    id: task.item.id,
-    repo_id: task.repoKey,
-    remote_task: task.owner.kind !== "local",
-  })));
+  const sidebarItems = computed<AppSidebarItem[]>(
+    () => workspaceSidebarProjection.value.sidebarItems,
+  );
   const selectedCloudRepo = computed(() =>
     remoteSnapshot.value.repos.find((repo) => repo.id === (selectedCloudRepoId.value ?? store.selectedRepoId))
       ?? sidebarRepos.value.find((repo) => repo.id === (selectedCloudRepoId.value ?? store.selectedRepoId) && repo.path === "cloud")
@@ -379,6 +382,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
 
   async function closeSelectedWorkspaceTask(): Promise<void> {
     const workspaceTask = selectedWorkspaceTask.value;
+    const closingPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
     if (!workspaceTask || workspaceTask.terminal.kind === "local") {
       if (workspaceTask) {
         markWorkspaceTaskLocallyClosed(workspaceTask);
@@ -408,8 +412,18 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
       });
       deleteRemoteCloudTaskMetadata(workspaceTask);
       markWorkspaceTaskLocallyClosed(workspaceTask);
-      if (selectedCloudItemId.value && locallyClosedRemoteTaskIds.value.has(selectedCloudItemId.value)) {
+      const currentPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
+      if (closingPresentationSlotId && currentPresentationSlotId === closingPresentationSlotId) {
         selectedCloudItemId.value = null;
+        store.selectedItemId = null;
+        if (store.lastSelectedItemByRepo[workspaceTask.repoKey] === closingPresentationSlotId) {
+          const { [workspaceTask.repoKey]: _closed, ...remainingSelections } = store.lastSelectedItemByRepo;
+          store.lastSelectedItemByRepo = remainingSelections;
+        }
+        await windowWorkspace.persistSelection({
+          selectedRepoId: store.selectedRepoId,
+          selectedItemId: null,
+        });
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));

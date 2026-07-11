@@ -5,6 +5,7 @@ import {
   type PipelineItem,
   type Repo,
 } from "../types/kanna";
+import type { TaskUiSlot } from "../types/taskUi";
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
@@ -255,6 +256,33 @@ function getSessionCreatedHandler(): (event: unknown) => Promise<void> {
   )?.[1] as ((event: unknown) => Promise<void>) | undefined;
   if (!handler) throw new Error("session_created handler was not registered");
   return handler;
+}
+
+function getSessionExitHandler(): (event: unknown) => Promise<void> {
+  const handler = mockState.listenMock.mock.calls.find(
+    ([eventName]) => eventName === "session_exit",
+  )?.[1] as ((event: unknown) => Promise<void>) | undefined;
+  if (!handler) throw new Error("session_exit handler was not registered");
+  return handler;
+}
+
+function makeReadyTaskSlot(task: PipelineItem, slotId: string): TaskUiSlot {
+  return {
+    slot_id: slotId,
+    task_id: task.id,
+    state: "ready",
+    task,
+    draft: {
+      repo_id: task.repo_id,
+      prompt: task.prompt ?? "",
+      display_name: task.display_name,
+      pipeline: task.pipeline,
+      stage: task.stage,
+      agent_type: "pty",
+      agent_provider: task.agent_provider,
+      created_at: task.created_at,
+    },
+  };
 }
 
 async function flushAsync(): Promise<void> {
@@ -567,9 +595,13 @@ describe("createInitApi", () => {
       }
     ).initialWindowBootstrap = bootstrapRef;
 
+    const restoreSelection = vi.fn((taskId: string) => {
+      expect(taskId).toBe("task-1");
+      state.selectedItemId.value = "create:stable-bootstrap";
+    });
     const services = {
       loadInitialData: createSnapshotLoader(state, { items: mockState.items }),
-      restoreSelection: vi.fn(),
+      restoreSelection,
     };
     const toast = {
       toasts: ref([]),
@@ -593,6 +625,7 @@ describe("createInitApi", () => {
 
     expect(state.selectedRepoId.value).toBe("repo-1");
     expect(services.restoreSelection).toHaveBeenCalledWith("task-1");
+    expect(state.selectedItemId.value).toBe("create:stable-bootstrap");
   });
 
   it("refreshes externally spawned tasks without moving focus to the new task", async () => {
@@ -613,17 +646,28 @@ describe("createInitApi", () => {
     const state = createStoreState();
     state.repos.value = [...mockState.repos];
     state.items.value = [currentTask];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "create:stable-current";
+    const selectedTaskId = ref<string | null>(currentTask.id);
+    const currentTaskSlot = computed(() => selectedTaskId.value
+      ? makeReadyTaskSlot(currentTask, "create:stable-current")
+      : null);
+    const restoreSelection = vi.fn((taskId: string) => {
+      selectedTaskId.value = taskId;
+      state.selectedItemId.value = "create:stable-current";
+    });
     const services = {
       loadInitialData: vi.fn(async () => {}),
       reloadSnapshot: vi.fn(async () => {
         state.items.value = [externalTask, currentTask];
+        selectedTaskId.value = null;
       }),
-      currentItem: computed(() => {
-        if (state.selectedItemId.value) {
-          return state.items.value.find((item) => item.id === state.selectedItemId.value) ?? null;
-        }
-        return state.items.value[0] ?? null;
-      }),
+      selectedTaskId: computed(() => selectedTaskId.value),
+      currentTaskSlot,
+      currentItem: computed(() => selectedTaskId.value
+        ? state.items.value.find((item) => item.id === selectedTaskId.value) ?? null
+        : state.items.value[0] ?? null),
+      restoreSelection,
     };
     const toast = {
       toasts: ref([]),
@@ -649,14 +693,15 @@ describe("createInitApi", () => {
     } as unknown as Parameters<typeof createInitApi>[2]);
 
     await initApi.init(createDb());
-    expect(state.selectedItemId.value).toBeNull();
+    expect(state.selectedItemId.value).toBe("create:stable-current");
     expect(services.currentItem.value?.id).toBe("task-current");
 
     await getSessionCreatedHandler()({ payload: { session_id: "task-external" } });
 
     expect(services.reloadSnapshot).toHaveBeenCalled();
     expect(state.items.value.map((item) => item.id)).toEqual(["task-external", "task-current"]);
-    expect(state.selectedItemId.value).toBe("task-current");
+    expect(restoreSelection).toHaveBeenCalledWith("task-current");
+    expect(state.selectedItemId.value).toBe("create:stable-current");
     expect(services.currentItem.value?.id).toBe("task-current");
     expect(persistSelection).toHaveBeenCalledWith({
       selectedRepoId: "repo-1",
@@ -690,8 +735,9 @@ describe("createInitApi", () => {
     state.repos.value = [...mockState.repos];
     state.items.value = [reviewTask];
     state.selectedRepoId.value = "repo-1";
-    state.selectedItemId.value = "task-review";
-    state.lastSelectedItemByRepo.value = { "repo-1": "task-review" };
+    state.selectedItemId.value = "create:stable-review";
+    state.lastSelectedItemByRepo.value = { "repo-1": "create:stable-review" };
+    const selectedTaskId = ref<string | null>(reviewTask.id);
     const reloadSnapshot = vi.fn(async () => {
       state.items.value = [revisionTask, closedReviewTask];
     });
@@ -715,6 +761,8 @@ describe("createInitApi", () => {
     const services = {
       loadInitialData: vi.fn(async () => {}),
       reloadSnapshot,
+      selectedTaskId: computed(() => selectedTaskId.value),
+      currentTaskSlot: computed(() => null),
       reconcileSelection,
       windowWorkspace: { onSharedInvalidation, persistSelection },
     };
@@ -743,6 +791,159 @@ describe("createInitApi", () => {
       selectedRepoId: "repo-1",
       selectedItemId: null,
     });
+  });
+
+  it("preserves a noncanonical slot when shared refresh keeps its durable task visible", async () => {
+    const currentTask = mockState.makeItem({ id: "task-current", tags: "[]" });
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [currentTask];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "create:stable-current";
+    const restoreSelection = vi.fn((taskId: string) => {
+      expect(taskId).toBe(currentTask.id);
+      state.selectedItemId.value = "create:stable-current";
+    });
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot: vi.fn(async () => {
+        state.items.value = [{ ...currentTask }];
+      }),
+      selectedTaskId: computed(() => currentTask.id),
+      currentTaskSlot: computed(() => makeReadyTaskSlot(currentTask, "create:stable-current")),
+      restoreSelection,
+      windowWorkspace: {
+        onSharedInvalidation,
+        persistSelection: vi.fn(async () => {}),
+      } as never,
+    });
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    await initApi.init(createDb());
+    await getSharedInvalidationHandler(onSharedInvalidation)();
+
+    expect(state.selectedItemId.value).toBe("create:stable-current");
+    expect(restoreSelection).not.toHaveBeenCalled();
+  });
+
+  it("preserves an acknowledged creating slot while its durable task payload is unhydrated", async () => {
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "create:acknowledged";
+    const acknowledgedSlot: TaskUiSlot = {
+      slot_id: "create:acknowledged",
+      task_id: "task-acknowledged",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Still hydrating",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-07-11T00:00:00Z",
+      },
+    };
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const persistSelection = vi.fn(async () => {});
+    const restoreSelection = vi.fn();
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot: vi.fn(async () => {
+        state.items.value = [];
+      }),
+      selectedTaskId: computed(() => acknowledgedSlot.task_id),
+      currentTaskSlot: computed(() => acknowledgedSlot),
+      restoreSelection,
+      windowWorkspace: {
+        onSharedInvalidation,
+        persistSelection,
+      } as never,
+    });
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    await initApi.init(createDb());
+    await getSharedInvalidationHandler(onSharedInvalidation)();
+
+    expect(state.selectedItemId.value).toBe("create:acknowledged");
+    expect(restoreSelection).not.toHaveBeenCalled();
+    expect(persistSelection).not.toHaveBeenCalled();
+  });
+
+  it("uses the selected durable task when teardown exit chooses a replacement", async () => {
+    const closingTask = mockState.makeItem({
+      id: "task-closing",
+      teardown_started_at: "2026-07-11T00:00:00Z",
+    });
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [closingTask];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "create:stable-closing";
+    const selectReplacementAfterItemRemoval = vi.fn(async () => "create:stable-next");
+    const reloadSnapshot = vi.fn(async () => {});
+    const closeTaskAndReleasePorts = vi.fn(async (_taskId: string, close: (taskId: string) => Promise<void>) => {
+      await close(closingTask.id);
+    });
+    updateDesktopServerClientHandlersForTests({ closeTask: async () => {} });
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, {
+      loadInitialData: vi.fn(async () => {}),
+      selectedTaskId: computed(() => closingTask.id),
+      selectReplacementAfterItemRemoval,
+      reloadSnapshot,
+      resolveSessionExitWaiters: vi.fn(),
+      persistExitedSessionResumeId: vi.fn(async () => {}),
+    });
+    const checkUnblocked = vi.fn(async () => {});
+    const initApi = createInitApi(context, {
+      closeTaskAndReleasePorts,
+    } as unknown as import("./ports").PortsStore, {
+      checkUnblocked,
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    await initApi.init(createDb());
+    await getSessionExitHandler()({
+      payload: { session_id: "td-task-closing", code: 0 },
+    });
+
+    expect(selectReplacementAfterItemRemoval).toHaveBeenCalledWith(closingTask);
+    expect(closeTaskAndReleasePorts).toHaveBeenCalledWith(closingTask.id, expect.any(Function));
+    expect(checkUnblocked).toHaveBeenCalledWith(closingTask.id);
+    expect(reloadSnapshot).toHaveBeenCalled();
   });
 
   it("loads valid theme preferences from settings", async () => {
@@ -954,13 +1155,20 @@ describe("createInitApi", () => {
     state.repos.value = [...mockState.repos];
     state.items.value = [currentTask];
     state.selectedRepoId.value = "repo-1";
-    state.selectedItemId.value = "task-current";
+    state.selectedItemId.value = "create:stable-current";
+    const currentTaskSlot = computed(() => makeReadyTaskSlot(currentTask, "create:stable-current"));
     const services = {
       loadInitialData: vi.fn(async () => {}),
       reloadSnapshot: vi.fn(async () => {
         state.items.value = [externalTask, currentTask];
       }),
-      currentItem: computed(() => state.items.value.find((item) => item.id === state.selectedItemId.value) ?? null),
+      selectedTaskId: computed(() => currentTask.id),
+      currentTaskSlot,
+      currentItem: computed(() => state.items.value.find((item) => item.id === currentTask.id) ?? null),
+      restoreSelection: vi.fn((taskId: string) => {
+        expect(taskId).toBe(currentTask.id);
+        state.selectedItemId.value = "create:stable-current";
+      }),
       prewarmWorktreeShellSession: vi.fn(async () => {}),
       spawnShellSession: vi.fn(async () => {}),
       windowWorkspace: {
@@ -996,7 +1204,7 @@ describe("createInitApi", () => {
     await flushAsync();
 
     expect(services.reloadSnapshot).toHaveBeenCalled();
-    expect(state.selectedItemId.value).toBe("task-current");
+    expect(state.selectedItemId.value).toBe("create:stable-current");
   });
 });
 

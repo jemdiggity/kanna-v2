@@ -3,6 +3,7 @@ import { type PipelineItem, type Repo } from "../types/kanna";
 import { readRepoConfig, requireService, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { reconcileTaskUiSlots } from "./taskUiSlots";
 
 interface OptimisticItemOverlay {
   key: string;
@@ -52,12 +53,17 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   const repos = computed(() => mergedSnapshot.value.entries.map((entry) => entry.repo));
   const items = computed(() => flattenSnapshotItems(mergedSnapshot.value));
 
-  function syncSnapshot(): void {
+  function syncSnapshot(options: { authoritative?: boolean } = {}): void {
     context.state.repos.value = repos.value;
     context.state.items.value = items.value;
     context.state.taskBlockers.value = mergedSnapshot.value.taskBlockers;
     context.state.worktreePaths.value = { ...mergedSnapshot.value.worktreePaths };
     context.state.snapshotSettings.value = { ...mergedSnapshot.value.settings };
+    context.state.taskUiSlots.value = reconcileTaskUiSlots(
+      context.state.taskUiSlots.value,
+      context.state.items.value,
+      options,
+    );
   }
 
   async function reloadSnapshot(): Promise<void> {
@@ -69,7 +75,6 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
 
       const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
       if (runId !== refreshRunId.value) return;
-
       const loadedRepos = snapshot.entries.map((entry) => entry.repo);
       const loadedItems = flattenSnapshotItems(snapshot);
 
@@ -82,10 +87,12 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         if (!context.state.stageOrderCache.has(repo.path)) {
           try {
             const config = await readRepoConfig(repo.path);
+            if (runId !== refreshRunId.value) return;
             if (config.stage_order) {
               context.state.stageOrderCache.set(repo.path, config.stage_order);
             }
           } catch (error) {
+            if (runId !== refreshRunId.value) return;
             console.debug("[store] no repo config while refreshing stage order cache:", error);
           }
         }
@@ -96,10 +103,9 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       );
 
       if (runId !== refreshRunId.value) return;
-
       baseSnapshot.value = snapshot;
       applySnapshotSettingsToState(context.state, snapshot.settings);
-      syncSnapshot();
+      syncSnapshot({ authoritative: true });
 
       for (const item of loadedItems) {
         const pending = context.state.pendingCreateVisibility.get(item.id);
@@ -111,7 +117,6 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       }
     } catch (error) {
       if (runId !== refreshRunId.value) return;
-
       snapshotError.value = error;
       throw error;
     } finally {

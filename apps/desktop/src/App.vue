@@ -2,6 +2,7 @@
 import { computed, inject, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { type AgentProvider, type DbHandle } from "./types/kanna";
+import type { TaskUiSlot } from "./types/taskUi";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import AppModalLayer from "./components/AppModalLayer.vue";
@@ -70,11 +71,74 @@ const {
   closeSelectedWorkspaceTask,
   advanceSelectedRemoteWorkspaceTask,
   disposeDesktopCloudWorkspace,
-} = useAppCloudWorkspace({ db, store, toast });
+} = useAppCloudWorkspace({ db, store, toast, windowWorkspace });
 if (import.meta.env.DEV) {
   void cloudSnapshot;
   void lanSnapshot;
 }
+
+const mainPanelUiSlot = computed<TaskUiSlot | null>(() => {
+  const selectedId = selectedCloudItemId.value ?? store.selectedItemId;
+  const localSlot = store.currentTaskSlot;
+  if (
+    localSlot
+    && (
+      selectedId === localSlot.slot_id
+      || (localSlot.task_id !== null && selectedId === localSlot.task_id)
+    )
+  ) {
+    return localSlot;
+  }
+
+  const item = mainPanelItem.value;
+  if (!selectedId || !item) return null;
+  const sidebarRow = sidebarItems.value.find((candidate) => candidate.slot_id === selectedId)
+    ?? sidebarItems.value.find((candidate) =>
+      candidate.repo_id === item.repo_id && candidate.task_id === selectedId,
+    )
+    ?? sidebarItems.value.find((candidate) =>
+      candidate.repo_id === item.repo_id && candidate.task_id === item.id,
+    );
+  if (!sidebarRow || sidebarRow.state !== "ready") return null;
+
+  return {
+    slot_id: sidebarRow.slot_id,
+    task_id: sidebarRow.task_id,
+    state: "ready",
+    task: item,
+    draft: {
+      repo_id: item.repo_id,
+      prompt: item.prompt ?? "",
+      display_name: item.display_name,
+      pipeline: item.pipeline,
+      stage: item.stage,
+      agent_type: item.agent_type === "agent" || item.agent_type === "sdk" ? "agent" : "pty",
+      agent_provider: item.agent_provider,
+      created_at: item.created_at,
+    },
+  };
+});
+
+const selectedSidebarSlotId = computed(() => {
+  const selectedId = selectedCloudItemId.value ?? store.selectedItemId;
+  if (!selectedId) return null;
+
+  const direct = sidebarItems.value.find((item) => item.slot_id === selectedId);
+  if (direct) return direct.slot_id;
+
+  const workspaceTask = selectedWorkspaceTask.value
+    ?? workspaceTasksByItemId.value.get(selectedId)
+    ?? null;
+  if (workspaceTask) {
+    const retainedPresentation = sidebarItems.value.find((item) =>
+      workspaceTasksByItemId.value.get(item.slot_id) === workspaceTask,
+    );
+    if (retainedPresentation) return retainedPresentation.slot_id;
+  }
+
+  return sidebarItems.value.find((item) => item.task_id === selectedId)?.slot_id
+    ?? selectedId;
+});
 
 defineExpose({
   cloudSnapshot,
@@ -331,9 +395,9 @@ const modalLayerController = {
       <Sidebar
         ref="sidebarRef"
         :repos="sidebarRepos"
-        :pipeline-items="sidebarItems"
+        :task-slots="sidebarItems"
         :selected-repo-id="store.selectedRepoId"
-        :selected-item-id="store.selectedItemId"
+        :selected-slot-id="selectedSidebarSlotId"
         :blocker-names="sidebarBlockerNames"
         @select-repo="handleSelectRepo"
         @select-item="handleSelectItem"
@@ -361,14 +425,13 @@ const modalLayerController = {
     <div v-if="!isMobile || store.selectedItemId" class="main-column">
       <MainPanel
         ref="mainPanelRef"
-        :item="mainPanelItem"
+        :ui-slot="mainPanelUiSlot"
         :repo-path="mainPanelRepo?.path"
         :spawn-pty-session="store.spawnPtySession"
         :recover-task-session="store.recoverTaskSession"
         :maximized="maximized"
         :blockers="currentBlockers"
         :has-repos="sidebarRepos.length > 0"
-        :pending-setup="store.currentItem ? (store.pendingSetupIds ?? []).includes(store.currentItem.id) : false"
         :cloud-task="mainPanelIsCloudTask"
         :cloud-terminal-ref="mainPanelCloudTerminalRef"
         @close-task="closeSelectedWorkspaceTask"
