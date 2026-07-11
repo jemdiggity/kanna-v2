@@ -9,6 +9,7 @@ import {
   type Firestore,
 } from "firebase/firestore";
 import type { TaskSummary } from "../api/types";
+import { buildCloudTaskId } from "../api/taskIdentity";
 import {
   parseMobileFirebaseConfig,
   type MobileFirestoreEmulatorConfig
@@ -468,14 +469,13 @@ function normalizeAgentType(type: string | null | undefined): TaskSummary["agent
   return type === "agent" || type === "pty" ? type : null;
 }
 
-function cloudTaskId(id: string): string {
-  return `cloud:${id}`;
-}
-
 function cloudTaskSummaryId(snapshot: CloudTaskSnapshot): string {
-  return snapshot.cloudTaskId ?? cloudTaskId(
-    `${snapshot.ownerDesktopId}:${snapshot.localRepoId ?? snapshot.repo.cloudRepoId}:${snapshot.ownerLocalTaskId}`,
-  );
+  return snapshot.cloudTaskId
+    ?? buildCloudTaskId({
+        ownerDesktopId: snapshot.ownerDesktopId,
+        localRepoId: snapshot.localRepoId ?? snapshot.repo.cloudRepoId,
+        ownerLocalTaskId: snapshot.ownerLocalTaskId
+      });
 }
 
 function stableTaskIdentity(task: { updatedAt: string }): string {
@@ -490,7 +490,11 @@ function stableTaskIdentity(task: { updatedAt: string }): string {
   const repoId = optionalString(record.localRepoId)
     ?? optionalString(repo?.cloudRepoId);
   return ownerDesktopId && repoId && ownerLocalTaskId
-    ? cloudTaskId(`${ownerDesktopId}:${repoId}:${ownerLocalTaskId}`)
+    ? buildCloudTaskId({
+        ownerDesktopId,
+        localRepoId: repoId,
+        ownerLocalTaskId
+      })
     : "";
 }
 

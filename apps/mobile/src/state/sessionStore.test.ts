@@ -49,6 +49,52 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("retags an active terminal without losing buffered state", () => {
+    const store = createSessionStore();
+
+    store.setSelectedTask("task-pending");
+    store.beginTaskTerminal("task-pending", "snapshot\n");
+    store.appendTaskTerminal("task-pending", "delta\n");
+    store.setTaskTerminalDims("task-pending", 132, 43);
+
+    store.retagTaskIdentity("task-pending", "task-published");
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-published",
+      taskTerminalTaskId: "task-published",
+      taskTerminalStatus: "live",
+      taskTerminalOutput: "snapshot\ndelta\n",
+      taskTerminalCols: 132,
+      taskTerminalRows: 43
+    });
+  });
+
+  it("retags an active agent without losing buffered events", () => {
+    const store = createSessionStore();
+
+    store.setSelectedTask("task-pending");
+    store.beginTaskAgent("task-pending");
+    store.applyTaskAgentStreamEvent("task-pending", {
+      type: "snapshot",
+      events: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "Buffered", truncated: false }
+      }]
+    });
+
+    store.retagTaskIdentity("task-pending", "task-published");
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-published",
+      taskAgentTaskId: "task-published",
+      taskAgentStatus: "live",
+      taskAgentEvents: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "Buffered", truncated: false }
+      }]
+    });
+  });
+
   it("clears the selected task when reconciliation finds no remaining collection match", () => {
     const store = createSessionStore();
 

@@ -15,6 +15,10 @@ import type {
   TaskActionResponse,
   TaskSummary,
 } from "../api/types";
+import {
+  buildCloudTaskId,
+  canonicalizeTaskActionId,
+} from "../api/taskIdentity";
 
 export interface RemoteDesktopRecord {
   desktopId: string;
@@ -83,7 +87,14 @@ export interface RemoteTransportDependencies {
 
 interface CloudTaskRoute {
   desktopId: string;
+  repoId?: string;
+  localRepoId?: string;
   taskId: string;
+}
+
+interface CloudRepoRoute {
+  desktopId: string;
+  localRepoId: string;
 }
 
 type CloudIndexedTaskSummary = TaskSummary & {
@@ -121,6 +132,8 @@ export function createRemoteTransport({
       if (isCloudTaskRoute(task)) {
         const route = {
           desktopId: task.ownerDesktopId,
+          repoId: task.repoId,
+          localRepoId: task.ownerLocalRepoId ?? task.repoId,
           taskId: task.ownerLocalTaskId
         };
         nextRoutes.set(task.id, route);
@@ -166,11 +179,14 @@ export function createRemoteTransport({
     return rememberCloudTasks(await listCloudTasks(), readEpoch);
   };
 
-  const resolveCloudRepoDesktopId = async (
-    repoId: string
-  ): Promise<string | null> => {
+  const resolveCloudRepoRoute = async (
+    repoId: string,
+    requestedDesktopId?: string
+  ): Promise<CloudRepoRoute | null> => {
     if (!listCloudTasks) {
-      return null;
+      return requestedDesktopId
+        ? { desktopId: requestedDesktopId, localRepoId: repoId }
+        : null;
     }
 
     await listFreshCloudTasks();
@@ -180,9 +196,20 @@ export function createRemoteTransport({
       ): task is CloudIndexedTaskSummary & {
         ownerDesktopId: string;
         ownerLocalTaskId: string;
-      } => task.repoId === repoId && isCloudTaskRoute(task)
+      } =>
+        task.repoId === repoId &&
+        isCloudTaskRoute(task) &&
+        (!requestedDesktopId || task.ownerDesktopId === requestedDesktopId)
     );
-    return routeTask?.ownerDesktopId ?? null;
+    if (routeTask) {
+      return {
+        desktopId: routeTask.ownerDesktopId,
+        localRepoId: routeTask.ownerLocalRepoId ?? repoId
+      };
+    }
+    return requestedDesktopId
+      ? { desktopId: requestedDesktopId, localRepoId: repoId }
+      : null;
   };
 
   const requestDesktop = async <T>(
@@ -270,8 +297,58 @@ export function createRemoteTransport({
       return { ...response, taskId };
     }
 
+    if (route.localRepoId) {
+      const canonicalTaskId = canonicalizeTaskActionId({
+        canonicalTaskId: taskId,
+        ownerDesktopId: route.desktopId,
+        localRepoId: route.localRepoId,
+        sourceLocalTaskId: route.taskId,
+        responseLocalTaskId: responseTaskId
+      });
+      const resolvedTask = await requestDesktop<TaskSummary[]>(
+        route.desktopId,
+        "GET",
+        "/v1/tasks/recent",
+        null
+      )
+        .then((tasks) =>
+          Array.isArray(tasks)
+            ? tasks.find(
+                (candidate) =>
+                  candidate.id === responseTaskId &&
+                  candidate.repoId === route.localRepoId
+              )
+            : undefined
+        )
+        .catch(() => undefined);
+      provisionalTaskRoutes.set(canonicalTaskId, {
+        desktopId: route.desktopId,
+        repoId: route.repoId,
+        localRepoId: route.localRepoId,
+        taskId: responseTaskId
+      });
+      return {
+        ...response,
+        taskId: canonicalTaskId,
+        ownerDesktopId: route.desktopId,
+        ownerLocalRepoId: route.localRepoId,
+        ownerLocalTaskId: responseTaskId,
+        ...(resolvedTask
+          ? {
+              task: {
+                ...resolvedTask,
+                id: canonicalTaskId,
+                repoId: route.repoId ?? resolvedTask.repoId
+              }
+            }
+          : {})
+      };
+    }
+
     provisionalTaskRoutes.set(responseTaskId, {
       desktopId: route.desktopId,
+      repoId: route.repoId,
+      localRepoId: route.localRepoId,
       taskId: responseTaskId
     });
     return response;
@@ -357,20 +434,43 @@ export function createRemoteTransport({
     },
     createTask: async (input: CreateTaskRequest) => {
       const { desktopId: requestedDesktopId, ...taskInput } = input;
-      const desktopId =
-        requestedDesktopId ?? (await resolveCloudRepoDesktopId(input.repoId));
-      if (desktopId) {
+      const repoRoute = await resolveCloudRepoRoute(
+        input.repoId,
+        requestedDesktopId
+      );
+      if (repoRoute) {
         const created = await requestDesktop<CreateTaskResponse>(
-          desktopId,
+          repoRoute.desktopId,
           "POST",
           "/v1/tasks",
-          taskInput
+          { ...taskInput, repoId: repoRoute.localRepoId }
         );
-        provisionalTaskRoutes.set(created.taskId, {
-          desktopId,
+        if (!listCloudTasks) {
+          provisionalTaskRoutes.set(created.taskId, {
+            desktopId: repoRoute.desktopId,
+            taskId: created.taskId
+          });
+          return created;
+        }
+        const canonicalTaskId = buildCloudTaskId({
+          ownerDesktopId: repoRoute.desktopId,
+          localRepoId: repoRoute.localRepoId,
+          ownerLocalTaskId: created.taskId
+        });
+        provisionalTaskRoutes.set(canonicalTaskId, {
+          desktopId: repoRoute.desktopId,
+          repoId: input.repoId,
+          localRepoId: repoRoute.localRepoId,
           taskId: created.taskId
         });
-        return created;
+        return {
+          ...created,
+          taskId: canonicalTaskId,
+          repoId: input.repoId,
+          ownerDesktopId: repoRoute.desktopId,
+          ownerLocalRepoId: repoRoute.localRepoId,
+          ownerLocalTaskId: created.taskId
+        };
       }
 
       return request<CreateTaskResponse>("POST", "/v1/tasks", taskInput);
@@ -437,7 +537,10 @@ export function createRemoteTransport({
 
       const route = taskRouteForId(taskId);
       if (route) {
-        return observeTaskTerminal(route, listener);
+        return observeTaskTerminal(
+          { desktopId: route.desktopId, taskId: route.taskId },
+          listener
+        );
       }
 
       if (listCloudTasks) {
@@ -455,7 +558,13 @@ export function createRemoteTransport({
                 desktopId: getSelectedDesktopOrThrow(getSelectedDesktopId),
                 taskId
               };
-            activeSubscription = observeTaskTerminal(targetRoute, listener);
+            activeSubscription = observeTaskTerminal(
+              {
+                desktopId: targetRoute.desktopId,
+                taskId: targetRoute.taskId
+              },
+              listener
+            );
             if (closed) {
               activeSubscription.close();
             }
@@ -495,7 +604,10 @@ export function createRemoteTransport({
 
       const route = taskRouteForId(taskId);
       if (route) {
-        return observeTaskAgent(route, listener);
+        return observeTaskAgent(
+          { desktopId: route.desktopId, taskId: route.taskId },
+          listener
+        );
       }
 
       if (listCloudTasks) {
@@ -527,7 +639,13 @@ export function createRemoteTransport({
                 desktopId: getSelectedDesktopOrThrow(getSelectedDesktopId),
                 taskId
               };
-            activeSubscription = observeTaskAgent(targetRoute, listener);
+            activeSubscription = observeTaskAgent(
+              {
+                desktopId: targetRoute.desktopId,
+                taskId: targetRoute.taskId
+              },
+              listener
+            );
             for (const command of pendingCommands.splice(0)) {
               command(activeSubscription);
             }

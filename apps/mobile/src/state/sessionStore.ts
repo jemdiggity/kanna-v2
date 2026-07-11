@@ -105,6 +105,7 @@ export interface SessionStore {
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
   setSelectedTask(taskId: string | null): void;
+  retagTaskIdentity(previousTaskId: string, nextTaskId: string): void;
   setActiveView(view: MobileView): void;
   setPairingCode(code: string | null): void;
   setComposerState(isOpen: boolean, prompt: string): void;
@@ -404,6 +405,35 @@ export function createSessionStore(): SessionStore {
           selectedTaskId === null ? [] : state.taskAgentEvents,
         taskAgentErrorMessage:
           selectedTaskId === null ? null : state.taskAgentErrorMessage
+      };
+      publish();
+    },
+    retagTaskIdentity(previousTaskId, nextTaskId) {
+      const selectedTaskId =
+        state.selectedTaskId === previousTaskId
+          ? nextTaskId
+          : state.selectedTaskId;
+      const taskTerminalTaskId =
+        state.taskTerminalTaskId === previousTaskId
+          ? nextTaskId
+          : state.taskTerminalTaskId;
+      const taskAgentTaskId =
+        state.taskAgentTaskId === previousTaskId
+          ? nextTaskId
+          : state.taskAgentTaskId;
+      if (
+        selectedTaskId === state.selectedTaskId &&
+        taskTerminalTaskId === state.taskTerminalTaskId &&
+        taskAgentTaskId === state.taskAgentTaskId
+      ) {
+        return;
+      }
+
+      state = {
+        ...state,
+        selectedTaskId,
+        taskTerminalTaskId,
+        taskAgentTaskId
       };
       publish();
     },
