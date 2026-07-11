@@ -1016,6 +1016,126 @@ describe("DiffView", () => {
     }
   });
 
+  it("keeps the anchored code line fixed throughout all-lines rendering", async () => {
+    vi.useFakeTimers();
+    diffMocks.parsePatchFilesMock
+      .mockReturnValueOnce([
+        {
+          files: [
+            {
+              name: "anchored-context.txt",
+              __searchRows: [{ lineIndex: "anchor", text: "changed anchor" }],
+              hunks: [],
+            },
+          ],
+        },
+      ])
+      .mockReturnValueOnce([
+        {
+          files: [
+            {
+              name: "anchored-context.txt",
+              __searchRows: [{ lineIndex: "anchor", text: "changed anchor" }],
+              __deferPostRender: true,
+              hunks: [],
+            },
+          ],
+        },
+      ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/anchored-context.txt b/anchored-context.txt";
+      return "";
+    });
+
+    const makeRect = (top: number, height: number): DOMRect => ({
+      x: 0,
+      y: top,
+      top,
+      right: 800,
+      bottom: top + height,
+      left: 0,
+      width: 800,
+      height,
+      toJSON: () => ({}),
+    }) as DOMRect;
+
+    const containerTop = 100;
+    const compactLineDocumentTop = 280;
+    let allLinesDocumentTop = 700;
+    let renderCount = 0;
+    let container!: HTMLElement;
+
+    renderMock.mockImplementation(({ containerWrapper }: { containerWrapper?: HTMLElement }) => {
+      renderCount += 1;
+      const line = containerWrapper
+        ?.querySelector("diffs-container")
+        ?.shadowRoot
+        ?.querySelector<HTMLElement>('[data-content] [data-line-index="anchor"]');
+      if (!line) return;
+      line.setAttribute("data-line", "8");
+      line.setAttribute("data-line-type", "change-addition");
+      line.getBoundingClientRect = () => makeRect(
+        containerTop
+          + (renderCount === 1 ? compactLineDocumentTop : allLinesDocumentTop)
+          - container.scrollTop,
+        20,
+      );
+    });
+
+    let wrapper: ReturnType<typeof mount<typeof DiffView>> | null = null;
+    try {
+      wrapper = mount(DiffView, {
+        props: {
+          repoPath: "/repo",
+          initialScope: "working",
+        },
+        attachTo: document.body,
+        global: {
+          mocks: {
+            $t: (key: string) => key,
+          },
+        },
+      });
+
+      container = wrapper.get(".diff-container").element as HTMLElement;
+      container.getBoundingClientRect = () => makeRect(containerTop, 400);
+      container.scrollTo = ({ top }: ScrollToOptions) => {
+        container.scrollTop = top ?? 0;
+      };
+
+      await flushPromises();
+      await flushPromises();
+
+      container.scrollTop = 200;
+      container.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await nextTick();
+
+      await wrapper.get(".context-toggle").trigger("click");
+      await flushPromises();
+      await flushPromises();
+
+      expect(container.scrollTop).toBe(620);
+
+      allLinesDocumentTop = 900;
+      await vi.runOnlyPendingTimersAsync();
+      await flushPromises();
+
+      const anchoredLine = wrapper
+        .get(".diff-file")
+        .element
+        .querySelector("diffs-container")
+        ?.shadowRoot
+        ?.querySelector<HTMLElement>('[data-line="8"][data-line-type="change-addition"]');
+      expect(anchoredLine).not.toBeNull();
+      expect(anchoredLine!.getBoundingClientRect().top - container.getBoundingClientRect().top).toBe(80);
+      expect(container.scrollTop).toBe(820);
+    } finally {
+      wrapper?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it("restores the previous scroll position when switching diff scopes", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "git_diff") return "diff --git a/working.txt b/working.txt";

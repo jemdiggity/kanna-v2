@@ -46,6 +46,21 @@ type DiffScope = "branch" | "working";
 type DiffContextMode = "compact" | "all";
 type DiffScrollPositions = Partial<Record<DiffScope, number>>;
 interface DiffContentPaneHandle { getContainerElement: () => HTMLElement | null; }
+interface DiffScrollAnchor {
+  filePath: string;
+  lineNumber: string;
+  lineType: string | null;
+  viewportOffset: number;
+}
+interface ActiveDiffScrollAnchor {
+  loadId: number;
+  anchor: DiffScrollAnchor;
+  lineElement: HTMLElement | null;
+}
+interface LoadDiffOptions {
+  preserveCurrentScroll?: boolean;
+  scrollAnchor?: DiffScrollAnchor | null;
+}
 
 const workingFilterOrder: WorkingFilter[] = ["all", "unstaged", "staged"];
 const branchIncludeOrder: BranchInclude[] = ["none", "staged", "all"];
@@ -120,6 +135,7 @@ const contextLabel = computed(() =>
 let nextDiffLoadId = 0;
 let activeDiffLoadId = 0;
 let scrollRestorePendingLoadId = 0;
+let activeDiffScrollAnchor: ActiveDiffScrollAnchor | null = null;
 let applySearchHighlightsFromSearch = () => {};
 
 const {
@@ -274,14 +290,67 @@ function shortSha(sha: string): string {
   return sha.slice(0, 8);
 }
 
+function getDiffFilePath(wrapper: HTMLElement): string {
+  const header = wrapper.querySelector<HTMLElement>(".diff-file-header");
+  return header?.title || header?.textContent || "";
+}
+
+function getRenderedCodeLines(wrapper: HTMLElement): HTMLElement[] {
+  return Array.from(wrapper.querySelectorAll<HTMLElement>("diffs-container"))
+    .flatMap((diffContainer) => Array.from(
+      diffContainer.shadowRoot?.querySelectorAll<HTMLElement>("[data-line]") ?? [],
+    ));
+}
+
 function getFileWrapper(filePath: string): HTMLElement | null {
   const container = containerRef.value;
   if (!container) return null;
-  const wrappers = Array.from(container.querySelectorAll<HTMLElement>(".diff-file"));
-  return wrappers.find((candidate) => {
-    const header = candidate.querySelector<HTMLElement>(".diff-file-header");
-    return (header?.title || header?.textContent || "") === filePath;
-  }) ?? null;
+  return Array.from(container.querySelectorAll<HTMLElement>(".diff-file"))
+    .find((candidate) => getDiffFilePath(candidate) === filePath) ?? null;
+}
+
+function captureScrollAnchor(): DiffScrollAnchor | null {
+  const container = containerRef.value;
+  if (!container) return null;
+  const containerRect = container.getBoundingClientRect();
+
+  for (const wrapper of container.querySelectorAll<HTMLElement>(".diff-file")) {
+    const filePath = getDiffFilePath(wrapper);
+    if (!filePath) continue;
+    const line = getRenderedCodeLines(wrapper).find((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+    });
+    if (!line) continue;
+    const lineNumber = line.getAttribute("data-line");
+    if (lineNumber == null) continue;
+    return {
+      filePath,
+      lineNumber,
+      lineType: line.getAttribute("data-line-type"),
+      viewportOffset: line.getBoundingClientRect().top - containerRect.top,
+    };
+  }
+
+  return null;
+}
+
+function findAnchoredLine(activeAnchor: ActiveDiffScrollAnchor): HTMLElement | null {
+  if (activeAnchor.lineElement?.isConnected) {
+    return activeAnchor.lineElement;
+  }
+  const anchor = activeAnchor.anchor;
+  const wrapper = getFileWrapper(anchor.filePath);
+  if (!wrapper) {
+    activeAnchor.lineElement = null;
+    return null;
+  }
+  const line = getRenderedCodeLines(wrapper).find((candidate) =>
+    candidate.getAttribute("data-line") === anchor.lineNumber
+      && candidate.getAttribute("data-line-type") === anchor.lineType
+  ) ?? null;
+  activeAnchor.lineElement = line;
+  return line;
 }
 
 function getElementOverlayTop(element: HTMLElement): number | null {
@@ -374,8 +443,32 @@ function restoreScrollPosition() {
   containerRef.value.scrollTo({ top, behavior: "auto" });
 }
 
+function restoreScrollAnchor(activeAnchor: ActiveDiffScrollAnchor): boolean {
+  const container = containerRef.value;
+  const line = findAnchoredLine(activeAnchor);
+  if (!container || !line) return false;
+  const anchor = activeAnchor.anchor;
+  const containerRect = container.getBoundingClientRect();
+  const lineRect = line.getBoundingClientRect();
+  const top = Math.max(
+    0,
+    container.scrollTop + lineRect.top - containerRect.top - anchor.viewportOffset,
+  );
+  container.scrollTo({ top, behavior: "auto" });
+  updateScrollPosition(scope.value, container.scrollTop);
+  return true;
+}
+
+function restoreScrollAnchorForActiveLoad(context: DiffRenderContext): boolean {
+  if (!isActiveDiffLoad(context.loadId)) return false;
+  const activeAnchor = activeDiffScrollAnchor;
+  if (!activeAnchor || activeAnchor.loadId !== context.loadId) return false;
+  return restoreScrollAnchor(activeAnchor);
+}
+
 function restoreScrollPositionForActiveLoad(context: DiffRenderContext) {
   if (!isActiveDiffLoad(context.loadId)) return;
+  if (restoreScrollAnchorForActiveLoad(context)) return;
   if ((scrollPositions.value[scope.value] ?? 0) <= 0) return;
   restoreScrollPosition();
 }
@@ -386,13 +479,19 @@ function finishPendingScrollRestore(context: DiffRenderContext) {
   scrollRestorePendingLoadId = 0;
 }
 
+function clearScrollAnchorForLoad(loadId: number) {
+  if (activeDiffScrollAnchor?.loadId === loadId) {
+    activeDiffScrollAnchor = null;
+  }
+}
+
 function syncViewStateFromProps() {
   scope.value = props.initialScope === "branch" ? "branch" : "working";
   scrollPositions.value = cloneScrollPositions(props.initialScrollPositions);
   branchInclude.value = normalizeBranchInclude(props.initialBranchInclude);
 }
 
-async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
+async function loadDiff(options: LoadDiffOptions = {}) {
   if (options.preserveCurrentScroll !== false) {
     saveCurrentScrollPosition();
   }
@@ -401,6 +500,9 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
   const path = props.worktreePath || props.repoPath;
   const loadId = ++nextDiffLoadId;
   activeDiffLoadId = loadId;
+  activeDiffScrollAnchor = options.scrollAnchor
+    ? { loadId, anchor: options.scrollAnchor, lineElement: null }
+    : null;
   const loadStartedAt = performance.now();
   const renderContext: DiffRenderContext = {
     loadId,
@@ -489,6 +591,7 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
       renderedFiles.value = [];
       cleanupInstance();
       scrollRestorePendingLoadId = 0;
+      clearScrollAnchorForLoad(loadId);
       logDiffPerf(loadId, "empty", {
         totalMs: roundDuration(performance.now() - loadStartedAt),
       });
@@ -506,13 +609,16 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
     if (!isActiveDiffLoad(loadId)) {
       return;
     }
-    restoreScrollPosition();
+    if (!restoreScrollAnchorForActiveLoad(renderContext)) {
+      restoreScrollPosition();
+    }
   } catch (e: unknown) {
     if (!isActiveDiffLoad(loadId)) {
       return;
     }
     error.value = e instanceof Error ? e.message : String(e);
     scrollRestorePendingLoadId = 0;
+    clearScrollAnchorForLoad(loadId);
     logDiffPerf(loadId, "error", {
       totalMs: roundDuration(performance.now() - loadStartedAt),
       error: error.value,
@@ -592,8 +698,9 @@ function cycleBranchInclude() {
 }
 
 function toggleContextLines() {
+  const scrollAnchor = allLines.value ? null : captureScrollAnchor();
   contextMode.value = allLines.value ? "compact" : "all";
-  void loadDiff();
+  void loadDiff({ scrollAnchor });
 }
 
 function refreshBranchDiffOnWindowFocus() {
@@ -684,6 +791,7 @@ onMounted(() => {
 onUnmounted(() => {
   activeDiffLoadId = 0;
   scrollRestorePendingLoadId = 0;
+  activeDiffScrollAnchor = null;
   window.removeEventListener("focus", refreshBranchDiffOnWindowFocus);
   cleanupInstance();
 });
