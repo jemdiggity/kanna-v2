@@ -136,8 +136,10 @@ All frontend; the engine needs nothing new.
     thinking; bracket keys are ruled out regardless (shadowed by the
     scope-cycle pair, and awkward on the JIS/Korean layouts the app
     ships locales for).
-- Sidebar: tasks parked awaiting a human verdict show a badge (they
-  already bold on unread); ⌘⌥↑/↓ makes the review queue workable.
+- Sidebar: no dedicated review badge — a badge was tried and cut
+  (operator preference: tasks parked at `pr` either advance, close, or
+  go back to `in progress`, and the stage sections already say which).
+  Unread bold plus ⌘⌥↑/↓ make the review queue workable.
 
 ## Agent polymorphism (making "what approval means" frictionless)
 

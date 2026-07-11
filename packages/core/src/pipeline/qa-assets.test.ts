@@ -87,6 +87,14 @@ describe("QA pipeline assets", () => {
     expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
   });
 
+  it("ships the approve post on the default pipeline pr stage so advancing queues the merge", () => {
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/default.json"));
+    const prStage = parsed.stages.find((stage) => stage.name === "pr");
+    expect(prStage?.post?.name).toBe("approve");
+    expect(prStage?.post?.agent).toBe("approve");
+    expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
+  });
+
   it("keeps the PR agent agnostic to the development branch name", () => {
     const prAgent = readRepoFile(".kanna/agents/pr/AGENT.md");
 

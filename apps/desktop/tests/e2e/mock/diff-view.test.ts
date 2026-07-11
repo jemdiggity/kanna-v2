@@ -256,7 +256,26 @@ async function installStageActionRecorder(
            }
            await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["in progress", item.id]);
          } else if (item && url.endsWith("/actions/advance-stage")) {
-           await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id]);
+           // Model the production engine: a current stage with a post parks
+           // the task (stage and closed_at unchanged) behind a running post
+           // stage_run; the post's own completion performs the transition.
+           // A final stage without a post closes on advance; other stages
+           // move forward.
+           let pinnedStage = null;
+           try {
+             const def = JSON.parse(item.pipeline_def || "null");
+             pinnedStage = (def?.stages || []).find((stage) => stage.name === item.stage) || null;
+           } catch {}
+           if (pinnedStage?.post) {
+             await db.execute(
+               "INSERT INTO stage_run (id, task_id, stage, kind, agent, status) VALUES (?, ?, ?, 'post', ?, 'running')",
+               ["e2e-post-" + item.id, item.id, pinnedStage.post.name, pinnedStage.post.agent || null],
+             );
+           } else if (item.stage === "pr") {
+             await db.execute("UPDATE pipeline_item SET closed_at = ? WHERE id = ?", [new Date().toISOString(), item.id]);
+           } else {
+             await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id]);
+           }
          }
          return new Response(JSON.stringify({ taskId: item?.id || "unknown" }), {
            status: 200,
@@ -1623,6 +1642,182 @@ describe("diff view", () => {
     const callsAfterApprove = await waitForRecordedStageActions(client, 2);
     expect(callsAfterApprove[1].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`);
     expect(callsAfterApprove[1].method).toBe("POST");
+  });
+
+  const E2E_PR_APPROVE_PIPELINE_DEF = JSON.stringify({
+    name: "default",
+    stages: [
+      { name: "in progress", policy: { transition: "manual" } },
+      { name: "review", policy: { transition: "auto" } },
+      {
+        name: "pr",
+        policy: { transition: "manual" },
+        post: { name: "approve", agent: "approve", prompt: "Approve $PREV_RESULT" },
+      },
+    ],
+  });
+
+  const E2E_PR_NO_POST_PIPELINE_DEF = JSON.stringify({
+    name: "custom",
+    stages: [
+      { name: "in progress", policy: { transition: "manual" } },
+      { name: "pr", policy: { transition: "manual" } },
+    ],
+  });
+
+  async function parkSelectedTaskAtPr(pipelineDef: string): Promise<{ id: string }> {
+    const task = await client.executeSync<{ id: string }>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       return { id: ctx.selectedItem().id };`
+    );
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       db.execute("UPDATE pipeline_item SET stage = ?, pipeline_def = ? WHERE id = ?", ["pr", ${JSON.stringify(pipelineDef)}, ${JSON.stringify(task.id)}])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    return task;
+  }
+
+  async function restoreSharedFixtureTask(taskId: string): Promise<void> {
+    const result = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       (async () => {
+         await db.execute("DELETE FROM stage_run WHERE id = ?", [${JSON.stringify(`e2e-post-${taskId}`)}]);
+         await db.execute(
+           "UPDATE pipeline_item SET closed_at = NULL, stage = ?, pipeline_def = NULL WHERE id = ?",
+           ["in progress", ${JSON.stringify(taskId)}],
+         );
+         await ctx.refreshAllItems();
+         cb("ok");
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(result).toBe("ok");
+  }
+
+  it("parks a pr-stage approve behind the running approve post and keeps approval single-flight", async () => {
+    const task = await parkSelectedTaskAtPr(E2E_PR_APPROVE_PIPELINE_DEF);
+    await installStageActionRecorder(client);
+
+    await openDiffModal(client);
+    await client.waitForElement(".verdict-bar .approve", 2_000);
+    const approveLabel = await client.executeSync<string>(
+      `return document.querySelector(".verdict-bar .approve").textContent.trim();`
+    );
+    expect(approveLabel).toBe("Approve & Merge");
+    await client.click(await client.findElement(".verdict-bar .approve"));
+
+    const calls = await waitForRecordedStageActions(client, 1);
+    expect(calls[0].url).toContain(`/v1/tasks/${encodeURIComponent(task.id)}/actions/advance-stage`);
+    expect(calls[0].method).toBe("POST");
+
+    // Production: the task stays open at pr while the approve post runs.
+    const parkedState = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const taskId = ${JSON.stringify(task.id)};
+       const read = () => {
+         const items = ctx.store?.items?.value ?? ctx.store?.items ?? [];
+         return (items || []).find((candidate) => candidate.id === taskId) || null;
+       };
+       const wait = () => new Promise((resolve) => setTimeout(resolve, 100));
+       (async () => {
+         const deadline = Date.now() + 10000;
+         while (Date.now() < deadline) {
+           const item = read();
+           if (item && item.has_running_post && item.closed_at == null && item.stage === "pr") {
+             cb("parked-with-running-post");
+             return;
+           }
+           await wait();
+         }
+         const item = read();
+         cb("timeout: " + JSON.stringify(item && { stage: item.stage, closed_at: item.closed_at, has_running_post: item.has_running_post }));
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(parkedState).toBe("parked-with-running-post");
+
+    // Single-flight: the approve button is disabled and a repeated click or
+    // Cmd+S must not send a second ordinary advance while the post runs.
+    const approveDisabled = await client.executeSync<boolean>(
+      `return document.querySelector(".verdict-bar .approve").disabled;`
+    );
+    expect(approveDisabled).toBe(true);
+    await client.executeSync(
+      `document.querySelector(".verdict-bar .approve").click();`
+    );
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+    await sleep(500);
+    const callsAfterRepeat = await waitForRecordedStageActions(client, 1);
+    expect(callsAfterRepeat).toHaveLength(1);
+
+    // The post's successful completion — not the advance — closes the task.
+    const closedState = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const taskId = ${JSON.stringify(task.id)};
+       const isClosed = () => {
+         const items = ctx.store?.items?.value ?? ctx.store?.items ?? [];
+         const item = (items || []).find((candidate) => candidate.id === taskId);
+         return !item || item.closed_at != null;
+       };
+       (async () => {
+         await db.execute(
+           "UPDATE stage_run SET status = 'succeeded', finished_at = datetime('now') WHERE id = ?",
+           [${JSON.stringify(`e2e-post-${task.id}`)}],
+         );
+         await db.execute("UPDATE pipeline_item SET closed_at = ? WHERE id = ?", [new Date().toISOString(), taskId]);
+         await ctx.refreshAllItems();
+         cb(isClosed() ? "closed-after-post" : "still-open");
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(closedState).toBe("closed-after-post");
+
+    await restoreSharedFixtureTask(task.id);
+  });
+
+  it("keeps approval generic and closing for pinned pipelines without an approve post", async () => {
+    const task = await parkSelectedTaskAtPr(E2E_PR_NO_POST_PIPELINE_DEF);
+    await installStageActionRecorder(client);
+
+    await openDiffModal(client);
+    await client.waitForElement(".verdict-bar .approve", 2_000);
+    const approveLabel = await client.executeSync<string>(
+      `return document.querySelector(".verdict-bar .approve").textContent.trim();`
+    );
+    expect(approveLabel).toBe("Approve");
+    await client.click(await client.findElement(".verdict-bar .approve"));
+
+    const calls = await waitForRecordedStageActions(client, 1);
+    expect(calls[0].url).toContain(`/v1/tasks/${encodeURIComponent(task.id)}/actions/advance-stage`);
+
+    // With no post on the pinned final stage, the advance itself closes the
+    // task — approval never claims merge behavior it cannot deliver.
+    const closedState = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const taskId = ${JSON.stringify(task.id)};
+       const isClosed = () => {
+         const items = ctx.store?.items?.value ?? ctx.store?.items ?? [];
+         const item = (items || []).find((candidate) => candidate.id === taskId);
+         return !item || item.closed_at != null;
+       };
+       const wait = () => new Promise((resolve) => setTimeout(resolve, 100));
+       (async () => {
+         const deadline = Date.now() + 10000;
+         while (!isClosed() && Date.now() < deadline) await wait();
+         cb(isClosed() ? "closed" : "still-open");
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(closedState).toBe("closed");
+
+    await restoreSharedFixtureTask(task.id);
   });
 
   it("keeps pending review comments and summary draft when request-revision fails", async () => {

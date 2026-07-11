@@ -15,7 +15,6 @@ import {
 import { useKannaStore } from "../stores/kanna";
 import { isTaskTearingDown } from "../stores/taskStages";
 import { macOsTextInputAttrs } from "../utils/textInput";
-import { reviewAwaitingVerdictStage } from "../utils/reviewInbox";
 
 const { t } = useI18n();
 const store = useKannaStore();
@@ -78,9 +77,6 @@ const selectedTaskRepoId = computed(() => {
     ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
     : null;
   return item && item.closed_at == null ? item.repo_id : null;
-});
-const awaitingVerdictStagesById = computed(() => {
-  return new Map(props.pipelineItems.map((item) => [item.id, reviewAwaitingVerdictStage(item)]));
 });
 
 function isSearchActive(): boolean {
@@ -202,16 +198,6 @@ function itemTitle(item: SidebarPipelineItem): string {
 
 function itemTooltip(item: SidebarPipelineItem): string | undefined {
   return itemTitle(item);
-}
-
-function awaitingVerdictStage(item: SidebarPipelineItem): string | null {
-  return awaitingVerdictStagesById.value.get(item.id) ?? null;
-}
-
-function awaitingVerdictLabel(item: SidebarPipelineItem): string {
-  return t("sidebar.awaitingVerdictBadge", {
-    stage: awaitingVerdictStage(item) ?? item.stage,
-  });
 }
 
 function isRemoteTask(item: SidebarPipelineItem): boolean {
@@ -671,13 +657,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     :title="itemTooltip(row.item)"
                   >
                     <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
-                  <span
-                    v-if="awaitingVerdictStage(row.item)"
-                    class="awaiting-verdict-badge"
-                    :title="awaitingVerdictLabel(row.item)"
-                    :aria-label="awaitingVerdictLabel(row.item)"
-                    :data-testid="`awaiting-verdict-badge-${row.item.id}`"
-                  >{{ t('sidebar.awaitingVerdictShort') }}</span>
                   <button
                     v-if="row.depth > 0 && editingItemId !== row.item.id"
                     type="button"
@@ -751,13 +730,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       :title="itemTooltip(row.item)"
                     >
                       <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
-                    <span
-                      v-if="awaitingVerdictStage(row.item)"
-                      class="awaiting-verdict-badge"
-                      :title="awaitingVerdictLabel(row.item)"
-                      :aria-label="awaitingVerdictLabel(row.item)"
-                      :data-testid="`awaiting-verdict-badge-${row.item.id}`"
-                    >{{ t('sidebar.awaitingVerdictShort') }}</span>
                     <button
                       v-if="row.depth > 0 && editingItemId !== row.item.id"
                       type="button"
@@ -813,13 +785,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     :title="itemTooltip(row.item)"
                   >
                     <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
-                  <span
-                    v-if="awaitingVerdictStage(row.item)"
-                    class="awaiting-verdict-badge"
-                    :title="awaitingVerdictLabel(row.item)"
-                    :aria-label="awaitingVerdictLabel(row.item)"
-                    :data-testid="`awaiting-verdict-badge-${row.item.id}`"
-                  >{{ t('sidebar.awaitingVerdictShort') }}</span>
                   <span
                     v-if="blockerNames?.[row.item.id]"
                     class="blocked-by-text"
@@ -1197,19 +1162,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .remote-task-marker {
   color: var(--kn-accent);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
-}
-
-.awaiting-verdict-badge {
-  flex: 0 0 auto;
-  border: 1px solid var(--kn-border-subtle, var(--kn-bg-panel-raised));
-  border-radius: 3px;
-  padding: 0 4px;
-  color: var(--kn-text-muted);
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 14px;
-  letter-spacing: 0;
-  pointer-events: auto;
 }
 
 .subtask-detach {

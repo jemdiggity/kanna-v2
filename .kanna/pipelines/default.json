@@ -27,7 +27,12 @@
       "description": "Agent creates a GitHub PR",
       "agent": "pr",
       "prompt": "Create a PR for the work on branch $BRANCH.",
-      "policy": { "transition": "manual" }
+      "policy": { "transition": "manual" },
+      "post": {
+        "name": "approve",
+        "agent": "approve",
+        "prompt": "Approve the PR for branch $BRANCH after PR creation and signal the merge master. Previous result: $PREV_RESULT"
+      }
     }
   ]
 }
