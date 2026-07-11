@@ -118,8 +118,6 @@
     "newTaskTooltip": "New Task (⌘N)",
     "removeRepoTooltip": "Remove Repo",
     "remoteTaskTooltip": "Remote task",
-    "awaitingVerdictShort": "Review",
-    "awaitingVerdictBadge": "Awaiting {stage} verdict",
     "detachSubtask": "Remove parent",
     "sectionMergeQueue": "Merge Queue",
     "sectionPullRequests": "Pull Requests",
