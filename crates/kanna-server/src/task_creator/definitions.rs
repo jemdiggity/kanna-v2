@@ -284,11 +284,55 @@ pub(super) fn read_task_pipeline_definition(
     pipeline_def: Option<&str>,
 ) -> Result<PipelineDefinition, String> {
     if let Some(pipeline_def) = pipeline_def.filter(|value| !value.trim().is_empty()) {
-        let raw: RawPipelineDefinition = serde_json::from_str(pipeline_def)
+        let mut value: serde_json::Value = serde_json::from_str(pipeline_def)
+            .map_err(|e| format!("invalid stored pipeline definition: {}", e))?;
+        normalize_legacy_pipeline_provider_csv(&mut value);
+        let raw: RawPipelineDefinition = serde_json::from_value(value)
             .map_err(|e| format!("invalid stored pipeline definition: {}", e))?;
         return normalize_pipeline_definition(raw);
     }
     read_pipeline_definition(repo_path, pipeline_name)
+}
+
+fn normalize_legacy_pipeline_provider_csv(value: &mut serde_json::Value) {
+    let Some(stages) = value
+        .get_mut("stages")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for stage in stages {
+        if let Some(provider) = stage.get_mut("agent_provider") {
+            normalize_legacy_provider_csv(provider);
+        }
+        for post_key in ["post", "post_action"] {
+            if let Some(provider) = stage
+                .get_mut(post_key)
+                .and_then(|post| post.get_mut("agent_provider"))
+            {
+                normalize_legacy_provider_csv(provider);
+            }
+        }
+    }
+}
+
+fn normalize_legacy_provider_csv(value: &mut serde_json::Value) {
+    let serde_json::Value::String(provider) = value else {
+        return;
+    };
+    if !provider.contains(',') {
+        return;
+    }
+
+    *value = serde_json::Value::Array(
+        provider
+            .split(',')
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .map(|provider| serde_json::Value::String(provider.to_string()))
+            .collect(),
+    );
 }
 
 pub(super) fn read_agent_definition(
@@ -673,15 +717,7 @@ where
         // unset optional field as null. Continue reading those durable task
         // snapshots while omitting the field from newly serialized snapshots.
         serde_json::Value::Null => return Ok(None),
-        // Provider selection was historically accepted as a scalar, and one
-        // buggy snapshot format joined ordered candidates into a CSV scalar.
-        // Decode both forms into the durable structural representation.
-        serde_json::Value::String(provider) => provider
-            .split(',')
-            .map(str::trim)
-            .filter(|provider| !provider.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>(),
+        serde_json::Value::String(provider) => vec![provider.trim().to_string()],
         serde_json::Value::Array(values) => {
             if values.is_empty() || !values.iter().all(serde_json::Value::is_string) {
                 return Err(serde::de::Error::custom(

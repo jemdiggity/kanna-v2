@@ -12,6 +12,24 @@
     "test": {
       "dependsOn": ["^build"]
     },
+    "@kanna/core#test": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/.kanna/**"]
+    },
+    "@kanna/cli-contract#test": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.kanna/**",
+        "$TURBO_ROOT$/packages/core/src/**",
+        "$TURBO_ROOT$/packages/core/package.json",
+        "$TURBO_ROOT$/packages/core/tsconfig.json",
+        "$TURBO_ROOT$/packages/core/BUILD.bazel",
+        "$TURBO_ROOT$/crates/kanna-tool-catalog/src/**",
+        "$TURBO_ROOT$/crates/kanna-tool-catalog/Cargo.toml",
+        "$TURBO_ROOT$/crates/kanna-tool-catalog/BUILD.bazel"
+      ]
+    },
     "@kanna/kd#test": {
       "dependsOn": ["^build"],
       "cache": false

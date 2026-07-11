@@ -36,6 +36,7 @@ interface PackageManifest {
 interface TurboDryRun {
   tasks: Array<{
     taskId: string;
+    inputs: Record<string, string>;
     resolvedTaskDefinition: {
       cache: boolean;
     };
@@ -65,6 +66,7 @@ const vitestUnitPackages = [
   "services/firebase-functions/package.json",
   "services/relay/package.json",
   "tests/cli-contract/package.json",
+  "tests/remote-e2e/package.json",
   "tools/kd/package.json",
 ];
 
@@ -89,6 +91,56 @@ describe("test orchestration", () => {
     expect(kdTestTask.resolvedTaskDefinition.cache).toBe(false);
   });
 
+  it("hashes repository inputs consumed by cross-package test suites", () => {
+    const output = execFileSync(
+      "pnpm",
+      [
+        "exec",
+        "turbo",
+        "run",
+        "test",
+        "--dry=json",
+        "--filter=@kanna/core",
+        "--filter=@kanna/cli-contract",
+      ],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 30_000,
+      },
+    );
+    const plan = JSON.parse(output) as TurboDryRun;
+    const coreTestTask = plan.tasks.find((task) => task.taskId === "@kanna/core#test");
+    const cliContractTestTask = plan.tasks.find(
+      (task) => task.taskId === "@kanna/cli-contract#test",
+    );
+
+    expect(coreTestTask).toBeDefined();
+    expect(cliContractTestTask).toBeDefined();
+    if (!coreTestTask || !cliContractTestTask) return;
+
+    expect(Object.keys(coreTestTask.inputs)).toEqual(
+      expect.arrayContaining([
+        "../../.kanna/agents/implement/AGENT.md",
+        "../../.kanna/pipelines/schema.json",
+      ]),
+    );
+    expect(Object.keys(cliContractTestTask.inputs)).toEqual(
+      expect.arrayContaining([
+        "../../.kanna/agents/implement/AGENT.md",
+        "../../.kanna/pipelines/schema.json",
+        "../../packages/core/src/config/agent-providers.ts",
+        "../../crates/kanna-tool-catalog/src/catalog.json",
+      ]),
+    );
+    expect(
+      Object.keys(cliContractTestTask.inputs).filter((input) =>
+        input.includes("/node_modules/") || input.includes("/.turbo/"),
+      ),
+    ).toEqual([]);
+  });
+
   it("keeps root unit tests bounded and heavy suites explicit", () => {
     const root = manifest("package.json");
     const remote = manifest("tests/remote-e2e/package.json");
@@ -98,7 +150,9 @@ describe("test orchestration", () => {
     expect(root.scripts?.["test:remote-e2e"]).toBe("./kd test remote-e2e");
     expect(root.scripts?.["test:tui-fidelity"])
       .toBe("pnpm --filter @kanna/tui-fidelity test:tui-fidelity");
-    expect(remote.scripts).not.toHaveProperty("test");
+    expect(remote.scripts?.test).toBe(
+      "vitest run --maxWorkers=2 src/scriptedAgent.test.ts src/staging.test.ts src/vitestArgs.test.ts",
+    );
     expect(remote.scripts?.["test:remote-e2e"]).toBe("tsx src/run.ts --dev");
     expect(fidelity.scripts).not.toHaveProperty("test");
     expect(fidelity.scripts?.["test:tui-fidelity"]).toBe("tsx src/run.ts");

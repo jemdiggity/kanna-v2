@@ -238,6 +238,52 @@ fn read_pipeline_definition_rejects_malformed_provider_selections() {
 }
 
 #[test]
+fn read_pipeline_definition_rejects_legacy_csv_provider_selections() {
+    for location in ["stage", "post", "post_action"] {
+        let mut stage = serde_json::json!({
+            "name": "in progress",
+            "transition": "manual",
+        });
+        if location == "stage" {
+            stage["agent_provider"] = serde_json::json!("codex,claude");
+        } else {
+            stage[location] = serde_json::json!({
+                "name": "commit",
+                "agent_provider": "codex,claude",
+            });
+        }
+
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-pipeline-csv-provider-{location}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        let pipeline_dir = repo_root.join(".kanna/pipelines");
+        std::fs::create_dir_all(&pipeline_dir).unwrap();
+        std::fs::write(
+            pipeline_dir.join("qa.json"),
+            serde_json::json!({
+                "name": "qa",
+                "stages": [stage],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error =
+            super::super::definitions::read_pipeline_definition(&repo_root.to_string_lossy(), "qa")
+                .err()
+                .expect("live pipeline definitions must reject legacy CSV providers");
+
+        assert!(
+            error.contains("agent_provider"),
+            "{location}: expected provider-specific error, got {error:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
 fn stored_pipeline_definition_accepts_legacy_null_provider_and_omits_it_on_reserialize() {
     let snapshot = serde_json::json!({
         "name": "qa",
@@ -1311,7 +1357,9 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             disallowed_tools: Some(vec!["WebFetch".to_string()]),
             max_turns: Some(7),
             max_budget_usd: Some(1.5),
-            setup_cmds: Some(vec!["echo custom setup".to_string()]),
+            setup_cmds: Some(vec![
+                "printf 'custom setup' > .kanna/custom-setup-ran".to_string()
+            ]),
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -1335,11 +1383,10 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
     );
     assert_eq!(spawn_options["maxTurns"], 7);
     assert_eq!(spawn_options["maxBudgetUsd"], 1.5);
-
     match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
-            assert!(command.contains("echo custom setup"));
+            assert!(command.contains("custom-setup-ran"));
             assert!(command.contains("--model opus"));
             assert!(command.contains("--permission-mode acceptEdits"));
             assert!(command.contains("--allowedTools Bash"));

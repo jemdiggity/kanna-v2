@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeDesktopTask,
   createDesktopBackup,
+  fetchDesktopRepoAgentProviders,
   fetchDesktopSnapshot,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
@@ -65,6 +66,39 @@ describe("desktopServerClient", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("mobile_server_status");
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48121/v1/snapshot",
+      {
+        method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("fetches repo-scoped agent providers from the encoded repo endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          providers: [
+            { id: "claude", executable: "/repo/.kanna/bin/claude" },
+            { id: "future-provider", executable: "/repo/.kanna/bin/future-provider" },
+            { id: "opencode", executable: "/repo/.kanna/bin/opencode" },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchDesktopRepoAgentProviders("repo/with space")).resolves.toEqual([
+      "claude",
+      "opencode",
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/repos/repo%2Fwith%20space/agent-providers",
       {
         method: "GET",
         headers: undefined,

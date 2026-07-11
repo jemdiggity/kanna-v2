@@ -257,7 +257,10 @@ pub(super) fn build_task_shell_command(
             .collect::<Vec<_>>()
             .join(" && ");
         command_parts.push(format!(
-            "printf '\\033[33mRunning startup...\\033[0m\\n' && {} && printf '\\n'",
+            // zsh may cache a provider found later on PATH before setup
+            // installs a workspace-local executable. Refresh its command
+            // table so the just-provisioned binary wins.
+            "printf '\\033[33mRunning startup...\\033[0m\\n' && {} && rehash && printf '\\n'",
             setup_parts
         ));
     }

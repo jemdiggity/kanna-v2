@@ -1,3 +1,4 @@
+use super::commands::build_task_shell_command;
 use super::definitions::RepoConfig;
 use super::provider::AgentProvider;
 use crate::config::Config;
@@ -214,6 +215,74 @@ pub(super) fn apply_workspace_path_env(
         .collect::<Vec<_>>();
     if !path_parts.is_empty() {
         env.insert("PATH".to_string(), path_parts.join(":"));
+    }
+}
+
+pub(super) fn run_workspace_setup_commands(
+    setup_cmds: &[String],
+    worktree_path: &str,
+    env: &HashMap<String, String>,
+) -> Result<(), String> {
+    if setup_cmds.is_empty() {
+        return Ok(());
+    }
+
+    let command = build_task_shell_command(
+        "true",
+        setup_cmds,
+        env.get("KANNA_CLI_PATH").map(String::as_str),
+        env.get("PATH").map(String::as_str),
+    );
+    let output = Command::new("/bin/zsh")
+        // Headless setup has no terminal to satisfy interactive shell
+        // startup hooks. Login mode still loads the user's base environment;
+        // the generated command then restores Kanna's explicit PATH.
+        .args(["--login", "-c", &command])
+        .current_dir(worktree_path)
+        .envs(env)
+        .output()
+        .map_err(|error| format!("failed to run workspace setup: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let details = [stdout, stderr]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let suffix = if details.is_empty() {
+        String::new()
+    } else {
+        format!(": {details}")
+    };
+    Err(format!(
+        "workspace setup failed with {}{suffix}",
+        output.status
+    ))
+}
+
+pub(super) fn append_executable_parent_to_path(
+    path: Option<&str>,
+    executable: &str,
+) -> Option<String> {
+    let parent = Path::new(executable).parent()?.to_string_lossy();
+    if parent.is_empty() {
+        return path.map(str::to_string);
+    }
+    if path
+        .unwrap_or_default()
+        .split(':')
+        .any(|entry| entry == parent)
+    {
+        return path.map(str::to_string);
+    }
+
+    match path.filter(|path| !path.is_empty()) {
+        Some(path) => Some(format!("{path}:{parent}")),
+        None => Some(parent.into_owned()),
     }
 }
 

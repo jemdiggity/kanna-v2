@@ -57,6 +57,23 @@ async function cycleToAgentChoice(
   expect(await agentChoiceLabel(client)).toBe(expectedLabel);
 }
 
+async function listAgentChoices(
+  client: WebDriverClient,
+  maxChoices = 12,
+): Promise<string[]> {
+  const first = await agentChoiceLabel(client);
+  const choices = [first];
+
+  for (let i = 1; i < maxChoices; i += 1) {
+    await client.click(await client.waitForElement(".agent-provider", 2_000));
+    const current = await agentChoiceLabel(client);
+    if (current === first) return choices;
+    choices.push(current);
+  }
+
+  throw new Error(`agent choices did not cycle back to ${first}: ${choices.join(", ")}`);
+}
+
 async function submitTaskFromModal(
   client: WebDriverClient,
   prompt: string,
@@ -453,6 +470,20 @@ describe("new task modal", () => {
     await resetRecentAgentChoices(client);
     await resetDefaultAgentPreference(client);
     await openNewTaskModal(client);
+
+    const repoProviders = await client.executeSync<string[]>(
+      `const providers = window.__KANNA_E2E__?.setupState?.appTaskCreation?.availableAgentProviders;
+       return Array.from(providers?.value ?? providers ?? []);`,
+    );
+    expect(repoProviders).toEqual(["claude", "opencode"]);
+
+    const choices = await listAgentChoices(client);
+    expect(choices).toEqual(["claude", "opencode", "claude sdk", "opencode sdk"]);
+    expect(choices).not.toContain("antigravity");
+    expect(choices).not.toContain("codex");
+    expect(choices).not.toContain("codex sdk");
+    expect(choices).not.toContain("copilot");
+
     await cycleToAgentChoice(client, "opencode sdk");
     const promptInput = await client.waitForElement(".prompt-input", 2_000);
     await client.sendKeys(promptInput, prompt);
