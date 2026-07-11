@@ -49,12 +49,12 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
   }
 
   const selectedItemIdForPersistence = computed(() => {
+    const selectedItemId = context.state.selectedItemId.value;
     const initializingItem = context.state.initializingTaskItems.value.find(
-      (candidate) => candidate.id === context.state.selectedItemId.value,
+      (candidate) => candidate.id === selectedItemId,
     );
-    return initializingItem
-      ? initializingItem.taskId
-      : context.state.selectedItemId.value;
+    if (initializingItem) return initializingItem.taskId;
+    return selectedItemId?.startsWith("create:") ? null : selectedItemId;
   });
 
   async function persistWindowSelection(): Promise<void> {
@@ -152,11 +152,17 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     const previousItemId = options.previousItemId !== undefined
       ? options.previousItemId
       : context.state.selectedItemId.value;
-    nav.select(itemId, previousItemId);
-    context.state.selectedItemId.value = itemId;
     const initializingItem = context.state.initializingTaskItems.value.find(
       (candidate) => candidate.id === itemId,
     );
+    const item = context.state.items.value.find((candidate) => candidate.id === itemId);
+    if (!initializingItem && !item) {
+      logSelection("selectItem:ignoredStale", previousItemId, itemId);
+      return;
+    }
+
+    nav.select(itemId, previousItemId);
+    context.state.selectedItemId.value = itemId;
     if (initializingItem) {
       context.state.selectedRepoId.value = initializingItem.repo_id;
       context.state.lastSelectedItemByRepo.value[initializingItem.repo_id] = itemId;
@@ -167,7 +173,6 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
       return;
     }
 
-    const item = context.state.items.value.find((candidate) => candidate.id === itemId);
     if (item) {
       context.state.selectedRepoId.value = item.repo_id;
     }

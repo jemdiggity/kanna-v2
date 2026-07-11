@@ -1,6 +1,6 @@
 import { type AgentProvider, type PipelineItem } from "@kanna/db";
 import { invoke } from "../invoke";
-import { createDesktopTask } from "../services/desktopServerClient";
+import { createDesktopTask, fetchClosedTaskIdentities } from "../services/desktopServerClient";
 import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
 import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import { debugLog } from "../utils/debugLog";
@@ -17,6 +17,11 @@ import { showCloudPublishErrorToast } from "./taskPublishing";
 import type { TasksApi } from "./tasks";
 
 const CREATE_SNAPSHOT_RETRY_DELAYS_MS = [50, 150] as const;
+const CREATE_BACKGROUND_SNAPSHOT_RETRY_DELAYS_MS = [500, 1_000, 2_000, 5_000] as const;
+
+function sleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 
 export function createTaskItemActions(
   context: StoreContext,
@@ -190,71 +195,139 @@ export function createTaskItemActions(
       initializingItemId,
       createdTaskId,
     );
-    replaceRememberedInitializingItem(createdTaskId);
     if (context.state.selectedItemId.value === initializingItemId) {
       void persistSelection().catch((error) => {
         console.error("[store] failed to persist acknowledged task selection:", error);
       });
     }
 
-    let snapshotReloaded = false;
-    for (let attempt = 0; attempt <= CREATE_SNAPSHOT_RETRY_DELAYS_MS.length; attempt += 1) {
-      try {
-        await reloadSnapshot();
-        snapshotReloaded = true;
-        if (context.state.items.value.some((candidate) => candidate.id === createdTaskId)) {
-          break;
+    let createdItem: PipelineItem | null = null;
+    let publishedCreatedTask = false;
+    const handoffHydratedCreatedTask = async (): Promise<PipelineItem | null> => {
+      const hydratedItem = context.state.items.value.find(
+        (candidate) => candidate.id === createdTaskId,
+      ) ?? null;
+      if (!hydratedItem) return null;
+
+      const liveInitializingItem = context.state.initializingTaskItems.value.find(
+        (candidate) => candidate.id === initializingItemId,
+      );
+      if (liveInitializingItem) {
+        const wasSelected = context.state.selectedItemId.value === initializingItemId;
+        if (context.state.lastSelectedItemByRepo.value[repoId] === initializingItemId) {
+          context.state.lastSelectedItemByRepo.value = {
+            ...context.state.lastSelectedItemByRepo.value,
+            [repoId]: createdTaskId,
+          };
         }
+        if (wasSelected) {
+          context.state.selectedItemId.value = createdTaskId;
+          context.state.lastSelectedItemByRepo.value = {
+            ...context.state.lastSelectedItemByRepo.value,
+            [repoId]: createdTaskId,
+          };
+        }
+        removeInitializingItem();
+
+        const selectItem = context.services.selectItem;
+        if (wasSelected && selectItem) {
+          try {
+            await selectItem(createdTaskId, { previousItemId: initializingItemId });
+          } catch (error) {
+            console.error("[store] failed to persist created task selection:", error);
+          }
+        }
+      }
+
+      context.state.pendingCreateVisibility.delete(createdTaskId);
+      return hydratedItem;
+    };
+    const publishHydratedCreatedTask = (hydratedItem: PipelineItem) => {
+      if (publishedCreatedTask) return;
+      publishedCreatedTask = true;
+      const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
+      void publishDesktopLanTaskSnapshot(context.requireDb());
+      publishCreatedTaskSnapshot(createdTaskId, hydratedItem, createdRepo);
+    };
+    const stopReconciliationIfTaskClosed = async (): Promise<boolean> => {
+      let taskIsClosed = false;
+      try {
+        taskIsClosed = (await fetchClosedTaskIdentities()).some(
+          (candidate) => candidate.id === createdTaskId,
+        );
       } catch (error) {
-        snapshotReloaded = false;
+        console.error("[store] failed to check created task closure during reconciliation:", error);
+        return false;
+      }
+      if (!taskIsClosed) return false;
+
+      context.state.pendingCreateVisibility.delete(createdTaskId);
+      replaceRememberedInitializingItem(null);
+      removeInitializingItem();
+      try {
+        await selectReplacementAfterInitializationFailure();
+      } catch (error) {
+        console.error("[store] failed to persist selection after reconciled task closure:", error);
+      }
+      return true;
+    };
+
+    for (let attempt = 0; attempt <= CREATE_SNAPSHOT_RETRY_DELAYS_MS.length; attempt += 1) {
+      let reloadWasSuperseded = false;
+      try {
+        const reloadResult = await reloadSnapshot();
+        reloadWasSuperseded = reloadResult?.status === "superseded";
+      } catch (error) {
         // The create request already committed the durable task and session.
         // Retain the initialized UI row while bounded retries recover a
         // transient snapshot failure without inviting a duplicate task.
         console.error("[store] failed to hydrate created task snapshot:", error);
       }
 
+      createdItem = await handoffHydratedCreatedTask();
+      if (createdItem || reloadWasSuperseded) break;
+
       const retryDelay = CREATE_SNAPSHOT_RETRY_DELAYS_MS[attempt];
       if (retryDelay === undefined) break;
-      await new Promise<void>((resolve) => setTimeout(resolve, retryDelay));
+      await sleep(retryDelay);
     }
 
-    const createdItem = context.state.items.value.find((candidate) => candidate.id === createdTaskId);
-    if (snapshotReloaded && !createdItem) {
-      context.state.pendingCreateVisibility.delete(createdTaskId);
-      replaceRememberedInitializingItem(null, createdTaskId);
-      removeInitializingItem();
-      try {
-        await selectReplacementAfterInitializationFailure();
-      } catch (cleanupError) {
-        console.error("[store] failed to persist selection for an absent created task:", cleanupError);
-      }
-    } else if (createdItem) {
-      // Normal snapshot reloads reconcile this handoff in queries.ts. Keep a
-      // defensive path for a concurrent refresh (or custom reload service)
-      // that hydrated the durable item before this create continuation.
-      if (context.state.selectedItemId.value === initializingItemId) {
-        const selectItem = context.services.selectItem;
-        if (selectItem) {
-          const selectionPromise = selectItem(createdTaskId, {
-            previousItemId: initializingItemId,
-          });
-          removeInitializingItem();
-          try {
-            await selectionPromise;
-          } catch (error) {
-            console.error("[store] failed to persist created task selection:", error);
+    if (createdItem) {
+      publishHydratedCreatedTask(createdItem);
+    } else {
+      const continueCreatedTaskReconciliation = async () => {
+        let retryIndex = 0;
+        while (true) {
+          const alreadyHydrated = await handoffHydratedCreatedTask();
+          if (alreadyHydrated) {
+            publishHydratedCreatedTask(alreadyHydrated);
+            return;
           }
-        } else {
-          context.state.selectedItemId.value = createdTaskId;
-          context.state.lastSelectedItemByRepo.value[repoId] = createdTaskId;
-          removeInitializingItem();
+          if (!context.state.initializingTaskItems.value.some(
+            (candidate) => candidate.id === initializingItemId && candidate.taskId === createdTaskId,
+          )) {
+            return;
+          }
+
+          const retryDelay = CREATE_BACKGROUND_SNAPSHOT_RETRY_DELAYS_MS[
+            Math.min(retryIndex, CREATE_BACKGROUND_SNAPSHOT_RETRY_DELAYS_MS.length - 1)
+          ];
+          await sleep(retryDelay);
+          retryIndex += 1;
+
+          let reloadApplied = false;
+          try {
+            const reloadResult = await reloadSnapshot();
+            reloadApplied = reloadResult?.status !== "superseded";
+          } catch (error) {
+            console.error("[store] background created task snapshot retry failed:", error);
+          }
+          if (reloadApplied && await stopReconciliationIfTaskClosed()) return;
         }
-      } else {
-        removeInitializingItem();
-      }
-      const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
-      void publishDesktopLanTaskSnapshot(context.requireDb());
-      publishCreatedTaskSnapshot(createdTaskId, createdItem, createdRepo);
+      };
+      void continueCreatedTaskReconciliation().catch((error) => {
+        console.error("[store] created task reconciliation stopped unexpectedly:", error);
+      });
     }
 
     debugLog(`[perf:createItem] server create TOTAL: ${(performance.now() - t0).toFixed(1)}ms`);

@@ -2294,6 +2294,213 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "task-one" });
   });
 
+  it("does not reselect an initializer that hydrates during cross-repo navigation", async () => {
+    const taskOne = createPipelineItem({
+      id: "task-one",
+      repo_id: "repo-1",
+      prompt: "Repo one task",
+      display_name: "Repo one task",
+    });
+    const durableTask = createPipelineItem({
+      id: "task-two",
+      repo_id: "repo-2",
+      prompt: "Repo two task",
+      display_name: "Repo two task",
+    });
+    const initializingItem: InitializingTaskItem = {
+      id: "create:navigation",
+      state: "initializing",
+      taskId: durableTask.id,
+      repo_id: "repo-2",
+      prompt: "Repo two task",
+      display_name: null,
+      pipeline: "default",
+      stage: "in progress",
+      agent_type: "pty",
+      agent_provider: "claude",
+      created_at: "2026-05-18T00:01:00.000Z",
+    };
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = taskOne.id;
+    store.selectedItemIdForPersistence = taskOne.id;
+    store.selectedRepo = store.repos[0];
+    store.currentItem = taskOne;
+    store.items = [taskOne];
+    store.sortedItemsForCurrentRepo = [taskOne];
+    store.sortedItemsAllRepos = [taskOne];
+    store.initializingTaskItems = [initializingItem];
+    store.lastSelectedItemByRepo = {
+      "repo-1": taskOne.id,
+      "repo-2": initializingItem.id,
+    };
+    activeStore = reactive(store);
+
+    const repoSelectionGate = createDeferred<void>();
+    const persistedSelectionIds: string[] = [];
+    const taskEventIds: string[] = [];
+    store.selectRepo.mockImplementation(async (repoId: string) => {
+      activeStore.selectedRepoId = repoId;
+      activeStore.selectedItemId = activeStore.lastSelectedItemByRepo[repoId] ?? null;
+      await repoSelectionGate.promise;
+    });
+    store.selectItem.mockImplementation(async (itemId: string) => {
+      activeStore.selectedItemId = itemId;
+      persistedSelectionIds.push(itemId);
+      taskEventIds.push(itemId);
+    });
+
+    const MainPanelTaskRouteStub = defineComponent({
+      name: "MainPanel",
+      props: { uiItem: Object },
+      template: '<div data-testid="terminal-task-id">{{ uiItem?.taskId || "" }}</div>',
+    });
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: MainPanelTaskRouteStub,
+    });
+
+    try {
+      const navigation = capturedKeyboardActions?.navigateDown();
+      await vi.waitFor(() => expect(store.selectRepo).toHaveBeenCalledWith("repo-2"));
+
+      activeStore.items = [taskOne, durableTask];
+      activeStore.initializingTaskItems = [];
+      activeStore.selectedRepoId = "repo-2";
+      activeStore.selectedRepo = activeStore.repos[1];
+      activeStore.selectedItemId = durableTask.id;
+      activeStore.selectedItemIdForPersistence = durableTask.id;
+      activeStore.lastSelectedItemByRepo = {
+        ...activeStore.lastSelectedItemByRepo,
+        "repo-2": durableTask.id,
+      };
+      activeStore.currentInitializingItem = null;
+      activeStore.currentItem = durableTask;
+      activeStore.sortedItemsForCurrentRepo = [durableTask];
+      activeStore.sortedItemsAllRepos = [taskOne, durableTask];
+
+      repoSelectionGate.resolve();
+      await navigation;
+      await flushPromises();
+
+      expect(store.selectItem).not.toHaveBeenCalledWith(
+        initializingItem.id,
+        expect.anything(),
+      );
+      expect(persistedSelectionIds.some((id) => id.startsWith("create:"))).toBe(false);
+      expect(taskEventIds.some((id) => id.startsWith("create:"))).toBe(false);
+      expect(wrapper.get('[data-testid="terminal-task-id"]').text()).toBe(durableTask.id);
+      expect(store.selectedItemId).toBe(durableTask.id);
+      expect(store.selectedItemIdForPersistence).toBe(durableTask.id);
+    } finally {
+      repoSelectionGate.resolve();
+      store.selectRepo.mockReset();
+      store.selectItem.mockReset();
+      wrapper.unmount();
+    }
+  });
+
+  it("does not let an older cross-repo navigation overwrite a newer selection intent", async () => {
+    const taskOne = createPipelineItem({
+      id: "task-one",
+      repo_id: "repo-1",
+      prompt: "Repo one task",
+      display_name: "Repo one task",
+    });
+    const initializingItem: InitializingTaskItem = {
+      id: "create:navigation",
+      state: "initializing",
+      taskId: null,
+      repo_id: "repo-2",
+      prompt: "Repo two task",
+      display_name: null,
+      pipeline: "default",
+      stage: "in progress",
+      agent_type: "pty",
+      agent_provider: "claude",
+      created_at: "2026-05-18T00:01:00.000Z",
+    };
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = taskOne.id;
+    store.selectedItemIdForPersistence = taskOne.id;
+    store.selectedRepo = store.repos[0];
+    store.currentItem = taskOne;
+    store.items = [taskOne];
+    store.sortedItemsForCurrentRepo = [taskOne];
+    store.sortedItemsAllRepos = [taskOne];
+    store.initializingTaskItems = [initializingItem];
+    store.lastSelectedItemByRepo = {
+      "repo-1": taskOne.id,
+      "repo-2": initializingItem.id,
+    };
+    activeStore = reactive(store);
+
+    const firstRepoSelectionGate = createDeferred<void>();
+    const persistedSelectionIds: string[] = [];
+    const taskEventIds: string[] = [];
+    let repoSelectionCount = 0;
+    store.selectRepo.mockImplementation(async (repoId: string) => {
+      repoSelectionCount += 1;
+      activeStore.selectedRepoId = repoId;
+      activeStore.selectedRepo = activeStore.repos.find((repo) => repo.id === repoId) ?? null;
+      activeStore.selectedItemId = activeStore.lastSelectedItemByRepo[repoId] ?? null;
+      if (repoSelectionCount === 1) await firstRepoSelectionGate.promise;
+    });
+    store.selectItem.mockImplementation(async (itemId: string) => {
+      const initializingTarget = activeStore.initializingTaskItems.find((item) => item.id === itemId) ?? null;
+      const durableTarget = activeStore.items.find((item) => item.id === itemId) ?? null;
+      activeStore.selectedItemId = itemId;
+      activeStore.selectedRepoId = initializingTarget?.repo_id ?? durableTarget?.repo_id ?? activeStore.selectedRepoId;
+      activeStore.currentInitializingItem = initializingTarget;
+      activeStore.currentItem = initializingTarget ? null : durableTarget;
+      activeStore.selectedItemIdForPersistence = initializingTarget?.taskId ?? durableTarget?.id ?? null;
+      persistedSelectionIds.push(activeStore.selectedItemIdForPersistence ?? "");
+      taskEventIds.push(itemId);
+    });
+
+    const MainPanelTaskRouteStub = defineComponent({
+      name: "MainPanel",
+      props: { uiItem: Object },
+      template: '<div data-testid="terminal-task-id">{{ uiItem?.taskId || "" }}</div>',
+    });
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: MainPanelTaskRouteStub,
+    });
+
+    try {
+      const olderNavigation = capturedKeyboardActions?.navigateDown();
+      await vi.waitFor(() => expect(repoSelectionCount).toBe(1));
+
+      const newerNavigation = capturedKeyboardActions?.navigateUp();
+      await newerNavigation;
+      expect(activeStore.selectedItemId).toBe(taskOne.id);
+
+      firstRepoSelectionGate.resolve();
+      await olderNavigation;
+      await flushPromises();
+
+      expect(store.selectItem).toHaveBeenCalledTimes(1);
+      expect(store.selectItem).toHaveBeenCalledWith(taskOne.id, {
+        previousItemId: initializingItem.id,
+      });
+      expect(persistedSelectionIds.some((id) => id.startsWith("create:"))).toBe(false);
+      expect(taskEventIds.some((id) => id.startsWith("create:"))).toBe(false);
+      expect(wrapper.get('[data-testid="terminal-task-id"]').text()).toBe(taskOne.id);
+      expect(activeStore.selectedItemId).toBe(taskOne.id);
+    } finally {
+      firstRepoSelectionGate.resolve();
+      store.selectRepo.mockReset();
+      store.selectItem.mockReset();
+      wrapper.unmount();
+    }
+  });
+
   it("keeps unread task shortcuts scoped to the selected repo before falling back to read tasks", async () => {
     store.repos = [
       { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },

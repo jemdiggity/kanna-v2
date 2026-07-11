@@ -1016,8 +1016,9 @@ describe("kanna store task base branch integration", () => {
         }
         try {
           await spawnTask(taskId, worktreePath, worktreeConfig, portEnv);
-        } catch {
+        } catch (error) {
           mockState.pipelineItems = mockState.pipelineItems.filter((item) => item.id !== taskId);
+          throw error;
         }
         return {
           taskId,
@@ -1659,15 +1660,20 @@ describe("kanna store task base branch integration", () => {
     };
     const store = await createStore();
 
-    const taskId = await store.createItem("repo-1", "/tmp/repo", "Spawn failure cleanup", "agent", {
-      agentProvider: "claude",
-    });
+    await expect(store.createItem(
+      "repo-1",
+      "/tmp/repo",
+      "Spawn failure cleanup",
+      "agent",
+      { agentProvider: "claude" },
+    )).rejects.toThrow("daemon unavailable");
+    const spawnCall = mockState.invokeMock.mock.calls.find(
+      ([command]) => command === "spawn_agent_session",
+    );
+    const taskId = String(spawnCall?.[1]?.sessionId);
 
     await vi.waitFor(() => {
-      expect(mockState.invokeMock).toHaveBeenCalledWith(
-        "spawn_agent_session",
-        expect.objectContaining({ sessionId: taskId }),
-      );
+      expect(spawnCall?.[1]).toEqual(expect.objectContaining({ sessionId: taskId }));
       expect(mockState.pipelineItems.some((item) => item.id === taskId)).toBe(false);
     });
     expect(mockState.upsertTerminalSessionMock).not.toHaveBeenCalledWith(
@@ -1950,6 +1956,10 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("persists the durable selection and retries hydration after a transient snapshot failure", async () => {
+    mockState.repos = [
+      mockState.makeRepo(),
+      mockState.makeRepo({ id: "repo-2", path: "/tmp/repo-2", name: "repo-2" }),
+    ];
     const store = await createStore();
     const persistSelection = vi.fn(async () => {});
     store.attachWindowWorkspace({
@@ -2002,6 +2012,7 @@ describe("kanna store task base branch integration", () => {
       expect(snapshotAttempts).toBe(2);
     });
     const durableTaskId = store.currentInitializingItem!.taskId!;
+    const initializingItemId = store.currentInitializingItem!.id;
     expect(persistSelection).toHaveBeenCalledWith({
       selectedRepoId: "repo-1",
       selectedItemId: durableTaskId,
@@ -2009,6 +2020,11 @@ describe("kanna store task base branch integration", () => {
     expect(persistSelection.mock.calls.some(([selection]) =>
       String(selection.selectedItemId).startsWith("create:")))
       .toBe(false);
+
+    await store.selectRepo("repo-2");
+    await store.selectRepo("repo-1");
+    expect(store.selectedItemId).toBe(initializingItemId);
+    expect(store.currentInitializingItem?.taskId).toBe(durableTaskId);
 
     releaseRetry();
     await expect(createPromise).resolves.toBe(durableTaskId);
@@ -2081,6 +2097,222 @@ describe("kanna store task base branch integration", () => {
       String(selection.selectedItemId).startsWith("create:")))
       .toBe(false);
     consoleError.mockRestore();
+  });
+
+  it("retains the initializer until a superseding snapshot hydrates the durable task", async () => {
+    const store = await createStore();
+    const persistSelection = vi.fn(async () => {});
+    store.attachWindowWorkspace({
+      bootstrap: { windowId: "test-window", selectedRepoId: null, selectedItemId: null },
+      loadSnapshot: vi.fn(async () => ({ windows: [] })),
+      saveSnapshot: vi.fn(async () => {}),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection,
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData: vi.fn(async () => {}),
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    });
+    updateDesktopServerClientHandlersForTests({ patchTask: async () => {} });
+    const firstCreateReloadGate = mockState.defer();
+    const finalCreateReloadGate = mockState.defer();
+    const winningReloadGate = mockState.defer();
+    let snapshotAttempts = 0;
+    const emptySnapshot = () => ({
+      entries: mockState.repos.map((repo) => ({ repo, items: [] })),
+      taskBlockers: mockState.taskBlockers,
+      worktreePaths: {},
+      settings: {},
+    });
+    const durableSnapshot = () => ({
+      entries: mockState.repos.map((repo) => ({
+        repo,
+        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+      })),
+      taskBlockers: mockState.taskBlockers,
+      worktreePaths: {},
+      settings: {},
+    });
+    setDesktopSnapshotFetcherForTests(async () => {
+      snapshotAttempts += 1;
+      if (snapshotAttempts === 1) {
+        await firstCreateReloadGate.promise;
+        return emptySnapshot();
+      }
+      if (snapshotAttempts === 2) return emptySnapshot();
+      if (snapshotAttempts === 3) {
+        await finalCreateReloadGate.promise;
+        return emptySnapshot();
+      }
+      if (snapshotAttempts === 4) {
+        await winningReloadGate.promise;
+        return durableSnapshot();
+      }
+      return durableSnapshot();
+    });
+
+    const createPromise = store.createItem(
+      "repo-1",
+      "/tmp/repo",
+      "Wait for the winning snapshot",
+      "pty",
+      { agentProvider: "claude" },
+    );
+    await vi.waitFor(() => {
+      expect(snapshotAttempts).toBe(1);
+      expect(store.currentInitializingItem?.taskId).toMatch(/^[0-9a-f-]+$/);
+    });
+    const durableTaskId = store.currentInitializingItem!.taskId!;
+
+    vi.useFakeTimers();
+    try {
+      firstCreateReloadGate.resolve();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(snapshotAttempts).toBe(2);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(snapshotAttempts).toBe(3);
+
+      const winningReload = store.renameItem(durableTaskId, "Hydrated by the winner");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(snapshotAttempts).toBe(4);
+
+      finalCreateReloadGate.resolve();
+      await expect(createPromise).resolves.toBe(durableTaskId);
+      const initializingBeforeWinner = store.initializingTaskItems.map((item) => ({ ...item }));
+      const selectedBeforeWinner = store.selectedItemId;
+
+      winningReloadGate.resolve();
+      await winningReload;
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(initializingBeforeWinner).toEqual([
+        expect.objectContaining({ taskId: durableTaskId }),
+      ]);
+      expect(selectedBeforeWinner).toMatch(/^create:/);
+      expect(store.initializingTaskItems).toEqual([]);
+      expect(store.selectedItemId).toBe(durableTaskId);
+      expect(store.selectedItemIdForPersistence).toBe(durableTaskId);
+      expect(store.currentItem?.id).toBe(durableTaskId);
+      expect(persistSelection.mock.calls.some(([selection]) =>
+        String(selection.selectedItemId).startsWith("create:")))
+        .toBe(false);
+    } finally {
+      firstCreateReloadGate.resolve();
+      finalCreateReloadGate.resolve();
+      winningReloadGate.resolve();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps retrying in the background after bounded create snapshot errors", async () => {
+    const store = await createStore();
+    const backgroundReloadGate = mockState.defer();
+    let snapshotAttempts = 0;
+    setDesktopSnapshotFetcherForTests(async () => {
+      snapshotAttempts += 1;
+      if (snapshotAttempts <= 3) {
+        throw new Error(`snapshot unavailable ${snapshotAttempts}`);
+      }
+      await backgroundReloadGate.promise;
+      return {
+        entries: mockState.repos.map((repo) => ({
+          repo,
+          items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+        })),
+        taskBlockers: mockState.taskBlockers,
+        worktreePaths: {},
+        settings: {},
+      };
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    vi.useFakeTimers();
+    try {
+      const createPromise = store.createItem(
+        "repo-1",
+        "/tmp/repo",
+        "Recover snapshot hydration in the background",
+        "pty",
+        { agentProvider: "claude" },
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      const durableTaskId = await createPromise;
+
+      expect(snapshotAttempts).toBe(3);
+      expect(store.initializingTaskItems).toEqual([
+        expect.objectContaining({ taskId: durableTaskId }),
+      ]);
+      expect(store.selectedItemId).toMatch(/^create:/);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(snapshotAttempts).toBe(4);
+      backgroundReloadGate.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await flushStore();
+
+      expect(store.initializingTaskItems).toEqual([]);
+      expect(store.selectedItemId).toBe(durableTaskId);
+      expect(store.selectedItemIdForPersistence).toBe(durableTaskId);
+      expect(store.currentItem?.id).toBe(durableTaskId);
+    } finally {
+      backgroundReloadGate.resolve();
+      consoleError.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops background reconciliation when the acknowledged task is confirmed closed", async () => {
+    const store = await createStore();
+    let durableTaskId: string | null = null;
+    const fetchClosedTaskIdentities = vi.fn(async () => durableTaskId
+      ? [{ id: durableTaskId, repo_id: "repo-1" }]
+      : []);
+    updateDesktopServerClientHandlersForTests({ fetchClosedTaskIdentities });
+    let snapshotAttempts = 0;
+    setDesktopSnapshotFetcherForTests(async () => {
+      snapshotAttempts += 1;
+      return {
+        entries: mockState.repos.map((repo) => ({ repo, items: [] })),
+        taskBlockers: mockState.taskBlockers,
+        worktreePaths: {},
+        settings: {},
+      };
+    });
+
+    vi.useFakeTimers();
+    try {
+      const createPromise = store.createItem(
+        "repo-1",
+        "/tmp/repo",
+        "Close before snapshot hydration",
+        "pty",
+        { agentProvider: "claude" },
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      durableTaskId = await createPromise;
+
+      expect(snapshotAttempts).toBe(3);
+      expect(store.initializingTaskItems).toEqual([
+        expect.objectContaining({ taskId: durableTaskId }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(500);
+      await flushStore();
+
+      expect(fetchClosedTaskIdentities).toHaveBeenCalled();
+      expect(store.initializingTaskItems).toEqual([]);
+      expect(store.selectedItemId).toBeNull();
+      expect(store.lastSelectedItemByRepo["repo-1"]).toBeUndefined();
+      expect(snapshotAttempts).toBe(4);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(snapshotAttempts).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("selects a UI-only initializing item immediately while creation continues", async () => {

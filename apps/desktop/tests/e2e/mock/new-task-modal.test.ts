@@ -59,6 +59,21 @@ async function agentChoiceLabel(client: WebDriverClient): Promise<string> {
   );
 }
 
+async function waitForAgentChoiceLabel(
+  client: WebDriverClient,
+  expectedLabel: string,
+  timeoutMs = 2_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let label = "";
+  while (Date.now() < deadline) {
+    label = await agentChoiceLabel(client);
+    if (label === expectedLabel) return label;
+    await sleep(50);
+  }
+  throw new Error(`timed out waiting for agent choice ${expectedLabel}, last label: ${label}`);
+}
+
 async function cycleToAgentChoice(
   client: WebDriverClient,
   expectedLabel: string,
@@ -611,7 +626,7 @@ describe("new task modal", () => {
     ]);
 
     await openNewTaskModal(client);
-    expect(await agentChoiceLabel(client)).toBe("claude sdk");
+    expect(await waitForAgentChoiceLabel(client, "claude sdk")).toBe("claude sdk");
 
     const claudeCliPrompt = "Remember claude cli as the recent task agent";
     await cycleToAgentChoice(client, "claude");
@@ -629,7 +644,7 @@ describe("new task modal", () => {
     ]);
 
     await openNewTaskModal(client);
-    expect(await agentChoiceLabel(client)).toBe("claude");
+    expect(await waitForAgentChoiceLabel(client, "claude")).toBe("claude");
     await client.click(await client.waitForElement(".agent-provider", 2_000));
     expect(await agentChoiceLabel(client)).toBe("claude sdk");
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));

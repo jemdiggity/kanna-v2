@@ -11,17 +11,20 @@ import { initializeTaskItem, type InitializingTaskItem } from "./taskInitializat
 
 const mockState = vi.hoisted(() => {
   const insertOperatorEventMock = vi.fn(async () => {});
+  const postDesktopOperatorEventMock = vi.fn(async () => {});
   const setSettingMock = vi.fn(async () => {});
   const updatePipelineItemActivityMock = vi.fn(async () => {});
   const markDesktopTaskReadMock = vi.fn(async (taskId: string) => ({ taskId, activity: "idle" }));
 
   return {
     insertOperatorEventMock,
+    postDesktopOperatorEventMock,
     setSettingMock,
     updatePipelineItemActivityMock,
     markDesktopTaskReadMock,
     reset() {
       insertOperatorEventMock.mockClear();
+      postDesktopOperatorEventMock.mockClear();
       setSettingMock.mockClear();
       updatePipelineItemActivityMock.mockClear();
       markDesktopTaskReadMock.mockClear();
@@ -37,7 +40,7 @@ vi.mock("@kanna/" + "db", () => ({
 
 vi.mock("../services/desktopServerClient", () => ({
   markDesktopTaskRead: mockState.markDesktopTaskReadMock,
-  postDesktopOperatorEvent: vi.fn(async () => {}),
+  postDesktopOperatorEvent: mockState.postDesktopOperatorEventMock,
   putDesktopSetting: vi.fn(async (key: string, value: string) => ({ key, value })),
   setDesktopServerClientHandlersForTests: vi.fn(),
 }));
@@ -236,6 +239,28 @@ describe("createSelectionApi", () => {
       "selected_item_id",
       "task-1",
     );
+  });
+
+  it("ignores a stale initializing id after hydration without persisting or emitting it", async () => {
+    const state = createStoreState();
+    state.repos.value = [createRepo()];
+    state.items.value = [createItem({ id: "task-durable" })];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "task-durable";
+    state.lastSelectedItemByRepo.value = { "repo-1": "task-durable" };
+    const persistSelection = vi.fn(async () => {});
+    const selection = createSelectionApi(createStoreContext(
+      state,
+      toastStub(),
+      { windowWorkspace: { persistSelection } } as never,
+    ));
+
+    await selection.selectItem("create:stale", { previousItemId: "task-1" });
+
+    expect(state.selectedItemId.value).toBe("task-durable");
+    expect(state.lastSelectedItemByRepo.value).toEqual({ "repo-1": "task-durable" });
+    expect(persistSelection).not.toHaveBeenCalled();
+    expect(mockState.postDesktopOperatorEventMock).not.toHaveBeenCalled();
   });
 
   it("marks an unread selected task read and invalidates other windows", async () => {
@@ -495,15 +520,17 @@ describe("createQueriesApi snapshot ordering", () => {
       worktreePaths: {},
       settings: {},
     });
-    await newerReload;
+    const newerResult = await newerReload;
     olderResponse.resolve({
       entries: [{ repo, items: [] }],
       taskBlockers: [],
       worktreePaths: {},
       settings: {},
     });
-    await olderReload;
+    const olderResult = await olderReload;
 
+    expect(newerResult).toEqual({ status: "applied" });
+    expect(olderResult).toEqual({ status: "superseded" });
     expect(state.items.value.map((item) => item.id)).toEqual(["task-durable"]);
     expect(state.initializingTaskItems.value).toEqual([]);
     expect(state.selectedItemId.value).toBe("task-durable");

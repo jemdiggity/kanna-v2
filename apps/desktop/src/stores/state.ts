@@ -91,6 +91,10 @@ export interface KannaSnapshot {
   settings: Record<string, string>;
 }
 
+export type SnapshotReloadResult =
+  | { status: "applied" }
+  | { status: "superseded" };
+
 export interface CreateItemOptions {
   baseBranch?: string;
   baseRef?: string | null;
@@ -137,7 +141,7 @@ export interface StoreState {
 export interface StoreServices {
   windowWorkspace?: WindowWorkspaceController;
   loadInitialData?: () => Promise<void>;
-  reloadSnapshot?: () => Promise<void>;
+  reloadSnapshot?: () => Promise<SnapshotReloadResult | void>;
   fetchSnapshot?: () => Promise<KannaSnapshot>;
   withOptimisticItemOverlay?: <T>(input: {
     key: string;

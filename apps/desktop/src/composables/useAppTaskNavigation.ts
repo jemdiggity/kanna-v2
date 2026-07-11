@@ -93,6 +93,8 @@ export function useAppTaskNavigation({
   openPeerPicker,
   openPairPeerPicker,
 }: UseAppTaskNavigationOptions) {
+  let selectionIntentVersion = 0;
+
   function claimLocalTaskOwnership(repoId: string) {
     claimLocalTaskSelectionOwnership({
       store,
@@ -154,17 +156,41 @@ export function useAppTaskNavigation({
 
   // Navigation
   async function selectSidebarItem(item: Pick<AppSidebarItem, "id" | "repo_id">, previousItemId?: string | null) {
+    const selectionIntent = ++selectionIntentVersion;
     if (item.repo_id !== store.selectedRepoId) {
       const previous = previousItemId !== undefined ? previousItemId : store.selectedItemId;
-      await handleSelectRepo(item.repo_id);
-      await handleSelectItem(item.id, previous);
+      const initializingTarget = store.initializingTaskItems.find(
+        (candidate) => candidate.id === item.id,
+      );
+      await handleSelectRepo(item.repo_id, selectionIntent);
+      if (selectionIntent !== selectionIntentVersion) return;
+      if (!initializingTarget) {
+        await handleSelectItem(item.id, previous, selectionIntent);
+        return;
+      }
+
+      const liveInitializingTarget = store.initializingTaskItems.find(
+        (candidate) => candidate.id === initializingTarget.id,
+      );
+      if (liveInitializingTarget) {
+        await handleSelectItem(liveInitializingTarget.id, previous, selectionIntent);
+        return;
+      }
+
+      const durableTaskId = initializingTarget.taskId;
+      if (!durableTaskId || !store.items.some((candidate) => candidate.id === durableTaskId)) {
+        return;
+      }
+      if (store.selectedItemId !== durableTaskId) {
+        await handleSelectItem(durableTaskId, previous, selectionIntent);
+      }
       return;
     }
 
     if (previousItemId !== undefined) {
-      await handleSelectItem(item.id, previousItemId);
+      await handleSelectItem(item.id, previousItemId, selectionIntent);
     } else {
-      await handleSelectItem(item.id);
+      await handleSelectItem(item.id, undefined, selectionIntent);
     }
   }
 
@@ -189,6 +215,7 @@ export function useAppTaskNavigation({
   }
 
   async function navigateRepos(direction: -1 | 1) {
+    const selectionIntent = ++selectionIntentVersion;
     const visibleRepos = sidebarRepos.value;
     if (visibleRepos.length === 0) return;
     const currentIndex = visibleRepos.findIndex((r) => r.id === store.selectedRepoId);
@@ -212,14 +239,16 @@ export function useAppTaskNavigation({
 
     if (targetItem && !nextRepo.id.startsWith("cloud:")) {
       store.selectedRepoId = nextRepo.id;
-      await handleSelectItem(targetItem.id, previousItemId);
+      await handleSelectItem(targetItem.id, previousItemId, selectionIntent);
+      if (selectionIntent !== selectionIntentVersion) return;
       await store.selectRepo(nextRepo.id);
       return;
     }
 
-    await handleSelectRepo(nextRepo.id);
+    await handleSelectRepo(nextRepo.id, selectionIntent);
+    if (selectionIntent !== selectionIntentVersion) return;
     if (targetItem) {
-      await handleSelectItem(targetItem.id, previousItemId);
+      await handleSelectItem(targetItem.id, previousItemId, selectionIntent);
     }
   }
 
@@ -605,7 +634,8 @@ export function useAppTaskNavigation({
     return cmds;
   });
 
-  async function handleSelectRepo(repoId: string) {
+  async function handleSelectRepo(repoId: string, selectionIntent = ++selectionIntentVersion) {
+    if (selectionIntent !== selectionIntentVersion) return;
     if (repoId.startsWith("cloud:")) {
       selectedCloudRepoId.value = repoId;
       store.selectedRepoId = repoId;
@@ -622,7 +652,12 @@ export function useAppTaskNavigation({
     await store.selectRepo(repoId);
   }
 
-  async function handleSelectItem(itemId: string, previousItemId?: string | null) {
+  async function handleSelectItem(
+    itemId: string,
+    previousItemId?: string | null,
+    selectionIntent = ++selectionIntentVersion,
+  ) {
+    if (selectionIntent !== selectionIntentVersion) return;
     const workspaceTask = workspaceTasksByItemId.value.get(itemId);
     if (workspaceTask && workspaceTask.owner.kind !== "local") {
       selectedCloudRepoId.value = workspaceTask.repoKey;

@@ -1,6 +1,12 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { type PipelineItem, type Repo } from "../types/kanna";
-import { readRepoConfig, requireService, type KannaSnapshot, type StoreContext } from "./state";
+import {
+  readRepoConfig,
+  requireService,
+  type KannaSnapshot,
+  type SnapshotReloadResult,
+  type StoreContext,
+} from "./state";
 import { debugLog } from "../utils/debugLog";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 import { removeInitializingTaskItem } from "./taskInitialization";
@@ -22,7 +28,7 @@ export interface QueriesApi {
   repos: QueryState<Repo[]>;
   items: QueryState<PipelineItem[]>;
   loadInitialData: () => Promise<void>;
-  reloadSnapshot: () => Promise<void>;
+  reloadSnapshot: () => Promise<SnapshotReloadResult>;
   withOptimisticItemOverlay: <T>(input: {
     key: string;
     apply: (snapshot: KannaSnapshot) => KannaSnapshot;
@@ -79,19 +85,21 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         };
       }
       if (wasSelected) {
-        const selectItem = context.services.selectItem;
-        if (selectItem) {
-          selectionPromises.push(selectItem(taskId, { previousItemId: initializingItem.id }));
-        } else {
-          context.state.selectedItemId.value = taskId;
-          context.state.lastSelectedItemByRepo.value[initializingItem.repo_id] = taskId;
-        }
+        context.state.selectedItemId.value = taskId;
+        context.state.lastSelectedItemByRepo.value = {
+          ...context.state.lastSelectedItemByRepo.value,
+          [initializingItem.repo_id]: taskId,
+        };
       }
-
       context.state.initializingTaskItems.value = removeInitializingTaskItem(
         context.state.initializingTaskItems.value,
         initializingItem.id,
       );
+
+      const selectItem = context.services.selectItem;
+      if (wasSelected && selectItem) {
+        selectionPromises.push(selectItem(taskId, { previousItemId: initializingItem.id }));
+      }
     }
 
     for (const selectionPromise of selectionPromises) {
@@ -103,7 +111,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     }
   }
 
-  async function reloadSnapshot(): Promise<void> {
+  async function reloadSnapshot(): Promise<SnapshotReloadResult> {
     const runId = ++refreshRunId.value;
     snapshotPending.value = true;
     snapshotError.value = null;
@@ -111,7 +119,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       const refreshStart = performance.now();
 
       const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
-      if (runId !== refreshRunId.value) return;
+      if (runId !== refreshRunId.value) return { status: "superseded" };
       const loadedRepos = snapshot.entries.map((entry) => entry.repo);
       const loadedItems = flattenSnapshotItems(snapshot);
 
@@ -124,7 +132,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         if (!context.state.stageOrderCache.has(repo.path)) {
           try {
             const config = await readRepoConfig(repo.path);
-            if (runId !== refreshRunId.value) return;
+            if (runId !== refreshRunId.value) return { status: "superseded" };
             if (config.stage_order) {
               context.state.stageOrderCache.set(repo.path, config.stage_order);
             }
@@ -133,7 +141,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
           }
         }
       }
-      if (runId !== refreshRunId.value) return;
+      if (runId !== refreshRunId.value) return { status: "superseded" };
 
       debugLog(
         `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
@@ -152,10 +160,10 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         );
         context.state.pendingCreateVisibility.delete(item.id);
       }
+      return { status: "applied" };
     } catch (error) {
-      if (runId === refreshRunId.value) {
-        snapshotError.value = error;
-      }
+      if (runId !== refreshRunId.value) return { status: "superseded" };
+      snapshotError.value = error;
       throw error;
     } finally {
       if (runId === refreshRunId.value) {
@@ -200,19 +208,19 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       data: mergedSnapshot,
       pending: snapshotPending,
       error: snapshotError,
-      refresh: reloadSnapshot,
+      refresh: async () => { await reloadSnapshot(); },
     },
     repos: {
       data: repos,
       pending: snapshotPending,
       error: snapshotError,
-      refresh: reloadSnapshot,
+      refresh: async () => { await reloadSnapshot(); },
     },
     items: {
       data: items,
       pending: snapshotPending,
       error: snapshotError,
-      refresh: reloadSnapshot,
+      refresh: async () => { await reloadSnapshot(); },
     },
     loadInitialData,
     reloadSnapshot,
