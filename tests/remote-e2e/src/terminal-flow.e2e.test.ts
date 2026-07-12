@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createRemoteTransport } from "../../../apps/mobile/src/lib/transports/remoteTransport";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
 import {
   collectTerminalEvents,
@@ -122,6 +123,37 @@ describe("remote task terminal flow E2E", () => {
         path: `/v1/tasks/${task.taskId}/input`,
         body: { input: "too late" }
       })).rejects.toThrow(/daemon|session|not found|failed/i);
+    } finally {
+      events.close();
+    }
+  }, 45_000);
+
+  it("selects menu option 1 through the mobile relay transport before its delayed Enter", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "Mobile menu input task"
+    });
+    const events = collectTerminalEvents(harness, task.taskId);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => harness.desktopId,
+      invokeDesktop: (request) => harness.client.invokeDesktop(request)
+    });
+
+    try {
+      await waitForTerminalOutput(events, "SCRIPT_MENU_CURSOR:2");
+
+      // This is the same KannaTransport call used by the mobile composer in
+      // remote mode. The scripted PTY only emits SELECTED after receiving the
+      // delayed CR, so raw terminal input of just "1" cannot pass this test.
+      await transport.sendTaskInput(task.taskId, "1");
+      const output = await waitForTerminalOutput(events, "SCRIPT_MENU_SELECTED:1");
+
+      const cursor = output.indexOf("SCRIPT_MENU_CURSOR:2");
+      const highlighted = output.indexOf("SCRIPT_MENU_OPTION_1_HIGHLIGHTED");
+      const selected = output.indexOf("SCRIPT_MENU_SELECTED:1");
+      expect(cursor).toBeGreaterThanOrEqual(0);
+      expect(highlighted).toBeGreaterThan(cursor);
+      expect(selected).toBeGreaterThan(highlighted);
     } finally {
       events.close();
     }

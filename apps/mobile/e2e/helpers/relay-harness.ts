@@ -10,7 +10,9 @@ const HYBRID_CLOUD_ONLY_REPO_ID = "mobile-hybrid-cloud-only-repo";
 const HYBRID_CLOUD_ONLY_LOCAL_TASK_ID = "mobile-hybrid-cloud-only-task";
 const HYBRID_UNRESOLVED_TASK_ID = "mobile-hybrid-unresolved-selection";
 const RELAY_TASK_SENTINEL = "SCRIPT_READY";
-const RELAY_INPUT_MARKER = "mobile-relay-appium-input";
+const RELAY_MENU_CURSOR_MARKER = "SCRIPT_MENU_CURSOR:2";
+const RELAY_MENU_OPTION_ONE_MARKER = "SCRIPT_MENU_OPTION_1_HIGHLIGHTED";
+const RELAY_MENU_SELECTION_MARKER = "SCRIPT_MENU_SELECTED:1";
 const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 
@@ -34,6 +36,7 @@ interface ScriptedTask {
 
 interface TerminalEventCollector {
   close(): void;
+  outputText(): string;
 }
 
 interface RemoteHarnessModule {
@@ -80,13 +83,13 @@ export interface MobileRelayHarness {
   harness: RemoteHarness;
   hybridEnv: Record<string, string>;
   hybridFixture: MobileHybridFixture;
-  inputMarker: string;
+  menuInput: string;
   lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
   terminalEvents: TerminalEventCollector;
   publishHybridCloudRefresh(): Promise<void>;
   stop(): Promise<void>;
-  waitForInput(timeoutMs?: number): Promise<string>;
+  waitForFirstMenuSelection(timeoutMs?: number): Promise<string>;
 }
 
 export interface MobileHybridFixture {
@@ -132,6 +135,7 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
     await assertHybridLanFixture(harness, [localTask, lanOnlyTask]);
     terminalEvents = remote.terminal.collectTerminalEvents(harness, localTask.taskId);
     await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_TASK_SENTINEL);
+    await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_MENU_CURSOR_MARKER);
     const cloudTaskId = cloudTaskIdFor(harness, localTask);
     const cloudOnlyTaskId =
       `cloud:${HYBRID_CLOUD_ONLY_DESKTOP_ID}:` +
@@ -192,7 +196,7 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
       harness,
       hybridEnv: mobileRelayExpoEnv(harness, { forceCloud: false }),
       hybridFixture,
-      inputMarker: RELAY_INPUT_MARKER,
+      menuInput: "1",
       lanOnlyTask,
       localTask,
       terminalEvents,
@@ -202,12 +206,22 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
         terminalEvents?.close();
         await harness.stop();
       },
-      waitForInput(timeoutMs = 10_000) {
-        return remote.terminal.waitForTerminalOutput(
+      async waitForFirstMenuSelection(timeoutMs = 10_000) {
+        const output = await remote.terminal.waitForTerminalOutput(
           terminalEvents!,
-          RELAY_INPUT_MARKER,
+          RELAY_MENU_SELECTION_MARKER,
           timeoutMs
         );
+        const cursor = output.indexOf(RELAY_MENU_CURSOR_MARKER);
+        const highlighted = output.indexOf(RELAY_MENU_OPTION_ONE_MARKER);
+        const selected = output.indexOf(RELAY_MENU_SELECTION_MARKER);
+        if (cursor < 0 || highlighted < cursor || selected < highlighted) {
+          throw new Error(
+            "Expected the scripted menu to start on option 2, highlight option 1, then select option 1. " +
+            `Terminal output:\n${output}`
+          );
+        }
+        return output;
       }
     };
   } catch (error) {

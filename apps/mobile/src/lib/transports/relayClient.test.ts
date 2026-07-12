@@ -360,39 +360,6 @@ describe("createRelayDesktopClient", () => {
     ]);
   });
 
-  it("sends terminal input through relay command invokes", async () => {
-    const socket = createSocket();
-    const client = createRelayDesktopClient({
-      createSocket: () => socket,
-      getIdToken: async () => "id-token-1",
-      relayUrl: "wss://relay.example"
-    });
-
-    const input = client.sendTaskInput({
-      desktopId: "desktop-1",
-      taskId: "task-1",
-      data: "continue\n"
-    });
-
-    socket.onopen?.();
-    await flushPromises();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
-    socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
-    await flushPromises();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
-    await flushPromises();
-
-    expect(socket.send).toHaveBeenLastCalledWith(
-      JSON.stringify({
-        type: "term_input",
-        task_id: "task-1",
-        data_b64: Buffer.from("continue\n").toString("base64")
-      })
-    );
-
-    await expect(input).resolves.toBeUndefined();
-  });
-
   it("force-refreshes the token once and reports an auth error when the relay keeps rejecting it", async () => {
     vi.useFakeTimers();
     try {

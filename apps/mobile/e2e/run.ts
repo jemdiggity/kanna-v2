@@ -267,9 +267,9 @@ async function main(): Promise<void> {
       await runRelayTaskFlow(driver, {
         credentials: relayHarness.credentials,
         fixture: relayHarness.fixture,
-        input: relayHarness.inputMarker
+        input: relayHarness.menuInput
       });
-      await relayHarness.waitForInput();
+      await relayHarness.waitForFirstMenuSelection();
     } else if (mode === "hybrid" && relayHarness) {
       await seedTrustedDesktopThroughDeepLink({
         bundleId: env.bundleId,

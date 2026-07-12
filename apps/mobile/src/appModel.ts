@@ -639,7 +639,6 @@ function createClientForMode({
         invokeDesktop: relayClient.invokeDesktop,
         observeTaskTerminal: relayClient.observeTaskTerminal,
         observeTaskAgent: relayClient.observeTaskAgent,
-        sendTaskInput: relayClient.sendTaskInput,
         listCloudTasks: listCloudTasksForRouting,
       }),
     );
