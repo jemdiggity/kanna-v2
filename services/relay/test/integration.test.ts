@@ -99,6 +99,51 @@ function sha256Hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function publishedTask(activity: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    localRepoId: "repo-cloud-publish",
+    ownerDesktopId: SECRET_DESKTOP_ID,
+    ownerLocalTaskId: "task-cloud-publish",
+    title: "Server cloud publication",
+    promptSnippet: "Server cloud publication",
+    displayName: null,
+    stage: "in progress",
+    activity,
+    status: "active",
+    repo: {
+      cloudRepoId: "repo-cloud-publish",
+      name: "Kanna",
+      remoteUrl: "git@github.com:kanna/kanna.git",
+      remoteUrlHash: "remote-hash",
+      defaultBranch: "main",
+    },
+    branch: "task-cloud-publish",
+    baseRef: "origin/main",
+    prNumber: null,
+    prUrl: null,
+    agent: { provider: "codex", type: "pty" },
+    transfer: {
+      state: "none",
+      transferId: null,
+      sourceDesktopId: null,
+      destinationDesktopId: null,
+    },
+    blockedByTaskIds: [],
+    createdAt: "2026-07-14 00:00:00",
+    updatedAt: activity === "working" ? "2026-07-14 00:02:00" : "2026-07-14 00:01:00",
+    closedAt: null,
+    ...overrides,
+  };
+}
+
+function publishedSnapshot(activity: string, tasks = [publishedTask(activity)]): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    desktop: { displayName: "Studio Mac" },
+    tasks,
+  };
+}
+
 async function seedRelayDesktopCredentials(firestorePort: number): Promise<void> {
   const previousHost = process.env.FIRESTORE_EMULATOR_HOST;
   process.env.FIRESTORE_EMULATOR_HOST = `127.0.0.1:${firestorePort}`;
@@ -347,6 +392,8 @@ describe("Relay integration", () => {
   let idToken = "";
   let otherIdToken = "";
   let relayProcess: ChildProcessWithoutNullStreams | null = null;
+  let testFirestoreApp: App | null = null;
+  let testFirestore: ReturnType<typeof getFirestore>;
 
   beforeAll(async () => {
     relayPort = await findFreePort();
@@ -388,10 +435,16 @@ describe("Relay integration", () => {
     firebaseProcess.stderr?.on("data", (chunk: Buffer) => {
       process.stderr.write(`[firebase] ${chunk.toString()}`);
     });
+    // Firebase is intentionally quiet on success, but its inherited stdout pipe
+    // still needs a reader or a busy full-suite run can back-pressure startup.
+    firebaseProcess.stdout?.resume();
     idToken = await waitForAuthEmulator(authPort);
     otherIdToken = await signInToAuthEmulator(authPort, OTHER_TEST_EMAIL, OTHER_TEST_PASSWORD) ?? "";
     if (!otherIdToken) throw new Error("Second seeded auth user is unavailable");
     await seedRelayDesktopCredentials(firestorePort);
+    process.env.FIRESTORE_EMULATOR_HOST = `127.0.0.1:${firestorePort}`;
+    testFirestoreApp = initializeApp({ projectId: "kanna-local" }, `relay-suite-${firestorePort}`);
+    testFirestore = getFirestore(testFirestoreApp);
 
     relayProcess = spawn("pnpm", ["exec", "tsx", "src/index.ts"], {
       cwd: fileURLToPath(new URL("..", import.meta.url)),
@@ -417,6 +470,8 @@ describe("Relay integration", () => {
   afterAll(async () => {
     await terminateProcessTree(relayProcess);
     await terminateProcessTree(firebaseProcess);
+    if (testFirestoreApp) await deleteApp(testFirestoreApp);
+    delete process.env.FIRESTORE_EMULATOR_HOST;
     if (firebaseConfigDir) await rm(firebaseConfigDir, { recursive: true, force: true });
   });
 
@@ -436,6 +491,94 @@ describe("Relay integration", () => {
 
     expect(userId).toBe(TEST_USER_ID);
     await closeAndWait(ws);
+  });
+
+  it("reconciles only the authenticated desktop task subtree and carries activity-only changes", async () => {
+    const tasksRef = testFirestore.collection(
+      `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}/tasks`,
+    );
+    await tasksRef.doc("duplicate-one").set(publishedTask("idle"));
+    await tasksRef.doc("duplicate-two").set(publishedTask("idle"));
+    await tasksRef.doc("stale").set(publishedTask("idle", {
+      ownerLocalTaskId: "stale-task",
+    }));
+
+    const { ws } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+    const firstAck = waitForMessage(ws, (message) =>
+      message.type === "task_snapshot_ack" && message.id === "publish-idle");
+    ws.send(JSON.stringify({
+      type: "task_snapshot_publish",
+      id: "publish-idle",
+      snapshot: publishedSnapshot("idle"),
+    }));
+    await expect(firstAck).resolves.toMatchObject({ ok: true });
+
+    let documents = await tasksRef.get();
+    expect(documents.docs).toHaveLength(1);
+    expect(documents.docs[0]?.data()).toMatchObject({
+      ownerLocalTaskId: "task-cloud-publish",
+      activity: "idle",
+    });
+
+    const activityAck = waitForMessage(ws, (message) =>
+      message.type === "task_snapshot_ack" && message.id === "publish-working");
+    ws.send(JSON.stringify({
+      type: "task_snapshot_publish",
+      id: "publish-working",
+      snapshot: publishedSnapshot("working"),
+    }));
+    await expect(activityAck).resolves.toMatchObject({ ok: true });
+    documents = await tasksRef.get();
+    expect(documents.docs[0]?.data()).toMatchObject({ activity: "working" });
+
+    const crossDesktopAck = waitForMessage(ws, (message) =>
+      message.type === "task_snapshot_ack" && message.id === "publish-other");
+    ws.send(JSON.stringify({
+      type: "task_snapshot_publish",
+      id: "publish-other",
+      snapshot: publishedSnapshot("working", [publishedTask("working", {
+        ownerDesktopId: "desktop-other",
+      })]),
+    }));
+    await expect(crossDesktopAck).resolves.toMatchObject({ ok: false });
+    expect((await testFirestore.doc(
+      `users/${TEST_USER_ID}/desktops/desktop-other`,
+    ).get()).exists).toBe(false);
+    await closeAndWait(ws);
+  });
+
+  it("stops an already-authenticated desktop from publishing after credential revocation", async () => {
+    const credentialRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`,
+    );
+    const { ws } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+    try {
+      await credentialRef.set({ revokedAt: "2026-07-14T00:00:00Z" }, { merge: true });
+      const ack = waitForMessage(ws, (message) =>
+        message.type === "task_snapshot_ack" && message.id === "publish-revoked");
+      const closed = new Promise<number>((resolveClose) => {
+        ws.once("close", (code) => resolveClose(code));
+      });
+      ws.send(JSON.stringify({
+        type: "task_snapshot_publish",
+        id: "publish-revoked",
+        snapshot: publishedSnapshot("working"),
+      }));
+      await expect(ack).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/no longer authorized/),
+      });
+      await expect(closed).resolves.toBe(4005);
+    } finally {
+      await credentialRef.set({ revokedAt: null }, { merge: true });
+      if (ws.readyState < WebSocket.CLOSING) await closeAndWait(ws);
+    }
   });
 
   it("rejects bad desktop, device, and phone credentials against Firebase emulators", async () => {

@@ -87,8 +87,9 @@ service cloud.firestore {
         && request.resource.data.desktopId == desktopId
         && request.resource.data.keys().hasOnly([
           'desktopId',
-          'desktopSecret',
+          'desktopSecretHash',
           'displayName',
+          'revokedAt',
           'uid',
           'updatedAt',
         ]);
@@ -98,8 +99,9 @@ service cloud.firestore {
         && request.resource.data.desktopId == desktopId
         && request.resource.data.keys().hasOnly([
           'desktopId',
-          'desktopSecret',
+          'desktopSecretHash',
           'displayName',
+          'revokedAt',
           'uid',
           'updatedAt',
         ]);

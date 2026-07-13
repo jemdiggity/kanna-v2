@@ -1,4 +1,9 @@
-use crate::{commands, config::Config, daemon_client, db, http_api, relay_client};
+use crate::{
+    cloud_task_publisher::{map_ui_snapshot, PublisherState, PublisherStep},
+    commands,
+    config::Config,
+    daemon_client, db, http_api, relay_client,
+};
 use futures_util::{SinkExt, StreamExt};
 use relay_client::{RelayId, RelayInvoke, RelayMessage};
 use std::collections::HashMap;
@@ -10,6 +15,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 const RELAY_PING_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_PONG_TIMEOUT: Duration = Duration::from_secs(75);
+const TASK_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+fn cloud_task_publication_enabled(desktop_secret: Option<&str>) -> bool {
+    desktop_secret.is_some_and(|secret| !secret.is_empty())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelayKeepaliveAction {
@@ -71,13 +81,45 @@ pub(crate) async fn run_relay_loop(
         // Track observer tasks per session_id
         let mut observe_tasks: HashMap<String, JoinHandle<()>> = HashMap::new();
         let mut keepalive = RelayKeepalive::new();
+        let mut publisher = PublisherState::new();
         let mut ping_interval = tokio::time::interval(RELAY_PING_INTERVAL);
         ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ping_interval.tick().await;
+        let mut publication_interval = tokio::time::interval(TASK_SNAPSHOT_POLL_INTERVAL);
+        publication_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let publication_enabled = cloud_task_publication_enabled(config.desktop_secret.as_deref());
 
         // Message processing loop
         loop {
             let msg = tokio::select! {
+                _ = publication_interval.tick(), if publication_enabled => {
+                    match db.ui_snapshot() {
+                        Ok(snapshot) => publisher.observe(map_ui_snapshot(
+                            &config.desktop_id,
+                            &config.desktop_name,
+                            snapshot,
+                        )),
+                        Err(error) => log::warn!("Failed to build cloud task snapshot: {error}"),
+                    }
+                    match publisher.next_step(Instant::now()) {
+                        PublisherStep::Publish(request) => {
+                            let message = RelayMessage::TaskSnapshotPublish {
+                                id: request.id,
+                                snapshot: request.snapshot,
+                            };
+                            if let Err(error) = send_relay_response_message(&sink, message).await {
+                                log::error!("Failed to publish cloud task snapshot: {error}");
+                                break;
+                            }
+                        }
+                        PublisherStep::Reconnect => {
+                            log::warn!("Cloud task snapshot retries exhausted; reconnecting relay");
+                            break;
+                        }
+                        PublisherStep::Wait => {}
+                    }
+                    continue;
+                }
                 _ = ping_interval.tick() => {
                     match keepalive.on_ping_tick(Instant::now()) {
                         RelayKeepaliveAction::SendPing => {
@@ -335,6 +377,19 @@ pub(crate) async fn run_relay_loop(
                         },
                         RelayMessage::AuthOk { user_id } => {
                             log::info!("Relay authenticated as user {}", user_id);
+                            publisher.on_authenticated();
+                        }
+                        RelayMessage::TaskSnapshotAck { id, ok, error } => {
+                            if let Err(message) =
+                                publisher.on_ack(&id, ok, error.clone(), Instant::now())
+                            {
+                                log::warn!("{message}");
+                            } else if !ok {
+                                log::warn!(
+                                    "Relay rejected cloud task snapshot {id}: {}",
+                                    error.as_deref().unwrap_or("unknown error")
+                                );
+                            }
                         }
                         RelayMessage::TunnelEstablish {
                             desktop_id,
@@ -401,6 +456,7 @@ pub(crate) async fn run_relay_loop(
         }
 
         // Clean up all observer tasks on disconnect
+        publisher.on_disconnected();
         for (session_id, handle) in observe_tasks.drain() {
             log::info!(
                 "Cleaning up observer for session {} on disconnect",
@@ -749,5 +805,12 @@ mod tests {
             keepalive.on_ping_tick(start + RELAY_PONG_TIMEOUT),
             RelayKeepaliveAction::SendPing
         );
+    }
+
+    #[test]
+    fn cloud_task_publication_requires_desktop_specific_credentials() {
+        assert!(!cloud_task_publication_enabled(None));
+        assert!(!cloud_task_publication_enabled(Some("")));
+        assert!(cloud_task_publication_enabled(Some("desktop-secret")));
     }
 }

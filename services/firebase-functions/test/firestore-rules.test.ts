@@ -247,7 +247,7 @@ describeWithEmulator("firestore security rules", () => {
     await expectSucceeds(
       clientUpdate("alice", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
-        desktopSecret: "secret-1",
+        desktopSecretHash: "hash-1",
         displayName: "Alice Mac",
         uid: "alice",
         updatedAt: "2026-05-08T00:00:00.000Z",
@@ -257,7 +257,7 @@ describeWithEmulator("firestore security rules", () => {
     await expectSucceeds(
       clientUpdate("alice", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
-        desktopSecret: "secret-1-rotated",
+        desktopSecretHash: "hash-1-rotated",
         displayName: "Alice Mac",
         uid: "alice",
         updatedAt: "2026-05-08T00:00:01.000Z",
@@ -266,7 +266,7 @@ describeWithEmulator("firestore security rules", () => {
     await expectDenied(
       clientUpdate("bob", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
-        desktopSecret: "secret-2",
+        desktopSecretHash: "hash-2",
         displayName: "Bob Mac",
         uid: "alice",
         updatedAt: "2026-05-08T00:00:01.000Z",
@@ -275,7 +275,7 @@ describeWithEmulator("firestore security rules", () => {
     await expectDenied(
       clientUpdate("bob", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
-        desktopSecret: "bob-takeover-secret",
+        desktopSecretHash: "bob-takeover-hash",
         displayName: "Bob Mac",
         uid: "bob",
         updatedAt: "2026-05-08T00:00:02.000Z",
@@ -284,7 +284,7 @@ describeWithEmulator("firestore security rules", () => {
     await expectDenied(
       clientUpdate("alice", "desktopCredentials/desktop-2", {
         desktopId: "desktop-1",
-        desktopSecret: "secret-1",
+        desktopSecretHash: "hash-1",
         displayName: "Alice Mac",
         uid: "alice",
         updatedAt: "2026-05-08T00:00:03.000Z",

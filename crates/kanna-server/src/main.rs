@@ -1,4 +1,5 @@
 mod bonjour;
+mod cloud_task_publisher;
 mod commands;
 mod config;
 mod daemon_client;

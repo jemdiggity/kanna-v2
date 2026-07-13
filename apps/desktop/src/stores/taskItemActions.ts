@@ -1,14 +1,12 @@
-import { type AgentProvider, type PipelineItem } from "@kanna/db";
+import { type AgentProvider } from "@kanna/db";
 import { invoke } from "../invoke";
 import { createDesktopTask } from "../services/desktopServerClient";
-import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
 import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import { debugLog } from "../utils/debugLog";
 import { resolveRealE2eAgentOverride } from "./e2eRealAgentOverride";
 import { resolveInitialBaseRef } from "./taskBaseBranch";
 import { normalizeAgentExecutionType, type AgentExecutionType } from "./agentExecutionType";
 import { requireService, type CreateItemOptions, type StoreContext } from "./state";
-import { showCloudPublishErrorToast } from "./taskPublishing";
 import {
   acknowledgeTaskUiSlot,
   buildCreatingTaskUiSlot,
@@ -183,11 +181,8 @@ export function createTaskItemActions(
       console.error("[store] failed to hydrate created task snapshot:", error);
     }
 
-    const createdItem = context.state.items.value.find((candidate) => candidate.id === createdTaskId);
-    const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
-    if (createdItem) {
+    if (context.state.items.value.some((candidate) => candidate.id === createdTaskId)) {
       void publishDesktopLanTaskSnapshot(context.requireDb());
-      publishCreatedTaskSnapshot(createdTaskId, createdItem, createdRepo);
     }
     debugLog(`[perf:createItem] server create TOTAL: ${(performance.now() - t0).toFixed(1)}ms`);
 
@@ -197,33 +192,6 @@ export function createTaskItemActions(
       console.error("[store] failed to invalidate workspace after task creation:", error);
     }
     return createdTaskId;
-  }
-
-  function publishCreatedTaskSnapshot(taskId: string, createdItem: PipelineItem, createdRepo: Parameters<typeof publishDesktopTaskSnapshot>[2]) {
-    const publishPromise = publishDesktopTaskSnapshot(context.requireDb(), createdItem, createdRepo)
-      .then(() => {
-        if (import.meta.env.DEV && typeof window !== "undefined") {
-          (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
-            status: "ok",
-            taskId,
-          };
-        }
-      })
-      .catch((error) => {
-        if (import.meta.env.DEV && typeof window !== "undefined") {
-          (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
-            status: "error",
-            taskId,
-            message: error instanceof Error ? error.message : String(error),
-          };
-        }
-        console.warn("[cloud] failed to publish task snapshot:", error);
-        showCloudPublishErrorToast(context, error);
-        throw error;
-      });
-    void publishPromise.catch((error) => {
-      console.debug("[cloud] async publish task snapshot failed after non-awaited path:", error);
-    });
   }
 
   return { createItem };
