@@ -7,43 +7,38 @@ use std::net::TcpListener;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const CRASH_DB_ENV: &str = "KANNA_TEST_CRASH_LEGACY_DB";
 const CRASH_READY_ENV: &str = "KANNA_TEST_CRASH_LEGACY_READY";
 
 struct TestRoot {
-    path: Option<PathBuf>,
+    temp_dir: Option<tempfile::TempDir>,
 }
 
 impl TestRoot {
     fn new() -> Self {
-        let path = unique_test_root();
-        std::fs::create_dir_all(&path).expect("test root should be created");
-        Self { path: Some(path) }
+        let temp_dir = tempfile::Builder::new()
+            .prefix("kanna-server-legacy-relocation-")
+            .tempdir()
+            .expect("test root should be created");
+        Self {
+            temp_dir: Some(temp_dir),
+        }
     }
 
     fn path(&self) -> &Path {
-        self.path.as_deref().expect("test root should be present")
+        self.temp_dir
+            .as_ref()
+            .expect("test root should be present")
+            .path()
     }
 
     fn cleanup(&mut self) -> std::io::Result<()> {
-        let Some(path) = self.path.take() else {
+        let Some(temp_dir) = self.temp_dir.take() else {
             return Ok(());
         };
-        if let Err(error) = std::fs::remove_dir_all(&path) {
-            self.path = Some(path);
-            return Err(error);
-        }
-        Ok(())
-    }
-}
-
-impl Drop for TestRoot {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_dir_all(path);
-        }
+        temp_dir.close()
     }
 }
 
@@ -104,17 +99,6 @@ impl Drop for ChildGuard {
         }
         self.child.take();
     }
-}
-
-fn unique_test_root() -> PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after the Unix epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "kanna-server-legacy-relocation-{}-{suffix}",
-        std::process::id()
-    ))
 }
 
 fn free_loopback_port() -> u16 {

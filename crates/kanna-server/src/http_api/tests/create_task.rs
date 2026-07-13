@@ -512,9 +512,13 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             let session_id = match command {
-                DaemonCommand::SpawnAgent { session_id, params } => {
-                    assert!(params.cwd.contains(".kanna-worktrees/task-"));
-                    let env = params.env;
+                DaemonCommand::Spawn {
+                    session_id,
+                    cwd,
+                    env,
+                    ..
+                } => {
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(
                         env.get("KANNA_CLI_PATH").map(String::as_str),
                         Some(expected_cli_path.as_str())
@@ -536,7 +540,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
                     );
                     session_id
                 }
-                other => panic!("expected SpawnAgent command, got {:?}", other),
+                other => panic!("expected Spawn command, got {:?}", other),
             };
             write_half
                 .write_all(

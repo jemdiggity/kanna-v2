@@ -38,7 +38,7 @@ describe("generated provider registry", () => {
       "claude", "copilot", "codex", "opencode", "antigravity",
     ]);
     expect(getAgentProviderSpec("antigravity").executable).toBe("agy");
-    expect(getAgentProviderSpec("opencode").default_session_type).toBe("agent");
+    expect(getAgentProviderSpec("opencode").default_session_type).toBe("pty");
     expect(isAgentProvider("future-agent")).toBe(false);
   });
 

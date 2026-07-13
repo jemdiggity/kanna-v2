@@ -495,21 +495,23 @@ async fn ordered_agent_candidates_fall_back_through_the_http_task_creation_path(
         .json::<Value>()
         .await
         .expect("task response should be JSON");
-    assert_eq!(created["agentType"], "agent");
+    assert_eq!(created["agentType"], "pty");
 
     let command = daemon.await.expect("fake daemon should finish");
     match command {
-        DaemonCommand::SpawnAgent { params, .. } => {
-            assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
-            let executable = params
-                .executable
-                .expect("headless spawn should include its resolved executable");
+        DaemonCommand::Spawn {
+            args,
+            agent_provider,
+            ..
+        } => {
+            assert_eq!(agent_provider, Some(DaemonAgentProvider::Claude));
             assert!(
-                executable.ends_with("/.kanna/provider-bin/claude"),
-                "unexpected executable: {executable}"
+                args.iter()
+                    .any(|arg| arg.contains("/.kanna/provider-bin/claude")),
+                "PTY spawn should include the resolved Claude executable: {args:?}"
             );
         }
-        other => panic!("expected headless spawn, got {other:?}"),
+        other => panic!("expected PTY spawn, got {other:?}"),
     }
 
     let task_id = created["taskId"]

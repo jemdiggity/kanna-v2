@@ -807,14 +807,14 @@ fn resolve_agent_type_normalizes_chat_to_agent() {
 }
 
 #[test]
-fn resolve_agent_type_defaults_opencode_to_agent_but_allows_explicit_pty() {
+fn resolve_agent_type_defaults_to_pty_but_allows_explicit_agent() {
     assert!(matches!(
         resolve_agent_type(None, AgentProvider::Opencode),
-        Ok(AgentSessionType::Agent)
+        Ok(AgentSessionType::Pty)
     ));
     assert!(matches!(
-        resolve_agent_type(Some("pty"), AgentProvider::Opencode),
-        Ok(AgentSessionType::Pty)
+        resolve_agent_type(Some("agent"), AgentProvider::Opencode),
+        Ok(AgentSessionType::Agent)
     ));
 }
 
@@ -1213,7 +1213,7 @@ fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
 }
 
 #[test]
-fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
+fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
     for provider in ["claude", "codex"] {
         let label = format!("agent-default-{provider}");
         let repo_root = init_git_repo(&label);
@@ -1256,11 +1256,8 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
             .into_iter()
             .find(|item| item.id == prepared.created_task.task_id)
             .unwrap();
-        assert_eq!(created.agent_type.as_deref(), Some("agent"));
-        assert!(matches!(
-            prepared.session,
-            PreparedSessionSpawn::Agent { .. }
-        ));
+        assert_eq!(created.agent_type.as_deref(), Some("pty"));
+        assert!(matches!(prepared.session, PreparedSessionSpawn::Pty { .. }));
 
         let _ = std::fs::remove_dir_all(&repo_root);
     }
@@ -1532,7 +1529,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             base_ref: None,
             agent: None,
             agent_provider: Some("codex".to_string()),
-            agent_type: None,
+            agent_type: Some("agent".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -1612,7 +1609,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             base_ref: None,
             agent: None,
             agent_provider: Some("codex".to_string()),
-            agent_type: None,
+            agent_type: Some("agent".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,

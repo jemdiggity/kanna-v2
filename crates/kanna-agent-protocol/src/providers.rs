@@ -61,10 +61,7 @@ impl AgentProvider {
     }
 
     pub const fn default_session_type(self) -> AgentSessionType {
-        match self {
-            Self::Claude | Self::Codex | Self::Opencode => AgentSessionType::Agent,
-            Self::Copilot | Self::Antigravity => AgentSessionType::Pty,
-        }
+        AgentSessionType::Pty
     }
 
     pub const fn supports_headless(self) -> bool {
