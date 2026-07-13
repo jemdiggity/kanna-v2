@@ -6,7 +6,7 @@ export const AGENT_PROVIDER_SPECS = [
   {
     "id": "claude",
     "executable": "claude",
-    "default_session_type": "agent",
+    "default_session_type": "pty",
     "supports_headless": true
   },
   {
@@ -18,13 +18,13 @@ export const AGENT_PROVIDER_SPECS = [
   {
     "id": "codex",
     "executable": "codex",
-    "default_session_type": "agent",
+    "default_session_type": "pty",
     "supports_headless": true
   },
   {
     "id": "opencode",
     "executable": "opencode",
-    "default_session_type": "agent",
+    "default_session_type": "pty",
     "supports_headless": true
   },
   {

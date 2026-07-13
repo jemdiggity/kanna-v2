@@ -13,14 +13,9 @@ fn registry_covers_every_provider_once() {
 #[test]
 fn provider_metadata_matches_runtime_contracts() {
     assert_eq!(AgentProvider::Antigravity.executable(), "agy");
-    assert_eq!(
-        AgentProvider::Copilot.default_session_type(),
-        AgentSessionType::Pty
-    );
-    assert_eq!(
-        AgentProvider::Opencode.default_session_type(),
-        AgentSessionType::Agent
-    );
+    for provider in AgentProvider::ALL {
+        assert_eq!(provider.default_session_type(), AgentSessionType::Pty);
+    }
     assert!(AgentProvider::Claude.supports_headless());
     assert!(AgentProvider::Codex.supports_headless());
     assert!(AgentProvider::Opencode.supports_headless());

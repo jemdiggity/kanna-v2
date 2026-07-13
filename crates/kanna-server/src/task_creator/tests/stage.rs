@@ -90,10 +90,11 @@ fn prepare_merge_agent_creates_in_progress_task() {
     assert_eq!(prepared.created_task.repo_id, "repo-1");
     assert_eq!(prepared.created_task.stage, "in progress");
     assert_eq!(prepared.created_task.title, "Merge Master");
+    assert_eq!(prepared.created_task.agent_type, "pty");
     assert_eq!(prepared.stage_agent.as_deref(), Some("merge"));
     let runtime_prompt = match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => args.join(" "),
-        PreparedSessionSpawn::Agent { prompt, .. } => prompt,
+        PreparedSessionSpawn::Agent { .. } => panic!("merge master should use a PTY session"),
     };
     assert!(runtime_prompt.contains("You are the merge master."));
     assert!(!runtime_prompt.contains("Implement the requested task in this worktree."));
