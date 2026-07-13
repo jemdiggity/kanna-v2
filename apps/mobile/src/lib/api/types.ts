@@ -78,6 +78,11 @@ export interface TaskActionResponse {
 
 export type TaskActivity = "idle" | "working" | "unread";
 
+export interface TaskActivityResponse {
+  taskId: string;
+  activity: TaskActivity | null;
+}
+
 export interface TaskSummary {
   id: string;
   repoId: string;

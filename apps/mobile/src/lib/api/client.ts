@@ -11,6 +11,7 @@ import type {
   MobileServerStatus,
   PairingSession,
   TaskActionResponse,
+  TaskActivityResponse,
   TaskSummary
 } from "./types";
 
@@ -49,6 +50,7 @@ export interface KannaTransport {
   createTask(input: CreateTaskRequest): Promise<CreateTaskResponse>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
+  markTaskRead(taskId: string): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   observeTaskTerminal(
@@ -73,6 +75,7 @@ export interface KannaClient {
   createTask(input: CreateTaskRequest): Promise<CreateTaskResponse>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
+  markTaskRead(taskId: string): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   observeTaskTerminal(
@@ -103,6 +106,7 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     createTask: (input) => transport.createTask(input),
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
+    markTaskRead: (taskId) => transport.markTaskRead(taskId),
     closeTask: (taskId) => transport.closeTask(taskId),
     sendTaskInput: (taskId, input) => transport.sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>

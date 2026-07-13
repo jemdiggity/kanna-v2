@@ -51,6 +51,10 @@ describe("createKannaClient", () => {
       advanceTaskStage: vi.fn().mockResolvedValue({
         taskId: "task-5"
       }),
+      markTaskRead: vi.fn().mockResolvedValue({
+        taskId: "task-1",
+        activity: "idle"
+      }),
       closeTask: vi.fn().mockResolvedValue(undefined),
       sendTaskInput: vi.fn().mockResolvedValue(undefined),
       observeTaskTerminal: vi.fn().mockReturnValue({
@@ -90,6 +94,10 @@ describe("createKannaClient", () => {
     });
     expect(await client.advanceTaskStage("task-1")).toEqual({
       taskId: "task-5"
+    });
+    expect(await client.markTaskRead("task-1")).toEqual({
+      taskId: "task-1",
+      activity: "idle"
     });
     await expect(client.closeTask("task-1")).resolves.toBeUndefined();
     await expect(client.sendTaskInput("task-1", "continue")).resolves.toBeUndefined();

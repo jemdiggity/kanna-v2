@@ -16,6 +16,133 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 describe("remote transport", () => {
+  it("posts mark-read to the selected remote desktop", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "task/read",
+      activity: "idle"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    await expect(transport.markTaskRead("task/read")).resolves.toEqual({
+      taskId: "task/read",
+      activity: "idle"
+    });
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      method: "POST",
+      path: "/v1/tasks/task%2Fread/actions/mark-read",
+      body: null
+    });
+  });
+
+  it("routes cloud mark-read to the owner desktop and local task id", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "local-task-1",
+      activity: "idle"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [{
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-1",
+        ownerOnline: true
+      }]
+    });
+
+    await expect(transport.markTaskRead("cloud-task-1")).resolves.toEqual({
+      taskId: "local-task-1",
+      activity: "idle"
+    });
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/mark-read",
+      body: null
+    });
+  });
+
+  it("refreshes a cached cloud route before marking a task read", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "local-task-b",
+      activity: "idle"
+    });
+    let cloudTasks = [{
+      id: "cloud-task-1",
+      repoId: "repo-1",
+      title: "Cloud task",
+      stage: "in progress",
+      ownerDesktopId: "desktop-a",
+      ownerLocalTaskId: "local-task-a",
+      ownerOnline: true
+    }];
+    const listCloudTasks = vi.fn(async () => cloudTasks);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks
+    });
+    await transport.listRecentTasks();
+    cloudTasks = [{
+      ...cloudTasks[0],
+      ownerDesktopId: "desktop-b",
+      ownerLocalTaskId: "local-task-b"
+    }];
+
+    await transport.markTaskRead("cloud-task-1");
+
+    expect(listCloudTasks).toHaveBeenCalledTimes(2);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-b",
+      method: "POST",
+      path: "/v1/tasks/local-task-b/actions/mark-read",
+      body: null
+    });
+  });
+
+  it("falls back to the selected desktop when a cached cloud route disappears", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "cloud-task-1",
+      activity: "idle"
+    });
+    let cloudTasks = [{
+      id: "cloud-task-1",
+      repoId: "repo-1",
+      title: "Cloud task",
+      stage: "in progress",
+      ownerDesktopId: "desktop-a",
+      ownerLocalTaskId: "local-task-a",
+      ownerOnline: true
+    }];
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-selected",
+      invokeDesktop,
+      listCloudTasks: async () => cloudTasks
+    });
+    await transport.listRecentTasks();
+    cloudTasks = [];
+
+    await transport.markTaskRead("cloud-task-1");
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-selected",
+      method: "POST",
+      path: "/v1/tasks/cloud-task-1/actions/mark-read",
+      body: null
+    });
+  });
+
   it("maps cloud desktop records into the mobile desktop summary shape", async () => {
     const transport = createRemoteTransport({
       listDesktopRecords: async () => [

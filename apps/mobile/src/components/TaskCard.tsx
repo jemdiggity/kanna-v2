@@ -13,16 +13,21 @@ interface TaskCardProps {
 
 export function TaskCard({ isRecentView, repoName, task, onPress }: TaskCardProps) {
   const model = buildTaskListItemModel(task, repoName, isRecentView);
+  const effectiveActivity =
+    task.activity === "working" || task.activity === "unread"
+      ? task.activity
+      : "idle";
   const titleActivityStyle =
-    task.activity === "unread"
+    effectiveActivity === "unread"
       ? styles.titleUnread
-      : task.activity === "working"
+      : effectiveActivity === "working"
         ? styles.titleWorking
         : styles.titleIdle;
 
   return (
     <Pressable
       accessibilityLabel={`${task.title}, ${model.repoLabel}, ${model.stageLabel}`}
+      accessibilityValue={{ text: effectiveActivity }}
       accessible
       style={styles.card}
       testID={MOBILE_E2E_IDS.taskListItem(task.id)}

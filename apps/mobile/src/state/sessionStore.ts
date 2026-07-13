@@ -1,6 +1,7 @@
 import type {
   DesktopMode,
   DesktopSummary,
+  TaskActivity,
   TaskSummary,
   RepoSummary,
 } from "../lib/api/types";
@@ -99,6 +100,7 @@ export interface SessionStore {
   setRepoTasks(tasks: TaskSummary[]): void;
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
+  setTaskActivity(taskId: string, activity: TaskActivity): void;
   setSelectedTask(taskId: string | null): void;
   retagTaskIdentity(previousTaskId: string, nextTaskId: string): void;
   setActiveView(view: MobileView): void;
@@ -375,6 +377,24 @@ export function createSessionStore(): SessionStore {
         searchQuery: query,
         searchResults: uniqueResults
       };
+      publish();
+    },
+    setTaskActivity(taskId, activity) {
+      let changed = false;
+      const updateTasks = (tasks: readonly TaskSummary[]): TaskSummary[] =>
+        tasks.map((task) => {
+          if (task.id !== taskId || (task.activity ?? "idle") === activity) {
+            return task;
+          }
+          changed = true;
+          return { ...task, activity };
+        });
+      const repoTasks = updateTasks(state.repoTasks);
+      const recentTasks = updateTasks(state.recentTasks);
+      const searchResults = updateTasks(state.searchResults);
+      if (!changed) return;
+
+      state = { ...state, repoTasks, recentTasks, searchResults };
       publish();
     },
     setSelectedTask(selectedTaskId) {

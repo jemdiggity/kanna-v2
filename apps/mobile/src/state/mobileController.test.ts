@@ -146,6 +146,10 @@ function createClientMock(): ClientMock {
     advanceTaskStage: vi.fn().mockResolvedValue({
       taskId: "task-pr"
     }),
+    markTaskRead: vi.fn().mockResolvedValue({
+      taskId: "task-1",
+      activity: "idle"
+    }),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
     closeTask: vi.fn().mockResolvedValue(undefined),
     observeTaskTerminal: vi.fn().mockImplementation((_taskId, listener) => {
@@ -1437,6 +1441,312 @@ describe("createMobileController", () => {
       desktopName: "Kanna Cloud",
       recentTasks: [{ id: "cloud-task-1", title: "Cloud task" }]
     });
+  });
+
+  it("marks an unread task idle after it remains open for one second", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([unreadTask]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(999);
+
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.markTaskRead).toHaveBeenCalledTimes(1);
+    expect(client.markTaskRead).toHaveBeenCalledWith("task-1");
+    expect(store.getState().repoTasks[0]?.activity).toBe("idle");
+    expect(store.getState().recentTasks[0]?.activity).toBe("idle");
+  });
+
+  it("marks an already-open task read after a LAN poll changes only activity", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const workingTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "working" as const
+    };
+    const unreadTask = { ...workingTask, activity: "unread" as const };
+    client.listRecentTasks
+      .mockResolvedValueOnce([workingTask])
+      .mockResolvedValueOnce([unreadTask]);
+    client.listRepoTasks
+      .mockResolvedValueOnce([workingTask])
+      .mockResolvedValueOnce([unreadTask]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(store.getState().repoTasks[0]?.activity).toBe("unread");
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(client.markTaskRead).toHaveBeenCalledWith("task-1");
+    expect(store.getState().repoTasks[0]?.activity).toBe("idle");
+  });
+
+  it("does not apply a stale mark-read response after the task closes", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([unreadTask]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    let resolveMarkRead: ((value: { taskId: string; activity: "idle" }) => void) | null = null;
+    client.markTaskRead.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveMarkRead = resolve;
+    }));
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.markTaskRead).toHaveBeenCalledTimes(1);
+
+    controller.closeTask();
+    resolveMarkRead?.({ taskId: "task-1", activity: "idle" });
+    await Promise.resolve();
+
+    expect(store.getState().selectedTaskId).toBeNull();
+    expect(store.getState().recentTasks[0]?.activity).toBe("unread");
+  });
+
+  it("does not mark read while selected task copies disagree about activity", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([
+      { ...unreadTask, activity: "working" as const }
+    ]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite a working copy with a delayed mark-read response", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([unreadTask]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    let resolveMarkRead: ((value: { taskId: string; activity: "idle" }) => void) | null = null;
+    client.markTaskRead.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveMarkRead = resolve;
+    }));
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.markTaskRead).toHaveBeenCalledTimes(1);
+
+    store.setRecentTasks([{ ...unreadTask, activity: "working" }]);
+    resolveMarkRead?.({ taskId: "task-1", activity: "idle" });
+    await Promise.resolve();
+
+    expect(store.getState().repoTasks[0]?.activity).toBe("unread");
+    expect(store.getState().recentTasks[0]?.activity).toBe("working");
+  });
+
+  it("requires a fresh one-second dwell after leaving and returning to the task view", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([unreadTask]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(999);
+    controller.showView("more");
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+
+    controller.showView("tasks");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.markTaskRead).toHaveBeenCalledTimes(1);
+    expect(store.getState().recentTasks[0]?.activity).toBe("idle");
+  });
+
+  it("marks an unread task read after returning from More through Recent", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([unreadTask]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(999);
+    controller.showView("more");
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+
+    controller.showView("recent");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.markTaskRead).toHaveBeenCalledTimes(1);
+    expect(store.getState().recentTasks[0]?.activity).toBe("idle");
+  });
+
+  it("does not mark read after the connection leaves connected state", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([unreadTask]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(999);
+    store.setConnectionState("idle");
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+    expect(store.getState().recentTasks[0]?.activity).toBe("unread");
+  });
+
+  it("retries a rejected mark-read without disconnecting", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([unreadTask]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    client.markTaskRead
+      .mockRejectedValueOnce(new Error("relay timeout"))
+      .mockResolvedValueOnce({ taskId: "task-1", activity: "idle" });
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(client.markTaskRead).toHaveBeenCalledTimes(1);
+    expect(store.getState().connectionState).toBe("connected");
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.markTaskRead).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.markTaskRead).toHaveBeenCalledTimes(2);
+    expect(store.getState().connectionState).toBe("connected");
+    expect(store.getState().recentTasks[0]?.activity).toBe("idle");
+  });
+
+  it("retries an exhausted mark-read cycle after a later collection refresh", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const unreadTask = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Refactor mobile shell",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    client.listRecentTasks.mockResolvedValue([unreadTask]);
+    client.listRepoTasks.mockResolvedValue([unreadTask]);
+    client.markTaskRead.mockRejectedValue(new Error("relay timeout"));
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    expect(client.markTaskRead).toHaveBeenCalledTimes(3);
+    expect(store.getState().connectionState).toBe("connected");
+
+    client.markTaskRead.mockReset();
+    client.markTaskRead.mockResolvedValue({ taskId: "task-1", activity: "idle" });
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.markTaskRead).toHaveBeenCalledTimes(1);
+    expect(store.getState().recentTasks[0]?.activity).toBe("idle");
   });
 
   it("bootstraps the cloud connection after email sign-in", async () => {
@@ -3033,6 +3343,58 @@ describe("createMobileController", () => {
       selectedTaskId: "cloud-task-agent",
       taskAgentTaskId: "cloud-task-agent"
     });
+  });
+
+  it("marks an already-open live cloud task read when its activity becomes unread", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const workingTask: TaskSummary = {
+      id: "cloud-task-1",
+      repoId: "repo-cloud-1",
+      repoName: "Cloud Repo",
+      title: "Cloud task",
+      stage: "in progress",
+      activity: "working",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalTaskId: "local-task-1",
+      ownerOnline: true
+    };
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        onUpdate([workingTask]);
+        return () => undefined;
+      })
+    });
+
+    await controller.bootstrap();
+    controller.openTask("cloud-task-1");
+    liveUpdate?.([{ ...workingTask, activity: "unread" }]);
+    await vi.advanceTimersByTimeAsync(999);
+
+    expect(client.markTaskRead).not.toHaveBeenCalled();
+    expect(store.getState().repoTasks[0]?.activity).toBe("unread");
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.markTaskRead).toHaveBeenCalledWith("cloud-task-1");
+    expect(store.getState().repoTasks[0]?.activity).toBe("idle");
+    expect(store.getState().recentTasks[0]?.activity).toBe("idle");
   });
 
   it("selects the first repo when live cloud tasks arrive without a selected repo", async () => {

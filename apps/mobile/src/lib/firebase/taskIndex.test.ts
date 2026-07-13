@@ -455,6 +455,55 @@ describe("cloud task index", () => {
     expect(firestoreMocks.getDocs).not.toHaveBeenCalled();
   });
 
+  it("emits live updates when only task activity changes", () => {
+    const onUpdate = vi.fn();
+    const listeners = captureSnapshotListeners();
+    createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
+      "user-1",
+      onUpdate,
+    );
+    listeners.root().onNext({ docs: [desktopDocument("desktop-a")] });
+
+    for (const activity of ["working", "unread", "idle"] as const) {
+      listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+        activity,
+        ownerDesktopId: "desktop-a",
+      })));
+    }
+
+    expect(onUpdate.mock.calls.map(([tasks]) => tasks[0]?.activity)).toEqual([
+      "working",
+      "unread",
+      "idle",
+    ]);
+  });
+
+  it("accepts task documents whose legacy status field is omitted", () => {
+    const onUpdate = vi.fn();
+    const onError = vi.fn<(error: CloudTaskIndexError) => void>();
+    const listeners = captureSnapshotListeners();
+    createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
+      "user-1",
+      onUpdate,
+      onError,
+    );
+    listeners.root().onNext({ docs: [desktopDocument("desktop-a")] });
+
+    listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+      status: undefined,
+      activity: "working",
+      ownerDesktopId: "desktop-a",
+    })));
+
+    expect(onUpdate).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: "cloud-task-1",
+        activity: "working",
+      }),
+    ]);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("publishes only the complete initial Firestore aggregate through the app model", async () => {
     const listeners = captureSnapshotListeners();
     firestoreMocks.getDocs.mockResolvedValue({ docs: [] });

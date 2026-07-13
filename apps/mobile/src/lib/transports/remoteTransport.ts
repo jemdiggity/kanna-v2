@@ -13,6 +13,7 @@ import type {
   PairingSession,
   RepoSummary,
   TaskActionResponse,
+  TaskActivityResponse,
   TaskSummary,
 } from "../api/types";
 import {
@@ -150,14 +151,12 @@ export function createRemoteTransport({
   };
 
   const resolveCloudTaskRoute = async (
-    taskId: string
+    taskId: string,
+    refreshCloudRoute = false
   ): Promise<CloudTaskRoute | null> => {
     const cached = taskRouteForId(taskId);
-    if (cached) {
+    if (!listCloudTasks || (!refreshCloudRoute && cached)) {
       return cached;
-    }
-    if (!listCloudTasks) {
-      return null;
     }
 
     await listFreshCloudTasks();
@@ -251,9 +250,10 @@ export function createRemoteTransport({
     taskId: string,
     method: RemoteDesktopInvocationRequest["method"],
     buildPath: (localTaskId: string) => string,
-    body: unknown | null
+    body: unknown | null,
+    refreshCloudRoute = false
   ): Promise<T> => {
-    const route = await resolveCloudTaskRoute(taskId);
+    const route = await resolveCloudTaskRoute(taskId, refreshCloudRoute);
     if (route) {
       return requestDesktop<T>(
         route.desktopId,
@@ -480,6 +480,15 @@ export function createRemoteTransport({
         taskId,
         (localTaskId) =>
           `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/advance-stage`
+      ),
+    markTaskRead: (taskId: string) =>
+      requestTask<TaskActivityResponse>(
+        taskId,
+        "POST",
+        (localTaskId) =>
+          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/mark-read`,
+        null,
+        true
       ),
     closeTask: async (taskId: string) => {
       const closingRoute = taskRouteForId(taskId);

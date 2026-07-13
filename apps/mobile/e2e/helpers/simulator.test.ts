@@ -44,8 +44,10 @@ describe("selectSimulatorDevice", () => {
   });
 
   it("builds the Expo development client URL for a Metro server", () => {
-    expect(buildExpoDevelopmentClientUrl("http://127.0.0.1:8679")).toBe(
-      "exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8679"
+    expect(
+      buildExpoDevelopmentClientUrl("kanna-dev", "http://127.0.0.1:8679")
+    ).toBe(
+      "kanna-dev://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8679&disableOnboarding=1"
     );
   });
 });

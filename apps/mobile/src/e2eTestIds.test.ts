@@ -6,6 +6,7 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.appShell).toBe("mobile.app-shell");
     expect(MOBILE_E2E_IDS.tasksScreen).toBe("mobile.tasks-screen");
     expect(MOBILE_E2E_IDS.taskDetailScreen).toBe("mobile.task-detail-screen");
+    expect(MOBILE_E2E_IDS.taskDetailTitle).toBe("mobile.task-detail-title");
     expect(MOBILE_E2E_IDS.taskBackButton).toBe("mobile.task-back-button");
     expect(MOBILE_E2E_IDS.accountButton).toBe("mobile.account-button");
     expect(MOBILE_E2E_IDS.accountSheet).toBe("mobile.account-sheet");

@@ -1,5 +1,10 @@
 # Mobile Task Status Rendering Implementation Plan
 
+> **Revision note:** Reviewer-required desktop publication, mark-read lifecycle,
+> transport, and relay E2E work is specified in
+> `2026-07-11-mobile-task-status-revision.md`, which supersedes this original
+> rendering-only plan where the two differ.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Render mobile task titles with the same idle, working, and unread typography as the desktop task list.

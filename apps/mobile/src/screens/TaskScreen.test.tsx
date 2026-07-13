@@ -53,7 +53,8 @@ function renderTaskScreen(
     cols: null,
     rows: null
   },
-  e2eTaskSnapshotMarker?: string
+  e2eTaskSnapshotMarker?: string,
+  activity: "idle" | "working" | "unread" = "idle"
 ): ElementNode {
   if (!TaskScreen) {
     throw new Error("TaskScreen was not loaded");
@@ -65,7 +66,8 @@ function renderTaskScreen(
       repoId: "repo-1",
       title: "Task",
       stage: "in progress",
-      agentType
+      agentType,
+      activity
     },
     terminalOutput: "terminal",
     terminalStatus: "live",
@@ -142,7 +144,6 @@ describe("TaskScreen", () => {
       rows: 43
     });
   });
-
   it("renders an E2E-only accepted snapshot marker when provided", () => {
     const marker = "cloud-only:Cloud task refreshed";
     const tree = renderTaskScreen("agent", undefined, marker);
@@ -161,6 +162,17 @@ describe("TaskScreen", () => {
 
     expect(findByTestId(tree, "mobile.task-detail-title")?.props).toMatchObject({
       children: "Task"
+    });
+  });
+
+  it("exposes selected task activity without grouping the detail controls", () => {
+    const tree = renderTaskScreen("pty", undefined, undefined, "unread");
+    const title = findByTestId(tree, "mobile.task-detail-title");
+
+    expect(title?.props).toMatchObject({
+      accessibilityValue: { text: "unread" },
+      children: "Task",
+      testID: "mobile.task-detail-title"
     });
   });
 });

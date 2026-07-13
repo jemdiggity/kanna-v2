@@ -60,6 +60,10 @@ export function TaskScreen({
   const [draftInput, setDraftInput] = useState("");
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const isAgentTask = task.agentType === "agent";
+  const effectiveActivity =
+    task.activity === "working" || task.activity === "unread"
+      ? task.activity
+      : "idle";
   const isComposerDisabled = isAgentTask
     ? agentStatus === "connecting" || agentStatus === "error"
     : model.isComposerDisabled;
@@ -145,6 +149,7 @@ export function TaskScreen({
         <View style={styles.titleChip}>
           <Text style={styles.stageLabel}>{model.stageLabel}</Text>
           <Text
+            accessibilityValue={{ text: effectiveActivity }}
             numberOfLines={1}
             style={styles.title}
             testID={MOBILE_E2E_IDS.taskDetailTitle}

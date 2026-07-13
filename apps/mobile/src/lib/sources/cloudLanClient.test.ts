@@ -60,6 +60,7 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     }),
     runMergeAgent: vi.fn().mockResolvedValue({ taskId: "task-merge" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-advanced" }),
+    markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
     closeTask: vi.fn().mockResolvedValue(undefined),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
     observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
@@ -988,6 +989,7 @@ describe("createCloudLanClient", () => {
     await client.closeTask("lan-only");
     await client.advanceTaskStage("cloud-only");
     await client.runMergeAgent("cloud-duplicate");
+    await client.markTaskRead("cloud-duplicate");
 
     expect(lan.observeTaskAgent).toHaveBeenCalledWith(
       "local-duplicate",
@@ -1012,6 +1014,8 @@ describe("createCloudLanClient", () => {
     expect(lan.closeTask).toHaveBeenCalledWith("lan-only");
     expect(cloud.advanceTaskStage).toHaveBeenCalledWith("cloud-only");
     expect(lan.runMergeAgent).toHaveBeenCalledWith("local-duplicate");
+    expect(lan.markTaskRead).toHaveBeenCalledWith("local-duplicate");
+    expect(cloud.markTaskRead).not.toHaveBeenCalled();
   });
 
   it("translates routed action responses back to the displayed task identity", async () => {

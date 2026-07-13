@@ -1,4 +1,5 @@
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
+import type { TaskActivity } from "../../src/lib/api/types";
 
 const RELAY_TASK_TITLE = "Hybrid duplicate from LAN";
 const HYBRID_DUPLICATE_CLOUD_TITLE = "Hybrid duplicate from cloud";
@@ -86,10 +87,13 @@ export interface MobileRelayHarness {
   menuInput: string;
   lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
+  prepareTaskUnreadForMarkRead(): Promise<void>;
+  setTaskActivity(activity: TaskActivity): Promise<void>;
   terminalEvents: TerminalEventCollector;
   publishHybridCloudRefresh(): Promise<void>;
   stop(): Promise<void>;
   waitForFirstMenuSelection(timeoutMs?: number): Promise<string>;
+  waitForLocalTaskActivity(activity: TaskActivity, timeoutMs?: number): Promise<void>;
 }
 
 export interface MobileHybridFixture {
@@ -199,6 +203,25 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
       menuInput: "1",
       lanOnlyTask,
       localTask,
+      async prepareTaskUnreadForMarkRead() {
+        await setLocalTaskRuntimeStatus(harness, localTask.taskId, "busy");
+        await setLocalTaskRuntimeStatus(harness, localTask.taskId, "idle");
+        await waitForLocalTaskActivity(harness, localTask, "unread");
+        await setCloudTaskActivity({
+          activity: "unread",
+          auth,
+          harness,
+          localTask,
+        });
+      },
+      setTaskActivity(activity) {
+        return setCloudTaskActivity({
+          activity,
+          auth,
+          harness,
+          localTask,
+        });
+      },
       terminalEvents,
       publishHybridCloudRefresh: () =>
         publishHybridCloudRefresh({ auth, harness }),
@@ -222,6 +245,9 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
           );
         }
         return output;
+      },
+      waitForLocalTaskActivity(activity, timeoutMs) {
+        return waitForLocalTaskActivity(harness, localTask, activity, timeoutMs);
       }
     };
   } catch (error) {
@@ -338,7 +364,8 @@ async function seedCloudDesktopSnapshot(input: {
       promptSnippet: stringValue("Run deterministic scripted task"),
       displayName: stringValue(HYBRID_DUPLICATE_CLOUD_TITLE),
       stage: stringValue("review"),
-      status: stringValue("working"),
+      status: stringValue("active"),
+      activity: stringValue("working"),
       repo: mapValue({
         cloudRepoId: stringValue(input.localTask.repoId),
         name: stringValue("Mobile relay Appium repo")
@@ -423,6 +450,72 @@ async function assertHybridLanFixture(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+async function setCloudTaskActivity(input: {
+  activity: TaskActivity;
+  auth: AuthSession;
+  harness: RemoteHarness;
+  localTask: ScriptedTask;
+}): Promise<void> {
+  await setFirestoreDocument(
+    input.harness.ports.firestore,
+    [
+      "users",
+      input.auth.uid,
+      "desktops",
+      input.harness.desktopId,
+      "tasks",
+      input.localTask.taskId,
+    ],
+    input.auth.idToken,
+    { activity: stringValue(input.activity) },
+  );
+}
+
+async function setLocalTaskRuntimeStatus(
+  harness: RemoteHarness,
+  taskId: string,
+  status: "busy" | "idle",
+): Promise<void> {
+  const response = await fetch(
+    `${harness.lanBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/runtime-status`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, selected: false }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Failed to set local task ${taskId} runtime status ${status}: ` +
+        `${response.status} ${await response.text()}`,
+    );
+  }
+}
+
+async function waitForLocalTaskActivity(
+  harness: RemoteHarness,
+  task: ScriptedTask,
+  expected: TaskActivity,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastObserved: unknown = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(
+      `${harness.lanBaseUrl}/v1/repos/${encodeURIComponent(task.repoId)}/tasks`,
+    );
+    if (response.ok) {
+      const tasks = await response.json() as Array<{ id?: unknown; activity?: unknown }>;
+      lastObserved = tasks.find((candidate) => candidate.id === task.taskId)?.activity ?? null;
+      if (lastObserved === expected) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Expected owner task ${task.taskId} activity ${expected}; last observed ${String(lastObserved)}`,
+  );
 }
 
 async function signInRelayUser(authPort: number): Promise<AuthSession> {

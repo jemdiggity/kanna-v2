@@ -21,7 +21,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
     ).toThrow("KANNA_APPIUM_PORT");
   });
 
-  it("parses the appium port and server URL", () => {
+  it("defaults local E2E to the development native identity", () => {
     expect(
       resolveRequiredMobileE2eEnv({
         KANNA_APPIUM_PORT: "4723",
@@ -29,9 +29,12 @@ describe("resolveRequiredMobileE2eEnv", () => {
         KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120"
       })
     ).toMatchObject({
+      appEnv: "dev",
+      appScheme: "kanna-dev",
       appiumPort: 4723,
       metroPort: 1430,
-      bundleId: "build.kanna.app",
+      bundleId: "build.kanna.app.dev",
+      updatedWdaBundleId: "build.kanna.app.dev.webdriveragentrunner",
       desktopServerUrl: "http://127.0.0.1:48120"
     });
   });
@@ -45,6 +48,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
       })
     ).toMatchObject({
       appEnv: "staging",
+      appScheme: "kanna-staging",
       bundleId: "build.kanna.app.staging"
     });
   });
@@ -106,7 +110,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
     ).toMatchObject({
       xcodeOrgId: "GY3LFAA59P",
       xcodeSigningId: "Apple Development",
-      updatedWdaBundleId: "build.kanna.app.webdriveragentrunner"
+      updatedWdaBundleId: "build.kanna.app.dev.webdriveragentrunner"
     });
   });
 });

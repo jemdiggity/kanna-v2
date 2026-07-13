@@ -115,6 +115,20 @@ describe("TaskCard", () => {
     expect(tree.props.accessibilityLabel).not.toBe("mobile.task-row.task-1");
   });
 
+  it.each([
+    ["working", "working"],
+    ["unread", "unread"],
+    ["idle", "idle"],
+    [undefined, "idle"],
+  ] as const)(
+    "exposes %s activity through a stable native accessibility value",
+    (activity, expectedActivity) => {
+      expect(renderTaskCard(activity).props?.accessibilityValue).toEqual({
+        text: expectedActivity,
+      });
+    },
+  );
+
   it.each<{
     activity: TaskActivity | undefined;
     expectedFontWeight: "bold" | "normal";
