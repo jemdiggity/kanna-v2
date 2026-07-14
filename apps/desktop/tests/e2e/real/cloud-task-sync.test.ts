@@ -323,6 +323,34 @@ async function waitForPublishedTaskActivity(input: {
   throw new Error(`timed out waiting for published ${input.activity} activity: ${JSON.stringify(lastDocuments)}`);
 }
 
+async function waitForDesktopCredentialRevocationState(input: {
+  desktopId: string;
+  revoked: boolean;
+}): Promise<void> {
+  const firestorePort = process.env.KANNA_FIREBASE_FIRESTORE_PORT;
+  if (!firestorePort) throw new Error("KANNA_FIREBASE_FIRESTORE_PORT is required");
+  const path = `desktopCredentials/${input.desktopId.replace(/\//g, "_")}`;
+  const deadline = Date.now() + 30_000;
+  let lastDocument: unknown = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(firestoreDocumentUrl(firestorePort, path), {
+      headers: { Authorization: "Bearer owner" },
+    });
+    const body = await response.json().catch(() => null) as {
+      fields?: { revokedAt?: { nullValue?: null; timestampValue?: string } };
+    } | null;
+    lastDocument = body;
+    const revokedAt = body?.fields?.revokedAt;
+    if (response.ok && (input.revoked ? Boolean(revokedAt?.timestampValue) : revokedAt?.nullValue === null)) {
+      return;
+    }
+    await sleep(250);
+  }
+  throw new Error(
+    `timed out waiting for desktop credential revoked=${input.revoked}: ${JSON.stringify(lastDocument)}`,
+  );
+}
+
 async function seedCloudTaskSnapshot(snapshot: Record<string, unknown>): Promise<void> {
   const firestorePort = process.env.KANNA_FIREBASE_FIRESTORE_PORT;
   if (!firestorePort) {
@@ -862,6 +890,24 @@ describe("cloud task sync", () => {
       desktopId: primaryDesktopId,
       ownerLocalTaskId: result,
       activity: "working",
+    });
+
+    await signOut(primary);
+    await waitForDesktopCredentialRevocationState({
+      desktopId: primaryDesktopId,
+      revoked: true,
+    });
+    await execDb(primary, "UPDATE pipeline_item SET activity = 'idle', updated_at = datetime('now') WHERE id = ?", [result]);
+
+    await signIn(primary);
+    await waitForDesktopCredentialRevocationState({
+      desktopId: primaryDesktopId,
+      revoked: false,
+    });
+    await waitForPublishedTaskActivity({
+      desktopId: primaryDesktopId,
+      ownerLocalTaskId: result,
+      activity: "idle",
     });
 
     await sleep(1000);

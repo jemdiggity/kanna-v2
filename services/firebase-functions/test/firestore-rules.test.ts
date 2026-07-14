@@ -249,6 +249,7 @@ describeWithEmulator("firestore security rules", () => {
         desktopId: "desktop-1",
         desktopSecretHash: "hash-1",
         displayName: "Alice Mac",
+        revokedAt: null,
         uid: "alice",
         updatedAt: "2026-05-08T00:00:00.000Z",
       })
@@ -339,6 +340,73 @@ describeWithEmulator("firestore security rules", () => {
         revokedAt: null,
         uid: "alice",
         updatedAt: "2026-05-08T00:00:07.000Z",
+      })
+    );
+  });
+
+  it("denies creation of an incomplete canonical credential tombstone", async () => {
+    await expectDenied(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        revokedAt: "2026-05-08T00:00:00.000Z",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
+  });
+
+  it("allows the same owner to reassociate after revoking an existing canonical credential", async () => {
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: null,
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: "2026-05-08T00:00:01.000Z",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:01.000Z",
+      })
+    );
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: null,
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:02.000Z",
+      })
+    );
+  });
+
+  it("allows the same owner to reassociate after creating a canonical revoke tombstone", async () => {
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: "2026-05-08T00:00:00.000Z",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: null,
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:01.000Z",
       })
     );
   });

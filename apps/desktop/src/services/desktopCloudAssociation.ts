@@ -45,18 +45,25 @@ export async function associateDesktopCloudCredential(): Promise<void> {
 }
 
 export async function revokeDesktopCloudCredential(): Promise<void> {
-  const [session, firestore, credential] = await Promise.all([
+  const [session, firestore, credential, status] = await Promise.all([
     getConfiguredDesktopAuthSession(),
     getConfiguredDesktopFirestore(),
     invoke<DesktopCloudCredentialPayload>("desktop_cloud_credential").catch(() => null),
+    invoke<{ desktopName?: string }>("mobile_server_status").catch(() => null),
   ]);
   const auth = session.getState();
   if (auth.status !== "signedIn" || !firestore) return;
   const desktopId = normalizeRequired(credential?.desktopId);
-  if (!desktopId) return;
+  const desktopSecretHash = normalizeRequired(credential?.desktopSecretHash);
+  if (!desktopId || !desktopSecretHash) return;
+
+  const displayName = normalizeDesktopName(status?.desktopName)
+    || await fallbackDesktopName();
 
   await setDoc(doc(firestore, "desktopCredentials", desktopDocumentId(desktopId)), {
     desktopId,
+    desktopSecretHash,
+    displayName,
     revokedAt: serverTimestamp(),
     uid: auth.user.uid,
     updatedAt: serverTimestamp(),

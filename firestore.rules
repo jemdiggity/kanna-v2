@@ -83,32 +83,34 @@ service cloud.firestore {
     }
 
     match /desktopCredentials/{desktopId} {
+      function canonicalCredentialFields() {
+        return [
+          'desktopId',
+          'desktopSecretHash',
+          'displayName',
+          'revokedAt',
+          'uid',
+          'updatedAt',
+        ];
+      }
+
+      function hasCanonicalCredentialFields() {
+        return request.resource.data.keys().hasOnly(canonicalCredentialFields())
+          && request.resource.data.keys().hasAll(canonicalCredentialFields());
+      }
+
       allow read: if false;
       allow delete: if false;
       allow create: if request.auth != null
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.desktopId == desktopId
-        && request.resource.data.keys().hasOnly([
-          'desktopId',
-          'desktopSecretHash',
-          'displayName',
-          'revokedAt',
-          'uid',
-          'updatedAt',
-        ]);
+        && hasCanonicalCredentialFields();
       allow update: if request.auth != null
         && request.resource.data.uid == request.auth.uid
         && resource.data.desktopId == desktopId
         && request.resource.data.desktopId == desktopId
         && request.resource.data.desktopSecretHash == resource.data.desktopSecretHash
-        && request.resource.data.keys().hasOnly([
-          'desktopId',
-          'desktopSecretHash',
-          'displayName',
-          'revokedAt',
-          'uid',
-          'updatedAt',
-        ])
+        && hasCanonicalCredentialFields()
         && (
           resource.data.uid == request.auth.uid
           || (

@@ -318,8 +318,13 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       desktopAuthState.value = state;
       if (state.status === "signedIn") {
         if (!associatedCloudUsers.has(state.user.uid)) {
-          associatedCloudUsers.add(state.user.uid);
           void associateDesktopCloudCredential()
+            .then(() => {
+              const currentState = desktopAuthState.value;
+              if (currentState.status === "signedIn" && currentState.user.uid === state.user.uid) {
+                associatedCloudUsers.add(state.user.uid);
+              }
+            })
             .catch((error) => {
               console.warn("[cloud] failed to associate desktop credential:", error);
               showCloudBackendErrorToast(error);
@@ -332,6 +337,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         });
         startCloudTaskSubscription(state.user.uid);
       } else {
+        associatedCloudUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
       }

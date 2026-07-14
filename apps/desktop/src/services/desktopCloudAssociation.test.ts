@@ -84,6 +84,8 @@ describe("desktop cloud credential association", () => {
       { segments: [{ app: "firestore" }, "desktopCredentials", "desktop-1"] },
       {
         desktopId: "desktop-1",
+        desktopSecretHash: "secret-hash",
+        displayName: "Studio Mac",
         revokedAt: "SERVER_TIMESTAMP",
         uid: "user-1",
         updatedAt: "SERVER_TIMESTAMP",

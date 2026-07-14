@@ -84,6 +84,7 @@ const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   }),
 );
 const associateDesktopCloudCredentialMock = vi.hoisted(() => vi.fn(async () => {}));
+const desktopAuthStateListeners = vi.hoisted(() => new Set<(state: unknown) => void>());
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -366,11 +367,12 @@ vi.mock("./services/desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
     initialize: vi.fn(async () => {}),
     subscribe: vi.fn((handler: (state: unknown) => void) => {
+      desktopAuthStateListeners.add(handler);
       handler({
         status: "signedIn",
         user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
       });
-      return () => {};
+      return () => desktopAuthStateListeners.delete(handler);
     }),
   })),
 }));
@@ -728,6 +730,7 @@ describe("App", () => {
     cloudTasksMock.mockReset();
     cloudTasksMock.mockResolvedValue({ repos: [], items: [] });
     subscribeDesktopCloudTasksMock.mockClear();
+    desktopAuthStateListeners.clear();
     associateDesktopCloudCredentialMock.mockReset();
     associateDesktopCloudCredentialMock.mockResolvedValue(undefined);
     appUpdateStartMock.mockClear();
@@ -806,6 +809,48 @@ describe("App", () => {
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).toHaveBeenCalledWith("Cloud sync failed: permission-denied");
+
+    wrapper.unmount();
+  });
+
+  it("retries desktop credential association after a transient failure", async () => {
+    associateDesktopCloudCredentialMock
+      .mockRejectedValueOnce(new Error("temporary association failure"))
+      .mockResolvedValueOnce(undefined);
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 1);
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+      });
+    }
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 2);
+
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(2);
+
+    wrapper.unmount();
+  });
+
+  it("re-associates the same user after signed-out state revokes the credential", async () => {
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 1);
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({ status: "signedOut" });
+    }
+    await flushPromises();
+    for (const listener of desktopAuthStateListeners) {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+      });
+    }
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 2);
+
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(2);
 
     wrapper.unmount();
   });
