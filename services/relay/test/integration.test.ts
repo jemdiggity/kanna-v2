@@ -151,11 +151,14 @@ async function seedRelayDesktopCredentials(firestorePort: number): Promise<void>
   try {
     app = initializeApp({ projectId: "kanna-local" }, `relay-integration-${firestorePort}`);
     await getFirestore(app)
-      .doc(`users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`)
+      .doc(`desktopCredentials/${SECRET_DESKTOP_ID}`)
       .set({
         desktopId: SECRET_DESKTOP_ID,
         desktopSecretHash: sha256Hex(SECRET_DESKTOP_SECRET),
-        createdAt: new Date(0).toISOString(),
+        displayName: "Studio Mac",
+        revokedAt: null,
+        uid: TEST_USER_ID,
+        updatedAt: new Date(0).toISOString(),
       });
   } finally {
     if (app) await deleteApp(app);
@@ -165,6 +168,50 @@ async function seedRelayDesktopCredentials(firestorePort: number): Promise<void>
       process.env.FIRESTORE_EMULATOR_HOST = previousHost;
     }
   }
+}
+
+function firebaseUserId(idToken: string): string {
+  const payload = JSON.parse(
+    Buffer.from(idToken.split(".")[1] ?? "", "base64url").toString("utf8"),
+  ) as { user_id?: unknown };
+  if (typeof payload.user_id !== "string" || !payload.user_id) {
+    throw new Error("Firebase ID token is missing user_id");
+  }
+  return payload.user_id;
+}
+
+function firestoreDocumentUrl(firestorePort: number, path: string): string {
+  return `http://127.0.0.1:${firestorePort}/v1/projects/kanna-local/databases/(default)/documents/${path}`;
+}
+
+async function writeCanonicalCredentialAs(input: {
+  firestorePort: number;
+  idToken: string;
+  uid: string;
+  revokedAt?: string | null;
+}): Promise<Response> {
+  return fetch(
+    firestoreDocumentUrl(input.firestorePort, `desktopCredentials/${SECRET_DESKTOP_ID}`),
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${input.idToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fields: {
+          desktopId: { stringValue: SECRET_DESKTOP_ID },
+          desktopSecretHash: { stringValue: sha256Hex(SECRET_DESKTOP_SECRET) },
+          displayName: { stringValue: "Studio Mac" },
+          revokedAt: input.revokedAt == null
+            ? { nullValue: null }
+            : { stringValue: input.revokedAt },
+          uid: { stringValue: input.uid },
+          updatedAt: { stringValue: new Date().toISOString() },
+        },
+      }),
+    },
+  );
 }
 
 /**
@@ -550,24 +597,48 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
-  it("stops an already-authenticated desktop from publishing after credential revocation", async () => {
+  it("reassigns the canonical credential, closes the old relay socket, and publishes only for the new owner", async () => {
     const credentialRef = testFirestore.doc(
-      `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`,
+      `desktopCredentials/${SECRET_DESKTOP_ID}`,
     );
-    const { ws } = await connectAndAuth({
+    const oldTasksRef = testFirestore.collection(
+      `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}/tasks`,
+    );
+    await oldTasksRef.doc("old-owner-sentinel").set(publishedTask("idle", {
+      ownerLocalTaskId: "old-owner-sentinel",
+    }));
+    const newOwnerUid = firebaseUserId(otherIdToken);
+    const newDesktopRef = testFirestore.doc(
+      `users/${newOwnerUid}/desktops/${SECRET_DESKTOP_ID}`,
+    );
+    const { ws: oldOwnerSocket } = await connectAndAuth({
       desktop_id: SECRET_DESKTOP_ID,
       desktop_secret: SECRET_DESKTOP_SECRET,
     });
+    let newOwnerSocket: WebSocket | null = null;
     try {
-      await credentialRef.set({ revokedAt: "2026-07-14T00:00:00Z" }, { merge: true });
-      const ack = waitForMessage(ws, (message) =>
-        message.type === "task_snapshot_ack" && message.id === "publish-revoked");
-      const closed = new Promise<number>((resolveClose) => {
-        ws.once("close", (code) => resolveClose(code));
+      const revoke = await writeCanonicalCredentialAs({
+        firestorePort,
+        idToken,
+        uid: TEST_USER_ID,
+        revokedAt: new Date().toISOString(),
       });
-      ws.send(JSON.stringify({
+      expect(revoke.status).toBe(200);
+      const reclaim = await writeCanonicalCredentialAs({
+        firestorePort,
+        idToken: otherIdToken,
+        uid: newOwnerUid,
+      });
+      expect(reclaim.status).toBe(200);
+
+      const ack = waitForMessage(oldOwnerSocket, (message) =>
+        message.type === "task_snapshot_ack" && message.id === "publish-after-reassignment");
+      const closed = new Promise<number>((resolveClose) => {
+        oldOwnerSocket.once("close", (code) => resolveClose(code));
+      });
+      oldOwnerSocket.send(JSON.stringify({
         type: "task_snapshot_publish",
-        id: "publish-revoked",
+        id: "publish-after-reassignment",
         snapshot: publishedSnapshot("working"),
       }));
       await expect(ack).resolves.toMatchObject({
@@ -575,9 +646,43 @@ describe("Relay integration", () => {
         error: expect.stringMatching(/no longer authorized/),
       });
       await expect(closed).resolves.toBe(4005);
+
+      const authenticated = await connectAndAuth({
+        desktop_id: SECRET_DESKTOP_ID,
+        desktop_secret: SECRET_DESKTOP_SECRET,
+      });
+      newOwnerSocket = authenticated.ws;
+      expect(authenticated.userId).toBe(newOwnerUid);
+      const newOwnerAck = waitForMessage(newOwnerSocket, (message) =>
+        message.type === "task_snapshot_ack" && message.id === "publish-new-owner");
+      newOwnerSocket.send(JSON.stringify({
+        type: "task_snapshot_publish",
+        id: "publish-new-owner",
+        snapshot: publishedSnapshot("working"),
+      }));
+      await expect(newOwnerAck).resolves.toMatchObject({ ok: true });
+
+      const newTasks = await newDesktopRef.collection("tasks").get();
+      expect(newTasks.docs).toHaveLength(1);
+      expect(newTasks.docs[0]?.data()).toMatchObject({
+        ownerDesktopId: SECRET_DESKTOP_ID,
+        activity: "working",
+      });
+      expect((await oldTasksRef.doc("old-owner-sentinel").get()).exists).toBe(true);
     } finally {
-      await credentialRef.set({ revokedAt: null }, { merge: true });
-      if (ws.readyState < WebSocket.CLOSING) await closeAndWait(ws);
+      if (newOwnerSocket && newOwnerSocket.readyState < WebSocket.CLOSING) {
+        await closeAndWait(newOwnerSocket);
+      }
+      await testFirestore.recursiveDelete(newDesktopRef);
+      await credentialRef.set({
+        desktopId: SECRET_DESKTOP_ID,
+        desktopSecretHash: sha256Hex(SECRET_DESKTOP_SECRET),
+        displayName: "Studio Mac",
+        revokedAt: null,
+        uid: TEST_USER_ID,
+        updatedAt: new Date().toISOString(),
+      });
+      if (oldOwnerSocket.readyState < WebSocket.CLOSING) await closeAndWait(oldOwnerSocket);
     }
   });
 

@@ -11,6 +11,7 @@ mod pairing;
 mod register;
 mod relay;
 mod relay_client;
+mod runtime;
 mod session_replacements;
 mod task_creator;
 mod terminal_watcher;
@@ -163,27 +164,5 @@ async fn main() {
     tokio::spawn(async move {
         terminal_watcher::terminal_state_watcher_loop(terminal_state, session_replacements).await;
     });
-    let lan_task = tokio::spawn(http_api::serve(Arc::clone(&http_state)));
-    if relay_url.is_empty() {
-        match lan_task.await {
-            Ok(Ok(())) => log::warn!("LAN API exited unexpectedly"),
-            Ok(Err(err)) => log::error!("LAN API failed: {}", err),
-            Err(err) => log::error!("LAN API task join error: {}", err),
-        }
-    } else {
-        let relay_loop = relay::run_relay_loop(config, db, http_state);
-        tokio::pin!(relay_loop);
-
-        tokio::select! {
-            result = lan_task => match result {
-                Ok(Ok(())) => log::warn!("LAN API exited unexpectedly"),
-                Ok(Err(err)) => log::error!("LAN API failed: {}", err),
-                Err(err) => log::error!("LAN API task join error: {}", err),
-            },
-            result = &mut relay_loop => match result {
-                Ok(()) => log::warn!("relay loop exited unexpectedly"),
-                Err(err) => log::error!("relay loop failed: {}", err),
-            },
-        };
-    }
+    runtime::run_server_services(config, db, http_state).await;
 }

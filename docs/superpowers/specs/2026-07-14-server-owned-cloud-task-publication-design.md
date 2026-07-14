@@ -18,7 +18,9 @@ The relay rejects unknown schema versions, mismatched owner desktop IDs, duplica
 
 ## Renderer Boundary
 
-The existing direct Firestore task publisher and all calls from `useAppCloudWorkspace`, task creation, close/advance actions, and remote-close cleanup are removed. The auth composable invokes a small credential-association service once per signed-in user. That service writes the deterministic desktop document with `desktopId`, `desktopSecretHash`, display name, and user profile email. It never reads SQLite or writes task documents.
+The existing direct Firestore task publisher and all calls from `useAppCloudWorkspace`, task creation, close/advance actions, and remote-close cleanup are removed. The auth composable invokes a small credential-association service once per signed-in user. That service writes the deterministic top-level `desktopCredentials/{desktopId}` document with `desktopId`, `desktopSecretHash`, display name, and owning UID, plus the user profile email. It never reads SQLite or writes task documents. Firestore rules allow signed-in clients to read their own `users/{uid}/desktops/*` task index but deny all client writes and deletes there; only the relay's Admin SDK reconciles that subtree.
+
+On sign-out, the still-authenticated owner tombstones its canonical credential document while preserving the unreadable desktop-secret hash. Rules deny deletion and hash rotation. A later signed-in user on the same physical desktop may reclaim the revoked document only by presenting that same locally derived hash, which avoids both a legacy-fallback window and an unauthenticated claim race. The relay revalidates every publication, so an old authenticated socket receives a negative acknowledgement and closes after revocation or reassignment; subsequent publications resolve only to the new owner's subtree.
 
 LAN task discovery remains separate from cloud publication. This change does not make a renderer a Firestore task publisher merely because it refreshes the existing local transfer snapshot.
 
@@ -30,7 +32,7 @@ Credential revalidation occurs immediately before publication. Revocation, delet
 
 ## Testing
 
-- Rust tests cover schema mapping, activity changes, blocker and metadata preservation, coalescing, retry limits, timeouts, and reconnect reconciliation.
+- Rust tests cover schema mapping, activity changes, blocker and metadata preservation, coalescing, retry limits, timeouts, reconnect reconciliation, and a runtime integration with two LAN renderer clients sharing one relay publisher.
 - Relay unit/integration tests cover own-subtree reconciliation, stale deletion, activity-only replacement, malformed/oversized rejection, cross-desktop isolation, and credential revocation/reassignment.
 - Desktop architecture tests prove no task publisher is imported by renderer production paths and no code depends on `navigator.locks`; App tests prove multiple windows only run idempotent credential association/read subscriptions.
-- An emulator-backed integration test starts `kanna-server` and relay, changes SQLite activity to `working`, waits for Firestore, and reads the result through the mobile task-index mapper.
+- `pnpm --dir apps/desktop test:e2e:cloud-mobile-index` starts `kanna-server`, relay, and fresh Firebase emulators, changes SQLite activity to `working`, and reads the result through `apps/mobile/src/lib/firebase/taskIndex.ts`.

@@ -82,6 +82,7 @@ export interface TaskSummary {
   repoName?: string | null;
   title: string;
   stage: string | null;
+  activity?: string;
   snippet?: string | null;
   agentProvider?: string | null;
   agentType?: "pty" | "agent" | null;

@@ -336,8 +336,7 @@ async function seedCloudTaskSnapshot(snapshot: Record<string, unknown>): Promise
     : `${ownerDesktopId}:${readRequiredString(snapshot, "ownerLocalTaskId")}`;
   const taskDocId = deterministicFirestoreDocId(`task:${cloudTaskId}`);
 
-  await writeFirestoreEmulatorDocument({
-    idToken,
+  await writeFirestoreEmulatorAdminDocument({
     firestorePort,
     path: `users/${localId}/desktops/${desktopDocId}`,
     data: {
@@ -345,8 +344,7 @@ async function seedCloudTaskSnapshot(snapshot: Record<string, unknown>): Promise
       updatedAt: readRequiredString(snapshot, "updatedAt"),
     },
   });
-  await writeFirestoreEmulatorDocument({
-    idToken,
+  await writeFirestoreEmulatorAdminDocument({
     firestorePort,
     path: `users/${localId}/desktops/${desktopDocId}/tasks/${taskDocId}`,
     data: snapshot,
@@ -398,8 +396,7 @@ function readRequiredString(record: Record<string, unknown>, key: string): strin
   return value;
 }
 
-async function writeFirestoreEmulatorDocument(input: {
-  idToken: string;
+async function writeFirestoreEmulatorAdminDocument(input: {
   firestorePort: string;
   path: string;
   data: Record<string, unknown>;
@@ -407,7 +404,9 @@ async function writeFirestoreEmulatorDocument(input: {
   const response = await fetch(firestoreDocumentUrl(input.firestorePort, input.path), {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${input.idToken}`,
+      // The emulator owner token models the relay's Firebase Admin write.
+      // Signed-in renderer clients are intentionally denied by firestore.rules.
+      Authorization: "Bearer owner",
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ fields: toFirestoreFields(input.data) }),

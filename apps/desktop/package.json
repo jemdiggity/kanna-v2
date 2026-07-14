@@ -16,6 +16,7 @@
     "test:e2e:app-update": "tsx tests/e2e/run.ts mock/app-update.test.ts",
     "test:e2e:app-update:bundle": "pnpm -C ../.. exec kd test app-update-bundle",
     "test:e2e:real": "tsx tests/e2e/run.ts real/",
+    "test:e2e:cloud-mobile-index": "tsx tests/e2e/run.ts real/cloud-task-mobile-index.test.ts",
     "test:e2e:all": "tsx tests/e2e/run.ts"
   },
   "dependencies": {

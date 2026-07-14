@@ -234,6 +234,7 @@ describe("cloud task index", () => {
       repoName: "kanna",
       title: "Mobile cloud",
       stage: "in progress",
+      activity: "working",
       snippet: "Fix mobile cloud",
       agentProvider: "claude",
       agentType: "agent",

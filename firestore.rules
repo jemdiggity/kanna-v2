@@ -63,10 +63,12 @@ service cloud.firestore {
       }
 
       match /desktops/{desktopDocId} {
-        allow read, write: if isSignedInAs(uid);
+        allow read: if isSignedInAs(uid);
+        allow write: if false;
 
         match /tasks/{taskDocId} {
-          allow read, write: if isSignedInAs(uid);
+          allow read: if isSignedInAs(uid);
+          allow write: if false;
         }
       }
 
@@ -81,7 +83,8 @@ service cloud.firestore {
     }
 
     match /desktopCredentials/{desktopId} {
-      allow read, delete: if false;
+      allow read: if false;
+      allow delete: if false;
       allow create: if request.auth != null
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.desktopId == desktopId
@@ -94,9 +97,10 @@ service cloud.firestore {
           'updatedAt',
         ]);
       allow update: if request.auth != null
-        && resource.data.uid == request.auth.uid
         && request.resource.data.uid == request.auth.uid
+        && resource.data.desktopId == desktopId
         && request.resource.data.desktopId == desktopId
+        && request.resource.data.desktopSecretHash == resource.data.desktopSecretHash
         && request.resource.data.keys().hasOnly([
           'desktopId',
           'desktopSecretHash',
@@ -104,7 +108,20 @@ service cloud.firestore {
           'revokedAt',
           'uid',
           'updatedAt',
-        ]);
+        ])
+        && (
+          resource.data.uid == request.auth.uid
+          || (
+            resource.data.revokedAt != null
+            && request.resource.data.revokedAt == null
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'displayName',
+              'revokedAt',
+              'uid',
+              'updatedAt',
+            ])
+          )
+        );
     }
 
     match /{document=**} {
