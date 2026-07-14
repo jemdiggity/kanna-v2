@@ -234,10 +234,10 @@ describe("cloud task index", () => {
       repoName: "kanna",
       title: "Mobile cloud",
       stage: "in progress",
-      activity: "working",
       snippet: "Fix mobile cloud",
       agentProvider: "claude",
       agentType: "agent",
+      activity: "working",
       ownerDesktopId: "desktop-1",
       ownerLocalRepoId: "local-repo-1",
       ownerLocalTaskId: "task-1",
@@ -245,22 +245,22 @@ describe("cloud task index", () => {
     });
   });
 
+  const legacySnapshot = {
+    ownerDesktopId: "desktop-1",
+    localRepoId: "repo-1",
+    ownerLocalTaskId: "task-1",
+    title: "Fix mobile cloud",
+    promptSnippet: null,
+    displayName: null,
+    stage: "in progress",
+    status: "active",
+    repo: { cloudRepoId: "repo-1", name: "kanna" },
+    updatedAt: "2026-05-14T00:01:00.000Z",
+    closedAt: null,
+  };
+
   it("uses owner identity as the mobile task id when cloudTaskId is absent", () => {
-    expect(
-      mapCloudTaskSnapshot({
-        ownerDesktopId: "desktop-1",
-        localRepoId: "repo-1",
-        ownerLocalTaskId: "task-1",
-        title: "Fix mobile cloud",
-        promptSnippet: null,
-        displayName: null,
-        stage: "in progress",
-        status: "active",
-        repo: { cloudRepoId: "repo-1", name: "kanna" },
-        updatedAt: "2026-05-14T00:01:00.000Z",
-        closedAt: null,
-      }),
-    ).toMatchObject({
+    expect(mapCloudTaskSnapshot(legacySnapshot)).toMatchObject({
       id: "cloud:desktop-1:repo-1:task-1",
       repoId: "repo-1",
       ownerDesktopId: "desktop-1",
@@ -268,6 +268,23 @@ describe("cloud task index", () => {
       ownerLocalTaskId: "task-1",
     });
   });
+
+  for (const { label, activity, expected } of [
+    { label: "working", activity: "working", expected: "working" },
+    { label: "unread", activity: "unread", expected: "unread" },
+    { label: "idle", activity: "idle", expected: "idle" },
+    { label: "null", activity: null, expected: "idle" },
+    { label: "missing", activity: undefined, expected: "idle" },
+    { label: "unrecognized", activity: "paused", expected: "idle" },
+  ] as const) {
+    it(`maps ${label} cloud activity to ${expected}`, () => {
+      const snapshot = activity === undefined
+        ? legacySnapshot
+        : { ...legacySnapshot, activity };
+
+      expect(mapCloudTaskSnapshot(snapshot).activity).toBe(expected);
+    });
+  }
 
   it("sorts newest updated cloud tasks first", () => {
     const tasks = sortCloudTasks([
@@ -435,6 +452,55 @@ describe("cloud task index", () => {
       expect.objectContaining({ id: "cloud-task-a" }),
     ]);
     expect(firestoreMocks.getDocs).not.toHaveBeenCalled();
+  });
+
+  it("emits live updates when only task activity changes", () => {
+    const onUpdate = vi.fn();
+    const listeners = captureSnapshotListeners();
+    createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
+      "user-1",
+      onUpdate,
+    );
+    listeners.root().onNext({ docs: [desktopDocument("desktop-a")] });
+
+    for (const activity of ["working", "unread", "idle"] as const) {
+      listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+        activity,
+        ownerDesktopId: "desktop-a",
+      })));
+    }
+
+    expect(onUpdate.mock.calls.map(([tasks]) => tasks[0]?.activity)).toEqual([
+      "working",
+      "unread",
+      "idle",
+    ]);
+  });
+
+  it("accepts task documents whose legacy status field is omitted", () => {
+    const onUpdate = vi.fn();
+    const onError = vi.fn<(error: CloudTaskIndexError) => void>();
+    const listeners = captureSnapshotListeners();
+    createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
+      "user-1",
+      onUpdate,
+      onError,
+    );
+    listeners.root().onNext({ docs: [desktopDocument("desktop-a")] });
+
+    listeners.child("desktop-a").onNext(taskSnapshot(validTask({
+      status: undefined,
+      activity: "working",
+      ownerDesktopId: "desktop-a",
+    })));
+
+    expect(onUpdate).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: "cloud-task-1",
+        activity: "working",
+      }),
+    ]);
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("publishes only the complete initial Firestore aggregate through the app model", async () => {

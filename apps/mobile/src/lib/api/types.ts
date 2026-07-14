@@ -76,13 +76,19 @@ export interface TaskActionResponse {
   task?: TaskSummary;
 }
 
+export type TaskActivity = "idle" | "working" | "unread";
+
+export interface TaskActivityResponse {
+  taskId: string;
+  activity: TaskActivity | null;
+}
+
 export interface TaskSummary {
   id: string;
   repoId: string;
   repoName?: string | null;
   title: string;
   stage: string | null;
-  activity?: string;
   snippet?: string | null;
   agentProvider?: string | null;
   agentType?: "pty" | "agent" | null;
@@ -90,4 +96,5 @@ export interface TaskSummary {
   ownerLocalRepoId?: string;
   ownerLocalTaskId?: string;
   ownerOnline?: boolean;
+  activity?: TaskActivity | null;
 }

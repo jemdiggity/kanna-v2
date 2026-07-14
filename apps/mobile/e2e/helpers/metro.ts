@@ -71,8 +71,20 @@ export function shouldReuseExpoServer(
   return true;
 }
 
-export function buildExpoStartCommand(port: number): string[] {
-  return ["pnpm", "exec", "expo", "start", "--port", String(port), "--dev-client"];
+export function buildExpoStartCommand(
+  port: number,
+  options: { clearCache?: boolean } = {}
+): string[] {
+  return [
+    "pnpm",
+    "exec",
+    "expo",
+    "start",
+    "--port",
+    String(port),
+    "--dev-client",
+    ...(options.clearCache ? ["--clear"] : [])
+  ];
 }
 
 export async function ensureExpoServer(
@@ -106,15 +118,21 @@ export async function ensureExpoServer(
     await waitForPortToClear(options.metroPort);
   }
 
-  const child = spawn("pnpm", buildExpoStartCommand(options.metroPort), {
-    cwd: options.projectRoot,
-    env: {
-      ...process.env,
-      CI: "1",
-      ...expoEnv
-    },
-    stdio: "inherit"
-  });
+  const child = spawn(
+    "pnpm",
+    buildExpoStartCommand(options.metroPort, {
+      clearCache: options.requireExactEnvironment
+    }),
+    {
+      cwd: options.projectRoot,
+      env: {
+        ...process.env,
+        CI: "1",
+        ...expoEnv
+      },
+      stdio: "inherit"
+    }
+  );
 
   await waitForExpoServer(options.metroPort);
 

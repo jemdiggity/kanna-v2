@@ -13,10 +13,21 @@ interface TaskCardProps {
 
 export function TaskCard({ isRecentView, repoName, task, onPress }: TaskCardProps) {
   const model = buildTaskListItemModel(task, repoName, isRecentView);
+  const effectiveActivity =
+    task.activity === "working" || task.activity === "unread"
+      ? task.activity
+      : "idle";
+  const titleActivityStyle =
+    effectiveActivity === "unread"
+      ? styles.titleUnread
+      : effectiveActivity === "working"
+        ? styles.titleWorking
+        : styles.titleIdle;
 
   return (
     <Pressable
       accessibilityLabel={`${task.title}, ${model.repoLabel}, ${model.stageLabel}`}
+      accessibilityValue={{ text: effectiveActivity }}
       accessible
       style={styles.card}
       testID={MOBILE_E2E_IDS.taskListItem(task.id)}
@@ -27,7 +38,7 @@ export function TaskCard({ isRecentView, repoName, task, onPress }: TaskCardProp
         <Text style={styles.repoLabel}>{model.repoLabel}</Text>
       </View>
       <View style={styles.row}>
-        <Text style={styles.title}>{task.title}</Text>
+        <Text style={[styles.title, titleActivityStyle]}>{task.title}</Text>
         <View style={styles.stagePill}>
           <Text style={styles.stageLabel}>{model.stageLabel}</Text>
         </View>
@@ -73,8 +84,19 @@ const styles = StyleSheet.create({
   title: {
     color: "#F3F7FF",
     flex: 1,
-    fontSize: 17,
-    fontWeight: "700"
+    fontSize: 17
+  },
+  titleIdle: {
+    fontStyle: "normal",
+    fontWeight: "normal"
+  },
+  titleUnread: {
+    fontStyle: "normal",
+    fontWeight: "bold"
+  },
+  titleWorking: {
+    fontStyle: "italic",
+    fontWeight: "normal"
   },
   stagePill: {
     alignSelf: "flex-start",

@@ -13,6 +13,7 @@ import type {
   PairingSession,
   RepoSummary,
   TaskActionResponse,
+  TaskActivityResponse,
   TaskSummary
 } from "../api/types";
 
@@ -93,6 +94,10 @@ export function createLanTransport(
       }),
     advanceTaskStage: (taskId: string) =>
       request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`, {
+        method: "POST"
+      }),
+    markTaskRead: (taskId: string) =>
+      request<TaskActivityResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`, {
         method: "POST"
       }),
     closeTask: (taskId: string) =>

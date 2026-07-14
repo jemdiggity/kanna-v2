@@ -65,6 +65,10 @@ export function resolveSmokeModeAppEnv(
   return mode === "hybrid" ? "dev" : configuredAppEnv;
 }
 
+export function requiresExactExpoEnvironment(mode: string): boolean {
+  return mode === "relay" || mode === "hybrid";
+}
+
 interface StoppedDesktopServerHandle {
   baseUrl: string;
   close(): Promise<void>;
@@ -228,7 +232,7 @@ async function main(): Promise<void> {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
     if (mode === "relay" || mode === "hybrid") {
-      relayHarness = await startMobileRelayHarness();
+      relayHarness = await startMobileRelayHarness({ mode });
     }
 
     expoServer = await ensureExpoServer({
@@ -246,7 +250,7 @@ async function main(): Promise<void> {
           : { KANNA_APP_ENV: env.appEnv },
       metroPort: env.metroPort,
       projectRoot,
-      requireExactEnvironment: mode === "hybrid"
+      requireExactEnvironment: requiresExactExpoEnvironment(mode)
     });
 
     driver = await createMobileSession({
@@ -255,6 +259,7 @@ async function main(): Promise<void> {
     });
     if (simulatorDevice) {
       await openSimulatorDevelopmentClient({
+        appScheme: env.appScheme,
         device: simulatorDevice,
         metroPort: env.metroPort
       });
@@ -267,7 +272,10 @@ async function main(): Promise<void> {
       await runRelayTaskFlow(driver, {
         credentials: relayHarness.credentials,
         fixture: relayHarness.fixture,
-        input: relayHarness.menuInput
+        input: relayHarness.menuInput,
+        prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
+        setTaskActivity: relayHarness.setTaskActivity,
+        waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity
       });
       await relayHarness.waitForFirstMenuSelection();
     } else if (mode === "hybrid" && relayHarness) {

@@ -2,8 +2,6 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const EXPO_DEVELOPMENT_CLIENT_SCHEME = "exp+kanna-mobile";
-
 export interface AvailableSimulatorDevice {
   name: string;
   runtime: string;
@@ -111,11 +109,15 @@ export async function assertSimulatorAppInstalled(
   }
 }
 
-export function buildExpoDevelopmentClientUrl(metroUrl: string): string {
-  return `${EXPO_DEVELOPMENT_CLIENT_SCHEME}://expo-development-client/?url=${encodeURIComponent(metroUrl)}`;
+export function buildExpoDevelopmentClientUrl(
+  appScheme: string,
+  metroUrl: string
+): string {
+  return `${appScheme}://expo-development-client/?url=${encodeURIComponent(metroUrl)}&disableOnboarding=1`;
 }
 
 export async function openSimulatorDevelopmentClient(input: {
+  appScheme: string;
   device: AvailableSimulatorDevice;
   metroPort: number;
 }): Promise<void> {
@@ -123,6 +125,9 @@ export async function openSimulatorDevelopmentClient(input: {
     "simctl",
     "openurl",
     input.device.udid,
-    buildExpoDevelopmentClientUrl(`http://127.0.0.1:${input.metroPort}`)
+    buildExpoDevelopmentClientUrl(
+      input.appScheme,
+      `http://127.0.0.1:${input.metroPort}`
+    )
   ]);
 }

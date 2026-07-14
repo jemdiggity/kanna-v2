@@ -4,6 +4,7 @@ export type MobileE2eTarget = "simulator" | "device";
 
 export interface MobileE2eEnv {
   appEnv: string;
+  appScheme: string;
   appiumPort: number;
   bundleId: string;
   cloudEmail?: string;
@@ -72,11 +73,15 @@ export function resolveRequiredMobileE2eEnv(
   }
 
   const target = env.KANNA_IOS_E2E_TARGET?.trim() === "device" ? "device" : "simulator";
-  const appEnv = env.KANNA_APP_ENV?.trim() || "prod";
+  const appEnv = env.KANNA_APP_ENV?.trim() || "dev";
   const appConfig = createExpoConfig({ KANNA_APP_ENV: appEnv });
   const defaultBundleId =
     appConfig.ios.bundleIdentifier.trim() || "build.kanna.app";
   const bundleId = env.KANNA_IOS_BUNDLE_ID?.trim() || defaultBundleId;
+  const configuredAppScheme = Array.isArray(appConfig.scheme)
+    ? appConfig.scheme[0]
+    : appConfig.scheme;
+  const appScheme = configuredAppScheme?.trim() || bundleId;
   const xcodeOrgId =
     env.KANNA_IOS_XCODE_ORG_ID?.trim() || appConfig.ios.appleTeamId.trim() || undefined;
   const xcodeSigningId = env.KANNA_IOS_XCODE_SIGNING_ID?.trim() || "Apple Development";
@@ -85,6 +90,7 @@ export function resolveRequiredMobileE2eEnv(
 
   return {
     appEnv,
+    appScheme,
     appiumPort,
     bundleId,
     cloudEmail: env.KANNA_E2E_CLOUD_EMAIL?.trim() || undefined,

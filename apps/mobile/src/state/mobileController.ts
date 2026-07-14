@@ -1,10 +1,16 @@
-import type { CreateTaskResponse, RepoSummary, TaskSummary } from "../lib/api/types";
+import type {
+  CreateTaskResponse,
+  RepoSummary,
+  TaskActivity,
+  TaskSummary
+} from "../lib/api/types";
 import type {
   KannaClient,
   TaskAgentSubscription,
   TaskTerminalSubscription
 } from "../lib/api/client";
 import type { MobileAuthSession } from "../lib/firebase/auth";
+import { isTaskDetailVisible } from "../appShell";
 import type { ComposerAgentProvider, MobileView, SessionStore } from "./sessionStore";
 
 export interface MobileController {
@@ -36,6 +42,9 @@ export interface MobileController {
 }
 
 const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
+const MARK_READ_DEBOUNCE_MS = 1_000;
+const MARK_READ_MAX_ATTEMPTS = 3;
+const MARK_READ_RETRY_BASE_MS = 1_000;
 
 export interface CloudTaskPublication {
   cloudAuthoritative: boolean;
@@ -133,6 +142,10 @@ export function createMobileController(
     unownedErrorMessage = message;
     publishOwnedErrorMessage();
   };
+  let markReadTimer: ReturnType<typeof setTimeout> | null = null;
+  let markReadGeneration = 0;
+  let observedSelectedTaskReadKey: string | null = null;
+  let exhaustedMarkReadGeneration: number | null = null;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
     const message =
@@ -244,6 +257,105 @@ export function createMobileController(
     }
   };
 
+  const selectedTaskReadState = () => {
+    const state = store.getState();
+    const selectedTaskId = state.selectedTaskId;
+    const activities: TaskActivity[] = selectedTaskId
+      ? [state.repoTasks, state.recentTasks, state.searchResults]
+          .flatMap((tasks) => tasks.filter((task) => task.id === selectedTaskId))
+          .map((task) => task.activity ?? "idle")
+      : [];
+    const activity =
+      activities.length > 0 &&
+      activities.every((candidate) => candidate === activities[0])
+        ? activities[0]
+        : null;
+
+    return {
+      taskId: selectedTaskId,
+      visible: isTaskDetailVisible(
+        state.connectionState,
+        selectedTaskId !== null,
+        state.activeView
+      ),
+      activities,
+      activity
+    };
+  };
+
+  const selectedTaskReadKey = (): string | null => {
+    const { taskId, visible, activities } = selectedTaskReadState();
+    const selectedTaskId = taskId;
+    if (!selectedTaskId) return null;
+    return `${selectedTaskId}\u0000${visible ? "visible" : "hidden"}\u0000${activities.join(",")}`;
+  };
+
+  const canMarkSelectedTaskRead = (taskId: string, generation: number) => {
+    const selected = selectedTaskReadState();
+    return (
+      generation === markReadGeneration &&
+      selected.taskId === taskId &&
+      selected.visible &&
+      selected.activity === "unread"
+    );
+  };
+
+  const reconcileSelectedTaskRead = (allowExhaustedRetry = false) => {
+    const readKey = selectedTaskReadKey();
+    const shouldRetryExhausted =
+      allowExhaustedRetry && exhaustedMarkReadGeneration === markReadGeneration;
+    if (readKey === observedSelectedTaskReadKey && !shouldRetryExhausted) return;
+    observedSelectedTaskReadKey = readKey;
+    const generation = ++markReadGeneration;
+    exhaustedMarkReadGeneration = null;
+    if (markReadTimer) {
+      clearTimeout(markReadTimer);
+      markReadTimer = null;
+    }
+
+    const selected = selectedTaskReadState();
+    if (!selected.taskId || !selected.visible || selected.activity !== "unread") return;
+    const taskId = selected.taskId;
+    markReadTimer = setTimeout(() => {
+      markReadTimer = null;
+      void markSelectedTaskRead(taskId, generation, 1);
+    }, MARK_READ_DEBOUNCE_MS);
+  };
+
+  const markSelectedTaskRead = async (
+    taskId: string,
+    generation: number,
+    attempt: number
+  ) => {
+    if (!canMarkSelectedTaskRead(taskId, generation)) {
+      return;
+    }
+
+    try {
+      const response = await client.markTaskRead(taskId);
+      if (
+        !canMarkSelectedTaskRead(taskId, generation)
+        || response.activity !== "idle"
+      ) {
+        return;
+      }
+      store.setTaskActivity(taskId, "idle");
+      reconcileSelectedTaskRead();
+    } catch {
+      if (!canMarkSelectedTaskRead(taskId, generation)) return;
+      if (attempt >= MARK_READ_MAX_ATTEMPTS) {
+        exhaustedMarkReadGeneration = generation;
+        return;
+      }
+
+      const retryDelay = MARK_READ_RETRY_BASE_MS * 2 ** (attempt - 1);
+      markReadTimer = setTimeout(() => {
+        markReadTimer = null;
+        void markSelectedTaskRead(taskId, generation, attempt + 1);
+      }, retryDelay);
+    }
+  };
+
   const stopTaskTerminal = () => {
     const subscription = activeTaskTerminal?.subscription;
     activeTaskTerminal = null;
@@ -307,10 +419,11 @@ export function createMobileController(
     }
   };
 
-  const reconcileSelectedTask = () => {
+  const reconcileSelectedTask = (allowExhaustedReadRetry = false) => {
     const selectedTaskId = store.getState().selectedTaskId;
     if (!selectedTaskId) {
       pruneResolvedPendingTaskIdentities();
+      reconcileSelectedTaskRead(allowExhaustedReadRetry);
       return;
     }
 
@@ -328,17 +441,20 @@ export function createMobileController(
         }
       }
       pruneResolvedPendingTaskIdentities();
+      reconcileSelectedTaskRead(allowExhaustedReadRetry);
       return;
     }
 
     if (findTask(selectedTaskId)) {
       pruneResolvedPendingTaskIdentities();
+      reconcileSelectedTaskRead(allowExhaustedReadRetry);
       return;
     }
 
     stopTaskSession();
     store.reconcileSelectedTask();
     pruneResolvedPendingTaskIdentities();
+    reconcileSelectedTaskRead(allowExhaustedReadRetry);
   };
 
   const refreshSearchResults = async (): Promise<boolean> => {
@@ -369,6 +485,7 @@ export function createMobileController(
 
     taskCollectionsRevision += 1;
     store.setSearchResults(query, results);
+    reconcileSelectedTaskRead();
     return true;
   };
 
@@ -404,6 +521,7 @@ export function createMobileController(
 
     taskCollectionsRevision += 1;
     store.setRepoTasks(repoTasks);
+    reconcileSelectedTaskRead();
     return true;
   };
 
@@ -559,7 +677,7 @@ export function createMobileController(
     if (!(await refreshSearchResults())) {
       return;
     }
-    reconcileSelectedTask();
+    reconcileSelectedTask(true);
   };
 
   const refreshDesktops = async (options: { force?: boolean } = {}) => {
@@ -633,7 +751,7 @@ export function createMobileController(
     if (!(await refreshSearchResults())) {
       return;
     }
-    reconcileSelectedTask();
+    reconcileSelectedTask(true);
   };
 
   const applyLiveCloudTasks = (
@@ -672,7 +790,7 @@ export function createMobileController(
     );
     const searchQuery = store.getState().searchQuery;
     store.setSearchResults(searchQuery, filterTasksForQuery(tasks, searchQuery));
-    reconcileSelectedTask();
+    reconcileSelectedTask(true);
     const ownedError = cloudSubscriptionError;
     if (cloudAuthoritative && ownedError?.epoch === subscriptionEpoch) {
       cloudSubscriptionError = null;
@@ -1033,6 +1151,7 @@ export function createMobileController(
 
     showView(view) {
       store.setActiveView(view);
+      reconcileSelectedTaskRead();
     },
 
     async selectDesktop(desktopId) {
@@ -1063,6 +1182,7 @@ export function createMobileController(
       taskCollectionsRevision += 1;
       store.setSelectedTask(taskId);
       store.setActiveView("tasks");
+      reconcileSelectedTaskRead();
       startTaskView(taskId);
     },
 
@@ -1072,6 +1192,7 @@ export function createMobileController(
       store.setSelectedTask(null);
       store.clearTaskTerminal();
       store.clearTaskAgent();
+      reconcileSelectedTaskRead();
     },
 
     openComposer() {
@@ -1119,6 +1240,7 @@ export function createMobileController(
       if (!query.trim()) {
         store.setSearchResults("", []);
         store.setActiveView("tasks");
+        reconcileSelectedTaskRead();
         return;
       }
 
@@ -1130,6 +1252,7 @@ export function createMobileController(
         taskCollectionsRevision += 1;
         store.setSearchResults(query, results);
         store.setActiveView("search");
+        reconcileSelectedTaskRead();
       } catch (error) {
         if (taskCollectionsRevision === searchRevision) {
           fail(error);
@@ -1330,6 +1453,7 @@ export function createMobileController(
         store.clearTaskAgent();
         store.setActiveView("tasks");
         setUnownedErrorMessage(null);
+        reconcileSelectedTaskRead();
       } catch (error) {
         fail(error);
       }

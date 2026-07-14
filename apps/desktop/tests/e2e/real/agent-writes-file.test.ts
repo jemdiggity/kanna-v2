@@ -34,17 +34,28 @@ async function captureTaskCreateDiagnostics(client: WebDriverClient) {
   // Diagnostics only: this internal snapshot is used after a failed UI task
   // creation flow to explain what state the visible UI got stuck in.
   const ui = await client.executeSync<{
-    pendingSetupIds: string[];
+    creatingTaskSlots: Array<{
+      slotId: string;
+      taskId: string | null;
+      prompt: string;
+    }>;
     selectedRepoId: string | null;
     selectedRepoPath: string | null;
     showNewTaskModal: boolean;
     toastMessages: string[];
   }>(`const ctx = window.__KANNA_E2E__.setupState;
+      const taskUiSlots = ctx.store?.taskUiSlots?.value ?? ctx.store?.taskUiSlots ?? [];
       const toastMessages = Array.from(document.querySelectorAll(".toast-message"))
         .map((node) => node.textContent ?? "")
         .filter((text) => text.length > 0);
       return {
-        pendingSetupIds: ctx.store?.pendingSetupIds?.value ?? [],
+        creatingTaskSlots: taskUiSlots
+          .filter((slot) => slot.state === "creating")
+          .map((slot) => ({
+            slotId: slot.slot_id,
+            taskId: slot.task_id,
+            prompt: slot.draft.prompt,
+          })),
         selectedRepoId: ctx.store?.selectedRepoId?.value ?? null,
         selectedRepoPath: ctx.store?.selectedRepo?.path ?? null,
         showNewTaskModal: Boolean(ctx.showNewTaskModal?.value ?? ctx.showNewTaskModal),

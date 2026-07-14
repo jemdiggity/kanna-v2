@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  requiresExactExpoEnvironment,
   resolveSmokeModeAppEnv,
   smokeSpecPaths,
   supportedSmokeModes,
@@ -31,6 +32,7 @@ describe("mobile smoke runner", () => {
   it("supports a relay-backed Appium mode", () => {
     expect(supportedSmokeModes).toContain("relay");
     expect(smokeSpecPaths).toContain("specs/relay/relay-task-flow.e2e.ts");
+    expect(requiresExactExpoEnvironment("relay")).toBe(true);
   });
 
   it("supports a signed-in cloud plus trusted-LAN hybrid Appium mode", () => {
@@ -38,5 +40,7 @@ describe("mobile smoke runner", () => {
     expect(smokeSpecPaths).toContain("specs/hybrid/hybrid-task-flow.e2e.ts");
     expect(resolveSmokeModeAppEnv("hybrid", undefined)).toBe("dev");
     expect(resolveSmokeModeAppEnv("relay", "staging")).toBe("staging");
+    expect(requiresExactExpoEnvironment("hybrid")).toBe(true);
+    expect(requiresExactExpoEnvironment("smoke")).toBe(false);
   });
 });

@@ -260,6 +260,97 @@ describe("createSessionStore", () => {
     expect(publishes).toBe(0);
   });
 
+  it("publishes when only a task's activity changes", () => {
+    const store = createSessionStore();
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Recent task",
+        stage: "pr",
+        snippet: "ready for review",
+        activity: "idle"
+      }
+    ]);
+    publishes = 0;
+
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Recent task",
+        stage: "pr",
+        snippet: "ready for review",
+        activity: "working"
+      }
+    ]);
+
+    expect(publishes).toBe(1);
+    expect(store.getState().recentTasks[0]?.activity).toBe("working");
+  });
+
+  it("does not publish when missing task activity is refreshed as idle", () => {
+    const store = createSessionStore();
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setRepoTasks([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Keep scroll position",
+        stage: "in progress",
+        snippet: "latest output"
+      }
+    ]);
+    publishes = 0;
+
+    store.setRepoTasks([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Keep scroll position",
+        stage: "in progress",
+        snippet: "latest output",
+        activity: "idle"
+      }
+    ]);
+
+    expect(publishes).toBe(0);
+  });
+
+  it("updates a task activity across every collection with one publication", () => {
+    const store = createSessionStore();
+    const unreadTask = {
+      id: "task-activity",
+      repoId: "repo-1",
+      title: "Read this task",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    store.setRepoTasks([unreadTask]);
+    store.setRecentTasks([unreadTask]);
+    store.setSearchResults("read", [unreadTask]);
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setTaskActivity("task-activity", "idle");
+
+    expect(publishes).toBe(1);
+    expect(store.getState().repoTasks[0]?.activity).toBe("idle");
+    expect(store.getState().recentTasks[0]?.activity).toBe("idle");
+    expect(store.getState().searchResults[0]?.activity).toBe("idle");
+  });
+
   it("deduplicates task lists by id before publishing state", () => {
     const store = createSessionStore();
     const task = {

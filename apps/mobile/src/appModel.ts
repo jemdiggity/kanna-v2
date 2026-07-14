@@ -713,6 +713,7 @@ function createDisconnectedClient(): KannaClient {
     createTask: unavailable,
     runMergeAgent: unavailable,
     advanceTaskStage: unavailable,
+    markTaskRead: unavailable,
     closeTask: unavailable,
     sendTaskInput: unavailable,
     observeTaskTerminal(taskId, listener) {
@@ -801,6 +802,8 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).runMergeAgent(taskId),
     advanceTaskStage: async (taskId) =>
       (await resolveClient(desktopId)).advanceTaskStage(taskId),
+    markTaskRead: async (taskId) =>
+      (await resolveClient(desktopId)).markTaskRead(taskId),
     closeTask: async (taskId) =>
       (await resolveClient(desktopId)).closeTask(taskId),
     sendTaskInput: async (taskId, input) =>
@@ -942,6 +945,7 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     createTask: (input) => getClient().createTask(input),
     runMergeAgent: (taskId) => getClient().runMergeAgent(taskId),
     advanceTaskStage: (taskId) => getClient().advanceTaskStage(taskId),
+    markTaskRead: (taskId) => getClient().markTaskRead(taskId),
     closeTask: (taskId) => getClient().closeTask(taskId),
     sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>

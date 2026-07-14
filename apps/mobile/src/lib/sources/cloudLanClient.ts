@@ -1008,6 +1008,10 @@ export function createCloudLanClient(
       invokeTaskActionRoute(taskId, (client, routedTaskId) =>
         client.advanceTaskStage(routedTaskId)
       ),
+    markTaskRead: (taskId) =>
+      invokeTaskRoute(taskId, (client, routedTaskId) =>
+        client.markTaskRead(routedTaskId)
+      ),
     closeTask: async (taskId) => {
       const route = routeForTask(taskId);
       if (route.source === "unavailable") {

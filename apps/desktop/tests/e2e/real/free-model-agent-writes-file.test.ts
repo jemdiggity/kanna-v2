@@ -25,9 +25,13 @@ function readTaskWorktreeNames(repoPath: string): Promise<string[]> {
 async function captureOpenCodeDiagnostics(client: WebDriverClient, taskId: string) {
   return client.executeAsync<{
     bodyText: string;
+    creatingTaskSlots: Array<{
+      slotId: string;
+      taskId: string | null;
+      prompt: string;
+    }>;
     daemonSessions: unknown;
     lastAgentSpawnError: unknown;
-    pendingSetupIds: string[];
     taskRows: unknown;
     terminalText: string;
     terminalBufferText: string;
@@ -38,14 +42,21 @@ async function captureOpenCodeDiagnostics(client: WebDriverClient, taskId: strin
       const hook = window.__KANNA_E2E__?.terminalBuffers;
       const db = ctx?.db?.value || ctx?.db;
       const invoke = window.__TAURI__?.core?.invoke;
+      const taskUiSlots = ctx?.store?.taskUiSlots?.value ?? ctx?.store?.taskUiSlots ?? [];
       Promise.all([
         invoke ? invoke("list_sessions").catch((error) => ({ error: String(error) })) : Promise.resolve({ error: "invoke unavailable" }),
         db ? db.select("SELECT id, agent_provider, activity, agent_session_id, branch, port_env FROM pipeline_item WHERE id = ?", [${JSON.stringify(taskId)}]).catch((error) => ({ error: String(error) })) : Promise.resolve({ error: "db unavailable" }),
       ]).then(([daemonSessions, taskRows]) => cb({
           bodyText: document.body?.innerText ?? "",
+          creatingTaskSlots: taskUiSlots
+            .filter((slot) => slot.state === "creating")
+            .map((slot) => ({
+              slotId: slot.slot_id,
+              taskId: slot.task_id,
+              prompt: slot.draft.prompt,
+            })),
           daemonSessions,
           lastAgentSpawnError: window.__KANNA_E2E_LAST_AGENT_SPAWN_ERROR__ ?? null,
-          pendingSetupIds: ctx?.store?.pendingSetupIds?.value ?? [],
           taskRows,
           terminalText: document.querySelector(".terminal-container")?.textContent ?? "",
           terminalBufferText: hook?.getText?.(${JSON.stringify(taskId)}) ?? "",

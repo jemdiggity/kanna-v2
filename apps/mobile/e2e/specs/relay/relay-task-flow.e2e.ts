@@ -1,5 +1,5 @@
 import type { Browser } from "webdriverio";
-import { selectors } from "../../helpers/selectors";
+import { extractTaskRowId, selectors } from "../../helpers/selectors";
 import {
   ensureTaskListVisible,
   openPtyFixtureTask,
@@ -9,6 +9,7 @@ import {
   type PtyTerminalFixture
 } from "../smoke/list-detail-back.e2e";
 import { openProfileConnectionSheet } from "../smoke/profile-connection.e2e";
+import type { TaskActivity } from "../../../src/lib/api/types";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
@@ -22,11 +23,15 @@ interface RelayTaskFlowOptions {
   credentials: RelayCredentials;
   fixture: PtyTerminalFixture;
   input: string;
+  prepareTaskUnreadForMarkRead(): Promise<void>;
+  setTaskActivity(activity: TaskActivity): Promise<void>;
+  waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
 }
 
 interface RelayElement {
   addValue(value: string): Promise<unknown>;
   click(): Promise<unknown>;
+  getAttribute(name: string): Promise<string | null>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
   setValue(value: string): Promise<unknown>;
@@ -48,6 +53,7 @@ interface RelayUi {
   getBackButton(): Promise<RelayElement>;
   getTaskInput(): Promise<RelayElement>;
   getTaskDetailScreen(): Promise<RelayElement>;
+  getTaskDetailActivity(): Promise<RelayElement>;
   getTaskRowById(taskId: string): Promise<RelayElement>;
   getTaskRows(): Promise<RelayElement[]>;
   getTaskSendButton(): Promise<RelayElement>;
@@ -66,6 +72,7 @@ interface RelayUi {
 
 interface RelayWebViewContextDriver {
   execute<T>(script: () => T): Promise<T>;
+  getNativeInspection?: () => Promise<string | null>;
   getContext?: () => Promise<string>;
   getContexts?: () => Promise<unknown[]>;
   switchContext?: (context: string) => Promise<unknown>;
@@ -140,6 +147,9 @@ function createRelayUi(driver: Browser): RelayUi {
     async getTaskDetailScreen() {
       return driver.$(selectors.taskDetailScreen);
     },
+    async getTaskDetailActivity() {
+      return driver.$(selectors.taskDetailTitle);
+    },
     async getTaskRowById(taskId) {
       return driver.$(`~mobile.task-row.${taskId}`);
     },
@@ -175,6 +185,10 @@ function createWebViewContextDriver(driver: Browser): RelayWebViewContextDriver 
     getContexts: driver.getContexts
       ? async () => await driver.getContexts?.() ?? []
       : undefined,
+    getNativeInspection: async () => {
+      const marker = await driver.$(selectors.terminalInspection);
+      return marker.getAttribute("value").catch(() => null);
+    },
     switchContext: driver.switchContext
       ? async (context: string) => await driver.switchContext?.(context)
       : undefined
@@ -220,6 +234,99 @@ async function returnToTaskListShell(ui: RelayUi): Promise<void> {
     await backButton.click();
     await ui.pause(500);
   }
+}
+
+async function waitForTaskActivity(
+  ui: Pick<RelayUi, "getTaskRowById" | "getTaskRows" | "waitUntil">,
+  taskId: string,
+  expectedActivity: TaskActivity,
+): Promise<void> {
+  let lastObserved: string | null = null;
+  try {
+    await ui.waitUntil(
+      async () => {
+        const task = await ui.getTaskRowById(taskId);
+        lastObserved = await task.getAttribute("value").catch(() => null);
+        return lastObserved === expectedActivity;
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: `Expected relay task ${taskId} activity ${expectedActivity}`,
+      },
+    );
+  } catch {
+    const renderedTaskIds: string[] = [];
+    for (const row of await ui.getTaskRows().catch(() => [])) {
+      const name = await row.getAttribute("name").catch(() => null) ??
+        await row.getAttribute("label").catch(() => null);
+      const renderedTaskId = extractTaskRowId(name);
+      if (renderedTaskId) renderedTaskIds.push(renderedTaskId);
+    }
+    throw new Error(
+      `Expected relay task ${taskId} activity ${expectedActivity}; ` +
+        `last native accessibility value was ${String(lastObserved)}; ` +
+        `rendered task row ids were ${JSON.stringify(renderedTaskIds.sort())}`,
+    );
+  }
+}
+
+async function waitForSelectedTaskDetailActivity(
+  ui: Pick<RelayUi, "getTaskDetailActivity" | "waitUntil">,
+  expectedActivity: TaskActivity,
+): Promise<void> {
+  let lastObserved: string | null = null;
+  try {
+    await ui.waitUntil(
+      async () => {
+        const activity = await ui.getTaskDetailActivity();
+        lastObserved = await activity.getAttribute("value").catch(() => null);
+        return lastObserved === expectedActivity;
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: `Expected selected relay task activity ${expectedActivity}`,
+      },
+    );
+  } catch {
+    throw new Error(
+      `Expected selected relay task activity ${expectedActivity}; ` +
+        `last native accessibility value was ${String(lastObserved)}`,
+    );
+  }
+}
+
+export async function verifyRelayTaskActivityTransitions(
+  ui: Pick<RelayUi, "getTaskRowById" | "getTaskRows" | "waitUntil">,
+  taskId: string,
+  setTaskActivity: (activity: "unread" | "idle") => Promise<void>,
+): Promise<void> {
+  await waitForTaskActivity(ui, taskId, "working");
+  await setTaskActivity("unread");
+  await waitForTaskActivity(ui, taskId, "unread");
+  await setTaskActivity("idle");
+  await waitForTaskActivity(ui, taskId, "idle");
+}
+
+export async function verifyRelayTaskMarkedRead(
+  ui: Pick<RelayUi, "getTaskRowById" | "getTaskRows" | "waitUntil">,
+  taskId: string,
+  actions: {
+    closeTask(): Promise<void>;
+    openTask(): Promise<void>;
+    prepareUnread(): Promise<void>;
+    waitForOwnerIdle(): Promise<void>;
+    waitForSelectedDetailIdle(): Promise<void>;
+  },
+): Promise<void> {
+  await actions.prepareUnread();
+  await waitForTaskActivity(ui, taskId, "unread");
+  await actions.openTask();
+  await actions.waitForOwnerIdle();
+  await actions.waitForSelectedDetailIdle();
+  await actions.closeTask();
+  await waitForTaskActivity(ui, taskId, "idle");
 }
 
 async function signInToRelay(
@@ -271,6 +378,22 @@ export async function runRelayTaskFlow(
     await signInToRelay(driver, ui, options.credentials);
   }
   await ensureTaskListVisible(ui);
+  await verifyRelayTaskActivityTransitions(
+    ui,
+    options.fixture.taskId,
+    options.setTaskActivity,
+  );
+  await verifyRelayTaskMarkedRead(ui, options.fixture.taskId, {
+    prepareUnread: options.prepareTaskUnreadForMarkRead,
+    async openTask() {
+      await openRelayFixtureTask(ui, options.fixture.taskId);
+      const backButton = await ui.getBackButton();
+      await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    },
+    waitForOwnerIdle: () => options.waitForLocalTaskActivity("idle"),
+    waitForSelectedDetailIdle: () => waitForSelectedTaskDetailActivity(ui, "idle"),
+    closeTask: () => returnToTaskListShell(ui),
+  });
   await openRelayFixtureTask(ui, options.fixture.taskId);
   await waitForTaskTerminalLive(ui);
   await waitForRenderedPtyTerminal(ui, options.fixture);

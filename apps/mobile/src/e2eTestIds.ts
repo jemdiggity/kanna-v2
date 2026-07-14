@@ -12,6 +12,7 @@ export const MOBILE_E2E_IDS = {
   agentMessageView: "mobile.agent-message-view",
   agentMessageReady: "mobile.agent-message-ready",
   terminalOverlay: "mobile.terminal-overlay",
+  terminalInspection: "mobile.terminal-inspection",
   accountButton: "mobile.account-button",
   accountSheet: "mobile.account-sheet",
   accountCloseButton: "mobile.account-close",

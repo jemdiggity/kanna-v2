@@ -8,7 +8,7 @@ import {
   where,
   type Firestore,
 } from "firebase/firestore";
-import type { TaskSummary } from "../api/types";
+import type { TaskActivity, TaskSummary } from "../api/types";
 import { buildCloudTaskId } from "../api/taskIdentity";
 import {
   parseMobileFirebaseConfig,
@@ -24,7 +24,7 @@ export interface CloudTaskSnapshot {
   promptSnippet?: string | null;
   displayName?: string | null;
   stage: string;
-  activity?: string;
+  activity?: string | null;
   status?: string;
   repo: { cloudRepoId: string; name: string };
   agent?: { provider?: string | null; type?: string | null } | null;
@@ -259,7 +259,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     promptSnippet: optionalNullableString(value.promptSnippet),
     displayName: optionalNullableString(value.displayName),
     stage: requiredString(value.stage, "stage"),
-    activity: optionalString(value.activity),
+    activity: optionalNullableString(value.activity),
     status: optionalString(value.status),
     repo: {
       cloudRepoId: requiredString(value.repo.cloudRepoId, "repo.cloudRepoId"),
@@ -311,10 +311,10 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     repoName: snapshot.repo.name,
     title: snapshot.displayName ?? snapshot.title,
     stage: snapshot.stage,
-    ...(snapshot.activity ? { activity: snapshot.activity } : {}),
     snippet: snapshot.promptSnippet ?? undefined,
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),
+    activity: normalizeTaskActivity(snapshot.activity),
     ownerDesktopId: snapshot.ownerDesktopId,
     ...(snapshot.localRepoId
       ? { ownerLocalRepoId: snapshot.localRepoId }
@@ -470,6 +470,10 @@ function isLeapYear(year: number): boolean {
 
 function normalizeAgentType(type: string | null | undefined): TaskSummary["agentType"] {
   return type === "agent" || type === "pty" ? type : null;
+}
+
+function normalizeTaskActivity(activity: string | null | undefined): TaskActivity {
+  return activity === "working" || activity === "unread" ? activity : "idle";
 }
 
 function cloudTaskSummaryId(snapshot: CloudTaskSnapshot): string {

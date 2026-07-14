@@ -59,7 +59,7 @@ impl Db {
                     pipeline_item.unread_at, pipeline_item.port_offset,
                     pipeline_item.display_name, pipeline_item.last_output_preview,
                     pipeline_item.port_env, pipeline_item.agent_spawn_options,
-                    pipeline_item.pinned, pipeline_item.pin_order,
+                    COALESCE(pipeline_item.pinned, 0) AS pinned, pipeline_item.pin_order,
                     pipeline_item.base_ref, pipeline_item.agent_session_id,
                     pipeline_item.teardown_started_at, pipeline_item.parent_task_id,
                     pipeline_item.notify_task_id, pipeline_item.notified_at,

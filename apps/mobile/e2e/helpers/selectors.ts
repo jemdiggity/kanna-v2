@@ -12,6 +12,7 @@ export const selectors = {
   agentMessageView: `~${MOBILE_E2E_IDS.agentMessageView}`,
   agentMessageReady: `~${MOBILE_E2E_IDS.agentMessageReady}`,
   terminalOverlay: `~${MOBILE_E2E_IDS.terminalOverlay}`,
+  terminalInspection: `~${MOBILE_E2E_IDS.terminalInspection}`,
   accountButton: `~${MOBILE_E2E_IDS.accountButton}`,
   accountSheet: `~${MOBILE_E2E_IDS.accountSheet}`,
   accountCloseButton: `~${MOBILE_E2E_IDS.accountCloseButton}`,
