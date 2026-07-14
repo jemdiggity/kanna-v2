@@ -93,12 +93,13 @@ describe("windowWorkspace in Tauri", () => {
     openWebviewLabels.splice(0, openWebviewLabels.length, "main");
     closeMock.mockClear();
     destroyMock.mockClear();
-    emitMock.mockClear();
+    emitMock.mockReset();
+    emitMock.mockResolvedValue(undefined);
     ensuredWindowWasLive.splice(0);
     webviewCreatedHarness.handler = null;
   });
 
-  it("requests a normal native close instead of directly destroying the webview", async () => {
+  it("destroys the native window only after its membership is removed", async () => {
     settingStore.set(
       WINDOW_WORKSPACE_SETTINGS_KEY,
       JSON.stringify({
@@ -125,12 +126,103 @@ describe("windowWorkspace in Tauri", () => {
 
     await workspace.closeWindow();
 
-    expect(closeMock).toHaveBeenCalledTimes(1);
-    expect(destroyMock).not.toHaveBeenCalled();
+    expect(closeMock).not.toHaveBeenCalled();
+    expect(destroyMock).toHaveBeenCalledTimes(1);
     expect(emitMock).toHaveBeenCalledWith(
       "kanna://window-workspace-invalidated",
       { reason: "windowMembership", sourceWindowId: "main" },
     );
+  });
+
+  it("exposes a native-destroy-only finalization path after membership is removed", async () => {
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: {
+        windowId: "main",
+        selectedRepoId: null,
+        selectedItemId: null,
+      },
+    });
+
+    await workspace.destroyNativeWindow();
+
+    expect(closeMock).not.toHaveBeenCalled();
+    expect(destroyMock).toHaveBeenCalledTimes(1);
+    expect(emitMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a committed removal result distinct from notification failure", async () => {
+    const savedWindow = {
+      windowId: "main",
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+      order: 0,
+      sidebarHidden: true,
+      sidebarWidth: 347,
+    };
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({ windows: [savedWindow] } satisfies WorkspaceSnapshot),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.forgetCurrentWindow()).resolves.toEqual(savedWindow);
+    emitMock.mockRejectedValueOnce(new Error("notification failed"));
+    await expect(workspace.notifyWindowMembershipChanged()).rejects.toThrow(
+      "notification failed",
+    );
+
+    expect(JSON.parse(
+      settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? "",
+    )).toEqual({ windows: [] });
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("keeps a committed restoration distinct from notification failure", async () => {
+    const savedWindow = {
+      windowId: "main",
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+      order: 0,
+      sidebarHidden: true,
+      sidebarWidth: 347,
+    };
+    const successorWindow = {
+      windowId: "window-2",
+      selectedRepoId: "repo-2",
+      selectedItemId: "task-2",
+      order: 0,
+      sidebarHidden: false,
+      sidebarWidth: 260,
+    };
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({ windows: [successorWindow] } satisfies WorkspaceSnapshot),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.restoreCurrentWindow(savedWindow)).resolves.toBeUndefined();
+    emitMock.mockRejectedValueOnce(new Error("notification failed"));
+    await expect(workspace.notifyWindowMembershipChanged()).rejects.toThrow(
+      "notification failed",
+    );
+
+    expect(JSON.parse(
+      settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? "",
+    )).toEqual({
+      windows: [successorWindow, { ...savedWindow, order: 1 }],
+    });
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   it("prunes stale saved windows when the last live window closes", async () => {

@@ -235,6 +235,7 @@ export interface DesktopWindowWorkspaceSnapshot {
 
 export type DesktopWindowWorkspaceMutation =
   | { operation: "ensure"; window: DesktopWorkspaceWindowState }
+  | { operation: "restore"; window: DesktopWorkspaceWindowState }
   | {
       operation: "updateSelection";
       windowId: string;

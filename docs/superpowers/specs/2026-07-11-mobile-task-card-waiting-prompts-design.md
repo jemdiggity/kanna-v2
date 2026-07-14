@@ -55,19 +55,9 @@ LAN task summaries expose `waitingPromptSnippet` from the durable task value.
 
 Cloud task snapshots add nullable `waitingPromptSnippet` while keeping the original `promptSnippet` separate. The mobile and remote-desktop cloud mappers use only `waitingPromptSnippet` for card preview content.
 
-Firestore publication is event-driven and change-aware:
+`kanna-server` is the sole automatic Firestore task-index producer. It maps the authoritative SQLite UI snapshot, including `last_output_preview`, and sends full reconciliations over its authenticated relay WebSocket. Its publication state machine permits one request in flight, coalesces newer SQLite states, retries failures with bounded backoff, and forces an authoritative reconciliation after reconnect. The relay validates the authenticated desktop and reconciles only that desktop's Firestore task subtree.
 
-- title changes continue through the existing display-name structural publication path;
-- a changed waiting prompt schedules a per-task trailing-edge publication;
-- multiple changes inside a five-second window collapse into the newest prompt;
-- only `waitingPromptSnippet` on the already-existing task document is updated;
-- a value equal to the last successfully published value is skipped; and
-- a failed settled update receives one delayed retry, then stops; and
-- close/dispose cancels pending work.
-
-There are no writes for terminal output chunks and no periodic preview writes. At most one Firestore write is produced for a settled burst of waiting-prompt changes, in addition to already-required structural task writes. Task creation from any window publishes its LAN snapshot and emits a shared invalidation; it never writes Firestore directly, so the elected owner remains the only automatic cloud writer.
-
-Exactly one desktop window owns automatic local Firestore publication: the first live window in the persisted workspace order. Restored secondary windows still subscribe to cloud state but do not reconcile local snapshots or schedule waiting-prompt writes. Window open/close events re-elect the owner; if the current owner closes, it first fences new cloud work and drains any in-flight write before atomically removing its membership and notifying the successor. The drain is bounded to five seconds: a timeout keeps the window open and restores its previous publication role rather than allowing an unsafe overlapping handoff. If local workspace recovery is also unavailable, the previous owner remains the fallback publisher until election can be read again. The next live window only takes over after a successful drain and removal. Writes within the elected window are serialized so a delayed structural reconcile cannot overwrite a newer title or waiting prompt.
+Renderer windows perform idempotent credential association and read subscriptions only. They do not elect a Firestore publisher, drain cloud writes, or hand publication ownership between windows. Closing a renderer removes its workspace membership before taking the explicit final native-close path; `kanna-server` continues observing SQLite independently of renderer lifetime. Task creation, title changes, activity changes, and waiting-prompt changes therefore reach the same server-owned publication path from every window without per-output-chunk writes.
 
 Workspace membership and selection changes use narrow server-side mutations inside a SQLite `BEGIN IMMEDIATE` transaction rather than replacing a whole JSON snapshot from each Webview. Removal carries the caller's observed and currently live window ids, so stale members are pruned without deleting a concurrently opened window or resurrecting a window that already closed. Each Webview registers its close handler before ensuring its own membership; an opener only creates the Webview and never performs a second ensure on the child's behalf.
 
@@ -91,16 +81,25 @@ Regression coverage verifies:
 - busy transitions and meaningless footer content do not overwrite the stored prompt;
 - the server persists only changed waiting prompts and publishes one task invalidation;
 - cloud and LAN snapshots keep original `promptSnippet` separate from `waitingPromptSnippet`;
-- per-task cloud publication coalesces changes, deduplicates successful values, corrects an in-flight A→B→A change, and never runs periodically;
-- sign-out/re-authentication, secondary-window ownership, owner handoff fencing, and structural/prompt write ordering do not lose or duplicate updates;
+- server-owned cloud publication coalesces changes, retries bounded failures, and reconciles current SQLite state after reconnect;
+- sign-out/re-authentication and multiple renderer windows cannot create competing task publishers;
 - concurrent workspace membership and selection mutations, including close-during-startup, neither resurrect closed windows nor discard newly opened windows;
-- an offline cloud drain times out safely without transferring ownership, and recovery failures retain the previous publisher;
+- every native close request is prevented throughout initialization, membership removal, and finalization; only the explicit programmatic `destroy()` path, which bypasses `CloseRequested`, may destroy the window;
+- a failed membership removal keeps the window open and restores removed membership best effort;
 - desktop title edits map to the mobile task title;
 - the mobile card omits card type and repository name;
 - title and waiting prompt bounds append `…` without splitting Unicode scalar values; and
 - the pre-capture state renders a muted `…` placeholder.
 
 Focused daemon, server, desktop, and mobile tests run first, followed by the affected Rust suites, TypeScript package tests, and desktop/mobile typechecks.
+
+### Cross-boundary E2E coverage and exceptions
+
+The desktop `mock/new-window.test.ts` lane contains a real Tauri-window scenario that closes the source window through the application lifecycle and checks the surviving membership. In this worktree the native-close run could not complete: macOS WebDriver timed out after destroying the focused window, and subsequent commands reported `No window could be found`. Running this scenario requires a WebDriver harness that can reattach to or switch sessions after focused native-window destruction. The narrower App regressions model Tauri's close wrapper with deferred initialization, membership removal, and final destruction; dispatch overlapping native close requests; prove every request remains prevented; and prove the one explicit programmatic destroy still completes. A destroy-failure regression also proves membership compensation and retry. Tauri-controller and server workspace-mutation tests cover the adjacent native and persistence boundaries.
+
+The server-owned `cloud-task-mobile-index` E2E starts `kanna-server`, relay, and fresh Firebase emulators; it changes SQLite `last_output_preview` and verifies the exact waiting text reaches the mobile Firestore mapper while retaining activity. This is the positive desktop-owner publication path and does not depend on a renderer being alive to publish.
+
+The mobile relay lane seeds distinct title, original prompt, repository, and non-null waiting-prompt values through the authoritative local server fixture, then inspects the exact row before opening it. Its run in this worktree reached authenticated server/relay/Firebase publication and created a live Appium/WebDriverAgent session, but the installed `build.kanna.app.dev` simulator app never exposed `mobile.app-shell` within 30 seconds. A current dev build installed for the iOS 26.2 simulator and configured to boot the matching Metro bundle on the lane's assigned port would make the UI journey runnable. Relay-row helper tests and focused task-card, presentation, screen, and Firestore-index tests prove the exact row includes title, stage, and waiting text while excluding the original prompt, repository label, `TASK`, and `RECENT` in the meantime.
 
 ## Out of Scope
 

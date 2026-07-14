@@ -102,6 +102,27 @@ describe("windowWorkspace", () => {
     });
   });
 
+  it("keeps authoritative snapshots empty instead of synthesizing the current window", async () => {
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.loadSnapshot()).resolves.toEqual({
+      windows: [{
+        windowId: "main",
+        selectedRepoId: null,
+        selectedItemId: null,
+        order: 0,
+        sidebarHidden: false,
+        sidebarWidth: 260,
+      }],
+    });
+    await expect(
+      workspace.loadSnapshot({ authoritative: true }),
+    ).resolves.toEqual({ windows: [] });
+  });
+
   it("preserves valid sidebar widths and defaults invalid widths", () => {
     const snapshot = reconcileWorkspaceSnapshot(
       {
@@ -445,6 +466,195 @@ describe("windowWorkspace", () => {
       sourceWindowId: "win-2",
     });
     unlisten();
+  });
+
+  it("returns the exact removed row for failed-close recovery", async () => {
+    const savedWindow = {
+      windowId: "main",
+      selectedRepoId: "repo-current",
+      selectedItemId: "task-current",
+      order: 0,
+      sidebarHidden: true,
+      sidebarWidth: 347,
+    };
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({ windows: [savedWindow] } satisfies WorkspaceSnapshot),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.forgetCurrentWindow()).resolves.toEqual(savedWindow);
+  });
+
+  it("restores a failed closer behind the successor that acquired ownership", () => {
+    const mutation = {
+      operation: "restore",
+      window: {
+        windowId: "main",
+        selectedRepoId: "repo-current",
+        selectedItemId: "task-current",
+        order: 0,
+        sidebarHidden: true,
+        sidebarWidth: 347,
+      },
+    } as const;
+    const restored = applyWindowWorkspaceMutation(
+      {
+        windows: [
+          {
+            windowId: "window-2",
+            selectedRepoId: "repo-2",
+            selectedItemId: "task-2",
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+        ],
+      },
+      mutation,
+    );
+
+    expect(restored.windows).toEqual([
+      {
+        windowId: "window-2",
+        selectedRepoId: "repo-2",
+        selectedItemId: "task-2",
+        order: 0,
+        sidebarHidden: false,
+        sidebarWidth: 260,
+      },
+      {
+        windowId: "main",
+        selectedRepoId: "repo-current",
+        selectedItemId: "task-current",
+        order: 1,
+        sidebarHidden: true,
+        sidebarWidth: 347,
+      },
+    ]);
+    expect(applyWindowWorkspaceMutation(restored, mutation)).toEqual(restored);
+  });
+
+  it("captures pending selection persistence before an ambiguous removal", async () => {
+    const selectionStarted = createDeferred<void>();
+    const releaseSelection = createDeferred<void>();
+    const removalError = new Error("remove response lost");
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [{
+          windowId: "main",
+          selectedRepoId: "repo-old",
+          selectedItemId: "task-old",
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+        }],
+      } satisfies WorkspaceSnapshot),
+    );
+    updateDesktopServerClientHandlersForTests({
+      mutateWindowWorkspace: async (mutation) => {
+        if (mutation.operation === "updateSelection") {
+          selectionStarted.resolve();
+          await releaseSelection.promise;
+        }
+        const current = JSON.parse(
+          settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? '{"windows":[]}',
+        ) as WorkspaceSnapshot;
+        const next = applyWindowWorkspaceMutation(current, mutation);
+        settingStore.set(WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(next));
+        if (mutation.operation === "remove") throw removalError;
+        return next;
+      },
+    });
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    const persistence = workspace.persistSelection({
+      selectedRepoId: "repo-current",
+      selectedItemId: "task-current",
+    });
+    await selectionStarted.promise;
+    const removal = workspace.forgetCurrentWindow();
+    releaseSelection.resolve();
+    await persistence;
+
+    await expect(removal).rejects.toMatchObject({
+      cause: removalError,
+      removedWindow: {
+        windowId: "main",
+        selectedRepoId: "repo-current",
+        selectedItemId: "task-current",
+        order: 0,
+        sidebarHidden: false,
+        sidebarWidth: 260,
+      },
+    });
+  });
+
+  it("compensates an ambiguous removal response without retaking ownership", async () => {
+    const removalError = new Error("remove response lost");
+    const savedWindow = {
+      windowId: "main",
+      selectedRepoId: "repo-current",
+      selectedItemId: "task-current",
+      order: 0,
+      sidebarHidden: true,
+      sidebarWidth: 347,
+    };
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          savedWindow,
+          {
+            windowId: "window-2",
+            selectedRepoId: "repo-2",
+            selectedItemId: "task-2",
+            order: 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    updateDesktopServerClientHandlersForTests({
+      mutateWindowWorkspace: async (mutation) => {
+        const current = JSON.parse(
+          settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? '{"windows":[]}',
+        ) as WorkspaceSnapshot;
+        const next = applyWindowWorkspaceMutation(current, mutation);
+        settingStore.set(WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(next));
+        if (mutation.operation === "remove") throw removalError;
+        return next;
+      },
+    });
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.forgetCurrentWindow()).rejects.toMatchObject({
+      cause: removalError,
+      removedWindow: savedWindow,
+    });
+
+    const saved = JSON.parse(
+      settingStore.get(WINDOW_WORKSPACE_SETTINGS_KEY) ?? "",
+    ) as WorkspaceSnapshot;
+    expect(saved.windows).toEqual([{
+      windowId: "window-2",
+      selectedRepoId: "repo-2",
+      selectedItemId: "task-2",
+      order: 0,
+      sidebarHidden: false,
+      sidebarWidth: 260,
+    }]);
   });
 
   it("does not restore a removed leader when another window saves selection", async () => {

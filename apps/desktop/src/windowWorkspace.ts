@@ -25,16 +25,35 @@ export interface WorkspaceSnapshot {
   windows: WorkspaceWindowState[];
 }
 
+export interface LoadWorkspaceSnapshotOptions {
+  authoritative?: boolean;
+}
+
+export class WindowWorkspaceRemovalError extends Error {
+  readonly removedWindow: WorkspaceWindowState | null;
+  override readonly cause: unknown;
+
+  constructor(removedWindow: WorkspaceWindowState | null, cause: unknown) {
+    super("window workspace removal could not be confirmed");
+    this.name = "WindowWorkspaceRemovalError";
+    this.removedWindow = removedWindow;
+    this.cause = cause;
+  }
+}
+
 export interface WindowWorkspaceController {
   bootstrap: WindowBootstrap;
   initialize: () => Promise<void>;
-  loadSnapshot: () => Promise<WorkspaceSnapshot>;
+  loadSnapshot: (options?: LoadWorkspaceSnapshotOptions) => Promise<WorkspaceSnapshot>;
   openWindow: (selection: {
     selectedRepoId: string | null;
     selectedItemId: string | null;
   }) => Promise<void>;
   closeWindow: () => Promise<void>;
-  forgetCurrentWindow: () => Promise<void>;
+  destroyNativeWindow: () => Promise<void>;
+  forgetCurrentWindow: () => Promise<WorkspaceWindowState | null>;
+  restoreCurrentWindow: (window: WorkspaceWindowState) => Promise<void>;
+  notifyWindowMembershipChanged: () => Promise<void>;
   persistSelection: (selection: {
     selectedRepoId: string | null;
     selectedItemId: string | null;
@@ -133,6 +152,16 @@ export function applyWindowWorkspaceMutation(
     case "ensure":
       if (!next.windows.some((entry) => entry.windowId === mutation.window.windowId)) {
         next.windows.push(mutation.window);
+      }
+      break;
+    case "restore":
+      if (!next.windows.some((entry) => entry.windowId === mutation.window.windowId)) {
+        // A window recovering from a failed native close rejoins at the end so
+        // it does not disturb the surviving windows' stable display order.
+        next.windows.push({
+          ...mutation.window,
+          order: next.windows.length,
+        });
       }
       break;
     case "updateSelection": {
@@ -264,8 +293,13 @@ export function createWindowWorkspace(input: {
     return normalizeWorkspaceSnapshot(snapshot);
   }
 
-  async function loadSnapshot(): Promise<WorkspaceSnapshot> {
-    return reconcileWorkspaceSnapshot(await readWorkspaceSnapshot(db), bootstrap.windowId);
+  async function loadSnapshot(
+    options: LoadWorkspaceSnapshotOptions = {},
+  ): Promise<WorkspaceSnapshot> {
+    const persisted = await readWorkspaceSnapshot(db);
+    return options.authoritative
+      ? persisted
+      : reconcileWorkspaceSnapshot(persisted, bootstrap.windowId);
   }
 
   async function initialize(): Promise<void> {
@@ -281,23 +315,49 @@ export function createWindowWorkspace(input: {
         order: snapshot.windows.length,
       },
     });
-    await notifyWindowMembershipChanged();
+    try {
+      await notifyWindowMembershipChanged();
+    } catch (error) {
+      // The durable membership is sufficient for this window to initialize;
+      // the notification only prompts peer renderers to refresh sooner.
+      console.warn("[windowWorkspace] failed to notify initialized membership:", error);
+    }
   }
 
-  async function forgetCurrentWindow(): Promise<void> {
-    const snapshot = await loadSnapshot();
+  async function forgetCurrentWindow(): Promise<WorkspaceWindowState | null> {
+    // Capture only a durable row. loadSnapshot() synthesizes a default row for
+    // missing windows, which is not safe compensation state for an ambiguous
+    // remove response.
+    await currentWindowUpdateQueue.catch(() => undefined);
+    const snapshot = await readWorkspaceSnapshot(db);
+    const currentWindow = snapshot.windows.find(
+      (entry) => entry.windowId === bootstrap.windowId,
+    ) ?? null;
     const openWindowIds = await readOpenWorkspaceWindowIds();
-    await mutateWorkspace({
-      operation: "remove",
-      windowId: bootstrap.windowId,
-      ...(openWindowIds
-        ? {
-            observedWindowIds: snapshot.windows.map((entry) => entry.windowId),
-            liveWindowIds: [...openWindowIds],
-          }
-        : {}),
-    });
-    await notifyWindowMembershipChanged();
+    try {
+      await mutateWorkspace({
+        operation: "remove",
+        windowId: bootstrap.windowId,
+        ...(openWindowIds
+          ? {
+              observedWindowIds: snapshot.windows.map((entry) => entry.windowId),
+              liveWindowIds: [...openWindowIds],
+            }
+          : {}),
+      });
+    } catch (error) {
+      // The server may have committed even when its response is lost. Preserve
+      // the pre-remove row so the close coordinator can restore idempotently.
+      throw new WindowWorkspaceRemovalError(currentWindow, error);
+    }
+    return currentWindow;
+  }
+
+  async function restoreCurrentWindow(window: WorkspaceWindowState): Promise<void> {
+    if (window.windowId !== bootstrap.windowId) {
+      throw new Error(`cannot restore workspace window ${window.windowId} from ${bootstrap.windowId}`);
+    }
+    await mutateWorkspace({ operation: "restore", window });
   }
 
   async function notifyWindowMembershipChanged(): Promise<void> {
@@ -332,10 +392,13 @@ export function createWindowWorkspace(input: {
     window.open(url, "_blank");
   }
 
-  async function closeCurrentWindow(): Promise<void> {
+  async function destroyNativeWindow(): Promise<void> {
     if (isTauri) {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      await getCurrentWindow().close();
+      // `close()` emits another CloseRequested event. This path runs only
+      // after membership removal, so bypass that event and destroy exactly
+      // once instead of reopening the close-request race.
+      await getCurrentWindow().destroy();
       return;
     }
 
@@ -370,9 +433,36 @@ export function createWindowWorkspace(input: {
       await spawnWindow(nextWindow);
     },
     forgetCurrentWindow,
+    restoreCurrentWindow,
+    notifyWindowMembershipChanged,
+    destroyNativeWindow,
     closeWindow: async () => {
-      await forgetCurrentWindow();
-      await closeCurrentWindow();
+      let removedWindow: WorkspaceWindowState | null = null;
+      try {
+        removedWindow = await forgetCurrentWindow();
+        await notifyWindowMembershipChanged();
+        await destroyNativeWindow();
+      } catch (error) {
+        if (error instanceof WindowWorkspaceRemovalError) {
+          removedWindow = error.removedWindow;
+        }
+        if (removedWindow) {
+          try {
+            await restoreCurrentWindow(removedWindow);
+          } catch (recoveryError) {
+            console.warn("[windowWorkspace] failed to restore membership after close failure:", recoveryError);
+          }
+          try {
+            // Notify even when the restore response was lost: the idempotent
+            // mutation may still have committed and peers should refresh from
+            // the authoritative snapshot.
+            await notifyWindowMembershipChanged();
+          } catch (notificationError) {
+            console.warn("[windowWorkspace] failed to notify restored membership:", notificationError);
+          }
+        }
+        throw error;
+      }
     },
     persistSelection: async (selection) => {
       await queueCurrentWindowMutation({

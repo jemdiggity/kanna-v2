@@ -310,6 +310,14 @@ export async function resetDatabase(client: WebDriverClient): Promise<void> {
     await execDb(client, "INSERT INTO settings (key, value) VALUES (?, ?)", [key, value]);
   }
 
+  // The app stays mounted while the E2E database is reset. Deleting settings
+  // removes this window's workspace membership, so restore it through the same
+  // initialization path used at startup before selection persistence resumes.
+  const membershipResult = await callVueMethod(client, "windowWorkspace.initialize");
+  if (isVueCallError(membershipResult)) {
+    throw new Error(membershipResult.__error);
+  }
+
   // Refresh the Vue state so the UI reflects the empty DB
   await callVueMethod(client, "refreshRepos");
 }

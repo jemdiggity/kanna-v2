@@ -95,7 +95,7 @@ pub(super) async fn mutate_window_workspace(
 
 fn validate_mutation(payload: &WorkspaceMutationRequest) -> Result<(), String> {
     match payload.operation.as_str() {
-        "ensure" if payload.window.is_some() => Ok(()),
+        "ensure" | "restore" if payload.window.is_some() => Ok(()),
         "updateSelection" if payload.window_id.is_some() => Ok(()),
         "updateSidebarHidden"
             if payload.window_id.is_some() && payload.sidebar_hidden.is_some() =>
@@ -122,6 +122,25 @@ fn apply_mutation(
                 .iter()
                 .any(|candidate| candidate.window_id == window.window_id)
             {
+                snapshot.windows.push(window);
+            }
+        }
+        "restore" => {
+            let mut window = payload.window.expect("validated window");
+            if !snapshot
+                .windows
+                .iter()
+                .any(|candidate| candidate.window_id == window.window_id)
+            {
+                // A failed closer rejoins behind surviving windows so restoring
+                // its old order cannot disturb their stable display order.
+                window.order = snapshot
+                    .windows
+                    .iter()
+                    .map(|candidate| candidate.order)
+                    .max()
+                    .unwrap_or(-1)
+                    .saturating_add(1);
                 snapshot.windows.push(window);
             }
         }
@@ -228,6 +247,82 @@ mod tests {
 
         assert_eq!(next.windows.len(), 1);
         assert_eq!(next.windows[0].window_id, "window-2");
+    }
+
+    #[test]
+    fn restoring_a_window_preserves_its_state_behind_surviving_windows() {
+        let snapshot = WorkspaceSnapshot {
+            windows: vec![WorkspaceWindowState {
+                window_id: "window-2".to_string(),
+                selected_repo_id: Some("repo-2".to_string()),
+                selected_item_id: Some("task-2".to_string()),
+                sidebar_hidden: false,
+                sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+                order: 0,
+            }],
+        };
+
+        let mutation = WorkspaceMutationRequest {
+            operation: "restore".to_string(),
+            window_id: None,
+            window: Some(WorkspaceWindowState {
+                window_id: "main".to_string(),
+                selected_repo_id: Some("repo-current".to_string()),
+                selected_item_id: Some("task-current".to_string()),
+                sidebar_hidden: true,
+                sidebar_width: 347,
+                order: 0,
+            }),
+            selected_repo_id: None,
+            selected_item_id: None,
+            sidebar_hidden: None,
+            sidebar_width: None,
+            observed_window_ids: None,
+            live_window_ids: None,
+        };
+        let next = apply_mutation(snapshot, mutation);
+
+        assert_eq!(next.windows.len(), 2);
+        assert_eq!(next.windows[0].window_id, "window-2");
+        assert_eq!(next.windows[0].order, 0);
+        assert_eq!(next.windows[1].window_id, "main");
+        assert_eq!(
+            next.windows[1].selected_repo_id.as_deref(),
+            Some("repo-current")
+        );
+        assert_eq!(
+            next.windows[1].selected_item_id.as_deref(),
+            Some("task-current")
+        );
+        assert!(next.windows[1].sidebar_hidden);
+        assert_eq!(next.windows[1].sidebar_width, 347);
+        assert_eq!(next.windows[1].order, 1);
+
+        let replayed = apply_mutation(
+            next.clone(),
+            WorkspaceMutationRequest {
+                operation: "restore".to_string(),
+                window_id: None,
+                window: Some(WorkspaceWindowState {
+                    window_id: "main".to_string(),
+                    selected_repo_id: Some("repo-stale".to_string()),
+                    selected_item_id: Some("task-stale".to_string()),
+                    sidebar_hidden: false,
+                    sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+                    order: 0,
+                }),
+                selected_repo_id: None,
+                selected_item_id: None,
+                sidebar_hidden: None,
+                sidebar_width: None,
+                observed_window_ids: None,
+                live_window_ids: None,
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(replayed).expect("serialize replayed snapshot"),
+            serde_json::to_value(next).expect("serialize original snapshot")
+        );
     }
 
     #[test]

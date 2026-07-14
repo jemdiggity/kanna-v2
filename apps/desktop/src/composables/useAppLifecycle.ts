@@ -27,7 +27,9 @@ import {
   WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_DOWN_EVENT,
   WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_UP_EVENT,
   WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT,
+  WindowWorkspaceRemovalError,
   type WindowWorkspaceController,
+  type WorkspaceWindowState,
 } from "../windowWorkspace";
 import { scheduleStartupBackup, startPeriodicBackup } from "./useBackup";
 import type { KeyboardActions } from "./useKeyboardShortcuts";
@@ -69,8 +71,6 @@ interface UseAppLifecycleOptions {
   openImageUrlPreview: (imageUrl: string) => void;
   preferences: AppPreferences;
   remoteTaskDiagnostics: Ref<unknown>;
-  relinquishDesktopCloudWorkspace: () => Promise<void>;
-  resumeDesktopCloudWorkspace: () => Promise<void>;
   restoreSidebarWidth: () => Promise<void>;
   shortcutsStartFull: Ref<boolean>;
   showShortcutsModal: Ref<boolean>;
@@ -109,8 +109,6 @@ export function useAppLifecycle({
   openImageUrlPreview,
   preferences,
   remoteTaskDiagnostics,
-  relinquishDesktopCloudWorkspace,
-  resumeDesktopCloudWorkspace,
   restoreSidebarWidth,
   shortcutsStartFull,
   showShortcutsModal,
@@ -123,7 +121,8 @@ export function useAppLifecycle({
   windowWorkspace,
 }: UseAppLifecycleOptions) {
   const appUnlisteners: Array<() => void> = [];
-  let closingCurrentWindow = false;
+  const fatalInitializationError = ref<string | null>(null);
+  let currentWindowClosePhase: "open" | "preparing" | "recovering" | "destroying" = "open";
   let resolveWindowMembershipInitialization: (() => void) | null = null;
   const windowMembershipInitialization = new Promise<void>((resolve) => {
     resolveWindowMembershipInitialization = resolve;
@@ -134,16 +133,42 @@ export function useAppLifecycle({
     resolveWindowMembershipInitialization = null;
   }
 
-  async function requestCloseCurrentWindow() {
-    if (closingCurrentWindow) return;
-    closingCurrentWindow = true;
+  async function restoreWindowMembershipAfterCloseFailure(
+    removedWindow: WorkspaceWindowState | null,
+  ): Promise<void> {
+    if (!removedWindow) return;
     try {
-      await relinquishDesktopCloudWorkspace();
+      await windowWorkspace.restoreCurrentWindow(removedWindow);
+    } catch (error) {
+      console.warn("[App] failed to restore window membership after close failure:", error);
+    }
+    try {
+      await windowWorkspace.notifyWindowMembershipChanged();
+    } catch (error) {
+      console.warn("[App] failed to notify restored window membership:", error);
+    }
+  }
+
+  async function requestCloseCurrentWindow() {
+    if (currentWindowClosePhase !== "open") return;
+    currentWindowClosePhase = "preparing";
+    let removedWindow: WorkspaceWindowState | null = null;
+    try {
       await windowMembershipInitialization;
-      await windowWorkspace.closeWindow();
+      removedWindow = await windowWorkspace.forgetCurrentWindow();
+      await windowWorkspace.notifyWindowMembershipChanged();
+      currentWindowClosePhase = "destroying";
+      await windowWorkspace.destroyNativeWindow();
     } catch (error: unknown) {
-      closingCurrentWindow = false;
-      await resumeDesktopCloudWorkspace();
+      if (error instanceof WindowWorkspaceRemovalError) {
+        removedWindow = error.removedWindow;
+      }
+      currentWindowClosePhase = "recovering";
+      try {
+        await restoreWindowMembershipAfterCloseFailure(removedWindow);
+      } finally {
+        currentWindowClosePhase = "open";
+      }
       throw error;
     }
   }
@@ -218,28 +243,27 @@ export function useAppLifecycle({
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const unlistenNativeWindowCloseRequest = await getCurrentWindow().onCloseRequested(async (event) => {
-          if (closingCurrentWindow) return;
-          closingCurrentWindow = true;
+          // Every user/native close request is fenced. The one authorized
+          // destruction bypasses CloseRequested through destroyNativeWindow.
+          event.preventDefault();
+          if (currentWindowClosePhase !== "open") return;
           try {
-            await relinquishDesktopCloudWorkspace();
-            await windowMembershipInitialization;
-            await windowWorkspace.forgetCurrentWindow();
+            await requestCloseCurrentWindow();
           } catch (error: unknown) {
-            closingCurrentWindow = false;
-            event.preventDefault();
-            await resumeDesktopCloudWorkspace();
             console.error("[App] native window close request failed:", error);
           }
         });
         appUnlisteners.push(unlistenNativeWindowCloseRequest);
       } catch (e: unknown) {
         finishWindowMembershipInitialization();
+        fatalInitializationError.value =
+          "Native window-close protection is unavailable. Restart Kanna and try again.";
         console.error("[App] native window close-request listener registration failed:", e);
         return;
       }
     }
 
-    if (closingCurrentWindow) {
+    if (currentWindowClosePhase !== "open") {
       finishWindowMembershipInitialization();
       return;
     }
@@ -248,7 +272,7 @@ export function useAppLifecycle({
     } finally {
       finishWindowMembershipInitialization();
     }
-    if (closingCurrentWindow) return;
+    if (currentWindowClosePhase !== "open") return;
 
     appUpdate.start();
     window.addEventListener("dragenter", suppressFileDropNavigation);
@@ -514,6 +538,7 @@ export function useAppLifecycle({
   });
 
   return {
+    fatalInitializationError,
     focusAgentTerminal,
     requestCloseCurrentWindow,
   };

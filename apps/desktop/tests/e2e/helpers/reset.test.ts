@@ -235,4 +235,30 @@ describe("reset helpers", () => {
       "task-b",
     );
   });
+
+  it("re-establishes the mounted window membership after deleting settings", async () => {
+    const client = {};
+    mocks.getVueState.mockResolvedValue("kanna-test.db");
+    mocks.queryDb.mockResolvedValue([]);
+    mocks.execDb.mockResolvedValue(undefined);
+    mocks.callVueMethod.mockResolvedValue(undefined);
+    mocks.tauriInvoke.mockResolvedValueOnce("/tmp/app-data");
+
+    const { resetDatabase } = await import("./reset");
+
+    await resetDatabase(client as never);
+
+    expect(mocks.callVueMethod).toHaveBeenCalledWith(
+      client,
+      "windowWorkspace.initialize",
+    );
+    const initializeCall = mocks.callVueMethod.mock.calls.findIndex(
+      ([, method]) => method === "windowWorkspace.initialize",
+    );
+    const refreshCall = mocks.callVueMethod.mock.calls.findIndex(
+      ([, method]) => method === "refreshRepos",
+    );
+    expect(initializeCall).toBeGreaterThanOrEqual(0);
+    expect(refreshCall).toBeGreaterThan(initializeCall);
+  });
 });
