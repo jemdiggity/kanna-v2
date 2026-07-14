@@ -72,6 +72,7 @@ interface RelayUi {
 
 interface RelayWebViewContextDriver {
   execute<T>(script: () => T): Promise<T>;
+  getNativeInspection?: () => Promise<string | null>;
   getContext?: () => Promise<string>;
   getContexts?: () => Promise<unknown[]>;
   switchContext?: (context: string) => Promise<unknown>;
@@ -184,6 +185,10 @@ function createWebViewContextDriver(driver: Browser): RelayWebViewContextDriver 
     getContexts: driver.getContexts
       ? async () => await driver.getContexts?.() ?? []
       : undefined,
+    getNativeInspection: async () => {
+      const marker = await driver.$(selectors.terminalInspection);
+      return marker.getAttribute("value").catch(() => null);
+    },
     switchContext: driver.switchContext
       ? async (context: string) => await driver.switchContext?.(context)
       : undefined

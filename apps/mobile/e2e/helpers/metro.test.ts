@@ -103,4 +103,17 @@ describe("mobile Metro helpers", () => {
       "--dev-client"
     ]);
   });
+
+  it("clears Metro's transform cache when runtime environment values must be exact", () => {
+    expect(buildExpoStartCommand(1430, { clearCache: true })).toEqual([
+      "pnpm",
+      "exec",
+      "expo",
+      "start",
+      "--port",
+      "1430",
+      "--dev-client",
+      "--clear"
+    ]);
+  });
 });

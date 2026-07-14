@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
 import type { TaskActivity } from "../../src/lib/api/types";
 
@@ -16,6 +17,9 @@ const RELAY_MENU_OPTION_ONE_MARKER = "SCRIPT_MENU_OPTION_1_HIGHLIGHTED";
 const RELAY_MENU_SELECTION_MARKER = "SCRIPT_MENU_SELECTED:1";
 const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
+const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
+
+type MobileRelayHarnessMode = "relay" | "hybrid";
 
 interface RemoteHarness {
   desktopId: string;
@@ -25,7 +29,14 @@ interface RemoteHarness {
     firestore: number;
     relay: number;
   };
+  restartServerWithIdentity(identity: {
+    desktopId: string;
+    desktopSecret?: string | null;
+  }): Promise<void>;
+  startServer(): Promise<void>;
   stopRelay(): Promise<void>;
+  stopServer(): Promise<void>;
+  waitForDesktop(desktopId?: string): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -122,7 +133,10 @@ export interface MobileHybridFixture {
   unresolvedTaskId: string;
 }
 
-export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
+export async function startMobileRelayHarness(
+  options: { mode?: MobileRelayHarnessMode } = {}
+): Promise<MobileRelayHarness> {
+  const mode = options.mode ?? "relay";
   const remote = await loadRemoteHarnessModules();
   const harness = await remote.harness.startRemoteHarness({
     lanHost: "0.0.0.0"
@@ -130,28 +144,55 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
   let terminalEvents: TerminalEventCollector | null = null;
 
   try {
+    const auth = await signInRelayUser(harness.ports.auth);
+    if (mode === "relay") {
+      const desktopSecret = desktopSecretFor(harness.desktopId);
+      await publishDesktopCredential({
+        auth,
+        desktopId: harness.desktopId,
+        desktopSecret,
+        displayName: "Remote E2E Desktop",
+        firestorePort: harness.ports.firestore
+      });
+      await harness.restartServerWithIdentity({
+        desktopId: harness.desktopId,
+        desktopSecret
+      });
+      await harness.waitForDesktop();
+    }
+
     const localTask = await remote.terminal.createScriptedTask(harness, {
       displayName: RELAY_TASK_TITLE
     });
-    const lanOnlyTask = await remote.terminal.createScriptedTask(harness, {
-      displayName: HYBRID_LAN_ONLY_TITLE
-    });
-    await assertHybridLanFixture(harness, [localTask, lanOnlyTask]);
-    terminalEvents = remote.terminal.collectTerminalEvents(harness, localTask.taskId);
-    await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_TASK_SENTINEL);
-    await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_MENU_CURSOR_MARKER);
+    const lanOnlyTask = mode === "hybrid"
+      ? await remote.terminal.createScriptedTask(harness, {
+          displayName: HYBRID_LAN_ONLY_TITLE
+        })
+      : localTask;
+    await assertHybridLanFixture(
+      harness,
+      mode === "hybrid" ? [localTask, lanOnlyTask] : [localTask]
+    );
     const cloudTaskId = cloudTaskIdFor(harness, localTask);
     const cloudOnlyTaskId =
       `cloud:${HYBRID_CLOUD_ONLY_DESKTOP_ID}:` +
       `${HYBRID_CLOUD_ONLY_REPO_ID}:${HYBRID_CLOUD_ONLY_LOCAL_TASK_ID}`;
-    const auth = await signInRelayUser(harness.ports.auth);
-    await seedCloudDesktopSnapshot({
-      auth,
-      cloudTaskId,
-      cloudOnlyTaskId,
-      harness,
-      localTask
-    });
+    if (mode === "relay") {
+      await setLocalTaskRuntimeStatus(harness, localTask.taskId, "busy");
+      await waitForLocalTaskActivity(harness, localTask, "working");
+      await waitForCloudTaskActivity({
+        activity: "working",
+        auth,
+        harness,
+        task: localTask
+      }, CLOUD_PUBLICATION_TIMEOUT_MS, 1_000);
+    } else {
+      await seedHybridCloudSnapshots({ auth, harness, localTask });
+    }
+
+    terminalEvents = remote.terminal.collectTerminalEvents(harness, localTask.taskId);
+    await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_TASK_SENTINEL);
+    await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_MENU_CURSOR_MARKER);
 
     const terminalFixture: PtyTerminalFixture = {
       taskId: cloudTaskId,
@@ -204,27 +245,24 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
       lanOnlyTask,
       localTask,
       async prepareTaskUnreadForMarkRead() {
-        await setLocalTaskRuntimeStatus(harness, localTask.taskId, "busy");
-        await setLocalTaskRuntimeStatus(harness, localTask.taskId, "idle");
-        await waitForLocalTaskActivity(harness, localTask, "unread");
-        await setCloudTaskActivity({
+        await setPublishedTaskActivity({
           activity: "unread",
           auth,
           harness,
-          localTask,
+          task: localTask
         });
       },
       setTaskActivity(activity) {
-        return setCloudTaskActivity({
+        return setPublishedTaskActivity({
           activity,
           auth,
           harness,
-          localTask,
+          task: localTask
         });
       },
       terminalEvents,
       publishHybridCloudRefresh: () =>
-        publishHybridCloudRefresh({ auth, harness }),
+        publishHybridCloudRefresh({ harness }),
       async stop() {
         terminalEvents?.close();
         await harness.stop();
@@ -258,26 +296,24 @@ export async function startMobileRelayHarness(): Promise<MobileRelayHarness> {
 }
 
 async function publishHybridCloudRefresh(input: {
-  auth: AuthSession;
   harness: RemoteHarness;
 }): Promise<void> {
-  await setFirestoreDocument(
-    input.harness.ports.firestore,
-    [
-      "users",
-      input.auth.uid,
-      "desktops",
-      HYBRID_CLOUD_ONLY_DESKTOP_ID,
-      "tasks",
-      HYBRID_CLOUD_ONLY_LOCAL_TASK_ID
-    ],
-    input.auth.idToken,
-    {
-      title: stringValue(HYBRID_CLOUD_ONLY_REFRESHED_TITLE),
-      displayName: stringValue(HYBRID_CLOUD_ONLY_REFRESHED_TITLE),
-      updatedAt: stringValue(new Date().toISOString())
-    }
-  );
+  await publishRelayTaskSnapshot({
+    desktopId: HYBRID_CLOUD_ONLY_DESKTOP_ID,
+    desktopSecret: desktopSecretFor(HYBRID_CLOUD_ONLY_DESKTOP_ID),
+    displayName: "Cloud-only E2E Desktop",
+    relayPort: input.harness.ports.relay,
+    tasks: [
+      syntheticCloudTask({
+        activity: "idle",
+        desktopId: HYBRID_CLOUD_ONLY_DESKTOP_ID,
+        displayName: HYBRID_CLOUD_ONLY_REFRESHED_TITLE,
+        repoId: HYBRID_CLOUD_ONLY_REPO_ID,
+        taskId: HYBRID_CLOUD_ONLY_LOCAL_TASK_ID,
+        title: HYBRID_CLOUD_ONLY_REFRESHED_TITLE
+      })
+    ]
+  });
 }
 
 async function loadRemoteHarnessModules(): Promise<{
@@ -325,104 +361,63 @@ function cloudTaskIdFor(
   return `cloud:${harness.desktopId}:${localTask.repoId}:${localTask.taskId}`;
 }
 
-async function seedCloudDesktopSnapshot(input: {
+async function seedHybridCloudSnapshots(input: {
   auth: AuthSession;
-  cloudTaskId: string;
-  cloudOnlyTaskId: string;
   harness: RemoteHarness;
   localTask: ScriptedTask;
 }): Promise<void> {
-  const updatedAt = new Date().toISOString();
-  await setFirestoreDocument(
-    input.harness.ports.firestore,
-    ["users", input.auth.uid, "desktops", input.harness.desktopId],
-    input.auth.idToken,
+  const fixtures = [
     {
-      desktopId: stringValue(input.harness.desktopId),
-      displayName: stringValue("Remote E2E Desktop"),
-      updatedAt: stringValue(updatedAt)
+      desktopId: input.harness.desktopId,
+      displayName: "Remote E2E Desktop",
+      tasks: [
+        syntheticCloudTask({
+          activity: "working",
+          desktopId: input.harness.desktopId,
+          displayName: HYBRID_DUPLICATE_CLOUD_TITLE,
+          repoId: input.localTask.repoId,
+          taskId: input.localTask.taskId,
+          title: HYBRID_DUPLICATE_CLOUD_TITLE
+        })
+      ]
+    },
+    {
+      desktopId: HYBRID_CLOUD_ONLY_DESKTOP_ID,
+      displayName: "Cloud-only E2E Desktop",
+      tasks: [
+        syntheticCloudTask({
+          activity: "idle",
+          desktopId: HYBRID_CLOUD_ONLY_DESKTOP_ID,
+          displayName: HYBRID_CLOUD_ONLY_TITLE,
+          repoId: HYBRID_CLOUD_ONLY_REPO_ID,
+          taskId: HYBRID_CLOUD_ONLY_LOCAL_TASK_ID,
+          title: HYBRID_CLOUD_ONLY_TITLE
+        })
+      ]
     }
-  );
+  ];
 
-  await setFirestoreDocument(
-    input.harness.ports.firestore,
-    [
-      "users",
-      input.auth.uid,
-      "desktops",
-      input.harness.desktopId,
-      "tasks",
-      input.localTask.taskId
-    ],
-    input.auth.idToken,
-    {
-      cloudTaskId: stringValue(input.cloudTaskId),
-      localRepoId: stringValue(input.localTask.repoId),
-      ownerDesktopId: stringValue(input.harness.desktopId),
-      ownerLocalTaskId: stringValue(input.localTask.taskId),
-      title: stringValue(HYBRID_DUPLICATE_CLOUD_TITLE),
-      promptSnippet: stringValue("Run deterministic scripted task"),
-      displayName: stringValue(HYBRID_DUPLICATE_CLOUD_TITLE),
-      stage: stringValue("review"),
-      status: stringValue("active"),
-      activity: stringValue("working"),
-      repo: mapValue({
-        cloudRepoId: stringValue(input.localTask.repoId),
-        name: stringValue("Mobile relay Appium repo")
-      }),
-      agent: mapValue({
-        provider: stringValue("codex"),
-        type: stringValue("pty")
-      }),
-      updatedAt: stringValue(updatedAt),
-      closedAt: nullValue()
+  await input.harness.stopServer();
+  try {
+    for (const fixture of fixtures) {
+      const desktopSecret = desktopSecretFor(fixture.desktopId);
+      await publishDesktopCredential({
+        auth: input.auth,
+        desktopId: fixture.desktopId,
+        desktopSecret,
+        displayName: fixture.displayName,
+        firestorePort: input.harness.ports.firestore
+      });
+      await publishRelayTaskSnapshot({
+        ...fixture,
+        desktopSecret,
+        relayPort: input.harness.ports.relay
+      });
     }
-  );
-
-  await setFirestoreDocument(
-    input.harness.ports.firestore,
-    ["users", input.auth.uid, "desktops", HYBRID_CLOUD_ONLY_DESKTOP_ID],
-    input.auth.idToken,
-    {
-      desktopId: stringValue(HYBRID_CLOUD_ONLY_DESKTOP_ID),
-      displayName: stringValue("Cloud-only E2E Desktop"),
-      updatedAt: stringValue(updatedAt)
-    }
-  );
-
-  await setFirestoreDocument(
-    input.harness.ports.firestore,
-    [
-      "users",
-      input.auth.uid,
-      "desktops",
-      HYBRID_CLOUD_ONLY_DESKTOP_ID,
-      "tasks",
-      HYBRID_CLOUD_ONLY_LOCAL_TASK_ID
-    ],
-    input.auth.idToken,
-    {
-      cloudTaskId: stringValue(input.cloudOnlyTaskId),
-      localRepoId: stringValue(HYBRID_CLOUD_ONLY_REPO_ID),
-      ownerDesktopId: stringValue(HYBRID_CLOUD_ONLY_DESKTOP_ID),
-      ownerLocalTaskId: stringValue(HYBRID_CLOUD_ONLY_LOCAL_TASK_ID),
-      title: stringValue(HYBRID_CLOUD_ONLY_TITLE),
-      promptSnippet: stringValue("Visible only through the cloud task index"),
-      displayName: stringValue(HYBRID_CLOUD_ONLY_TITLE),
-      stage: stringValue("in progress"),
-      status: stringValue("idle"),
-      repo: mapValue({
-        cloudRepoId: stringValue(HYBRID_CLOUD_ONLY_REPO_ID),
-        name: stringValue("Hybrid cloud-only repo")
-      }),
-      agent: mapValue({
-        provider: stringValue("codex"),
-        type: stringValue("pty")
-      }),
-      updatedAt: stringValue(updatedAt),
-      closedAt: nullValue()
-    }
-  );
+  } finally {
+    await input.harness.startServer();
+    await input.harness.waitForDesktop();
+  }
 }
 
 async function assertHybridLanFixture(
@@ -452,25 +447,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function setCloudTaskActivity(input: {
+async function setPublishedTaskActivity(input: {
   activity: TaskActivity;
   auth: AuthSession;
   harness: RemoteHarness;
-  localTask: ScriptedTask;
+  task: ScriptedTask;
 }): Promise<void> {
-  await setFirestoreDocument(
-    input.harness.ports.firestore,
-    [
-      "users",
-      input.auth.uid,
-      "desktops",
-      input.harness.desktopId,
-      "tasks",
-      input.localTask.taskId,
-    ],
-    input.auth.idToken,
-    { activity: stringValue(input.activity) },
+  if (input.activity === "working") {
+    await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "busy");
+  } else if (input.activity === "unread") {
+    await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "busy");
+    await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "idle");
+  } else {
+    await postLocalTaskAction(input.harness, input.task.taskId, "mark-read");
+  }
+  await waitForLocalTaskActivity(
+    input.harness,
+    input.task,
+    input.activity
   );
+  await waitForCloudTaskActivity(input);
 }
 
 async function setLocalTaskRuntimeStatus(
@@ -490,6 +486,23 @@ async function setLocalTaskRuntimeStatus(
     throw new Error(
       `Failed to set local task ${taskId} runtime status ${status}: ` +
         `${response.status} ${await response.text()}`,
+    );
+  }
+}
+
+async function postLocalTaskAction(
+  harness: RemoteHarness,
+  taskId: string,
+  action: "mark-read"
+): Promise<void> {
+  const response = await fetch(
+    `${harness.lanBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Failed to apply local task ${taskId} action ${action}: ` +
+        `${response.status} ${await response.text()}`
     );
   }
 }
@@ -518,6 +531,58 @@ async function waitForLocalTaskActivity(
   );
 }
 
+async function waitForCloudTaskActivity(input: {
+  activity: TaskActivity;
+  auth: AuthSession;
+  harness: RemoteHarness;
+  task: ScriptedTask;
+}, timeoutMs = CLOUD_PUBLICATION_TIMEOUT_MS, stableForMs = 0): Promise<void> {
+  const path = [
+    "users",
+    input.auth.uid,
+    "desktops",
+    input.harness.desktopId,
+    "tasks"
+  ].map(encodeURIComponent).join("/");
+  const url =
+    `http://127.0.0.1:${input.harness.ports.firestore}/v1/projects/kanna-local/` +
+    `databases/(default)/documents/${path}?pageSize=100`;
+  const deadline = Date.now() + timeoutMs;
+  let lastObserved: unknown = null;
+  let matchingSince: number | null = null;
+
+  while (Date.now() < deadline) {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${input.auth.idToken}` }
+    });
+    const body = await response.json().catch(() => null) as {
+      documents?: Array<{ fields?: FirestoreFields }>;
+    } | null;
+    if (response.ok) {
+      const taskDocument = body?.documents?.find((document) =>
+        document.fields?.ownerLocalTaskId?.stringValue === input.task.taskId
+        && document.fields?.localRepoId?.stringValue === input.task.repoId
+      );
+      lastObserved = taskDocument?.fields?.activity?.stringValue ?? null;
+      if (lastObserved === input.activity) {
+        matchingSince ??= Date.now();
+        if (Date.now() - matchingSince >= stableForMs) return;
+      } else {
+        matchingSince = null;
+      }
+    } else {
+      lastObserved = `${response.status} ${JSON.stringify(body)}`;
+      matchingSince = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(
+    `Expected published task ${input.task.taskId} activity ${input.activity}; ` +
+      `last observed ${String(lastObserved)}`
+  );
+}
+
 async function signInRelayUser(authPort: number): Promise<AuthSession> {
   const response = await fetch(
     `http://127.0.0.1:${authPort}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=kanna-local`,
@@ -536,6 +601,156 @@ async function signInRelayUser(authPort: number): Promise<AuthSession> {
     throw new Error(`Failed to sign into relay Auth emulator: ${response.status} ${JSON.stringify(body)}`);
   }
   return { idToken: body.idToken, uid: body.localId };
+}
+
+function desktopSecretFor(desktopId: string): string {
+  return createHash("sha256")
+    .update(`mobile-relay-e2e:${desktopId}`)
+    .digest("hex");
+}
+
+async function publishDesktopCredential(input: {
+  auth: AuthSession;
+  desktopId: string;
+  desktopSecret: string;
+  displayName: string;
+  firestorePort: number;
+}): Promise<void> {
+  await setFirestoreDocument(
+    input.firestorePort,
+    ["desktopCredentials", input.desktopId.split("/").join("_")],
+    input.auth.idToken,
+    {
+      desktopId: stringValue(input.desktopId),
+      desktopSecretHash: stringValue(
+        createHash("sha256").update(input.desktopSecret).digest("hex")
+      ),
+      displayName: stringValue(input.displayName),
+      revokedAt: nullValue(),
+      uid: stringValue(input.auth.uid),
+      updatedAt: stringValue(new Date().toISOString())
+    }
+  );
+}
+
+function syntheticCloudTask(input: {
+  activity: TaskActivity;
+  desktopId: string;
+  displayName: string;
+  repoId: string;
+  taskId: string;
+  title: string;
+}): Record<string, unknown> {
+  const timestamp = new Date().toISOString();
+  return {
+    localRepoId: input.repoId,
+    ownerDesktopId: input.desktopId,
+    ownerLocalTaskId: input.taskId,
+    title: input.title,
+    promptSnippet: "Run deterministic scripted task",
+    displayName: input.displayName,
+    stage: "in progress",
+    activity: input.activity,
+    status: "active",
+    repo: {
+      cloudRepoId: input.repoId,
+      name: "Mobile relay Appium repo",
+      remoteUrl: null,
+      remoteUrlHash: null,
+      defaultBranch: null
+    },
+    branch: null,
+    baseRef: null,
+    prNumber: null,
+    prUrl: null,
+    agent: { provider: "codex", type: "pty" },
+    transfer: {
+      state: "none",
+      transferId: null,
+      sourceDesktopId: null,
+      destinationDesktopId: null
+    },
+    blockedByTaskIds: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    closedAt: null
+  };
+}
+
+async function publishRelayTaskSnapshot(input: {
+  desktopId: string;
+  desktopSecret: string;
+  displayName: string;
+  relayPort: number;
+  tasks: Array<Record<string, unknown>>;
+}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const publicationId = `mobile-e2e-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const socket = new WebSocket(`ws://127.0.0.1:${input.relayPort}`);
+    let settled = false;
+    const timeout = setTimeout(() => {
+      finish(new Error(`Timed out publishing cloud snapshot for ${input.desktopId}`));
+    }, CLOUD_PUBLICATION_TIMEOUT_MS);
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.close();
+      if (error) reject(error);
+      else resolve();
+    };
+
+    socket.addEventListener("open", () => {
+      socket.send(JSON.stringify({
+        type: "auth",
+        desktop_id: input.desktopId,
+        desktop_secret: input.desktopSecret
+      }));
+    });
+    socket.addEventListener("message", (event) => {
+      const message = parseJsonRecord(event.data);
+      if (message?.type === "auth_ok") {
+        socket.send(JSON.stringify({
+          type: "task_snapshot_publish",
+          id: publicationId,
+          snapshot: {
+            schemaVersion: 1,
+            desktop: { displayName: input.displayName },
+            tasks: input.tasks
+          }
+        }));
+      } else if (
+        message?.type === "task_snapshot_ack"
+        && message.id === publicationId
+      ) {
+        if (message.ok === true) finish();
+        else finish(new Error(
+          `Relay rejected cloud snapshot for ${input.desktopId}: ${String(message.error)}`
+        ));
+      }
+    });
+    socket.addEventListener("error", () => {
+      finish(new Error(`Relay socket failed for ${input.desktopId}`));
+    });
+    socket.addEventListener("close", (event) => {
+      if (!settled) {
+        finish(new Error(
+          `Relay closed while publishing ${input.desktopId}: ${event.code} ${event.reason}`
+        ));
+      }
+    });
+  });
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(
+      typeof value === "string" ? value : Buffer.from(value as ArrayBuffer).toString("utf8")
+    ) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function setFirestoreDocument(
@@ -570,10 +785,6 @@ async function setFirestoreDocument(
 
 function stringValue(value: string): FirestoreFieldValue {
   return { stringValue: value };
-}
-
-function mapValue(fields: FirestoreFields): FirestoreFieldValue {
-  return { mapValue: { fields } };
 }
 
 function nullValue(): FirestoreFieldValue {

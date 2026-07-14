@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef } from "react";
-import { StyleSheet, View } from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { StyleSheet, Text, View } from "react-native";
 import {
   WebView as NativeWebView,
   type WebViewMessageEvent,
@@ -13,6 +13,7 @@ import {
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
 import { planTerminalMutation } from "./terminalMutation";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 
 interface TerminalWebViewProps {
   taskId: string;
@@ -31,6 +32,14 @@ interface TerminalWebViewHandle {
 }
 
 type PendingScriptKind = "terminal-state" | "resize";
+
+interface TerminalInspection {
+  byteCount: number;
+  cols: number | null;
+  frameCount: number;
+  rows: number | null;
+  text: string;
+}
 
 const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<
   WebViewProps & React.RefAttributes<TerminalWebViewHandle>
@@ -51,6 +60,7 @@ export function TerminalWebView({
   const previousTaskIdRef = useRef<string | null>(null);
   const previousOutputRef = useRef("");
   const previousStatusRef = useRef<TaskTerminalStatus>("idle");
+  const [terminalInspection, setTerminalInspection] = useState<TerminalInspection | null>(null);
   const document = useMemo(
     () =>
       buildTerminalDocument({
@@ -134,16 +144,24 @@ export function TerminalWebView({
   }, [cols, rows]);
 
   const handleMessage = (event: WebViewMessageEvent) => {
-    let payload: { type?: string } | null = null;
+    let payload: { type?: string; inspection?: TerminalInspection } | null = null;
 
     try {
-      payload = JSON.parse(event.nativeEvent.data) as { type?: string };
+      payload = JSON.parse(event.nativeEvent.data) as {
+        type?: string;
+        inspection?: TerminalInspection;
+      };
     } catch {
       return;
     }
 
     if (payload?.type === "terminal-tap") {
       onConsolePress?.();
+      return;
+    }
+
+    if (payload?.type === "terminal-inspection" && payload.inspection) {
+      setTerminalInspection(payload.inspection);
       return;
     }
 
@@ -164,6 +182,16 @@ export function TerminalWebView({
 
   return (
     <View style={fullscreen ? styles.wrapFullscreen : styles.wrap}>
+      {process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1" && terminalInspection ? (
+        <Text
+          accessibilityValue={{ text: JSON.stringify(terminalInspection) }}
+          pointerEvents="none"
+          style={styles.e2eTerminalInspection}
+          testID={MOBILE_E2E_IDS.terminalInspection}
+        >
+          {JSON.stringify(terminalInspection)}
+        </Text>
+      ) : null}
       <WebView
         ref={webViewRef}
         originWhitelist={["*"]}
@@ -209,5 +237,15 @@ const styles = StyleSheet.create({
   webviewFullscreen: {
     backgroundColor: "#050B14",
     flex: 1
+  },
+  e2eTerminalInspection: {
+    color: "transparent",
+    fontSize: 1,
+    height: 1,
+    left: 0,
+    opacity: 0.01,
+    position: "absolute",
+    top: 0,
+    width: 1
   }
 });

@@ -232,7 +232,7 @@ async function main(): Promise<void> {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
     if (mode === "relay" || mode === "hybrid") {
-      relayHarness = await startMobileRelayHarness();
+      relayHarness = await startMobileRelayHarness({ mode });
     }
 
     expoServer = await ensureExpoServer({

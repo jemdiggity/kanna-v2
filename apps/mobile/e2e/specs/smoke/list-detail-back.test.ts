@@ -236,6 +236,25 @@ describe("waitForTaskTerminalLive", () => {
 });
 
 describe("inspectTerminalWebView", () => {
+  it("uses the native terminal diagnostic bridge without switching WebView context", async () => {
+    const switchContext = vi.fn(async () => undefined);
+    const inspection = {
+      byteCount: 1024,
+      cols: 80,
+      frameCount: 3,
+      rows: 24,
+      text: "SCRIPT_READY"
+    };
+
+    await expect(inspectTerminalWebView({
+      execute: vi.fn(),
+      getContexts: vi.fn(async () => ["NATIVE_APP", "WEBVIEW_build.kanna.app.dev"]),
+      getNativeInspection: vi.fn(async () => JSON.stringify(inspection)),
+      switchContext
+    })).resolves.toEqual({ kind: "rendered", ...inspection });
+    expect(switchContext).not.toHaveBeenCalled();
+  });
+
   it("reports why WebView terminal inspection is unavailable", async () => {
     await expect(
       inspectTerminalWebView({

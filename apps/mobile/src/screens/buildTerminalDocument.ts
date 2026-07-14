@@ -369,6 +369,8 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         if (shouldStick) {
           term.scrollToBottom();
         }
+
+        notifyTerminalInspection();
       }
 
       function notifyReady() {
@@ -377,6 +379,40 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         }
 
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: "terminal-ready" }));
+      }
+
+      function renderedTerminalText() {
+        try {
+          const buffer = term.buffer.active;
+          const firstLine = Math.max(0, buffer.length - 200);
+          const lines = [];
+          for (let index = firstLine; index < buffer.length; index += 1) {
+            const line = buffer.getLine(index);
+            if (line) {
+              lines.push(line.translateToString(true));
+            }
+          }
+          return lines.join("\\n");
+        } catch (_error) {
+          return root.dataset.kannaTextSample || "";
+        }
+      }
+
+      function notifyTerminalInspection() {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: "terminal-inspection",
+          inspection: {
+            byteCount: Number.parseInt(root.dataset.kannaByteCount || "0", 10) || 0,
+            cols: Number.parseInt(root.dataset.kannaCols || "", 10) || null,
+            frameCount: Number.parseInt(root.dataset.kannaFrameCount || "0", 10) || 0,
+            rows: Number.parseInt(root.dataset.kannaRows || "", 10) || null,
+            text: renderedTerminalText()
+          }
+        }));
       }
 
       function notifyTerminalTap() {

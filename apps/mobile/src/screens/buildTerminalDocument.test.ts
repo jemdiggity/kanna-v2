@@ -295,6 +295,15 @@ describe("buildTerminalDocument", () => {
     expect(terminal.writes).toHaveLength(1);
     expect(root.dataset.kannaByteCount).toBe("16");
     expect(messages.map((message) => JSON.parse(message).type)).toContain("terminal-ready");
+    const inspection = messages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "terminal-inspection");
+    expect(inspection?.inspection).toMatchObject({
+      byteCount: 16,
+      cols: 132,
+      frameCount: 1,
+      rows: 43
+    });
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {
