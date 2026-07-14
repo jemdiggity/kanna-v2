@@ -110,7 +110,11 @@ function extractTerminalScript(html: string): string {
   return scripts.at(-1) ?? "";
 }
 
-function createExecutedTerminalDocument(): {
+function createExecutedTerminalDocument({
+  enableE2EInspection = false
+}: {
+  enableE2EInspection?: boolean;
+} = {}): {
   terminal: StubTerminal;
   window: Window & typeof globalThis;
   root: HTMLElement;
@@ -118,7 +122,7 @@ function createExecutedTerminalDocument(): {
   terminalViewport: HTMLElement;
   messages: string[];
 } {
-  const html = buildTerminalDocument({ bottomInset: 24 });
+  const html = buildTerminalDocument({ bottomInset: 24, enableE2EInspection });
   const window = new Window() as Window & typeof globalThis;
   const messages: string[] = [];
 
@@ -173,9 +177,54 @@ function createExecutedTerminalDocument(): {
 }
 
 describe("buildTerminalDocument", () => {
+  it("omits terminal inspection traversal and messages outside E2E builds", () => {
+    const { messages, window } = createExecutedTerminalDocument();
+    const script = extractTerminalScript(
+      buildTerminalDocument({
+        bottomInset: 24,
+        enableE2EInspection: false
+      })
+    );
+
+    window.__replaceTerminalState({ chunksB64: [b64("first frame\n")] });
+    window.__appendTerminalChunk({ chunksB64: [b64("second frame\n")] });
+
+    expect(script).not.toContain("terminal-inspection");
+    expect(script).not.toContain("term.buffer.active");
+    expect(script).not.toContain("recordTerminalFrame");
+    expect(messages.map((message) => JSON.parse(message).type)).not.toContain(
+      "terminal-inspection"
+    );
+  });
+
+  it("reports rendered terminal inspection after replace and append in E2E builds", () => {
+    const { messages, window } = createExecutedTerminalDocument({ enableE2EInspection: true });
+    const script = extractTerminalScript(
+      buildTerminalDocument({
+        bottomInset: 24,
+        enableE2EInspection: true
+      })
+    );
+
+    window.__replaceTerminalState({ chunksB64: [b64("first frame\n")] });
+    window.__appendTerminalChunk({ chunksB64: [b64("second frame\n")] });
+
+    const inspections = messages
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === "terminal-inspection");
+    expect(inspections).toHaveLength(2);
+    expect(script).toContain("term.buffer.active");
+    expect(script).toContain("recordTerminalFrame");
+    expect(inspections.at(-1)?.inspection).toMatchObject({
+      byteCount: 25,
+      frameCount: 2
+    });
+  });
+
   it("builds an xterm shell with sticky scroll behavior and bottom inset", () => {
     const html = buildTerminalDocument({
-      bottomInset: 132
+      bottomInset: 132,
+      enableE2EInspection: false
     });
 
     expect(html).toContain('charset="utf-8"');
@@ -205,7 +254,8 @@ describe("buildTerminalDocument", () => {
 
   it("enables mobile pinch zoom and bidirectional touch scrolling for xterm", () => {
     const html = buildTerminalDocument({
-      bottomInset: 24
+      bottomInset: 24,
+      enableE2EInspection: false
     });
 
     expect(html).toContain("maximum-scale=3");
@@ -250,7 +300,7 @@ describe("buildTerminalDocument", () => {
   });
 
   it("executes two-finger fallback pinch scaling with clamping and keeps terminal scripts working", () => {
-    const { messages, root, terminal, viewport, window } = createExecutedTerminalDocument();
+    const { root, terminal, viewport, window } = createExecutedTerminalDocument();
 
     viewport.dispatchEvent(
       createTouchEvent(window, "touchstart", [
@@ -293,17 +343,6 @@ describe("buildTerminalDocument", () => {
     expect(terminal.resizeCalls).toContainEqual({ cols: 132, rows: 43 });
     expect(terminal.resets).toBe(1);
     expect(terminal.writes).toHaveLength(1);
-    expect(root.dataset.kannaByteCount).toBe("16");
-    expect(messages.map((message) => JSON.parse(message).type)).toContain("terminal-ready");
-    const inspection = messages
-      .map((message) => JSON.parse(message))
-      .find((message) => message.type === "terminal-inspection");
-    expect(inspection?.inspection).toMatchObject({
-      byteCount: 16,
-      cols: 132,
-      frameCount: 1,
-      rows: 43
-    });
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {
@@ -363,21 +402,19 @@ describe("buildTerminalDocument", () => {
   });
 
   it("builds resize scripts for the WebView terminal dimension bridge", () => {
-    const html = buildTerminalDocument({ bottomInset: 24 });
+    const html = buildTerminalDocument({ bottomInset: 24, enableE2EInspection: false });
     const script = buildTerminalResizeScript(132, 43);
 
     expect(html).toContain("window.__setTerminalDims");
     expect(html).toContain("term.resize(pinnedCols, pinnedRows)");
     expect(html).toContain("root.dataset.kannaCols = String(pinnedCols)");
     expect(html).toContain("root.dataset.kannaRows = String(pinnedRows)");
-    expect(html).toContain("root.dataset.kannaFrameCount");
-    expect(html).toContain("new TextDecoder");
     expect(html).toContain("applyPinnedSize()");
     expect(script).toBe('window.__setTerminalDims({"cols":132,"rows":43}); true;');
   });
 
   it("keeps echoed terminal input control stripping in the webview byte path", () => {
-    const html = buildTerminalDocument({ bottomInset: 24 });
+    const html = buildTerminalDocument({ bottomInset: 24, enableE2EInspection: false });
     const replaceScript = buildTerminalReplaceScript({
       output: `${b64("\u001b[200~continue\u001b[201~\u001b[13u\nClaude response\n")}\n`,
       status: "live"

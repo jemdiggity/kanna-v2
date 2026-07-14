@@ -26,6 +26,8 @@ interface TerminalWebViewProps {
 }
 
 const FULLSCREEN_BOTTOM_INSET = 132;
+const ENABLE_E2E_TERMINAL_INSPECTION =
+  process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1";
 
 interface TerminalWebViewHandle {
   injectJavaScript(script: string): void;
@@ -64,7 +66,8 @@ export function TerminalWebView({
   const document = useMemo(
     () =>
       buildTerminalDocument({
-        bottomInset: fullscreen ? FULLSCREEN_BOTTOM_INSET : 24
+        bottomInset: fullscreen ? FULLSCREEN_BOTTOM_INSET : 24,
+        enableE2EInspection: ENABLE_E2E_TERMINAL_INSPECTION
       }),
     [fullscreen]
   );
@@ -160,7 +163,11 @@ export function TerminalWebView({
       return;
     }
 
-    if (payload?.type === "terminal-inspection" && payload.inspection) {
+    if (
+      ENABLE_E2E_TERMINAL_INSPECTION &&
+      payload?.type === "terminal-inspection" &&
+      payload.inspection
+    ) {
       setTerminalInspection(payload.inspection);
       return;
     }
@@ -182,7 +189,7 @@ export function TerminalWebView({
 
   return (
     <View style={fullscreen ? styles.wrapFullscreen : styles.wrap}>
-      {process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1" && terminalInspection ? (
+      {ENABLE_E2E_TERMINAL_INSPECTION && terminalInspection ? (
         <Text
           accessibilityValue={{ text: JSON.stringify(terminalInspection) }}
           pointerEvents="none"

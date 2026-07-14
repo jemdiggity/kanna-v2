@@ -20,6 +20,7 @@ const injectedScripts: string[] = [];
 const effects: EffectRecord[] = [];
 const refs: Array<{ current: unknown }> = [];
 const states: unknown[] = [];
+const stateUpdates: unknown[] = [];
 let hookIndex = 0;
 let stateHookIndex = 0;
 let lastTree: ElementNode | null = null;
@@ -40,6 +41,7 @@ vi.mock("react", async (importActual) => {
         states[index] = initialValue;
       }
       return [states[index], (value: unknown) => {
+        stateUpdates.push(value);
         states[index] = value;
       }];
     }),
@@ -86,6 +88,7 @@ function resetTestState() {
   effects.length = 0;
   refs.length = 0;
   states.length = 0;
+  stateUpdates.length = 0;
   hookIndex = 0;
   stateHookIndex = 0;
   lastTree = null;
@@ -171,6 +174,40 @@ describe("TerminalWebView", () => {
     expect(marker?.props.accessibilityValue).toEqual({
       text: JSON.stringify(inspection)
     });
+    expect(stateUpdates).toEqual([inspection]);
+    expect((webView.props.source as { html: string }).html).toContain("terminal-inspection");
+  });
+
+  it("ignores terminal inspection messages and instrumentation outside E2E builds", async () => {
+    vi.stubEnv("EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED", "0");
+    const webView = await renderTerminalWebView({});
+    const inspection = {
+      byteCount: 128,
+      cols: 80,
+      frameCount: 2,
+      rows: 24,
+      text: "SCRIPT_READY"
+    };
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({ type: "terminal-inspection", inspection })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({});
+
+    const marker = React.Children.toArray(lastTree?.props.children).find(
+      (child): child is ElementNode =>
+        typeof child === "object" &&
+        child !== null &&
+        "type" in child &&
+        (child as ElementNode).type === "Text"
+    );
+    expect(marker).toBeUndefined();
+    expect(stateUpdates).toEqual([]);
+    expect((webView.props.source as { html: string }).html).not.toContain(
+      "terminal-inspection"
+    );
   });
 
   it("injects queued PTY dimensions before a queued terminal snapshot once the bridge is ready", async () => {

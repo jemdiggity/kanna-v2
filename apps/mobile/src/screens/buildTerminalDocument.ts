@@ -7,6 +7,7 @@ import {
 
 interface BuildTerminalDocumentOptions {
   bottomInset: number;
+  enableE2EInspection: boolean;
 }
 
 interface BuildTerminalUpdateScriptOptions {
@@ -14,7 +15,10 @@ interface BuildTerminalUpdateScriptOptions {
   status: TaskTerminalStatus;
 }
 
-export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOptions): string {
+export function buildTerminalDocument({
+  bottomInset,
+  enableE2EInspection
+}: BuildTerminalDocumentOptions): string {
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -370,7 +374,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
           term.scrollToBottom();
         }
 
-        notifyTerminalInspection();
+        ${enableE2EInspection ? "notifyTerminalInspection();" : ""}
       }
 
       function notifyReady() {
@@ -381,7 +385,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: "terminal-ready" }));
       }
 
-      function renderedTerminalText() {
+      ${enableE2EInspection ? `function renderedTerminalText() {
         try {
           const buffer = term.buffer.active;
           const firstLine = Math.max(0, buffer.length - 200);
@@ -413,7 +417,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
             text: renderedTerminalText()
           }
         }));
-      }
+      }` : ""}
 
       function notifyTerminalTap() {
         if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
@@ -493,7 +497,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         return Uint8Array.from(output);
       }
 
-      function resetTerminalFrameDiagnostics() {
+      ${enableE2EInspection ? `function resetTerminalFrameDiagnostics() {
         root.dataset.kannaFrameCount = "0";
         root.dataset.kannaByteCount = "0";
         root.dataset.kannaTextSample = "";
@@ -513,7 +517,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
           // TextDecoder may not be available in older WebViews; byte count still
           // proves a valid base64 frame reached the terminal write path.
         }
-      }
+      }` : ""}
 
       function writeTerminalChunks(chunksB64, done) {
         const chunks = Array.isArray(chunksB64) ? chunksB64 : [];
@@ -530,7 +534,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
             writeNext();
             return;
           }
-          recordTerminalFrame(bytes);
+          ${enableE2EInspection ? "recordTerminalFrame(bytes);" : ""}
           term.write(bytes, writeNext);
         }
 
@@ -540,7 +544,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
       window.__replaceTerminalState = function replaceTerminalState(state) {
         const shouldStick = stickyToBottom || isNearBottom();
         term.reset();
-        resetTerminalFrameDiagnostics();
+        ${enableE2EInspection ? "resetTerminalFrameDiagnostics();" : ""}
         fitTerminal();
         const complete = () => {
           fitTerminal();
