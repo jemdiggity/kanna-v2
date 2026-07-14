@@ -148,6 +148,27 @@ describe("TaskCard", () => {
     );
   });
 
+  it("renders a prompt only once when the waiting preview duplicates the title", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const duplicatePrompt = "Fix the duplicated mobile task prompt";
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: duplicatePrompt,
+        stage: "in progress",
+        waitingPromptSnippet: `  ${duplicatePrompt}  `
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(textContent(tree).split(duplicatePrompt)).toHaveLength(2);
+    expect(tree.props?.accessibilityLabel).toBe(
+      `${duplicatePrompt}. in progress`
+    );
+  });
+
   it("styles the pre-capture ellipsis as a muted placeholder", () => {
     const tree = renderTaskCard();
     const placeholder = findTextNodeByCompleteText(tree, "…");

@@ -11,6 +11,13 @@ interface TaskCardProps {
 
 export function TaskCard({ task, onPress }: TaskCardProps) {
   const model = buildTaskListItemModel(task);
+  const accessibilityLabel = [
+    model.title,
+    model.stageLabel,
+    model.waitingPromptSnippet
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(". ");
   const effectiveActivity =
     task.activity === "working" || task.activity === "unread"
       ? task.activity
@@ -24,7 +31,7 @@ export function TaskCard({ task, onPress }: TaskCardProps) {
 
   return (
     <Pressable
-      accessibilityLabel={`${model.title}. ${model.stageLabel}. ${model.waitingPromptSnippet}`}
+      accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
       accessibilityValue={{ text: effectiveActivity }}
       accessible
@@ -40,15 +47,19 @@ export function TaskCard({ task, onPress }: TaskCardProps) {
           <Text style={styles.stageLabel}>{model.stageLabel}</Text>
         </View>
       </View>
-      <Text
-        numberOfLines={3}
-        style={[
-          styles.preview,
-          model.isWaitingPromptPlaceholder ? styles.previewPlaceholder : null
-        ]}
-      >
-        {model.waitingPromptSnippet}
-      </Text>
+      {model.waitingPromptSnippet ? (
+        <Text
+          numberOfLines={3}
+          style={[
+            styles.preview,
+            model.isWaitingPromptPlaceholder
+              ? styles.previewPlaceholder
+              : null
+          ]}
+        >
+          {model.waitingPromptSnippet}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }
