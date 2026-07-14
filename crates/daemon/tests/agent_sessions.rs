@@ -150,6 +150,45 @@ impl ClientConn {
             }
         }
     }
+
+    /// Attach to an agent and collect replayed plus live events until one
+    /// matches `stop` (inclusive).
+    fn attach_and_collect_agent_events_until<F: Fn(&AgentEvent) -> bool>(
+        &mut self,
+        session_id: &str,
+        from_seq: u64,
+        stop: F,
+    ) -> Vec<AgentEvent> {
+        self.send(&Command::AttachAgent {
+            session_id: session_id.to_string(),
+            from_seq,
+        });
+
+        let snapshot = self.recv_until(|event| {
+            matches!(
+                event,
+                Event::AgentSnapshot {
+                    session_id: snapshot_session_id,
+                    ..
+                } if snapshot_session_id == session_id
+            )
+        });
+        let mut events = match snapshot {
+            Event::AgentSnapshot { events, .. } => events
+                .into_iter()
+                .map(|sequenced| sequenced.event)
+                .collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+
+        if let Some(stop_index) = events.iter().position(&stop) {
+            events.truncate(stop_index + 1);
+            return events;
+        }
+
+        events.extend(self.collect_agent_events_until(stop));
+        events
+    }
 }
 
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -658,11 +697,9 @@ fn interrupt_is_surfaced_as_interrupted_not_crashed() {
 
     // Attach and wait until the turn is actually running, so the interrupt
     // lands on a live child rather than racing the spawn.
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-int".to_string(),
-        from_seq: 0,
-    });
-    conn.collect_agent_events_until(
+    conn.attach_and_collect_agent_events_until(
+        "agent-int",
+        0,
         |e| matches!(e, AgentEvent::AssistantText { text, .. } if text == "interim answer"),
     );
 
