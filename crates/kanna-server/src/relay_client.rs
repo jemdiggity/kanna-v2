@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::{cloud_task_publisher::CloudTaskSnapshotEnvelope, config::Config};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,18 @@ pub enum RelayMessage {
         status: Option<u16>,
         #[serde(skip_serializing_if = "Option::is_none")]
         body: Option<serde_json::Value>,
+    },
+    #[serde(rename = "task_snapshot_publish")]
+    TaskSnapshotPublish {
+        id: String,
+        snapshot: CloudTaskSnapshotEnvelope,
+    },
+    #[serde(rename = "task_snapshot_ack")]
+    TaskSnapshotAck {
+        id: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     #[serde(rename = "event")]
     Event {
@@ -223,6 +235,24 @@ mod tests {
                 "tunnel_id": "tunnel-1"
             })
         );
+    }
+
+    #[test]
+    fn task_snapshot_ack_deserializes_for_server_retry_state() {
+        let message: super::RelayMessage = serde_json::from_value(serde_json::json!({
+            "type": "task_snapshot_ack",
+            "id": "task-snapshot-9",
+            "ok": false,
+            "error": "credential revoked"
+        }))
+        .expect("task snapshot ack should deserialize");
+
+        let super::RelayMessage::TaskSnapshotAck { id, ok, error } = message else {
+            panic!("expected task snapshot ack");
+        };
+        assert_eq!(id, "task-snapshot-9");
+        assert!(!ok);
+        assert_eq!(error.as_deref(), Some("credential revoked"));
     }
 
     #[test]

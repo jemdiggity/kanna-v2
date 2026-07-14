@@ -75,14 +75,14 @@ Cloud and relay data flow:
 - Signed-in mobile clients authenticate to the relay with a Firebase ID token.
 - The app reads Firestore task indexes under
   `users/{uid}/desktops/{desktopDocId}/tasks`.
-- Firestore rules restrict user documents, desktops, desktop tasks, and
-  transfers to the signed-in user's UID.
+- Firestore rules allow signed-in users to read their own desktop/task index;
+  task publication writes are restricted to the relay's Admin SDK.
 - The relay authenticates mobile WebSockets with Firebase Auth ID tokens and
   routes task requests/terminal streams to the user's desktop.
 - Relay server logs include connection/auth events that can include remote IP
   address, user ID, role, desktop ID, and error messages.
 
-Task data synced by the desktop:
+Task data synced by `kanna-server` through the authenticated relay:
 
 - Desktop display name and desktop ID.
 - User primary email on `users/{uid}` when available.
@@ -105,8 +105,9 @@ Sources:
 - `apps/mobile/src/lib/transports/lanTransport.ts`
 - `services/relay/src/index.ts`
 - `services/relay/src/auth.ts`
-- `apps/desktop/src/services/desktopCloudPublisher.ts`
-- `apps/desktop/src/utils/cloudTaskSnapshot.ts`
+- `apps/desktop/src/services/desktopCloudAssociation.ts`
+- `crates/kanna-server/src/cloud_task_publisher.rs`
+- `services/relay/src/cloudTaskPublication.ts`
 - `firestore.rules`
 
 ## App Privacy Label Guidance

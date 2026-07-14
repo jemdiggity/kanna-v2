@@ -1,0 +1,590 @@
+use crate::db::{SnapshotPipelineItem, UiSnapshot};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::time::{Duration, Instant};
+
+const MAX_PUBLISH_ATTEMPTS: u8 = 3;
+const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CloudTaskSnapshotEnvelope {
+    schema_version: u8,
+    desktop: CloudDesktopSnapshot,
+    tasks: Vec<CloudTaskSnapshot>,
+}
+
+impl CloudTaskSnapshotEnvelope {
+    pub(crate) fn fingerprint(&self) -> String {
+        serde_json::to_string(self).expect("cloud task snapshot must serialize")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudDesktopSnapshot {
+    display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudTaskSnapshot {
+    local_repo_id: String,
+    owner_desktop_id: String,
+    owner_local_task_id: String,
+    title: String,
+    prompt_snippet: Option<String>,
+    display_name: Option<String>,
+    stage: String,
+    activity: String,
+    status: String,
+    repo: CloudRepoSnapshot,
+    branch: Option<String>,
+    base_ref: Option<String>,
+    pr_number: Option<i64>,
+    pr_url: Option<String>,
+    agent: CloudAgentSnapshot,
+    transfer: CloudTransferSnapshot,
+    blocked_by_task_ids: Vec<String>,
+    created_at: String,
+    updated_at: String,
+    closed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudRepoSnapshot {
+    cloud_repo_id: String,
+    name: String,
+    remote_url: Option<String>,
+    remote_url_hash: Option<String>,
+    default_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CloudAgentSnapshot {
+    provider: String,
+    #[serde(rename = "type")]
+    execution_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudTransferSnapshot {
+    state: String,
+    transfer_id: Option<String>,
+    source_desktop_id: Option<String>,
+    destination_desktop_id: Option<String>,
+}
+
+pub(crate) fn map_ui_snapshot(
+    desktop_id: &str,
+    desktop_name: &str,
+    snapshot: UiSnapshot,
+) -> CloudTaskSnapshotEnvelope {
+    let blockers = snapshot.task_blockers.into_iter().fold(
+        HashMap::<String, Vec<String>>::new(),
+        |mut by_task, blocker| {
+            by_task
+                .entry(blocker.blocked_item_id)
+                .or_default()
+                .push(blocker.blocker_item_id);
+            by_task
+        },
+    );
+    let mut tasks = Vec::new();
+
+    for entry in snapshot.entries {
+        for item in entry.items {
+            let blocked_by_task_ids = blockers.get(&item.id).cloned().unwrap_or_default();
+            tasks.push(map_task(desktop_id, &entry.repo, item, blocked_by_task_ids));
+        }
+    }
+    tasks.sort_by(|left, right| {
+        left.local_repo_id
+            .cmp(&right.local_repo_id)
+            .then(left.owner_local_task_id.cmp(&right.owner_local_task_id))
+    });
+
+    CloudTaskSnapshotEnvelope {
+        schema_version: 1,
+        desktop: CloudDesktopSnapshot {
+            display_name: truncate(desktop_name, 256),
+        },
+        tasks,
+    }
+}
+
+fn map_task(
+    desktop_id: &str,
+    repo: &crate::db::SnapshotRepo,
+    item: SnapshotPipelineItem,
+    blocked_by_task_ids: Vec<String>,
+) -> CloudTaskSnapshot {
+    let prompt = item.prompt.unwrap_or_default();
+    let title = item
+        .display_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            prompt
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| item.id.clone());
+    let status = if item.closed_at.is_some() {
+        "done"
+    } else if !blocked_by_task_ids.is_empty() {
+        "blocked"
+    } else if item.stage == "pr" {
+        "pr"
+    } else {
+        "active"
+    };
+
+    let updated_at = item
+        .updated_at
+        .clone()
+        .or_else(|| item.created_at.clone())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".into());
+    let created_at = item
+        .created_at
+        .clone()
+        .unwrap_or_else(|| updated_at.clone());
+
+    CloudTaskSnapshot {
+        local_repo_id: repo.id.clone(),
+        owner_desktop_id: desktop_id.to_string(),
+        owner_local_task_id: item.id,
+        title: truncate(&title, 512),
+        prompt_snippet: (!prompt.is_empty()).then(|| prompt.chars().take(500).collect()),
+        display_name: truncate_option(item.display_name, 512),
+        stage: truncate(&item.stage, 64),
+        activity: truncate(&item.activity, 32),
+        status: status.into(),
+        repo: CloudRepoSnapshot {
+            cloud_repo_id: repo.id.clone(),
+            name: truncate(&repo.name, 256),
+            remote_url: truncate_option(repo.remote_url.clone(), 2048),
+            remote_url_hash: truncate_option(repo.remote_url_hash.clone(), 128),
+            default_branch: truncate_option(repo.default_branch.clone(), 512),
+        },
+        branch: truncate_option(item.branch, 512),
+        base_ref: truncate_option(item.base_ref, 512),
+        pr_number: item.pr_number,
+        pr_url: truncate_option(item.pr_url, 2048),
+        agent: CloudAgentSnapshot {
+            provider: truncate(&item.agent_provider, 64),
+            execution_type: truncate(&item.agent_type.unwrap_or_else(|| "pty".into()), 32),
+        },
+        transfer: CloudTransferSnapshot {
+            state: "none".into(),
+            transfer_id: None,
+            source_desktop_id: None,
+            destination_desktop_id: None,
+        },
+        blocked_by_task_ids: blocked_by_task_ids.into_iter().take(100).collect(),
+        created_at,
+        updated_at,
+        closed_at: item.closed_at,
+    }
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn truncate_option(value: Option<String>, max_chars: usize) -> Option<String> {
+    value.map(|value| truncate(&value, max_chars))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PublishRequest {
+    pub(crate) id: String,
+    pub(crate) snapshot: CloudTaskSnapshotEnvelope,
+}
+
+#[derive(Debug)]
+struct InFlight {
+    request: PublishRequest,
+    attempt: u8,
+    sent_at: Instant,
+}
+
+#[derive(Debug)]
+pub(crate) enum PublisherStep {
+    Publish(PublishRequest),
+    Reconnect,
+    Wait,
+}
+
+#[derive(Debug)]
+pub(crate) struct PublisherState {
+    authenticated: bool,
+    force_reconcile: bool,
+    latest: Option<CloudTaskSnapshotEnvelope>,
+    last_acked_fingerprint: Option<String>,
+    in_flight: Option<InFlight>,
+    retry_at: Option<(Instant, u8)>,
+    reconnect: bool,
+    next_id: u64,
+}
+
+impl PublisherState {
+    pub(crate) fn new() -> Self {
+        Self {
+            authenticated: false,
+            force_reconcile: false,
+            latest: None,
+            last_acked_fingerprint: None,
+            in_flight: None,
+            retry_at: None,
+            reconnect: false,
+            next_id: 1,
+        }
+    }
+
+    pub(crate) fn on_authenticated(&mut self) {
+        self.authenticated = true;
+        self.force_reconcile = true;
+        self.reconnect = false;
+    }
+
+    pub(crate) fn on_disconnected(&mut self) {
+        self.authenticated = false;
+        self.force_reconcile = true;
+        self.in_flight = None;
+        self.retry_at = None;
+        self.reconnect = false;
+    }
+
+    pub(crate) fn observe(&mut self, snapshot: CloudTaskSnapshotEnvelope) {
+        self.latest = Some(snapshot);
+    }
+
+    pub(crate) fn next_step(&mut self, now: Instant) -> PublisherStep {
+        if self.reconnect {
+            return PublisherStep::Reconnect;
+        }
+        if !self.authenticated {
+            return PublisherStep::Wait;
+        }
+        if let Some(in_flight) = self.in_flight.take() {
+            if now.duration_since(in_flight.sent_at) < ACK_TIMEOUT {
+                self.in_flight = Some(in_flight);
+                return PublisherStep::Wait;
+            }
+            self.schedule_failure(in_flight.attempt, now);
+        }
+        if self.reconnect {
+            return PublisherStep::Reconnect;
+        }
+
+        let attempt = match self.retry_at {
+            Some((ready_at, _)) if now < ready_at => return PublisherStep::Wait,
+            Some((_, attempt)) => attempt,
+            None => 1,
+        };
+        let Some(snapshot) = self.latest.clone() else {
+            return PublisherStep::Wait;
+        };
+        let fingerprint = snapshot.fingerprint();
+        if self.retry_at.is_none()
+            && !self.force_reconcile
+            && self.last_acked_fingerprint.as_deref() == Some(&fingerprint)
+        {
+            return PublisherStep::Wait;
+        }
+
+        self.retry_at = None;
+        self.force_reconcile = false;
+        let request = PublishRequest {
+            id: format!("task-snapshot-{}", self.next_id),
+            snapshot,
+        };
+        self.next_id += 1;
+        self.in_flight = Some(InFlight {
+            request: request.clone(),
+            attempt,
+            sent_at: now,
+        });
+        PublisherStep::Publish(request)
+    }
+
+    pub(crate) fn on_ack(
+        &mut self,
+        id: &str,
+        ok: bool,
+        _error: Option<String>,
+        now: Instant,
+    ) -> Result<(), String> {
+        let Some(in_flight) = self.in_flight.take() else {
+            return Err(format!("unexpected task snapshot acknowledgement {id}"));
+        };
+        if in_flight.request.id != id {
+            self.in_flight = Some(in_flight);
+            return Err(format!("task snapshot acknowledgement id mismatch: {id}"));
+        }
+        if ok {
+            self.last_acked_fingerprint = Some(in_flight.request.snapshot.fingerprint());
+            return Ok(());
+        }
+        self.schedule_failure(in_flight.attempt, now);
+        Ok(())
+    }
+
+    fn schedule_failure(&mut self, attempt: u8, now: Instant) {
+        if attempt >= MAX_PUBLISH_ATTEMPTS {
+            self.reconnect = true;
+        } else {
+            let delay = Duration::from_secs(1 << (attempt - 1));
+            self.retry_at = Some((now + delay, attempt + 1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_ui_snapshot, PublisherState, PublisherStep};
+    use crate::db::{
+        SnapshotEntry, SnapshotPipelineItem, SnapshotRepo, SnapshotTaskBlocker, UiSnapshot,
+    };
+    use std::collections::HashMap;
+    use tokio::time::{Duration, Instant};
+
+    fn ui_snapshot(activity: &str) -> UiSnapshot {
+        UiSnapshot {
+            entries: vec![SnapshotEntry {
+                repo: SnapshotRepo {
+                    id: "repo-1".into(),
+                    path: "/tmp/repo".into(),
+                    name: "Kanna".into(),
+                    default_branch: Some("main".into()),
+                    remote_url: Some("git@github.com:kanna/kanna.git".into()),
+                    remote_url_hash: Some("remote-hash".into()),
+                    hidden: 0,
+                    sort_order: 0,
+                    created_at: Some("2026-07-01 00:00:00".into()),
+                    last_opened_at: None,
+                },
+                items: vec![SnapshotPipelineItem {
+                    id: "task-1".into(),
+                    repo_id: "repo-1".into(),
+                    issue_number: None,
+                    issue_title: None,
+                    prompt: Some("Implement publication\nwith detail".into()),
+                    pipeline: "default".into(),
+                    pipeline_def: None,
+                    stage: "review".into(),
+                    pr_number: Some(42),
+                    pr_url: Some("https://github.com/kanna/kanna/pull/42".into()),
+                    branch: Some("feat/cloud".into()),
+                    closed_at: None,
+                    agent_type: Some("pty".into()),
+                    agent_provider: "codex".into(),
+                    activity: activity.into(),
+                    activity_changed_at: Some("2026-07-14 01:02:03".into()),
+                    unread_at: None,
+                    port_offset: None,
+                    display_name: Some("Cloud publication".into()),
+                    last_output_preview: None,
+                    port_env: None,
+                    agent_spawn_options: None,
+                    pinned: 0,
+                    pin_order: None,
+                    base_ref: Some("origin/main".into()),
+                    agent_session_id: None,
+                    teardown_started_at: None,
+                    parent_task_id: None,
+                    notify_task_id: None,
+                    notified_at: None,
+                    created_at: Some("2026-07-14 00:00:00".into()),
+                    updated_at: Some("2026-07-14 01:02:03".into()),
+                    has_running_post: 0,
+                }],
+            }],
+            task_blockers: vec![SnapshotTaskBlocker {
+                blocked_item_id: "task-1".into(),
+                blocker_item_id: "task-blocker".into(),
+            }],
+            worktree_paths: HashMap::new(),
+            settings: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn snapshot_mapping_preserves_mobile_cloud_schema_and_activity() {
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["desktop"]["displayName"], "Studio Mac");
+        assert_eq!(json["tasks"][0]["ownerDesktopId"], "desktop-1");
+        assert_eq!(json["tasks"][0]["ownerLocalTaskId"], "task-1");
+        assert_eq!(json["tasks"][0]["localRepoId"], "repo-1");
+        assert_eq!(json["tasks"][0]["title"], "Cloud publication");
+        assert_eq!(
+            json["tasks"][0]["promptSnippet"],
+            "Implement publication\nwith detail"
+        );
+        assert_eq!(json["tasks"][0]["activity"], "working");
+        assert_eq!(json["tasks"][0]["status"], "blocked");
+        assert_eq!(
+            json["tasks"][0]["blockedByTaskIds"],
+            serde_json::json!(["task-blocker"])
+        );
+        assert_eq!(
+            json["tasks"][0]["repo"]["remoteUrl"],
+            "git@github.com:kanna/kanna.git"
+        );
+        assert_eq!(json["tasks"][0]["repo"]["remoteUrlHash"], "remote-hash");
+        assert_eq!(json["tasks"][0]["branch"], "feat/cloud");
+        assert_eq!(json["tasks"][0]["baseRef"], "origin/main");
+        assert_eq!(json["tasks"][0]["prNumber"], 42);
+        assert_eq!(
+            json["tasks"][0]["agent"],
+            serde_json::json!({"provider":"codex","type":"pty"})
+        );
+    }
+
+    #[test]
+    fn activity_only_change_changes_snapshot_fingerprint() {
+        let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
+        let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        assert_ne!(idle.fingerprint(), working.fingerprint());
+    }
+
+    #[test]
+    fn snapshot_mapping_bounds_user_controlled_strings_for_the_relay_contract() {
+        let mut source = ui_snapshot("working");
+        source.entries[0].repo.name = "r".repeat(300);
+        source.entries[0].items[0].display_name = Some("t".repeat(600));
+        source.entries[0].items[0].stage = "s".repeat(100);
+        let snapshot = map_ui_snapshot("desktop-1", &"d".repeat(300), source);
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(
+            json["desktop"]["displayName"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            256
+        );
+        assert_eq!(
+            json["tasks"][0]["title"].as_str().unwrap().chars().count(),
+            512
+        );
+        assert_eq!(
+            json["tasks"][0]["displayName"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            512
+        );
+        assert_eq!(
+            json["tasks"][0]["stage"].as_str().unwrap().chars().count(),
+            64
+        );
+        assert_eq!(
+            json["tasks"][0]["repo"]["name"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            256
+        );
+    }
+
+    #[test]
+    fn publisher_coalesces_to_latest_snapshot_with_one_in_flight() {
+        let now = Instant::now();
+        let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
+        let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        let mut state = PublisherState::new();
+        state.on_authenticated();
+        state.observe(idle);
+
+        let PublisherStep::Publish(first) = state.next_step(now) else {
+            panic!("expected publish")
+        };
+        state.observe(working.clone());
+        assert!(matches!(state.next_step(now), PublisherStep::Wait));
+        state.on_ack(&first.id, true, None, now).unwrap();
+        let PublisherStep::Publish(second) = state.next_step(now) else {
+            panic!("expected coalesced publish")
+        };
+        assert_eq!(second.snapshot.fingerprint(), working.fingerprint());
+    }
+
+    #[test]
+    fn publisher_retries_with_backoff_then_requests_reconnect() {
+        let now = Instant::now();
+        let mut state = PublisherState::new();
+        state.on_authenticated();
+        state.observe(map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            ui_snapshot("idle"),
+        ));
+
+        for attempt in 1..=3 {
+            let PublisherStep::Publish(request) =
+                state.next_step(now + Duration::from_secs(attempt * 10))
+            else {
+                panic!("expected publish attempt {attempt}");
+            };
+            state
+                .on_ack(&request.id, false, Some("write failed".into()), now)
+                .unwrap();
+        }
+        assert!(matches!(
+            state.next_step(now + Duration::from_secs(60)),
+            PublisherStep::Reconnect
+        ));
+    }
+
+    #[test]
+    fn authenticated_reconnect_forces_reconciliation_of_unchanged_snapshot() {
+        let now = Instant::now();
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
+        let mut state = PublisherState::new();
+        state.on_authenticated();
+        state.observe(snapshot.clone());
+        let PublisherStep::Publish(first) = state.next_step(now) else {
+            panic!("expected first")
+        };
+        state.on_ack(&first.id, true, None, now).unwrap();
+        assert!(matches!(state.next_step(now), PublisherStep::Wait));
+
+        state.on_disconnected();
+        state.on_authenticated();
+        state.observe(snapshot);
+        assert!(matches!(state.next_step(now), PublisherStep::Publish(_)));
+    }
+
+    #[test]
+    fn publisher_times_out_an_unacknowledged_request_and_retries() {
+        let now = Instant::now();
+        let mut state = PublisherState::new();
+        state.on_authenticated();
+        state.observe(map_ui_snapshot(
+            "desktop-1",
+            "Studio Mac",
+            ui_snapshot("idle"),
+        ));
+        assert!(matches!(state.next_step(now), PublisherStep::Publish(_)));
+        assert!(matches!(
+            state.next_step(now + Duration::from_secs(16)),
+            PublisherStep::Wait
+        ));
+        assert!(matches!(
+            state.next_step(now + Duration::from_secs(18)),
+            PublisherStep::Publish(_)
+        ));
+    }
+}

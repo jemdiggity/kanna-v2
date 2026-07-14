@@ -24,6 +24,7 @@ export interface CloudTaskSnapshot {
   promptSnippet?: string | null;
   displayName?: string | null;
   stage: string;
+  activity?: string;
   status?: string;
   repo: { cloudRepoId: string; name: string };
   agent?: { provider?: string | null; type?: string | null } | null;
@@ -258,6 +259,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     promptSnippet: optionalNullableString(value.promptSnippet),
     displayName: optionalNullableString(value.displayName),
     stage: requiredString(value.stage, "stage"),
+    activity: optionalString(value.activity),
     status: optionalString(value.status),
     repo: {
       cloudRepoId: requiredString(value.repo.cloudRepoId, "repo.cloudRepoId"),
@@ -309,6 +311,7 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     repoName: snapshot.repo.name,
     title: snapshot.displayName ?? snapshot.title,
     stage: snapshot.stage,
+    ...(snapshot.activity ? { activity: snapshot.activity } : {}),
     snippet: snapshot.promptSnippet ?? undefined,
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),

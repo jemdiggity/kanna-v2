@@ -12,6 +12,10 @@ let testRepoPath = "";
 let secondaryRepoId = "";
 let primaryRepoId = "";
 let primaryDesktopId = "";
+let primaryLanPort = 0;
+let initialPrimaryTaskCount = 0;
+let initialPrimaryOpenTaskCount = 0;
+let initialSecondaryTaskCount = 0;
 let testRepoRemoteUrl: string | null = null;
 let testRepoRemoteUrlHash: string | null = null;
 
@@ -168,6 +172,19 @@ async function countOpenLocalTasks(client: typeof primary): Promise<number> {
 }
 
 async function signOut(client: typeof primary): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const sessionReady = await client.executeSync<boolean>(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      const session = ctx.desktopAuthSession?.__v_isRef
+        ? ctx.desktopAuthSession.value
+        : ctx.desktopAuthSession;
+      return Boolean(session);
+    `);
+    if (sessionReady) break;
+    await sleep(100);
+  }
+
   const result = await client.executeAsync(`
     const cb = arguments[arguments.length - 1];
     const ctx = window.__KANNA_E2E__.setupState;
@@ -196,11 +213,11 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
     const ctx = window.__KANNA_E2E__.setupState;
     const value = ctx.sidebarItems?.__v_isRef ? ctx.sidebarItems.value : ctx.sidebarItems;
     return JSON.parse(JSON.stringify(value.filter((item) => item.prompt === ${JSON.stringify(prompt)}).map((item) => ({
-      id: item.id,
+      id: item.task_id,
       prompt: item.prompt,
       repo_id: item.repo_id,
       stage: item.stage,
-      isRemote: item.id.startsWith("cloud:") || item.id.startsWith("lan:"),
+      isRemote: Boolean(item.remote_task),
     }))));
   `);
 }
@@ -265,18 +282,73 @@ function hashRemoteUrl(remoteUrl: string | null | undefined): string | null {
   return createHash("sha256").update(remoteUrl.trim()).digest("hex");
 }
 
-async function waitForRunningMobileServerStatus(client: typeof primary): Promise<{ desktopId: string }> {
+async function waitForRunningMobileServerStatus(client: typeof primary): Promise<{ desktopId: string; lanPort: number }> {
   const deadline = Date.now() + 30_000;
   let lastStatus: unknown = null;
   while (Date.now() < deadline) {
     lastStatus = await tauriInvoke(client, "mobile_server_status").catch((error) => ({ error: String(error) }));
-    const status = lastStatus as { state?: string; desktopId?: string };
-    if (status.state === "running" && status.desktopId?.match(/^desktop-/)) {
-      return { desktopId: status.desktopId };
+    const status = lastStatus as { state?: string; desktopId?: string; lanPort?: number };
+    if (status.state === "running" && status.desktopId?.match(/^desktop-/) && status.lanPort) {
+      return { desktopId: status.desktopId, lanPort: status.lanPort };
     }
     await sleep(250);
   }
   throw new Error(`timed out waiting for running mobile server status; last status=${JSON.stringify(lastStatus)}`);
+}
+
+async function waitForPublishedTaskActivity(input: {
+  desktopId: string;
+  ownerLocalTaskId: string;
+  activity: string;
+}): Promise<void> {
+  const firestorePort = process.env.KANNA_FIREBASE_FIRESTORE_PORT;
+  if (!firestorePort) throw new Error("KANNA_FIREBASE_FIRESTORE_PORT is required");
+  const { idToken, localId } = await signInForIdToken();
+  const path = `users/${localId}/desktops/${input.desktopId}/tasks`;
+  const deadline = Date.now() + 30_000;
+  let lastDocuments: unknown = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(firestoreDocumentUrl(firestorePort, path), {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    const body = await response.json().catch(() => null) as {
+      documents?: Array<{ fields?: Record<string, { stringValue?: string }> }>;
+    } | null;
+    lastDocuments = body;
+    const task = body?.documents?.find((document) =>
+      document.fields?.ownerLocalTaskId?.stringValue === input.ownerLocalTaskId);
+    if (task?.fields?.activity?.stringValue === input.activity) return;
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for published ${input.activity} activity: ${JSON.stringify(lastDocuments)}`);
+}
+
+async function waitForDesktopCredentialRevocationState(input: {
+  desktopId: string;
+  revoked: boolean;
+}): Promise<void> {
+  const firestorePort = process.env.KANNA_FIREBASE_FIRESTORE_PORT;
+  if (!firestorePort) throw new Error("KANNA_FIREBASE_FIRESTORE_PORT is required");
+  const path = `desktopCredentials/${input.desktopId.replace(/\//g, "_")}`;
+  const deadline = Date.now() + 30_000;
+  let lastDocument: unknown = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(firestoreDocumentUrl(firestorePort, path), {
+      headers: { Authorization: "Bearer owner" },
+    });
+    const body = await response.json().catch(() => null) as {
+      fields?: { revokedAt?: { nullValue?: null; timestampValue?: string } };
+    } | null;
+    lastDocument = body;
+    const revokedAt = body?.fields?.revokedAt;
+    if (response.ok && (input.revoked ? Boolean(revokedAt?.timestampValue) : revokedAt?.nullValue === null)) {
+      return;
+    }
+    await sleep(250);
+  }
+  throw new Error(
+    `timed out waiting for desktop credential revoked=${input.revoked}: ${JSON.stringify(lastDocument)}`,
+  );
 }
 
 async function seedCloudTaskSnapshot(snapshot: Record<string, unknown>): Promise<void> {
@@ -292,8 +364,7 @@ async function seedCloudTaskSnapshot(snapshot: Record<string, unknown>): Promise
     : `${ownerDesktopId}:${readRequiredString(snapshot, "ownerLocalTaskId")}`;
   const taskDocId = deterministicFirestoreDocId(`task:${cloudTaskId}`);
 
-  await writeFirestoreEmulatorDocument({
-    idToken,
+  await writeFirestoreEmulatorAdminDocument({
     firestorePort,
     path: `users/${localId}/desktops/${desktopDocId}`,
     data: {
@@ -301,8 +372,7 @@ async function seedCloudTaskSnapshot(snapshot: Record<string, unknown>): Promise
       updatedAt: readRequiredString(snapshot, "updatedAt"),
     },
   });
-  await writeFirestoreEmulatorDocument({
-    idToken,
+  await writeFirestoreEmulatorAdminDocument({
     firestorePort,
     path: `users/${localId}/desktops/${desktopDocId}/tasks/${taskDocId}`,
     data: snapshot,
@@ -354,8 +424,7 @@ function readRequiredString(record: Record<string, unknown>, key: string): strin
   return value;
 }
 
-async function writeFirestoreEmulatorDocument(input: {
-  idToken: string;
+async function writeFirestoreEmulatorAdminDocument(input: {
   firestorePort: string;
   path: string;
   data: Record<string, unknown>;
@@ -363,7 +432,9 @@ async function writeFirestoreEmulatorDocument(input: {
   const response = await fetch(firestoreDocumentUrl(input.firestorePort, input.path), {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${input.idToken}`,
+      // The emulator owner token models the relay's Firebase Admin write.
+      // Signed-in renderer clients are intentionally denied by firestore.rules.
+      Authorization: "Bearer owner",
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ fields: toFirestoreFields(input.data) }),
@@ -618,7 +689,9 @@ describe("cloud task sync", () => {
     await resetDatabase(primary);
     await resetDatabase(secondary);
     testRepoPath = await createFixtureRepo("cloud-task-sync-source");
-    primaryDesktopId = (await waitForRunningMobileServerStatus(primary)).desktopId;
+    const primaryServer = await waitForRunningMobileServerStatus(primary);
+    primaryDesktopId = primaryServer.desktopId;
+    primaryLanPort = primaryServer.lanPort;
     primaryRepoId = await importTestRepo(primary, testRepoPath, "cloud-sync-repo");
     secondaryRepoId = await importTestRepo(secondary, testRepoPath, "cloud-sync-repo-secondary");
     testRepoRemoteUrl = await tauriInvoke(primary, "git_remote_url", { repoPath: testRepoPath }) as string | null;
@@ -696,6 +769,9 @@ describe("cloud task sync", () => {
 
     await signIn(primary);
     await signIn(secondary);
+    initialPrimaryTaskCount = await countLocalTasks(primary);
+    initialPrimaryOpenTaskCount = await countOpenLocalTasks(primary);
+    initialSecondaryTaskCount = await countLocalTasks(secondary);
   }, 240_000);
 
   afterAll(async () => {
@@ -728,9 +804,9 @@ describe("cloud task sync", () => {
   });
 
   it("shows a task created on one signed-in desktop on another signed-in desktop", async () => {
-    expect(await countLocalTasks(primary)).toBe(1);
-    expect(await countOpenLocalTasks(primary)).toBe(0);
-    expect(await countLocalTasks(secondary)).toBe(0);
+    expect(await countLocalTasks(primary)).toBe(initialPrimaryTaskCount);
+    expect(await countOpenLocalTasks(primary)).toBe(initialPrimaryOpenTaskCount);
+    expect(await countLocalTasks(secondary)).toBe(initialSecondaryTaskCount);
 
     await seedCloudTaskSnapshot({
       cloudTaskId: "stale-cloud-task",
@@ -785,8 +861,8 @@ describe("cloud task sync", () => {
     }
 
     await waitForSidebarTask(primary, "Cloud sync visible task");
-    expect(await countLocalTasks(primary)).toBe(2);
-    expect(await countOpenLocalTasks(primary)).toBe(1);
+    expect(await countLocalTasks(primary)).toBe(initialPrimaryTaskCount + 1);
+    expect(await countOpenLocalTasks(primary)).toBe(initialPrimaryOpenTaskCount + 1);
     expect(await sidebarItemsForPrompt(primary, "Cloud sync visible task")).toEqual([
       expect.objectContaining({
         id: result,
@@ -794,6 +870,45 @@ describe("cloud task sync", () => {
         stage: "in progress",
       }),
     ]);
+
+    await execDb(primary, "UPDATE pipeline_item SET activity = 'idle', updated_at = datetime('now') WHERE id = ?", [result]);
+    await waitForPublishedTaskActivity({
+      desktopId: primaryDesktopId,
+      ownerLocalTaskId: result,
+      activity: "idle",
+    });
+    const workingResponse = await fetch(
+      `http://127.0.0.1:${primaryLanPort}/v1/tasks/${encodeURIComponent(result)}/actions/runtime-status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "busy", selected: false }),
+      },
+    );
+    expect(workingResponse.ok).toBe(true);
+    await waitForPublishedTaskActivity({
+      desktopId: primaryDesktopId,
+      ownerLocalTaskId: result,
+      activity: "working",
+    });
+
+    await signOut(primary);
+    await waitForDesktopCredentialRevocationState({
+      desktopId: primaryDesktopId,
+      revoked: true,
+    });
+    await execDb(primary, "UPDATE pipeline_item SET activity = 'idle', updated_at = datetime('now') WHERE id = ?", [result]);
+
+    await signIn(primary);
+    await waitForDesktopCredentialRevocationState({
+      desktopId: primaryDesktopId,
+      revoked: false,
+    });
+    await waitForPublishedTaskActivity({
+      desktopId: primaryDesktopId,
+      ownerLocalTaskId: result,
+      activity: "idle",
+    });
 
     await sleep(1000);
     await waitForSidebarTask(secondary, "Cloud sync visible task");
@@ -824,7 +939,7 @@ describe("cloud task sync", () => {
       selectedTerminalTransport: "none",
       sources: expect.arrayContaining(["cloud"]),
     }));
-    expect(await countLocalTasks(secondary)).toBe(0);
+    expect(await countLocalTasks(secondary)).toBe(initialSecondaryTaskCount);
 
     const synced = await waitForCloudTaskSnapshot(secondary, "Cloud sync visible task");
     expect(synced.terminalRef).toEqual({
@@ -953,7 +1068,7 @@ describe("cloud task sync", () => {
     // remote task is "cloud", i.e. the relay websocket (desktopRelayTerminal.ts
     // observe_session over KANNA_RELAY_PORT). Everything asserted below from
     // the secondary's terminal therefore traversed the relay.
-    expect(await countLocalTasks(secondary)).toBe(0);
+    expect(await countLocalTasks(secondary)).toBe(initialSecondaryTaskCount);
     expect(await remoteDiagnosticsForPrompt(secondary, prompt)).toContainEqual(
       expect.objectContaining({
         selectedTerminalTransport: "cloud",
@@ -1074,7 +1189,7 @@ describe("cloud task sync", () => {
          const value = ctx.sidebarItems?.__v_isRef ? ctx.sidebarItems.value : ctx.sidebarItems;
          states.push(JSON.parse(JSON.stringify((value || [])
            .filter((item) => item.prompt === prompt)
-           .map((item) => ({ id: item.id, isRemote: item.remote_task === true })))));
+           .map((item) => ({ id: item.task_id, isRemote: item.remote_task === true })))));
        };
        read();
        const sampler = setInterval(read, 10);

@@ -83,7 +83,8 @@ const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
     return vi.fn();
   }),
 );
-const reconcileDesktopTaskSnapshotsMock = vi.hoisted(() => vi.fn(async () => {}));
+const associateDesktopCloudCredentialMock = vi.hoisted(() => vi.fn(async () => {}));
+const desktopAuthStateListeners = vi.hoisted(() => new Set<(state: unknown) => void>());
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -366,11 +367,12 @@ vi.mock("./services/desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
     initialize: vi.fn(async () => {}),
     subscribe: vi.fn((handler: (state: unknown) => void) => {
+      desktopAuthStateListeners.add(handler);
       handler({
         status: "signedIn",
         user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
       });
-      return () => {};
+      return () => desktopAuthStateListeners.delete(handler);
     }),
   })),
 }));
@@ -381,9 +383,8 @@ vi.mock("./services/desktopCloudTaskIndex", () => ({
   subscribeDesktopCloudTasks: subscribeDesktopCloudTasksMock,
 }));
 
-vi.mock("./services/desktopCloudPublisher", () => ({
-  deleteRemoteTaskSnapshots: vi.fn(async () => {}),
-  reconcileDesktopTaskSnapshots: reconcileDesktopTaskSnapshotsMock,
+vi.mock("./services/desktopCloudAssociation", () => ({
+  associateDesktopCloudCredential: associateDesktopCloudCredentialMock,
 }));
 
 vi.mock("./services/desktopRelayTerminal", () => ({
@@ -729,8 +730,9 @@ describe("App", () => {
     cloudTasksMock.mockReset();
     cloudTasksMock.mockResolvedValue({ repos: [], items: [] });
     subscribeDesktopCloudTasksMock.mockClear();
-    reconcileDesktopTaskSnapshotsMock.mockReset();
-    reconcileDesktopTaskSnapshotsMock.mockResolvedValue(undefined);
+    desktopAuthStateListeners.clear();
+    associateDesktopCloudCredentialMock.mockReset();
+    associateDesktopCloudCredentialMock.mockResolvedValue(undefined);
     appUpdateStartMock.mockClear();
     appUpdateMock.dispose.mockClear();
     appUpdateMock.dismiss.mockClear();
@@ -776,29 +778,29 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("reconciles cloud task snapshots on sign-in without periodic writes", async () => {
+  it("associates the desktop credential on sign-in without renderer task publication", async () => {
     vi.useFakeTimers();
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
 
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledWith(dbMock);
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(1);
 
-    reconcileDesktopTaskSnapshotsMock.mockClear();
+    associateDesktopCloudCredentialMock.mockClear();
     cloudTasksMock.mockClear();
 
     await vi.advanceTimersByTimeAsync(1000);
     await flushPromises();
 
-    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
+    expect(associateDesktopCloudCredentialMock).not.toHaveBeenCalled();
     expect(cloudTasksMock).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });
 
-  it("shows one toast when sign-in cloud reconciliation fails", async () => {
+  it("shows one toast when desktop credential association fails", async () => {
     vi.useFakeTimers();
-    reconcileDesktopTaskSnapshotsMock.mockRejectedValueOnce(
+    associateDesktopCloudCredentialMock.mockRejectedValueOnce(
       Object.assign(new Error("Missing or insufficient permissions."), { code: "permission-denied" }),
     );
 
@@ -807,6 +809,48 @@ describe("App", () => {
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).toHaveBeenCalledWith("Cloud sync failed: permission-denied");
+
+    wrapper.unmount();
+  });
+
+  it("retries desktop credential association after a transient failure", async () => {
+    associateDesktopCloudCredentialMock
+      .mockRejectedValueOnce(new Error("temporary association failure"))
+      .mockResolvedValueOnce(undefined);
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 1);
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+      });
+    }
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 2);
+
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(2);
+
+    wrapper.unmount();
+  });
+
+  it("re-associates the same user after signed-out state revokes the credential", async () => {
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 1);
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({ status: "signedOut" });
+    }
+    await flushPromises();
+    for (const listener of desktopAuthStateListeners) {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+      });
+    }
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 2);
+
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(2);
 
     wrapper.unmount();
   });

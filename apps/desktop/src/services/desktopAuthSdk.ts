@@ -114,6 +114,8 @@ export function createFirebaseDesktopAuthSdk(auth: Auth, _app: FirebaseApp): Des
       return mapSignedInFirebaseUser(credential.user);
     },
     async signOut() {
+      const { revokeDesktopCloudCredential } = await import("./desktopCloudAssociation");
+      await revokeDesktopCloudCredential();
       await firebaseSignOut(auth);
     },
     async getIdToken(forceRefresh) {

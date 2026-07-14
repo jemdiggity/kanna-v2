@@ -38,6 +38,7 @@ const appUpdate = useAppUpdate();
 useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 store.attachWindowWorkspace(windowWorkspace);
 const {
+  desktopAuthSession,
   cloudSnapshot,
   lanSnapshot,
   selectedCloudRepoId,
@@ -62,6 +63,7 @@ const {
   disposeDesktopCloudWorkspace,
 } = useAppCloudWorkspace({ db, store, toast, windowWorkspace });
 if (import.meta.env.DEV) {
+  void desktopAuthSession;
   void cloudSnapshot;
   void lanSnapshot;
 }

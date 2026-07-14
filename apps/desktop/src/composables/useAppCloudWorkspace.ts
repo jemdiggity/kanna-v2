@@ -1,4 +1,4 @@
-import { computed, ref, watch, watchEffect, type ComputedRef } from "vue";
+import { computed, ref, watchEffect, type ComputedRef } from "vue";
 import { computedAsync } from "@vueuse/core";
 import type { DbHandle, PipelineItem } from "../types/kanna";
 import type { SidebarTaskItem } from "../types/taskUi";
@@ -13,12 +13,11 @@ import {
 } from "../services/desktopCloudTaskIndex";
 import { invoke } from "../invoke";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
-import { deleteRemoteTaskSnapshots, reconcileDesktopTaskSnapshots } from "../services/desktopCloudPublisher";
+import { associateDesktopCloudCredential } from "../services/desktopCloudAssociation";
 import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import { createConfiguredDesktopRelayTerminalClient } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
 import { fetchClosedTaskIdentities } from "../services/desktopServerClient";
-import { computeTaskSnapshotFingerprint } from "../utils/cloudTaskFingerprint";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
 import { buildWorkspace } from "../workspace/buildWorkspace";
 import { createWorkspaceSidebarProjector } from "../workspace/projectWorkspaceTasksForSidebar";
@@ -51,8 +50,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let subscribedCloudUid: string | null = null;
   let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
-  const reconciledCloudSnapshotUsers = new Set<string>();
-  let lastPublishedTaskFingerprint: string | null = null;
+  const associatedCloudUsers = new Set<string>();
   let lastCloudBackendErrorToastAt: number | null = null;
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
@@ -298,24 +296,6 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     subscribedCloudUid = null;
   }
 
-  // Publish (reconcile) only when the local open-task set actually changed.
-  // Writes are event-driven now — no periodic reconcile poll.
-  function publishLocalTaskChangesIfNeeded(): void {
-    if (desktopAuthState.value.status !== "signedIn") return;
-    const fingerprint = computeTaskSnapshotFingerprint(store.items);
-    if (fingerprint === lastPublishedTaskFingerprint) return;
-    lastPublishedTaskFingerprint = fingerprint;
-    void reconcileDesktopTaskSnapshots(db).catch((error) => {
-      console.warn("[cloud] failed to publish local task snapshot change:", error);
-      showCloudBackendErrorToast(error);
-    });
-  }
-
-  watch(
-    () => computeTaskSnapshotFingerprint(store.items),
-    () => publishLocalTaskChangesIfNeeded(),
-  );
-
   async function refreshLanTasks(): Promise<void> {
     await publishDesktopLanTaskSnapshot(db);
     const snapshot = await listDesktopLanTasks({
@@ -337,16 +317,16 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     unsubscribeDesktopAuth = session.subscribe((state) => {
       desktopAuthState.value = state;
       if (state.status === "signedIn") {
-        if (!reconciledCloudSnapshotUsers.has(state.user.uid)) {
-          reconciledCloudSnapshotUsers.add(state.user.uid);
-          void reconcileDesktopTaskSnapshots(db)
+        if (!associatedCloudUsers.has(state.user.uid)) {
+          void associateDesktopCloudCredential()
             .then(() => {
-              // Seed the fingerprint so the change watcher doesn't immediately
-              // republish what we just reconciled on sign-in.
-              lastPublishedTaskFingerprint = computeTaskSnapshotFingerprint(store.items);
+              const currentState = desktopAuthState.value;
+              if (currentState.status === "signedIn" && currentState.user.uid === state.user.uid) {
+                associatedCloudUsers.add(state.user.uid);
+              }
             })
             .catch((error) => {
-              console.warn("[cloud] failed to reconcile local task snapshots:", error);
+              console.warn("[cloud] failed to associate desktop credential:", error);
               showCloudBackendErrorToast(error);
             });
         }
@@ -357,6 +337,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         });
         startCloudTaskSubscription(state.user.uid);
       } else {
+        associatedCloudUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
       }
@@ -410,7 +391,6 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,
       });
-      deleteRemoteCloudTaskMetadata(workspaceTask);
       markWorkspaceTaskLocallyClosed(workspaceTask);
       const currentPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
       if (closingPresentationSlotId && currentPresentationSlotId === closingPresentationSlotId) {
@@ -430,35 +410,6 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     } finally {
       client.close();
     }
-  }
-
-  function deleteRemoteCloudTaskMetadata(workspaceTask: WorkspaceTask): void {
-    for (const source of workspaceTask.sources) {
-      if (source.kind !== "cloud" || !source.terminalRef) continue;
-      void deleteRemoteTaskSnapshots({
-        ownerDesktopId: source.terminalRef.ownerDesktopId,
-        localRepoId: source.terminalRef.ownerLocalRepoId
-          ?? resolveRemoteCloseLocalRepoId(workspaceTask, source.taskId, source.terminalRef.ownerLocalTaskId),
-        ownerLocalTaskId: source.terminalRef.ownerLocalTaskId,
-      }).catch((error) => {
-        console.warn("[cloud] failed to delete remote task metadata:", error);
-      });
-    }
-  }
-
-  function resolveRemoteCloseLocalRepoId(
-    workspaceTask: WorkspaceTask,
-    sourceTaskId: string,
-    ownerLocalTaskId: string,
-  ): string {
-    if (!workspaceTask.item.repo_id.startsWith("cloud:")) return workspaceTask.item.repo_id;
-    const unprefixed = sourceTaskId.startsWith("cloud:")
-      ? sourceTaskId.slice("cloud:".length)
-      : sourceTaskId;
-    const suffix = `:${ownerLocalTaskId}`;
-    return unprefixed.endsWith(suffix)
-      ? unprefixed.slice(0, -suffix.length)
-      : workspaceTask.item.repo_id.slice("cloud:".length);
   }
 
   async function advanceSelectedRemoteWorkspaceTask(

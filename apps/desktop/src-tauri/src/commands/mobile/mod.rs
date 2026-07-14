@@ -350,7 +350,7 @@ pub async fn create_mobile_pairing_session(
 }
 
 /// Expose the desktop's cloud credential to the frontend so a signed-in user
-/// can register this desktop in Firestore (`users/{uid}/desktops`). Only the
+/// can register this desktop in Firestore (`desktopCredentials/{desktopId}`). Only the
 /// SHA-256 hash of the secret crosses into the webview; the relay compares
 /// the hash, so the plain secret never leaves the Rust side.
 #[tauri::command]

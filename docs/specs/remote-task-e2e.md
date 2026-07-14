@@ -94,11 +94,11 @@ Status key: ✅ landed.
    `docs/2026-06-12-relay-desktop-credential-bootstrap.md`; Kanna deploys no
    Cloud Functions). The current flow: desktop persists
    `desktop_id`+`desktop_secret` in `desktop-identity.json`/`server.toml`;
-   the signed-in desktop app (`desktopCloudPublisher.ts`) upserts the SHA-256
-   `desktopSecretHash` onto `users/{uid}/desktops` per `firestore.rules` (the
+   the signed-in desktop credential bootstrap upserts the SHA-256
+   `desktopSecretHash` onto `desktopCredentials/{desktopId}` per `firestore.rules` (the
    plain secret never enters Firestore); the relay verifies the presented
    secret against the hash (timing-safe). E2E: provision the doc the way the
-   publisher does (as signed-in Buffy), assert relay auth succeeds with the
+   bootstrap does (as signed-in Buffy), assert relay auth succeeds with the
    right secret and rejects a wrong secret and a `revokedAt` doc. Pairing
    codes grant LAN/local trust rather than cloud credentials; an authenticated
    relay client may request their creation through `create_pairing_session`.
