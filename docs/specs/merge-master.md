@@ -69,8 +69,14 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 - Signal payload shape: free text typed into the session (matches the
   notify boundary) vs a structured queue the master polls. Start with
   typed text — it is the existing boundary and survives agent swaps.
-- Whether the default pipeline ships the approve post or it stays an
-  opt-in example. Default-off until the singleton endpoint exists.
+- ~~Whether the default pipeline ships the approve post or it stays an
+  opt-in example. Default-off until the singleton endpoint exists.~~
+  Resolved: the singleton signal endpoint
+  (`POST /v1/repos/{repo_id}/agents/{agent}/signal`) exists, and both the
+  default and qa pipelines ship the approve post on their pr stage.
+  Approval UI derives merge behavior from the task's pinned
+  `pipeline_def`, so pre-change snapshots and custom pipelines without
+  the post keep a plain approve that only advances.
 - Merge master crash recovery: resume via the persisted resume-session id
   vs re-reading a durable journal. Journal preferred if residency ever
   becomes flaky.

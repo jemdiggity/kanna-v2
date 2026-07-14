@@ -502,6 +502,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
+  if (group === "test" && command === "rust") {
+    return { taskId: "test.rust", input: {} };
+  }
   if (group === "test" && command === "app-update-bundle") {
     return { taskId: "test.app-update-bundle", input: {} };
   }
@@ -607,6 +610,7 @@ const helpTopics: Record<string, string[]> = {
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
+    "  test rust",
     "  test app-update-bundle",
     "  test cloud-emulator",
     "  test cloud-staging",
@@ -936,12 +940,18 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd test <command>",
     "",
     "Commands:",
+    "  test rust",
     "  test app-update-bundle",
     "  test cloud-emulator",
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
     "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]"
+  ],
+  "test rust": [
+    "Usage: kd test rust",
+    "",
+    "Run workspace Rust tests with daemon integration tests serialized."
   ],
   "test app-update-bundle": [
     "Usage: kd test app-update-bundle",

@@ -1,3 +1,4 @@
+import { isAgentProvider, type AgentProvider } from "@kanna/agent-protocol";
 import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
@@ -46,6 +47,7 @@ export interface DesktopServerClientHandlersForTests {
   blockTask?: (taskId: string, blockerTaskIds: string[]) => MaybePromise<void>;
   unblockTask?: (taskId: string) => MaybePromise<void>;
   addRepo?: (input: AddDesktopRepoInput) => MaybePromise<DesktopRepoResponse>;
+  fetchRepoAgentProviders?: (repoId: string) => MaybePromise<AgentProvider[]>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
   fetchPendingIncomingTransfers?: () => MaybePromise<PendingIncomingTransfer[]>;
@@ -197,6 +199,20 @@ export async function createDesktopTask(
     method: "POST",
     body: request,
   });
+}
+
+interface DesktopRepoAgentProvidersResponse {
+  providers: Array<{ id: string; executable: string }>;
+}
+
+export async function fetchDesktopRepoAgentProviders(repoId: string): Promise<AgentProvider[]> {
+  if (clientHandlersForTests?.fetchRepoAgentProviders) {
+    return await clientHandlersForTests.fetchRepoAgentProviders(repoId);
+  }
+  const response = await requestJson<DesktopRepoAgentProvidersResponse>(
+    `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`,
+  );
+  return response.providers.map(({ id }) => id).filter(isAgentProvider);
 }
 
 export interface DesktopSettingResponse {

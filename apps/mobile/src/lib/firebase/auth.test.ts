@@ -46,6 +46,73 @@ function createSdkMock(initialUser: MobileAuthUser | null = null): MobileAuthSdk
 }
 
 describe("createMobileAuthSession", () => {
+  it("waits for the first authoritative auth observation", async () => {
+    const restoredUser = createUser("restored-user", "restored@kanna.test");
+    const sdk = createSdkMock();
+    let observeAuthState: ((user: MobileAuthUser | null) => void) | undefined;
+    sdk.onAuthStateChanged = vi.fn((listener) => {
+      observeAuthState = listener;
+      return () => undefined;
+    });
+    const session = createMobileAuthSession({ sdk });
+    let initialized = false;
+
+    const initialization = session.initialize().then(() => {
+      initialized = true;
+    });
+    await Promise.resolve();
+
+    expect(initialized).toBe(false);
+    expect(observeAuthState).toBeTypeOf("function");
+
+    observeAuthState!(restoredUser);
+    await initialization;
+
+    expect(session.getState()).toEqual({
+      status: "signedIn",
+      user: restoredUser
+    });
+  });
+
+  it("shares auth readiness and registers only one SDK subscription", async () => {
+    const sdk = createSdkMock();
+    let observeAuthState: ((user: MobileAuthUser | null) => void) | undefined;
+    sdk.onAuthStateChanged = vi.fn((listener) => {
+      observeAuthState = listener;
+      return () => undefined;
+    });
+    const session = createMobileAuthSession({ sdk });
+
+    const firstInitialization = session.initialize();
+    const secondInitialization = session.initialize();
+
+    expect(secondInitialization).toBe(firstInitialization);
+    expect(sdk.onAuthStateChanged).toHaveBeenCalledOnce();
+
+    observeAuthState!(null);
+    await firstInitialization;
+
+    expect(session.initialize()).toBe(firstInitialization);
+    expect(sdk.onAuthStateChanged).toHaveBeenCalledOnce();
+  });
+
+  it("rejects shared auth readiness when SDK subscription registration throws", async () => {
+    const sdk = createSdkMock();
+    sdk.onAuthStateChanged = vi.fn(() => {
+      throw new Error("auth observer registration failed");
+    });
+    const session = createMobileAuthSession({ sdk });
+
+    const firstInitialization = session.initialize();
+    const secondInitialization = session.initialize();
+
+    expect(secondInitialization).toBe(firstInitialization);
+    await expect(firstInitialization).rejects.toThrow(
+      "auth observer registration failed"
+    );
+    expect(sdk.onAuthStateChanged).toHaveBeenCalledOnce();
+  });
+
   it("starts signed out and notifies subscribers when email sign-in succeeds", async () => {
     const sdk = createSdkMock();
     const session = createMobileAuthSession({ sdk });

@@ -1,4 +1,5 @@
 import { nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, type Ref } from "vue";
+import { isAgentProvider } from "@kanna/agent-protocol";
 import type { DbHandle } from "../types/kanna";
 
 import i18n from "../i18n";
@@ -34,6 +35,7 @@ import type { useAppPreferences } from "./useAppPreferences";
 import { parseRecentAgentChoices } from "../utils/agentChoiceUsage";
 import type { useAppUpdate } from "./useAppUpdate";
 import type { useToast } from "./useToast";
+import { showTerminalFileLinkHintOnce } from "./terminalFileLinkHint";
 
 type AppPreferences = ReturnType<typeof useAppPreferences>["preferences"];
 type AppUpdateController = ReturnType<typeof useAppUpdate>;
@@ -185,6 +187,14 @@ export function useAppLifecycle({
     if (detail.url) openImageUrlPreview(detail.url);
   }
 
+  function handleTerminalFileLinkAvailable() {
+    showTerminalFileLinkHintOnce(
+      window.localStorage,
+      toast.info,
+      i18n.global.t("toasts.latestAgentFileHint"),
+    );
+  }
+
   // Restore focus after native macOS fullscreen exit.
   // WKWebView loses first-responder status during the exit animation, breaking
   // terminal input and keyboard shortcuts. The Rust side calls
@@ -246,6 +256,7 @@ export function useAppLifecycle({
     window.addEventListener("drop", suppressFileDropNavigation);
     document.addEventListener("file-link-activate", handleFileLinkActivate);
     document.addEventListener("image-link-activate", handleImageLinkActivate);
+    document.addEventListener("terminal-file-link-available", handleTerminalFileLinkAvailable);
 
     await restoreSidebarWidth();
     await store.init(db);
@@ -456,10 +467,9 @@ export function useAppLifecycle({
     preferences.agentMessageAppearance = store.agentMessageAppearance;
 
     const savedAgentProvider = await getDesktopSetting("defaultAgentProvider");
-    if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";
-    else if (savedAgentProvider === "codex") preferences.defaultAgentProvider = "codex";
-    else if (savedAgentProvider === "opencode") preferences.defaultAgentProvider = "opencode";
-    else if (savedAgentProvider === "antigravity") preferences.defaultAgentProvider = "antigravity";
+    if (isAgentProvider(savedAgentProvider)) {
+      preferences.defaultAgentProvider = savedAgentProvider;
+    }
     const savedAgentType = await getDesktopSetting("defaultAgentType");
     if (savedAgentType !== null) {
       preferences.defaultAgentType = normalizeAgentExecutionType(savedAgentType);
@@ -498,6 +508,7 @@ export function useAppLifecycle({
     window.removeEventListener("drop", suppressFileDropNavigation);
     document.removeEventListener("file-link-activate", handleFileLinkActivate);
     document.removeEventListener("image-link-activate", handleImageLinkActivate);
+    document.removeEventListener("terminal-file-link-available", handleTerminalFileLinkAvailable);
     stopSystemThemeListener();
     appUpdate.dispose();
   });

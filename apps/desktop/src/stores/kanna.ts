@@ -35,11 +35,13 @@ export const useKannaStore = defineStore("kanna", () => {
   services.withOptimisticItemOverlay = queries.withOptimisticItemOverlay;
   services.selectedRepo = selection.selectedRepo;
   services.currentItem = selection.currentItem;
+  services.selectedTaskId = selection.selectedTaskId;
+  services.currentTaskSlot = selection.currentTaskSlot;
+  services.persistSelection = selection.persistSelection;
   services.sortedItemsForCurrentRepo = selection.sortedItemsForCurrentRepo;
   services.sortedItemsAllRepos = selection.sortedItemsAllRepos;
   services.isItemHidden = selection.isItemHidden;
   services.getStageOrder = selection.getStageOrder;
-  services.persistSelection = selection.persistSelection;
   services.selectRepo = selection.selectRepo;
   services.selectItem = selection.selectItem;
   services.selectReplacementAfterItemRemoval = selection.selectReplacementAfterItemRemoval;
@@ -126,6 +128,7 @@ Use this branch as the default when the user does not specify a target branch. B
   return {
     repos: state.repos,
     items: state.items,
+    taskUiSlots: state.taskUiSlots,
     taskBlockers: state.taskBlockers,
     selectedRepoId: state.selectedRepoId,
     selectedItemId: state.selectedItemId,
@@ -140,19 +143,18 @@ Use this branch as the default when the user does not specify a target branch. B
     appTheme: state.appTheme,
     codeTheme: state.codeTheme,
     agentMessageAppearance: state.agentMessageAppearance,
-    initializingTaskItems: state.initializingTaskItems,
+    markdownPreviewMode: state.markdownPreviewMode,
     lastHiddenRepoId: state.lastHiddenRepoId,
     selectedRepo: selection.selectedRepo,
-    selectedItemIdForPersistence: selection.selectedItemIdForPersistence,
-    currentInitializingItem: selection.currentInitializingItem,
     currentItem: selection.currentItem,
+    selectedTaskId: selection.selectedTaskId,
+    currentTaskSlot: selection.currentTaskSlot,
     sortedItemsForCurrentRepo: selection.sortedItemsForCurrentRepo,
     sortedItemsAllRepos: selection.sortedItemsAllRepos,
     getStageOrder: selection.getStageOrder,
 
     init: initApi.init,
     attachWindowWorkspace,
-    persistSelection: selection.persistSelection,
     selectRepo: selection.selectRepo,
     selectItem: selection.selectItem,
     goBack: selection.goBack,

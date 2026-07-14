@@ -25,17 +25,13 @@ function readTaskWorktreeNames(repoPath: string): Promise<string[]> {
 async function captureOpenCodeDiagnostics(client: WebDriverClient, taskId: string) {
   return client.executeAsync<{
     bodyText: string;
-    daemonSessions: unknown;
-    initializingTaskItems: Array<{
-      id: string;
+    creatingTaskSlots: Array<{
+      slotId: string;
       taskId: string | null;
-      repo_id: string;
-      state: string;
       prompt: string;
     }>;
+    daemonSessions: unknown;
     lastAgentSpawnError: unknown;
-    selectedItemId: string | null;
-    selectedItemIdForPersistence: string | null;
     taskRows: unknown;
     terminalText: string;
     terminalBufferText: string;
@@ -43,40 +39,27 @@ async function captureOpenCodeDiagnostics(client: WebDriverClient, taskId: strin
     toastMessages: string[];
   }>(`const cb = arguments[arguments.length - 1];
       const ctx = window.__KANNA_E2E__?.setupState;
-      const store = ctx?.store;
       const hook = window.__KANNA_E2E__?.terminalBuffers;
-      const unwrap = (value) => value?.__v_isRef ? value.value : value;
-      const initializingTaskItems = Array.from(unwrap(store?.initializingTaskItems) ?? []);
-      const terminalBufferText = (() => {
-        try {
-          return hook?.lines?.(${JSON.stringify(taskId)})?.join("\\n") ?? "";
-        } catch (error) {
-          return "[terminal buffer unavailable: "
-            + (error instanceof Error ? error.message : String(error))
-            + "]";
-        }
-      })();
       const db = ctx?.db?.value || ctx?.db;
       const invoke = window.__TAURI__?.core?.invoke;
+      const taskUiSlots = ctx?.store?.taskUiSlots?.value ?? ctx?.store?.taskUiSlots ?? [];
       Promise.all([
         invoke ? invoke("list_sessions").catch((error) => ({ error: String(error) })) : Promise.resolve({ error: "invoke unavailable" }),
         db ? db.select("SELECT id, agent_provider, activity, agent_session_id, branch, port_env FROM pipeline_item WHERE id = ?", [${JSON.stringify(taskId)}]).catch((error) => ({ error: String(error) })) : Promise.resolve({ error: "db unavailable" }),
       ]).then(([daemonSessions, taskRows]) => cb({
           bodyText: document.body?.innerText ?? "",
+          creatingTaskSlots: taskUiSlots
+            .filter((slot) => slot.state === "creating")
+            .map((slot) => ({
+              slotId: slot.slot_id,
+              taskId: slot.task_id,
+              prompt: slot.draft.prompt,
+            })),
           daemonSessions,
-          initializingTaskItems: initializingTaskItems.map((item) => ({
-            id: item.id,
-            taskId: item.taskId ?? null,
-            repo_id: item.repo_id,
-            state: item.state,
-            prompt: item.prompt,
-          })),
           lastAgentSpawnError: window.__KANNA_E2E_LAST_AGENT_SPAWN_ERROR__ ?? null,
-          selectedItemId: unwrap(store?.selectedItemId) ?? null,
-          selectedItemIdForPersistence: unwrap(store?.selectedItemIdForPersistence) ?? null,
           taskRows,
           terminalText: document.querySelector(".terminal-container")?.textContent ?? "",
-          terminalBufferText,
+          terminalBufferText: hook?.getText?.(${JSON.stringify(taskId)}) ?? "",
           sessionIds: hook?.sessionIds?.() ?? [],
           toastMessages: Array.from(document.querySelectorAll(".toast-message"))
             .map((node) => node.textContent ?? "")

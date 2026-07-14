@@ -38,6 +38,17 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
 }
 
 describe("taskSearchMatch", () => {
+  it("accepts structural searchable task data without an identity", () => {
+    const searchable = {
+      display_name: "Stable creation slot",
+      issue_title: null,
+      branch: null,
+      prompt: "Keep one row while the durable task hydrates",
+    };
+
+    expect(taskSearchMatch("creation slot", searchable)?.score).toBeGreaterThan(0);
+  });
+
   it("matches non-Latin queries in task titles", () => {
     const japaneseItem = makeItem({
       display_name: "タスク検索",

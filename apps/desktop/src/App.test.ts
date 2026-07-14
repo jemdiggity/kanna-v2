@@ -5,7 +5,7 @@ import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyboardActions } from "./composables/useKeyboardShortcuts";
 import type { PipelineItem } from "./types/kanna";
-import type { InitializingTaskItem } from "./stores/taskInitialization";
+import type { TaskUiSlot } from "./types/taskUi";
 import {
   WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
   WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT,
@@ -53,49 +53,29 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-function createPipelineItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
+function readyTaskSlot(slotId: string, task: { id: string; repo_id: string; [key: string]: unknown }): TaskUiSlot {
+  const pipelineTask = task as unknown as PipelineItem;
   return {
-    id: "task-local",
-    repo_id: "repo-1",
-    issue_number: null,
-    issue_title: null,
-    prompt: "Local task",
-    pipeline: "default",
-    stage: "in progress",
-    stage_result: null,
-    active_post_action: null,
-    tags: "[]",
-    pr_number: null,
-    pr_url: null,
-    branch: "task-task-local",
-    closed_at: null,
-    agent_type: "pty",
-    agent_provider: "claude",
-    activity: "idle",
-    activity_changed_at: "2026-05-18T00:00:00.000Z",
-    unread_at: null,
-    port_offset: null,
-    display_name: "Local task",
-    port_env: null,
-    pinned: 0,
-    pin_order: null,
-    base_ref: "origin/main",
-    agent_session_id: null,
-    previous_stage: null,
-    teardown_started_at: null,
-    last_output_preview: null,
-    created_at: "2026-05-18T00:00:00.000Z",
-    updated_at: "2026-05-18T00:00:00.000Z",
-    ...overrides,
+    slot_id: slotId,
+    task_id: task.id,
+    state: "ready",
+    task: pipelineTask,
+    draft: {
+      repo_id: task.repo_id,
+      prompt: pipelineTask.prompt ?? "",
+      display_name: pipelineTask.display_name ?? null,
+      pipeline: pipelineTask.pipeline ?? "default",
+      stage: pipelineTask.stage ?? "in progress",
+      agent_type: pipelineTask.agent_type === "agent" || pipelineTask.agent_type === "sdk" ? "agent" : "pty",
+      agent_provider: pipelineTask.agent_provider ?? "claude",
+      created_at: pipelineTask.created_at ?? "2026-01-01T00:00:00.000Z",
+    },
   };
 }
 
 const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
-const nativeCloseRegistrationHarness = {
-  onRegistered: null as null | ((handler: NonNullable<typeof closeRequestedHandler>) => void),
-};
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
 const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   vi.fn((_uid: string, onSnapshot: (snapshot: { repos: unknown[]; items: unknown[]; terminalRefs: Record<string, unknown> }) => void) => {
@@ -103,22 +83,15 @@ const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
     return vi.fn();
   }),
 );
-const reconcileDesktopTaskSnapshotsMock = vi.hoisted(() => vi.fn(async () => {}));
-const publishDesktopWaitingPromptSnippetMock = vi.hoisted(() => vi.fn(async () => {}));
-const fenceAndDrainDesktopCloudWritesMock = vi.hoisted(() => vi.fn(async () => {}));
-const resumeDesktopCloudWritesMock = vi.hoisted(() => vi.fn());
-const desktopAuthHarness = vi.hoisted(() => ({
-  subscriber: null as null | ((state: unknown) => void),
-}));
-const windowWorkspaceInvalidationHandlers = new Set<(
-  payload: { reason?: string; sourceWindowId?: string },
-) => void | Promise<void>>();
+const associateDesktopCloudCredentialMock = vi.hoisted(() => vi.fn(async () => {}));
+const desktopAuthStateListeners = vi.hoisted(() => new Set<(state: unknown) => void>());
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseTaskMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseMock = vi.hoisted(() => vi.fn());
+const openLatestTerminalFileLinkMock = vi.hoisted(() => vi.fn(async () => true));
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
   select: dbSelectMock,
@@ -128,13 +101,13 @@ const dbMock = {
 const store = {
   repos: [{ id: "repo-1", path: "/tmp/repo", name: "repo" }],
   items: [],
+  taskUiSlots: [] as TaskUiSlot[],
   selectedRepoId: "repo-1" as string | null,
   selectedItemId: null,
-  selectedItemIdForPersistence: null as string | null,
+  selectedTaskId: null as string | null,
   selectedRepo: { id: "repo-1", path: "/tmp/repo", name: "repo" } as { id: string; path: string; name: string } | null,
-  initializingTaskItems: [] as InitializingTaskItem[],
-  currentInitializingItem: null as InitializingTaskItem | null,
   currentItem: null,
+  currentTaskSlot: null as TaskUiSlot | null,
   sortedItemsForCurrentRepo: [],
   sortedItemsAllRepos: [],
   taskBlockers: [] as Array<{ blocked_item_id: string; blocker_item_id: string }>,
@@ -148,8 +121,8 @@ const store = {
   appTheme: "dark",
   codeTheme: "match",
   agentMessageAppearance: "chat",
+  markdownPreviewMode: "rendered" as "raw" | "rendered",
   init: vi.fn(async () => {}),
-  persistSelection: vi.fn(async () => {}),
   createItem: vi.fn(async () => {}),
   recordIncomingTransfer: vi.fn(async () => {}),
   approveIncomingTransfer: vi.fn(async () => "task-imported"),
@@ -216,7 +189,6 @@ const store = {
     allowed_tools: undefined,
   })),
 };
-let activeStore = store;
 const toastInfoMock = vi.fn();
 const toastWarningMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -226,7 +198,6 @@ const mockWindowWorkspace = {
     selectedRepoId: null,
     selectedItemId: null,
   },
-  initialize: vi.fn(async () => {}),
   loadSnapshot: vi.fn(async () => ({ windows: [] })),
   saveSnapshot: vi.fn(async () => {}),
   openWindow: vi.fn(async () => {}),
@@ -237,12 +208,6 @@ const mockWindowWorkspace = {
   persistSidebarWidth: vi.fn(async () => {}),
   invalidateSharedData: vi.fn(async () => {}),
   restoreAdditionalWindows: vi.fn(async () => {}),
-  onSharedInvalidation: vi.fn(async (handler: (
-    payload: { reason?: string; sourceWindowId?: string },
-  ) => void | Promise<void>) => {
-    windowWorkspaceInvalidationHandlers.add(handler);
-    return () => windowWorkspaceInvalidationHandlers.delete(handler);
-  }),
 };
 
 let capturedKeyboardActions: KeyboardActions | null = null;
@@ -259,7 +224,7 @@ const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>)
 });
 
 vi.mock("./stores/kanna", () => ({
-  useKannaStore: () => activeStore,
+  useKannaStore: () => store,
 }));
 
 vi.mock("./invoke", () => ({
@@ -275,7 +240,6 @@ vi.mock("@tauri-apps/api/window", () => ({
     setTheme: nativeWindowSetThemeMock,
     onCloseRequested: vi.fn(async (handler: (event: { preventDefault: () => void }) => void | Promise<void>) => {
       closeRequestedHandler = handler;
-      nativeCloseRegistrationHarness.onRegistered?.(handler);
       return () => {
         closeRequestedHandler = null;
       };
@@ -337,6 +301,7 @@ vi.mock("./i18n", () => ({
       locale: {
         value: "en",
       },
+      t: (key: string) => key,
     },
   },
 }));
@@ -394,20 +359,20 @@ vi.mock("./composables/useToast", () => ({
   }),
 }));
 
+vi.mock("./composables/terminalFileLinkRegistry", () => ({
+  openLatestTerminalFileLink: openLatestTerminalFileLinkMock,
+}));
+
 vi.mock("./services/desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
     initialize: vi.fn(async () => {}),
     subscribe: vi.fn((handler: (state: unknown) => void) => {
-      desktopAuthHarness.subscriber = handler;
+      desktopAuthStateListeners.add(handler);
       handler({
         status: "signedIn",
         user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
       });
-      return () => {
-        if (desktopAuthHarness.subscriber === handler) {
-          desktopAuthHarness.subscriber = null;
-        }
-      };
+      return () => desktopAuthStateListeners.delete(handler);
     }),
   })),
 }));
@@ -418,12 +383,8 @@ vi.mock("./services/desktopCloudTaskIndex", () => ({
   subscribeDesktopCloudTasks: subscribeDesktopCloudTasksMock,
 }));
 
-vi.mock("./services/desktopCloudPublisher", () => ({
-  deleteRemoteTaskSnapshots: vi.fn(async () => {}),
-  fenceAndDrainDesktopCloudWrites: fenceAndDrainDesktopCloudWritesMock,
-  publishDesktopWaitingPromptSnippet: publishDesktopWaitingPromptSnippetMock,
-  reconcileDesktopTaskSnapshots: reconcileDesktopTaskSnapshotsMock,
-  resumeDesktopCloudWrites: resumeDesktopCloudWritesMock,
+vi.mock("./services/desktopCloudAssociation", () => ({
+  associateDesktopCloudCredential: associateDesktopCloudCredentialMock,
 }));
 
 vi.mock("./services/desktopRelayTerminal", () => ({
@@ -600,54 +561,6 @@ function buildOutgoingTransferFinalizationRequestedEvent() {
     },
   };
 }
-
-function buildLocalCloudItem(overrides: Record<string, unknown> = {}) {
-  return {
-    id: "task-local",
-    repo_id: "repo-1",
-    prompt: "Improve the card",
-    pipeline: "default",
-    stage: "in progress",
-    tags: "[]",
-    pr_number: null,
-    pr_url: null,
-    branch: "task-local",
-    activity: "working",
-    activity_changed_at: "2026-07-11T00:00:00.000Z",
-    unread_at: null,
-    port_offset: null,
-    port_env: null,
-    pinned: 0,
-    pin_order: null,
-    display_name: "Improve mobile cards",
-    issue_number: null,
-    issue_title: null,
-    closed_at: null,
-    agent_session_id: null,
-    base_ref: "main",
-    agent_provider: "claude",
-    agent_type: "pty",
-    previous_stage: null,
-    stage_result: null,
-    teardown_started_at: null,
-    last_output_preview: null,
-    active_post_action: null,
-    created_at: "2026-07-11T00:00:00.000Z",
-    updated_at: "2026-07-11T00:00:00.000Z",
-    ...overrides,
-  };
-}
-
-function workspaceWindowState(windowId: string, order: number) {
-  return {
-    windowId,
-    selectedRepoId: null,
-    selectedItemId: null,
-    sidebarHidden: false,
-    sidebarWidth: 260,
-    order,
-  };
-}
 async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof SidebarWithoutRepoStub) {
   vi.stubGlobal("__KANNA_MOBILE__", false);
   const { default: App } = await import("./App.vue");
@@ -681,9 +594,9 @@ async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof Sidebar
       },
     },
   });
-  for (let attempt = 0; attempt < 10; attempt++) {
-    await flushPromises();
-  }
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
   return wrapper;
 }
 
@@ -724,9 +637,9 @@ async function mountAppWithOverrides(
       },
     },
   });
-  for (let attempt = 0; attempt < 10; attempt++) {
-    await flushPromises();
-  }
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
   return wrapper;
 }
 
@@ -736,9 +649,7 @@ describe("App", () => {
   });
 
   beforeEach(() => {
-    activeStore = store;
     store.init.mockClear();
-    store.persistSelection.mockClear();
     store.createItem.mockClear();
     store.createRepo.mockClear();
     store.importRepo.mockClear();
@@ -752,34 +663,35 @@ describe("App", () => {
     store.selectRepo.mockClear();
     store.selectItem.mockClear();
     store.advanceStage.mockClear();
-    store.closeTask.mockClear();
     relayAdvanceStageMock.mockClear();
     relayCloseTaskMock.mockClear();
     relayCloseMock.mockClear();
+    openLatestTerminalFileLinkMock.mockReset();
+    openLatestTerminalFileLinkMock.mockResolvedValue(true);
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
     store.selectedRepoId = "repo-1";
     store.selectedItemId = null;
-    store.selectedItemIdForPersistence = null;
+    store.lastSelectedItemByRepo = {};
     store.selectedRepo = { id: "repo-1", path: "/tmp/repo", name: "repo" };
-    store.initializingTaskItems = [];
-    store.currentInitializingItem = null;
     store.currentItem = null;
+    store.currentTaskSlot = null;
+    store.selectedTaskId = null;
     store.items = [];
+    store.taskUiSlots = [];
     store.sortedItemsForCurrentRepo = [];
     store.sortedItemsAllRepos = [];
     store.taskBlockers = [];
-    store.lastSelectedItemByRepo = {};
     store.getStageOrder.mockReturnValue(["in progress", "pr", "merge"]);
     store.appTheme = "dark";
     store.codeTheme = "match";
+    store.markdownPreviewMode = "rendered";
+    store.savePreference.mockClear();
     nativeSetThemeMock.mockClear();
     listenHandlers.clear();
     currentWebviewWindowListenHandlers.clear();
     closeRequestedHandler = null;
-    nativeCloseRegistrationHarness.onRegistered = null;
     capturedKeyboardActions = null;
     mockWindowWorkspace.loadSnapshot.mockClear();
-    mockWindowWorkspace.initialize.mockClear();
     mockWindowWorkspace.saveSnapshot.mockClear();
     mockWindowWorkspace.openWindow.mockClear();
     mockWindowWorkspace.closeWindow.mockClear();
@@ -789,13 +701,7 @@ describe("App", () => {
     mockWindowWorkspace.persistSidebarWidth.mockClear();
     mockWindowWorkspace.invalidateSharedData.mockClear();
     mockWindowWorkspace.restoreAdditionalWindows.mockClear();
-    mockWindowWorkspace.onSharedInvalidation.mockClear();
     mockWindowWorkspace.bootstrap.windowId = "main";
-    windowWorkspaceInvalidationHandlers.clear();
-    mockWindowWorkspace.loadSnapshot.mockReset();
-    mockWindowWorkspace.loadSnapshot.mockImplementation(async () => ({
-      windows: [workspaceWindowState(mockWindowWorkspace.bootstrap.windowId, 0)],
-    }));
     dbSelectMock.mockReset();
     dbSelectMock.mockResolvedValue([]);
     dbMock.execute.mockReset();
@@ -824,14 +730,9 @@ describe("App", () => {
     cloudTasksMock.mockReset();
     cloudTasksMock.mockResolvedValue({ repos: [], items: [] });
     subscribeDesktopCloudTasksMock.mockClear();
-    reconcileDesktopTaskSnapshotsMock.mockReset();
-    reconcileDesktopTaskSnapshotsMock.mockResolvedValue(undefined);
-    publishDesktopWaitingPromptSnippetMock.mockReset();
-    publishDesktopWaitingPromptSnippetMock.mockResolvedValue(undefined);
-    fenceAndDrainDesktopCloudWritesMock.mockReset();
-    fenceAndDrainDesktopCloudWritesMock.mockResolvedValue(undefined);
-    resumeDesktopCloudWritesMock.mockClear();
-    desktopAuthHarness.subscriber = null;
+    desktopAuthStateListeners.clear();
+    associateDesktopCloudCredentialMock.mockReset();
+    associateDesktopCloudCredentialMock.mockResolvedValue(undefined);
     appUpdateStartMock.mockClear();
     appUpdateMock.dispose.mockClear();
     appUpdateMock.dismiss.mockClear();
@@ -877,115 +778,29 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("keeps restored secondary windows read-only for Firestore publication", async () => {
-    vi.useFakeTimers();
-    mockWindowWorkspace.bootstrap.windowId = "window-2";
-    mockWindowWorkspace.loadSnapshot.mockResolvedValue({
-      windows: [workspaceWindowState("main", 0), workspaceWindowState("window-2", 1)],
-    });
-    const localItems = reactive([buildLocalCloudItem()]);
-    store.items = localItems;
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    localItems[0].last_output_preview = "Ready for review.";
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(5_000);
-
-    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
-    expect(publishDesktopWaitingPromptSnippetMock).not.toHaveBeenCalled();
-
-    wrapper.unmount();
-  });
-
-  it("fails cloud publication over to the next window after the owner closes", async () => {
-    mockWindowWorkspace.bootstrap.windowId = "window-2";
-    mockWindowWorkspace.loadSnapshot.mockResolvedValue({
-      windows: [workspaceWindowState("main", 0), workspaceWindowState("window-2", 1)],
-    });
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
-
-    mockWindowWorkspace.loadSnapshot.mockResolvedValue({
-      windows: [workspaceWindowState("window-2", 0)],
-    });
-    for (const handler of windowWorkspaceInvalidationHandlers) {
-      await handler({ reason: "windowMembership", sourceWindowId: "main" });
-    }
-    await flushPromises();
-
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledWith(dbMock);
-
-    wrapper.unmount();
-  });
-
-  it("reconciles cloud task snapshots on sign-in without periodic writes", async () => {
+  it("associates the desktop credential on sign-in without renderer task publication", async () => {
     vi.useFakeTimers();
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
 
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledWith(dbMock);
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(1);
 
-    reconcileDesktopTaskSnapshotsMock.mockClear();
+    associateDesktopCloudCredentialMock.mockClear();
     cloudTasksMock.mockClear();
 
     await vi.advanceTimersByTimeAsync(1000);
     await flushPromises();
 
-    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
+    expect(associateDesktopCloudCredentialMock).not.toHaveBeenCalled();
     expect(cloudTasksMock).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });
 
-  it("reconciles again after signing out and back into the same account", async () => {
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    await flushPromises();
-
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
-
-    desktopAuthHarness.subscriber?.({ status: "signedOut" });
-    desktopAuthHarness.subscriber?.({
-      status: "signedIn",
-      user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
-    });
-    await flushPromises();
-
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(2);
-
-    wrapper.unmount();
-  });
-
-  it("does not let a delayed sign-in reconcile suppress a newer title change", async () => {
-    const firstReconcile = createDeferred<void>();
-    reconcileDesktopTaskSnapshotsMock
-      .mockImplementationOnce(async () => firstReconcile.promise)
-      .mockResolvedValue(undefined);
-    const localItems = reactive([buildLocalCloudItem({ display_name: "Title A" })]);
-    store.items = localItems;
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
-
-    localItems[0].display_name = "Title B";
-    await flushPromises();
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(2);
-
-    firstReconcile.resolve();
-    await flushPromises();
-    localItems[0].display_name = "Title A";
-    await flushPromises();
-
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(3);
-
-    wrapper.unmount();
-  });
-
-  it("shows one toast when sign-in cloud reconciliation fails", async () => {
+  it("shows one toast when desktop credential association fails", async () => {
     vi.useFakeTimers();
-    reconcileDesktopTaskSnapshotsMock.mockRejectedValueOnce(
+    associateDesktopCloudCredentialMock.mockRejectedValueOnce(
       Object.assign(new Error("Missing or insufficient permissions."), { code: "permission-denied" }),
     );
 
@@ -994,6 +809,48 @@ describe("App", () => {
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).toHaveBeenCalledWith("Cloud sync failed: permission-denied");
+
+    wrapper.unmount();
+  });
+
+  it("retries desktop credential association after a transient failure", async () => {
+    associateDesktopCloudCredentialMock
+      .mockRejectedValueOnce(new Error("temporary association failure"))
+      .mockResolvedValueOnce(undefined);
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 1);
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+      });
+    }
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 2);
+
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(2);
+
+    wrapper.unmount();
+  });
+
+  it("re-associates the same user after signed-out state revokes the credential", async () => {
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 1);
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({ status: "signedOut" });
+    }
+    await flushPromises();
+    for (const listener of desktopAuthStateListeners) {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+      });
+    }
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 2);
+
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(2);
 
     wrapper.unmount();
   });
@@ -1283,17 +1140,17 @@ describe("App", () => {
       name: "Sidebar",
       props: {
         repos: { type: Array, default: () => [] },
-        pipelineItems: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
       },
       emits: ["select-repo", "select-item"],
       template: `
         <div data-testid="sidebar">
           <button
-            v-for="item in pipelineItems"
-            :key="item.id"
+            v-for="item in taskSlots"
+            :key="item.slot_id"
             data-testid="cloud-task"
             type="button"
-            @click="$emit('select-repo', item.repo_id); $emit('select-item', item.id)"
+            @click="$emit('select-repo', item.repo_id); $emit('select-item', item.slot_id)"
           >
             {{ item.display_name }}
           </button>
@@ -1304,12 +1161,14 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        uiItem: Object,
+        uiSlot: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ uiItem?.id || "" }}</span>
+          <span data-testid="main-slot-id">{{ uiSlot?.slot_id || "" }}</span>
+          <span data-testid="main-task-id">{{ uiSlot?.task_id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiSlot?.task?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1325,7 +1184,407 @@ describe("App", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-remote:task-remote");
+    expect(wrapper.get('[data-testid="main-task-id"]').text()).toBe("cloud:repo-remote:task-remote");
+    const presentationSlotId = wrapper.get('[data-testid="main-slot-id"]').text();
+    expect(presentationSlotId).not.toBe("cloud:repo-remote:task-remote");
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: "cloud:repo-remote:task-remote",
+    });
     expect(wrapper.get('[data-testid="main-repo-path"]').text()).toBe("cloud");
+
+    wrapper.unmount();
+  });
+
+  it("clears and persists a remote selection after closing its stable presentation slot", async () => {
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-remote",
+        repo_id: "cloud:repo-remote",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+      terminalRefs: {
+        "cloud:repo-remote:task-remote": {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-owner",
+          ownerLocalTaskId: "task-owner",
+          transport: "cloud",
+        },
+      },
+    });
+
+    const SidebarRemoteCloseStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["select-item"],
+      template: `
+        <button
+          v-for="item in taskSlots"
+          :key="item.slot_id"
+          data-testid="remote-close-task"
+          type="button"
+          @click="$emit('select-item', item.slot_id)"
+        >
+          {{ item.display_name }}
+        </button>
+      `,
+    });
+
+    const wrapper = await mountApp(SidebarRemoteCloseStub);
+    await flushPromises();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="remote-close-task"]').trigger("click");
+    await flushPromises();
+
+    const presentationSlotId = store.selectedItemId;
+    expect(presentationSlotId).toMatch(/^remote:/);
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBe(presentationSlotId);
+    mockWindowWorkspace.persistSelection.mockClear();
+
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(relayCloseTaskMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-owner",
+    });
+    expect(store.selectedItemId).toBeNull();
+    expect(store.lastSelectedItemByRepo["cloud:repo-remote"]).toBeUndefined();
+    expect(mockWindowWorkspace.persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "cloud:repo-remote",
+      selectedItemId: null,
+    });
+    expect(wrapper.find('[data-testid="remote-close-task"]').exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it("normalizes a retained remote presentation slot to its local task slot without losing the highlight", async () => {
+    const localTask: PipelineItem = {
+      id: "task-owner",
+      repo_id: "repo-1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "Task that arrives locally",
+      pipeline: "default",
+      pipeline_def: null,
+      stage: "in progress",
+      pr_number: null,
+      pr_url: null,
+      branch: "task-owner",
+      closed_at: null,
+      agent_type: "pty",
+      agent_provider: "claude",
+      activity: "working",
+      activity_changed_at: "2026-05-18T00:00:00.000Z",
+      unread_at: null,
+      port_offset: null,
+      display_name: "Local owner task",
+      last_output_preview: null,
+      port_env: null,
+      pinned: 0,
+      pin_order: null,
+      base_ref: "origin/main",
+      agent_session_id: null,
+      teardown_started_at: null,
+      parent_task_id: null,
+      notify_task_id: null,
+      notified_at: null,
+      created_at: "2026-05-18T00:00:00.000Z",
+      updated_at: "2026-05-18T00:00:00.000Z",
+    };
+    const localItems = reactive<PipelineItem[]>([]);
+    store.items = localItems;
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "repo-1",
+        path: "cloud",
+        name: "repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        ...localTask,
+        id: "cloud:repo-1:task-owner",
+        pipeline: "cloud",
+        display_name: "Remote presentation",
+      }],
+      terminalRefs: {
+        "cloud:repo-1:task-owner": {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-1",
+          ownerLocalTaskId: "task-owner",
+          transport: "cloud",
+        },
+      },
+    });
+    store.selectItem.mockImplementation(async (taskId: string) => {
+      const slot = store.taskUiSlots.find((candidate) => candidate.task_id === taskId) ?? null;
+      store.selectedItemId = slot?.slot_id ?? taskId;
+      store.selectedTaskId = slot?.task_id ?? taskId;
+      store.currentTaskSlot = slot;
+      store.currentItem = slot?.task ?? null;
+    });
+
+    const SidebarOwnershipStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+        selectedSlotId: String,
+      },
+      emits: ["select-item"],
+      template: `
+        <div data-testid="ownership-sidebar">
+          <button
+            v-for="item in taskSlots"
+            :key="item.slot_id"
+            data-testid="ownership-task"
+            :data-slot-id="item.slot_id"
+            @click="$emit('select-item', item.slot_id)"
+          >{{ item.display_name }}</button>
+          <span data-testid="ownership-selected-slot">{{ selectedSlotId || "" }}</span>
+          <span data-testid="ownership-row-count">{{ taskSlots.length }}</span>
+        </div>
+      `,
+    });
+    const MainPanelOwnershipStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        cloudTask: Boolean,
+      },
+      template: '<div data-testid="ownership-cloud-task">{{ String(cloudTask) }}</div>',
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarOwnershipStub, {
+      MainPanel: MainPanelOwnershipStub,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    const presentationSlotId = wrapper.get('[data-testid="ownership-task"]').attributes("data-slot-id");
+    expect(presentationSlotId).toMatch(/^remote:/);
+    await wrapper.get('[data-testid="ownership-task"]').trigger("click");
+    await flushPromises();
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    expect(wrapper.get('[data-testid="ownership-cloud-task"]').text()).toBe("true");
+
+    store.taskUiSlots = [readyTaskSlot("slot:local-owner", localTask)];
+    localItems.push(localTask);
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    expect(store.selectItem).toHaveBeenCalledWith("task-owner");
+    expect(store.selectedItemId).toBe("slot:local-owner");
+    expect(wrapper.get('[data-testid="ownership-row-count"]').text()).toBe("1");
+    expect(wrapper.get('[data-testid="ownership-task"]').attributes("data-slot-id")).toBe(presentationSlotId);
+    expect(wrapper.get('[data-testid="ownership-selected-slot"]').text()).toBe(presentationSlotId);
+    expect(wrapper.get('[data-testid="ownership-cloud-task"]').text()).toBe("false");
+
+    wrapper.unmount();
+  });
+
+  it("passes stable slot props through and keeps a local creating slot ahead of a matching cloud route", async () => {
+    const creatingSlot: TaskUiSlot = {
+      slot_id: "create:stable-local",
+      task_id: "durable-pending",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Keep the local creation view stable",
+        display_name: "Stable local task",
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-05-18T00:00:00.000Z",
+      },
+    };
+    store.taskUiSlots = [creatingSlot];
+    store.currentTaskSlot = creatingSlot;
+    store.selectedItemId = creatingSlot.slot_id;
+    store.selectedTaskId = creatingSlot.task_id;
+    cloudTasksMock.mockResolvedValue({
+      repos: [],
+      items: [{
+        id: "cloud:repo-1:durable-pending",
+        repo_id: "repo-1",
+        prompt: creatingSlot.draft.prompt,
+        pipeline: "cloud",
+        stage: "in progress",
+        pipeline_def: null,
+        pr_number: null,
+        pr_url: null,
+        branch: "task-durable-pending",
+        activity: "working",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Cloud copy that must not win",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "claude",
+        agent_type: "pty",
+        teardown_started_at: null,
+        last_output_preview: null,
+        parent_task_id: null,
+        notify_task_id: null,
+        notified_at: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+      terminalRefs: {
+        "cloud:repo-1:durable-pending": {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalRepoId: "repo-1",
+          ownerLocalTaskId: "durable-pending",
+          transport: "cloud",
+        },
+      },
+    });
+
+    const SidebarSlotStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+        selectedSlotId: String,
+      },
+      template: `
+        <div data-testid="slot-sidebar">
+          <span data-testid="selected-slot-id">{{ selectedSlotId }}</span>
+          <span data-testid="projected-slot-id">{{ taskSlots[0]?.slot_id || "" }}</span>
+        </div>
+      `,
+    });
+    const MainPanelSlotStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        uiSlot: Object,
+        cloudTask: Boolean,
+      },
+      template: `
+        <div data-testid="slot-main-panel">
+          <span data-testid="panel-slot-id">{{ uiSlot?.slot_id || "" }}</span>
+          <span data-testid="panel-slot-state">{{ uiSlot?.state || "" }}</span>
+          <span data-testid="panel-task-id">{{ uiSlot?.task?.id || "" }}</span>
+          <span data-testid="panel-cloud-task">{{ String(cloudTask) }}</span>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarSlotStub, {
+      MainPanel: MainPanelSlotStub,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="selected-slot-id"]').text()).toBe("create:stable-local");
+    expect(wrapper.get('[data-testid="projected-slot-id"]').text()).toBe("create:stable-local");
+    expect(wrapper.get('[data-testid="panel-slot-id"]').text()).toBe("create:stable-local");
+    expect(wrapper.get('[data-testid="panel-slot-state"]').text()).toBe("creating");
+    expect(wrapper.get('[data-testid="panel-task-id"]').text()).toBe("");
+    expect(wrapper.get('[data-testid="panel-cloud-task"]').text()).toBe("true");
+
+    wrapper.unmount();
+  });
+
+  it("selects an unacknowledged creating row by slot id without a workspace alias", async () => {
+    const creatingSlot: TaskUiSlot = {
+      slot_id: "create:without-workspace",
+      task_id: null,
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 0,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Select me before acknowledgement",
+        display_name: "Creating without workspace",
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-05-18T00:00:00.000Z",
+      },
+    };
+    store.taskUiSlots = [creatingSlot];
+
+    const SidebarCreatingStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["select-item"],
+      template: `
+        <button
+          v-for="item in taskSlots"
+          :key="item.slot_id"
+          data-testid="creating-without-workspace"
+          @click="$emit('select-item', item.slot_id)"
+        >{{ item.display_name }}</button>
+      `,
+    });
+
+    const wrapper = await mountApp(SidebarCreatingStub);
+    await wrapper.get('[data-testid="creating-without-workspace"]').trigger("click");
+    await flushPromises();
+
+    expect(store.selectItem).toHaveBeenCalledWith("create:without-workspace");
+    expect(mockWindowWorkspace.persistSelection).not.toHaveBeenCalledWith(expect.objectContaining({
+      selectedItemId: "create:without-workspace",
+    }));
 
     wrapper.unmount();
   });
@@ -1384,12 +1643,12 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        uiItem: Object,
+        uiSlot: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ uiItem?.id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiSlot?.task?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1465,12 +1724,12 @@ describe("App", () => {
     const MainPanelCloudStub = defineComponent({
       name: "MainPanel",
       props: {
-        uiItem: Object,
+        uiSlot: Object,
         repoPath: String,
       },
       template: `
         <div data-testid="main-panel">
-          <span data-testid="main-item-id">{{ uiItem?.id || "" }}</span>
+          <span data-testid="main-item-id">{{ uiSlot?.task?.id || "" }}</span>
           <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
         </div>
       `,
@@ -1555,12 +1814,12 @@ describe("App", () => {
     const SidebarCaptureStub = defineComponent({
       name: "Sidebar",
       props: {
-        pipelineItems: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
       },
       template: `
         <div data-testid="sidebar-items">
-          <span v-for="item in pipelineItems" :key="item.id" data-testid="sidebar-item">
-            {{ item.id }}:{{ String(item.remote_task) }}
+          <span v-for="item in taskSlots" :key="item.slot_id" data-testid="sidebar-item">
+            {{ item.task_id }}:{{ String(item.remote_task) }}
           </span>
         </div>
       `,
@@ -1678,17 +1937,17 @@ describe("App", () => {
     const SidebarMixedStub = defineComponent({
       name: "Sidebar",
       props: {
-        pipelineItems: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
       },
       emits: ["select-item"],
       template: `
         <div data-testid="sidebar">
           <button
-            v-for="item in pipelineItems"
-            :key="item.id"
-            :data-testid="\`task-\${item.id}\`"
+            v-for="item in taskSlots"
+            :key="item.slot_id"
+            :data-testid="\`task-\${item.task_id}\`"
             type="button"
-            @click="$emit('select-item', item.id)"
+            @click="$emit('select-item', item.slot_id)"
           >
             {{ item.display_name }}
           </button>
@@ -1699,9 +1958,9 @@ describe("App", () => {
     const MainPanelTaskStub = defineComponent({
       name: "MainPanel",
       props: {
-        uiItem: Object,
+        uiSlot: Object,
       },
-      template: '<div data-testid="main-item-id">{{ uiItem?.id || "" }}</div>',
+      template: '<div data-testid="main-item-id">{{ uiSlot?.task?.id || "" }}</div>',
     });
 
     const wrapper = await mountAppWithOverrides(SidebarMixedStub, {
@@ -1726,297 +1985,6 @@ describe("App", () => {
     expect(relayCloseMock).toHaveBeenCalled();
 
     wrapper.unmount();
-  });
-
-  it("revokes remote action ownership whenever local task creation starts", async () => {
-    const localItem = createPipelineItem({ id: "task-local" });
-    store.items = [localItem];
-    store.currentItem = localItem;
-    store.sortedItemsForCurrentRepo = [localItem];
-    store.sortedItemsAllRepos = [localItem];
-    cloudTasksMock.mockResolvedValue({
-      repos: [{
-        id: "repo-1",
-        path: "cloud",
-        name: "repo",
-        default_branch: "main",
-        hidden: 0,
-        sort_order: 0,
-        created_at: "2026-05-18T00:00:00.000Z",
-        last_opened_at: "2026-05-18T00:00:00.000Z",
-      }],
-      items: [createPipelineItem({
-        id: "cloud:repo-1:task-remote",
-        prompt: "Remote task",
-        pipeline: "cloud",
-        branch: "task-remote",
-        display_name: "Remote task",
-        agent_provider: "codex",
-      })],
-      terminalRefs: {
-        "cloud:repo-1:task-remote": {
-          ownerDesktopId: "desktop-owner",
-          ownerLocalTaskId: "task-owner",
-          transport: "cloud",
-        },
-      },
-    });
-    const initializingItem: InitializingTaskItem = {
-      id: "create:local-task",
-      state: "initializing",
-      taskId: null,
-      repo_id: "repo-1",
-      prompt: "Create local task",
-      display_name: null,
-      pipeline: "default",
-      stage: "in progress",
-      agent_type: "pty",
-      agent_provider: "claude",
-      created_at: "2026-05-18T00:01:00.000Z",
-    };
-    store.createItem.mockImplementationOnce(async () => {
-      store.selectedRepoId = "repo-1";
-      store.selectedItemId = initializingItem.id;
-      store.selectedItemIdForPersistence = null;
-      store.initializingTaskItems = [initializingItem];
-      store.currentInitializingItem = initializingItem;
-      store.currentItem = null;
-    });
-    activeStore = reactive(store);
-
-    const SidebarMixedCreationStub = defineComponent({
-      name: "Sidebar",
-      props: {
-        pipelineItems: { type: Array, default: () => [] },
-      },
-      emits: ["select-item", "new-task"],
-      template: `
-        <div>
-          <button
-            v-for="item in pipelineItems"
-            v-show="item.remote_task"
-            :key="item.id"
-            :data-testid="\`task-\${item.id}\`"
-            type="button"
-            @click="$emit('select-item', item.id)"
-          >{{ item.display_name }}</button>
-          <button data-testid="new-local-task" type="button" @click="$emit('new-task', 'repo-1')">new</button>
-        </div>
-      `,
-    });
-    const CommandPaletteCreationStub = defineComponent({
-      name: "CommandPaletteModal",
-      props: {
-        dynamicCommands: { type: Array, default: () => [] },
-      },
-      template: `
-        <button
-          v-for="command in dynamicCommands"
-          :key="command.id"
-          type="button"
-          :data-command-id="command.id"
-          @click="command.execute()"
-        >{{ command.label }}</button>
-      `,
-    });
-    const wrapper = await mountAppWithOverrides(SidebarMixedCreationStub, {
-      CommandPaletteModal: CommandPaletteCreationStub,
-    });
-    await flushPromises();
-
-    await wrapper.get('[data-testid="task-cloud:repo-1:task-remote"]').trigger("click");
-    await flushPromises();
-    capturedKeyboardActions?.advanceStage();
-    await flushPromises();
-    expect(relayAdvanceStageMock).toHaveBeenCalled();
-    relayAdvanceStageMock.mockClear();
-    relayCloseMock.mockClear();
-
-    await wrapper.get('[data-testid="new-local-task"]').trigger("click");
-    await flushPromises();
-    await flushPromises();
-    await wrapper.get("textarea").setValue("Create local task");
-    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
-    await vi.waitFor(() => expect(store.createItem).toHaveBeenCalled());
-    await flushPromises();
-
-    expect(store.selectedItemId).toBe(initializingItem.id);
-    expect(store.persistSelection).toHaveBeenCalled();
-    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
-
-    capturedKeyboardActions?.advanceStage();
-    await capturedKeyboardActions?.closeTask();
-    await flushPromises();
-
-    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
-    expect(relayCloseTaskMock).not.toHaveBeenCalled();
-    expect(store.advanceStage).not.toHaveBeenCalled();
-
-    await wrapper.get('[data-testid="task-cloud:repo-1:task-remote"]').trigger("click");
-    await flushPromises();
-    store.createItem.mockClear();
-    capturedKeyboardActions?.commandPalette();
-    await flushPromises();
-    await wrapper.get('[data-command-id="create-agent"]').trigger("click");
-    await vi.waitFor(() => expect(store.createItem).toHaveBeenCalled());
-
-    capturedKeyboardActions?.advanceStage();
-    await capturedKeyboardActions?.closeTask();
-    await flushPromises();
-
-    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
-    expect(relayCloseTaskMock).not.toHaveBeenCalled();
-
-    wrapper.unmount();
-  });
-
-  it("includes initializing rows in visible keyboard navigation order", async () => {
-    const durableItem = createPipelineItem({ id: "task-durable" });
-    const initializingItem: InitializingTaskItem = {
-      id: "create:navigation",
-      state: "initializing",
-      taskId: null,
-      repo_id: "repo-1",
-      prompt: "Initializing first",
-      display_name: null,
-      pipeline: "default",
-      stage: "in progress",
-      agent_type: "pty",
-      agent_provider: "claude",
-      created_at: "2026-05-18T00:01:00.000Z",
-    };
-    store.items = [durableItem];
-    store.currentItem = durableItem;
-    store.selectedItemId = durableItem.id;
-    store.selectedItemIdForPersistence = durableItem.id;
-    store.sortedItemsForCurrentRepo = [durableItem];
-    store.sortedItemsAllRepos = [durableItem];
-    store.initializingTaskItems = [initializingItem];
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    await flushPromises();
-    store.selectItem.mockClear();
-
-    await capturedKeyboardActions?.navigateUp();
-
-    expect(store.selectItem).toHaveBeenCalledWith(initializingItem.id, {
-      previousItemId: durableItem.id,
-    });
-    wrapper.unmount();
-  });
-
-  it("restores a remembered initializer after navigating away and back without mounting its terminal", async () => {
-    const repoOneTask = createPipelineItem({
-      id: "task-repo-one",
-      repo_id: "repo-1",
-      prompt: "Repo one task",
-      display_name: "Repo one task",
-    });
-    const repoTwoReadyTask = createPipelineItem({
-      id: "task-repo-two-ready",
-      repo_id: "repo-2",
-      prompt: "Repo two ready task",
-      display_name: "Repo two ready task",
-    });
-    const initializingItem: InitializingTaskItem = {
-      id: "create:repo-two-held",
-      state: "initializing",
-      taskId: null,
-      repo_id: "repo-2",
-      prompt: "Repo two initializing task",
-      display_name: null,
-      pipeline: "default",
-      stage: "in progress",
-      agent_type: "pty",
-      agent_provider: "claude",
-      created_at: "2026-05-18T00:02:00.000Z",
-    };
-    store.repos = [
-      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
-      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
-    ];
-    store.items = [repoOneTask, repoTwoReadyTask];
-    store.selectedRepoId = "repo-2";
-    store.selectedItemId = initializingItem.id;
-    store.selectedItemIdForPersistence = null;
-    store.selectedRepo = store.repos[1];
-    store.initializingTaskItems = [initializingItem];
-    store.currentInitializingItem = initializingItem;
-    store.currentItem = null;
-    store.sortedItemsForCurrentRepo = [repoTwoReadyTask];
-    store.sortedItemsAllRepos = [repoOneTask, repoTwoReadyTask];
-    store.lastSelectedItemByRepo = {
-      "repo-1": repoOneTask.id,
-      "repo-2": initializingItem.id,
-    };
-    activeStore = reactive(store);
-
-    function applySelectedItem(itemId: string | null) {
-      const initializer = activeStore.initializingTaskItems.find((item) => item.id === itemId) ?? null;
-      const readyTask = activeStore.items.find((item) => item.id === itemId) ?? null;
-      activeStore.selectedItemId = itemId;
-      activeStore.selectedItemIdForPersistence = initializer?.taskId ?? readyTask?.id ?? null;
-      activeStore.currentInitializingItem = initializer;
-      activeStore.currentItem = initializer ? null : readyTask;
-      if (initializer) {
-        activeStore.selectedRepoId = initializer.repo_id;
-        activeStore.lastSelectedItemByRepo[initializer.repo_id] = initializer.id;
-      } else if (readyTask) {
-        activeStore.selectedRepoId = readyTask.repo_id;
-        activeStore.lastSelectedItemByRepo[readyTask.repo_id] = readyTask.id;
-      }
-      activeStore.selectedRepo = activeStore.repos.find((repo) => repo.id === activeStore.selectedRepoId) ?? null;
-    }
-    store.selectItem.mockImplementation(async (itemId: string) => {
-      applySelectedItem(itemId);
-    });
-    store.selectRepo.mockImplementation(async (repoId: string) => {
-      activeStore.selectedRepoId = repoId;
-      activeStore.selectedRepo = activeStore.repos.find((repo) => repo.id === repoId) ?? null;
-      applySelectedItem(activeStore.lastSelectedItemByRepo[repoId] ?? null);
-    });
-
-    const TerminalTabsStub = defineComponent({
-      name: "TerminalTabs",
-      props: { sessionId: String },
-      template: '<div data-testid="terminal-tabs" :data-session-id="sessionId" />',
-    });
-    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
-      MainPanel: false,
-      TaskHeader: true,
-      TerminalTabs: TerminalTabsStub,
-    });
-
-    try {
-      expect(wrapper.find(".setup-placeholder").exists()).toBe(true);
-      expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
-
-      await capturedKeyboardActions?.navigateRepoUp();
-      await flushPromises();
-      expect(activeStore.selectedRepoId).toBe("repo-1");
-      expect(wrapper.get('[data-testid="terminal-tabs"]').attributes("data-session-id"))
-        .toBe(repoOneTask.id);
-
-      await capturedKeyboardActions?.navigateRepoDown();
-      await flushPromises();
-
-      expect(activeStore.selectedRepoId).toBe("repo-2");
-      expect(activeStore.selectedItemId).toBe(initializingItem.id);
-      expect(activeStore.lastSelectedItemByRepo["repo-2"]).toBe(initializingItem.id);
-      expect(activeStore.currentInitializingItem).toEqual(initializingItem);
-      expect(activeStore.currentItem).toBeNull();
-      expect(activeStore.selectedItemIdForPersistence).toBeNull();
-      expect(activeStore.items.some((item) => item.id.startsWith("create:"))).toBe(false);
-      expect(wrapper.find(".setup-placeholder").exists()).toBe(true);
-      expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
-      expect(store.spawnPtySession.mock.calls.some(([sessionId]) =>
-        typeof sessionId === "string" && sessionId.startsWith("create:"),
-      )).toBe(false);
-    } finally {
-      store.selectRepo.mockReset();
-      store.selectItem.mockReset();
-      wrapper.unmount();
-    }
   });
 
   it("renders the modal with the preferred existing base branch selected", async () => {
@@ -2397,7 +2365,7 @@ describe("App", () => {
   it("opens a new window through the workspace controller using the current selection", async () => {
     store.selectedRepoId = "repo-1";
     store.selectedItemId = "task-1";
-    store.selectedItemIdForPersistence = "task-1";
+    store.selectedTaskId = "task-1";
 
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
@@ -2410,97 +2378,19 @@ describe("App", () => {
     });
   });
 
-  it("does not pass a UI-only initializing item id to a new window", async () => {
-    store.selectedRepoId = "repo-1";
-    store.selectedItemId = "create-1";
-    store.selectedItemIdForPersistence = null;
-
-    await mountApp(SidebarWithRepoStub);
-    await capturedKeyboardActions?.newWindow();
-
-    expect(mockWindowWorkspace.openWindow).toHaveBeenCalledWith({
-      selectedRepoId: "repo-1",
-      selectedItemId: null,
-    });
-  });
-
   it("closes the focused window through the workspace controller", async () => {
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
 
     await capturedKeyboardActions?.closeWindow();
 
-    expect(fenceAndDrainDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
     expect(mockWindowWorkspace.closeWindow).toHaveBeenCalledTimes(1);
-  });
-
-  it("drains cloud writes before removing the publisher window", async () => {
-    const drain = createDeferred<void>();
-    fenceAndDrainDesktopCloudWritesMock.mockImplementationOnce(async () => drain.promise);
-    await mountApp(SidebarWithRepoStub);
-    reconcileDesktopTaskSnapshotsMock.mockClear();
-
-    const closing = capturedKeyboardActions?.closeWindow();
-    await flushPromises();
-    expect(mockWindowWorkspace.closeWindow).not.toHaveBeenCalled();
-    for (const handler of windowWorkspaceInvalidationHandlers) {
-      await handler({ reason: "windowMembership", sourceWindowId: "window-2" });
-    }
-    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
-
-    drain.resolve();
-    await closing;
-
-    expect(mockWindowWorkspace.closeWindow).toHaveBeenCalledTimes(1);
-  });
-
-  it("skips membership initialization when the native window closes as its handler registers", async () => {
-    const event = { preventDefault: vi.fn() };
-    let closing: Promise<void> | null = null;
-    nativeCloseRegistrationHarness.onRegistered = (handler) => {
-      closing = Promise.resolve(handler(event));
-    };
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    await closing;
-
-    expect(fenceAndDrainDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
-    expect(mockWindowWorkspace.initialize).not.toHaveBeenCalled();
-    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
-    expect(store.init).not.toHaveBeenCalled();
-    expect(event.preventDefault).not.toHaveBeenCalled();
-    wrapper.unmount();
-  });
-
-  it("waits for in-flight membership initialization before removing an early-closing window", async () => {
-    const initialization = createDeferred<void>();
-    mockWindowWorkspace.initialize.mockImplementationOnce(async () => initialization.promise);
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    const handler = await waitForNativeCloseRequestedHandler();
-    expect(handler).toBeTypeOf("function");
-    expect(store.init).not.toHaveBeenCalled();
-
-    const event = { preventDefault: vi.fn() };
-    const closing = handler?.(event);
-    await flushPromises();
-
-    expect(fenceAndDrainDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
-    expect(mockWindowWorkspace.forgetCurrentWindow).not.toHaveBeenCalled();
-
-    initialization.resolve();
-    await closing;
-
-    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
-    expect(store.init).not.toHaveBeenCalled();
-    expect(event.preventDefault).not.toHaveBeenCalled();
-    wrapper.unmount();
   });
 
   it("opens a new window when the native window-open event arrives", async () => {
     store.selectedRepoId = "repo-1";
     store.selectedItemId = "task-1";
-    store.selectedItemIdForPersistence = "task-1";
+    store.selectedTaskId = "task-1";
 
     await mountApp(SidebarWithRepoStub);
     expect(listenHandlers.has(WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT)).toBe(false);
@@ -2539,29 +2429,9 @@ describe("App", () => {
     expect(event.preventDefault).not.toHaveBeenCalled();
   });
 
-  it("keeps the native window open when the cloud write drain times out", async () => {
-    fenceAndDrainDesktopCloudWritesMock.mockRejectedValueOnce(
-      new Error("cloud write drain timed out after 5000ms"),
-    );
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    await mountApp(SidebarWithRepoStub);
-    resumeDesktopCloudWritesMock.mockClear();
-    const handler = await waitForNativeCloseRequestedHandler();
-    const event = { preventDefault: vi.fn() };
-
-    await handler?.(event);
-
-    expect(event.preventDefault).toHaveBeenCalledTimes(1);
-    expect(mockWindowWorkspace.forgetCurrentWindow).not.toHaveBeenCalled();
-    expect(resumeDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
-
-    errorSpy.mockRestore();
-  });
-
   it("keeps the native window open if workspace closure persistence fails", async () => {
     mockWindowWorkspace.forgetCurrentWindow.mockRejectedValueOnce(new Error("write failed"));
     await mountApp(SidebarWithRepoStub);
-    resumeDesktopCloudWritesMock.mockClear();
     const handler = await waitForNativeCloseRequestedHandler();
     expect(handler).toBeTypeOf("function");
     const event = { preventDefault: vi.fn() };
@@ -2570,39 +2440,6 @@ describe("App", () => {
 
     expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
-    expect(resumeDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("restores the previous publisher when close persistence and workspace recovery both fail", async () => {
-    mockWindowWorkspace.bootstrap.windowId = "window-2";
-    mockWindowWorkspace.loadSnapshot.mockResolvedValue({
-      windows: [workspaceWindowState("window-2", 0)],
-    });
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    await flushPromises();
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
-    reconcileDesktopTaskSnapshotsMock.mockClear();
-    resumeDesktopCloudWritesMock.mockClear();
-
-    mockWindowWorkspace.forgetCurrentWindow.mockRejectedValueOnce(new Error("write failed"));
-    mockWindowWorkspace.initialize.mockRejectedValueOnce(new Error("server unavailable"));
-    mockWindowWorkspace.loadSnapshot.mockRejectedValueOnce(new Error("server unavailable"));
-    const handler = await waitForNativeCloseRequestedHandler();
-    const event = { preventDefault: vi.fn() };
-
-    await handler?.(event);
-    await flushPromises();
-
-    expect(event.preventDefault).toHaveBeenCalledTimes(1);
-    expect(resumeDesktopCloudWritesMock).toHaveBeenCalledTimes(1);
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledTimes(1);
-
-    warnSpy.mockRestore();
-    errorSpy.mockRestore();
-    wrapper.unmount();
   });
 
   it("navigates tasks when the native task-navigation event arrives", async () => {
@@ -2625,7 +2462,6 @@ describe("App", () => {
 
   it("navigates task shortcuts in the same order the sidebar renders stage groups", async () => {
     store.selectedRepoId = "repo-1";
-    store.selectedItemId = "task-progress";
     store.items = [
       {
         id: "task-pr",
@@ -2650,13 +2486,27 @@ describe("App", () => {
         updated_at: "2026-04-17T10:00:00.000Z",
       },
     ];
+    store.taskUiSlots = [
+      readyTaskSlot("slot:pr", store.items[0]),
+      readyTaskSlot("slot:progress", store.items[1]),
+    ];
+    store.selectedItemId = "slot:progress";
+    store.selectedTaskId = "task-progress";
+    store.currentTaskSlot = store.taskUiSlots[1];
+    store.selectItem.mockImplementationOnce(async (taskId: string) => {
+      const slot = store.taskUiSlots.find((candidate) => candidate.task_id === taskId) ?? null;
+      store.selectedItemId = slot?.slot_id ?? taskId;
+      store.selectedTaskId = slot?.task_id ?? taskId;
+      store.currentTaskSlot = slot;
+    });
 
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.navigateDown();
 
-    expect(store.selectItem).toHaveBeenCalledWith("task-pr", { previousItemId: "task-progress" });
+    expect(store.selectItem).toHaveBeenCalledWith("task-pr", { previousItemId: "slot:progress" });
+    expect(store.selectedItemId).toBe("slot:pr");
   });
 
   it("navigates task shortcuts across repo boundaries in sidebar order", async () => {
@@ -2665,7 +2515,6 @@ describe("App", () => {
       { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
     ];
     store.selectedRepoId = "repo-1";
-    store.selectedItemId = "task-one";
     store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
     store.items = [
       {
@@ -2691,6 +2540,13 @@ describe("App", () => {
         updated_at: "2026-04-17T10:01:00.000Z",
       },
     ];
+    store.taskUiSlots = [
+      readyTaskSlot("slot:one", store.items[0]),
+      readyTaskSlot("slot:two", store.items[1]),
+    ];
+    store.selectedItemId = "slot:one";
+    store.selectedTaskId = "task-one";
+    store.currentTaskSlot = store.taskUiSlots[0];
 
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
@@ -2699,214 +2555,7 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.selectRepo).toHaveBeenCalledWith("repo-2");
-    expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "task-one" });
-  });
-
-  it("does not reselect an initializer that hydrates during cross-repo navigation", async () => {
-    const taskOne = createPipelineItem({
-      id: "task-one",
-      repo_id: "repo-1",
-      prompt: "Repo one task",
-      display_name: "Repo one task",
-    });
-    const durableTask = createPipelineItem({
-      id: "task-two",
-      repo_id: "repo-2",
-      prompt: "Repo two task",
-      display_name: "Repo two task",
-    });
-    const initializingItem: InitializingTaskItem = {
-      id: "create:navigation",
-      state: "initializing",
-      taskId: durableTask.id,
-      repo_id: "repo-2",
-      prompt: "Repo two task",
-      display_name: null,
-      pipeline: "default",
-      stage: "in progress",
-      agent_type: "pty",
-      agent_provider: "claude",
-      created_at: "2026-05-18T00:01:00.000Z",
-    };
-    store.repos = [
-      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
-      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
-    ];
-    store.selectedRepoId = "repo-1";
-    store.selectedItemId = taskOne.id;
-    store.selectedItemIdForPersistence = taskOne.id;
-    store.selectedRepo = store.repos[0];
-    store.currentItem = taskOne;
-    store.items = [taskOne];
-    store.sortedItemsForCurrentRepo = [taskOne];
-    store.sortedItemsAllRepos = [taskOne];
-    store.initializingTaskItems = [initializingItem];
-    store.lastSelectedItemByRepo = {
-      "repo-1": taskOne.id,
-      "repo-2": initializingItem.id,
-    };
-    activeStore = reactive(store);
-
-    const repoSelectionGate = createDeferred<void>();
-    const persistedSelectionIds: string[] = [];
-    const taskEventIds: string[] = [];
-    store.selectRepo.mockImplementation(async (repoId: string) => {
-      activeStore.selectedRepoId = repoId;
-      activeStore.selectedItemId = activeStore.lastSelectedItemByRepo[repoId] ?? null;
-      await repoSelectionGate.promise;
-    });
-    store.selectItem.mockImplementation(async (itemId: string) => {
-      activeStore.selectedItemId = itemId;
-      persistedSelectionIds.push(itemId);
-      taskEventIds.push(itemId);
-    });
-
-    const MainPanelTaskRouteStub = defineComponent({
-      name: "MainPanel",
-      props: { uiItem: Object },
-      template: '<div data-testid="terminal-task-id">{{ uiItem?.taskId || "" }}</div>',
-    });
-    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
-      MainPanel: MainPanelTaskRouteStub,
-    });
-
-    try {
-      const navigation = capturedKeyboardActions?.navigateDown();
-      await vi.waitFor(() => expect(store.selectRepo).toHaveBeenCalledWith("repo-2"));
-
-      activeStore.items = [taskOne, durableTask];
-      activeStore.initializingTaskItems = [];
-      activeStore.selectedRepoId = "repo-2";
-      activeStore.selectedRepo = activeStore.repos[1];
-      activeStore.selectedItemId = durableTask.id;
-      activeStore.selectedItemIdForPersistence = durableTask.id;
-      activeStore.lastSelectedItemByRepo = {
-        ...activeStore.lastSelectedItemByRepo,
-        "repo-2": durableTask.id,
-      };
-      activeStore.currentInitializingItem = null;
-      activeStore.currentItem = durableTask;
-      activeStore.sortedItemsForCurrentRepo = [durableTask];
-      activeStore.sortedItemsAllRepos = [taskOne, durableTask];
-
-      repoSelectionGate.resolve();
-      await navigation;
-      await flushPromises();
-
-      expect(store.selectItem).not.toHaveBeenCalledWith(
-        initializingItem.id,
-        expect.anything(),
-      );
-      expect(persistedSelectionIds.some((id) => id.startsWith("create:"))).toBe(false);
-      expect(taskEventIds.some((id) => id.startsWith("create:"))).toBe(false);
-      expect(wrapper.get('[data-testid="terminal-task-id"]').text()).toBe(durableTask.id);
-      expect(store.selectedItemId).toBe(durableTask.id);
-      expect(store.selectedItemIdForPersistence).toBe(durableTask.id);
-    } finally {
-      repoSelectionGate.resolve();
-      store.selectRepo.mockReset();
-      store.selectItem.mockReset();
-      wrapper.unmount();
-    }
-  });
-
-  it("does not let an older cross-repo navigation overwrite a newer selection intent", async () => {
-    const taskOne = createPipelineItem({
-      id: "task-one",
-      repo_id: "repo-1",
-      prompt: "Repo one task",
-      display_name: "Repo one task",
-    });
-    const initializingItem: InitializingTaskItem = {
-      id: "create:navigation",
-      state: "initializing",
-      taskId: null,
-      repo_id: "repo-2",
-      prompt: "Repo two task",
-      display_name: null,
-      pipeline: "default",
-      stage: "in progress",
-      agent_type: "pty",
-      agent_provider: "claude",
-      created_at: "2026-05-18T00:01:00.000Z",
-    };
-    store.repos = [
-      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
-      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
-    ];
-    store.selectedRepoId = "repo-1";
-    store.selectedItemId = taskOne.id;
-    store.selectedItemIdForPersistence = taskOne.id;
-    store.selectedRepo = store.repos[0];
-    store.currentItem = taskOne;
-    store.items = [taskOne];
-    store.sortedItemsForCurrentRepo = [taskOne];
-    store.sortedItemsAllRepos = [taskOne];
-    store.initializingTaskItems = [initializingItem];
-    store.lastSelectedItemByRepo = {
-      "repo-1": taskOne.id,
-      "repo-2": initializingItem.id,
-    };
-    activeStore = reactive(store);
-
-    const firstRepoSelectionGate = createDeferred<void>();
-    const persistedSelectionIds: string[] = [];
-    const taskEventIds: string[] = [];
-    let repoSelectionCount = 0;
-    store.selectRepo.mockImplementation(async (repoId: string) => {
-      repoSelectionCount += 1;
-      activeStore.selectedRepoId = repoId;
-      activeStore.selectedRepo = activeStore.repos.find((repo) => repo.id === repoId) ?? null;
-      activeStore.selectedItemId = activeStore.lastSelectedItemByRepo[repoId] ?? null;
-      if (repoSelectionCount === 1) await firstRepoSelectionGate.promise;
-    });
-    store.selectItem.mockImplementation(async (itemId: string) => {
-      const initializingTarget = activeStore.initializingTaskItems.find((item) => item.id === itemId) ?? null;
-      const durableTarget = activeStore.items.find((item) => item.id === itemId) ?? null;
-      activeStore.selectedItemId = itemId;
-      activeStore.selectedRepoId = initializingTarget?.repo_id ?? durableTarget?.repo_id ?? activeStore.selectedRepoId;
-      activeStore.currentInitializingItem = initializingTarget;
-      activeStore.currentItem = initializingTarget ? null : durableTarget;
-      activeStore.selectedItemIdForPersistence = initializingTarget?.taskId ?? durableTarget?.id ?? null;
-      persistedSelectionIds.push(activeStore.selectedItemIdForPersistence ?? "");
-      taskEventIds.push(itemId);
-    });
-
-    const MainPanelTaskRouteStub = defineComponent({
-      name: "MainPanel",
-      props: { uiItem: Object },
-      template: '<div data-testid="terminal-task-id">{{ uiItem?.taskId || "" }}</div>',
-    });
-    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
-      MainPanel: MainPanelTaskRouteStub,
-    });
-
-    try {
-      const olderNavigation = capturedKeyboardActions?.navigateDown();
-      await vi.waitFor(() => expect(repoSelectionCount).toBe(1));
-
-      const newerNavigation = capturedKeyboardActions?.navigateUp();
-      await newerNavigation;
-      expect(activeStore.selectedItemId).toBe(taskOne.id);
-
-      firstRepoSelectionGate.resolve();
-      await olderNavigation;
-      await flushPromises();
-
-      expect(store.selectItem).toHaveBeenCalledTimes(1);
-      expect(store.selectItem).toHaveBeenCalledWith(taskOne.id, {
-        previousItemId: initializingItem.id,
-      });
-      expect(persistedSelectionIds.some((id) => id.startsWith("create:"))).toBe(false);
-      expect(taskEventIds.some((id) => id.startsWith("create:"))).toBe(false);
-      expect(wrapper.get('[data-testid="terminal-task-id"]').text()).toBe(taskOne.id);
-      expect(activeStore.selectedItemId).toBe(taskOne.id);
-    } finally {
-      firstRepoSelectionGate.resolve();
-      store.selectRepo.mockReset();
-      store.selectItem.mockReset();
-      wrapper.unmount();
-    }
+    expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "slot:one" });
   });
 
   it("keeps unread task shortcuts scoped to the selected repo before falling back to read tasks", async () => {
@@ -3027,7 +2676,10 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("task-current");
   });
 
-  it("navigates repos when the native repo-navigation event arrives", async () => {
+  it.each([
+    { label: "presentation slot", rememberedSelection: "slot:two" },
+    { label: "durable task id", rememberedSelection: "task-two" },
+  ])("navigates repos when the native event remembers a $label", async ({ rememberedSelection }) => {
     store.repos = [
       { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
       { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
@@ -3037,11 +2689,12 @@ describe("App", () => {
     store.items = [
       { id: "task-two", repo_id: "repo-2", stage: "in progress" },
     ];
+    store.taskUiSlots = [readyTaskSlot("slot:two", store.items[0])];
     store.sortedItemsAllRepos = [
       { id: "task-one", repo_id: "repo-1" },
       { id: "task-two", repo_id: "repo-2" },
     ];
-    store.lastSelectedItemByRepo = {};
+    store.lastSelectedItemByRepo = { "repo-2": rememberedSelection };
 
     await mountApp(SidebarWithRepoStub);
     expect(listenHandlers.has(WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT)).toBe(false);
@@ -3185,7 +2838,6 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
-          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -3756,7 +3408,6 @@ describe("App", () => {
       "Set up Kanna for this repository.",
       "pty",
       expect.objectContaining({
-        agentProvider: "codex",
         customTask: expect.objectContaining({
           agent: "setup",
           name: "Set Up Repository",
@@ -3764,6 +3415,7 @@ describe("App", () => {
         }),
       }),
     );
+    expect(store.createItem.mock.calls.at(-1)?.[4]).not.toHaveProperty("agentProvider");
 
     store.loadAgent.mockClear();
     store.createItem.mockClear();
@@ -3778,7 +3430,6 @@ describe("App", () => {
       "Help me create or update the .kanna/config.json for this repository.",
       "pty",
       expect.objectContaining({
-        agentProvider: "codex",
         customTask: expect.objectContaining({
           agent: "config-factory",
           name: "Create Config",
@@ -3786,6 +3437,7 @@ describe("App", () => {
         }),
       }),
     );
+    expect(store.createItem.mock.calls.at(-1)?.[4]).not.toHaveProperty("agentProvider");
   });
 
   it("launches the setup agent after importing a repository from AddRepoModal", async () => {
@@ -3824,7 +3476,6 @@ describe("App", () => {
       "Set up Kanna for this repository.",
       "pty",
       expect.objectContaining({
-        agentProvider: "codex",
         customTask: expect.objectContaining({
           agent: "setup",
           name: "Set Up Repository",
@@ -3832,6 +3483,7 @@ describe("App", () => {
         }),
       }),
     );
+    expect(store.createItem.mock.calls.at(-1)?.[4]).not.toHaveProperty("agentProvider");
   });
 
   it("keeps loading transfer peers until discovery has had time to warm up", async () => {
@@ -4156,6 +3808,55 @@ describe("App", () => {
     expect(wrapper.find(".action-bar").exists()).toBe(false);
   });
 
+  it("opens the latest terminal file link for the selected task", async () => {
+    store.currentItem = {
+      id: "task-1",
+      stage: "in progress",
+      branch: "task-1",
+      prompt: "Fix handoff",
+      tags: "[]",
+    };
+    store.selectedItemId = "task-1";
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    await capturedKeyboardActions?.openLatestFileLink();
+
+    expect(openLatestTerminalFileLinkMock).toHaveBeenCalledWith("task-1");
+    expect(toastInfoMock).not.toHaveBeenCalledWith("toasts.noTerminalFileLink");
+    wrapper.unmount();
+  });
+
+  it("shows info feedback when the selected terminal has no file link", async () => {
+    openLatestTerminalFileLinkMock.mockResolvedValue(false);
+    store.currentItem = {
+      id: "task-1",
+      stage: "in progress",
+      branch: "task-1",
+      prompt: "Fix handoff",
+      tags: "[]",
+    };
+    store.selectedItemId = "task-1";
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    await capturedKeyboardActions?.openLatestFileLink();
+
+    expect(toastInfoMock).toHaveBeenCalledWith("toasts.noTerminalFileLink");
+    wrapper.unmount();
+  });
+
+  it("shows the latest-file shortcut hint only once when a terminal link becomes available", async () => {
+    localStorage.removeItem("kanna:terminal-file-link-shortcut-hint:v1");
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    document.dispatchEvent(new CustomEvent("terminal-file-link-available", { bubbles: true }));
+    document.dispatchEvent(new CustomEvent("terminal-file-link-available", { bubbles: true }));
+
+    expect(toastInfoMock).toHaveBeenCalledTimes(1);
+    expect(toastInfoMock).toHaveBeenCalledWith("toasts.latestAgentFileHint");
+    expect(localStorage.getItem("kanna:terminal-file-link-shortcut-hint:v1")).toBe("1");
+    wrapper.unmount();
+  });
+
   it("dismiss closes the entire file flow after preview-local dismiss is exhausted", async () => {
     vi.stubGlobal("__KANNA_MOBILE__", false);
     const { default: App } = await import("./App.vue");
@@ -4164,7 +3865,6 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
-          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -4219,7 +3919,6 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
-          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -4425,7 +4124,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-mode")).toBe("rendered");
   });
 
-  it("remembers markdown render mode when reopening a preview window", async () => {
+  it("opens Markdown rendered and persists a raw-mode choice", async () => {
     const MarkdownFilePickerModalTestStub = defineComponent({
       name: "FilePickerModal",
       emits: ["select"],
@@ -4457,7 +4156,7 @@ describe("App", () => {
       },
       template: `
         <div data-testid="file-preview-modal" :data-mode="initialMarkdownMode">
-          <button data-testid="toggle-markdown-render" @click="emit('update-markdown-mode', 'rendered')">rendered</button>
+          <button data-testid="toggle-markdown-raw" @click="emit('update-markdown-mode', 'raw')">raw</button>
         </div>
       `,
     });
@@ -4474,17 +4173,15 @@ describe("App", () => {
     await wrapper.get('[data-testid="file-picker-select"]').trigger("click");
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-mode")).toBe("raw");
-
-    await wrapper.get('[data-testid="toggle-markdown-render"]').trigger("click");
-    await flushPromises();
-
-    capturedKeyboardActions?.dismiss();
-    await flushPromises();
-    capturedKeyboardActions?.toggleFilePreview();
-    await flushPromises();
-
     expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-mode")).toBe("rendered");
+
+    await wrapper.get('[data-testid="toggle-markdown-raw"]').trigger("click");
+    await flushPromises();
+
+    expect(store.markdownPreviewMode).toBe("raw");
+    expect(store.savePreference).toHaveBeenCalledWith("markdownPreviewMode", "raw");
+
+    wrapper.unmount();
   });
 
   it("preserves file picker scroll state when preview hides and resumes the picker", async () => {
@@ -4539,7 +4236,6 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
-          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,

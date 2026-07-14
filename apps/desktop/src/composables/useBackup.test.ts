@@ -45,7 +45,6 @@ const {
   cleanOldBackups,
   backupOnStartup,
   scheduleStartupBackup,
-  migrateLegacyDatabaseIfNeeded,
 } = await import("./useBackup");
 
 describe("useBackup", () => {
@@ -70,11 +69,7 @@ describe("useBackup", () => {
     it("parses a valid backup filename", () => {
       const ts = parseBackupTimestamp("kanna-v2.db.backup-2026-03-21T10-30-00");
       expect(ts).toBeInstanceOf(Date);
-      expect(ts!.getFullYear()).toBe(2026);
-      expect(ts!.getMonth()).toBe(2); // March = 2
-      expect(ts!.getDate()).toBe(21);
-      expect(ts!.getHours()).toBe(10);
-      expect(ts!.getMinutes()).toBe(30);
+      expect(ts!.toISOString()).toBe("2026-03-21T10:30:00.000Z");
     });
 
     it("parses a valid backup filename with a collision suffix", () => {
@@ -119,11 +114,11 @@ describe("useBackup", () => {
       expect(liveCopyCall).toBeUndefined();
     });
 
-    it("skips backup if DB file does not exist", async () => {
-      testState.invokeResults.file_exists = false;
+    it("uses the server-owned database path even when it is outside app data", async () => {
       await createBackup("kanna-v2.db");
 
-      expect(testState.desktopBackupCalls).toBe(0);
+      expect(testState.desktopBackupCalls).toBe(1);
+      expect(testState.invokeCalls.some((call) => call.cmd === "file_exists")).toBe(false);
     });
 
     it("does not truncate WAL while an independent server writer may be active", async () => {
@@ -142,59 +137,6 @@ describe("useBackup", () => {
       // Should call list_dir for cleanup
       const listCall = testState.invokeCalls.find((c) => c.cmd === "list_dir");
       expect(listCall).toBeTruthy();
-    });
-  });
-
-  describe("migrateLegacyDatabaseIfNeeded", () => {
-    it("copies a legacy database into the current app data dir", async () => {
-      testState.invokeResults.get_app_data_dir = "/mock/data/build.kanna";
-      testState.invokeResults.file_exists = ({ path }: { path: string }) =>
-        path === "/mock/data/com.kanna.app/kanna-v2.db" ||
-        path === "/mock/data/com.kanna.app/kanna-v2.db-wal";
-
-      await migrateLegacyDatabaseIfNeeded("kanna-v2.db");
-
-      const ensureDirCall = testState.invokeCalls.find((c) => c.cmd === "ensure_directory");
-      expect((ensureDirCall?.args as { path: string }).path).toBe("/mock/data/build.kanna");
-
-      const copyCalls = testState.invokeCalls.filter((c) => c.cmd === "copy_file");
-      expect(copyCalls).toEqual([
-        {
-          cmd: "copy_file",
-          args: {
-            src: "/mock/data/com.kanna.app/kanna-v2.db",
-            dst: "/mock/data/build.kanna/kanna-v2.db",
-          },
-        },
-        {
-          cmd: "copy_file",
-          args: {
-            src: "/mock/data/com.kanna.app/kanna-v2.db-wal",
-            dst: "/mock/data/build.kanna/kanna-v2.db-wal",
-          },
-        },
-      ]);
-    });
-
-    it("skips migration when the current database already exists", async () => {
-      testState.invokeResults.get_app_data_dir = "/mock/data/build.kanna";
-      testState.invokeResults.file_exists = ({ path }: { path: string }) =>
-        path === "/mock/data/build.kanna/kanna-v2.db";
-
-      await migrateLegacyDatabaseIfNeeded("kanna-v2.db");
-
-      const copyCall = testState.invokeCalls.find((c) => c.cmd === "copy_file");
-      expect(copyCall).toBeUndefined();
-    });
-
-    it("skips migration when there is no legacy database to copy", async () => {
-      testState.invokeResults.get_app_data_dir = "/mock/data/build.kanna";
-      testState.invokeResults.file_exists = false;
-
-      await migrateLegacyDatabaseIfNeeded("kanna-v2.db");
-
-      const copyCall = testState.invokeCalls.find((c) => c.cmd === "copy_file");
-      expect(copyCall).toBeUndefined();
     });
   });
 

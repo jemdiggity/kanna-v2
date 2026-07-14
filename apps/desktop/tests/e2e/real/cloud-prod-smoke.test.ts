@@ -210,45 +210,26 @@ function readFirestoreString(document: FirestoreDocument, field: string): string
 }
 
 describe.skipIf(missingEnv.length > 0)("cloud production/staging smoke", () => {
-  it("writes and reads nested desktop task snapshots through direct Firestore rules", async () => {
+  it("keeps renderer task publication read-only in deployed Firestore rules", async () => {
     const runId = randomUUID().slice(0, 8);
     const { idToken, localId, email } = await signInForIdToken();
-    const title = `Kanna cloud smoke ${runId}`;
-    const updatedTitle = `${title} updated`;
-    let desktopPath: string | null = null;
-    let taskPath: string | null = null;
-
-    try {
-      await patchFirestoreDocument(idToken, `users/${localId}`, {
-        primaryEmail: { stringValue: email },
-        updatedAt: { stringValue: new Date().toISOString() },
-      });
-
-      const desktop = await createFirestoreDocument(idToken, `users/${localId}/desktops`, {
-        desktopId: { stringValue: `desktop-smoke-${runId}` },
-        displayName: { stringValue: "Kanna Smoke Desktop" },
-        updatedAt: { stringValue: new Date().toISOString() },
-      });
-      desktopPath = documentPath(desktop);
-
-      const task = await createFirestoreDocument(idToken, `${desktopPath}/tasks`, snapshotFields(smokeSnapshot(runId, title)));
-      taskPath = documentPath(task);
-
-      const createdTask = await getFirestoreDocument(idToken, taskPath);
-      expect(readFirestoreString(createdTask, "title")).toBe(title);
-      expect(readFirestoreString(createdTask, "ownerLocalTaskId")).toBe(`task-smoke-${runId}`);
-      expect(readFirestoreString(createdTask, "localRepoId")).toBe(`repo-smoke-${runId}`);
-
-      await patchFirestoreDocument(idToken, taskPath, snapshotFields(smokeSnapshot(runId, updatedTitle)));
-      const updatedTask = await getFirestoreDocument(idToken, taskPath);
-      expect(readFirestoreString(updatedTask, "title")).toBe(updatedTitle);
-
-      await expectFirestoreWriteDenied(idToken, `users/${localId}/tasks/${runId}`, {
-        title: { stringValue: "flat task writes stay denied" },
-      });
-    } finally {
-      if (taskPath) await deleteFirestoreDocument(idToken, taskPath).catch(() => undefined);
-      if (desktopPath) await deleteFirestoreDocument(idToken, desktopPath).catch(() => undefined);
-    }
+    const desktopPath = `users/${localId}/desktops/desktop-smoke-${runId}`;
+    await patchFirestoreDocument(idToken, `users/${localId}`, {
+      primaryEmail: { stringValue: email },
+      updatedAt: { stringValue: new Date().toISOString() },
+    });
+    await expectFirestoreWriteDenied(idToken, desktopPath, {
+      desktopId: { stringValue: `desktop-smoke-${runId}` },
+      displayName: { stringValue: "Kanna Smoke Desktop" },
+      updatedAt: { stringValue: new Date().toISOString() },
+    });
+    await expectFirestoreWriteDenied(
+      idToken,
+      `${desktopPath}/tasks/task-smoke-${runId}`,
+      snapshotFields(smokeSnapshot(runId, `Kanna cloud smoke ${runId}`)),
+    );
+    await expectFirestoreWriteDenied(idToken, `users/${localId}/tasks/${runId}`, {
+      title: { stringValue: "flat task writes stay denied" },
+    });
   }, 60_000);
 });

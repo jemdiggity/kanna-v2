@@ -12,24 +12,33 @@ import { macOsTextInputAttrs } from "../utils/textInput";
 import { getSyntaxLanguageForPath } from "../utils/syntaxLanguage";
 import { getShikiTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
+import {
+  DEFAULT_MARKDOWN_PREVIEW_MODE,
+  type MarkdownPreviewMode,
+} from "../stores/markdownPreviewMode";
 
 const { t } = useI18n();
 const { zIndex, bringToFront } = useModalZIndex();
 const { effectiveCodeTheme } = useThemeRuntime();
 const shikiTheme = computed(() => getShikiTheme(effectiveCodeTheme.value));
 
-const props = defineProps<{
-  filePath: string;
-  worktreePath: string;
-  ideCommand?: string;
-  maximized?: boolean;
-  initialLine?: number;
-  initialMarkdownMode?: "raw" | "rendered";
-}>();
+const props = withDefaults(
+  defineProps<{
+    filePath: string;
+    worktreePath: string;
+    ideCommand?: string;
+    maximized?: boolean;
+    initialLine?: number;
+    initialMarkdownMode?: MarkdownPreviewMode;
+  }>(),
+  {
+    initialMarkdownMode: DEFAULT_MARKDOWN_PREVIEW_MODE,
+  },
+);
 
 const emit = defineEmits<{
   (e: "close"): void;
-  (e: "update-markdown-mode", mode: "raw" | "rendered"): void;
+  (e: "update-markdown-mode", mode: MarkdownPreviewMode): void;
 }>();
 
 const contentRef = ref<HTMLElement | null>(null);
@@ -76,7 +85,9 @@ const error = ref<string | null>(null);
 const isMarkdownFile = computed(() =>
   props.filePath.toLowerCase().endsWith(".md")
 );
-const renderMarkdown = ref(props.initialMarkdownMode === "rendered" && isMarkdownFile.value);
+const renderMarkdown = ref(
+  props.initialMarkdownMode === "rendered" && isMarkdownFile.value,
+);
 
 const lineCount = computed(() => {
   if (!content.value) return 0;

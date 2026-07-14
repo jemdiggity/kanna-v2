@@ -2,6 +2,7 @@ import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAppTaskCreation } from "./useAppTaskCreation";
+import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -68,6 +69,9 @@ function createTaskCreationHarness() {
 
 describe("useAppTaskCreation", () => {
   beforeEach(() => {
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoAgentProviders: async () => ["claude", "copilot", "codex", "opencode", "antigravity"],
+    });
     invokeMock.mockReset();
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_dir") return [];
@@ -76,6 +80,17 @@ describe("useAppTaskCreation", () => {
       if (command === "git_list_base_branches") return ["origin/main"];
       return "";
     });
+  });
+
+  it("loads executable availability through the repo-scoped server resolver", async () => {
+    const fetchRepoAgentProviders = vi.fn(async (): Promise<["opencode"]> => ["opencode"]);
+    updateDesktopServerClientHandlersForTests({ fetchRepoAgentProviders });
+    const { creation } = createTaskCreationHarness();
+
+    await creation.openNewTaskModal();
+
+    expect(fetchRepoAgentProviders).toHaveBeenCalledWith("repo-1");
+    expect(creation.availableAgentProviders.value).toEqual(["opencode"]);
   });
 
   it("records the exact agent choice after a task is created", async () => {
@@ -157,7 +172,6 @@ describe("useAppTaskCreation", () => {
       "Set up Kanna for this repository.",
       "pty",
       expect.objectContaining({
-        agentProvider: "codex",
         customTask: expect.objectContaining({
           name: "Set Up Repository",
           agent: "setup",
@@ -165,5 +179,6 @@ describe("useAppTaskCreation", () => {
         }),
       }),
     );
+    expect(store.createItem.mock.calls[0]?.[4]).not.toHaveProperty("agentProvider");
   });
 });

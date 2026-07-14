@@ -85,10 +85,11 @@ async function createDesktopCredentialDoc(
     throw new Error(`desktop credential id ${credential.desktopId} did not match status id ${status.desktopId}`);
   }
 
+  const path = `desktopCredentials/${status.desktopId.replaceAll("/", "_")}`;
   const response = await fetch(
-    `${firestoreDocumentsUrl()}/users/${encodeURIComponent(auth.localId)}/desktops`,
+    `${firestoreDocumentsUrl()}/${path}`,
     {
-      method: "POST",
+      method: "PATCH",
       headers: {
         Authorization: `Bearer ${auth.idToken}`,
         "Content-Type": "application/json"
@@ -99,6 +100,7 @@ async function createDesktopCredentialDoc(
           displayName: { stringValue: status.desktopName || "Kanna E2E Desktop" },
           desktopSecretHash: { stringValue: credential.desktopSecretHash },
           revokedAt: { nullValue: null },
+          uid: { stringValue: auth.localId },
           updatedAt: { stringValue: new Date().toISOString() }
         }
       })
@@ -108,8 +110,6 @@ async function createDesktopCredentialDoc(
   if (!response.ok || typeof body?.name !== "string") {
     throw new Error(`failed to create relay desktop doc: ${response.status} ${JSON.stringify(body)}`);
   }
-  const path = body.name.split("/documents/")[1];
-  if (!path) throw new Error(`unexpected Firestore document name: ${body.name}`);
   return path;
 }
 

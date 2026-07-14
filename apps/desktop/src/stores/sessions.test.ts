@@ -1,9 +1,9 @@
-import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 import { createSessionsApi } from "./sessions";
-import type { StoreContext } from "./state";
+import { createStoreState, type StoreContext } from "./state";
+import { acknowledgeTaskUiSlot, buildCreatingTaskUiSlot } from "./taskUiSlots";
 
 const mocks = vi.hoisted(() => {
   const invokeDefault = async (command: string, args?: Record<string, unknown>) => {
@@ -41,7 +41,14 @@ const mocks = vi.hoisted(() => {
   const invokeMock = vi.fn(invokeDefault);
   const updateAgentSessionIdMock = vi.fn(async () => {});
   const putTaskAgentSessionMock = vi.fn(async () => {});
-  return { invokeMock, invokeDefault, updateAgentSessionIdMock, putTaskAgentSessionMock };
+  const applyTaskRuntimeStatusMock = vi.fn(async (taskId: string) => ({ taskId, activity: null }));
+  return {
+    invokeMock,
+    invokeDefault,
+    updateAgentSessionIdMock,
+    putTaskAgentSessionMock,
+    applyTaskRuntimeStatusMock,
+  };
 });
 
 vi.mock("../invoke", () => ({
@@ -68,26 +75,13 @@ function makeContext(): StoreContext {
     execute: vi.fn(async () => undefined),
   } as unknown as DbHandle;
 
+  const state = createStoreState();
+  state.db.value = db;
+  state.suspendAfterMinutes.value = 5;
+  state.killAfterMinutes.value = 30;
+
   return {
-    state: {
-      db: ref(db),
-      repos: ref<Repo[]>([]),
-      items: ref<PipelineItem[]>([]),
-      initialWindowBootstrap: ref(null),
-      selectedRepoId: ref(null),
-      selectedItemId: ref(null),
-      lastSelectedItemByRepo: ref({}),
-      suspendAfterMinutes: ref(5),
-      killAfterMinutes: ref(30),
-      ideCommand: ref("code"),
-      hideShortcutsOnStartup: ref(false),
-      devLingerTerminals: ref(false),
-      lastHiddenRepoId: ref(null),
-      pipelineCache: new Map(),
-      agentCache: new Map(),
-      stageOrderCache: new Map(),
-      pendingCreateVisibility: new Map(),
-    },
+    state,
     services: {},
     toast: {
       success: vi.fn(),
@@ -99,6 +93,43 @@ function makeContext(): StoreContext {
   };
 }
 
+function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
+  return {
+    id: "task-1",
+    repo_id: "repo-1",
+    issue_number: null,
+    issue_title: null,
+    prompt: "Ship it",
+    pipeline: "default",
+    pipeline_def: null,
+    stage: "in progress",
+    pr_number: null,
+    pr_url: null,
+    branch: "task-task-1",
+    closed_at: null,
+    agent_type: "pty",
+    agent_provider: "claude",
+    activity: "working",
+    activity_changed_at: "2026-07-11T00:00:00.000Z",
+    unread_at: null,
+    port_offset: null,
+    display_name: null,
+    last_output_preview: null,
+    port_env: null,
+    pinned: 0,
+    pin_order: null,
+    base_ref: "origin/main",
+    agent_session_id: null,
+    teardown_started_at: null,
+    parent_task_id: null,
+    notify_task_id: null,
+    notified_at: null,
+    created_at: "2026-07-11T00:00:00.000Z",
+    updated_at: "2026-07-11T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 describe("createSessionsApi", () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -106,9 +137,33 @@ describe("createSessionsApi", () => {
     mocks.invokeMock.mockImplementation(mocks.invokeDefault);
     mocks.updateAgentSessionIdMock.mockClear();
     mocks.putTaskAgentSessionMock.mockClear();
+    mocks.applyTaskRuntimeStatusMock.mockClear();
     setDesktopServerClientHandlersForTests({
       putTaskAgentSession: mocks.putTaskAgentSessionMock,
+      applyTaskRuntimeStatus: mocks.applyTaskRuntimeStatusMock,
     });
+  });
+
+  it("derives pending setup runtime status from an acknowledged creating slot", async () => {
+    const context = makeContext();
+    const item = makeItem();
+    context.state.items.value = [item];
+    context.state.taskUiSlots.value = acknowledgeTaskUiSlot(
+      [buildCreatingTaskUiSlot({
+        slotId: "create:slot-1",
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentType: "pty",
+        requestedAgentProviders: "claude",
+      })],
+      "create:slot-1",
+      item.id,
+    );
+    const sessions = createSessionsApi(context);
+
+    await sessions.applyTaskRuntimeStatus(item, "idle");
+
+    expect(mocks.applyTaskRuntimeStatusMock).not.toHaveBeenCalled();
   });
 
   it("reports OpenCode CLI availability", async () => {

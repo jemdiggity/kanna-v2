@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, expect, it } from "vitest";
 import { parsePipelineJson } from "./pipeline-loader";
 
@@ -48,6 +49,14 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA pipeline assets", () => {
+  it("keeps the pipeline provider schema aligned with the generated registry", () => {
+    const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json")) as {
+      $defs?: { agentProvider?: { enum?: string[] } };
+    };
+
+    expect(schema.$defs?.agentProvider?.enum).toEqual([...AGENT_PROVIDERS]);
+  });
+
   it("keeps the commit agent focused on committing work instead of task-session mechanics", () => {
     const commitAgent = readRepoFile(".kanna/agents/commit/AGENT.md");
 
@@ -87,6 +96,14 @@ describe("QA pipeline assets", () => {
     expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
   });
 
+  it("ships the approve post on the default pipeline pr stage so advancing queues the merge", () => {
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/default.json"));
+    const prStage = parsed.stages.find((stage) => stage.name === "pr");
+    expect(prStage?.post?.name).toBe("approve");
+    expect(prStage?.post?.agent).toBe("approve");
+    expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
+  });
+
   it("keeps the PR agent agnostic to the development branch name", () => {
     const prAgent = readRepoFile(".kanna/agents/pr/AGENT.md");
 
@@ -106,6 +123,8 @@ describe("QA pipeline assets", () => {
     expect(mergeAgent).toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
     expect(mergeAgent).toContain("Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id");
     expect(mergeAgent).toContain("If it returns `exists: true`, do not delete the remote branch");
+    expect(mergeAgent).toContain('If MCP is unavailable, use `kanna-cli task dependent-tasks-exist --task-id "<task_id>"`.');
+    expect(mergeAgent).not.toContain("If MCP is unavailable, use `curl ");
     expect(mergeAgent).toContain("A blocker that has reached `pr` can already have dependent tasks stacked on its branch");
     expect(mergeAgent).toContain("After the full detected stack has merged, delete the stack branches that are no longer needed");
     expect(mergeAgent).toContain("gh pr merge <PR> --merge");

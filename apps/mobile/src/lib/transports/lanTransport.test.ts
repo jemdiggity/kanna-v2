@@ -7,6 +7,24 @@ import {
 } from "./lanTransport";
 
 describe("createLanTransport", () => {
+  it("posts mark-read through the LAN task action route", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ taskId: "task/read", activity: "idle" })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.markTaskRead("task/read")).resolves.toEqual({
+      taskId: "task/read",
+      activity: "idle"
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/task%2Fread/actions/mark-read",
+      { method: "POST" }
+    );
+  });
+
   it("calls the shared LAN API routes for task listing, repo listing, and task creation", async () => {
     const fetchImpl = vi.fn<FetchLike>()
       .mockResolvedValueOnce({

@@ -6,8 +6,10 @@
     "build": "./kd build desktop",
     "build:desktop-sidecars": "./kd build sidecars",
     "dev": "./kd dev up",
-    "test": "turbo test",
-    "test:tui-fidelity": "pnpm --filter @kanna/tui-fidelity test",
+    "test": "turbo test --concurrency=2",
+    "test:agent-cli-compat": "pnpm --filter @kanna/cli-contract test:agent-cli-compat",
+    "test:remote-e2e": "./kd test remote-e2e",
+    "test:tui-fidelity": "pnpm --filter @kanna/tui-fidelity test:tui-fidelity",
     "lint": "turbo lint",
     "firebase:emulators": "./kd emulators up",
     "firebase:emulators:test": "./kd emulators exec -- pnpm test"

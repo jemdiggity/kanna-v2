@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ComponentPublicInstance } from "vue";
+import { computed } from "vue";
 
 import NewTaskModal from "./NewTaskModal.vue";
 import AddRepoModal from "./AddRepoModal.vue";
@@ -25,6 +26,7 @@ import type {
   DiffScrollPositions,
 } from "../composables/useAppModals";
 import type { PendingReviewComment } from "../utils/reviewComments";
+import { pinnedApproveMergePost } from "../utils/pinnedStage";
 import type { AppModalLayerController } from "./AppModalLayer.types";
 
 const props = defineProps<{
@@ -34,6 +36,15 @@ const props = defineProps<{
 const c = props.controller;
 const m = c.appModals;
 const preferences = c.appPreferences.preferences;
+
+// Approval capability comes from the durable task's pinned pipeline_def:
+// only a pinned current stage with the merge-signaling approve post may
+// present approval as a merge.
+const diffApproveSignalsMerge = computed(() => {
+  const item = c.store.currentItem;
+  return item ? pinnedApproveMergePost(item) : false;
+});
+const diffHasRunningPost = computed(() => Boolean(c.store.currentItem?.has_running_post));
 
 function setShellModalRef(component: Element | ComponentPublicInstance | null) {
   m.shellModalRef.value = component as InstanceType<typeof ShellModal> | null;
@@ -74,6 +85,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :default-agent-provider="preferences.defaultAgentProvider"
     :default-agent-type="preferences.defaultAgentType"
     :recent-agent-choices="preferences.recentAgentChoices"
+    :available-agent-providers="c.appTaskCreation.availableAgentProviders.value"
     :pipelines="m.availablePipelines.value"
     :default-pipeline="m.defaultPipelineName.value"
     :base-branches="m.availableBaseBranches.value"
@@ -137,6 +149,8 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :review-stage="c.store.currentItem?.stage ?? undefined"
     :review-comments="m.currentDiffViewState.value?.reviewComments"
     :review-head-commit="m.currentDiffViewState.value?.reviewHeadCommit"
+    :approve-signals-merge="diffApproveSignalsMerge"
+    :has-running-post="diffHasRunningPost"
     @scope-change="(scope: DiffScope) => m.updateCurrentDiffViewState({ scope })"
     @scroll-state-change="(scrollPositions: DiffScrollPositions) => m.updateCurrentDiffViewState({ scrollPositions })"
     @branch-include-change="(branchInclude: BranchInclude) => m.updateCurrentDiffViewState({ branchInclude })"

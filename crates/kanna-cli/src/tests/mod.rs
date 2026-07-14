@@ -1,9 +1,9 @@
 use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
-    get_task_via_api, parse_wait_until, rename_task_via_api, repo_task_list_path,
-    request_revision_via_api, rerun_stage_via_api, send_task_input_via_api,
-    set_task_parent_via_api, signal_agent_path, signal_agent_via_api, task_get_path,
-    task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
+    dependent_tasks_exist_path, dependent_tasks_exist_via_api, get_task_via_api, parse_wait_until,
+    rename_task_via_api, repo_task_list_path, request_revision_via_api, rerun_stage_via_api,
+    send_task_input_via_api, set_task_parent_via_api, signal_agent_path, signal_agent_via_api,
+    task_get_path, task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
     unblock_task_via_api,
 };
 use crate::commands::guide::{
@@ -65,6 +65,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_get_task",
             TypedToolSurface {
                 command_path: &["task", "get"],
+                param_args: &[("task_id", "task_id")],
+            },
+        ),
+        (
+            "kanna_is_dependent_tasks_exist",
+            TypedToolSurface {
+                command_path: &["task", "dependent-tasks-exist"],
                 param_args: &[("task_id", "task_id")],
             },
         ),

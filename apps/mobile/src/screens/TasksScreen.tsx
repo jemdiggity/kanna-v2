@@ -21,7 +21,8 @@ export function TasksScreen({
   onSelectRepo,
   onOpenTask
 }: TasksScreenProps) {
-  const filteredTasks = selectedRepoId
+  const isRecentView = heading === "Recent";
+  const filteredTasks = !isRecentView && selectedRepoId
     ? tasks.filter((task) => task.repoId === selectedRepoId)
     : tasks;
 
@@ -34,7 +35,7 @@ export function TasksScreen({
       <View style={styles.wrap}>
         {heading ? <Text style={styles.heading}>{heading}</Text> : null}
 
-        {repos.length > 0 ? (
+        {!isRecentView && repos.length > 0 ? (
           <ScrollView
             contentContainerStyle={styles.repoRow}
             horizontal

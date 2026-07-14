@@ -62,6 +62,22 @@ describe("mobile Metro helpers", () => {
     ).toBe(true);
   });
 
+  it("does not reuse a dev-client Metro with unverified env in exact-environment mode", () => {
+    expect(
+      shouldReuseExpoServer(
+        {
+          commandLine: "node expo start --port 1430 --dev-client EXPO_PUBLIC_KANNA_FORCE_CLOUD=1",
+          cwd: "/tmp/kanna/apps/mobile"
+        },
+        {
+          projectRoot: "/tmp/kanna/apps/mobile",
+          env: { EXPO_PUBLIC_KANNA_FORCE_CLOUD: "0" },
+          requireExactEnvironment: true
+        }
+      )
+    ).toBe(false);
+  });
+
   it("does not reuse an Expo server from another project root", () => {
     expect(
       shouldReuseExpoServer(
@@ -85,6 +101,19 @@ describe("mobile Metro helpers", () => {
       "--port",
       "1430",
       "--dev-client"
+    ]);
+  });
+
+  it("clears Metro's transform cache when runtime environment values must be exact", () => {
+    expect(buildExpoStartCommand(1430, { clearCache: true })).toEqual([
+      "pnpm",
+      "exec",
+      "expo",
+      "start",
+      "--port",
+      "1430",
+      "--dev-client",
+      "--clear"
     ]);
   });
 });

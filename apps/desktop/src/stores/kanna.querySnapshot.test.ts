@@ -1,22 +1,33 @@
 import { createPinia, setActivePinia } from "pinia";
-import { nextTick } from "vue";
+import { nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
-import { createQueriesApi } from "./queries";
-import { createSelectionApi } from "./selection";
 import {
   createStoreContext,
   createStoreState,
+  type KannaSnapshot,
   type StoreServices,
 } from "./state";
+import { createQueriesApi } from "./queries";
+import { useKannaStore } from "./kanna";
 import {
-  buildInitializingTaskItem,
-  initializeTaskItem,
-} from "./taskInitialization";
+  setDesktopSnapshotFetcherForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 
 const beginTaskSwitchMock = vi.hoisted(() => vi.fn());
 const invalidateSharedDataMock = vi.hoisted(() => vi.fn(async () => {}));
 const onSharedInvalidationMock = vi.hoisted(() => vi.fn(async () => () => undefined));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-17T00:00:00.000Z";
@@ -77,7 +88,7 @@ const mockState = vi.hoisted(() => {
   let allRepos: Repo[] = [];
   let pipelineItems: PipelineItem[] = [];
 
-  const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+  const invokeImplementation = async (command: string, args?: Record<string, unknown>) => {
     switch (command) {
       case "ensure_term_init":
       case "list_sessions":
@@ -106,7 +117,8 @@ const mockState = vi.hoisted(() => {
       default:
         throw new Error(`unexpected invoke: ${command}`);
     }
-  });
+  };
+  const invokeMock = vi.fn(invokeImplementation);
   const listReposMock = vi.fn(async () => allRepos.filter((repo) => !repo.hidden));
   const listPipelineItemsMock = vi.fn(async (_db: DbHandle, repoId: string) =>
     pipelineItems.filter((item) => item.repo_id === repoId),
@@ -124,7 +136,8 @@ const mockState = vi.hoisted(() => {
       makeItem({ id: "item-1", repo_id: "repo-1" }),
       makeItem({ id: "item-2", repo_id: "repo-2" }),
     ];
-    invokeMock.mockClear();
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(invokeImplementation);
     listReposMock.mockClear();
     listPipelineItemsMock.mockClear();
     listTaskBlockersMock.mockClear();
@@ -232,8 +245,6 @@ vi.mock("./kannaCleanup", () => ({
 }));
 
 vi.mock("./agent-provider", () => ({
-  normalizeAgentProviderCandidates: vi.fn((providers?: string | string[]) =>
-    providers == null ? [] : (Array.isArray(providers) ? providers : [providers])),
   getPreferredAgentProviders: vi.fn(() => "claude"),
   requireResolvedAgentProvider: vi.fn((provider?: string) => provider ?? "claude"),
   resolveAgentProvider: vi.fn((provider?: string | string[]) => Array.isArray(provider) ? provider[0] : (provider ?? "claude")),
@@ -253,6 +264,11 @@ vi.mock("./taskCloseSelection", () => ({
 
 vi.mock("./taskShellPrewarm", () => ({
   shouldPrewarmTaskShellOnCreate: vi.fn(() => false),
+}));
+
+vi.mock("./taskRuntimeStatus", () => ({
+  resolveActivityForRuntimeStatus: vi.fn(() => null),
+  shouldIgnoreRuntimeStatusDuringSetup: vi.fn(() => false),
 }));
 
 vi.mock("../perf/taskSwitchPerf", () => ({
@@ -335,11 +351,6 @@ vi.mock("@kanna/" + "db", () => ({
   deleteTaskPortsForItem: vi.fn(async () => {}),
 }));
 
-import { useKannaStore } from "./kanna";
-import {
-  setDesktopSnapshotFetcherForTests,
-  updateDesktopServerClientHandlersForTests,
-} from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -377,40 +388,6 @@ async function createStore(db: DbHandle = createDb()) {
   await store.init(db);
   await flushStore();
   return store;
-}
-
-function createDirectQueryHarness(
-  fetchSnapshot: NonNullable<StoreServices["fetchSnapshot"]>,
-  persistSelection = vi.fn(async () => {}),
-) {
-  const state = createStoreState();
-  const services: StoreServices = {
-    fetchSnapshot,
-    windowWorkspace: {
-      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
-      loadSnapshot: vi.fn(async () => ({ windows: [] })),
-      saveSnapshot: vi.fn(async () => {}),
-      openWindow: vi.fn(async () => {}),
-      closeWindow: vi.fn(async () => {}),
-      forgetCurrentWindow: vi.fn(async () => {}),
-      persistSelection,
-      persistSidebarHidden: vi.fn(async () => {}),
-      persistSidebarWidth: vi.fn(async () => {}),
-      invalidateSharedData: vi.fn(async () => {}),
-      restoreAdditionalWindows: vi.fn(async () => {}),
-      onSharedInvalidation: vi.fn(async () => vi.fn()),
-    },
-  };
-  const context = createStoreContext(state, {
-    error: vi.fn(),
-    warning: vi.fn(),
-  } as never, services);
-  const queries = createQueriesApi(context);
-  const selection = createSelectionApi(context);
-  services.reloadSnapshot = queries.reloadSnapshot;
-  services.persistSelection = selection.persistSelection;
-  services.reconcileSelection = selection.reconcileSelection;
-  return { state, queries, persistSelection };
 }
 
 describe("kanna query snapshot regressions", () => {
@@ -473,6 +450,258 @@ describe("kanna query snapshot regressions", () => {
     vi.useRealTimers();
   });
 
+  it("keeps the newest snapshot when an older reload resolves last", async () => {
+    const older = deferred<KannaSnapshot>();
+    const newer = deferred<KannaSnapshot>();
+    const fetchSnapshot = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, { fetchSnapshot });
+    const queries = createQueriesApi(context);
+
+    const olderReload = queries.reloadSnapshot();
+    const newerReload = queries.reloadSnapshot();
+
+    newer.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: { markdownPreviewMode: "raw" },
+    });
+    await newerReload;
+    expect(state.markdownPreviewMode.value).toBe("raw");
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+
+    older.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: { markdownPreviewMode: "rendered" },
+    });
+    await olderReload;
+
+    expect(state.markdownPreviewMode.value).toBe("raw");
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+    expect(queries.snapshot.pending.value).toBe(false);
+    expect(queries.snapshot.error.value).toBeNull();
+  });
+
+  it("keeps a stale snapshot unpublished while the newer reload remains pending", async () => {
+    const older = deferred<KannaSnapshot>();
+    const newer = deferred<KannaSnapshot>();
+    const fetchSnapshot = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, { fetchSnapshot });
+    const queries = createQueriesApi(context);
+
+    const olderReload = queries.reloadSnapshot();
+    const newerReload = queries.reloadSnapshot();
+
+    older.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {
+        markdownPreviewMode: "raw",
+        snapshotOwner: "older",
+      },
+    });
+    await olderReload;
+
+    expect(state.markdownPreviewMode.value).toBe("rendered");
+    expect(state.snapshotSettings.value.snapshotOwner).toBeUndefined();
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBeUndefined();
+    expect(queries.snapshot.data.value.settings.snapshotOwner).toBeUndefined();
+    expect(queries.snapshot.pending.value).toBe(true);
+    expect(queries.snapshot.error.value).toBeNull();
+
+    newer.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {
+        markdownPreviewMode: "raw",
+        snapshotOwner: "newer",
+      },
+    });
+    await newerReload;
+
+    expect(state.markdownPreviewMode.value).toBe("raw");
+    expect(state.snapshotSettings.value.snapshotOwner).toBe("newer");
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+    expect(queries.snapshot.data.value.settings.snapshotOwner).toBe("newer");
+    expect(queries.snapshot.pending.value).toBe(false);
+    expect(queries.snapshot.error.value).toBeNull();
+  });
+
+  it("ignores an older reload failure while the newer reload remains pending", async () => {
+    const older = deferred<KannaSnapshot>();
+    const newer = deferred<KannaSnapshot>();
+    const fetchSnapshot = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, { fetchSnapshot });
+    const queries = createQueriesApi(context);
+
+    const olderReload = queries.reloadSnapshot();
+    const newerReload = queries.reloadSnapshot();
+
+    older.reject(new Error("older reload failed"));
+    await expect(olderReload).resolves.toBeUndefined();
+
+    expect(state.markdownPreviewMode.value).toBe("rendered");
+    expect(state.snapshotSettings.value.snapshotOwner).toBeUndefined();
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBeUndefined();
+    expect(queries.snapshot.error.value).toBeNull();
+    expect(queries.snapshot.pending.value).toBe(true);
+
+    newer.resolve({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {
+        markdownPreviewMode: "raw",
+        snapshotOwner: "newer",
+      },
+    });
+    await newerReload;
+
+    expect(state.markdownPreviewMode.value).toBe("raw");
+    expect(state.snapshotSettings.value.snapshotOwner).toBe("newer");
+    expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+    expect(queries.snapshot.data.value.settings.snapshotOwner).toBe("newer");
+    expect(queries.snapshot.error.value).toBeNull();
+    expect(queries.snapshot.pending.value).toBe(false);
+  });
+
+  it("keeps the newest snapshot when an older reload resumes after reading repo config", async () => {
+    const older = deferred<KannaSnapshot>();
+    const newer = deferred<KannaSnapshot>();
+    const repoConfig = deferred<string>();
+    const configReadStarted = deferred<void>();
+    const fetchSnapshot = vi.fn()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, { fetchSnapshot });
+    const queries = createQueriesApi(context);
+    const olderRepo = mockState.makeRepo({
+      id: "repo-config-race",
+      path: "/tmp/repo-config-race",
+      name: "repo-config-race",
+    });
+    const originalInvoke = mockState.invokeMock.getMockImplementation();
+    if (!originalInvoke) throw new Error("invoke mock implementation is unavailable");
+
+    mockState.invokeMock.mockImplementation(async (command, args) => {
+      if (
+        command === "read_text_file"
+        && args?.path === `${olderRepo.path}/.kanna/config.json`
+      ) {
+        configReadStarted.resolve();
+        return repoConfig.promise;
+      }
+      return originalInvoke(command, args);
+    });
+
+    let olderReload: Promise<void> | undefined;
+    try {
+      olderReload = queries.reloadSnapshot();
+      older.resolve({
+        entries: [{ repo: olderRepo, items: [] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: { markdownPreviewMode: "rendered" },
+      });
+      await configReadStarted.promise;
+
+      const newerReload = queries.reloadSnapshot();
+      newer.resolve({
+        entries: [],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {
+          markdownPreviewMode: "raw",
+          snapshotOwner: "newer",
+        },
+      });
+      await newerReload;
+
+      repoConfig.resolve("{}");
+      await olderReload;
+
+      expect(state.markdownPreviewMode.value).toBe("raw");
+      expect(state.snapshotSettings.value.snapshotOwner).toBe("newer");
+      expect(queries.snapshot.data.value.settings.markdownPreviewMode).toBe("raw");
+      expect(queries.snapshot.data.value.settings.snapshotOwner).toBe("newer");
+      expect(queries.snapshot.pending.value).toBe(false);
+      expect(queries.snapshot.error.value).toBeNull();
+    } finally {
+      repoConfig.resolve("{}");
+      await olderReload?.catch(() => undefined);
+      mockState.invokeMock.mockReset();
+      mockState.invokeMock.mockImplementation(originalInvoke);
+    }
+  });
+
+  it("rejects and records the latest reload failure", async () => {
+    const current = deferred<KannaSnapshot>();
+    const state = createStoreState();
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, {
+      fetchSnapshot: () => current.promise,
+    });
+    const queries = createQueriesApi(context);
+    const failure = new Error("current reload failed");
+
+    const reload = queries.reloadSnapshot();
+    expect(queries.snapshot.pending.value).toBe(true);
+
+    current.reject(failure);
+    await expect(reload).rejects.toBe(failure);
+
+    expect(queries.snapshot.error.value).toBe(failure);
+    expect(queries.snapshot.pending.value).toBe(false);
+  });
+
   it("removes a hidden repo and its tasks from the visible store state together", async () => {
     const store = await createStore();
 
@@ -498,6 +727,182 @@ describe("kanna query snapshot regressions", () => {
     expect(mockState.getSettingMock).not.toHaveBeenCalled();
     expect(mockState.getUnblockedItemsMock).not.toHaveBeenCalled();
     expect(db["select"]).not.toHaveBeenCalled();
+  });
+
+  it("hydrates a durable task into its acknowledged UI slot without changing its slot ID", async () => {
+    const store = await createStore();
+    store.taskUiSlots.splice(0, store.taskUiSlots.length, {
+      slot_id: "create:slot-1",
+      task_id: "item-1",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Ship it",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-04-17T00:00:00.000Z",
+      },
+    });
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "create:slot-1";
+
+    await store.init(createDb());
+
+    expect(store.taskUiSlots).toEqual([
+      expect.objectContaining({
+        slot_id: "create:slot-1",
+        task_id: "item-1",
+        state: "ready",
+        task: expect.objectContaining({ id: "item-1" }),
+      }),
+      expect.objectContaining({
+        slot_id: "item-2",
+        task_id: "item-2",
+        state: "ready",
+        task: expect.objectContaining({ id: "item-2" }),
+      }),
+    ]);
+    expect(store.selectedItemId).toBe("create:slot-1");
+    expect(store.currentTaskSlot).toMatchObject({
+      slot_id: "create:slot-1",
+      task_id: "item-1",
+      state: "ready",
+    });
+  });
+
+  it("counts only successful authoritative reloads against acknowledged-slot miss grace", async () => {
+    const state = createStoreState();
+    state.taskUiSlots.value = [{
+      slot_id: "create:missing-slot",
+      task_id: "missing-task",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Hydrate or expire",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-04-17T00:00:00.000Z",
+      },
+    }];
+    const missingSnapshot: KannaSnapshot = {
+      entries: [{ repo: mockState.makeRepo(), items: [] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    };
+    const services: StoreServices = {
+      fetchSnapshot: vi.fn(async () => missingSnapshot),
+    };
+    const context = createStoreContext(state, {} as never, services);
+    const queries = createQueriesApi(context);
+
+    await queries.withOptimisticItemOverlay({
+      key: "test:no-op-overlay",
+      apply: (snapshot) => snapshot,
+      run: async () => {},
+      reconcile: async () => {},
+    });
+
+    expect(state.taskUiSlots.value).toEqual([
+      expect.objectContaining({ authoritative_miss_grace_remaining: 1 }),
+    ]);
+
+    await queries.reloadSnapshot();
+
+    expect(state.taskUiSlots.value).toEqual([
+      expect.objectContaining({ authoritative_miss_grace_remaining: 0 }),
+    ]);
+
+    await queries.withOptimisticItemOverlay({
+      key: "test:second-no-op-overlay",
+      apply: (snapshot) => snapshot,
+      run: async () => {},
+      reconcile: async () => {},
+    });
+
+    expect(state.taskUiSlots.value).toEqual([
+      expect.objectContaining({ authoritative_miss_grace_remaining: 0 }),
+    ]);
+
+    await queries.reloadSnapshot();
+
+    expect(state.taskUiSlots.value).toEqual([]);
+  });
+
+  it("ignores an older snapshot that resolves after a newer slot hydration", async () => {
+    const store = await createStore();
+    const item2Slot = store.taskUiSlots.find((slot) => slot.task_id === "item-2");
+    expect(item2Slot).toBeDefined();
+    store.taskUiSlots.splice(0, store.taskUiSlots.length, {
+      slot_id: "create:slot-1",
+      task_id: "item-1",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Ship it",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-04-17T00:00:00.000Z",
+      },
+    }, item2Slot!);
+    await store.selectItem("item-1");
+
+    const olderResponse = deferred<KannaSnapshot>();
+    const newerResponse = deferred<KannaSnapshot>();
+    let requestCount = 0;
+    setDesktopSnapshotFetcherForTests(() => {
+      requestCount += 1;
+      return requestCount === 1 ? olderResponse.promise : newerResponse.promise;
+    });
+    const snapshot = (items: PipelineItem[]): KannaSnapshot => ({
+      entries: mockState.visibleRepos.map((repo) => ({
+        repo,
+        items: items.filter((item) => item.repo_id === repo.id),
+      })),
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    });
+
+    const olderReload = store.init(createDb());
+    const newerReload = store.init(createDb());
+    expect(requestCount).toBe(2);
+
+    const newerItem = mockState.makeItem({
+      id: "item-1",
+      repo_id: "repo-1",
+      display_name: "Newest task",
+    });
+    newerResponse.resolve(snapshot([newerItem, mockState.makeItem({ id: "item-2", repo_id: "repo-2" })]));
+    await newerReload;
+    olderResponse.resolve(snapshot([mockState.makeItem({ id: "item-2", repo_id: "repo-2" })]));
+    await olderReload;
+    await flushStore();
+
+    expect(store.items.map((item) => item.id)).toEqual(["item-1", "item-2"]);
+    expect(store.items.find((item) => item.id === "item-1")?.display_name).toBe("Newest task");
+    expect(store.selectedItemId).toBe("create:slot-1");
+    expect(store.currentTaskSlot).toMatchObject({
+      slot_id: "create:slot-1",
+      task_id: "item-1",
+      state: "ready",
+      task: expect.objectContaining({ id: "item-1", display_name: "Newest task" }),
+    });
   });
 
   it("restores an unhidden repo with its tasks from the same refresh path", async () => {
@@ -576,198 +981,5 @@ describe("kanna query snapshot regressions", () => {
     await store.hideRepo("repo-2");
 
     expect(invalidateSharedDataMock).toHaveBeenCalledWith("hideRepo");
-  });
-
-  it("reconciles a hydrated selection when its repo disappears from the applied snapshot", async () => {
-    const store = await createStore();
-    const persistSelection = vi.fn(async () => {});
-    store.attachWindowWorkspace({
-      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
-      loadSnapshot: vi.fn(async () => ({ windows: [] })),
-      saveSnapshot: vi.fn(async () => {}),
-      openWindow: vi.fn(async () => {}),
-      closeWindow: vi.fn(async () => {}),
-      forgetCurrentWindow: vi.fn(async () => {}),
-      persistSelection,
-      persistSidebarHidden: vi.fn(async () => {}),
-      persistSidebarWidth: vi.fn(async () => {}),
-      invalidateSharedData: vi.fn(async () => {}),
-      restoreAdditionalWindows: vi.fn(async () => {}),
-      onSharedInvalidation: vi.fn(async () => vi.fn()),
-    });
-    await store.selectRepo("repo-1");
-    await store.selectItem("item-1");
-    persistSelection.mockClear();
-
-    await store.hideRepo("repo-1");
-    await flushStore();
-
-    expect(store.selectedRepoId).toBe("repo-2");
-    expect(store.selectedItemId).toBe("item-2");
-    expect(store.currentItem?.id).toBe("item-2");
-    expect(store.lastSelectedItemByRepo["repo-1"]).toBeUndefined();
-    expect(persistSelection).toHaveBeenLastCalledWith({
-      selectedRepoId: "repo-2",
-      selectedItemId: "item-2",
-    });
-  });
-
-  it("preserves a cloud-only selection while retiring a hidden local repo", async () => {
-    const retiredRepo = mockState.makeRepo({
-      id: "repo-retired",
-      path: "/tmp/repo-retired",
-      name: "repo-retired",
-    });
-    const survivingRepo = mockState.makeRepo({
-      id: "repo-surviving",
-      path: "/tmp/repo-surviving",
-      name: "repo-surviving",
-    });
-    const retiredItem = mockState.makeItem({
-      id: "item-retired",
-      repo_id: retiredRepo.id,
-    });
-    const survivingItem = mockState.makeItem({
-      id: "item-surviving",
-      repo_id: survivingRepo.id,
-    });
-    const cloudRepoId = "cloud:repo-remote";
-    const cloudTaskId = "cloud:lan:peer-primary:repo-remote:task-remote";
-    const persistSelection = vi.fn(async () => {});
-    const { state, queries } = createDirectQueryHarness(
-      async () => ({
-        entries: [{ repo: survivingRepo, items: [survivingItem] }],
-        taskBlockers: [],
-        worktreePaths: {},
-        settings: {},
-      }),
-      persistSelection,
-    );
-
-    state.repos.value = [retiredRepo, survivingRepo];
-    state.items.value = [retiredItem, survivingItem];
-    state.selectedRepoId.value = cloudRepoId;
-    state.selectedItemId.value = cloudTaskId;
-    state.lastSelectedItemByRepo.value = {
-      [retiredRepo.id]: retiredItem.id,
-      [survivingRepo.id]: survivingItem.id,
-      [cloudRepoId]: cloudTaskId,
-    };
-
-    await expect(queries.reloadSnapshot()).resolves.toEqual({ status: "applied" });
-
-    expect(state.repos.value.map((repo) => repo.id)).toEqual([survivingRepo.id]);
-    expect(state.selectedRepoId.value).toBe(cloudRepoId);
-    expect(state.selectedItemId.value).toBe(cloudTaskId);
-    expect(state.lastSelectedItemByRepo.value).toEqual({
-      [survivingRepo.id]: survivingItem.id,
-      [cloudRepoId]: cloudTaskId,
-    });
-    expect(persistSelection).not.toHaveBeenCalled();
-  });
-
-  it("clears pending initialization state when an applied snapshot removes its repo", async () => {
-    const survivingRepo = mockState.makeRepo({
-      id: "repo-2",
-      path: "/tmp/repo-2",
-      name: "repo-2",
-    });
-    const survivingItem = mockState.makeItem({
-      id: "item-2",
-      repo_id: survivingRepo.id,
-    });
-    const initializingItemId = "create:repo-removed";
-    const durableTaskId = "task-repo-removed";
-    const initializingItem = initializeTaskItem([
-      buildInitializingTaskItem({
-        id: initializingItemId,
-        repoId: "repo-1",
-        prompt: "This repo is no longer visible",
-        agentType: "pty",
-      }),
-    ], initializingItemId, durableTaskId)[0]!;
-    const persistSelection = vi.fn(async () => {});
-    const { state, queries } = createDirectQueryHarness(
-      async () => ({
-        entries: [{ repo: survivingRepo, items: [survivingItem] }],
-        taskBlockers: [],
-        worktreePaths: {},
-        settings: {},
-      }),
-      persistSelection,
-    );
-
-    state.repos.value = [mockState.makeRepo(), survivingRepo];
-    state.items.value = [survivingItem];
-    state.initializingTaskItems.value = [initializingItem];
-    state.pendingCreateVisibility.set(initializingItemId, { bumpAt: 1 });
-    state.pendingCreateVisibility.set(durableTaskId, { bumpAt: 1 });
-    state.selectedRepoId.value = "repo-1";
-    state.selectedItemId.value = initializingItemId;
-    state.lastSelectedItemByRepo.value = { "repo-1": initializingItemId };
-
-    await expect(queries.reloadSnapshot()).resolves.toEqual({ status: "applied" });
-
-    expect(state.initializingTaskItems.value).toEqual([]);
-    expect(state.pendingCreateVisibility.size).toBe(0);
-    expect(state.lastSelectedItemByRepo.value["repo-1"]).toBeUndefined();
-    expect(state.selectedRepoId.value).toBe(survivingRepo.id);
-    expect(state.selectedItemId.value).toBe(survivingItem.id);
-    expect(persistSelection).toHaveBeenLastCalledWith({
-      selectedRepoId: survivingRepo.id,
-      selectedItemId: survivingItem.id,
-    });
-  });
-
-  it("reports a reload as superseded when a newer snapshot applies during selection persistence", async () => {
-    const survivingRepo = mockState.makeRepo({
-      id: "repo-2",
-      path: "/tmp/repo-2",
-      name: "repo-2",
-    });
-    const survivingItem = mockState.makeItem({
-      id: "item-2",
-      repo_id: survivingRepo.id,
-    });
-    let releaseFirstPersistence = () => {};
-    const firstPersistenceGate = new Promise<void>((resolve) => {
-      releaseFirstPersistence = resolve;
-    });
-    let persistenceCalls = 0;
-    const persistSelection = vi.fn(async () => {
-      persistenceCalls += 1;
-      if (persistenceCalls === 1) await firstPersistenceGate;
-    });
-    const { state, queries } = createDirectQueryHarness(
-      async () => ({
-        entries: [{ repo: survivingRepo, items: [survivingItem] }],
-        taskBlockers: [],
-        worktreePaths: {},
-        settings: {},
-      }),
-      persistSelection,
-    );
-    const initializingItemId = "create:superseded-persistence";
-    state.repos.value = [mockState.makeRepo(), survivingRepo];
-    state.items.value = [survivingItem];
-    state.initializingTaskItems.value = initializeTaskItem([
-      buildInitializingTaskItem({
-        id: initializingItemId,
-        repoId: "repo-1",
-        prompt: "Wait while persisting",
-        agentType: "pty",
-      }),
-    ], initializingItemId, "task-superseded-persistence");
-    state.selectedRepoId.value = "repo-1";
-    state.selectedItemId.value = initializingItemId;
-    state.lastSelectedItemByRepo.value = { "repo-1": initializingItemId };
-
-    const olderReload = queries.reloadSnapshot();
-    await vi.waitFor(() => expect(persistSelection).toHaveBeenCalledTimes(1));
-
-    await expect(queries.reloadSnapshot()).resolves.toEqual({ status: "applied" });
-    releaseFirstPersistence();
-
-    await expect(olderReload).resolves.toEqual({ status: "superseded" });
   });
 });

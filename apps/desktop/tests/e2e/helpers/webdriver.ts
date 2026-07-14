@@ -149,6 +149,30 @@ export class WebDriverClient {
     await pauseForSlowMode(`webdriver press ${value}`);
   }
 
+  async pressShortcut(keys: string[]): Promise<void> {
+    const webdriverKeys: Record<string, string> = {
+      Meta: "\uE03D",
+      Control: "\uE009",
+      Alt: "\uE00A",
+      Shift: "\uE008",
+    };
+    const values = keys.map((key) => webdriverKeys[key] ?? key);
+    const releasedValues = [...values].reverse();
+    await this.post(`/session/${this.sid}/actions`, {
+      actions: [
+        {
+          type: "key",
+          id: "keyboard",
+          actions: [
+            ...values.map((value) => ({ type: "keyDown", value })),
+            ...releasedValues.map((value) => ({ type: "keyUp", value })),
+          ],
+        },
+      ],
+    });
+    await pauseForSlowMode(`webdriver shortcut ${keys.join("+")}`);
+  }
+
   async emitToWebviewWindow(event: string, payload: unknown = null, label = "main"): Promise<void> {
     const result = await this.executeAsync<string>(
       `const cb = arguments[arguments.length - 1];

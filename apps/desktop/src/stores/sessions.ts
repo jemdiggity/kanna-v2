@@ -1,4 +1,5 @@
 import type { AgentProvider, PipelineItem } from "../types/kanna";
+import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
@@ -15,6 +16,7 @@ import {
   requireResolvedAgentProvider,
   type AgentProviderAvailability,
 } from "./agent-provider";
+import { shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
@@ -30,10 +32,6 @@ const CODEX_SPAWN_SUBMIT_DELAY_MS = 5_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function agentProviderBinary(provider: AgentProvider): string {
-  return provider === "antigravity" ? "agy" : provider;
 }
 
 export interface SessionsApi {
@@ -113,6 +111,13 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       return;
     }
 
+    const isPendingSetup = context.state.taskUiSlots.value.some(
+      (slot) => slot.task_id === item.id && slot.state === "creating",
+    );
+    if (shouldIgnoreRuntimeStatusDuringSetup(status, isPendingSetup)) {
+      return;
+    }
+
     if (status === "busy" || status === "idle" || status === "waiting") {
       const response = await applyDesktopTaskRuntimeStatus(item.id, {
         status,
@@ -144,21 +149,18 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
   }
 
   async function isAgentProviderAvailable(provider: AgentProvider): Promise<boolean> {
-    const binary = agentProviderBinary(provider);
-    const path = await whichBinaryOptional(binary);
+    const path = await whichBinaryOptional(getAgentProviderSpec(provider).executable);
     return Boolean(path);
   }
 
   async function getAgentProviderAvailability(): Promise<AgentProviderAvailability> {
-    const [claude, copilot, codex, opencode, antigravity] = await Promise.all([
-      isAgentProviderAvailable("claude"),
-      isAgentProviderAvailable("copilot"),
-      isAgentProviderAvailable("codex"),
-      isAgentProviderAvailable("opencode"),
-      isAgentProviderAvailable("antigravity"),
-    ]);
-
-    return { claude, copilot, codex, opencode, antigravity };
+    const entries = await Promise.all(
+      AGENT_PROVIDERS.map(async (provider) => [
+        provider,
+        await isAgentProviderAvailable(provider),
+      ] as const),
+    );
+    return Object.fromEntries(entries) as AgentProviderAvailability;
   }
 
   async function waitForSessionExit(sessionId: string): Promise<void> {

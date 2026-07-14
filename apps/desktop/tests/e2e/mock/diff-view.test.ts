@@ -207,6 +207,22 @@ interface StageActionRecorderOptions {
   requestRevisionBody?: string;
 }
 
+interface DiffLineViewportSnapshot {
+  filePath: string;
+  lineNumber: string;
+  lineType: string | null;
+  viewportOffset: number;
+  scrollTop: number;
+  scrollHeight: number;
+  wrapperIndex: number;
+  wrapperCount: number;
+}
+
+interface SettledDiffLineViewportSnapshot extends DiffLineViewportSnapshot {
+  renderedFileCount: number;
+  timedOut?: boolean;
+}
+
 async function installStageActionRecorder(
   client: WebDriverClient,
   options: StageActionRecorderOptions = {},
@@ -240,7 +256,26 @@ async function installStageActionRecorder(
            }
            await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["in progress", item.id]);
          } else if (item && url.endsWith("/actions/advance-stage")) {
-           await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id]);
+           // Model the production engine: a current stage with a post parks
+           // the task (stage and closed_at unchanged) behind a running post
+           // stage_run; the post's own completion performs the transition.
+           // A final stage without a post closes on advance; other stages
+           // move forward.
+           let pinnedStage = null;
+           try {
+             const def = JSON.parse(item.pipeline_def || "null");
+             pinnedStage = (def?.stages || []).find((stage) => stage.name === item.stage) || null;
+           } catch {}
+           if (pinnedStage?.post) {
+             await db.execute(
+               "INSERT INTO stage_run (id, task_id, stage, kind, agent, status) VALUES (?, ?, ?, 'post', ?, 'running')",
+               ["e2e-post-" + item.id, item.id, pinnedStage.post.name, pinnedStage.post.agent || null],
+             );
+           } else if (item.stage === "pr") {
+             await db.execute("UPDATE pipeline_item SET closed_at = ? WHERE id = ?", [new Date().toISOString(), item.id]);
+           } else {
+             await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id]);
+           }
          }
          return new Response(JSON.stringify({ taskId: item?.id || "unknown" }), {
            status: 200,
@@ -663,6 +698,228 @@ describe("diff view", () => {
 
     const allLinesState = await getContextToggleState(client);
     expect(allLinesState).toEqual({ text: "All lines", active: true });
+  });
+
+  it("keeps a later file line fixed while real all-lines content renders above it", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    const targetFile = "e2e-scroll-anchor-14.txt";
+    const fileCount = 18;
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "file_index=1",
+        "while [ \"$file_index\" -le 18 ]; do",
+        "  file_number=$(printf '%02d' \"$file_index\")",
+        "  file_path=\"e2e-scroll-anchor-${file_number}.txt\"",
+        "  : > \"$file_path\"",
+        "  line_number=1",
+        "  while [ \"$line_number\" -le 120 ]; do",
+        "    printf 'anchor file %s line %03d original\\n' \"$file_number\" \"$line_number\" >> \"$file_path\"",
+        "    line_number=$((line_number + 1))",
+        "  done",
+        "  file_index=$((file_index + 1))",
+        "done",
+        "git add e2e-scroll-anchor-*.txt",
+        "git commit -m 'add e2e scroll anchor fixtures'",
+        "file_index=1",
+        "while [ \"$file_index\" -le 18 ]; do",
+        "  file_number=$(printf '%02d' \"$file_index\")",
+        "  file_path=\"e2e-scroll-anchor-${file_number}.txt\"",
+        "  awk -v file_number=\"$file_number\" '",
+        "    NR == 60 { printf \"anchor file %s line 060 changed\\n\", file_number; next }",
+        "    { print }",
+        "  ' \"$file_path\" > \"${file_path}.tmp\"",
+        "  mv \"${file_path}.tmp\" \"$file_path\"",
+        "  file_index=$((file_index + 1))",
+        "done",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Working");
+
+    const compactText = await waitForDiffText(
+      client,
+      `return text.includes("anchor file 01 line 060 changed")
+        && text.includes("anchor file 14 line 060 changed")
+        && text.includes("anchor file 18 line 060 changed");`,
+      20_000,
+    );
+    expect(compactText).toContain("anchor file 14 line 060 changed");
+
+    const before = await client.executeAsync<DiffLineViewportSnapshot | null>(
+      `const cb = arguments[arguments.length - 1];
+       const targetFile = ${JSON.stringify(targetFile)};
+       let scrolled = false;
+       let done = false;
+       const finish = (value) => {
+         if (done) return;
+         done = true;
+         clearInterval(interval);
+         clearTimeout(timeout);
+         cb(value);
+       };
+       const findTarget = () => {
+         const container = document.querySelector(".diff-container");
+         if (!(container instanceof HTMLElement)) return null;
+         const wrappers = Array.from(container.querySelectorAll(".diff-file"));
+         const wrapperIndex = wrappers.findIndex((candidate) => {
+           const header = candidate.querySelector(".diff-file-header");
+           return (header?.getAttribute("title") || header?.textContent || "") === targetFile;
+         });
+         const wrapper = wrappers[wrapperIndex];
+         if (!(wrapper instanceof HTMLElement)) return null;
+         const lines = Array.from(wrapper.querySelectorAll("diffs-container"))
+           .flatMap((host) => host.shadowRoot
+             ? Array.from(host.shadowRoot.querySelectorAll("[data-line]"))
+             : []);
+         if (lines.length === 0) return null;
+         return { container, wrappers, wrapper, wrapperIndex, lines };
+       };
+       const capture = () => {
+         const target = findTarget();
+         if (!target) return;
+         const { container, wrappers, wrapper, wrapperIndex, lines } = target;
+         if (!scrolled) {
+           container.scrollTop = Math.min(
+             wrapper.offsetTop + 20,
+             Math.max(0, container.scrollHeight - container.clientHeight),
+           );
+           container.dispatchEvent(new Event("scroll", { bubbles: true }));
+           scrolled = true;
+           return;
+         }
+         const containerRect = container.getBoundingClientRect();
+         const line = lines.find((candidate) => {
+           const rect = candidate.getBoundingClientRect();
+           return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+         });
+         if (!(line instanceof HTMLElement)) return;
+         const lineNumber = line.getAttribute("data-line");
+         if (lineNumber == null) return;
+         finish({
+           filePath: targetFile,
+           lineNumber,
+           lineType: line.getAttribute("data-line-type"),
+           viewportOffset: line.getBoundingClientRect().top - containerRect.top,
+           scrollTop: container.scrollTop,
+           scrollHeight: container.scrollHeight,
+           wrapperIndex,
+           wrapperCount: wrappers.length,
+         });
+       };
+       const interval = setInterval(capture, 50);
+       const timeout = setTimeout(() => finish(null), 10_000);
+       capture();`
+    );
+
+    expect(before).not.toBeNull();
+    expect(before!.filePath).toBe(targetFile);
+    expect(before!.wrapperIndex).toBeGreaterThan(10);
+    expect(before!.wrapperCount).toBeGreaterThanOrEqual(fileCount);
+    expect(before!.scrollTop).toBeGreaterThan(0);
+
+    await clickDiffToolbarButton(client, "Context");
+
+    const allLinesText = await waitForDiffText(
+      client,
+      `return text.includes("anchor file 01 line 001 original")
+        && text.includes("anchor file 14 line 001 original")
+        && text.includes("anchor file 18 line 120 original");`,
+      30_000,
+    );
+    expect(allLinesText).toContain("anchor file 14 line 001 original");
+
+    const after = await client.executeAsync<SettledDiffLineViewportSnapshot>(
+      `const cb = arguments[arguments.length - 1];
+       const expected = ${JSON.stringify(before)};
+       const expectedFileCount = ${before!.wrapperCount};
+       let done = false;
+       let stableSamples = 0;
+       let previous = null;
+       const finish = (value) => {
+         if (done) return;
+         done = true;
+         clearInterval(interval);
+         clearTimeout(timeout);
+         cb(value);
+       };
+       const read = () => {
+         const container = document.querySelector(".diff-container");
+         if (!(container instanceof HTMLElement)) return null;
+         const wrappers = Array.from(container.querySelectorAll(".diff-file"));
+         const wrapperIndex = wrappers.findIndex((candidate) => {
+           const header = candidate.querySelector(".diff-file-header");
+           return (header?.getAttribute("title") || header?.textContent || "") === expected.filePath;
+         });
+         const wrapper = wrappers[wrapperIndex];
+         if (!(wrapper instanceof HTMLElement)) return null;
+         const renderedFileCount = wrappers.filter((candidate) =>
+           Array.from(candidate.querySelectorAll("diffs-container"))
+             .some((host) => Boolean(host.shadowRoot?.querySelector("[data-line]")))
+         ).length;
+         const lines = Array.from(wrapper.querySelectorAll("diffs-container"))
+           .flatMap((host) => host.shadowRoot
+             ? Array.from(host.shadowRoot.querySelectorAll("[data-line]"))
+             : []);
+         const line = lines.find((candidate) =>
+           candidate.getAttribute("data-line") === expected.lineNumber
+             && candidate.getAttribute("data-line-type") === expected.lineType
+         );
+         if (!(line instanceof HTMLElement)) return null;
+         return {
+           filePath: expected.filePath,
+           lineNumber: line.getAttribute("data-line"),
+           lineType: line.getAttribute("data-line-type"),
+           viewportOffset:
+             line.getBoundingClientRect().top - container.getBoundingClientRect().top,
+           scrollTop: container.scrollTop,
+           scrollHeight: container.scrollHeight,
+           wrapperIndex,
+           wrapperCount: wrappers.length,
+           renderedFileCount,
+         };
+       };
+       const check = () => {
+         const current = read();
+         if (!current || current.renderedFileCount !== expectedFileCount) {
+           stableSamples = 0;
+           previous = current;
+           return;
+         }
+         const stable = previous
+           && Math.abs(current.viewportOffset - previous.viewportOffset) <= 0.25
+           && Math.abs(current.scrollTop - previous.scrollTop) <= 0.25
+           && current.scrollHeight === previous.scrollHeight;
+         stableSamples = stable ? stableSamples + 1 : 0;
+         previous = current;
+         if (stableSamples >= 3) finish(current);
+       };
+       const interval = setInterval(check, 50);
+       const timeout = setTimeout(() => {
+         finish({
+           ...(read() || expected),
+           renderedFileCount: read()?.renderedFileCount || 0,
+           timedOut: true,
+         });
+       }, 30_000);
+       check();`
+    );
+
+    if (after.timedOut) {
+      throw new Error(`timed out waiting for anchored all-lines geometry: ${JSON.stringify(after)}`);
+    }
+
+    const allLinesState = await getContextToggleState(client);
+    expect(allLinesState).toEqual({ text: "All lines", active: true });
+    expect(after.filePath).toBe(before!.filePath);
+    expect(after.lineNumber).toBe(before!.lineNumber);
+    expect(after.lineType).toBe(before!.lineType);
+    expect(Math.abs(after.viewportOffset - before!.viewportOffset)).toBeLessThanOrEqual(2);
+    expect(after.scrollTop).toBeGreaterThan(before!.scrollTop + 1_000);
+    expect(after.scrollHeight).toBeGreaterThan(before!.scrollHeight);
   });
 
   it("expands Branch diff hidden context lines with the keyboard shortcut", async () => {
@@ -1385,6 +1642,182 @@ describe("diff view", () => {
     const callsAfterApprove = await waitForRecordedStageActions(client, 2);
     expect(callsAfterApprove[1].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`);
     expect(callsAfterApprove[1].method).toBe("POST");
+  });
+
+  const E2E_PR_APPROVE_PIPELINE_DEF = JSON.stringify({
+    name: "default",
+    stages: [
+      { name: "in progress", policy: { transition: "manual" } },
+      { name: "review", policy: { transition: "auto" } },
+      {
+        name: "pr",
+        policy: { transition: "manual" },
+        post: { name: "approve", agent: "approve", prompt: "Approve $PREV_RESULT" },
+      },
+    ],
+  });
+
+  const E2E_PR_NO_POST_PIPELINE_DEF = JSON.stringify({
+    name: "custom",
+    stages: [
+      { name: "in progress", policy: { transition: "manual" } },
+      { name: "pr", policy: { transition: "manual" } },
+    ],
+  });
+
+  async function parkSelectedTaskAtPr(pipelineDef: string): Promise<{ id: string }> {
+    const task = await client.executeSync<{ id: string }>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       return { id: ctx.selectedItem().id };`
+    );
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       db.execute("UPDATE pipeline_item SET stage = ?, pipeline_def = ? WHERE id = ?", ["pr", ${JSON.stringify(pipelineDef)}, ${JSON.stringify(task.id)}])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    return task;
+  }
+
+  async function restoreSharedFixtureTask(taskId: string): Promise<void> {
+    const result = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       (async () => {
+         await db.execute("DELETE FROM stage_run WHERE id = ?", [${JSON.stringify(`e2e-post-${taskId}`)}]);
+         await db.execute(
+           "UPDATE pipeline_item SET closed_at = NULL, stage = ?, pipeline_def = NULL WHERE id = ?",
+           ["in progress", ${JSON.stringify(taskId)}],
+         );
+         await ctx.refreshAllItems();
+         cb("ok");
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(result).toBe("ok");
+  }
+
+  it("parks a pr-stage approve behind the running approve post and keeps approval single-flight", async () => {
+    const task = await parkSelectedTaskAtPr(E2E_PR_APPROVE_PIPELINE_DEF);
+    await installStageActionRecorder(client);
+
+    await openDiffModal(client);
+    await client.waitForElement(".verdict-bar .approve", 2_000);
+    const approveLabel = await client.executeSync<string>(
+      `return document.querySelector(".verdict-bar .approve").textContent.trim();`
+    );
+    expect(approveLabel).toBe("Approve & Merge");
+    await client.click(await client.findElement(".verdict-bar .approve"));
+
+    const calls = await waitForRecordedStageActions(client, 1);
+    expect(calls[0].url).toContain(`/v1/tasks/${encodeURIComponent(task.id)}/actions/advance-stage`);
+    expect(calls[0].method).toBe("POST");
+
+    // Production: the task stays open at pr while the approve post runs.
+    const parkedState = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const taskId = ${JSON.stringify(task.id)};
+       const read = () => {
+         const items = ctx.store?.items?.value ?? ctx.store?.items ?? [];
+         return (items || []).find((candidate) => candidate.id === taskId) || null;
+       };
+       const wait = () => new Promise((resolve) => setTimeout(resolve, 100));
+       (async () => {
+         const deadline = Date.now() + 10000;
+         while (Date.now() < deadline) {
+           const item = read();
+           if (item && item.has_running_post && item.closed_at == null && item.stage === "pr") {
+             cb("parked-with-running-post");
+             return;
+           }
+           await wait();
+         }
+         const item = read();
+         cb("timeout: " + JSON.stringify(item && { stage: item.stage, closed_at: item.closed_at, has_running_post: item.has_running_post }));
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(parkedState).toBe("parked-with-running-post");
+
+    // Single-flight: the approve button is disabled and a repeated click or
+    // Cmd+S must not send a second ordinary advance while the post runs.
+    const approveDisabled = await client.executeSync<boolean>(
+      `return document.querySelector(".verdict-bar .approve").disabled;`
+    );
+    expect(approveDisabled).toBe(true);
+    await client.executeSync(
+      `document.querySelector(".verdict-bar .approve").click();`
+    );
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+    await sleep(500);
+    const callsAfterRepeat = await waitForRecordedStageActions(client, 1);
+    expect(callsAfterRepeat).toHaveLength(1);
+
+    // The post's successful completion — not the advance — closes the task.
+    const closedState = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const taskId = ${JSON.stringify(task.id)};
+       const isClosed = () => {
+         const items = ctx.store?.items?.value ?? ctx.store?.items ?? [];
+         const item = (items || []).find((candidate) => candidate.id === taskId);
+         return !item || item.closed_at != null;
+       };
+       (async () => {
+         await db.execute(
+           "UPDATE stage_run SET status = 'succeeded', finished_at = datetime('now') WHERE id = ?",
+           [${JSON.stringify(`e2e-post-${task.id}`)}],
+         );
+         await db.execute("UPDATE pipeline_item SET closed_at = ? WHERE id = ?", [new Date().toISOString(), taskId]);
+         await ctx.refreshAllItems();
+         cb(isClosed() ? "closed-after-post" : "still-open");
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(closedState).toBe("closed-after-post");
+
+    await restoreSharedFixtureTask(task.id);
+  });
+
+  it("keeps approval generic and closing for pinned pipelines without an approve post", async () => {
+    const task = await parkSelectedTaskAtPr(E2E_PR_NO_POST_PIPELINE_DEF);
+    await installStageActionRecorder(client);
+
+    await openDiffModal(client);
+    await client.waitForElement(".verdict-bar .approve", 2_000);
+    const approveLabel = await client.executeSync<string>(
+      `return document.querySelector(".verdict-bar .approve").textContent.trim();`
+    );
+    expect(approveLabel).toBe("Approve");
+    await client.click(await client.findElement(".verdict-bar .approve"));
+
+    const calls = await waitForRecordedStageActions(client, 1);
+    expect(calls[0].url).toContain(`/v1/tasks/${encodeURIComponent(task.id)}/actions/advance-stage`);
+
+    // With no post on the pinned final stage, the advance itself closes the
+    // task — approval never claims merge behavior it cannot deliver.
+    const closedState = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const taskId = ${JSON.stringify(task.id)};
+       const isClosed = () => {
+         const items = ctx.store?.items?.value ?? ctx.store?.items ?? [];
+         const item = (items || []).find((candidate) => candidate.id === taskId);
+         return !item || item.closed_at != null;
+       };
+       const wait = () => new Promise((resolve) => setTimeout(resolve, 100));
+       (async () => {
+         const deadline = Date.now() + 10000;
+         while (!isClosed() && Date.now() < deadline) await wait();
+         cb(isClosed() ? "closed" : "still-open");
+       })().catch(function(e) { cb("err:" + e); });`
+    );
+    expect(closedState).toBe("closed");
+
+    await restoreSharedFixtureTask(task.id);
   });
 
   it("keeps pending review comments and summary draft when request-revision fails", async () => {

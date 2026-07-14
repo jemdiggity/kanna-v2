@@ -1,10 +1,16 @@
-import type { CreateTaskResponse, RepoSummary, TaskSummary } from "../lib/api/types";
+import type {
+  CreateTaskResponse,
+  RepoSummary,
+  TaskActivity,
+  TaskSummary
+} from "../lib/api/types";
 import type {
   KannaClient,
   TaskAgentSubscription,
   TaskTerminalSubscription
 } from "../lib/api/client";
 import type { MobileAuthSession } from "../lib/firebase/auth";
+import { isTaskDetailVisible } from "../appShell";
 import type { ComposerAgentProvider, MobileView, SessionStore } from "./sessionStore";
 
 export interface MobileController {
@@ -36,13 +42,24 @@ export interface MobileController {
 }
 
 const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
+const MARK_READ_DEBOUNCE_MS = 1_000;
+const MARK_READ_MAX_ATTEMPTS = 3;
+const MARK_READ_RETRY_BASE_MS = 1_000;
+
+export interface CloudTaskPublication {
+  cloudAuthoritative: boolean;
+}
 
 export interface MobileControllerOptions {
   // Live cloud task subscription (onSnapshot). When provided and signed in,
   // the controller reads tasks via this push stream instead of polling.
   subscribeCloudTasks?: (
     uid: string,
-    onUpdate: (tasks: TaskSummary[]) => void,
+    onUpdate: (
+      tasks: TaskSummary[],
+      publication?: CloudTaskPublication
+    ) => void,
+    onError?: (error: unknown) => void,
   ) => () => void;
 }
 
@@ -55,29 +72,86 @@ export function createMobileController(
   let activeTaskTerminal:
     | {
         taskId: string;
+        routeIdentity: string;
         subscription: TaskTerminalSubscription;
+        retagTaskId(taskId: string): void;
       }
     | null = null;
   let activeTaskAgent:
     | {
         taskId: string;
+        routeIdentity: string;
         subscription: TaskAgentSubscription;
+        retagTaskId(taskId: string): void;
       }
     | null = null;
+  let taskTerminalGeneration = 0;
+  let taskAgentGeneration = 0;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
   let backgroundRefreshMode: "collections" | "desktops" = "collections";
   let authUnsubscribe: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let bootstrapInFlight: Promise<void> | null = null;
-  let liveCloudTasksApplied = false;
+  let bootstrapRequested = false;
+  let cloudSubscriptionEpoch = 0;
+  let cloudSubscriptionError:
+    | { epoch: number; message: string }
+    | null = null;
+  let desktopMetadataError:
+    | { revision: number; message: string }
+    | null = null;
+  let unownedErrorMessage: string | null = null;
+  let taskCollectionsRevision = 0;
+  let liveRepositoryRevision = 0;
+  let lastExplicitRepos: RepoSummary[] = [];
+  let desktopCollectionsRevision = 0;
   let refreshDesktopsInFlight: Promise<void> | null = null;
+  const pendingTaskIdentities = new Map<
+    string,
+    {
+      ownerDesktopId: string;
+      ownerLocalRepoId: string;
+      ownerLocalTaskId: string;
+    }
+  >();
+
+  const getClientResolvedTaskRoute = (response: {
+    ownerDesktopId?: string;
+    ownerLocalRepoId?: string;
+    ownerLocalTaskId?: string;
+  }) => {
+    const ownerDesktopId = response.ownerDesktopId?.trim();
+    const ownerLocalRepoId = response.ownerLocalRepoId?.trim();
+    const ownerLocalTaskId = response.ownerLocalTaskId?.trim();
+    return ownerDesktopId && ownerLocalRepoId && ownerLocalTaskId
+      ? { ownerDesktopId, ownerLocalRepoId, ownerLocalTaskId }
+      : null;
+  };
+
+  const publishOwnedErrorMessage = () => {
+    store.setErrorMessage(
+      unownedErrorMessage ??
+      cloudSubscriptionError?.message ??
+      desktopMetadataError?.message ??
+      null
+    );
+  };
+
+  const setUnownedErrorMessage = (message: string | null) => {
+    unownedErrorMessage = message;
+    publishOwnedErrorMessage();
+  };
+  let markReadTimer: ReturnType<typeof setTimeout> | null = null;
+  let markReadGeneration = 0;
+  let observedSelectedTaskReadKey: string | null = null;
+  let exhaustedMarkReadGeneration: number | null = null;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
     const message =
       error instanceof Error ? error.message : "Terminal stream failed to start";
     store.setTaskTerminalError(taskId, message);
-    store.setErrorMessage(message);
+    setUnownedErrorMessage(message);
   };
 
   const findTask = (taskId: string): TaskSummary | null => {
@@ -90,14 +164,210 @@ export function createMobileController(
     );
   };
 
+  const resolveCanonicalTaskDisplayId = (
+    responseTaskId: string,
+    ownerDesktopId: string | null,
+    ownerLocalRepoId: string | null,
+    tasks: readonly TaskSummary[]
+  ): string | null => {
+    const candidates = new Map<string, TaskSummary>();
+    const exactRepoCandidates = new Map<string, TaskSummary>();
+    for (const task of tasks) {
+      if (task.id === responseTaskId) continue;
+      if (task.ownerLocalTaskId !== responseTaskId) continue;
+      if (ownerDesktopId && task.ownerDesktopId !== ownerDesktopId) continue;
+      candidates.set(task.id, task);
+      if (
+        ownerLocalRepoId &&
+        task.ownerLocalRepoId === ownerLocalRepoId
+      ) {
+        exactRepoCandidates.set(task.id, task);
+      }
+    }
+
+    if (ownerLocalRepoId && exactRepoCandidates.size === 1) {
+      return exactRepoCandidates.values().next().value!.id;
+    }
+    if (ownerLocalRepoId && exactRepoCandidates.size > 1) {
+      return null;
+    }
+    if (candidates.size === 1) {
+      const candidate = candidates.values().next().value!;
+      if (!ownerLocalRepoId || candidate.ownerLocalRepoId == null) {
+        return candidate.id;
+      }
+    }
+
+    return null;
+  };
+
+  const resolveTaskActionDisplayId = (
+    responseTaskId: string,
+    ownerDesktopId: string | null,
+    ownerLocalRepoId: string | null = null
+  ): string | null => {
+    const state = store.getState();
+    const canonicalTaskId = resolveCanonicalTaskDisplayId(
+      responseTaskId,
+      ownerDesktopId,
+      ownerLocalRepoId,
+      [...state.repoTasks, ...state.recentTasks, ...state.searchResults]
+    );
+    if (canonicalTaskId) {
+      return canonicalTaskId;
+    }
+    return findTask(responseTaskId)?.id ?? null;
+  };
+
+  const pruneResolvedPendingTaskIdentities = () => {
+    const state = store.getState();
+    const tasks = [
+      ...state.repoTasks,
+      ...state.recentTasks,
+      ...state.searchResults
+    ];
+    for (const [displayTaskId, pendingIdentity] of pendingTaskIdentities) {
+      if (
+        resolveCanonicalTaskDisplayId(
+          pendingIdentity.ownerLocalTaskId,
+          pendingIdentity.ownerDesktopId,
+          pendingIdentity.ownerLocalRepoId,
+          tasks
+        )
+      ) {
+        pendingTaskIdentities.delete(displayTaskId);
+      }
+    }
+  };
+
+  const rememberActionTaskSummary = (task: TaskSummary) => {
+    taskCollectionsRevision += 1;
+    const state = store.getState();
+    const recentTasks = [
+      task,
+      ...state.recentTasks.filter((candidate) => candidate.id !== task.id)
+    ];
+    store.setRepos(mergeReposWithTaskRepos(state.repos, recentTasks));
+    store.setRecentTasks(recentTasks);
+    if (state.selectedRepoId === task.repoId) {
+      store.setRepoTasks([
+        task,
+        ...state.repoTasks.filter((candidate) => candidate.id !== task.id)
+      ]);
+    }
+  };
+
+  const selectedTaskReadState = () => {
+    const state = store.getState();
+    const selectedTaskId = state.selectedTaskId;
+    const activities: TaskActivity[] = selectedTaskId
+      ? [state.repoTasks, state.recentTasks, state.searchResults]
+          .flatMap((tasks) => tasks.filter((task) => task.id === selectedTaskId))
+          .map((task) => task.activity ?? "idle")
+      : [];
+    const activity =
+      activities.length > 0 &&
+      activities.every((candidate) => candidate === activities[0])
+        ? activities[0]
+        : null;
+
+    return {
+      taskId: selectedTaskId,
+      visible: isTaskDetailVisible(
+        state.connectionState,
+        selectedTaskId !== null,
+        state.activeView
+      ),
+      activities,
+      activity
+    };
+  };
+
+  const selectedTaskReadKey = (): string | null => {
+    const { taskId, visible, activities } = selectedTaskReadState();
+    const selectedTaskId = taskId;
+    if (!selectedTaskId) return null;
+    return `${selectedTaskId}\u0000${visible ? "visible" : "hidden"}\u0000${activities.join(",")}`;
+  };
+
+  const canMarkSelectedTaskRead = (taskId: string, generation: number) => {
+    const selected = selectedTaskReadState();
+    return (
+      generation === markReadGeneration &&
+      selected.taskId === taskId &&
+      selected.visible &&
+      selected.activity === "unread"
+    );
+  };
+
+  const reconcileSelectedTaskRead = (allowExhaustedRetry = false) => {
+    const readKey = selectedTaskReadKey();
+    const shouldRetryExhausted =
+      allowExhaustedRetry && exhaustedMarkReadGeneration === markReadGeneration;
+    if (readKey === observedSelectedTaskReadKey && !shouldRetryExhausted) return;
+    observedSelectedTaskReadKey = readKey;
+    const generation = ++markReadGeneration;
+    exhaustedMarkReadGeneration = null;
+    if (markReadTimer) {
+      clearTimeout(markReadTimer);
+      markReadTimer = null;
+    }
+
+    const selected = selectedTaskReadState();
+    if (!selected.taskId || !selected.visible || selected.activity !== "unread") return;
+    const taskId = selected.taskId;
+    markReadTimer = setTimeout(() => {
+      markReadTimer = null;
+      void markSelectedTaskRead(taskId, generation, 1);
+    }, MARK_READ_DEBOUNCE_MS);
+  };
+
+  const markSelectedTaskRead = async (
+    taskId: string,
+    generation: number,
+    attempt: number
+  ) => {
+    if (!canMarkSelectedTaskRead(taskId, generation)) {
+      return;
+    }
+
+    try {
+      const response = await client.markTaskRead(taskId);
+      if (
+        !canMarkSelectedTaskRead(taskId, generation)
+        || response.activity !== "idle"
+      ) {
+        return;
+      }
+      store.setTaskActivity(taskId, "idle");
+      reconcileSelectedTaskRead();
+    } catch {
+      if (!canMarkSelectedTaskRead(taskId, generation)) return;
+      if (attempt >= MARK_READ_MAX_ATTEMPTS) {
+        exhaustedMarkReadGeneration = generation;
+        return;
+      }
+
+      const retryDelay = MARK_READ_RETRY_BASE_MS * 2 ** (attempt - 1);
+      markReadTimer = setTimeout(() => {
+        markReadTimer = null;
+        void markSelectedTaskRead(taskId, generation, attempt + 1);
+      }, retryDelay);
+    }
+  };
+
   const stopTaskTerminal = () => {
-    activeTaskTerminal?.subscription.close();
+    const subscription = activeTaskTerminal?.subscription;
     activeTaskTerminal = null;
+    taskTerminalGeneration += 1;
+    subscription?.close();
   };
 
   const stopTaskAgent = () => {
-    activeTaskAgent?.subscription.close();
+    const subscription = activeTaskAgent?.subscription;
     activeTaskAgent = null;
+    taskAgentGeneration += 1;
+    subscription?.close();
   };
 
   const stopTaskSession = () => {
@@ -105,102 +375,269 @@ export function createMobileController(
     stopTaskAgent();
   };
 
-  const reconcileSelectedTask = () => {
+  const clearTaskSessionIfMissing = (taskId: string) => {
+    if (findTask(taskId)) {
+      return;
+    }
+    stopTaskSession();
+    store.clearTaskTerminal();
+    store.clearTaskAgent();
+  };
+
+  const selectMigratedTaskIdentity = (
+    previousTaskId: string,
+    nextTaskId: string
+  ) => {
+    const nextTask = findTask(nextTaskId);
+    const nextRouteIdentity =
+      client.getTaskRouteIdentity?.(nextTaskId) ?? nextTaskId;
+    let retainedSession = false;
+
+    if (
+      nextTask?.agentType !== "agent" &&
+      activeTaskTerminal?.taskId === previousTaskId &&
+      activeTaskTerminal.routeIdentity === nextRouteIdentity
+    ) {
+      activeTaskTerminal.taskId = nextTaskId;
+      activeTaskTerminal.retagTaskId(nextTaskId);
+      retainedSession = true;
+    }
+    if (
+      nextTask?.agentType === "agent" &&
+      activeTaskAgent?.taskId === previousTaskId &&
+      activeTaskAgent.routeIdentity === nextRouteIdentity
+    ) {
+      activeTaskAgent.taskId = nextTaskId;
+      activeTaskAgent.retagTaskId(nextTaskId);
+      retainedSession = true;
+    }
+
+    if (retainedSession) {
+      store.retagTaskIdentity(previousTaskId, nextTaskId);
+    } else {
+      store.setSelectedTask(nextTaskId);
+    }
+  };
+
+  const reconcileSelectedTask = (allowExhaustedReadRetry = false) => {
     const selectedTaskId = store.getState().selectedTaskId;
-    if (!selectedTaskId || findTask(selectedTaskId)) {
+    if (!selectedTaskId) {
+      pruneResolvedPendingTaskIdentities();
+      reconcileSelectedTaskRead(allowExhaustedReadRetry);
+      return;
+    }
+
+    const pendingIdentity = pendingTaskIdentities.get(selectedTaskId);
+    if (pendingIdentity) {
+      const displayTaskId = resolveTaskActionDisplayId(
+        pendingIdentity.ownerLocalTaskId,
+        pendingIdentity.ownerDesktopId,
+        pendingIdentity.ownerLocalRepoId
+      );
+      if (displayTaskId) {
+        if (displayTaskId !== selectedTaskId) {
+          pendingTaskIdentities.delete(selectedTaskId);
+          selectMigratedTaskIdentity(selectedTaskId, displayTaskId);
+        }
+      }
+      pruneResolvedPendingTaskIdentities();
+      reconcileSelectedTaskRead(allowExhaustedReadRetry);
+      return;
+    }
+
+    if (findTask(selectedTaskId)) {
+      pruneResolvedPendingTaskIdentities();
+      reconcileSelectedTaskRead(allowExhaustedReadRetry);
       return;
     }
 
     stopTaskSession();
     store.reconcileSelectedTask();
+    pruneResolvedPendingTaskIdentities();
+    reconcileSelectedTaskRead(allowExhaustedReadRetry);
   };
 
-  const refreshSearchResults = async () => {
+  const refreshSearchResults = async (): Promise<boolean> => {
     const query = store.getState().searchQuery.trim();
     if (!query) {
-      return;
+      return true;
     }
 
-    const results = await client.searchTasks(query);
-    if (store.getState().searchQuery.trim() !== query) {
-      return;
+    const readRevision = taskCollectionsRevision;
+    let results: TaskSummary[];
+    try {
+      results = await client.searchTasks(query);
+    } catch (error) {
+      if (
+        taskCollectionsRevision !== readRevision ||
+        store.getState().searchQuery.trim() !== query
+      ) {
+        return false;
+      }
+      throw error;
+    }
+    if (
+      taskCollectionsRevision !== readRevision ||
+      store.getState().searchQuery.trim() !== query
+    ) {
+      return false;
     }
 
+    taskCollectionsRevision += 1;
     store.setSearchResults(query, results);
+    reconcileSelectedTaskRead();
+    return true;
   };
 
-  const loadRepoTasks = async (repoId: string | null) => {
+  const loadRepoTasks = async (repoId: string | null): Promise<boolean> => {
+    const readRevision = taskCollectionsRevision;
     if (!repoId) {
+      if (taskCollectionsRevision !== readRevision) {
+        return false;
+      }
+      taskCollectionsRevision += 1;
       store.setRepoTasks([]);
-      return;
+      return true;
     }
 
-    const repoTasks = await client.listRepoTasks(repoId);
+    let repoTasks: TaskSummary[];
+    try {
+      repoTasks = await client.listRepoTasks(repoId);
+    } catch (error) {
+      if (
+        taskCollectionsRevision !== readRevision ||
+        store.getState().selectedRepoId !== repoId
+      ) {
+        return false;
+      }
+      throw error;
+    }
+    if (
+      taskCollectionsRevision !== readRevision ||
+      store.getState().selectedRepoId !== repoId
+    ) {
+      return false;
+    }
+
+    taskCollectionsRevision += 1;
     store.setRepoTasks(repoTasks);
+    reconcileSelectedTaskRead();
+    return true;
   };
 
   const startTaskTerminal = (taskId: string) => {
-    if (activeTaskTerminal?.taskId === taskId) {
+    const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
+    if (
+      activeTaskTerminal?.taskId === taskId &&
+      activeTaskTerminal.routeIdentity === routeIdentity
+    ) {
       return;
     }
 
     stopTaskTerminal();
+    const generation = taskTerminalGeneration;
 
     store.beginTaskTerminal(taskId, "");
 
     try {
+      let streamTaskId = taskId;
       const subscription = client.observeTaskTerminal(taskId, (event) => {
+        if (generation !== taskTerminalGeneration) {
+          return;
+        }
         switch (event.type) {
           case "ready":
             if (event.cols && event.rows) {
-              store.setTaskTerminalDims(taskId, event.cols, event.rows);
+              store.setTaskTerminalDims(streamTaskId, event.cols, event.rows);
             }
-            store.setTaskTerminalStatus(taskId, "live");
+            store.setTaskTerminalStatus(streamTaskId, "live");
             break;
           case "output":
-            store.appendTaskTerminal(taskId, `${event.dataB64}\n`);
+            store.appendTaskTerminal(streamTaskId, `${event.dataB64}\n`);
             break;
           case "exit":
-            store.setTaskTerminalStatus(taskId, "closed");
+            store.setTaskTerminalStatus(streamTaskId, "closed");
             break;
           case "error":
-            store.setTaskTerminalError(taskId, event.message);
+            store.setTaskTerminalError(streamTaskId, event.message);
             break;
         }
       });
 
-      activeTaskTerminal = { taskId, subscription };
+      if (generation !== taskTerminalGeneration) {
+        subscription.close();
+        return;
+      }
+      activeTaskTerminal = {
+        taskId,
+        routeIdentity,
+        subscription,
+        retagTaskId(nextTaskId) {
+          streamTaskId = nextTaskId;
+        }
+      };
     } catch (error) {
+      if (generation !== taskTerminalGeneration) {
+        return;
+      }
+      taskTerminalGeneration += 1;
       setTerminalStartupError(taskId, error);
     }
   };
 
   const startTaskAgent = (taskId: string) => {
-    if (activeTaskAgent?.taskId === taskId) {
+    const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
+    if (
+      activeTaskAgent?.taskId === taskId &&
+      activeTaskAgent.routeIdentity === routeIdentity
+    ) {
       return;
     }
 
     stopTaskSession();
+    const generation = taskAgentGeneration;
     store.clearTaskTerminal();
     store.beginTaskAgent(taskId);
 
     try {
+      let streamTaskId = taskId;
       const subscription = client.observeTaskAgent(taskId, (event) => {
-        store.applyTaskAgentStreamEvent(taskId, event);
+        if (generation !== taskAgentGeneration) {
+          return;
+        }
+        store.applyTaskAgentStreamEvent(streamTaskId, event);
       });
 
-      activeTaskAgent = { taskId, subscription };
+      if (generation !== taskAgentGeneration) {
+        subscription.close();
+        return;
+      }
+      activeTaskAgent = {
+        taskId,
+        routeIdentity,
+        subscription,
+        retagTaskId(nextTaskId) {
+          streamTaskId = nextTaskId;
+        }
+      };
     } catch (error) {
+      if (generation !== taskAgentGeneration) {
+        return;
+      }
+      taskAgentGeneration += 1;
       const message =
         error instanceof Error ? error.message : "Agent stream failed to start";
       store.applyTaskAgentStreamEvent(taskId, { type: "error", message });
-      store.setErrorMessage(message);
+      setUnownedErrorMessage(message);
     }
   };
 
   const startTaskView = (taskId: string) => {
     const task = findTask(taskId);
-    if (task?.agentType === "agent") {
+    if (!task) {
+      return;
+    }
+    if (task.agentType === "agent") {
       startTaskAgent(taskId);
     } else {
       stopTaskAgent();
@@ -210,18 +647,37 @@ export function createMobileController(
   };
 
   const loadCollections = async () => {
-    const [desktops, repos, recentTasks] = await Promise.all([
-      client.listDesktops(),
+    const readRevision = taskCollectionsRevision;
+    const taskCollections = Promise.all([
       client.listRepos(),
       client.listRecentTasks()
+    ]).catch((error) => {
+      if (taskCollectionsRevision !== readRevision) {
+        return null;
+      }
+      throw error;
+    });
+    const [, collections] = await Promise.all([
+      refreshDesktops({ force: true }),
+      taskCollections
     ]);
 
-    store.setDesktops(desktops);
+    if (!collections || taskCollectionsRevision !== readRevision) {
+      return;
+    }
+    const [repos, recentTasks] = collections;
+
+    taskCollectionsRevision += 1;
+    lastExplicitRepos = repos;
     store.setRepos(mergeReposWithTaskRepos(repos, recentTasks));
     store.setRecentTasks(recentTasks);
-    await loadRepoTasks(store.getState().selectedRepoId);
-    await refreshSearchResults();
-    reconcileSelectedTask();
+    if (!(await loadRepoTasks(store.getState().selectedRepoId))) {
+      return;
+    }
+    if (!(await refreshSearchResults())) {
+      return;
+    }
+    reconcileSelectedTask(true);
   };
 
   const refreshDesktops = async (options: { force?: boolean } = {}) => {
@@ -229,49 +685,139 @@ export function createMobileController(
       await refreshDesktopsInFlight;
     }
     if (options.force || !refreshDesktopsInFlight) {
-      refreshDesktopsInFlight = client.listDesktops()
-        .then((desktops) => {
-          store.setDesktops(desktops);
-        })
-        .finally(() => {
-          refreshDesktopsInFlight = null;
-        });
+      const readRevision = ++desktopCollectionsRevision;
+      refreshDesktopsInFlight = (async () => {
+        try {
+          const desktops = await client.listDesktops();
+          if (desktopCollectionsRevision === readRevision) {
+            store.setDesktops(desktops);
+            desktopMetadataError = null;
+            publishOwnedErrorMessage();
+          }
+        } catch (error) {
+          if (desktopCollectionsRevision === readRevision) {
+            desktopMetadataError = {
+              revision: readRevision,
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Desktop metadata refresh failed"
+            };
+            publishOwnedErrorMessage();
+          }
+        }
+      })();
     }
-    await refreshDesktopsInFlight;
+    const refresh = refreshDesktopsInFlight;
+    try {
+      await refresh;
+    } finally {
+      if (refreshDesktopsInFlight === refresh) {
+        refreshDesktopsInFlight = null;
+      }
+    }
   };
 
   const refreshTaskCollections = async () => {
+    const readRevision = taskCollectionsRevision;
     const selectedRepoId = store.getState().selectedRepoId;
-    const [recentTasks, repoTasks] = await Promise.all([
-      client.listRecentTasks(),
-      selectedRepoId ? client.listRepoTasks(selectedRepoId) : Promise.resolve([])
-    ]);
+    let recentTasks: TaskSummary[];
+    let repoTasks: TaskSummary[];
+    try {
+      [recentTasks, repoTasks] = await Promise.all([
+        client.listRecentTasks(),
+        selectedRepoId ? client.listRepoTasks(selectedRepoId) : Promise.resolve([])
+      ]);
+    } catch (error) {
+      if (
+        taskCollectionsRevision !== readRevision ||
+        store.getState().selectedRepoId !== selectedRepoId
+      ) {
+        return;
+      }
+      throw error;
+    }
+    if (
+      taskCollectionsRevision !== readRevision ||
+      store.getState().selectedRepoId !== selectedRepoId
+    ) {
+      return;
+    }
+
+    taskCollectionsRevision += 1;
     store.setRepos(mergeReposWithTaskRepos(store.getState().repos, recentTasks));
     store.setRecentTasks(recentTasks);
     store.setRepoTasks(repoTasks);
-    await refreshSearchResults();
-    reconcileSelectedTask();
+    if (!(await refreshSearchResults())) {
+      return;
+    }
+    reconcileSelectedTask(true);
   };
 
-  const applyLiveCloudTasks = (tasks: TaskSummary[]) => {
-    liveCloudTasksApplied = true;
+  const applyLiveCloudTasks = (
+    tasks: TaskSummary[],
+    subscriptionEpoch: number,
+    cloudAuthoritative: boolean
+  ) => {
     tasks = uniqueTasksById(tasks);
-    void refreshDesktops().catch(fail);
-    store.setRepos(mergeReposWithTaskRepos(store.getState().repos, tasks));
+    taskCollectionsRevision += 1;
+    const repositoryRevision = ++liveRepositoryRevision;
+    const previousState = store.getState();
+    const selectedRepo = previousState.selectedRepoId
+      ? previousState.repos.find(
+          (repo) => repo.id === previousState.selectedRepoId
+        ) ?? {
+          id: previousState.selectedRepoId,
+          name: previousState.selectedRepoId
+        }
+      : null;
+    const selectedRepoHasTask = selectedRepo
+      ? tasks.some((task) => task.repoId === selectedRepo.id)
+      : false;
+    store.setRepos(
+      mergeReposWithTaskRepos(
+        [
+          ...lastExplicitRepos,
+          ...(selectedRepo && !selectedRepoHasTask ? [selectedRepo] : [])
+        ],
+        tasks
+      )
+    );
     store.setRecentTasks(tasks);
-    let selectedRepoId = store.getState().selectedRepoId;
-    const selectedRepoHasTasks = tasks.some((task) => task.repoId === selectedRepoId);
-    if (!selectedRepoId || !selectedRepoHasTasks) {
-      selectedRepoId = tasks[0]?.repoId ?? null;
-      if (selectedRepoId) {
-        store.selectRepo(selectedRepoId);
-      }
-    }
+    const selectedRepoId = store.getState().selectedRepoId;
     store.setRepoTasks(
       selectedRepoId ? tasks.filter((task) => task.repoId === selectedRepoId) : [],
     );
-    void refreshSearchResults();
-    reconcileSelectedTask();
+    const searchQuery = store.getState().searchQuery;
+    store.setSearchResults(searchQuery, filterTasksForQuery(tasks, searchQuery));
+    reconcileSelectedTask(true);
+    const ownedError = cloudSubscriptionError;
+    if (cloudAuthoritative && ownedError?.epoch === subscriptionEpoch) {
+      cloudSubscriptionError = null;
+      publishOwnedErrorMessage();
+    }
+    const selectedTaskId = store.getState().selectedTaskId;
+    if (selectedTaskId && findTask(selectedTaskId)) {
+      startTaskView(selectedTaskId);
+    }
+
+    void client.listRepos().then((repos) => {
+      if (
+        subscriptionEpoch !== cloudSubscriptionEpoch ||
+        repositoryRevision !== liveRepositoryRevision
+      ) {
+        return;
+      }
+      lastExplicitRepos = repos;
+      store.setRepos(mergeReposWithTaskRepos(repos, tasks));
+      const currentRepoId = store.getState().selectedRepoId;
+      store.setRepoTasks(
+        currentRepoId ? tasks.filter((task) => task.repoId === currentRepoId) : []
+      );
+    }).catch(() => {
+      // Repository supplementation is optional. Keep the task-derived and
+      // last-good repository list when either source is temporarily unavailable.
+    });
   };
 
   const reposFromTasks = (tasks: TaskSummary[]): RepoSummary[] => {
@@ -347,15 +893,65 @@ export function createMobileController(
 
   const startCloudTaskSubscription = (uid: string): boolean => {
     if (!options.subscribeCloudTasks) return false;
+    taskCollectionsRevision += 1;
+    desktopCollectionsRevision += 1;
     stopCloudTaskSubscription();
-    cloudTasksUnsubscribe = options.subscribeCloudTasks(uid, applyLiveCloudTasks);
+    const epoch = cloudSubscriptionEpoch;
+    const unsubscribe = options.subscribeCloudTasks(
+      uid,
+      (tasks, publication) => {
+        if (epoch !== cloudSubscriptionEpoch) {
+          return;
+        }
+        applyLiveCloudTasks(
+          tasks,
+          epoch,
+          publication?.cloudAuthoritative !== false
+        );
+      },
+      (error) => {
+        if (epoch !== cloudSubscriptionEpoch) {
+          return;
+        }
+        const message =
+          error instanceof Error ? error.message : "Cloud task subscription failed";
+        cloudSubscriptionError = { epoch, message };
+        publishOwnedErrorMessage();
+      }
+    );
+    if (epoch !== cloudSubscriptionEpoch) {
+      unsubscribe();
+      return false;
+    }
+    cloudTasksUnsubscribe = unsubscribe;
     return true;
   };
 
   const stopCloudTaskSubscription = () => {
-    cloudTasksUnsubscribe?.();
+    const unsubscribe = cloudTasksUnsubscribe;
     cloudTasksUnsubscribe = null;
-    liveCloudTasksApplied = false;
+    cloudSubscriptionError = null;
+    publishOwnedErrorMessage();
+    cloudSubscriptionEpoch += 1;
+    liveRepositoryRevision += 1;
+    unsubscribe?.();
+  };
+
+  const clearAccountScopedState = () => {
+    taskCollectionsRevision += 1;
+    desktopCollectionsRevision += 1;
+    stopCloudTaskSubscription();
+    stopTaskSession();
+    store.setSelectedTask(null);
+    store.setDesktops([]);
+    lastExplicitRepos = [];
+    store.setRepos([]);
+    store.setRecentTasks([]);
+    store.setRepoTasks([]);
+    store.setSearchResults(store.getState().searchQuery, []);
+    pendingTaskIdentities.clear();
+    desktopMetadataError = null;
+    setUnownedErrorMessage(null);
   };
 
   const startBackgroundRefresh = (mode: "collections" | "desktops") => {
@@ -384,7 +980,9 @@ export function createMobileController(
 
   const fail = (error: unknown) => {
     store.setConnectionState("error");
-    store.setErrorMessage(error instanceof Error ? error.message : "Mobile app request failed");
+    setUnownedErrorMessage(
+      error instanceof Error ? error.message : "Mobile app request failed"
+    );
   };
 
   const initializeAuth = async () => {
@@ -396,12 +994,20 @@ export function createMobileController(
     store.setAuthState(authSession.getState());
     if (!authUnsubscribe) {
       authUnsubscribe = authSession.subscribe((authState) => {
-        const previousAuthStatus = store.getState().auth.status;
+        const previousAuth = store.getState().auth;
+        const previousUid =
+          previousAuth.status === "signedIn" ? previousAuth.user.uid : null;
+        const nextUid = authState.status === "signedIn" ? authState.user.uid : null;
+        const identityChanged =
+          previousUid !== nextUid && (previousUid !== null || nextUid !== null);
+        if (identityChanged) {
+          clearAccountScopedState();
+        }
         store.setAuthState(authState);
         if (authState.status !== "signedIn") {
           stopCloudTaskSubscription();
         }
-        if (previousAuthStatus !== "signedIn" && authState.status === "signedIn") {
+        if (identityChanged) {
           void bootstrap().catch(fail);
         }
       });
@@ -409,16 +1015,36 @@ export function createMobileController(
   };
 
   const bootstrap = (): Promise<void> => {
+    bootstrapRequested = true;
     if (!bootstrapInFlight) {
-      bootstrapInFlight = doBootstrap().finally(() => {
-        bootstrapInFlight = null;
-      });
+      let runner!: Promise<void>;
+      runner = (async () => {
+        try {
+          while (true) {
+            bootstrapRequested = false;
+            await doBootstrap();
+            if (bootstrapRequested) {
+              continue;
+            }
+            if (bootstrapInFlight === runner) {
+              bootstrapInFlight = null;
+            }
+            return;
+          }
+        } catch (error) {
+          if (bootstrapInFlight === runner) {
+            bootstrapInFlight = null;
+          }
+          throw error;
+        }
+      })();
+      bootstrapInFlight = runner;
     }
     return bootstrapInFlight;
   };
 
   const doBootstrap = async () => {
-      store.setErrorMessage(null);
+      setUnownedErrorMessage(null);
       await initializeAuth();
 
       try {
@@ -431,6 +1057,7 @@ export function createMobileController(
         );
 
         if (status.state !== "running") {
+          stopCloudTaskSubscription();
           store.setConnectionState("idle");
           return;
         }
@@ -446,16 +1073,16 @@ export function createMobileController(
           store.getState().connectionMode === "remote" &&
           auth?.status === "signedIn" &&
           startCloudTaskSubscription(auth.user.uid);
-        if (liveCloudTasksApplied) {
+        backgroundRefreshMode = useLiveCloudTasks ? "desktops" : "collections";
+        if (useLiveCloudTasks) {
           await refreshDesktops({ force: true });
-          await refreshSearchResults();
-          reconcileSelectedTask();
         } else {
+          stopCloudTaskSubscription();
           await loadCollections();
         }
         startBackgroundRefresh(useLiveCloudTasks ? "desktops" : "collections");
         const selectedTaskId = store.getState().selectedTaskId;
-        if (selectedTaskId) {
+        if (selectedTaskId && findTask(selectedTaskId)) {
           startTaskView(selectedTaskId);
         }
       } catch (error) {
@@ -468,7 +1095,7 @@ export function createMobileController(
 
     async connectLocal() {
       store.setConnectionState("connecting");
-      store.setErrorMessage(null);
+      setUnownedErrorMessage(null);
 
       try {
         const pairing = await client.createPairingSession();
@@ -524,9 +1151,11 @@ export function createMobileController(
 
     showView(view) {
       store.setActiveView(view);
+      reconcileSelectedTaskRead();
     },
 
     async selectDesktop(desktopId) {
+      taskCollectionsRevision += 1;
       stopTaskSession();
       store.selectDesktop(desktopId);
       store.setSelectedTask(null);
@@ -537,26 +1166,33 @@ export function createMobileController(
     },
 
     async selectRepo(repoId) {
+      taskCollectionsRevision += 1;
       store.selectRepo(repoId);
       try {
-        await loadRepoTasks(repoId);
-        store.setErrorMessage(null);
+        const committed = await loadRepoTasks(repoId);
+        if (committed) {
+          setUnownedErrorMessage(null);
+        }
       } catch (error) {
         fail(error);
       }
     },
 
     openTask(taskId) {
+      taskCollectionsRevision += 1;
       store.setSelectedTask(taskId);
       store.setActiveView("tasks");
+      reconcileSelectedTaskRead();
       startTaskView(taskId);
     },
 
     closeTask() {
+      taskCollectionsRevision += 1;
       stopTaskSession();
       store.setSelectedTask(null);
       store.clearTaskTerminal();
       store.clearTaskAgent();
+      reconcileSelectedTaskRead();
     },
 
     openComposer() {
@@ -599,19 +1235,28 @@ export function createMobileController(
     },
 
     async searchTasks(query) {
-      store.setErrorMessage(null);
+      setUnownedErrorMessage(null);
+      const searchRevision = ++taskCollectionsRevision;
       if (!query.trim()) {
         store.setSearchResults("", []);
         store.setActiveView("tasks");
+        reconcileSelectedTaskRead();
         return;
       }
 
       try {
         const results = await client.searchTasks(query);
+        if (taskCollectionsRevision !== searchRevision) {
+          return;
+        }
+        taskCollectionsRevision += 1;
         store.setSearchResults(query, results);
         store.setActiveView("search");
+        reconcileSelectedTaskRead();
       } catch (error) {
-        fail(error);
+        if (taskCollectionsRevision === searchRevision) {
+          fail(error);
+        }
       }
     },
 
@@ -642,6 +1287,11 @@ export function createMobileController(
           agentProvider: state.composerAgentProvider,
           agentType: "pty"
         });
+        const createdRoute = getClientResolvedTaskRoute(created);
+        if (createdRoute) {
+          pendingTaskIdentities.set(created.taskId, createdRoute);
+        }
+        taskCollectionsRevision += 1;
         const createdTask = mapCreatedTask(created);
         const recentTasks = [
           createdTask,
@@ -661,7 +1311,7 @@ export function createMobileController(
           updatedAt: new Date().toISOString()
         });
         store.setComposerState(false, "");
-        store.setErrorMessage(null);
+        setUnownedErrorMessage(null);
         this.openTask(createdTask.id);
       } catch (error) {
         store.setComposerErrorMessage(
@@ -674,10 +1324,42 @@ export function createMobileController(
 
     async runMergeAgent(taskId) {
       try {
+        const sourceTask = findTask(taskId);
+        const ownerDesktopId =
+          sourceTask?.ownerDesktopId ??
+          store.getState().selectedDesktopId;
+        const ownerLocalRepoId = sourceTask?.ownerLocalRepoId ?? null;
         const response = await client.runMergeAgent(taskId);
+        const responseOwnerDesktopId =
+          response.ownerDesktopId ?? ownerDesktopId;
+        const responseOwnerLocalRepoId =
+          response.ownerLocalRepoId ?? ownerLocalRepoId;
+        const responseRoute = getClientResolvedTaskRoute(response);
+        if (response.taskId !== taskId && responseRoute) {
+          pendingTaskIdentities.set(response.taskId, responseRoute);
+        }
+        taskCollectionsRevision += 1;
         await refreshTaskCollections();
-        store.setErrorMessage(null);
-        this.openTask(response.taskId);
+        setUnownedErrorMessage(null);
+        const displayTaskId = resolveTaskActionDisplayId(
+          response.ownerLocalTaskId ??
+            response.task?.ownerLocalTaskId ??
+            response.taskId,
+          responseOwnerDesktopId,
+          responseOwnerLocalRepoId
+        );
+        if (
+          response.task &&
+          (!displayTaskId || displayTaskId === response.taskId)
+        ) {
+          rememberActionTaskSummary(response.task);
+        }
+        if (displayTaskId && displayTaskId !== response.taskId) {
+          pendingTaskIdentities.delete(response.taskId);
+        }
+        const taskIdToOpen = displayTaskId ?? response.taskId;
+        clearTaskSessionIfMissing(taskIdToOpen);
+        this.openTask(taskIdToOpen);
       } catch (error) {
         fail(error);
       }
@@ -685,28 +1367,61 @@ export function createMobileController(
 
     async advanceDesktopTaskStage(taskId) {
       try {
+        const sourceTask = findTask(taskId);
+        const ownerDesktopId =
+          sourceTask?.ownerDesktopId ??
+          store.getState().selectedDesktopId;
+        const ownerLocalRepoId = sourceTask?.ownerLocalRepoId ?? null;
         const response = await client.advanceTaskStage(taskId);
+        const responseOwnerDesktopId =
+          response.ownerDesktopId ?? ownerDesktopId;
+        const responseOwnerLocalRepoId =
+          response.ownerLocalRepoId ?? ownerLocalRepoId;
+        const responseRoute = getClientResolvedTaskRoute(response);
+        if (response.taskId !== taskId && responseRoute) {
+          pendingTaskIdentities.set(response.taskId, responseRoute);
+        }
+        taskCollectionsRevision += 1;
         await refreshTaskCollections();
-        store.setErrorMessage(null);
-        this.openTask(response.taskId);
+        setUnownedErrorMessage(null);
+        const displayTaskId = resolveTaskActionDisplayId(
+          response.ownerLocalTaskId ??
+            response.task?.ownerLocalTaskId ??
+            response.taskId,
+          responseOwnerDesktopId,
+          responseOwnerLocalRepoId
+        );
+        if (
+          response.task &&
+          (!displayTaskId || displayTaskId === response.taskId)
+        ) {
+          rememberActionTaskSummary(response.task);
+        }
+        if (displayTaskId && displayTaskId !== response.taskId) {
+          pendingTaskIdentities.delete(response.taskId);
+        }
+        const taskIdToOpen = displayTaskId ?? response.taskId;
+        clearTaskSessionIfMissing(taskIdToOpen);
+        this.openTask(taskIdToOpen);
       } catch (error) {
         fail(error);
       }
     },
 
     async sendTaskInput(taskId, input) {
-      if (!input.trim()) {
+      const submittedInput = input.trim();
+      if (!submittedInput) {
         return;
       }
 
       try {
         const task = findTask(taskId);
         if (task?.agentType === "agent" && activeTaskAgent?.taskId === taskId) {
-          activeTaskAgent.subscription.sendInput(input.trim());
+          activeTaskAgent.subscription.sendInput(submittedInput);
         } else {
-          await client.sendTaskInput(taskId, encodeSubmittedTaskInput(input, task));
+          await client.sendTaskInput(taskId, submittedInput);
         }
-        store.setErrorMessage(null);
+        setUnownedErrorMessage(null);
       } catch (error) {
         fail(error);
       }
@@ -729,13 +1444,16 @@ export function createMobileController(
     async closeDesktopTask(taskId) {
       try {
         await client.closeTask(taskId);
+        pendingTaskIdentities.delete(taskId);
+        taskCollectionsRevision += 1;
         stopTaskSession();
         await refreshTaskCollections();
         store.setSelectedTask(null);
         store.clearTaskTerminal();
         store.clearTaskAgent();
         store.setActiveView("tasks");
-        store.setErrorMessage(null);
+        setUnownedErrorMessage(null);
+        reconcileSelectedTaskRead();
       } catch (error) {
         fail(error);
       }
@@ -752,8 +1470,18 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
     agentType: response.agentType ?? null
   };
 }
+function filterTasksForQuery(
+  tasks: readonly TaskSummary[],
+  query: string
+): TaskSummary[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return [];
+  }
 
-function encodeSubmittedTaskInput(input: string, task: TaskSummary | null): string {
-  const submit = task?.agentProvider && task.agentProvider !== "claude" ? "\r" : "\x1b[13u";
-  return `\x1b[200~${input}\x1b[201~${submit}`;
+  return tasks.filter(
+    (task) =>
+      task.title.toLowerCase().includes(normalizedQuery) ||
+      task.snippet?.toLowerCase().includes(normalizedQuery) === true
+  );
 }

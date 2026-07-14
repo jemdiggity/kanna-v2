@@ -67,11 +67,10 @@ describe("remote desktop credential auth and discovery E2E", () => {
       displayName: localPairing.desktopName
     });
 
-    const idToken = await harness.getIdToken();
     const desktopDoc = await readFirestoreDocument(
       harness,
-      `users/${BUFFY_UID}/desktops/${desktopDocId(desktopId)}`,
-      idToken
+      `desktopCredentials/${desktopDocId(desktopId)}`,
+      "owner"
     );
     expect(stringField(desktopDoc, "desktopId")).toBe(desktopId);
     expect(stringField(desktopDoc, "displayName")).toBe(localPairing.desktopName);
@@ -246,12 +245,15 @@ async function publishDesktopCredentialAsBuffy(
       desktopId: { stringValue: input.desktopId },
       displayName: { stringValue: input.displayName },
       desktopSecretHash: { stringValue: sha256Hex(input.desktopSecret) },
+      revokedAt: input.revokedAt
+        ? { stringValue: input.revokedAt }
+        : { nullValue: null },
+      uid: { stringValue: BUFFY_UID },
       updatedAt: { stringValue: new Date().toISOString() },
-      ...(input.revokedAt ? { revokedAt: { stringValue: input.revokedAt } } : {})
     }
   };
   const response = await fetch(
-    `${firestoreBaseUrl(harness)}/users/${BUFFY_UID}/desktops/${desktopDocId(input.desktopId)}`,
+    `${firestoreBaseUrl(harness)}/desktopCredentials/${desktopDocId(input.desktopId)}`,
     {
       method: "PATCH",
       headers: {

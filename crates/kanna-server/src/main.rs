@@ -1,4 +1,5 @@
 mod bonjour;
+mod cloud_task_publisher;
 mod commands;
 mod config;
 mod daemon_client;
@@ -10,6 +11,7 @@ mod pairing;
 mod register;
 mod relay;
 mod relay_client;
+mod runtime;
 mod session_replacements;
 mod task_creator;
 mod terminal_watcher;
@@ -17,6 +19,19 @@ mod worktree_cleanup;
 
 use config::Config;
 use std::sync::Arc;
+
+/// Serializes unit tests that stage fake sidecars beside the shared test
+/// executable. Those paths are process-wide, so every creator must hold this
+/// guard until it has finished using and cleaning up the fixture.
+#[cfg(test)]
+static TEST_SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_sidecar_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_SIDECAR_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[tokio::main]
 async fn main() {
@@ -82,6 +97,23 @@ async fn main() {
         }
     );
 
+    if let Some((legacy_path, canonical_path)) =
+        config::legacy_database_relocation_paths(&config.db_path)
+    {
+        match db::relocate_legacy_database_if_needed(&legacy_path, &canonical_path) {
+            Ok(true) => log::info!(
+                "Relocated legacy database: {} -> {}",
+                legacy_path.display(),
+                canonical_path.display()
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Failed to relocate legacy database: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let heartbeat_config = config.clone();
     tokio::spawn(async move {
         loop {
@@ -132,27 +164,5 @@ async fn main() {
     tokio::spawn(async move {
         terminal_watcher::terminal_state_watcher_loop(terminal_state, session_replacements).await;
     });
-    let lan_task = tokio::spawn(http_api::serve(Arc::clone(&http_state)));
-    if relay_url.is_empty() {
-        match lan_task.await {
-            Ok(Ok(())) => log::warn!("LAN API exited unexpectedly"),
-            Ok(Err(err)) => log::error!("LAN API failed: {}", err),
-            Err(err) => log::error!("LAN API task join error: {}", err),
-        }
-    } else {
-        let relay_loop = relay::run_relay_loop(config, db, http_state);
-        tokio::pin!(relay_loop);
-
-        tokio::select! {
-            result = lan_task => match result {
-                Ok(Ok(())) => log::warn!("LAN API exited unexpectedly"),
-                Ok(Err(err)) => log::error!("LAN API failed: {}", err),
-                Err(err) => log::error!("LAN API task join error: {}", err),
-            },
-            result = &mut relay_loop => match result {
-                Ok(()) => log::warn!("relay loop exited unexpectedly"),
-                Err(err) => log::error!("relay loop failed: {}", err),
-            },
-        };
-    }
+    runtime::run_server_services(config, db, http_state).await;
 }

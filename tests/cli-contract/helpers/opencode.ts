@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
+import { assertLiveAgentCliContractsEnabled } from "./live-contract-guard";
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -52,6 +53,7 @@ async function runProcess(
 }
 
 export async function findOpenCodeBinary(): Promise<string> {
+  assertLiveAgentCliContractsEnabled();
   const home = process.env.HOME || "";
   const candidates = [
     `${home}/.opencode/bin/opencode`,

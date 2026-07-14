@@ -91,6 +91,7 @@ function buildContextShortcutGroups(
   const result = new Map<string, ContextShortcutItem[]>();
   const previewModalActions = [
     "openFile",
+    "openLatestFileLink",
     "toggleFilePreview",
     "showDiff",
     "showCommitGraph",

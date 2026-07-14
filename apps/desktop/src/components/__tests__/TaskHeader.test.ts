@@ -58,6 +58,35 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
 }
 
 describe("TaskHeader", () => {
+  it("renders a draft presentation when durable metadata is unavailable", async () => {
+    const { default: TaskHeader } = await import("../TaskHeader.vue");
+    const wrapper = mount(TaskHeader, {
+      props: {
+        item: {
+          display_name: "Initializing task",
+          issue_title: null,
+          prompt: "Prepare a stable task slot",
+          stage: "in progress",
+          branch: null,
+          port_env: null,
+          issue_number: null,
+          pr_number: null,
+          pr_url: null,
+        },
+      },
+      global: {
+        mocks: {
+          $t: (key: string, fallback?: string) => fallback ?? key,
+        },
+      },
+    });
+
+    expect(wrapper.get(".stage-badge").text()).toBe("in progress");
+    expect(wrapper.get(".task-title").text()).toBe("Initializing task");
+    expect(wrapper.get(".task-title").attributes("title")).toBe("Prepare a stable task slot");
+    expect(wrapper.findAll(".meta-item")).toHaveLength(0);
+  });
+
   it("renders all configured port badges", async () => {
     const { default: TaskHeader } = await import("../TaskHeader.vue");
     const wrapper = mount(TaskHeader, {

@@ -4,6 +4,7 @@ import type {
   PipelineStage,
   PipelineStagePolicy,
 } from "./pipeline-types";
+import { isAgentProvider, type AgentProvider } from "../config/agent-providers";
 
 function formatRawValue(value: unknown): string {
   if (value === undefined) {
@@ -17,6 +18,33 @@ function formatRawValue(value: unknown): string {
 
 function validationError(message: string): Error {
   return new Error(`Pipeline validation failed:\n  - ${message}`);
+}
+
+function parseAgentProviderSelection(
+  value: unknown,
+  location: string,
+): AgentProvider | AgentProvider[] | undefined {
+  if (value === undefined) return undefined;
+
+  const values = typeof value === "string"
+    ? [value]
+    : Array.isArray(value) && value.every((entry) => typeof entry === "string")
+      ? value
+      : null;
+
+  if (!values || values.length === 0) {
+    throw validationError(`${location} has an invalid agent_provider value`);
+  }
+
+  const invalid = values.filter((provider) => !isAgentProvider(provider));
+  if (invalid.length > 0) {
+    throw validationError(
+      `${location} has unsupported agent_provider values: ${invalid.join(", ")}`,
+    );
+  }
+
+  const providers = values.filter(isAgentProvider);
+  return typeof value === "string" ? providers[0] : providers;
 }
 
 function parseTransition(
@@ -205,11 +233,12 @@ function extractPost(value: unknown, stageName: string): PipelinePost | undefine
   if (typeof raw["prompt"] === "string") {
     post.prompt = raw["prompt"];
   }
-  if (
-    typeof raw["agent_provider"] === "string" ||
-    (Array.isArray(raw["agent_provider"]) && raw["agent_provider"].every((entry) => typeof entry === "string"))
-  ) {
-    post.agent_provider = raw["agent_provider"] as string | string[];
+  const agentProvider = parseAgentProviderSelection(
+    raw["agent_provider"],
+    `Post "${name}" on stage "${stageName}"`,
+  );
+  if (agentProvider !== undefined) {
+    post.agent_provider = agentProvider;
   }
 
   return post;
@@ -239,11 +268,12 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
         if (typeof s["description"] === "string") folded.description = s["description"];
         if (typeof s["agent"] === "string") folded.agent = s["agent"];
         if (typeof s["prompt"] === "string") folded.prompt = s["prompt"];
-        if (
-          typeof s["agent_provider"] === "string" ||
-          (Array.isArray(s["agent_provider"]) && s["agent_provider"].every((entry) => typeof entry === "string"))
-        ) {
-          folded.agent_provider = s["agent_provider"] as string | string[];
+        const agentProvider = parseAgentProviderSelection(
+          s["agent_provider"],
+          `Stage "${name || "(unnamed)"}"`,
+        );
+        if (agentProvider !== undefined) {
+          folded.agent_provider = agentProvider;
         }
         previous.post = folded;
         continue;
@@ -264,11 +294,12 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     if (typeof s["prompt"] === "string") {
       stage.prompt = s["prompt"];
     }
-    if (
-      typeof s["agent_provider"] === "string" ||
-      (Array.isArray(s["agent_provider"]) && s["agent_provider"].every((entry) => typeof entry === "string"))
-    ) {
-      stage.agent_provider = s["agent_provider"] as string | string[];
+    const agentProvider = parseAgentProviderSelection(
+      s["agent_provider"],
+      `Stage "${name || "(unnamed)"}"`,
+    );
+    if (agentProvider !== undefined) {
+      stage.agent_provider = agentProvider;
     }
     if (typeof s["environment"] === "string") {
       stage.environment = s["environment"];

@@ -11,6 +11,7 @@ import type {
   MobileServerStatus,
   PairingSession,
   TaskActionResponse,
+  TaskActivityResponse,
   TaskSummary
 } from "./types";
 
@@ -39,6 +40,7 @@ export interface TaskAgentSubscription {
 }
 
 export interface KannaTransport {
+  getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
@@ -48,6 +50,7 @@ export interface KannaTransport {
   createTask(input: CreateTaskRequest): Promise<CreateTaskResponse>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
+  markTaskRead(taskId: string): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   observeTaskTerminal(
@@ -62,6 +65,7 @@ export interface KannaTransport {
 }
 
 export interface KannaClient {
+  getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
@@ -71,6 +75,7 @@ export interface KannaClient {
   createTask(input: CreateTaskRequest): Promise<CreateTaskResponse>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
+  markTaskRead(taskId: string): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   observeTaskTerminal(
@@ -86,6 +91,12 @@ export interface KannaClient {
 
 export function createKannaClient(transport: KannaTransport): KannaClient {
   return {
+    ...(transport.getTaskRouteIdentity
+      ? {
+          getTaskRouteIdentity: (taskId: string) =>
+            transport.getTaskRouteIdentity!(taskId)
+        }
+      : {}),
     getStatus: () => transport.getStatus(),
     listDesktops: () => transport.listDesktops(),
     listRepos: () => transport.listRepos(),
@@ -95,6 +106,7 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     createTask: (input) => transport.createTask(input),
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
+    markTaskRead: (taskId) => transport.markTaskRead(taskId),
     closeTask: (taskId) => transport.closeTask(taskId),
     sendTaskInput: (taskId, input) => transport.sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>

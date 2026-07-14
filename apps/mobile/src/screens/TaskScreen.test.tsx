@@ -52,7 +52,9 @@ function renderTaskScreen(
   terminalDims: { cols: number | null; rows: number | null } = {
     cols: null,
     rows: null
-  }
+  },
+  e2eTaskSnapshotMarker?: string,
+  activity: "idle" | "working" | "unread" = "idle"
 ): ElementNode {
   if (!TaskScreen) {
     throw new Error("TaskScreen was not loaded");
@@ -64,7 +66,8 @@ function renderTaskScreen(
       repoId: "repo-1",
       title: "Task",
       stage: "in progress",
-      agentType
+      agentType,
+      activity
     },
     terminalOutput: "terminal",
     terminalStatus: "live",
@@ -74,6 +77,7 @@ function renderTaskScreen(
     agentEvents: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
     agentStatus: "live",
     agentErrorMessage: null,
+    e2eTaskSnapshotMarker,
     onBack: vi.fn(),
     onOpenMore: vi.fn(),
     onSendInput: vi.fn(),
@@ -138,6 +142,37 @@ describe("TaskScreen", () => {
     expect(terminal?.props).toMatchObject({
       cols: 132,
       rows: 43
+    });
+  });
+  it("renders an E2E-only accepted snapshot marker when provided", () => {
+    const marker = "cloud-only:Cloud task refreshed";
+    const tree = renderTaskScreen("agent", undefined, marker);
+
+    expect(findByTestId(tree, "mobile.task-snapshot-marker")?.props).toMatchObject({
+      accessibilityLabel: marker
+    });
+  });
+
+  it("exposes the visible task title independently from the snapshot marker", () => {
+    const tree = renderTaskScreen(
+      "pty",
+      undefined,
+      "other-task:Task\ntask-1:Task"
+    );
+
+    expect(findByTestId(tree, "mobile.task-detail-title")?.props).toMatchObject({
+      children: "Task"
+    });
+  });
+
+  it("exposes selected task activity without grouping the detail controls", () => {
+    const tree = renderTaskScreen("pty", undefined, undefined, "unread");
+    const title = findByTestId(tree, "mobile.task-detail-title");
+
+    expect(title?.props).toMatchObject({
+      accessibilityValue: { text: "unread" },
+      children: "Task",
+      testID: "mobile.task-detail-title"
     });
   });
 });

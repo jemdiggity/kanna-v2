@@ -15,8 +15,12 @@ import {
   type CodeThemePreference,
 } from "../theme/theme";
 import type { AgentExecutionType } from "./agentExecutionType";
+import {
+  DEFAULT_MARKDOWN_PREVIEW_MODE,
+  type MarkdownPreviewMode,
+} from "./markdownPreviewMode";
 import type { RequestRevisionOptions } from "./pipeline";
-import type { InitializingTaskItem } from "./taskInitialization";
+import type { TaskUiSlot } from "../types/taskUi";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
 
@@ -91,10 +95,6 @@ export interface KannaSnapshot {
   settings: Record<string, string>;
 }
 
-export type SnapshotReloadResult =
-  | { status: "applied" }
-  | { status: "superseded" };
-
 export interface CreateItemOptions {
   baseBranch?: string;
   baseRef?: string | null;
@@ -115,6 +115,7 @@ export interface StoreState {
   db: Ref<DbHandle | null>;
   repos: Ref<Repo[]>;
   items: Ref<PipelineItem[]>;
+  taskUiSlots: Ref<TaskUiSlot[]>;
   taskBlockers: Ref<TaskBlocker[]>;
   worktreePaths: Ref<Record<string, string>>;
   snapshotSettings: Ref<Record<string, string>>;
@@ -130,8 +131,8 @@ export interface StoreState {
   appTheme: Ref<AppThemePreference>;
   codeTheme: Ref<CodeThemePreference>;
   agentMessageAppearance: Ref<AgentMessageAppearance>;
+  markdownPreviewMode: Ref<MarkdownPreviewMode>;
   lastHiddenRepoId: Ref<string | null>;
-  initializingTaskItems: Ref<InitializingTaskItem[]>;
   pipelineCache: Map<string, PipelineDefinition>;
   agentCache: Map<string, AgentDefinition>;
   stageOrderCache: Map<string, string[]>;
@@ -141,7 +142,7 @@ export interface StoreState {
 export interface StoreServices {
   windowWorkspace?: WindowWorkspaceController;
   loadInitialData?: () => Promise<void>;
-  reloadSnapshot?: () => Promise<SnapshotReloadResult | void>;
+  reloadSnapshot?: () => Promise<void>;
   fetchSnapshot?: () => Promise<KannaSnapshot>;
   withOptimisticItemOverlay?: <T>(input: {
     key: string;
@@ -151,16 +152,16 @@ export interface StoreServices {
   }) => Promise<T>;
   selectedRepo?: ComputedRef<Repo | null>;
   currentItem?: ComputedRef<PipelineItem | null>;
+  selectedTaskId?: ComputedRef<string | null>;
+  currentTaskSlot?: ComputedRef<TaskUiSlot | null>;
+  persistSelection?: () => Promise<void>;
   sortedItemsForCurrentRepo?: ComputedRef<PipelineItem[]>;
   sortedItemsAllRepos?: ComputedRef<PipelineItem[]>;
   isItemHidden?: (item: PipelineItem) => boolean;
   getStageOrder?: (repoId: string) => readonly string[];
-  persistSelection?: () => Promise<void>;
   selectRepo?: (repoId: string) => Promise<void>;
   selectItem?: (itemId: string, options?: { previousItemId?: string | null }) => Promise<void>;
-  selectReplacementAfterItemRemoval?: (
-    removedItem: Pick<PipelineItem, "id" | "repo_id">,
-  ) => Promise<string | null>;
+  selectReplacementAfterItemRemoval?: (removedItem: PipelineItem) => Promise<string | null>;
   reconcileSelection?: () => void;
   restoreSelection?: (itemId: string) => void;
   goBack?: () => void;
@@ -276,6 +277,7 @@ export function createStoreState(): StoreState {
   const db = ref<DbHandle | null>(null);
   const repos = ref<Repo[]>([]);
   const items = ref<PipelineItem[]>([]);
+  const taskUiSlots = ref<TaskUiSlot[]>([]);
   const taskBlockers = ref<TaskBlocker[]>([]);
   const worktreePaths = ref<Record<string, string>>({});
   const snapshotSettings = ref<Record<string, string>>({});
@@ -291,8 +293,8 @@ export function createStoreState(): StoreState {
   const appTheme = ref<AppThemePreference>(DEFAULT_APP_THEME);
   const codeTheme = ref<CodeThemePreference>(DEFAULT_CODE_THEME);
   const agentMessageAppearance = ref<AgentMessageAppearance>("chat");
+  const markdownPreviewMode = ref<MarkdownPreviewMode>(DEFAULT_MARKDOWN_PREVIEW_MODE);
   const lastHiddenRepoId = ref<string | null>(null);
-  const initializingTaskItems = ref<InitializingTaskItem[]>([]);
   const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
   const pipelineCache = new Map<string, PipelineDefinition>();
   const agentCache = new Map<string, AgentDefinition>();
@@ -302,6 +304,7 @@ export function createStoreState(): StoreState {
     db,
     repos,
     items,
+    taskUiSlots,
     taskBlockers,
     worktreePaths,
     snapshotSettings,
@@ -317,8 +320,8 @@ export function createStoreState(): StoreState {
     appTheme,
     codeTheme,
     agentMessageAppearance,
+    markdownPreviewMode,
     lastHiddenRepoId,
-    initializingTaskItems,
     pipelineCache,
     agentCache,
     stageOrderCache,

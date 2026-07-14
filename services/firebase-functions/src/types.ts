@@ -1,3 +1,5 @@
+import type { AgentProvider } from "./generated/AgentProvider";
+
 export const emulatorPorts = {
   auth: 9099,
   firestore: 8080,
@@ -42,7 +44,7 @@ export interface CloudTaskSnapshot {
   prNumber: number | null;
   prUrl: string | null;
   agent: {
-    provider: "claude" | "copilot" | "codex" | "opencode";
+    provider: AgentProvider;
     type: string;
   };
   transfer: {

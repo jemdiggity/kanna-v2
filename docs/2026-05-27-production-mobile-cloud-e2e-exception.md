@@ -4,7 +4,7 @@ The production mobile/cloud defaults cross these boundaries:
 
 - mobile app config and signed-in cloud task index selection
 - Firebase Auth and task snapshot storage
-- direct Firestore task snapshot writes under `users/{uid}/desktops/{desktopDocId}/tasks/{taskDocId}`
+- relay-owned Firebase Admin reconciliation under `users/{uid}/desktops/{desktopDocId}/tasks/{taskDocId}`
 - relay routing to the desktop `kanna-server`
 - task-transfer, daemon terminal streaming, and local DB state
 
@@ -24,6 +24,7 @@ Current narrower coverage:
 - `pnpm --dir apps/desktop test` verifies the desktop production Firebase app config and sidecar packaging contract.
 - `cargo test -p kanna-runtime-defaults -p kanna-task-transfer defaults -- --test-threads=1` verifies shared runtime sidecar path defaults used by desktop, `kanna-server`, and task-transfer.
 - `pnpm --dir apps/desktop exec tsx tests/e2e/run.ts real/cloud-task-sync.test.ts` exercises the end-to-end desktop cloud task snapshot flow through Firebase emulators, a local relay, `kanna-server`, daemon terminal output, terminal input, and DB/sidebar state without touching production services.
+- `pnpm --dir apps/desktop test:e2e:cloud-mobile-index` is the focused single-instance boundary test for `kanna-server -> relay -> Firestore -> mobile task index`, including an activity transition to `working`.
 
 Mobile cloud E2E harness added in this branch:
 

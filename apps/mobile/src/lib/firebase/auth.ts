@@ -45,7 +45,7 @@ export function createMobileAuthSession({
   sdk
 }: MobileAuthSessionDeps): MobileAuthSession {
   let state: MobileAuthState = normalizeUserState(sdk.getCurrentUser());
-  let unsubscribeFromSdk: (() => void) | null = null;
+  let initialAuthPromise: Promise<void> | null = null;
   const listeners = new Set<(state: MobileAuthState) => void>();
 
   const publish = (nextState: MobileAuthState) => {
@@ -55,19 +55,33 @@ export function createMobileAuthSession({
     }
   };
 
-  const ensureSubscribed = () => {
-    if (unsubscribeFromSdk) {
-      return;
+  const waitForInitialAuth = () => {
+    if (initialAuthPromise) {
+      return initialAuthPromise;
     }
 
-    unsubscribeFromSdk = sdk.onAuthStateChanged((user) => {
-      publish(normalizeUserState(user));
+    let resolveInitialAuth!: () => void;
+    let rejectInitialAuth!: (reason?: unknown) => void;
+    initialAuthPromise = new Promise<void>((resolve, reject) => {
+      resolveInitialAuth = resolve;
+      rejectInitialAuth = reject;
     });
+
+    try {
+      sdk.onAuthStateChanged((user) => {
+        publish(normalizeUserState(user));
+        resolveInitialAuth();
+      });
+    } catch (error) {
+      rejectInitialAuth(error);
+    }
+
+    return initialAuthPromise;
   };
 
   return {
-    async initialize() {
-      ensureSubscribed();
+    initialize() {
+      return waitForInitialAuth();
     },
     getState() {
       return state;

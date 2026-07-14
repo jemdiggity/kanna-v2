@@ -1,38 +1,46 @@
 // @vitest-environment happy-dom
 
 import { flushPromises, mount } from "@vue/test-utils";
+import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PipelineItem } from "../../types/kanna";
-import { defineComponent, h, onMounted } from "vue";
+import type { TaskUiSlot } from "../../types/taskUi";
 
 const invokeMock = vi.fn();
 
-vi.mock("../../invoke", () => ({
-  invoke: invokeMock,
-}));
+const draft = {
+  repo_id: "repo-1",
+  prompt: "Make a merge master task",
+  display_name: "Merge Master",
+  pipeline: "default",
+  stage: "merge",
+  agent_type: "pty" as const,
+  agent_provider: "codex" as const,
+  created_at: "2026-05-05 02:09:21",
+};
 
-function createTask(overrides: Partial<PipelineItem> = {}): PipelineItem {
+function durableTask(overrides: Partial<PipelineItem> = {}): PipelineItem {
   return {
-    id: "task-ready",
+    id: "task-pending",
     repo_id: "repo-1",
-    prompt: "Make a merge master task",
-    stage: "merge",
+    prompt: draft.prompt,
+    stage: draft.stage,
     tags: "[\"merge\"]",
     pr_number: null,
     pr_url: null,
-    branch: "task-task-ready",
+    branch: "task-task-pending",
     agent_type: "pty",
     agent_provider: "codex",
     port_offset: null,
     port_env: null,
     activity: "working",
-    created_at: "2026-05-05 02:09:21",
-    updated_at: "2026-05-05 02:09:21",
-    activity_changed_at: "2026-05-05 02:09:21",
+    created_at: draft.created_at,
+    updated_at: draft.created_at,
+    activity_changed_at: draft.created_at,
     unread_at: null,
     pinned: 0,
     pin_order: null,
-    display_name: "Merge Master",
+    display_name: draft.display_name,
     closed_at: null,
     pipeline: "default",
     stage_result: null,
@@ -43,10 +51,35 @@ function createTask(overrides: Partial<PipelineItem> = {}): PipelineItem {
     previous_stage: null,
     teardown_started_at: null,
     last_output_preview: null,
-    active_post_action: null,
+    parent_task_id: null,
     ...overrides,
   };
 }
+
+function creatingSlot(taskId: string | null): TaskUiSlot {
+  return {
+    slot_id: "create:stable",
+    task_id: taskId,
+    state: "creating",
+    task: null,
+    authoritative_miss_grace_remaining: taskId ? 1 : 0,
+    draft,
+  };
+}
+
+function readySlot(task = durableTask()): TaskUiSlot {
+  return {
+    slot_id: "create:stable",
+    task_id: task.id,
+    state: "ready",
+    task,
+    draft,
+  };
+}
+
+vi.mock("../../invoke", () => ({
+  invoke: invokeMock,
+}));
 
 describe("MainPanel", () => {
   beforeEach(() => {
@@ -65,7 +98,7 @@ describe("MainPanel", () => {
 
     const mountPanel = () => mount(MainPanel, {
       props: {
-        uiItem: null,
+        uiSlot: null,
         hasRepos: false,
       },
       global: {
@@ -123,7 +156,7 @@ describe("MainPanel", () => {
 
     const wrapper = mount(MainPanel, {
       props: {
-        uiItem: null,
+        uiSlot: null,
         hasRepos: false,
       },
       global: {
@@ -148,6 +181,33 @@ describe("MainPanel", () => {
     expect(wrapper.text()).toContain("Version 1.0.14");
   }, 15_000);
 
+  it("renders a setup card and checks the generated executable for every provider", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "read_env_var") return Promise.reject(new Error("env var not set"));
+      return Promise.reject(new Error("missing"));
+    });
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: { item: null, hasRepos: false },
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+
+    await flushPromises();
+
+    expect(wrapper.findAll(".agent-card")).toHaveLength(AGENT_PROVIDERS.length);
+    for (const provider of AGENT_PROVIDERS) {
+      expect(invokeMock).toHaveBeenCalledWith("which_binary", {
+        name: getAgentProviderSpec(provider).executable,
+      });
+    }
+  }, 15_000);
+
   it("shows the Antigravity install command when agy is missing", async () => {
     invokeMock.mockImplementation((command: string, args?: { name?: string }) => {
       if (command === "read_env_var") return Promise.reject(new Error("env var not set"));
@@ -161,7 +221,7 @@ describe("MainPanel", () => {
 
     const wrapper = mount(MainPanel, {
       props: {
-        uiItem: null,
+        uiSlot: null,
         hasRepos: false,
       },
       global: {
@@ -209,7 +269,7 @@ describe("MainPanel", () => {
 
     const wrapper = mount(MainPanel, {
       props: {
-        uiItem: null,
+        uiSlot: null,
         hasRepos: false,
       },
       global: {
@@ -242,138 +302,60 @@ describe("MainPanel", () => {
     ]);
   }, 15_000);
 
-  it("does not mount task terminals for a UI item that has no durable task id", async () => {
+  it("keeps setup ahead of stale blockers and cloud routing through all creating phases", async () => {
     const { default: MainPanel } = await import("../MainPanel.vue");
 
     const wrapper = mount(MainPanel, {
       props: {
-        uiItem: {
-          id: "create-1",
-          state: "initializing",
-          taskId: null,
-          repo_id: "repo-1",
-          prompt: "Make a merge master task",
-          stage: "merge",
-          agent_type: "pty",
-          agent_provider: "codex",
-          created_at: "2026-05-05 02:09:21",
-          display_name: "Merge Master",
-          pipeline: "default",
-        },
+        uiSlot: creatingSlot(null),
         repoPath: "/tmp/repo",
         hasRepos: true,
+        blockers: [durableTask({ id: "stale-blocker" })],
+        cloudTask: true,
+        cloudTerminalRef: {
+          ownerDesktopId: "desktop-remote",
+          ownerLocalTaskId: "remote-task",
+        },
       },
       global: {
         mocks: {
           $t: (key: string) => key,
         },
         stubs: {
-          TaskHeader: { template: '<div data-testid="task-header" />' },
-          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
-        },
-      },
-    });
-
-    expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
-    expect(wrapper.text()).toContain("mainPanel.taskSettingUp");
-  });
-
-  it("mounts a ready terminal with the durable task id rather than the UI item id", async () => {
-    const { default: MainPanel } = await import("../MainPanel.vue");
-
-    const wrapper = mount(MainPanel, {
-      props: {
-        uiItem: {
-          id: "ui-ready-1",
-          state: "ready",
-          taskId: "task-durable-1",
-          task: createTask({ id: "task-durable-1" }),
-        },
-        repoPath: "/tmp/repo",
-        hasRepos: true,
-      },
-      global: {
-        mocks: {
-          $t: (key: string) => key,
-        },
-        stubs: {
-          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TaskHeader: {
+            props: ["item"],
+            template: '<div data-testid="task-header">{{ item.stage }}:{{ item.display_name }}</div>',
+          },
           TerminalTabs: {
             props: ["sessionId"],
             template: '<div data-testid="terminal-tabs" :data-session-id="sessionId" />',
           },
+          CloudTerminalView: { template: '<div data-testid="cloud-terminal" />' },
         },
       },
     });
 
-    expect(wrapper.get('[data-testid="terminal-tabs"]').attributes("data-session-id"))
-      .toBe("task-durable-1");
-  });
-
-  it("mounts the terminal once when an initializing item hands off to a ready task", async () => {
-    const { default: MainPanel } = await import("../MainPanel.vue");
-    let terminalMounts = 0;
-    const TerminalTabsStub = defineComponent({
-      props: { sessionId: String },
-      setup(props) {
-        onMounted(() => {
-          terminalMounts += 1;
-        });
-        return () => h("div", {
-          "data-testid": "terminal-tabs",
-          "data-session-id": props.sessionId,
-        });
-      },
-    });
-    const initializingItem = {
-      id: "create-1",
-      state: "initializing" as const,
-      taskId: null,
-      repo_id: "repo-1",
-      prompt: "Initialize once",
-      display_name: null,
-      pipeline: "default",
-      stage: "in progress",
-      agent_type: "pty" as const,
-      agent_provider: "claude" as const,
-      created_at: "2026-07-10T00:00:00.000Z",
-    };
-    const wrapper = mount(MainPanel, {
-      props: { uiItem: initializingItem, repoPath: "/tmp/repo", hasRepos: true },
-      global: {
-        mocks: { $t: (key: string) => key },
-        stubs: {
-          TaskHeader: { template: '<div data-testid="task-header" />' },
-          TerminalTabs: TerminalTabsStub,
-        },
-      },
-    });
-
-    expect(terminalMounts).toBe(0);
     expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="cloud-terminal"]').exists()).toBe(false);
+    expect(wrapper.find(".blocked-placeholder").exists()).toBe(false);
+    expect(wrapper.text()).toContain("mainPanel.taskSettingUp");
+    expect(wrapper.get('[data-testid="task-header"]').text()).toBe("merge:Merge Master");
 
-    const readyTask = createTask({ id: "task-durable-1", prompt: "Initialize once" });
-    await wrapper.setProps({
-      uiItem: {
-        id: "task-durable-1",
-        state: "ready",
-        taskId: "task-durable-1",
-        task: readyTask,
-      },
-    });
+    await wrapper.setProps({ uiSlot: creatingSlot("task-pending") });
 
-    expect(terminalMounts).toBe(1);
-    expect(wrapper.get('[data-testid="terminal-tabs"]').attributes("data-session-id"))
-      .toBe("task-durable-1");
+    expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="cloud-terminal"]').exists()).toBe(false);
+    expect(wrapper.find(".blocked-placeholder").exists()).toBe(false);
+    expect(wrapper.text()).toContain("mainPanel.taskSettingUp");
 
     await wrapper.setProps({
-      uiItem: {
-        id: "task-durable-1",
-        state: "ready",
-        taskId: "task-durable-1",
-        task: { ...readyTask, activity: "working" },
-      },
+      uiSlot: readySlot(),
+      blockers: [],
+      cloudTask: false,
+      cloudTerminalRef: null,
     });
-    expect(terminalMounts).toBe(1);
+
+    expect(wrapper.find(".setup-placeholder").exists()).toBe(false);
+    expect(wrapper.get('[data-testid="terminal-tabs"]').attributes("data-session-id")).toBe("task-pending");
   });
 });

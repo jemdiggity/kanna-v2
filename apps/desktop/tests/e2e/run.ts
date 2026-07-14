@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, copyFile, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
-import { dirname, basename, join, posix, resolve } from "node:path";
+import { dirname, basename, delimiter, join, posix, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { AGENT_PROVIDER_SPECS } from "@kanna/agent-protocol";
 import { buildRealE2eAgentEnv } from "./runEnv";
 import { createInstanceConfig, type InstanceConfig } from "./runConfig";
 import { pauseBeforeTestTarget, pauseForAppReady } from "./helpers/runSlowMode";
@@ -31,12 +33,59 @@ function sanitizeSuffix(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "-");
 }
 
+async function isExecutable(path: string): Promise<boolean> {
+  return await access(path, constants.X_OK).then(() => true).catch(() => false);
+}
+
 function agentCliVersionFixtureEnv(): Record<string, string> {
   return {
     KANNA_E2E_AGENT_CLI_VERSION_CLAUDE: "2.1.118 (Claude Code)\n",
     KANNA_E2E_AGENT_CLI_VERSION_COPILOT: "GitHub Copilot CLI 1.0.32.\nRun 'copilot update' to check for updates.\n",
     KANNA_E2E_AGENT_CLI_VERSION_CODEX: "codex-cli 0.125.0-beta.1+20260429\n",
     KANNA_E2E_AGENT_CLI_VERSION_OPENCODE: "1.4.3\n",
+  };
+}
+
+async function buildAgentProviderIsolationEnv(fixtureRoot: string): Promise<Record<string, string>> {
+  const providerExecutables = new Set(AGENT_PROVIDER_SPECS.map(({ executable }) => executable));
+  const sanitizedPathEntries: string[] = [];
+  const pathRoot = join(fixtureRoot, "path");
+  const zshStartupDir = join(fixtureRoot, "zsh");
+  await mkdir(pathRoot, { recursive: true });
+  await mkdir(zshStartupDir, { recursive: true });
+
+  for (const [index, entry] of (process.env.PATH ?? "").split(delimiter).entries()) {
+    if (!entry) continue;
+    const containsProvider = (await Promise.all(
+      [...providerExecutables].map((executable) => isExecutable(join(entry, executable))),
+    )).some(Boolean);
+    if (!containsProvider) {
+      sanitizedPathEntries.push(entry);
+      continue;
+    }
+
+    const mirror = join(pathRoot, String(index));
+    await mkdir(mirror, { recursive: true });
+    const entries = await readdir(entry, { withFileTypes: true }).catch(() => []);
+    for (const candidate of entries) {
+      if (providerExecutables.has(candidate.name)) continue;
+      const source = join(entry, candidate.name);
+      if (!await isExecutable(source)) continue;
+      await symlink(source, join(mirror, candidate.name));
+    }
+    sanitizedPathEntries.push(mirror);
+  }
+
+  const sanitizedPath = sanitizedPathEntries.join(delimiter);
+  const shellPath = sanitizedPath.replaceAll("'", "'\\''");
+  const zshPathExport = `export PATH='${shellPath}'\n`;
+  await writeFile(join(zshStartupDir, ".zprofile"), zshPathExport);
+  await writeFile(join(zshStartupDir, ".zshrc"), zshPathExport);
+
+  return {
+    PATH: sanitizedPath,
+    SHELL: "/bin/zsh",
+    ZDOTDIR: zshStartupDir,
   };
 }
 
@@ -238,14 +287,14 @@ function targetNeedsSecondaryInstance(testTarget: string): boolean {
 }
 
 function targetNeedsEmulators(testTarget: string): boolean {
-  return /real\/cloud-task-sync\.test\.ts$/.test(testTarget) ||
+  return /real\/cloud-task-(?:sync|mobile-index)\.test\.ts$/.test(testTarget) ||
     /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
     /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget) ||
     /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget);
 }
 
 function targetNeedsRelay(testTarget: string): boolean {
-  return /real\/cloud-task-sync\.test\.ts$/.test(testTarget) ||
+  return /real\/cloud-task-(?:sync|mobile-index)\.test\.ts$/.test(testTarget) ||
     /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
     /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget);
 }
@@ -256,6 +305,10 @@ function targetNeedsAuthIndexedDbOpenFailure(testTarget: string): boolean {
 
 function targetNeedsStaleNativeWindowState(testTarget: string): boolean {
   return /real\/startup-window-size\.test\.ts$/.test(testTarget);
+}
+
+function targetNeedsIsolatedAgentProviders(testTarget: string): boolean {
+  return /mock\/new-task-modal\.test\.ts$/.test(testTarget);
 }
 
 async function seedStaleNativeWindowStateForStartup(repoRoot: string): Promise<() => Promise<void>> {
@@ -396,7 +449,10 @@ async function main(): Promise<void> {
         CODEX_HOME: await setupIsolatedCodexHome(join(primaryDaemonDir, "codex-home")),
       }
     : realE2eAgentEnv;
-  const agentCliFixtureEnv = agentCliVersionFixtureEnv();
+  const agentCliVersionEnv = agentCliVersionFixtureEnv();
+  const agentProviderIsolationEnv = testTargets.some(targetNeedsIsolatedAgentProviders)
+    ? await buildAgentProviderIsolationEnv(join(primaryDaemonDir, "agent-provider-isolation"))
+    : {};
   const primary = buildInstanceConfig({
     daemonDir: primaryDaemonDir,
     dbName: primaryDbName,
@@ -492,8 +548,14 @@ async function main(): Promise<void> {
     withSecondary: boolean,
     useAgentCliFixtures: boolean,
     runtimeEnv: Record<string, string> = realE2eRuntimeEnv,
+    isolateAgentProviders = false,
   ): Promise<RunningInstances> {
-    const fixtureEnv = useAgentCliFixtures ? agentCliFixtureEnv : {};
+    const fixtureEnv = useAgentCliFixtures
+      ? {
+          ...agentCliVersionEnv,
+          ...(isolateAgentProviders ? agentProviderIsolationEnv : {}),
+        }
+      : {};
     await runCommand(primary.startCommand, {
       cwd: repoRoot,
       env: { ...primary.env, ...runtimeEnv, ...fixtureEnv },
@@ -709,16 +771,20 @@ async function main(): Promise<void> {
   }
 
   let runningInstances: RunningInstances | null = null;
+  let runningMockAgentProviderIsolation: boolean | null = null;
   let lastTargetWasReal = false;
   const cleanupAppDataHooks: Array<() => Promise<void>> = [];
 
   try {
     if (shouldStartInitialInstances(testTargets[0])) {
-      runningInstances = await startInstances(false, true);
+      const isolateAgentProviders = targetNeedsIsolatedAgentProviders(testTargets[0] ?? "");
+      runningInstances = await startInstances(false, true, realE2eRuntimeEnv, isolateAgentProviders);
+      runningMockAgentProviderIsolation = isolateAgentProviders;
     }
 
     for (const testTarget of testTargets) {
       const targetIsReal = isRealTestTarget(testTarget);
+      const isolateAgentProviders = targetNeedsIsolatedAgentProviders(testTarget);
       const needsSecondaryForTarget = targetNeedsSecondaryInstance(testTarget);
       const needsEmulatorsForTarget = targetNeedsEmulators(testTarget);
       if (targetIsReal) {
@@ -739,6 +805,16 @@ async function main(): Promise<void> {
           false,
           realE2eRuntimeEnvForTarget(testTarget),
         );
+        runningMockAgentProviderIsolation = null;
+      } else if (runningMockAgentProviderIsolation !== isolateAgentProviders) {
+        await stopInstances(runningInstances);
+        runningInstances = await startInstances(
+          false,
+          true,
+          realE2eRuntimeEnv,
+          isolateAgentProviders,
+        );
+        runningMockAgentProviderIsolation = isolateAgentProviders;
       } else if (runningInstances?.secondary && !needsSecondaryForTarget) {
         await stopInstances(runningInstances);
         runningInstances = await startInstances(false, !targetIsReal);

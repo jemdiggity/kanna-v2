@@ -7,6 +7,7 @@ export type ActionName =
   | "newWindow"
   | "closeWindow"
   | "openFile"
+  | "openLatestFileLink"
   | "toggleFilePreview"
   | "advanceStage"
   | "requestChanges"
@@ -91,6 +92,7 @@ export const shortcuts: ShortcutDef[] = [
   { action: "navigateRepoDown", labelKey: "shortcuts.nextRepo",       groupKey: "shortcuts.groupMoveAround", key: "ArrowDown",                 meta: true, shift: true,  display: "⇧⌘↓",     context: ["main"] },
   // Tools — open task and repo tools
   { action: "openFile",       labelKey: "shortcuts.filePicker",     groupKey: "shortcuts.groupOpenInspect", key: "p",                         meta: true,               display: "⌘P",       context: PREVIEW_MODAL_CONTEXTS },
+  { action: "openLatestFileLink", labelKey: "shortcuts.openLatestAgentFile", groupKey: "shortcuts.groupOpenInspect", key: "l", meta: true, display: "⌘L", context: PREVIEW_MODAL_CONTEXTS },
   { action: "toggleFilePreview", labelKey: "shortcuts.filePreview", groupKey: "shortcuts.groupOpenInspect", key: "p", code: "KeyP",            meta: true, alt: true,    display: "⌥⌘P",      context: ["main", "file"] },
   { action: "commandPalette", labelKey: "shortcuts.commandPalette", groupKey: "shortcuts.groupOpenInspect", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P",     context: ["main"] },
   { action: "showDiff",       labelKey: "shortcuts.viewDiff",       groupKey: "shortcuts.groupOpenInspect", key: "d",                         meta: true, display: "⌘D",                       context: PREVIEW_MODAL_CONTEXTS },

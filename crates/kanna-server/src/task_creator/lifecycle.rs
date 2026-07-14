@@ -1,3 +1,4 @@
+use super::environment::{resolve_headless_agent_executable, run_workspace_setup_commands};
 use super::types::{
     CreatedTask, PreparedPostDispatch, PreparedRunWorkspace, PreparedSessionSpawn,
     PreparedStageRerun, PreparedStageRunSpawn, PreparedTaskSpawn, PreparedWorkspaceTeardown,
@@ -393,7 +394,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     db_path: &str,
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
-    prepared: PreparedStageRerun,
+    mut prepared: PreparedStageRerun,
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
     let session_id = prepared.session_id.clone();
@@ -404,6 +405,24 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     let model = prepared.model.clone();
     let provider_session_id = prepared.provider_session_id.clone();
     let cwd = prepared.cwd.clone();
+    let record_failure = |error: String| match record_rerun_stage_failure(
+        db_path,
+        &task_id,
+        &stage,
+        run_kind,
+        stage_agent.as_deref(),
+        &agent_provider,
+        model.as_deref(),
+        &session_id,
+        provider_session_id.as_deref(),
+        &cwd,
+        &error,
+    ) {
+        Ok(()) => error,
+        Err(record_error) => {
+            format!("{error}; failed to record stage rerun failure: {record_error}")
+        }
+    };
     {
         // Reruns cancel whatever was running before the kill, for the same
         // reason stage swaps finish it first: the run record must never
@@ -413,6 +432,9 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             .map_err(|e| format!("db error: {}", e))?;
     }
     kill_session_replacing(daemon, replacements, &session_id).await?;
+    if let Err(error) = prepare_deferred_rerun_setup(&mut prepared) {
+        return Err(record_failure(error));
+    }
 
     let command = spawn_session_command(
         session_id.clone(),
@@ -421,10 +443,10 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         prepared.session,
     );
 
-    let event = daemon
-        .send_command(&command)
-        .await
-        .map_err(|e| format!("daemon error: {}", e))?;
+    let event = match daemon.send_command(&command).await {
+        Ok(event) => event,
+        Err(error) => return Err(record_failure(format!("daemon error: {error}"))),
+    };
     match event {
         DaemonEvent::SessionCreated { .. } => {
             record_rerun_stage_run(
@@ -444,9 +466,34 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 follow_task: None,
             })
         }
-        DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
-        other => Err(format!("unexpected daemon response: {:?}", other)),
+        DaemonEvent::Error { message, .. } => {
+            Err(record_failure(format!("daemon error: {message}")))
+        }
+        other => Err(record_failure(format!(
+            "unexpected daemon response: {other:?}"
+        ))),
     }
+}
+
+fn prepare_deferred_rerun_setup(prepared: &mut PreparedStageRerun) -> Result<(), String> {
+    if prepared.deferred_setup.is_empty() {
+        return Ok(());
+    }
+    run_workspace_setup_commands(&prepared.deferred_setup, &prepared.cwd, &prepared.env)?;
+    let PreparedSessionSpawn::Agent {
+        agent_provider,
+        executable,
+        ..
+    } = &mut prepared.session
+    else {
+        return Err("deferred rerun setup requires a headless agent session".to_string());
+    };
+    *executable = resolve_headless_agent_executable(
+        *agent_provider,
+        prepared.env.get("PATH").map(String::as_str),
+        &prepared.cwd,
+    )?;
+    Ok(())
 }
 
 /// Kill a session as part of an orchestrated replacement (stage swap, rerun,
@@ -643,6 +690,48 @@ fn record_rerun_stage_run(
         status: "running",
         result: None,
         feedback: None,
+        session_id: Some(session_id),
+        provider_session_id,
+        cwd: Some(cwd),
+        resumed_from_run_id: None,
+    })
+    .map_err(|e| format!("db error: {}", e))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_rerun_stage_failure(
+    db_path: &str,
+    task_id: &str,
+    stage: &str,
+    run_kind: &'static str,
+    stage_agent: Option<&str>,
+    agent_provider: &str,
+    model: Option<&str>,
+    session_id: &str,
+    provider_session_id: Option<&str>,
+    cwd: &str,
+    error: &str,
+) -> Result<(), String> {
+    let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+    db.cancel_running_stage_runs(task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    db.update_pipeline_item_activity(task_id, "unread")
+        .map_err(|e| format!("db error: {}", e))?;
+    db.update_pipeline_item_agent_session_id(task_id, None)
+        .map_err(|e| format!("db error: {}", e))?;
+    let result = format!("failed to rerun stage {stage}: {error}");
+    let run_id = generate_stage_run_id(task_id);
+    db.insert_stage_run(NewStageRun {
+        id: &run_id,
+        task_id,
+        stage,
+        kind: run_kind,
+        agent: stage_agent,
+        agent_provider: Some(agent_provider),
+        model,
+        status: "failed",
+        result: Some(&result),
+        feedback: Some("stage rerun failed"),
         session_id: Some(session_id),
         provider_session_id,
         cwd: Some(cwd),

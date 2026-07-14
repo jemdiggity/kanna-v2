@@ -1,3 +1,4 @@
+use super::commands::build_task_shell_command;
 use super::definitions::RepoConfig;
 use super::provider::AgentProvider;
 use crate::config::Config;
@@ -217,6 +218,83 @@ pub(super) fn apply_workspace_path_env(
     }
 }
 
+pub(super) fn run_workspace_setup_commands(
+    setup_cmds: &[String],
+    worktree_path: &str,
+    env: &HashMap<String, String>,
+) -> Result<(), String> {
+    if setup_cmds.is_empty() {
+        return Ok(());
+    }
+
+    let command = build_task_shell_command(
+        "true",
+        setup_cmds,
+        env.get("KANNA_CLI_PATH").map(String::as_str),
+        env.get("PATH").map(String::as_str),
+    );
+    let output = Command::new("/bin/zsh")
+        // Headless setup has no terminal to satisfy interactive shell
+        // startup hooks. Login mode still loads the user's base environment;
+        // the generated command then restores Kanna's explicit PATH.
+        .args(["--login", "-c", &command])
+        .current_dir(worktree_path)
+        .envs(env)
+        .output()
+        .map_err(|error| format!("failed to run workspace setup: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let details = [stdout, stderr]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let suffix = if details.is_empty() {
+        String::new()
+    } else {
+        format!(": {details}")
+    };
+    Err(format!(
+        "workspace setup failed with {}{suffix}",
+        output.status
+    ))
+}
+
+pub(super) fn append_executable_parent_to_path(
+    path: Option<&str>,
+    executable: &str,
+) -> Option<String> {
+    let parent = Path::new(executable).parent()?.to_string_lossy();
+    if parent.is_empty() {
+        return path.map(str::to_string);
+    }
+    if path
+        .unwrap_or_default()
+        .split(':')
+        .any(|entry| entry == parent)
+    {
+        return path.map(str::to_string);
+    }
+
+    match path.filter(|path| !path.is_empty()) {
+        Some(path) => Some(format!("{path}:{parent}")),
+        None => Some(parent.into_owned()),
+    }
+}
+
+pub(super) fn build_workspace_search_path(
+    workspace_root: &str,
+    repo_config: &RepoConfig,
+) -> Option<String> {
+    let mut env = HashMap::new();
+    apply_workspace_path_env(&mut env, workspace_root, repo_config);
+    env.remove("PATH")
+}
+
 pub(super) fn which_binary(name: &str) -> Result<Option<String>, String> {
     resolve_binary_from_candidates(name, sidecar_candidates(name), None).map(Some)
 }
@@ -226,26 +304,34 @@ pub(super) fn resolve_headless_agent_executable(
     path: Option<&str>,
     worktree_path: &str,
 ) -> Result<Option<String>, String> {
-    match provider {
-        AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
-            which_binary_with_path(provider.as_str(), path, worktree_path)
-        }
-        AgentProvider::Copilot | AgentProvider::Antigravity => Ok(None),
+    if !provider.supports_headless() {
+        return Err(format!(
+            "provider {provider} does not support headless agent sessions"
+        ));
     }
+    resolve_provider_executable(provider, path, worktree_path).map(Some)
+}
+
+pub(super) fn resolve_provider_executable(
+    provider: AgentProvider,
+    path: Option<&str>,
+    workspace_root: &str,
+) -> Result<String, String> {
+    which_binary_with_path(provider.executable(), path, workspace_root)
 }
 
 fn which_binary_with_path(
     name: &str,
     path: Option<&str>,
     worktree_path: &str,
-) -> Result<Option<String>, String> {
+) -> Result<String, String> {
     if let Some(path) = path {
         if let Some(binary) = resolve_workspace_binary_from_path(name, path, worktree_path) {
-            return Ok(Some(binary));
+            return Ok(binary);
         }
     }
 
-    resolve_binary_from_candidates(name, sidecar_candidates(name), path).map(Some)
+    resolve_binary_from_candidates(name, sidecar_candidates(name), path)
 }
 
 /// The user's real PATH as an interactive login shell resolves it, captured
@@ -281,26 +367,22 @@ pub(crate) fn warm_login_shell_path() {
 
 /// Cheap binary availability check against the process PATH plus the cached
 /// login-shell PATH — never a per-call login shell.
-pub(super) fn binary_on_path(name: &str) -> bool {
-    if let Ok(process_path) = std::env::var("PATH") {
-        if resolve_binary_from_path(name, &process_path).is_some() {
-            return true;
-        }
-    }
-    login_shell_path()
-        .map(|path| resolve_binary_from_path(name, path).is_some())
-        .unwrap_or(false)
-}
-
 fn resolve_binary_from_candidates(
     name: &str,
     candidates: Vec<PathBuf>,
     path: Option<&str>,
 ) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
+        #[cfg(test)]
+        if let Ok(test_path) = std::env::var("KANNA_TEST_PROVIDER_LOOKUP_PATH") {
+            return resolve_binary_from_path(name, &test_path)
+                .ok_or_else(|| format!("binary '{name}' not found in test provider PATH"));
+        }
+
         if let Some(path) = path {
-            return resolve_binary_from_path(name, path)
-                .ok_or_else(|| format!("binary '{}' not found in PATH", name));
+            if let Some(binary) = resolve_binary_from_path(name, path) {
+                return Ok(binary);
+            }
         }
 
         // The process PATH first (cheap, and correct when launched from a

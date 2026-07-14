@@ -15,6 +15,7 @@ import type { ShortcutContext } from "./useShortcutContext";
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
+import { openLatestTerminalFileLink } from "./terminalFileLinkRegistry";
 import type { WindowWorkspaceController } from "../windowWorkspace";
 
 interface SidebarRepoProjection {
@@ -157,9 +158,13 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       openNewTaskModal().catch((e) => console.error("[App] openNewTaskModal failed:", e));
     },
     newWindow: async () => {
+      const workspaceTask = selectedWorkspaceTask.value;
+      const selectedTaskId = workspaceTask && workspaceTask.localTaskId === null
+        ? workspaceTask.item.id
+        : store.selectedTaskId;
       await windowWorkspace.openWindow({
         selectedRepoId: store.selectedRepoId,
-        selectedItemId: store.selectedItemIdForPersistence,
+        selectedItemId: selectedTaskId,
       });
     },
     closeWindow: async () => {
@@ -177,6 +182,13 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       } else {
         showFilePickerOnTop();
       }
+    },
+    openLatestFileLink: async () => {
+      const sessionId = store.currentItem?.id;
+      const opened = sessionId
+        ? await openLatestTerminalFileLink(sessionId)
+        : false;
+      if (!opened) toast.info(t("toasts.noTerminalFileLink"));
     },
     toggleFilePreview: () => {
       if (showFilePreviewModal.value) {
@@ -229,7 +241,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
 
       const item = store.currentItem;
       if (!item) return;
-      if (store.selectedItemId && item.id !== store.selectedItemId) return;
+      if (store.selectedTaskId && item.id !== store.selectedTaskId) return;
       void store.advanceStage(item.id);
     },
     requestChanges: () => {

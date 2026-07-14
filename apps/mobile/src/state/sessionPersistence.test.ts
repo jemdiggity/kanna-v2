@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { createSessionPersistence, type StorageAdapter } from "./sessionPersistence";
 
 function createMemoryStorage(): StorageAdapter & { values: Map<string, string> } {
@@ -78,5 +79,34 @@ describe("createSessionPersistence", () => {
         }
       ]
     });
+  });
+
+  it("preserves every generated provider and discards unknown providers", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    storage.values.set("kanna.mobile.context.v1", JSON.stringify({
+      selectedDesktopId: null,
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks",
+      repoCreationProfiles: [
+        ...AGENT_PROVIDERS.map((agentProvider, index) => ({
+          repoId: `repo-${index}`,
+          desktopId: "desktop-e2e",
+          agentProvider,
+          updatedAt: "2026-07-06T00:00:00.000Z",
+        })),
+        {
+          repoId: "repo-unknown",
+          desktopId: "desktop-e2e",
+          agentProvider: "future-agent",
+          updatedAt: "2026-07-06T00:00:00.000Z",
+        },
+      ],
+    }));
+
+    const loaded = await persistence.load();
+
+    expect(loaded?.repoCreationProfiles?.map((profile) => profile.agentProvider)).toEqual(AGENT_PROVIDERS);
   });
 });

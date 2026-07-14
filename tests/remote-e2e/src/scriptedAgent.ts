@@ -27,18 +27,54 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-while IFS= read -r line; do
-  printf 'SCRIPT_INPUT:%s\\n' "$line"
-  case "$line" in
-    *exit-zero*)
-      printf 'SCRIPT_EXITING\\n'
-      exit 0
-      ;;
-    *exit-one*)
-      printf 'SCRIPT_FAILING\\n'
-      exit 7
-      ;;
-  esac
+original_tty=$(stty -g)
+stty -icanon min 1 time 0 -echo -icrnl
+
+cleanup() {
+  stty "$original_tty" 2>/dev/null || true
+  kill "$heartbeat_pid" 2>/dev/null || true
+}
+
+# This deliberately mirrors the model chooser failure mode: its cursor opens
+# on option 2, but typing 1 must highlight option 1 before the separately sent
+# Enter submits that highlighted option.
+printf 'SCRIPT_MENU_CURSOR:2\\n'
+line=""
+menu_choice=""
+carriage_return=$(printf '\\r')
+
+read_char() {
+  char=$(dd bs=1 count=1 2>/dev/null)
+}
+
+while :; do
+  read_char
+  if [ "$char" = "$carriage_return" ]; then
+    if [ "$menu_choice" = "1" ]; then
+      printf 'SCRIPT_MENU_SELECTED:1\\n'
+      menu_choice=""
+      line=""
+      continue
+    fi
+
+    printf 'SCRIPT_INPUT:%s\\n' "$line"
+    case "$line" in
+      *exit-zero*)
+        printf 'SCRIPT_EXITING\\n'
+        exit 0
+        ;;
+      *exit-one*)
+        printf 'SCRIPT_FAILING\\n'
+        exit 7
+        ;;
+    esac
+    line=""
+  elif [ -z "$line" ] && [ "$char" = "1" ]; then
+    menu_choice="1"
+    printf 'SCRIPT_MENU_OPTION_1_HIGHLIGHTED\\n'
+  else
+    line="\${line}\${char}"
+  fi
 done
 
 wait "$heartbeat_pid"

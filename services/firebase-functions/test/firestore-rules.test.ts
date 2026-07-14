@@ -243,12 +243,13 @@ describeWithEmulator("firestore security rules", () => {
     );
   });
 
-  it("allows owners to write desktop credential docs while denying client reads", async () => {
+  it("allows a new owner to reclaim only a revoked canonical credential with the same secret hash", async () => {
     await expectSucceeds(
       clientUpdate("alice", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
-        desktopSecret: "secret-1",
+        desktopSecretHash: "hash-1",
         displayName: "Alice Mac",
+        revokedAt: null,
         uid: "alice",
         updatedAt: "2026-05-08T00:00:00.000Z",
       })
@@ -257,7 +258,16 @@ describeWithEmulator("firestore security rules", () => {
     await expectSucceeds(
       clientUpdate("alice", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
-        desktopSecret: "secret-1-rotated",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac Updated",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:01.000Z",
+      })
+    );
+    await expectDenied(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1-rotated",
         displayName: "Alice Mac",
         uid: "alice",
         updatedAt: "2026-05-08T00:00:01.000Z",
@@ -266,7 +276,7 @@ describeWithEmulator("firestore security rules", () => {
     await expectDenied(
       clientUpdate("bob", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
-        desktopSecret: "secret-2",
+        desktopSecretHash: "hash-2",
         displayName: "Bob Mac",
         uid: "alice",
         updatedAt: "2026-05-08T00:00:01.000Z",
@@ -275,7 +285,7 @@ describeWithEmulator("firestore security rules", () => {
     await expectDenied(
       clientUpdate("bob", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
-        desktopSecret: "bob-takeover-secret",
+        desktopSecretHash: "bob-takeover-hash",
         displayName: "Bob Mac",
         uid: "bob",
         updatedAt: "2026-05-08T00:00:02.000Z",
@@ -284,15 +294,128 @@ describeWithEmulator("firestore security rules", () => {
     await expectDenied(
       clientUpdate("alice", "desktopCredentials/desktop-2", {
         desktopId: "desktop-1",
-        desktopSecret: "secret-1",
+        desktopSecretHash: "hash-1",
         displayName: "Alice Mac",
         uid: "alice",
         updatedAt: "2026-05-08T00:00:03.000Z",
       })
     );
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac Updated",
+        revokedAt: "2026-05-08T00:00:04.000Z",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:04.000Z",
+      })
+    );
+    await expectDenied(deleteDoc("bob", "desktopCredentials/desktop-1"));
+    await expectDenied(deleteDoc("alice", "desktopCredentials/desktop-1"));
+    await expectDenied(
+      clientUpdate("bob", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-2",
+        displayName: "Bob Mac",
+        revokedAt: null,
+        uid: "bob",
+        updatedAt: "2026-05-08T00:00:05.000Z",
+      })
+    );
+    await expectSucceeds(
+      clientUpdate("bob", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Bob Mac",
+        revokedAt: null,
+        uid: "bob",
+        updatedAt: "2026-05-08T00:00:06.000Z",
+      })
+    );
+    await expectDenied(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: null,
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:07.000Z",
+      })
+    );
   });
 
-  it("allows users to manage their own desktop task snapshots but keeps flat task writes denied", async () => {
+  it("denies creation of an incomplete canonical credential tombstone", async () => {
+    await expectDenied(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        revokedAt: "2026-05-08T00:00:00.000Z",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
+  });
+
+  it("allows the same owner to reassociate after revoking an existing canonical credential", async () => {
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: null,
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: "2026-05-08T00:00:01.000Z",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:01.000Z",
+      })
+    );
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: null,
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:02.000Z",
+      })
+    );
+  });
+
+  it("allows the same owner to reassociate after creating a canonical revoke tombstone", async () => {
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: "2026-05-08T00:00:00.000Z",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecretHash: "hash-1",
+        displayName: "Alice Mac",
+        revokedAt: null,
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:01.000Z",
+      })
+    );
+  });
+
+  it("keeps desktop publication documents read-only for signed-in renderer clients", async () => {
+    await seedDoc("users/user-1/desktops/desktop-doc-1", {
+      desktopId: "desktop-1",
+      updatedAt: "2026-05-08T00:00:00.000Z",
+    });
     await seedDoc("users/user-1/desktops/desktop-doc-1/tasks/task-doc-1", {
       cloudTaskId: "cloud-task-1",
       ownerDesktopId: "desktop-1",
@@ -301,15 +424,16 @@ describeWithEmulator("firestore security rules", () => {
       title: "Cloud task",
     });
 
+    await expectSucceeds(readDoc(mockUserToken("user-1"), "users/user-1/desktops/desktop-doc-1"));
     await expectSucceeds(readDoc(mockUserToken("user-1"), "users/user-1/desktops/desktop-doc-1/tasks/task-doc-1"));
     await expectDenied(readDoc(mockUserToken("user-2"), "users/user-1/desktops/desktop-doc-1/tasks/task-doc-1"));
-    await expectSucceeds(
+    await expectDenied(
       clientUpdate("user-1", "users/user-1/desktops/desktop-doc-2", {
         desktopId: "desktop-2",
         updatedAt: "2026-05-08T00:00:00.000Z",
       })
     );
-    await expectSucceeds(
+    await expectDenied(
       clientUpdate("user-1", "users/user-1/desktops/desktop-doc-2/tasks/task-doc-2", {
         cloudTaskId: "cloud-task-2",
         ownerDesktopId: "desktop-2",
@@ -318,7 +442,13 @@ describeWithEmulator("firestore security rules", () => {
         title: "Cloud task 2",
       })
     );
-    await expectSucceeds(deleteDoc("user-1", "users/user-1/desktops/desktop-doc-2/tasks/task-doc-2"));
+    await expectDenied(
+      clientUpdate("user-1", "users/user-1/desktops/desktop-doc-1", {
+        displayName: "Renderer overwrite",
+      })
+    );
+    await expectDenied(deleteDoc("user-1", "users/user-1/desktops/desktop-doc-1/tasks/task-doc-1"));
+    await expectDenied(deleteDoc("user-1", "users/user-1/desktops/desktop-doc-1"));
     await expectDenied(
       clientUpdate("user-2", "users/user-1/desktops/desktop-doc-3", {
         desktopId: "desktop-3",

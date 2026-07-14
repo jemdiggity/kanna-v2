@@ -26,6 +26,7 @@ export type RemoteHarnessEnvironment = "dev" | "staging";
 
 export interface RemoteHarnessOptions {
   environment?: RemoteHarnessEnvironment;
+  lanHost?: string;
   repoRoot?: string;
   keepArtifacts?: boolean;
   timeoutMs?: number;
@@ -196,6 +197,7 @@ async function writeServerConfig(input: {
   dbPath: string;
   desktopId: string;
   environment: RemoteHarnessEnvironment;
+  lanHost: string;
   repoRoot: string;
   stagingCredentials?: StagingBuffyCredentials;
   desktopSecret?: string | null;
@@ -225,7 +227,7 @@ async function writeServerConfig(input: {
         ...(input.desktopSecret ? [`desktop_secret = "${shellTomlString(input.desktopSecret)}"`] : []),
         `desktop_name = "${DESKTOP_NAME}"`,
         `server_version = "remote-e2e"`,
-        `lan_host = "127.0.0.1"`,
+        `lan_host = "${shellTomlString(input.lanHost)}"`,
         `lan_port = ${input.ports.server}`,
         `pairing_store_path = "${shellTomlString(join(input.daemonDir, "pairings.json"))}"`
       ];
@@ -237,6 +239,7 @@ async function writeServerConfig(input: {
 
 export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Promise<RemoteHarness> {
   const environment = options.environment ?? "dev";
+  const lanHost = options.lanHost ?? "127.0.0.1";
   const repoRoot = options.repoRoot ?? defaultRepoRoot();
   const timeoutMs = options.timeoutMs ?? 60_000;
   const root = await mkdtemp(join(tmpdir(), "kanna-remote-e2e-"));
@@ -348,6 +351,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       desktopId: currentDesktopId,
       desktopSecret: currentDesktopSecret,
       environment,
+      lanHost,
       repoRoot,
       stagingCredentials: staging?.credentials,
       ports
@@ -382,6 +386,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       dbPath,
       desktopId,
       environment,
+      lanHost,
       repoRoot,
       stagingCredentials: staging?.credentials,
       ports

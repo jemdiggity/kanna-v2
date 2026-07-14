@@ -1,4 +1,5 @@
 import type { AgentProvider } from "../types/kanna";
+import { isAgentProvider } from "@kanna/agent-protocol";
 import type { AgentExecutionType } from "../stores/agentExecutionType";
 
 export type RecentAgentChoice = {
@@ -6,14 +7,12 @@ export type RecentAgentChoice = {
   executionType: AgentExecutionType;
 };
 
-const VALID_PROVIDERS = new Set(["claude", "copilot", "codex", "opencode", "antigravity"]);
 const VALID_EXECUTION_TYPES = new Set(["pty", "agent"]);
 
 function isRecentAgentChoice(value: unknown): value is RecentAgentChoice {
   if (!value || typeof value !== "object") return false;
   const candidate = value as { provider?: unknown; executionType?: unknown };
-  return typeof candidate.provider === "string"
-    && VALID_PROVIDERS.has(candidate.provider)
+  return isAgentProvider(candidate.provider)
     && typeof candidate.executionType === "string"
     && VALID_EXECUTION_TYPES.has(candidate.executionType);
 }

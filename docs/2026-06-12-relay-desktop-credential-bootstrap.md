@@ -29,28 +29,31 @@ redeployed.
 2. The `desktop_cloud_credential` Tauri command exposes `desktopId` plus the
    SHA-256 hash of the secret to the frontend. The plain secret never enters
    the webview or Firestore.
-3. When a signed-in user's desktop reconciles cloud task snapshots,
-   `desktopCloudPublisher` upserts `desktopSecretHash` onto this desktop's
-   `users/{uid}/desktops` document (allowed by existing Firestore rules).
+3. A signed-in renderer performs only credential bootstrap: it upserts
+   `desktopCredentials/{desktopId}` with `desktopSecretHash`, `uid`, and the
+   display name. It never publishes task documents.
 4. `kanna-server` authenticates to the relay with
    `{type: "auth", desktop_id, desktop_secret}` (it already preferred this
    over `device_token` when the secret is present).
-5. The relay (`services/relay/src/auth.ts`) queries
-   `collectionGroup("desktops").where("desktopId" == …)` (bounded, not
-   `limit(1)`), skips revoked docs, and compares `sha256(presented secret)`
-   against `desktopSecretHash` with a timing-safe comparison. Squatting a
-   desktopId in another user's subcollection cannot capture or deny the real
-   desktop's session.
+5. The relay (`services/relay/src/auth.ts`) resolves the globally unique
+   canonical document first and compares `sha256(presented secret)` against
+   `desktopSecretHash` with a timing-safe comparison. The bounded collection-
+   group query remains only as a migration fallback for old credentials.
+6. On sign-out, the current owner tombstones the canonical document while
+   preserving its unreadable secret hash. A new signed-in owner on the same
+   physical desktop may reclaim only that revoked document and only by
+   presenting the identical hash derived locally from the desktop secret.
+   Deletes and hash rotation are denied, so there is no missing-document
+   fallback window or claim-without-secret race. Publication-time revalidation
+   closes any old relay socket before it can write again.
 
 The legacy `device_token` + `POST /register` path still works for phones and
 old configs, but the desktop app no longer depends on it.
 
 ## Deploy artifacts
 
-- `firestore.indexes.json` (new) carries the `COLLECTION_GROUP` field override
-  for `desktops.desktopId`; `firebase.json` references it and
-  `kd cloud deploy` now ships `firestore:rules,firestore:indexes` (functions
-  deploys stay retired).
+- `firestore.indexes.json` retains the `COLLECTION_GROUP` field override for
+  legacy fallback. New credentials use a direct canonical document lookup.
 - Relay image deploys via `./kd cloud deploy --production --relay`
   (Cloud Build → gcr.io/kanna-build/kanna-relay → compose stack on
   `kanna-relay-vm`).
@@ -66,7 +69,7 @@ old configs, but the desktop app no longer depends on it.
 - Real cloud smoke: `apps/desktop/tests/e2e/real/cloud-relay-desktop-auth.test.ts`
   (env-gated: `KANNA_FIREBASE_API_KEY`, `KANNA_FIREBASE_PROJECT_ID`,
   `KANNA_CLOUD_TEST_EMAIL`, `KANNA_CLOUD_TEST_PASSWORD`; optional
-  `KANNA_RELAY_SMOKE_URL`). Creates a disposable `users/{uid}/desktops` doc,
+  `KANNA_RELAY_SMOKE_URL`). Creates a disposable `desktopCredentials` doc,
   expects `auth_ok` from the deployed relay and a `4005` close for a wrong
   secret, then deletes the doc.
 

@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { TaskActivity, TaskSummary } from "../lib/api/types";
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -18,40 +19,106 @@ beforeAll(async () => {
 interface ElementNode {
   type: unknown;
   props?: {
-    children?: ElementNode | ElementNode[] | string | null;
+    children?: ElementChild | ElementChild[];
+    style?: unknown;
     [key: string]: unknown;
   };
 }
 
+type ElementChild = ElementNode | string | number | null | undefined | false;
+
 function flattenChildren(
-  children: ElementNode | ElementNode[] | string | null | undefined
-): Array<ElementNode | string> {
-  if (!children) return [];
-  if (typeof children === "string") return [children];
-  return (Array.isArray(children) ? children : [children]).filter(Boolean);
+  children: ElementChild | ElementChild[]
+): ElementChild[] {
+  return (Array.isArray(children) ? children : [children]).filter(
+    (child) => child !== null && child !== undefined && child !== false
+  );
 }
 
-function textContent(node: ElementNode | string | null | undefined): string {
-  if (!node) return "";
-  if (typeof node === "string") return node;
+function textContent(node: ElementChild | ElementChild[]): string {
+  if (Array.isArray(node)) return node.map(textContent).join("");
+  if (node === null || node === undefined || node === false) return "";
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
   return flattenChildren(node.props?.children).map(textContent).join("");
 }
 
-function allNodes(node: ElementNode | string | null | undefined): ElementNode[] {
-  if (!node || typeof node === "string") return [];
-  return [
-    node,
-    ...flattenChildren(node.props?.children).flatMap((child) => allNodes(child))
-  ];
+function findTextNodeByCompleteText(
+  node: ElementChild,
+  expectedText: string
+): ElementNode | null {
+  if (!node || typeof node !== "object") return null;
+  if (node.type === "Text" && textContent(node) === expectedText) return node;
+
+  for (const child of flattenChildren(node.props?.children)) {
+    const match = findTextNodeByCompleteText(child, expectedText);
+    if (match) return match;
+  }
+
+  return null;
+}
+
+function flattenStyle(style: unknown): Record<string, unknown> {
+  if (Array.isArray(style)) {
+    return style.reduce<Record<string, unknown>>(
+      (effectiveStyle, item) => ({
+        ...effectiveStyle,
+        ...flattenStyle(item)
+      }),
+      {}
+    );
+  }
+
+  return style && typeof style === "object"
+    ? (style as Record<string, unknown>)
+    : {};
+}
+
+function renderTaskCard(activity?: TaskActivity): ElementNode {
+  if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+  const task: TaskSummary = {
+    id: "task-1",
+    repoId: "repo-1",
+    title: "Match desktop typography",
+    stage: "in progress",
+    ...(activity === undefined ? {} : { activity })
+  };
+
+  return TaskCard({
+    task,
+    onPress: vi.fn()
+  }) as ElementNode;
 }
 
 describe("TaskCard", () => {
-  it("renders only stage, bounded title, and waiting prompt", () => {
+  it("keeps the automation id separate from its human-readable accessibility label", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
+
     const tree = TaskCard({
       task: {
         id: "task-1",
         repoId: "repo-1",
+        title: "Repair cloud task sync",
+        stage: "review"
+      },
+      onPress: vi.fn()
+    }) as { props: Record<string, unknown> };
+
+    expect(tree.props.testID).toBe("mobile.task-row.task-1");
+    expect(tree.props.accessibilityLabel).toContain("Repair cloud task sync");
+    expect(tree.props.accessibilityLabel).not.toBe("mobile.task-row.task-1");
+  });
+
+  it("renders only the title, stage, and waiting prompt text", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        repoName: "Repository label must stay hidden",
         title: "Current title",
         stage: "review",
         waitingPromptSnippet: "Please confirm the final UI."
@@ -66,15 +133,15 @@ describe("TaskCard", () => {
     expect(text.toUpperCase()).not.toContain("TASK");
     expect(text.toUpperCase()).not.toContain("RECENT");
     expect(text).not.toContain("repo-1");
+    expect(text).not.toContain("Repository label must stay hidden");
 
-    const textNodes = allNodes(tree).filter((node) => node.type === "Text");
-    const title = textNodes.find((node) => textContent(node) === "Current title");
-    const prompt = textNodes.find(
-      (node) => textContent(node) === "Please confirm the final UI."
+    const title = findTextNodeByCompleteText(tree, "Current title");
+    const waitingPrompt = findTextNodeByCompleteText(
+      tree,
+      "Please confirm the final UI."
     );
     expect(title?.props?.numberOfLines).toBe(2);
-    expect(prompt?.props?.numberOfLines).toBe(3);
-    expect(tree.props?.testID).toBe("mobile.task-row.task-1");
+    expect(waitingPrompt?.props?.numberOfLines).toBe(3);
     expect(tree.props?.accessibilityRole).toBe("button");
     expect(tree.props?.accessibilityLabel).toBe(
       "Current title. review. Please confirm the final UI."
@@ -82,20 +149,67 @@ describe("TaskCard", () => {
   });
 
   it("styles the pre-capture ellipsis as a muted placeholder", () => {
-    if (!TaskCard) throw new Error("TaskCard was not loaded");
-    const tree = TaskCard({
-      task: {
-        id: "task-2",
-        repoId: "repo-1",
-        title: "New task",
-        stage: "in progress"
-      },
-      onPress: vi.fn()
-    }) as ElementNode;
+    const tree = renderTaskCard();
+    const placeholder = findTextNodeByCompleteText(tree, "…");
 
-    const placeholder = allNodes(tree).find(
-      (node) => node.type === "Text" && textContent(node) === "…"
-    );
-    expect(placeholder?.props?.style).toContainEqual({ color: "#6F819E" });
+    expect(flattenStyle(placeholder?.props?.style)).toMatchObject({
+      color: "#6F819E"
+    });
   });
+
+  it.each([
+    ["working", "working"],
+    ["unread", "unread"],
+    ["idle", "idle"],
+    [undefined, "idle"],
+  ] as const)(
+    "exposes %s activity through a stable native accessibility value",
+    (activity, expectedActivity) => {
+      expect(renderTaskCard(activity).props?.accessibilityValue).toEqual({
+        text: expectedActivity,
+      });
+    },
+  );
+
+  it.each<{
+    activity: TaskActivity | undefined;
+    expectedFontWeight: "bold" | "normal";
+    expectedFontStyle: "italic" | "normal";
+  }>([
+    {
+      activity: "unread",
+      expectedFontWeight: "bold",
+      expectedFontStyle: "normal"
+    },
+    {
+      activity: "working",
+      expectedFontWeight: "normal",
+      expectedFontStyle: "italic"
+    },
+    {
+      activity: "idle",
+      expectedFontWeight: "normal",
+      expectedFontStyle: "normal"
+    },
+    {
+      activity: undefined,
+      expectedFontWeight: "normal",
+      expectedFontStyle: "normal"
+    }
+  ])(
+    "renders $activity activity with desktop-equivalent title typography",
+    ({ activity, expectedFontWeight, expectedFontStyle }) => {
+      const tree = renderTaskCard(activity);
+      const title = findTextNodeByCompleteText(
+        tree,
+        "Match desktop typography"
+      );
+
+      expect(title).not.toBeNull();
+      expect(flattenStyle(title?.props?.style)).toMatchObject({
+        fontWeight: expectedFontWeight,
+        fontStyle: expectedFontStyle
+      });
+    }
+  );
 });

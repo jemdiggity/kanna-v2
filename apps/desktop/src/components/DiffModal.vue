@@ -18,6 +18,7 @@ const diffViewRef = ref<InstanceType<typeof DiffView> | null>(null);
 const summaryComposerOpen = ref(false);
 const summaryDraft = ref("");
 const sendingRevision = ref(false);
+const approving = ref(false);
 
 const props = defineProps<{
   repoPath: string;
@@ -32,6 +33,8 @@ const props = defineProps<{
   reviewStage?: string;
   reviewComments?: PendingReviewComment[];
   reviewHeadCommit?: string;
+  approveSignalsMerge?: boolean;
+  hasRunningPost?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -47,6 +50,16 @@ const comments = computed(() => props.reviewComments ?? []);
 const reviewEnabled = computed(() =>
   Boolean(props.taskId) && (props.reviewStage === "review" || props.reviewStage === "pr")
 );
+// "Approve & Merge" is only truthful when the task's pinned current stage
+// declares the merge-signaling approve post (approveSignalsMerge comes from
+// the pinned pipeline_def). Pre-change snapshots and custom pipelines whose
+// final stage has no such post get the generic "Approve".
+const approveMergesTask = computed(() => props.approveSignalsMerge === true);
+// Approval is single-flight for the full post lifetime: the local flag
+// covers the request, hasRunningPost covers the running approve post. An
+// ordinary repeated approval must never reach the backend's running-post
+// override, which would close the task before the post finishes.
+const approveDisabled = computed(() => approving.value || props.hasRunningPost === true);
 const currentHeadCommit = computed(() => props.reviewHeadCommit ?? "HEAD");
 const baseRefLabel = computed(() => props.baseRef ?? "main");
 
@@ -89,9 +102,14 @@ async function submitRequestChanges() {
   }
 }
 
-function approveReview() {
-  if (!props.taskId) return;
-  void store.advanceStage(props.taskId);
+async function approveReview() {
+  if (!props.taskId || approveDisabled.value) return;
+  approving.value = true;
+  try {
+    await store.advanceStage(props.taskId);
+  } finally {
+    approving.value = false;
+  }
 }
 
 function dismiss(): boolean {
@@ -123,8 +141,8 @@ onMounted(() => {
         <button type="button" :disabled="comments.length === 0" @click="openRequestChangesComposer">
           {{ $t('diffView.requestChanges') }}
         </button>
-        <button type="button" class="approve" @click="approveReview">
-          {{ $t('diffView.approve') }}
+        <button type="button" class="approve" :disabled="approveDisabled" @click="approveReview">
+          {{ approveMergesTask ? $t('diffView.approveMerge') : $t('diffView.approve') }}
         </button>
       </div>
       <DiffView

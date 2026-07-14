@@ -32,6 +32,14 @@ fn task_get_uses_single_task_endpoint() {
 }
 
 #[test]
+fn dependent_tasks_exist_uses_task_endpoint() {
+    assert_eq!(
+        dependent_tasks_exist_path("task 1"),
+        "/v1/tasks/task%201/dependent-tasks-exist"
+    );
+}
+
+#[test]
 fn task_logs_uses_task_logs_endpoint() {
     assert_eq!(
         task_logs_path("task 1", Some(25)),

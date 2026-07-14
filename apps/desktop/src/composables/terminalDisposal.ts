@@ -34,6 +34,8 @@ export function createTerminalDisposalController(params: {
     params.state.disposed = true
     params.state.attached = false
     params.state.terminalStreamAttached = false
+    params.state.terminalView?.stopFileLinkAvailabilityWatch()
+    params.state.terminalView?.unregisterFileLinkProvider()
     params.state.terminalView?.fileLinkProvider.clearFileExistsCache()
     params.layout.cancelPendingFit()
     params.inputQueue.clearPendingInputFlushTimer()

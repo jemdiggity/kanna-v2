@@ -1,4 +1,6 @@
+use kanna_agent_protocol::AgentProvider;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DaemonCommandError {
@@ -108,13 +110,13 @@ pub(super) fn should_clear_daemon_client_after_error(error: &DaemonCommandError)
 pub(super) fn parse_agent_provider(
     agent_provider: Option<String>,
 ) -> Result<Option<String>, DaemonCommandError> {
-    match agent_provider.as_deref() {
-        Some("claude") | Some("copilot") | Some("codex") | Some("opencode")
-        | Some("antigravity") => Ok(agent_provider),
-        Some(other) => Err(DaemonCommandError {
-            message: format!("unsupported agent provider: {other}"),
-            code: None,
-        }),
+    match agent_provider {
+        Some(provider) => AgentProvider::from_str(&provider)
+            .map(|_| Some(provider))
+            .map_err(|message| DaemonCommandError {
+                message,
+                code: None,
+            }),
         None => Ok(None),
     }
 }
@@ -152,10 +154,21 @@ pub(super) fn parse_snapshot_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_retryable_command_error, parse_ack, parse_snapshot_response,
+        is_retryable_command_error, parse_ack, parse_agent_provider, parse_snapshot_response,
         should_clear_daemon_client_after_error, DaemonCommandError, TerminalSnapshotPayload,
         UNEXPECTED_ACK_EVENT_CODE,
     };
+
+    #[test]
+    fn parse_agent_provider_uses_the_shared_protocol_registry() {
+        for provider in kanna_agent_protocol::AgentProvider::ALL {
+            assert_eq!(
+                parse_agent_provider(Some(provider.as_str().to_string())).unwrap(),
+                Some(provider.as_str().to_string())
+            );
+        }
+        assert!(parse_agent_provider(Some("future-provider".to_string())).is_err());
+    }
 
     #[test]
     fn parse_snapshot_response_defaults_cursor_visible_for_older_payloads() {

@@ -130,7 +130,17 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       requestedItemId: itemId,
       selectedBefore: context.state.selectedItemId.value,
     });
+    const clearedSlotId = context.state.selectedItemId.value;
+    const clearedRepoId = context.state.selectedRepoId.value;
     context.state.selectedItemId.value = null;
+    if (
+      clearedRepoId
+      && context.state.lastSelectedItemByRepo.value[clearedRepoId] === clearedSlotId
+    ) {
+      const { [clearedRepoId]: _removed, ...remaining } = context.state.lastSelectedItemByRepo.value;
+      context.state.lastSelectedItemByRepo.value = remaining;
+    }
+    await requireService(context.services.persistSelection, "persistSelection")();
   }
 
   async function resolveStageAdvanceProjection(item: {
@@ -369,7 +379,15 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item) return;
     if (item.closed_at != null) return;
-    const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
+    // Single-flight: while a post (e.g. approve) runs, an ordinary repeated
+    // advance would hit the backend's running-post override and transition
+    // the stage before the post finishes its work. Only the post's own
+    // completion may move the task.
+    if (item.has_running_post) {
+      context.toast.warning(context.tt("toasts.stagePostRunning"));
+      return;
+    }
+    const sourceTaskIsSelected = requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
     const { nextStageName, pendingPostName, closesOnSuccess } = await resolveStageAdvanceProjection(item);
     debugLog("[pipeline:advanceStage] selection policy", {

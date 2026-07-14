@@ -6,10 +6,13 @@
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=2",
     "dev": "tsc --watch"
   },
   "devDependencies": {
     "vitest": "^3"
+  },
+  "dependencies": {
+    "@kanna/agent-protocol": "workspace:*"
   }
 }

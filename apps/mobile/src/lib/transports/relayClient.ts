@@ -29,7 +29,6 @@ export interface RelayDesktopClient {
   listActiveDesktopIds(): Promise<Set<string>>;
   observeTaskTerminal: RemoteTaskTerminalObserver;
   observeTaskAgent: RemoteTaskAgentObserver;
-  sendTaskInput(options: { desktopId: string; taskId: string; data: string }): Promise<void>;
 }
 
 export interface RelayDesktopClientDependencies {
@@ -421,9 +420,6 @@ export function createRelayDesktopClient({
           client.sendAgentInterrupt(taskId);
         },
       } satisfies TaskAgentSubscription;
-    },
-    async sendTaskInput({ desktopId, taskId, data }) {
-      streamClientForDesktop(desktopId).sendTermInput(taskId, encodeBase64(data));
     }
   };
 }

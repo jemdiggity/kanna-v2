@@ -16,8 +16,9 @@ export function claimLocalTaskSelectionOwnership({
 }: ClaimLocalTaskSelectionOwnershipOptions): void {
   const selectedItemId = store.selectedItemId;
   const selectedItemIsLocal = selectedItemId !== null && (
-    store.items.some((item) => item.id === selectedItemId && item.repo_id === repoId)
-    || store.initializingTaskItems.some((item) => item.id === selectedItemId && item.repo_id === repoId)
+    store.taskUiSlots.some((slot) =>
+      slot.slot_id === selectedItemId && slot.draft.repo_id === repoId,
+    )
   );
   const hadCloudOwnership = selectedCloudRepoId.value !== null || selectedCloudItemId.value !== null;
 

@@ -1,10 +1,10 @@
-import type { StoreContext } from "./state";
+import { requireService, type StoreContext } from "./state";
 
 export async function isTaskSelectedInAnyWindow(
   context: StoreContext,
   taskId: string,
 ): Promise<boolean> {
-  if (context.state.selectedItemId.value === taskId) {
+  if (requireService(context.services.selectedTaskId, "selectedTaskId").value === taskId) {
     return true;
   }
 

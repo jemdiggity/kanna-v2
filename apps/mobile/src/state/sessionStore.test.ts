@@ -49,6 +49,52 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("retags an active terminal without losing buffered state", () => {
+    const store = createSessionStore();
+
+    store.setSelectedTask("task-pending");
+    store.beginTaskTerminal("task-pending", "snapshot\n");
+    store.appendTaskTerminal("task-pending", "delta\n");
+    store.setTaskTerminalDims("task-pending", 132, 43);
+
+    store.retagTaskIdentity("task-pending", "task-published");
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-published",
+      taskTerminalTaskId: "task-published",
+      taskTerminalStatus: "live",
+      taskTerminalOutput: "snapshot\ndelta\n",
+      taskTerminalCols: 132,
+      taskTerminalRows: 43
+    });
+  });
+
+  it("retags an active agent without losing buffered events", () => {
+    const store = createSessionStore();
+
+    store.setSelectedTask("task-pending");
+    store.beginTaskAgent("task-pending");
+    store.applyTaskAgentStreamEvent("task-pending", {
+      type: "snapshot",
+      events: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "Buffered", truncated: false }
+      }]
+    });
+
+    store.retagTaskIdentity("task-pending", "task-published");
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-published",
+      taskAgentTaskId: "task-published",
+      taskAgentStatus: "live",
+      taskAgentEvents: [{
+        seq: 0,
+        event: { type: "assistant_text", text: "Buffered", truncated: false }
+      }]
+    });
+  });
+
   it("clears the selected task when reconciliation finds no remaining collection match", () => {
     const store = createSessionStore();
 
@@ -212,6 +258,97 @@ describe("createSessionStore", () => {
     ]);
 
     expect(publishes).toBe(0);
+  });
+
+  it("publishes when only a task's activity changes", () => {
+    const store = createSessionStore();
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Recent task",
+        stage: "pr",
+        snippet: "ready for review",
+        activity: "idle"
+      }
+    ]);
+    publishes = 0;
+
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Recent task",
+        stage: "pr",
+        snippet: "ready for review",
+        activity: "working"
+      }
+    ]);
+
+    expect(publishes).toBe(1);
+    expect(store.getState().recentTasks[0]?.activity).toBe("working");
+  });
+
+  it("does not publish when missing task activity is refreshed as idle", () => {
+    const store = createSessionStore();
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setRepoTasks([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Keep scroll position",
+        stage: "in progress",
+        snippet: "latest output"
+      }
+    ]);
+    publishes = 0;
+
+    store.setRepoTasks([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Keep scroll position",
+        stage: "in progress",
+        snippet: "latest output",
+        activity: "idle"
+      }
+    ]);
+
+    expect(publishes).toBe(0);
+  });
+
+  it("updates a task activity across every collection with one publication", () => {
+    const store = createSessionStore();
+    const unreadTask = {
+      id: "task-activity",
+      repoId: "repo-1",
+      title: "Read this task",
+      stage: "in progress",
+      activity: "unread" as const
+    };
+    store.setRepoTasks([unreadTask]);
+    store.setRecentTasks([unreadTask]);
+    store.setSearchResults("read", [unreadTask]);
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setTaskActivity("task-activity", "idle");
+
+    expect(publishes).toBe(1);
+    expect(store.getState().repoTasks[0]?.activity).toBe("idle");
+    expect(store.getState().recentTasks[0]?.activity).toBe("idle");
+    expect(store.getState().searchResults[0]?.activity).toBe("idle");
   });
 
   it("deduplicates task lists by id before publishing state", () => {

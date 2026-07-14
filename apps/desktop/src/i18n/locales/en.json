@@ -71,6 +71,7 @@
     "nextRepo": "Next Repo",
     "filePicker": "File Picker",
     "filePreview": "File Preview",
+    "openLatestAgentFile": "Open Latest Agent File",
     "commandPalette": "Command Palette",
     "viewDiff": "View Diff",
     "commitGraph": "Commit Graph",
@@ -118,8 +119,6 @@
     "newTaskTooltip": "New Task (⌘N)",
     "removeRepoTooltip": "Remove Repo",
     "remoteTaskTooltip": "Remote task",
-    "awaitingVerdictShort": "Review",
-    "awaitingVerdictBadge": "Awaiting {stage} verdict",
     "detachSubtask": "Remove parent",
     "sectionMergeQueue": "Merge Queue",
     "sectionPullRequests": "Pull Requests",
@@ -150,6 +149,7 @@
     "prAgentFailed": "Failed to start PR agent",
     "closeSourceTaskFailed": "Failed to close source task",
     "mergeAgentFailed": "Failed to start merge agent",
+    "stagePostRunning": "A stage post is still running — wait for it to finish",
     "blockedWorktreeFailed": "Failed to create worktree for blocked task",
     "blockTaskFailed": "Failed to block task",
     "selectRepoFirst": "Select a repository first",
@@ -164,7 +164,9 @@
     "taskAtFinalStage": "Task is at the final stage",
     "stageTeardownFailed": "Stage teardown script failed",
     "stageSetupFailed": "Stage setup script failed",
-    "stageNotFound": "Stage not found in pipeline"
+    "stageNotFound": "Stage not found in pipeline",
+    "latestAgentFileHint": "Tip: Press ⌘L to open the latest file mentioned by the agent.",
+    "noTerminalFileLink": "No file link found in this terminal."
   },
   "tags": {
     "inProgress": "In Progress",
@@ -257,6 +259,7 @@
     "pendingCommentCount": "Pending comments: {count}",
     "requestChanges": "Request Changes",
     "approve": "Approve",
+    "approveMerge": "Approve & Merge",
     "summaryPlaceholder": "Optional summary...",
     "sendRequestChanges": "Send Request",
     "shortcutClose": "Close"

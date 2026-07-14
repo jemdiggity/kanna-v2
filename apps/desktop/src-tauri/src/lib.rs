@@ -325,29 +325,79 @@ pub fn run() {
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use super::resolve_webdriver_port;
+    use std::ffi::OsString;
 
-    #[test]
-    fn webdriver_disabled_for_worktrees_without_explicit_port() {
-        unsafe {
-            std::env::set_var("KANNA_WORKTREE", "1");
-            std::env::remove_var("KANNA_WEBDRIVER_PORT");
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
         }
-        assert_eq!(resolve_webdriver_port(), None);
-        unsafe {
-            std::env::remove_var("KANNA_WORKTREE");
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
         }
     }
 
     #[test]
+    fn webdriver_env_guard_restores_existing_values() {
+        let _lock = super::test_env_lock()
+            .lock()
+            .expect("env lock should not be poisoned");
+        let _outer_worktree = EnvVarGuard::set("KANNA_WORKTREE", "outer-worktree");
+        let _outer_webdriver = EnvVarGuard::set("KANNA_WEBDRIVER_PORT", "4666");
+
+        {
+            let _worktree = EnvVarGuard::set("KANNA_WORKTREE", "1");
+            let _webdriver = EnvVarGuard::unset("KANNA_WEBDRIVER_PORT");
+            assert_eq!(std::env::var("KANNA_WORKTREE").as_deref(), Ok("1"));
+            assert!(std::env::var_os("KANNA_WEBDRIVER_PORT").is_none());
+        }
+
+        assert_eq!(
+            std::env::var("KANNA_WORKTREE").as_deref(),
+            Ok("outer-worktree")
+        );
+        assert_eq!(std::env::var("KANNA_WEBDRIVER_PORT").as_deref(), Ok("4666"));
+    }
+
+    #[test]
+    fn webdriver_disabled_for_worktrees_without_explicit_port() {
+        let _lock = super::test_env_lock()
+            .lock()
+            .expect("env lock should not be poisoned");
+        let _worktree = EnvVarGuard::set("KANNA_WORKTREE", "1");
+        let _webdriver = EnvVarGuard::unset("KANNA_WEBDRIVER_PORT");
+
+        assert_eq!(resolve_webdriver_port(), None);
+    }
+
+    #[test]
     fn webdriver_uses_explicit_port_even_in_worktrees() {
-        unsafe {
-            std::env::set_var("KANNA_WORKTREE", "1");
-            std::env::set_var("KANNA_WEBDRIVER_PORT", "4555");
-        }
+        let _lock = super::test_env_lock()
+            .lock()
+            .expect("env lock should not be poisoned");
+        let _worktree = EnvVarGuard::set("KANNA_WORKTREE", "1");
+        let _webdriver = EnvVarGuard::set("KANNA_WEBDRIVER_PORT", "4555");
+
         assert_eq!(resolve_webdriver_port(), Some(4555));
-        unsafe {
-            std::env::remove_var("KANNA_WORKTREE");
-            std::env::remove_var("KANNA_WEBDRIVER_PORT");
-        }
     }
 }

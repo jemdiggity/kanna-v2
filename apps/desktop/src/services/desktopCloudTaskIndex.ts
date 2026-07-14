@@ -9,6 +9,7 @@ import {
   type Firestore,
 } from "firebase/firestore";
 import { getApps, initializeApp } from "firebase/app";
+import { isAgentProvider } from "@kanna/agent-protocol";
 import type { PipelineItem, Repo } from "../types/kanna";
 import { invoke } from "../invoke";
 import { resolveDesktopFirebaseConfig } from "./desktopFirebaseConfig";
@@ -339,9 +340,7 @@ function normalizeActivity(activity: string | undefined): PipelineItem["activity
 }
 
 function normalizeAgentProvider(provider: string | null | undefined): PipelineItem["agent_provider"] {
-  return provider === "copilot" || provider === "codex" || provider === "opencode" || provider === "antigravity"
-    ? provider
-    : "claude";
+  return isAgentProvider(provider) ? provider : "claude";
 }
 
 async function resolveDesktopId(): Promise<string | null> {

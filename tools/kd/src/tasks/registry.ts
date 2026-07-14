@@ -58,6 +58,7 @@ import {
   type StagingRelayActiveDesktopIdsInput
 } from "../runtime/staging-relay";
 import { shipRelease } from "../runtime/release";
+import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
 import { getDevStatus } from "../runtime/status";
@@ -1980,6 +1981,19 @@ export const taskDefinitions = [
         data: plan
       };
     }
+  },
+  {
+    id: "test.rust",
+    description: "Run workspace Rust tests with daemon integration tests serialized.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      return executeRustTests({
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner,
+      });
+    },
   },
   {
     id: "test.app-update-bundle",

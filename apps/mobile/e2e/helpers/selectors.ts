@@ -4,11 +4,15 @@ export const selectors = {
   appShell: `~${MOBILE_E2E_IDS.appShell}`,
   tasksScreen: `~${MOBILE_E2E_IDS.tasksScreen}`,
   taskDetailScreen: `~${MOBILE_E2E_IDS.taskDetailScreen}`,
+  taskDetailTitle: `~${MOBILE_E2E_IDS.taskDetailTitle}`,
+  taskSnapshotMarker: `~${MOBILE_E2E_IDS.taskSnapshotMarker}`,
   taskBackButton: `~${MOBILE_E2E_IDS.taskBackButton}`,
   taskInput: `~${MOBILE_E2E_IDS.taskInput}`,
   taskSendButton: `~${MOBILE_E2E_IDS.taskSendButton}`,
   agentMessageView: `~${MOBILE_E2E_IDS.agentMessageView}`,
+  agentMessageReady: `~${MOBILE_E2E_IDS.agentMessageReady}`,
   terminalOverlay: `~${MOBILE_E2E_IDS.terminalOverlay}`,
+  terminalInspection: `~${MOBILE_E2E_IDS.terminalInspection}`,
   accountButton: `~${MOBILE_E2E_IDS.accountButton}`,
   accountSheet: `~${MOBILE_E2E_IDS.accountSheet}`,
   accountCloseButton: `~${MOBILE_E2E_IDS.accountCloseButton}`,
@@ -20,7 +24,21 @@ export const selectors = {
   accountPasswordToggle: `~${MOBILE_E2E_IDS.accountPasswordToggle}`,
   accountSignInButton: `~${MOBILE_E2E_IDS.accountSignInButton}`,
   accountSignOutButton: `~${MOBILE_E2E_IDS.accountSignOutButton}`,
+  tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
+  recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
   updateInfoOtaValue: `~${MOBILE_E2E_IDS.updateInfoOtaValue}`,
   taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]'
 } as const;
+
+const TASK_ROW_PREFIX = "mobile.task-row.";
+
+export function extractTaskRowId(
+  accessibilityName: string | null
+): string | null {
+  if (!accessibilityName?.startsWith(TASK_ROW_PREFIX)) {
+    return null;
+  }
+  const taskId = accessibilityName.slice(TASK_ROW_PREFIX.length);
+  return taskId || null;
+}

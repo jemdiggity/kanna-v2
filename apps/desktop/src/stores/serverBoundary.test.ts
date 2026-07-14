@@ -11,7 +11,6 @@ const RUST_SQL_SYMBOL = ["tauri", "plugin", "sql"].join("_");
 const BAZEL_SQL_REPO = ["desktop_crates", RUST_SQL_PLUGIN].join("__");
 
 const ALLOWED_DB_BOUNDARY_FILES = new Set([
-  "stores/db.ts",
   "stores/taskBlockedActions.ts",
   "stores/taskItemActions.ts",
 ]);
@@ -73,7 +72,7 @@ describe("desktop server boundary", () => {
     expect(databaseBoundaryViolations(commandExecute)).toEqual([]);
   });
 
-  it("keeps direct frontend database access inside documented migration carve-outs", () => {
+  it("keeps direct frontend database access inside documented boundary adapters", () => {
     const violations: Array<{ file: string; reasons: string[] }> = [];
 
     for (const file of listSourceFiles(SRC_ROOT)) {
@@ -87,6 +86,23 @@ describe("desktop server boundary", () => {
         violations.push({ file: rel, reasons });
       }
     }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("keeps SQLite schema migration ownership out of the desktop frontend", () => {
+    const forbidden = [
+      { file: resolve(SRC_ROOT, "main.ts"), needle: "runMigrations" },
+      { file: resolve(SRC_ROOT, "stores", "db.ts"), needle: "runMigrations" },
+      { file: resolve(SRC_ROOT, "stores", "db.ts"), needle: "checkDatabaseHealth" },
+      { file: resolve(SRC_ROOT, "stores", "db.ts"), needle: "schema_migrations" },
+      { file: resolve(SRC_ROOT, "stores", "db.ts"), needle: "migrateLegacyDatabaseIfNeeded" },
+      { file: resolve(SRC_ROOT, "composables", "useBackup.ts"), needle: "migrateLegacyDatabaseIfNeeded" },
+    ];
+
+    const violations = forbidden
+      .filter(({ file, needle }) => readFileSync(file, "utf8").includes(needle))
+      .map(({ file, needle }) => `${relative(REPO_ROOT, file)} contains ${needle}`);
 
     expect(violations).toEqual([]);
   });

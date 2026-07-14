@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub use kanna_agent_protocol::{AgentEvent as NeutralAgentEvent, PermissionDecision};
+pub use kanna_agent_protocol::{
+    AgentEvent as NeutralAgentEvent, AgentProvider, PermissionDecision,
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -121,16 +123,6 @@ pub struct AgentSpawnParams {
     /// Optional absolute executable path; otherwise resolved from env PATH.
     #[serde(default)]
     pub executable: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentProvider {
-    Claude,
-    Copilot,
-    Codex,
-    Opencode,
-    Antigravity,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

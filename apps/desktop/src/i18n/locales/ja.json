@@ -71,6 +71,7 @@
     "nextRepo": "次のリポジトリ",
     "filePicker": "ファイル検索",
     "filePreview": "ファイルプレビュー",
+    "openLatestAgentFile": "最新のエージェントファイルを開く",
     "commandPalette": "コマンドパレット",
     "viewDiff": "差分表示",
     "commitGraph": "コミットグラフ",
@@ -118,8 +119,6 @@
     "newTaskTooltip": "新規タスク (⌘N)",
     "removeRepoTooltip": "リポジトリを削除",
     "remoteTaskTooltip": "リモートタスク",
-    "awaitingVerdictShort": "確認",
-    "awaitingVerdictBadge": "{stage} の判定待ち",
     "detachSubtask": "親を解除",
     "sectionMergeQueue": "マージキュー",
     "sectionPullRequests": "プルリクエスト",
@@ -150,6 +149,7 @@
     "prAgentFailed": "PRエージェントの開始に失敗しました",
     "closeSourceTaskFailed": "元タスクのクローズに失敗しました",
     "mergeAgentFailed": "マージエージェントの開始に失敗しました",
+    "stagePostRunning": "ステージのポスト処理が実行中です。完了までお待ちください",
     "blockedWorktreeFailed": "ブロックタスクのワークツリー作成に失敗しました",
     "blockTaskFailed": "タスクのブロックに失敗しました",
     "selectRepoFirst": "リポジトリを先に選択してください",
@@ -164,7 +164,9 @@
     "taskAtFinalStage": "タスクは最終ステージにあります",
     "stageTeardownFailed": "ステージのティアダウンスクリプトが失敗しました",
     "stageSetupFailed": "ステージのセットアップスクリプトが失敗しました",
-    "stageNotFound": "パイプラインにステージが見つかりません"
+    "stageNotFound": "パイプラインにステージが見つかりません",
+    "latestAgentFileHint": "ヒント: ⌘Lでエージェントが言及した最新のファイルを開けます。",
+    "noTerminalFileLink": "このターミナルにファイルリンクが見つかりません。"
   },
   "tags": {
     "inProgress": "進行中",
@@ -254,6 +256,7 @@
     "pendingCommentCount": "未送信コメント {count} 件",
     "requestChanges": "変更を依頼",
     "approve": "承認",
+    "approveMerge": "承認してマージ",
     "summaryPlaceholder": "任意の概要...",
     "sendRequestChanges": "依頼を送信",
     "shortcutClose": "閉じる"

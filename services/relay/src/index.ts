@@ -4,7 +4,9 @@ import {
   verifyPhoneToken,
   verifyDeviceToken,
   verifyDesktopCredentials,
+  revalidateServerAuth,
   registerDevice,
+  type ServerAuthProof,
 } from "./auth.js";
 import {
   attachDesktopTunnel,
@@ -16,6 +18,10 @@ import {
   isTunnelSocket,
 } from "./router.js";
 import { handleOtaRequest } from "./ota.js";
+import {
+  handleCloudTaskPublication,
+  MAX_TASK_SNAPSHOT_BYTES,
+} from "./cloudTaskPublication.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const AUTH_TIMEOUT_MS = 10_000;
@@ -113,6 +119,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   let userId: string | null = null;
   let role: "phone" | "server" | null = null;
   let desktopId: string | null = null;
+  let serverAuthProof: ServerAuthProof | null = null;
 
   // 10-second auth timeout
   const authTimer = setTimeout(() => {
@@ -161,11 +168,21 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         );
         userId = principal?.userId ?? null;
         desktopId = principal?.desktopId ?? null;
+        serverAuthProof = principal ? {
+          kind: "desktop",
+          desktopId: msg.desktop_id,
+          desktopSecret: msg.desktop_secret,
+        } : null;
         role = "server";
       } else if (msg.device_token) {
         // Server (kanna-server) auth
         userId = await verifyDeviceToken(msg.device_token);
         desktopId = msg.desktop_id ?? msg.device_token;
+        serverAuthProof = {
+          kind: "device",
+          desktopId,
+          deviceToken: msg.device_token,
+        };
         role = "server";
       } else {
         ws.close(4004, "Missing id_token, device_token, or desktop credentials");
@@ -209,6 +226,52 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     if (isTunnelSocket(ws)) {
       forwardTunnelData(ws, raw, isBinary);
       return;
+    }
+    if (role === "server") {
+      let publication: { type?: unknown; id?: unknown; snapshot?: unknown } | null = null;
+      try {
+        publication = JSON.parse(data) as { type?: unknown; id?: unknown; snapshot?: unknown };
+      } catch {
+        // Non-publication messages retain the router's existing behavior.
+      }
+      if (publication?.type === "task_snapshot_publish") {
+        const id = typeof publication.id === "string" ? publication.id : "";
+        const sendAck = (ok: boolean, error?: string) => {
+          if (ws.readyState !== 1) return;
+          ws.send(JSON.stringify({
+            type: "task_snapshot_ack",
+            id,
+            ok,
+            ...(error ? { error } : {}),
+          }));
+        };
+        if (!id || Buffer.byteLength(data) > MAX_TASK_SNAPSHOT_BYTES + 16_384) {
+          sendAck(false, "task snapshot publication is malformed or oversized");
+          return;
+        }
+        if (!desktopId || !serverAuthProof || !await revalidateServerAuth(
+          serverAuthProof,
+          userId!,
+          desktopId,
+        )) {
+          sendAck(false, "desktop credential is no longer authorized");
+          ws.close(4005, "Authentication revoked");
+          return;
+        }
+        try {
+          await handleCloudTaskPublication({
+            userId: userId!,
+            desktopId,
+            snapshot: publication.snapshot,
+          });
+          sendAck(true);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[cloud] Task snapshot publication rejected for ${userId}/${desktopId}: ${message}`);
+          sendAck(false, message);
+        }
+        return;
+      }
     }
     routeMessage(userId!, role!, data, ws, desktopId);
   });

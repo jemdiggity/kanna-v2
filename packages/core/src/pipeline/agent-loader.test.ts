@@ -6,6 +6,35 @@ import {
   parseAgentExtension,
   validateAgentDefinition,
 } from "./agent-loader";
+import type { AgentDefinition, AgentExtension } from "./pipeline-types";
+
+const MALFORMED_AGENT_PROVIDER_CASES = [
+  {
+    name: "mixed array",
+    yaml: "agent_provider:\n  - claude\n  - 7",
+    error: /agent_provider.*string.*array of strings/,
+  },
+  {
+    name: "all-nonstring array",
+    yaml: "agent_provider:\n  - 7\n  - true",
+    error: /agent_provider.*string.*array of strings/,
+  },
+  {
+    name: "non-string scalar",
+    yaml: "agent_provider: 42",
+    error: /agent_provider.*string.*array of strings/,
+  },
+  {
+    name: "empty array",
+    yaml: "agent_provider: []",
+    error: /agent_provider.*at least one non-empty provider/,
+  },
+  {
+    name: "blank string",
+    yaml: 'agent_provider: "   "',
+    error: /agent_provider.*at least one non-empty provider/,
+  },
+] as const;
 
 describe("parseAgentDefinition", () => {
   it("parses valid AGENT.md with all fields", () => {
@@ -127,6 +156,21 @@ Do something.
     expect(() => parseAgentDefinition(content)).toThrow(/agent_provider.*claud/);
   });
 
+  it.each(MALFORMED_AGENT_PROVIDER_CASES)(
+    "rejects $name agent_provider frontmatter",
+    ({ yaml, error }) => {
+      const content = `---
+name: Malformed Provider
+description: Has malformed provider frontmatter
+${yaml}
+---
+
+Do something.
+`;
+      expect(() => parseAgentDefinition(content)).toThrow(error);
+    },
+  );
+
   it("uses markdown body as the prompt field", () => {
     const content = `---
 name: Body Agent
@@ -243,13 +287,13 @@ describe("validateAgentDefinition", () => {
       description: "Valid description",
       agent_provider: ["codex", "nope"],
       prompt: "Do something.",
-    };
+    } as unknown as AgentDefinition;
     const errors = validateAgentDefinition(def);
     expect(errors.some((e) => e.includes("agent_provider"))).toBe(true);
   });
 
   it("accepts all known agent_provider values", () => {
-    const def = {
+    const def: AgentDefinition = {
       name: "Valid Name",
       description: "Valid description",
       agent_provider: ["claude", "copilot", "codex", "opencode", "antigravity"],
@@ -300,10 +344,33 @@ Extra instructions.
 `;
     expect(() => parseAgentExtension(content)).toThrow(/permission_mode.*neverAsk/);
   });
+
+  it("rejects unknown agent_provider values", () => {
+    const content = `---
+agent_provider: claude, future-agent
+---
+
+Extra instructions.
+`;
+    expect(() => parseAgentExtension(content)).toThrow(/agent_provider.*future-agent/);
+  });
+
+  it.each(MALFORMED_AGENT_PROVIDER_CASES)(
+    "rejects $name agent_provider frontmatter",
+    ({ yaml, error }) => {
+      const content = `---
+${yaml}
+---
+
+Extra instructions.
+`;
+      expect(() => parseAgentExtension(content)).toThrow(error);
+    },
+  );
 });
 
 describe("applyAgentExtension", () => {
-  const base = {
+  const base: AgentDefinition = {
     name: "review",
     description: "Reviews branches",
     model: "sonnet",
@@ -366,13 +433,12 @@ Extra.
   });
 
   it("rejects a merged definition with an unknown agent_provider", () => {
-    const content = `---
-agent_provider: claude, nope
----
+    const extension = {
+      prompt: "Extra.",
+      agent_provider: ["claude", "nope"],
+    } as unknown as AgentExtension;
 
-Extra.
-`;
-    expect(() => applyAgentExtension(base, parseAgentExtension(content))).toThrow(/agent_provider.*nope/);
+    expect(() => applyAgentExtension(base, extension)).toThrow(/agent_provider.*nope/);
   });
 
   it("extends the built-in review agent with the repo extension", () => {

@@ -19,6 +19,7 @@ import { buildTaskWorkspaceModel } from "./taskWorkspace";
 
 interface TaskScreenProps {
   task: TaskSummary;
+  e2eTaskSnapshotMarker?: string;
   terminalOutput: string;
   terminalStatus: TaskTerminalStatus;
   terminalCols: number | null;
@@ -36,6 +37,7 @@ interface TaskScreenProps {
 
 export function TaskScreen({
   task,
+  e2eTaskSnapshotMarker,
   terminalOutput,
   terminalStatus,
   terminalCols,
@@ -58,6 +60,10 @@ export function TaskScreen({
   const [draftInput, setDraftInput] = useState("");
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const isAgentTask = task.agentType === "agent";
+  const effectiveActivity =
+    task.activity === "working" || task.activity === "unread"
+      ? task.activity
+      : "idle";
   const isComposerDisabled = isAgentTask
     ? agentStatus === "connecting" || agentStatus === "error"
     : model.isComposerDisabled;
@@ -88,6 +94,16 @@ export function TaskScreen({
 
   return (
     <View style={styles.screen} testID={MOBILE_E2E_IDS.taskDetailScreen}>
+      {e2eTaskSnapshotMarker ? (
+        <Text
+          accessibilityLabel={e2eTaskSnapshotMarker}
+          pointerEvents="none"
+          style={styles.e2eTaskSnapshotMarker}
+          testID={MOBILE_E2E_IDS.taskSnapshotMarker}
+        >
+          {e2eTaskSnapshotMarker}
+        </Text>
+      ) : null}
       <View style={styles.terminalCanvas}>
         {task.agentType === "agent" ? (
           <AgentMessageView
@@ -132,7 +148,12 @@ export function TaskScreen({
         </Pressable>
         <View style={styles.titleChip}>
           <Text style={styles.stageLabel}>{model.stageLabel}</Text>
-          <Text numberOfLines={1} style={styles.title}>
+          <Text
+            accessibilityValue={{ text: effectiveActivity }}
+            numberOfLines={1}
+            style={styles.title}
+            testID={MOBILE_E2E_IDS.taskDetailTitle}
+          >
             {model.title}
           </Text>
         </View>
@@ -358,5 +379,15 @@ const styles = StyleSheet.create({
     color: "#0B1220",
     fontSize: 13,
     fontWeight: "700"
+  },
+  e2eTaskSnapshotMarker: {
+    color: "transparent",
+    fontSize: 1,
+    height: 1,
+    left: 0,
+    opacity: 0.01,
+    position: "absolute",
+    top: 0,
+    width: 1
   }
 });

@@ -11,18 +11,31 @@ interface TaskCardProps {
 
 export function TaskCard({ task, onPress }: TaskCardProps) {
   const model = buildTaskListItemModel(task);
+  const effectiveActivity =
+    task.activity === "working" || task.activity === "unread"
+      ? task.activity
+      : "idle";
+  const titleActivityStyle =
+    effectiveActivity === "unread"
+      ? styles.titleUnread
+      : effectiveActivity === "working"
+        ? styles.titleWorking
+        : styles.titleIdle;
 
   return (
     <Pressable
       accessibilityLabel={`${model.title}. ${model.stageLabel}. ${model.waitingPromptSnippet}`}
       accessibilityRole="button"
+      accessibilityValue={{ text: effectiveActivity }}
       accessible
       style={styles.card}
       testID={MOBILE_E2E_IDS.taskListItem(task.id)}
       onPress={onPress}
     >
       <View style={styles.row}>
-        <Text numberOfLines={2} style={styles.title}>{model.title}</Text>
+        <Text numberOfLines={2} style={[styles.title, titleActivityStyle]}>
+          {model.title}
+        </Text>
         <View style={styles.stagePill}>
           <Text style={styles.stageLabel}>{model.stageLabel}</Text>
         </View>
@@ -57,8 +70,19 @@ const styles = StyleSheet.create({
   title: {
     color: "#F3F7FF",
     flex: 1,
-    fontSize: 17,
-    fontWeight: "700"
+    fontSize: 17
+  },
+  titleIdle: {
+    fontStyle: "normal",
+    fontWeight: "normal"
+  },
+  titleUnread: {
+    fontStyle: "normal",
+    fontWeight: "bold"
+  },
+  titleWorking: {
+    fontStyle: "italic",
+    fontWeight: "normal"
   },
   stagePill: {
     alignSelf: "flex-start",

@@ -6,7 +6,7 @@ import { missingCloudSmokeEnv } from "./cloudSmokeEnv";
  * Real-cloud smoke for the desktop relay credential path.
  *
  * Verifies the deployed relay can authenticate a kanna-server style desktop
- * connection from a `users/{uid}/desktops` document that stores only the
+ * connection from the canonical `desktopCredentials/{desktopId}` document that stores only the
  * SHA-256 hash of the desktop secret. Requires the same env credentials as
  * cloud-prod-smoke (never committed):
  *
@@ -14,8 +14,7 @@ import { missingCloudSmokeEnv } from "./cloudSmokeEnv";
  *   KANNA_CLOUD_TEST_EMAIL, KANNA_CLOUD_TEST_PASSWORD
  *
  * Optional: KANNA_RELAY_SMOKE_URL (defaults to wss://relay.kanna.build).
- * The disposable desktop document is deleted in cleanup; Firestore rules let
- * the signed-in user delete their own desktops docs.
+ * The disposable credential is deleted in cleanup by its signed-in owner.
  */
 const missingEnv = missingCloudSmokeEnv(process.env);
 const relayUrl = process.env.KANNA_RELAY_SMOKE_URL?.trim() || "wss://relay.kanna.build";
@@ -56,8 +55,9 @@ async function createDesktopCredentialDoc(
   desktopId: string,
   desktopSecretHash: string,
 ): Promise<string> {
-  const response = await fetch(`${firestoreDocumentsUrl()}/users/${encodeURIComponent(uid)}/desktops`, {
-    method: "POST",
+  const path = `desktopCredentials/${desktopId.replaceAll("/", "_")}`;
+  const response = await fetch(`${firestoreDocumentsUrl()}/${path}`, {
+    method: "PATCH",
     headers: { Authorization: `Bearer ${idToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       fields: {
@@ -65,6 +65,7 @@ async function createDesktopCredentialDoc(
         displayName: { stringValue: "Relay Smoke Desktop" },
         desktopSecretHash: { stringValue: desktopSecretHash },
         revokedAt: { nullValue: null },
+        uid: { stringValue: uid },
         updatedAt: { stringValue: new Date().toISOString() },
       },
     }),
@@ -73,8 +74,6 @@ async function createDesktopCredentialDoc(
   if (!response.ok || typeof body?.name !== "string") {
     throw new Error(`failed to create relay smoke desktop doc: ${response.status} ${JSON.stringify(body)}`);
   }
-  const path = body.name.split("/documents/")[1];
-  if (!path) throw new Error(`unexpected Firestore document name: ${body.name}`);
   return path;
 }
 

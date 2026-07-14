@@ -87,7 +87,7 @@ For each branch in safe order:
 7. If no PR URL exists, ask before directly updating the target branch.
 8. After each merge, fetch/reset to the updated target and recheck any risk areas involving already-merged branches.
 9. For stacked PRs, retarget direct children onto the next live parent or target branch with `gh pr edit --base` when a PR URL exists. Do not delete a parent branch while an unmerged child still uses it.
-10. Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id. If it returns `exists: true`, do not delete the remote branch; report the dependent tasks instead. If MCP is unavailable, use `curl "http://127.0.0.1:48120/v1/tasks/<task_id>/dependent-tasks-exist"`. A blocker that has reached `pr` can already have dependent tasks stacked on its branch before the dependent has its own PR. If a manual merge request did not include a task id, leave the remote branch in place and report that cleanup needs a Kanna task id.
+10. Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id. If it returns `exists: true`, do not delete the remote branch; report the dependent tasks instead. If MCP is unavailable, use `kanna-cli task dependent-tasks-exist --task-id "<task_id>"`. A blocker that has reached `pr` can already have dependent tasks stacked on its branch before the dependent has its own PR. If a manual merge request did not include a task id, leave the remote branch in place and report that cleanup needs a Kanna task id.
 11. After the full detected stack has merged, delete the stack branches that are no longer needed.
 
 If `gh` CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.

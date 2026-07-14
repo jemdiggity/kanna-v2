@@ -1,3 +1,5 @@
+import type { AgentProvider } from "@kanna/agent-protocol";
+
 /**
  * Models offered by the agent UI's model picker, per provider.
  *
@@ -13,7 +15,7 @@ export interface AgentModelOption {
   label: string;
 }
 
-export const AGENT_MODELS: Record<string, AgentModelOption[]> = {
+export const AGENT_MODELS: Partial<Record<AgentProvider, AgentModelOption[]>> = {
   claude: [
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
@@ -28,6 +30,7 @@ export const AGENT_MODELS: Record<string, AgentModelOption[]> = {
   ],
 };
 
-export function agentModelsFor(provider: string | undefined): AgentModelOption[] {
-  return (provider && AGENT_MODELS[provider]) || AGENT_MODELS.claude;
+export function agentModelsFor(provider: AgentProvider | undefined): AgentModelOption[] {
+  if (provider === undefined) return AGENT_MODELS.claude ?? [];
+  return AGENT_MODELS[provider] ?? [];
 }

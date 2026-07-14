@@ -5,11 +5,12 @@ use super::prompt::{build_revision_resume_message, PromptContext};
 use super::provider::{AgentProvider, AgentSessionType};
 use super::types::{CreatedTask, PreparedSessionSpawn, PreparedStageTransition, PreparedTaskSpawn};
 use super::{
-    build_agent_command, build_kanna_preamble, build_spawn_env, build_stage_prompt,
-    prepare_advance_stage_for_api, prepare_merge_agent_for_api, prepare_rerun_stage_for_api,
-    prepare_revision_task_for_api, prepare_stage_completion_for_api, prepare_task_for_api,
-    read_default_agent_provider_setting, rerun_prepared_stage_for_api, resolve_agent_type,
-    spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api_recording_stage_run,
+    build_agent_command, build_kanna_preamble, build_prepared_session, build_spawn_env,
+    build_stage_prompt, prepare_advance_stage_for_api, prepare_merge_agent_for_api,
+    prepare_rerun_stage_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
+    prepare_task_for_api, read_default_agent_provider_setting, rerun_prepared_stage_for_api,
+    resolve_agent_type, spawn_prepared_stage_run_for_api,
+    spawn_prepared_task_for_api_recording_stage_run,
 };
 use crate::config::Config;
 use crate::daemon_client::DaemonClient;
@@ -22,8 +23,6 @@ use std::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
-static TEST_SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Serializes tests that point `CLAUDE_CONFIG_DIR` at a test-local session
 /// store: the variable is process-global, so concurrent writers would read
 /// each other's stores.
@@ -31,6 +30,7 @@ static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod core;
 mod revision;
+mod setup;
 mod spawn;
 mod stage;
 
@@ -82,10 +82,24 @@ fn test_config(label: &str) -> Config {
 }
 
 fn init_git_repo(label: &str) -> std::path::PathBuf {
+    init_git_repo_with_provider_fixtures(label, true)
+}
+
+fn init_git_repo_without_provider_fixtures(label: &str) -> std::path::PathBuf {
+    init_git_repo_with_provider_fixtures(label, false)
+}
+
+fn init_git_repo_with_provider_fixtures(
+    label: &str,
+    with_provider_fixtures: bool,
+) -> std::path::PathBuf {
     let repo_root = std::env::temp_dir().join(format!("kanna-task-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    if with_provider_fixtures {
+        install_test_provider_binaries(&repo_root);
+    }
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -107,7 +121,7 @@ fn init_git_repo(label: &str) -> std::path::PathBuf {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -119,6 +133,30 @@ fn init_git_repo(label: &str) -> std::path::PathBuf {
         .unwrap()
         .success());
     repo_root
+}
+
+fn install_test_provider_binaries(repo_root: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = repo_root.join(".kanna/test-provider-bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    for provider in AgentProvider::ALL {
+        let path = bin_dir.join(provider.executable());
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": {
+                "path": {
+                    "prepend": [".kanna/test-provider-bin"]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
 }
 
 /// Fake daemon for post dispatch into a live session: replies `Ok` to each
@@ -268,18 +306,48 @@ fn insert_finished_stage_run(db: &Db, task_id: &str, stage: &str, result: &str) 
     .unwrap();
 }
 
-fn ensure_test_sidecar(name: &str) -> (std::path::PathBuf, bool) {
+struct ScopedTestSidecar {
+    path: std::path::PathBuf,
+    remove_on_drop: bool,
+}
+
+impl ScopedTestSidecar {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for ScopedTestSidecar {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn ensure_test_sidecar(name: &str) -> ScopedTestSidecar {
+    use std::os::unix::fs::PermissionsExt;
+
     let sidecar_path = std::env::current_exe()
         .unwrap()
         .parent()
         .unwrap()
         .join(name);
     if sidecar_path.exists() {
-        return (sidecar_path, false);
+        return ScopedTestSidecar {
+            path: sidecar_path,
+            remove_on_drop: false,
+        };
     }
 
     std::fs::write(&sidecar_path, "#!/bin/sh\nexit 0\n").unwrap();
-    (sidecar_path, true)
+    let mut permissions = std::fs::metadata(&sidecar_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&sidecar_path, permissions).unwrap();
+    ScopedTestSidecar {
+        path: sidecar_path,
+        remove_on_drop: true,
+    }
 }
 
 fn init_git_repo_with_pipeline(

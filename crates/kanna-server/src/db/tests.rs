@@ -973,3 +973,27 @@ fn count_open_task_blockers_treats_pr_stage_with_pr_url_as_resolved() {
 
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn ui_snapshot_treats_null_pinned_as_unpinned() {
+    let path = Db::test_db_path("snapshot-null-pinned");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "publish this task",
+        Some("Publish Task"),
+        "in progress",
+        "2026-07-14T00:00:00Z",
+    )
+    .expect("task");
+    db.conn
+        .execute("UPDATE pipeline_item SET pinned = NULL WHERE id = ?", ["task-1"])
+        .expect("clear pinned");
+
+    let snapshot = db.ui_snapshot().expect("snapshot with nullable pinned");
+    assert_eq!(snapshot.entries[0].items[0].pinned, 0);
+
+    let _ = std::fs::remove_file(path);
+}

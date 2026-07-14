@@ -20,8 +20,8 @@ import {
   shouldShowTopBar
 } from "./appShell";
 import {
-  shouldCheckForOtaUpdateOnForeground,
-  shouldRefreshOnAppStateTransition
+  getForegroundTransitionAction,
+  shouldCheckForOtaUpdateOnForeground
 } from "./appLifecycle";
 import { createAppModel, resolveForceCloud, type AppModel } from "./appModel";
 import { AccountBadge } from "./components/AccountBadge";
@@ -70,9 +70,22 @@ export default function App() {
   );
   const lastOtaCheckAtRef = useRef<number | null>(null);
   const hasDownloadedUpdateRef = useRef(false);
-  const taskDetailVisible =
-    state.connectionState === "connected" &&
-    isTaskDetailVisible(state.selectedTaskId, state.activeView);
+  const selectedTask =
+    state.repoTasks.find((task) => task.id === state.selectedTaskId) ??
+    state.recentTasks.find((task) => task.id === state.selectedTaskId) ??
+    state.searchResults.find((task) => task.id === state.selectedTaskId) ??
+    null;
+  const e2eTaskSnapshotMarker =
+    process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1"
+      ? state.recentTasks
+          .map((task) => `${task.id}:${task.title ?? ""}`)
+          .join("\n")
+      : undefined;
+  const taskDetailVisible = isTaskDetailVisible(
+    state.connectionState,
+    selectedTask !== null,
+    state.activeView
+  );
 
   const runOtaUpdateCheck = useCallback(async (nowMs = Date.now()) => {
     lastOtaCheckAtRef.current = nowMs;
@@ -102,21 +115,19 @@ export default function App() {
   useEffect(() => {
     let previousState: AppStateStatus = AppState.currentState;
     const subscription = AppState.addEventListener("change", (nextState) => {
-      if (
-        hasDownloadedUpdateRef.current &&
-        previousState === "background" &&
-        nextState === "active"
-      ) {
+      const foregroundAction = getForegroundTransitionAction({
+        previousState,
+        nextState,
+        hasDownloadedUpdate: hasDownloadedUpdateRef.current
+      });
+      if (foregroundAction === "reload") {
         hasDownloadedUpdateRef.current = false;
         void reloadToApplyUpdate();
         previousState = nextState;
         return;
       }
 
-      if (
-        shouldRefreshOnAppStateTransition(previousState, nextState) &&
-        model.sessionStore.getState().connectionState === "connected"
-      ) {
+      if (foregroundAction === "refresh") {
         void controller.refresh();
       }
 
@@ -141,15 +152,11 @@ export default function App() {
     };
   }, [controller, model]);
 
-  const selectedTask =
-    state.repoTasks.find((task) => task.id === state.selectedTaskId) ??
-    state.recentTasks.find((task) => task.id === state.selectedTaskId) ??
-    state.searchResults.find((task) => task.id === state.selectedTaskId) ??
-    null;
   const mainContent = (() => {
     if (selectedTask && taskDetailVisible) {
       return (
         <TaskScreen
+          e2eTaskSnapshotMarker={e2eTaskSnapshotMarker}
           task={selectedTask}
           terminalErrorMessage={state.taskTerminalErrorMessage}
           terminalOutput={state.taskTerminalOutput}
@@ -274,11 +281,7 @@ export default function App() {
           </View>
         ) : null}
 
-        {shouldShowTopBar(
-          state.connectionState,
-          state.selectedTaskId,
-          state.activeView
-        ) ? (
+        {shouldShowTopBar(taskDetailVisible) ? (
           <View style={styles.topBar}>
             <Text numberOfLines={1} style={styles.topBarTitle}>
               {shellTitle}
@@ -292,11 +295,7 @@ export default function App() {
 
         {mainContent}
 
-        {shouldShowFloatingToolbar(
-          state.connectionState,
-          state.selectedTaskId,
-          state.activeView
-        ) ? (
+        {shouldShowFloatingToolbar(taskDetailVisible) ? (
           <FloatingToolbar
             activeTab={toolbarTab}
             utilityActions={navigator.utilityActions}

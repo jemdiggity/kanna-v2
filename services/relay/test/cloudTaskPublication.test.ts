@@ -1,0 +1,139 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  handleCloudTaskPublication,
+  planTaskReconciliation,
+  validateCloudTaskPublication,
+  type CloudTaskPublicationStore,
+} from "../src/cloudTaskPublication.js";
+
+function task(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    localRepoId: "repo-1",
+    ownerDesktopId: "desktop-1",
+    ownerLocalTaskId: "task-1",
+    title: "Publish from server",
+    promptSnippet: "Publish from server",
+    waitingPromptSnippet: "Ready for review",
+    displayName: null,
+    stage: "in progress",
+    activity: "idle",
+    status: "active",
+    repo: {
+      cloudRepoId: "repo-1",
+      name: "Kanna",
+      remoteUrl: "git@github.com:kanna/kanna.git",
+      remoteUrlHash: "remote-hash",
+      defaultBranch: "main",
+    },
+    branch: "task-task-1",
+    baseRef: "origin/main",
+    prNumber: null,
+    prUrl: null,
+    agent: { provider: "codex", type: "pty" },
+    transfer: {
+      state: "none",
+      transferId: null,
+      sourceDesktopId: null,
+      destinationDesktopId: null,
+    },
+    blockedByTaskIds: [],
+    createdAt: "2026-07-14 00:00:00",
+    updatedAt: "2026-07-14 00:01:00",
+    closedAt: null,
+    ...overrides,
+  };
+}
+
+function publication(tasks: unknown[] = [task()]): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    desktop: { displayName: "Studio Mac" },
+    tasks,
+  };
+}
+
+describe("cloud task publication validation", () => {
+  it("accepts and normalizes the existing mobile cloud snapshot schema", () => {
+    const parsed = validateCloudTaskPublication(publication(), "desktop-1");
+    expect(parsed.tasks[0]).toMatchObject({
+      ownerDesktopId: "desktop-1",
+      ownerLocalTaskId: "task-1",
+      activity: "idle",
+      waitingPromptSnippet: "Ready for review",
+      agent: { provider: "codex", type: "pty" },
+      repo: { remoteUrlHash: "remote-hash" },
+    });
+  });
+
+  it("normalizes missing waiting prompts and bounds them by Unicode scalar count", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ waitingPromptSnippet: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.waitingPromptSnippet).toBeNull();
+
+    const bounded = validateCloudTaskPublication(
+      publication([task({ waitingPromptSnippet: "🙂".repeat(240) })]),
+      "desktop-1",
+    );
+    expect(bounded.tasks[0]?.waitingPromptSnippet).toBe("🙂".repeat(240));
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({ waitingPromptSnippet: "🙂".repeat(241) })]),
+      "desktop-1",
+    )).toThrow(/waitingPromptSnippet/);
+  });
+
+  it("rejects malformed, cross-desktop, duplicate, and oversized publications", () => {
+    expect(() => validateCloudTaskPublication(null, "desktop-1")).toThrow(/object/);
+    expect(() => validateCloudTaskPublication(publication([
+      task({ ownerDesktopId: "desktop-2" }),
+    ]), "desktop-1")).toThrow(/ownerDesktopId/);
+    expect(() => validateCloudTaskPublication(publication([task(), task()]), "desktop-1"))
+      .toThrow(/duplicate/);
+    expect(() => validateCloudTaskPublication(publication([
+      task({ title: "x".repeat(513) }),
+    ]), "desktop-1")).toThrow(/title/);
+    expect(() => validateCloudTaskPublication(publication(
+      Array.from({ length: 251 }, (_, index) => task({ ownerLocalTaskId: `task-${index}` })),
+    ), "desktop-1")).toThrow(/at most 250/);
+  });
+});
+
+describe("cloud task publication reconciliation", () => {
+  it("sets current tasks, carries activity-only changes, and deletes stale and duplicate docs", () => {
+    const plan = planTaskReconciliation(
+      [
+        { id: "current", data: task({ activity: "idle" }) },
+        { id: "duplicate", data: task({ activity: "idle" }) },
+        { id: "stale", data: task({ ownerLocalTaskId: "task-stale" }) },
+      ],
+      validateCloudTaskPublication(publication([task({ activity: "working" })]), "desktop-1").tasks,
+      () => "new-auto-id",
+    );
+
+    expect(plan.sets).toEqual([{ id: "current", data: expect.objectContaining({ activity: "working" }) }]);
+    expect(plan.deleteIds).toEqual(["duplicate", "stale"]);
+  });
+
+  it("uses only the authenticated user and desktop subtree", async () => {
+    const reconcile = vi.fn(async () => undefined);
+    const store: CloudTaskPublicationStore = { reconcile };
+
+    await handleCloudTaskPublication({
+      userId: "user-owner",
+      desktopId: "desktop-1",
+      snapshot: publication(),
+      store,
+    });
+
+    expect(reconcile).toHaveBeenCalledWith({
+      userId: "user-owner",
+      desktopId: "desktop-1",
+      displayName: "Studio Mac",
+      tasks: expect.arrayContaining([
+        expect.objectContaining({ ownerDesktopId: "desktop-1", ownerLocalTaskId: "task-1" }),
+      ]),
+    });
+  });
+});

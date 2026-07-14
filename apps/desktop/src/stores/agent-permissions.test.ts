@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { AgentProvider } from "../types/kanna";
 import {
   getAgentPermissionFlags,
   normalizePermissionMode,
@@ -53,5 +54,11 @@ describe("getAgentPermissionFlags", () => {
     expect(getAgentPermissionFlags("antigravity", "default")).toEqual(["--dangerously-skip-permissions"]);
     expect(getAgentPermissionFlags("antigravity", "dontAsk")).toEqual(["--dangerously-skip-permissions"]);
     expect(getAgentPermissionFlags("antigravity", "acceptEdits")).toEqual([]);
+  });
+
+  it("rejects an unhandled provider instead of applying another provider's flags", () => {
+    expect(() => getAgentPermissionFlags("future-agent" as AgentProvider)).toThrow(
+      "Unhandled agent provider: future-agent",
+    );
   });
 });

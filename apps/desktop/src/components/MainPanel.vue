@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import type { PipelineItem } from "../types/kanna";
-import type { TaskUiItem } from "../stores/taskInitialization";
+import { computed, ref, watch, type Ref } from "vue";
+import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
+import type { AgentProvider, PipelineItem } from "../types/kanna";
+import type { TaskUiSlot } from "../types/taskUi";
 import { isBlockerResolved } from "../utils/blockerResolution";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
@@ -9,7 +10,7 @@ import TerminalTabs from "./TerminalTabs.vue";
 import CloudTerminalView from "./CloudTerminalView.vue";
 
 const props = defineProps<{
-  uiItem: TaskUiItem | null;
+  uiSlot: TaskUiSlot | null;
   repoPath?: string;
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
   recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
@@ -30,6 +31,23 @@ const emit = defineEmits<{
 
 const isMobile = __KANNA_MOBILE__;
 const COMMAND_HINT_STORAGE_KEY = "kanna:hide-command-hint";
+const item = computed(() => props.uiSlot?.task ?? null);
+const headerItem = computed(() => {
+  const slot = props.uiSlot;
+  if (!slot) return null;
+  const task = slot.task;
+  return {
+    display_name: task?.display_name ?? slot.draft.display_name,
+    issue_title: task?.issue_title ?? null,
+    prompt: task?.prompt ?? slot.draft.prompt,
+    stage: task?.stage ?? slot.draft.stage,
+    branch: task?.branch ?? null,
+    port_env: task?.port_env ?? null,
+    issue_number: task?.issue_number ?? null,
+    pr_number: task?.pr_number ?? null,
+    pr_url: task?.pr_url ?? null,
+  };
+});
 
 const isBlocked = computed(() => {
   if (!props.blockers || props.blockers.length === 0) return false;
@@ -37,9 +55,6 @@ const isBlocked = computed(() => {
 });
 const commandHintDismissed = ref(readCommandHintDismissed());
 const showCommandHint = computed(() => !commandHintDismissed.value);
-const item = computed(() => props.uiItem?.state === "ready" ? props.uiItem.task : null);
-const headerItem = computed(() => props.uiItem?.state === "ready" ? props.uiItem.task : props.uiItem);
-const terminalSessionId = computed(() => props.uiItem?.state === "ready" ? props.uiItem.taskId : null);
 
 // --- Agent CLI detection ---
 
@@ -56,35 +71,60 @@ const antigravity = ref<AgentCliStatus>({ installed: false });
 const copiedAgent = ref<string | null>(null);
 
 interface AgentSetupCard {
-  key: string;
+  key: AgentProvider;
   nameKey: string;
   sortName: string;
+  installCommand: string;
   status: AgentCliStatus;
 }
 
-const INSTALL_COMMANDS: Record<string, string> = {
-  claude: "curl -fsSL https://claude.ai/install.sh | bash",
-  copilot: "curl -fsSL https://gh.io/copilot-install | bash",
-  codex: "npm install -g @openai/codex",
-  opencode: "curl -fsSL https://opencode.ai/install | bash",
-  antigravity: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+interface AgentCardMetadata {
+  nameKey: string;
+  sortName: string;
+  installCommand: string;
+}
+
+const AGENT_CARD_METADATA: Record<AgentProvider, AgentCardMetadata> = {
+  claude: {
+    nameKey: "mainPanel.agentClaudeName",
+    sortName: "Claude Code",
+    installCommand: "curl -fsSL https://claude.ai/install.sh | bash",
+  },
+  copilot: {
+    nameKey: "mainPanel.agentCopilotName",
+    sortName: "GitHub Copilot",
+    installCommand: "curl -fsSL https://gh.io/copilot-install | bash",
+  },
+  codex: {
+    nameKey: "mainPanel.agentCodexName",
+    sortName: "OpenAI Codex",
+    installCommand: "npm install -g @openai/codex",
+  },
+  opencode: {
+    nameKey: "mainPanel.agentOpenCodeName",
+    sortName: "OpenCode",
+    installCommand: "curl -fsSL https://opencode.ai/install | bash",
+  },
+  antigravity: {
+    nameKey: "mainPanel.agentAntigravityName",
+    sortName: "Google Antigravity",
+    installCommand: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+  },
 };
 
-const AGENT_CLI_BINARIES: Record<string, string> = {
-  claude: "claude",
-  copilot: "copilot",
-  codex: "codex",
-  opencode: "opencode",
-  antigravity: "agy",
+const statusByProvider: Record<AgentProvider, Ref<AgentCliStatus>> = {
+  claude,
+  copilot,
+  codex,
+  opencode,
+  antigravity,
 };
 
-const agentCards = computed<AgentSetupCard[]>(() => [
-  { key: "antigravity", nameKey: "mainPanel.agentAntigravityName", sortName: "Google Antigravity", status: antigravity.value },
-  { key: "claude", nameKey: "mainPanel.agentClaudeName", sortName: "Claude Code", status: claude.value },
-  { key: "codex", nameKey: "mainPanel.agentCodexName", sortName: "OpenAI Codex", status: codex.value },
-  { key: "copilot", nameKey: "mainPanel.agentCopilotName", sortName: "GitHub Copilot", status: copilot.value },
-  { key: "opencode", nameKey: "mainPanel.agentOpenCodeName", sortName: "OpenCode", status: opencode.value },
-]);
+const agentCards = computed<AgentSetupCard[]>(() => AGENT_PROVIDERS.map((provider) => ({
+  key: provider,
+  ...AGENT_CARD_METADATA[provider],
+  status: statusByProvider[provider].value,
+})));
 
 const agentSetupGroups = computed(() => {
   const sorted = [...agentCards.value].sort((a, b) =>
@@ -120,8 +160,8 @@ async function readE2eCliVersion(name: string): Promise<string | undefined> {
   }
 }
 
-async function checkCli(name: string): Promise<AgentCliStatus> {
-  const binary = AGENT_CLI_BINARIES[name] ?? name;
+async function checkCli(provider: AgentProvider): Promise<AgentCliStatus> {
+  const binary = getAgentProviderSpec(provider).executable;
   const e2eVersionOutput = await readE2eCliVersion(binary);
   if (e2eVersionOutput !== undefined) {
     return { installed: true, version: parseSemver(e2eVersionOutput) };
@@ -141,24 +181,18 @@ async function checkCli(name: string): Promise<AgentCliStatus> {
     }) as string;
     return { installed: true, version: parseSemver(output) };
   } catch (error) {
-    console.debug(`[main-panel] failed to read CLI version for ${name}:`, error);
+    console.debug(`[main-panel] failed to read CLI version for ${provider}:`, error);
     return { installed: true };
   }
 }
 
 async function checkAllClis() {
-  const [c, p, x, o, a] = await Promise.all([
-    checkCli("claude"),
-    checkCli("copilot"),
-    checkCli("codex"),
-    checkCli("opencode"),
-    checkCli("antigravity"),
-  ]);
-  claude.value = c;
-  copilot.value = p;
-  codex.value = x;
-  opencode.value = o;
-  antigravity.value = a;
+  const statuses = await Promise.all(
+    AGENT_PROVIDERS.map(async (provider) => [provider, await checkCli(provider)] as const),
+  );
+  for (const [provider, status] of statuses) {
+    statusByProvider[provider].value = status;
+  }
 }
 
 watch(() => props.hasRepos, (has) => {
@@ -167,9 +201,8 @@ watch(() => props.hasRepos, (has) => {
 
 defineExpose({ recheckClis: checkAllClis });
 
-async function copyCommand(agent: string) {
-  const cmd = INSTALL_COMMANDS[agent];
-  if (!cmd) return;
+async function copyCommand(agent: AgentProvider) {
+  const cmd = AGENT_CARD_METADATA[agent].installCommand;
   await navigator.clipboard.writeText(cmd);
   copiedAgent.value = agent;
   setTimeout(() => { copiedAgent.value = null; }, 1500);
@@ -190,13 +223,13 @@ function dismissCommandHint() {
 
 <template>
   <main class="main-panel">
-    <template v-if="uiItem">
+    <template v-if="uiSlot">
       <div v-if="isMobile" class="mobile-back-bar" @click="emit('back')">
         <span class="mobile-back-arrow">&larr;</span>
         <span>Tasks</span>
       </div>
       <TaskHeader v-if="!maximized && headerItem" :item="headerItem" />
-      <template v-if="uiItem.state === 'initializing'">
+      <template v-if="uiSlot.state !== 'ready' || !item">
         <div class="setup-placeholder">
           <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
         </div>
@@ -231,8 +264,7 @@ function dismissCommandHint() {
       </template>
       <template v-else>
         <TerminalTabs
-          v-if="item && terminalSessionId"
-          :session-id="terminalSessionId"
+          :session-id="item.id"
           :agent-type="item.agent_type || 'pty'"
           :agent-provider="item.agent_provider"
           :repo-path="repoPath"
@@ -262,7 +294,7 @@ function dismissCommandHint() {
                   </span>
                 </div>
                 <div v-if="!agent.status.installed" class="install-block">
-                  <code class="install-cmd">{{ INSTALL_COMMANDS[agent.key] }}</code>
+                  <code class="install-cmd">{{ agent.installCommand }}</code>
                   <button
                     class="copy-btn"
                     :title="copiedAgent === agent.key ? $t('mainPanel.agentCopied') : 'Copy'"

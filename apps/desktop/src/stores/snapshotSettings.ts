@@ -1,5 +1,6 @@
 import type { StoreState } from "./state";
 import { normalizeAppThemePreference, normalizeCodeThemePreference } from "../theme/theme";
+import { normalizeMarkdownPreviewMode } from "./markdownPreviewMode";
 
 export function applySnapshotSettingsToState(
   state: Pick<
@@ -12,6 +13,7 @@ export function applySnapshotSettingsToState(
     | "appTheme"
     | "codeTheme"
     | "agentMessageAppearance"
+    | "markdownPreviewMode"
   >,
   settings: Record<string, string>,
 ): void {
@@ -31,4 +33,5 @@ export function applySnapshotSettingsToState(
     agentMessageAppearance === "log" || agentMessageAppearance === "terminal"
       ? agentMessageAppearance
       : "chat";
+  state.markdownPreviewMode.value = normalizeMarkdownPreviewMode(settings.markdownPreviewMode);
 }

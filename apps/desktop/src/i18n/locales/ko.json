@@ -71,6 +71,7 @@
     "nextRepo": "다음 리포지토리",
     "filePicker": "파일 검색",
     "filePreview": "파일 미리보기",
+    "openLatestAgentFile": "최신 에이전트 파일 열기",
     "commandPalette": "명령 팔레트",
     "viewDiff": "차이 보기",
     "commitGraph": "커밋 그래프",
@@ -118,8 +119,6 @@
     "newTaskTooltip": "새 작업 (⌘N)",
     "removeRepoTooltip": "저장소 삭제",
     "remoteTaskTooltip": "원격 작업",
-    "awaitingVerdictShort": "검토",
-    "awaitingVerdictBadge": "{stage} 판정 대기 중",
     "detachSubtask": "상위 작업 해제",
     "sectionMergeQueue": "머지 큐",
     "sectionPullRequests": "풀 리퀘스트",
@@ -150,6 +149,7 @@
     "prAgentFailed": "PR 에이전트 시작 실패",
     "closeSourceTaskFailed": "원본 작업 닫기 실패",
     "mergeAgentFailed": "머지 에이전트 시작 실패",
+    "stagePostRunning": "스테이지 포스트가 아직 실행 중입니다. 완료될 때까지 기다려 주세요",
     "blockedWorktreeFailed": "차단된 작업의 워크트리 생성 실패",
     "blockTaskFailed": "작업 차단 실패",
     "selectRepoFirst": "먼저 저장소를 선택하세요",
@@ -164,7 +164,9 @@
     "taskAtFinalStage": "작업이 마지막 단계에 있습니다",
     "stageTeardownFailed": "단계 종료 스크립트 실패",
     "stageSetupFailed": "단계 설정 스크립트 실패",
-    "stageNotFound": "파이프라인에서 단계를 찾을 수 없습니다"
+    "stageNotFound": "파이프라인에서 단계를 찾을 수 없습니다",
+    "latestAgentFileHint": "팁: ⌘L을 눌러 에이전트가 언급한 최신 파일을 여세요.",
+    "noTerminalFileLink": "이 터미널에서 파일 링크를 찾을 수 없습니다."
   },
   "tags": {
     "inProgress": "진행 중",
@@ -257,6 +259,7 @@
     "pendingCommentCount": "보류 중인 댓글 {count}개",
     "requestChanges": "변경 요청",
     "approve": "승인",
+    "approveMerge": "승인 후 머지",
     "summaryPlaceholder": "선택 요약...",
     "sendRequestChanges": "요청 보내기",
     "shortcutClose": "닫기"

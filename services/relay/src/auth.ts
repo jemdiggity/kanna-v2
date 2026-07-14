@@ -54,6 +54,26 @@ export interface DesktopPrincipal {
   desktopId: string;
 }
 
+export type ServerAuthProof =
+  | { kind: "desktop"; desktopId: string; desktopSecret: string }
+  | { kind: "device"; desktopId: string; deviceToken: string };
+
+export async function revalidateServerAuth(
+  proof: ServerAuthProof,
+  expectedUserId: string,
+  expectedDesktopId: string,
+): Promise<boolean> {
+  if (proof.desktopId !== expectedDesktopId) return false;
+  if (proof.kind === "desktop") {
+    const principal = await verifyDesktopCredentials(proof.desktopId, proof.desktopSecret);
+    return principal?.userId === expectedUserId && principal.desktopId === expectedDesktopId;
+  }
+  // Legacy device tokens identify an account, not a specific desktop. They
+  // remain valid for the older relay command path, but cannot safely authorize
+  // writes to a desktop-owned Firestore subtree.
+  return false;
+}
+
 export function hashDesktopSecret(desktopSecret: string): string {
   return createHash("sha256").update(desktopSecret, "utf8").digest("hex");
 }
@@ -77,6 +97,22 @@ export async function verifyDesktopCredentials(
 ): Promise<DesktopPrincipal | null> {
   try {
     const { db } = getFirebaseServices();
+    const credentialDoc = await db
+      .collection("desktopCredentials")
+      .doc(desktopDocumentId(desktopId))
+      .get();
+    if (credentialDoc.exists) {
+      const data = credentialDoc.data();
+      if (data?.desktopId !== desktopId
+        || data?.revokedAt
+        || typeof data?.uid !== "string"
+        || !desktopSecretMatchesHash(desktopSecret, data?.desktopSecretHash)) {
+        console.warn("[auth] Canonical desktop credentials rejected:", desktopId);
+        return null;
+      }
+      return { userId: data.uid, desktopId };
+    }
+
     const snapshot = await db
       .collectionGroup("desktops")
       .where("desktopId", "==", desktopId)
@@ -88,6 +124,7 @@ export async function verifyDesktopCredentials(
       return null;
     }
 
+    const matchingPrincipals: DesktopPrincipal[] = [];
     for (const doc of snapshot.docs) {
       const data = doc.data();
       if (data.revokedAt) {
@@ -104,10 +141,17 @@ export async function verifyDesktopCredentials(
         continue;
       }
 
-      return {
+      matchingPrincipals.push({
         userId: userDoc.id,
         desktopId,
-      };
+      });
+    }
+
+    const userIds = new Set(matchingPrincipals.map((principal) => principal.userId));
+    if (userIds.size === 1) return matchingPrincipals[0];
+    if (userIds.size > 1) {
+      console.warn("[auth] Ambiguous legacy desktop ownership:", desktopId);
+      return null;
     }
 
     console.warn("[auth] Desktop credentials rejected:", desktopId);
@@ -116,6 +160,13 @@ export async function verifyDesktopCredentials(
     console.error("[auth] Failed to verify desktop credentials:", err);
     return null;
   }
+}
+
+function desktopDocumentId(desktopId: string): string {
+  if (desktopId === "." || desktopId === "..") {
+    return `desktop-${Buffer.from(desktopId).toString("hex")}`;
+  }
+  return desktopId.replaceAll("/", "_");
 }
 
 /**

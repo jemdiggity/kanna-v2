@@ -20,6 +20,10 @@ import {
   type WindowWorkspaceController,
 } from "../windowWorkspace";
 import type { useKannaStore } from "../stores/kanna";
+import {
+  MARKDOWN_PREVIEW_MODE_SETTING_KEY,
+  type MarkdownPreviewMode,
+} from "../stores/markdownPreviewMode";
 import type { PendingReviewComment } from "../utils/reviewComments";
 
 export type DiffScope = "branch" | "working";
@@ -41,7 +45,6 @@ export interface DiffViewState {
 interface FilePreviewRecallState {
   filePath: string;
   initialLine?: number;
-  markdownMode?: "raw" | "rendered";
 }
 
 interface ModalShortcutContextEntry {
@@ -167,7 +170,6 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     filePreviewRecallStates[key] = {
       filePath,
       initialLine,
-      markdownMode: filePreviewRecallStates[key]?.markdownMode ?? "raw",
     };
   }
 
@@ -176,17 +178,41 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     return key ? filePreviewRecallStates[key] : undefined;
   }
 
-  const currentPreviewMarkdownMode = computed<"raw" | "rendered">(() => {
-    const key = currentFileFlowKey.value;
-    return (key ? filePreviewRecallStates[key]?.markdownMode : undefined) ?? "raw";
-  });
+  const currentPreviewMarkdownMode = computed<MarkdownPreviewMode>(
+    () => store.markdownPreviewMode,
+  );
 
-  function updateCurrentPreviewMarkdownMode(mode: "raw" | "rendered") {
-    const key = buildCurrentFileFlowKey();
-    if (!key) return;
-    const current = filePreviewRecallStates[key];
-    if (!current) return;
-    filePreviewRecallStates[key] = { ...current, markdownMode: mode };
+  let markdownPreviewModeSaveInFlight = false;
+  let pendingMarkdownPreviewMode: MarkdownPreviewMode | undefined;
+
+  async function drainMarkdownPreviewModeSaves() {
+    if (markdownPreviewModeSaveInFlight) return;
+    markdownPreviewModeSaveInFlight = true;
+
+    try {
+      while (pendingMarkdownPreviewMode !== undefined) {
+        const mode = pendingMarkdownPreviewMode;
+        pendingMarkdownPreviewMode = undefined;
+
+        try {
+          await store.savePreference(MARKDOWN_PREVIEW_MODE_SETTING_KEY, mode);
+        } catch (error: unknown) {
+          console.error("[App] failed to persist Markdown preview mode:", error);
+        }
+
+        if (pendingMarkdownPreviewMode !== undefined) {
+          store.markdownPreviewMode = pendingMarkdownPreviewMode;
+        }
+      }
+    } finally {
+      markdownPreviewModeSaveInFlight = false;
+    }
+  }
+
+  function updateCurrentPreviewMarkdownMode(mode: MarkdownPreviewMode) {
+    store.markdownPreviewMode = mode;
+    pendingMarkdownPreviewMode = mode;
+    void drainMarkdownPreviewModeSaves();
   }
 
   function clampSidebarWidth(width: number): number {

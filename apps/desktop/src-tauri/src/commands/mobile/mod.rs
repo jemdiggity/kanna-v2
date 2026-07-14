@@ -350,7 +350,7 @@ pub async fn create_mobile_pairing_session(
 }
 
 /// Expose the desktop's cloud credential to the frontend so a signed-in user
-/// can register this desktop in Firestore (`users/{uid}/desktops`). Only the
+/// can register this desktop in Firestore (`desktopCredentials/{desktopId}`). Only the
 /// SHA-256 hash of the secret crosses into the webview; the relay compares
 /// the hash, so the plain secret never leaves the Rust side.
 #[tauri::command]
@@ -817,6 +817,7 @@ mod tests {
         stopped_snapshot, MobileServerManager, MobileServerState, MobileServerStatus,
     };
     use std::ffi::CString;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::process::{Command as StdCommand, Stdio};
     use std::sync::Mutex;
@@ -1171,7 +1172,8 @@ mod tests {
             .post(format!("{}/v1/tasks", server_base_url(port)))
             .json(&serde_json::json!({
                 "repoId": "repo-1",
-                "prompt": "Use intended DB default provider"
+                "prompt": "Create through the replacement server using the intended DB default provider",
+                "pipelineName": TEST_DEFAULT_PROVIDER_PIPELINE
             }))
             .send()
             .await
@@ -1879,11 +1881,46 @@ mod tests {
         })
     }
 
+    const TEST_DEFAULT_PROVIDER_PIPELINE: &str = "test-default-provider";
+
     fn init_test_git_repo(repo_root: &std::path::Path) {
         let _ = std::fs::remove_dir_all(repo_root);
-        std::fs::create_dir_all(repo_root).expect("repo directory should be created");
+        let pipeline_dir = repo_root.join(".kanna/pipelines");
+        let fixture_bin = repo_root.join(".kanna/fixture-bin");
+        std::fs::create_dir_all(&pipeline_dir).expect("pipeline directory should be created");
+        std::fs::create_dir_all(&fixture_bin).expect("fixture bin directory should be created");
         std::fs::write(repo_root.join("README.md"), "test repo")
             .expect("repo seed file should be written");
+        std::fs::write(
+            repo_root.join(".kanna/config.json"),
+            serde_json::json!({
+                "workspace": {
+                    "path": {
+                        "prepend": [".kanna/fixture-bin"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("repo config should be written");
+        std::fs::write(
+            pipeline_dir.join(format!("{TEST_DEFAULT_PROVIDER_PIPELINE}.json")),
+            serde_json::json!({
+                "name": TEST_DEFAULT_PROVIDER_PIPELINE,
+                "stages": [{
+                    "name": "in progress",
+                    "prompt": "$TASK_PROMPT",
+                    "policy": { "transition": "manual" }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("test pipeline should be written");
+        let copilot_fixture = fixture_bin.join("copilot");
+        std::fs::write(&copilot_fixture, "#!/bin/sh\nexit 0\n")
+            .expect("copilot fixture should be written");
+        std::fs::set_permissions(&copilot_fixture, std::fs::Permissions::from_mode(0o755))
+            .expect("copilot fixture should be executable");
         assert!(StdCommand::new("git")
             .arg("init")
             .arg("-b")
@@ -1905,7 +1942,7 @@ mod tests {
             .expect("git config user.name should run")
             .success());
         assert!(StdCommand::new("git")
-            .args(["add", "README.md"])
+            .args(["add", "."])
             .current_dir(repo_root)
             .status()
             .expect("git add should run")

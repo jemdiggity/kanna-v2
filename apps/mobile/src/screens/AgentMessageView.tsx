@@ -31,10 +31,14 @@ export function AgentMessageView({
   const lastStats = [...events]
     .reverse()
     .find((item) => item.event.type === "turn_completed")?.event;
+  const isStreamReady = status === "live" || status === "idle";
 
   return (
     <View style={styles.shell} testID={MOBILE_E2E_IDS.agentMessageView}>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        testID={isStreamReady ? MOBILE_E2E_IDS.agentMessageReady : undefined}
+      >
         {visibleEvents.map((item) => (
           <View key={item.seq} style={styles.row}>
             {renderEvent(item.event, onResolvePermission)}

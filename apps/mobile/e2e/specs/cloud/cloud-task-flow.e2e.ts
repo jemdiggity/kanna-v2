@@ -32,6 +32,8 @@ interface CloudUi {
   getPasswordInput(): Promise<CloudElement>;
   getSignInButton(): Promise<CloudElement>;
   getAgentMessageView(): Promise<CloudElement>;
+  getAgentMessageReady(): Promise<CloudElement>;
+  getTaskDetailScreen(): Promise<CloudElement>;
   getTerminalOverlay(): Promise<CloudElement>;
   getTaskRows(): Promise<CloudElement[]>;
   pause(ms: number): Promise<unknown>;
@@ -70,6 +72,12 @@ function createCloudUi(driver: Browser): CloudUi {
     },
     async getAgentMessageView() {
       return driver.$(selectors.agentMessageView);
+    },
+    async getAgentMessageReady() {
+      return driver.$(selectors.agentMessageReady);
+    },
+    async getTaskDetailScreen() {
+      return driver.$(selectors.taskDetailScreen);
     },
     async getTerminalOverlay() {
       return driver.$(selectors.terminalOverlay);

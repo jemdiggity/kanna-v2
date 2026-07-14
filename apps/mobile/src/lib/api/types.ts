@@ -59,11 +59,28 @@ export interface CreateTaskResponse {
   title: string;
   stage: string;
   agentType?: "pty" | "agent" | null;
+  /** Client-resolved owner route when taskId is mobile-canonical. */
+  ownerDesktopId?: string;
+  ownerLocalRepoId?: string;
+  ownerLocalTaskId?: string;
 }
 
 export interface TaskActionResponse {
   taskId: string;
   followTask?: boolean;
+  /** Client-resolved owner route when taskId is mobile-canonical. */
+  ownerDesktopId?: string;
+  ownerLocalRepoId?: string;
+  ownerLocalTaskId?: string;
+  /** Exact client-resolved metadata for a newly created action task. */
+  task?: TaskSummary;
+}
+
+export type TaskActivity = "idle" | "working" | "unread";
+
+export interface TaskActivityResponse {
+  taskId: string;
+  activity: TaskActivity | null;
 }
 
 export interface TaskSummary {
@@ -75,4 +92,9 @@ export interface TaskSummary {
   waitingPromptSnippet?: string | null;
   agentProvider?: string | null;
   agentType?: "pty" | "agent" | null;
+  ownerDesktopId?: string;
+  ownerLocalRepoId?: string;
+  ownerLocalTaskId?: string;
+  ownerOnline?: boolean;
+  activity?: TaskActivity | null;
 }

@@ -35,6 +35,7 @@ fn prepare_merge_agent_creates_in_progress_task() {
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -56,7 +57,7 @@ fn prepare_merge_agent_creates_in_progress_task() {
         .unwrap()
         .success());
     assert!(Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -89,10 +90,11 @@ fn prepare_merge_agent_creates_in_progress_task() {
     assert_eq!(prepared.created_task.repo_id, "repo-1");
     assert_eq!(prepared.created_task.stage, "in progress");
     assert_eq!(prepared.created_task.title, "Merge Master");
+    assert_eq!(prepared.created_task.agent_type, "pty");
     assert_eq!(prepared.stage_agent.as_deref(), Some("merge"));
     let runtime_prompt = match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => args.join(" "),
-        PreparedSessionSpawn::Agent { prompt, .. } => prompt,
+        PreparedSessionSpawn::Agent { .. } => panic!("merge master should use a PTY session"),
     };
     assert!(runtime_prompt.contains("You are the merge master."));
     assert!(!runtime_prompt.contains("Implement the requested task in this worktree."));
@@ -111,7 +113,7 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
         serde_json::json!({
             "name": "default",
             "environments": {
-                "dev": { "setup": ["echo setup-rerun"] }
+                "dev": { "setup": ["printf 'setup rerun' > setup-rerun.marker"] }
             },
             "stages": [
                 {
@@ -192,7 +194,7 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     match &prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
-            assert!(command.contains("echo setup-rerun"));
+            assert!(command.contains("setup-rerun.marker"));
             assert!(command.contains("Commit agent."));
             assert!(command.contains(
                 "Commit Fix rerun after {\"status\":\"success\",\"summary\":\"implemented\"}"
@@ -299,6 +301,7 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
         "---\nagent_provider: claude\n---\nLive agent: $TASK_PROMPT",
     )
     .unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -433,6 +436,7 @@ fn prepare_advance_stage_applies_repo_agent_extension() {
         "Repo extension: run the full unit and integration suites.",
     )
     .unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -548,6 +552,7 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
         "---\nagent_provider: claude\n---\nReview $TASK_PROMPT",
     )
     .unwrap();
+    install_test_provider_binaries(&repo_root);
     assert!(Command::new("git")
         .arg("init")
         .arg("-b")
@@ -958,6 +963,75 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
 }
 
 #[tokio::test]
+async fn prompt_only_stage_provider_overrides_source_task_provider_in_daemon_spawn() {
+    let repo_root = init_git_repo("prompt-only-stage-provider");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        serde_json::json!({
+            "stages": [
+                {
+                    "name": "in progress",
+                    "prompt": "$TASK_PROMPT",
+                    "transition": "manual"
+                },
+                {
+                    "name": "review",
+                    "prompt": "Review $TASK_PROMPT",
+                    "agent_provider": "codex",
+                    "transition": "manual"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = test_config("prompt-only-stage-provider");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        PreparedStageTransition::Post(_) => panic!("expected stage swap, got post dispatch"),
+        PreparedStageTransition::Close { .. } => panic!("expected stage swap, got close"),
+    };
+    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *run,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+
+    let spawn = commands
+        .iter()
+        .find(|command| {
+            matches!(
+                command,
+                kanna_daemon::protocol::Command::Spawn { .. }
+                    | kanna_daemon::protocol::Command::SpawnAgent { .. }
+            )
+        })
+        .expect("stage transition daemon spawn");
+    match spawn {
+        kanna_daemon::protocol::Command::Spawn { agent_provider, .. } => {
+            assert_eq!(*agent_provider, Some(DaemonAgentProvider::Codex));
+        }
+        kanna_daemon::protocol::Command::SpawnAgent { params, .. } => {
+            assert_eq!(params.agent_provider, DaemonAgentProvider::Codex);
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn stage_transition_tears_down_departed_stage_environment_before_repo_teardown() {
     let repo_root = init_git_repo("advance-stage-env-teardown");
     std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
@@ -965,7 +1039,12 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
     std::fs::write(
         repo_root.join(".kanna/config.json"),
         serde_json::json!({
-            "teardown": ["echo repo-teardown"]
+            "teardown": ["echo repo-teardown"],
+            "workspace": {
+                "path": {
+                    "prepend": [".kanna/test-provider-bin"]
+                }
+            }
         })
         .to_string(),
     )
@@ -1120,6 +1199,269 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
         }
         other => panic!("expected teardown spawn, got {other:?}"),
     }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn headless_rerun_runs_environment_setup_after_killing_previous_session() {
+    let repo_root = init_git_repo("headless-rerun-setup-order");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        serde_json::json!({
+            "environments": {
+                "dev": {
+                    "setup": [
+                        "test -f kill-observed && printf setup > headless-rerun-setup.marker"
+                    ]
+                }
+            },
+            "stages": [{
+                "name": "in progress",
+                "prompt": "$TASK_PROMPT",
+                "agent_provider": "codex",
+                "environment": "dev",
+                "transition": "manual"
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let worktree = repo_root.join(".kanna-worktrees/task-source");
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    assert!(Command::new("git")
+        .args(["branch", "task-source", "main"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("headless-rerun-setup-order");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Rerun after setup",
+        Some("Rerun after setup"),
+        "in progress",
+        "2026-07-11 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "codex")
+        .unwrap();
+    Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE pipeline_item SET agent_type = 'agent' WHERE id = 'task-1'",
+            [],
+        )
+        .unwrap();
+
+    let prepared = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
+    assert!(
+        !worktree.join("headless-rerun-setup.marker").exists(),
+        "headless setup must stay deferred while the previous session is live"
+    );
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_worktree = worktree.clone();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = match &command {
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    assert!(!daemon_worktree.join("headless-rerun-setup.marker").exists());
+                    std::fs::write(daemon_worktree.join("kill-observed"), "killed").unwrap();
+                    kanna_daemon::protocol::Event::Ok
+                }
+                kanna_daemon::protocol::Command::SpawnAgent { params, session_id } => {
+                    assert!(daemon_worktree
+                        .join("headless-rerun-setup.marker")
+                        .is_file());
+                    assert!(params.executable.is_some());
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    rerun_prepared_stage_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+    assert!(matches!(
+        commands.as_slice(),
+        [
+            kanna_daemon::protocol::Command::Kill { .. },
+            kanna_daemon::protocol::Command::SpawnAgent { .. }
+        ]
+    ));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn headless_rerun_setup_failure_records_durable_diagnostics_after_kill() {
+    let repo_root = init_git_repo("headless-rerun-setup-failure");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        serde_json::json!({
+            "environments": {
+                "dev": {
+                    "setup": ["printf setup-failed && exit 37"]
+                }
+            },
+            "stages": [{
+                "name": "in progress",
+                "prompt": "$TASK_PROMPT",
+                "agent_provider": "codex",
+                "environment": "dev",
+                "transition": "manual"
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let worktree = repo_root.join(".kanna-worktrees/task-source");
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    assert!(Command::new("git")
+        .args(["branch", "task-source", "main"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("headless-rerun-setup-failure");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Rerun with failing setup",
+        Some("Rerun with failing setup"),
+        "in progress",
+        "2026-07-11 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "codex")
+        .unwrap();
+    Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE pipeline_item SET agent_type = 'agent' WHERE id = 'task-1'",
+            [],
+        )
+        .unwrap();
+    let prepared = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(
+            command,
+            kanna_daemon::protocol::Command::Kill { .. }
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        command
+    });
+
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = rerun_prepared_stage_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .expect_err("failing deferred setup must reject the rerun");
+    fake_daemon.await.unwrap();
+
+    assert!(error.contains("exit status: 37"), "error: {error}");
+    assert!(error.contains("setup-failed"), "error: {error}");
+    let failed_run = db
+        .latest_stage_run("task-1")
+        .unwrap()
+        .expect("rerun setup failure should be durable");
+    assert_eq!(failed_run.status, "failed");
+    assert_eq!(failed_run.kind, "main");
+    let result = failed_run.result.unwrap();
+    assert!(result.contains("exit status: 37"), "result: {result}");
+    assert!(result.contains("setup-failed"), "result: {result}");
+    assert_eq!(failed_run.feedback.as_deref(), Some("stage rerun failed"));
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("unread")
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -1363,6 +1705,19 @@ fn write_post_pipeline_fixtures(repo_root: &std::path::Path) {
 fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
     assert!(Command::new("git")
         .args(["branch", "task-source"])
+        .current_dir(repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let source_worktree = repo_root.join(".kanna-worktrees/task-source");
+    std::fs::create_dir_all(source_worktree.parent().unwrap()).unwrap();
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            source_worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
         .current_dir(repo_root)
         .status()
         .unwrap()
@@ -1829,6 +2184,117 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
     assert_eq!(post_run.stage, "commit");
     assert_eq!(post_run.status, "running");
     assert_eq!(post_run.agent.as_deref(), Some("commit"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_daemon_spawn() {
+    let repo_root = init_git_repo("prompt-only-post-provider");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        serde_json::json!({
+            "stages": [
+                {
+                    "name": "in progress",
+                    "prompt": "$TASK_PROMPT",
+                    "transition": "manual",
+                    "post": {
+                        "name": "commit",
+                        "prompt": "Commit $TASK_PROMPT",
+                        "agent_provider": "codex"
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = test_config("prompt-only-post-provider");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+    let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = match &command {
+                kanna_daemon::protocol::Command::Input { .. }
+                | kanna_daemon::protocol::Command::Kill { .. } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn { session_id, .. }
+                | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            let done = matches!(
+                &command,
+                kanna_daemon::protocol::Command::Spawn { .. }
+                    | kanna_daemon::protocol::Command::SpawnAgent { .. }
+            );
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if done {
+                break;
+            }
+        }
+        commands
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+
+    let spawn = commands
+        .iter()
+        .find(|command| {
+            matches!(
+                command,
+                kanna_daemon::protocol::Command::Spawn { .. }
+                    | kanna_daemon::protocol::Command::SpawnAgent { .. }
+            )
+        })
+        .expect("post fallback daemon spawn");
+    match spawn {
+        kanna_daemon::protocol::Command::Spawn { agent_provider, .. } => {
+            assert_eq!(*agent_provider, Some(DaemonAgentProvider::Codex));
+        }
+        kanna_daemon::protocol::Command::SpawnAgent { params, .. } => {
+            assert_eq!(params.agent_provider, DaemonAgentProvider::Codex);
+        }
+        _ => unreachable!(),
+    }
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

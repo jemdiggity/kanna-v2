@@ -1,10 +1,11 @@
 import type {
   DesktopMode,
   DesktopSummary,
+  TaskActivity,
   TaskSummary,
   RepoSummary,
 } from "../lib/api/types";
-import type { FrameAgentEvent } from "@kanna/agent-protocol";
+import type { AgentProvider, FrameAgentEvent } from "@kanna/agent-protocol";
 import type { MobileAuthState } from "../lib/firebase/auth";
 import type {
   PersistedSessionContext,
@@ -35,12 +36,7 @@ export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
 export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type AuthState = MobileAuthState;
-export type ComposerAgentProvider =
-  | "claude"
-  | "copilot"
-  | "codex"
-  | "opencode"
-  | "antigravity";
+export type ComposerAgentProvider = AgentProvider;
 
 export interface SessionState {
   connectionMode: DesktopMode | null;
@@ -104,7 +100,9 @@ export interface SessionStore {
   setRepoTasks(tasks: TaskSummary[]): void;
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
+  setTaskActivity(taskId: string, activity: TaskActivity): void;
   setSelectedTask(taskId: string | null): void;
+  retagTaskIdentity(previousTaskId: string, nextTaskId: string): void;
   setActiveView(view: MobileView): void;
   setPairingCode(code: string | null): void;
   setComposerState(isOpen: boolean, prompt: string): void;
@@ -188,6 +186,7 @@ export function createSessionStore(): SessionStore {
         task.repoId === other.repoId &&
         task.title === other.title &&
         task.stage === other.stage &&
+        (task.activity ?? "idle") === (other.activity ?? "idle") &&
         (task.waitingPromptSnippet ?? null) ===
           (other.waitingPromptSnippet ?? null) &&
         (task.agentType ?? null) === (other.agentType ?? null)
@@ -381,6 +380,24 @@ export function createSessionStore(): SessionStore {
       };
       publish();
     },
+    setTaskActivity(taskId, activity) {
+      let changed = false;
+      const updateTasks = (tasks: readonly TaskSummary[]): TaskSummary[] =>
+        tasks.map((task) => {
+          if (task.id !== taskId || (task.activity ?? "idle") === activity) {
+            return task;
+          }
+          changed = true;
+          return { ...task, activity };
+        });
+      const repoTasks = updateTasks(state.repoTasks);
+      const recentTasks = updateTasks(state.recentTasks);
+      const searchResults = updateTasks(state.searchResults);
+      if (!changed) return;
+
+      state = { ...state, repoTasks, recentTasks, searchResults };
+      publish();
+    },
     setSelectedTask(selectedTaskId) {
       state = {
         ...state,
@@ -405,6 +422,35 @@ export function createSessionStore(): SessionStore {
           selectedTaskId === null ? [] : state.taskAgentEvents,
         taskAgentErrorMessage:
           selectedTaskId === null ? null : state.taskAgentErrorMessage
+      };
+      publish();
+    },
+    retagTaskIdentity(previousTaskId, nextTaskId) {
+      const selectedTaskId =
+        state.selectedTaskId === previousTaskId
+          ? nextTaskId
+          : state.selectedTaskId;
+      const taskTerminalTaskId =
+        state.taskTerminalTaskId === previousTaskId
+          ? nextTaskId
+          : state.taskTerminalTaskId;
+      const taskAgentTaskId =
+        state.taskAgentTaskId === previousTaskId
+          ? nextTaskId
+          : state.taskAgentTaskId;
+      if (
+        selectedTaskId === state.selectedTaskId &&
+        taskTerminalTaskId === state.taskTerminalTaskId &&
+        taskAgentTaskId === state.taskAgentTaskId
+      ) {
+        return;
+      }
+
+      state = {
+        ...state,
+        selectedTaskId,
+        taskTerminalTaskId,
+        taskAgentTaskId
       };
       publish();
     },

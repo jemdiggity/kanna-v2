@@ -1,12 +1,17 @@
 import { parse as parseYaml } from "yaml";
-import { isAgentProvider, splitAgentProviderValue } from "./agent-providers";
+import {
+  AGENT_PROVIDERS,
+  isAgentProvider,
+  splitAgentProviderValue,
+  type AgentProvider,
+} from "./agent-providers";
 export type Stage = "in_progress" | "pr" | "done";
 
 export interface CustomTaskConfig {
   name: string;
   description?: string;
   agent?: string;
-  agentProvider?: "claude" | "copilot" | "codex" | "opencode" | "antigravity";
+  agentProvider?: AgentProvider;
   model?: string;
   permissionMode?: "dontAsk" | "acceptEdits" | "default";
   executionMode?: "pty" | "agent";
@@ -25,6 +30,10 @@ export interface CustomTaskScanResult {
   errors: Array<{ path: string; error: string }>;
 }
 
+const AGENT_PROVIDER_PROMPT_UNION = AGENT_PROVIDERS
+  .map((provider) => `"${provider}"`)
+  .join(" | ");
+
 export const NEW_CUSTOM_TASK_PROMPT = `You are helping the user define a custom agent task for Kanna.
 
 Custom tasks are reusable agent configurations stored at .kanna/tasks/<taskname>/agent.md.
@@ -40,7 +49,7 @@ Available frontmatter fields (all optional, defaults shown):
 - name: Display name (default: derived from directory name)
 - description: Short description for the command palette
 - agent: name of an existing \`.kanna/agents/<name>/AGENT.md\` to run
-- agent_provider: "claude" | "copilot" | "codex" | "opencode" | "antigravity" (optional)
+- agent_provider: ${AGENT_PROVIDER_PROMPT_UNION} (optional)
 - model: null (uses Kanna default)
 - permission_mode: "dontAsk" | "acceptEdits" | "default" (default: provider-specific yolo-equivalent: Claude -> --dangerously-skip-permissions, Copilot -> --yolo, Codex -> --yolo, OpenCode -> --dangerously-skip-permissions)
 - execution_mode: "pty" | "agent" (default: pty; legacy "sdk" is accepted as "agent")
@@ -144,7 +153,7 @@ export function parseAgentMd(content: string, dirName: string): CustomTaskConfig
   if (fm.agent_provider !== undefined) {
     const firstKnown = splitAgentProviderValue(fm.agent_provider).find(isAgentProvider);
     if (firstKnown) {
-      config.agentProvider = firstKnown as CustomTaskConfig["agentProvider"];
+      config.agentProvider = firstKnown;
     }
   }
 

@@ -3,4 +3,6 @@ node_modules
 apps/desktop/node_modules
 apps/mobile/node_modules
 packages/agent-protocol/node_modules
+packages/core/node_modules
+packages/db/node_modules
 packages/stream-client/node_modules

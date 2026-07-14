@@ -1,35 +1,30 @@
 <script setup lang="ts">
-import type { Repo, PipelineItem } from "../types/kanna";
+import type { Repo } from "../types/kanna";
+import type { ReadySidebarTaskItem, SidebarTaskItem } from "../types/taskUi";
 import { computed, ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import draggable from "vuedraggable";
 import { taskSearchMatch } from "../utils/taskSearch";
 import {
-  groupedSidebarItemsByStage,
-  sidebarSubtreeRows,
-  sortedSidebarBlockedItems,
-  sortedSidebarPinnedItems,
-  sortSidebarItemsForRepo,
-  type SidebarTreeRow,
+  groupedSidebarTaskItemsByStage,
+  sidebarTaskSubtreeRows,
+  sortedSidebarTaskBlockedItems,
+  sortedSidebarTaskPinnedItems,
+  sortSidebarTaskItemsForRepo,
+  type SidebarTaskTreeRow,
 } from "../utils/sidebarOrdering";
 import { useKannaStore } from "../stores/kanna";
 import { isTaskTearingDown } from "../stores/taskStages";
 import { macOsTextInputAttrs } from "../utils/textInput";
-import { reviewAwaitingVerdictStage } from "../utils/reviewInbox";
-import type { InitializingTaskItem } from "../stores/taskInitialization";
 
 const { t } = useI18n();
 const store = useKannaStore();
 
-type SidebarPipelineItem = PipelineItem & {
-  remote_task?: boolean;
-};
-
 const props = defineProps<{
   repos: Repo[];
-  pipelineItems: SidebarPipelineItem[];
+  taskSlots: SidebarTaskItem[];
   selectedRepoId: string | null;
-  selectedItemId: string | null;
+  selectedSlotId: string | null;
   blockerNames?: Record<string, string>;
 }>();
 
@@ -48,7 +43,7 @@ const emit = defineEmits<{
   (e: "rename-done"): void;
 }>();
 
-interface DraggableChange<T extends { id: string }> {
+interface DraggableChange<T> {
   added?: {
     element: T;
     newIndex: number;
@@ -68,32 +63,18 @@ const repoDrag = ref<{ repoId: string; startY: number; active: boolean; overRepo
 const suppressNextRepoClick = ref(false);
 const trimmedSearchQuery = computed(() => searchQuery.value.trim());
 const hasActiveSearch = computed(() => trimmedSearchQuery.value.length > 0);
-const selectedVisibleTaskId = computed(() => {
-  const initializingItem = props.selectedItemId
-    ? store.initializingTaskItems.find((candidate) => candidate.id === props.selectedItemId)
+const selectedVisibleSlotId = computed(() => {
+  const item = props.selectedSlotId
+    ? props.taskSlots.find((candidate) => candidate.slot_id === props.selectedSlotId)
     : null;
-  if (initializingItem) return initializingItem.id;
-
-  const item = props.selectedItemId
-    ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
-    : null;
-  return item && item.closed_at == null ? item.id : null;
+  return item && item.closed_at == null ? item.slot_id : null;
 });
 const selectedTaskRepoId = computed(() => {
-  const initializingItem = props.selectedItemId
-    ? store.initializingTaskItems.find((candidate) => candidate.id === props.selectedItemId)
-    : null;
-  if (initializingItem) return initializingItem.repo_id;
-
-  const item = props.selectedItemId
-    ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
+  const item = props.selectedSlotId
+    ? props.taskSlots.find((candidate) => candidate.slot_id === props.selectedSlotId)
     : null;
   return item && item.closed_at == null ? item.repo_id : null;
 });
-const awaitingVerdictStagesById = computed(() => {
-  return new Map(props.pipelineItems.map((item) => [item.id, reviewAwaitingVerdictStage(item)]));
-});
-
 function isSearchActive(): boolean {
   return searchQuery.value.trim().length > 0;
 }
@@ -103,7 +84,7 @@ function clearSearch(): void {
   nextTick(() => searchInputRef.value?.focus());
 }
 
-function matchesSearch(item: SidebarPipelineItem): boolean {
+function matchesSearch(item: SidebarTaskItem): boolean {
   const q = trimmedSearchQuery.value;
   if (!q) return true;
   return taskSearchMatch(q, item) !== null;
@@ -112,24 +93,24 @@ function matchesSearch(item: SidebarPipelineItem): boolean {
 function sidebarOrderingOptions(repoId: string) {
   return {
     repoId,
-    items: props.pipelineItems,
+    items: props.taskSlots,
     blockers: store.taskBlockers,
     getStageOrder: store.getStageOrder,
     searchQuery: searchQuery.value,
   };
 }
 
-function sortedPinned(repoId: string): SidebarPipelineItem[] {
-  return sortedSidebarPinnedItems(sidebarOrderingOptions(repoId));
+function sortedPinned(repoId: string): SidebarTaskItem[] {
+  return sortedSidebarTaskPinnedItems(sidebarOrderingOptions(repoId));
 }
 
-function sortedBlocked(repoId: string): SidebarPipelineItem[] {
-  return sortedSidebarBlockedItems(sidebarOrderingOptions(repoId));
+function sortedBlocked(repoId: string): SidebarTaskItem[] {
+  return sortedSidebarTaskBlockedItems(sidebarOrderingOptions(repoId));
 }
 
 interface StageGroup {
   stageName: string;
-  items: SidebarPipelineItem[];
+  items: SidebarTaskItem[];
 }
 
 /**
@@ -138,30 +119,19 @@ interface StageGroup {
  * Stages not in the configured order sort alphabetically after listed stages.
  */
 function groupedByStage(repoId: string): StageGroup[] {
-  return groupedSidebarItemsByStage(sidebarOrderingOptions(repoId));
+  return groupedSidebarTaskItemsByStage(sidebarOrderingOptions(repoId));
 }
 
-function itemsForRepo(repoId: string): SidebarPipelineItem[] {
-  return sortSidebarItemsForRepo(sidebarOrderingOptions(repoId));
-}
-
-function initializingItemsForRepo(repoId: string): InitializingTaskItem[] {
-  return store.initializingTaskItems.filter((item) =>
-    item.repo_id === repoId
-    && (!hasActiveSearch.value || taskSearchMatch(trimmedSearchQuery.value, item) !== null),
-  );
-}
-
-function visibleItemCountForRepo(repoId: string): number {
-  return itemsForRepo(repoId).length + initializingItemsForRepo(repoId).length;
+function itemsForRepo(repoId: string): SidebarTaskItem[] {
+  return sortSidebarTaskItemsForRepo(sidebarOrderingOptions(repoId));
 }
 
 /** A top-level task plus its nested subtasks, depth-annotated for indented rendering. */
-function subtreeRows(repoId: string, item: SidebarPipelineItem): SidebarTreeRow[] {
-  return sidebarSubtreeRows(sidebarOrderingOptions(repoId), item);
+function subtreeRows(repoId: string, item: SidebarTaskItem): SidebarTaskTreeRow[] {
+  return sidebarTaskSubtreeRows(sidebarOrderingOptions(repoId), item);
 }
 
-function renderedTaskIds(repoId: string): Set<string> {
+function renderedSlotIds(repoId: string): Set<string> {
   const ids = new Set<string>();
   const roots = [
     ...sortedPinned(repoId),
@@ -170,19 +140,19 @@ function renderedTaskIds(repoId: string): Set<string> {
   ];
   for (const root of roots) {
     for (const row of subtreeRows(repoId, root)) {
-      ids.add(row.item.id);
+      ids.add(row.item.slot_id);
     }
   }
   return ids;
 }
 
-function fallbackItems(repoId: string): SidebarPipelineItem[] {
-  const rendered = renderedTaskIds(repoId);
-  return itemsForRepo(repoId).filter((item) => !rendered.has(item.id));
+function fallbackItems(repoId: string): SidebarTaskItem[] {
+  const rendered = renderedSlotIds(repoId);
+  return itemsForRepo(repoId).filter((item) => !rendered.has(item.slot_id));
 }
 
 function fallbackGroups(repoId: string): StageGroup[] {
-  const groups = new Map<string, SidebarPipelineItem[]>();
+  const groups = new Map<string, SidebarTaskItem[]>();
   for (const item of fallbackItems(repoId)) {
     if (!groups.has(item.stage)) groups.set(item.stage, []);
     groups.get(item.stage)!.push(item);
@@ -206,50 +176,61 @@ function subtaskIndentStyle(depth: number): Record<string, string> {
 }
 
 function totalItemsForRepo(repoId: string): number {
-  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.closed_at == null).length
-    + store.initializingTaskItems.filter((item) => item.repo_id === repoId).length;
+  return props.taskSlots.filter((i) => i.repo_id === repoId && i.closed_at == null).length;
 }
 
 function repoCountLabel(repoId: string): string {
-  const visible = visibleItemCountForRepo(repoId);
+  const visible = itemsForRepo(repoId).length;
   if (!hasActiveSearch.value) return String(visible);
   return `${visible}/${totalItemsForRepo(repoId)}`;
 }
 
-function itemTitle(item: SidebarPipelineItem): string {
+function itemTitle(item: SidebarTaskItem): string {
   const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
   // A running post (e.g. commit) executes inside the live session while the
   // stage stays put; the "..." prefix is the transition-in-flight signal.
   return item.has_running_post ? `... ${raw}` : raw;
 }
 
-function itemTooltip(item: SidebarPipelineItem): string | undefined {
+function itemTooltip(item: SidebarTaskItem): string | undefined {
   return itemTitle(item);
 }
 
-function awaitingVerdictStage(item: SidebarPipelineItem): string | null {
-  return awaitingVerdictStagesById.value.get(item.id) ?? null;
-}
-
-function awaitingVerdictLabel(item: SidebarPipelineItem): string {
-  return t("sidebar.awaitingVerdictBadge", {
-    stage: awaitingVerdictStage(item) ?? item.stage,
-  });
-}
-
-function isRemoteTask(item: SidebarPipelineItem): boolean {
+function isRemoteTask(item: SidebarTaskItem): boolean {
   return item.remote_task === true;
 }
 
-const editingItemId = ref<string | null>(null);
+function isReadyTask(item: SidebarTaskItem | null | undefined): item is ReadySidebarTaskItem {
+  return item?.state === "ready";
+}
+
+function readyTaskByDurableId(taskId: string | null | undefined): ReadySidebarTaskItem | null {
+  if (!taskId) return null;
+  return props.taskSlots.find((item): item is ReadySidebarTaskItem =>
+    item.state === "ready" && item.task_id === taskId,
+  ) ?? null;
+}
+
+function currentReadyTask(item: SidebarTaskItem | null | undefined): ReadySidebarTaskItem | null {
+  if (!item) return null;
+  return props.taskSlots.find((candidate): candidate is ReadySidebarTaskItem =>
+    candidate.slot_id === item.slot_id
+    && candidate.state === "ready"
+    && candidate.task_id === item.task_id,
+  ) ?? null;
+}
+
+const editingSlotId = ref<string | null>(null);
 const editingValue = ref("");
 const editingRepoId = ref<string | null>(null);
 const editingRepoValue = ref("");
 
-function startRename(item: SidebarPipelineItem) {
+function startRename(item: SidebarTaskItem) {
+  const readyItem = currentReadyTask(item);
+  if (!readyItem) return;
   editingRepoId.value = null;
-  editingItemId.value = item.id;
-  editingValue.value = item.display_name || item.issue_title || item.prompt || "";
+  editingSlotId.value = readyItem.slot_id;
+  editingValue.value = readyItem.display_name || readyItem.issue_title || readyItem.prompt || "";
   nextTick(() => {
     const input = document.querySelector('.rename-input') as HTMLInputElement | null;
     if (input) {
@@ -260,7 +241,7 @@ function startRename(item: SidebarPipelineItem) {
 }
 
 function startRepoRename(repo: Repo) {
-  editingItemId.value = null;
+  editingSlotId.value = null;
   editingRepoId.value = repo.id;
   editingRepoValue.value = repo.name;
   nextTick(() => {
@@ -287,19 +268,23 @@ function cancelRepoRename() {
   emit("rename-done");
 }
 
-function commitRename(itemId: string) {
+function commitRename(slotId: string) {
+  const item = props.taskSlots.find((candidate) => candidate.slot_id === slotId);
+  if (!isReadyTask(item)) {
+    editingSlotId.value = null;
+    return;
+  }
   const trimmed = editingValue.value.trim();
-  const item = props.pipelineItems.find((i) => i.id === itemId);
   const original = item?.issue_title || item?.prompt || "";
   // If cleared or matches original, set to null (remove custom name)
   const displayName = trimmed && trimmed !== original ? trimmed : null;
-  emit("rename-item", itemId, displayName);
-  editingItemId.value = null;
+  emit("rename-item", item.task_id, displayName);
+  editingSlotId.value = null;
   emit("rename-done");
 }
 
 function cancelRename() {
-  editingItemId.value = null;
+  editingSlotId.value = null;
   emit("rename-done");
 }
 
@@ -315,9 +300,9 @@ function handleSelectRepo(repoId: string) {
   emit("select-repo", repoId);
 }
 
-function handleSelectItem(item: Pick<SidebarPipelineItem, "id" | "repo_id">) {
+function handleSelectItem(item: SidebarTaskItem) {
   emit("select-repo", item.repo_id);
-  emit("select-item", item.id);
+  emit("select-item", item.slot_id);
 }
 
 function toggleRepo(repoId: string) {
@@ -328,8 +313,8 @@ function toggleRepo(repoId: string) {
   }
 }
 
-function reorderIds<T extends { id: string }>(items: readonly T[], oldIndex: number, newIndex: number): string[] {
-  const ids = items.map((item) => item.id);
+function reorderTaskIds(items: readonly ReadySidebarTaskItem[], oldIndex: number, newIndex: number): string[] {
+  const ids = items.map((item) => item.task_id);
   const [moved] = ids.splice(oldIndex, 1);
   if (!moved) return ids;
   ids.splice(newIndex, 0, moved);
@@ -397,36 +382,49 @@ function startRepoDrag(repoId: string, event: MouseEvent) {
   document.addEventListener("mouseup", handleRepoDragEnd);
 }
 
-function onPinnedChange(repoId: string, evt: DraggableChange<SidebarPipelineItem>) {
+function readyTasks(items: readonly SidebarTaskItem[]): ReadySidebarTaskItem[] | null {
+  return items.every(isReadyTask) ? [...items] : null;
+}
+
+function onPinnedChange(repoId: string, evt: DraggableChange<SidebarTaskItem>) {
   if (isSearchActive()) return;
   if (evt.added) {
+    const addedItem = currentReadyTask(evt.added.element);
+    if (!addedItem) return;
     // Item dragged from unpinned to pinned zone
     suppressParentDrop.value = true;
     dropParentId.value = null;
-    emit("pin-item", evt.added.element.id, evt.added.newIndex);
+    emit("pin-item", addedItem.task_id, evt.added.newIndex);
     // Reorder all pinned items with the new arrival
-    const ids = sortedPinned(repoId).map((i) => i.id);
-    ids.splice(evt.added.newIndex, 0, evt.added.element.id);
+    const existingPinned = readyTasks(sortedPinned(repoId));
+    if (!existingPinned) return;
+    const ids = existingPinned.map((item) => item.task_id);
+    ids.splice(evt.added.newIndex, 0, addedItem.task_id);
     emit("reorder-pinned", repoId, ids);
   }
   if (evt.moved) {
+    const pinned = readyTasks(sortedPinned(repoId));
+    if (!pinned || !pinned[evt.moved.oldIndex]) return;
     // Item reordered within pinned zone
-    emit("reorder-pinned", repoId, reorderIds(sortedPinned(repoId), evt.moved.oldIndex, evt.moved.newIndex));
+    emit("reorder-pinned", repoId, reorderTaskIds(pinned, evt.moved.oldIndex, evt.moved.newIndex));
   }
 }
 
-function onUnpinnedChange(repoId: string, evt: DraggableChange<SidebarPipelineItem>) {
+function onUnpinnedChange(repoId: string, evt: DraggableChange<SidebarTaskItem>) {
   if (isSearchActive()) return;
   const added = evt.added;
-  if (added) {
+  const addedItem = currentReadyTask(added?.element);
+  if (added && addedItem) {
     // Item dragged from pinned to unpinned zone — unpin it
     suppressParentDrop.value = true;
     dropParentId.value = null;
-    emit("unpin-item", added.element.id);
+    emit("unpin-item", addedItem.task_id);
     // Reorder remaining pinned items
-    const remainingIds = sortedPinned(repoId)
-      .filter((i) => i.id !== added.element.id)
-      .map((i) => i.id);
+    const remaining = sortedPinned(repoId)
+      .filter((item) => item.slot_id !== addedItem.slot_id);
+    const remainingReady = readyTasks(remaining);
+    if (!remainingReady) return;
+    const remainingIds = remainingReady.map((item) => item.task_id);
     if (remainingIds.length > 0) {
       emit("reorder-pinned", repoId, remainingIds);
     }
@@ -439,6 +437,11 @@ function onUnpinnedChange(repoId: string, evt: DraggableChange<SidebarPipelineIt
 interface SortableDragEvent {
   item?: HTMLElement;
   originalEvent?: Event;
+}
+
+interface SortableMoveEvent {
+  draggedContext?: { element?: SidebarTaskItem };
+  relatedContext?: { element?: SidebarTaskItem };
 }
 
 const draggedTaskId = ref<string | null>(null);
@@ -457,7 +460,7 @@ function pointerFromEvent(event: Event | undefined | null): { x: number; y: numb
 function taskRowAtPoint(x: number, y: number): { id: string; pinned: boolean } | null {
   const row = document.elementFromPoint(x, y)?.closest<HTMLElement>(".pipeline-item");
   const id = row?.dataset.taskId;
-  if (!row || !id) return null;
+  if (!row || !id || !readyTaskByDurableId(id)) return null;
   return { id, pinned: Boolean(row.closest(".pinned-zone")) };
 }
 
@@ -471,7 +474,7 @@ function resolveDropParent(x: number, y: number, childId: string): string | null
 }
 
 function currentParentId(taskId: string): string | null {
-  return props.pipelineItems.find((item) => item.id === taskId)?.parent_task_id ?? null;
+  return readyTaskByDurableId(taskId)?.parent_task_id ?? null;
 }
 
 function onTaskDragPointerMove(event: PointerEvent) {
@@ -488,9 +491,17 @@ function taskIdFromDragStart(evt: SortableDragEvent): string | null {
   const target = evt.originalEvent?.target;
   if (target instanceof HTMLElement) {
     const rowTaskId = target.closest<HTMLElement>(".pipeline-item[data-task-id]")?.dataset.taskId;
-    if (rowTaskId) return rowTaskId;
+    if (readyTaskByDurableId(rowTaskId)) return rowTaskId ?? null;
   }
-  return evt.item?.dataset.taskId ?? null;
+  const itemTaskId = evt.item?.dataset.taskId;
+  return readyTaskByDurableId(itemTaskId)?.task_id ?? null;
+}
+
+function canMoveTask(event: SortableMoveEvent): boolean {
+  const source = event.draggedContext?.element;
+  if (!currentReadyTask(source)) return false;
+  const target = event.relatedContext?.element;
+  return target === undefined || currentReadyTask(target) !== null;
 }
 
 function onTaskDragStart(evt: SortableDragEvent) {
@@ -529,8 +540,10 @@ function onTaskDragEnd(evt: SortableDragEvent) {
   }
 }
 
-function detachSubtask(itemId: string) {
-  emit("set-parent", itemId, null);
+function detachSubtask(item: SidebarTaskItem) {
+  const readyItem = currentReadyTask(item);
+  if (!readyItem) return;
+  emit("set-parent", readyItem.task_id, null);
 }
 
 watch(searchQuery, (q) => {
@@ -548,7 +561,7 @@ watch(searchQuery, (q) => {
 });
 
 async function scrollSelectedTaskIntoView() {
-  if (!props.selectedItemId) return;
+  if (!props.selectedSlotId) return;
   await nextTick();
   sidebarContentRef.value
     ?.querySelector<HTMLElement>(".pipeline-item.selected")
@@ -556,7 +569,7 @@ async function scrollSelectedTaskIntoView() {
 }
 
 watch(
-  [() => props.selectedItemId, selectedVisibleTaskId],
+  [() => props.selectedSlotId, selectedVisibleSlotId],
   () => {
     void scrollSelectedTaskIntoView();
   },
@@ -564,8 +577,8 @@ watch(
 );
 
 function renameSelectedItem() {
-  if (!props.selectedItemId) return;
-  const item = props.pipelineItems.find((i) => i.id === props.selectedItemId);
+  if (!props.selectedSlotId) return;
+  const item = props.taskSlots.find((candidate) => candidate.slot_id === props.selectedSlotId);
   if (item) startRename(item);
 }
 
@@ -591,7 +604,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
         <div
           v-for="repo in repos"
           :key="repo.id"
-          v-show="!hasActiveSearch || visibleItemCountForRepo(repo.id) > 0"
+          v-show="!hasActiveSearch || itemsForRepo(repo.id).length > 0"
           class="repo-section"
           :class="{
             'repo-dragging': repoDrag?.repoId === repo.id && repoDrag.active,
@@ -644,34 +657,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
           </div>
 
           <div v-if="!collapsedRepos.has(repo.id)" class="pipeline-list">
-          <!-- UI-only tasks waiting for a durable server task id. -->
-          <div
-            v-if="initializingItemsForRepo(repo.id).length > 0"
-            class="initializing-zone"
-          >
-            <div
-              v-for="initializingItem in initializingItemsForRepo(repo.id)"
-              :key="initializingItem.id"
-              class="pipeline-item initializing-item"
-              :class="{ selected: selectedItemId === initializingItem.id }"
-              :data-initializing-item-id="initializingItem.id"
-              aria-busy="true"
-              @click="handleSelectItem(initializingItem)"
-            >
-              <span
-                class="item-title"
-                :title="initializingItem.display_name || initializingItem.prompt"
-              >{{ initializingItem.display_name || initializingItem.prompt || $t('tasks.untitled') }}</span>
-            </div>
-          </div>
-
           <!-- Pinned tasks (draggable, sortable) -->
           <draggable
             :model-value="sortedPinned(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
-            item-key="id"
+            item-key="slot_id"
             :animation="150"
             :disabled="isSearchActive()"
+            :move="canMoveTask"
             :force-fallback="true"
             ghost-class="sortable-ghost"
             chosen-class="sortable-chosen"
@@ -682,25 +675,35 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             @end="onTaskDragEnd"
           >
             <template #item="{ element }">
-              <div class="task-subtree" :data-task-id="element.id">
+              <div
+                class="task-subtree"
+                :data-task-id="element.task_id"
+              >
                 <div
                   v-for="row in subtreeRows(repo.id, element)"
-                  :key="row.item.id"
+                  :key="row.item.slot_id"
                   class="pipeline-item"
-                  :data-task-id="row.item.id"
-                  :class="{ selected: selectedItemId === row.item.id, subtask: row.depth > 0, 'drop-target': dropParentId === row.item.id }"
+                  :data-slot-id="row.item.slot_id"
+                  :data-task-id="row.item.task_id"
+                  :aria-busy="row.item.state === 'creating' ? 'true' : undefined"
+                  :class="{
+                    selected: selectedSlotId === row.item.slot_id,
+                    'initializing-item': row.item.state === 'creating',
+                    subtask: row.depth > 0,
+                    'drop-target': row.item.task_id !== null && dropParentId === row.item.task_id,
+                  }"
                   :style="subtaskIndentStyle(row.depth)"
                   @click="handleSelectItem(row.item)"
                   @dblclick.stop="startRename(row.item)"
                 >
                   <input
-                    v-if="editingItemId === row.item.id"
+                    v-if="editingSlotId === row.item.slot_id"
                     class="rename-input"
                     v-model="editingValue"
                     v-bind="macOsTextInputAttrs"
-                    @keydown.enter="commitRename(row.item.id)"
+                    @keydown.enter="commitRename(row.item.slot_id)"
                     @keydown.escape="cancelRename()"
-                    @blur="commitRename(row.item.id)"
+                    @blur="commitRename(row.item.slot_id)"
                     @click.stop
                   />
                   <span
@@ -715,22 +718,15 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     :title="itemTooltip(row.item)"
                   >
                     <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
-                  <span
-                    v-if="awaitingVerdictStage(row.item)"
-                    class="awaiting-verdict-badge"
-                    :title="awaitingVerdictLabel(row.item)"
-                    :aria-label="awaitingVerdictLabel(row.item)"
-                    :data-testid="`awaiting-verdict-badge-${row.item.id}`"
-                  >{{ t('sidebar.awaitingVerdictShort') }}</span>
                   <button
-                    v-if="row.depth > 0 && editingItemId !== row.item.id"
+                    v-if="row.depth > 0 && row.item.state === 'ready' && editingSlotId !== row.item.slot_id"
                     type="button"
                     class="subtask-detach"
                     :title="$t('sidebar.detachSubtask')"
                     :aria-label="$t('sidebar.detachSubtask')"
-                    :data-testid="`detach-subtask-${row.item.id}`"
+                    :data-testid="`detach-subtask-${row.item.slot_id}`"
                     @mousedown.stop.prevent
-                    @click.stop="detachSubtask(row.item.id)"
+                    @click.stop="detachSubtask(row.item)"
                   >&times;</button>
                 </div>
               </div>
@@ -748,10 +744,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             <draggable
               :model-value="group.items"
               :group="{ name: `repo-${repo.id}` }"
-              item-key="id"
+              item-key="slot_id"
               :animation="150"
               :sort="false"
               :disabled="isSearchActive()"
+              :move="canMoveTask"
               :force-fallback="true"
               ghost-class="sortable-ghost"
               chosen-class="sortable-chosen"
@@ -762,25 +759,35 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
               @end="onTaskDragEnd"
             >
               <template #item="{ element }">
-                <div class="task-subtree" :data-task-id="element.id">
+                <div
+                  class="task-subtree"
+                  :data-task-id="element.task_id"
+                >
                   <div
                     v-for="row in subtreeRows(repo.id, element)"
-                    :key="row.item.id"
+                    :key="row.item.slot_id"
                     class="pipeline-item"
-                    :data-task-id="row.item.id"
-                    :class="{ selected: selectedItemId === row.item.id, subtask: row.depth > 0, 'drop-target': dropParentId === row.item.id }"
+                    :data-slot-id="row.item.slot_id"
+                    :data-task-id="row.item.task_id"
+                    :aria-busy="row.item.state === 'creating' ? 'true' : undefined"
+                    :class="{
+                      selected: selectedSlotId === row.item.slot_id,
+                      'initializing-item': row.item.state === 'creating',
+                      subtask: row.depth > 0,
+                      'drop-target': row.item.task_id !== null && dropParentId === row.item.task_id,
+                    }"
                     :style="subtaskIndentStyle(row.depth)"
                     @click="handleSelectItem(row.item)"
                     @dblclick.stop="startRename(row.item)"
                   >
                     <input
-                      v-if="editingItemId === row.item.id"
+                      v-if="editingSlotId === row.item.slot_id"
                       class="rename-input"
                       v-model="editingValue"
                       v-bind="macOsTextInputAttrs"
-                      @keydown.enter="commitRename(row.item.id)"
+                      @keydown.enter="commitRename(row.item.slot_id)"
                       @keydown.escape="cancelRename()"
-                      @blur="commitRename(row.item.id)"
+                      @blur="commitRename(row.item.slot_id)"
                       @click.stop
                     />
                     <span
@@ -795,22 +802,15 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       :title="itemTooltip(row.item)"
                     >
                       <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
-                    <span
-                      v-if="awaitingVerdictStage(row.item)"
-                      class="awaiting-verdict-badge"
-                      :title="awaitingVerdictLabel(row.item)"
-                      :aria-label="awaitingVerdictLabel(row.item)"
-                      :data-testid="`awaiting-verdict-badge-${row.item.id}`"
-                    >{{ t('sidebar.awaitingVerdictShort') }}</span>
                     <button
-                      v-if="row.depth > 0 && editingItemId !== row.item.id"
+                      v-if="row.depth > 0 && row.item.state === 'ready' && editingSlotId !== row.item.slot_id"
                       type="button"
                       class="subtask-detach"
                       :title="$t('sidebar.detachSubtask')"
                       :aria-label="$t('sidebar.detachSubtask')"
-                      :data-testid="`detach-subtask-${row.item.id}`"
+                      :data-testid="`detach-subtask-${row.item.slot_id}`"
                       @mousedown.stop.prevent
-                      @click.stop="detachSubtask(row.item.id)"
+                      @click.stop="detachSubtask(row.item)"
                     >&times;</button>
                   </div>
                 </div>
@@ -825,25 +825,32 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             :class="{ 'filtered-label': hasActiveSearch }"
           >{{ $t('sidebar.sectionBlocked') }}</div>
           <div class="type-zone">
-            <template v-for="blocked in sortedBlocked(repo.id)" :key="blocked.id">
+            <template v-for="blocked in sortedBlocked(repo.id)" :key="blocked.slot_id">
               <div
                 v-for="row in subtreeRows(repo.id, blocked)"
-                :key="row.item.id"
+                :key="row.item.slot_id"
                 class="pipeline-item"
-                :data-task-id="row.item.id"
-                :class="{ selected: selectedItemId === row.item.id, subtask: row.depth > 0, 'drop-target': dropParentId === row.item.id }"
+                :data-slot-id="row.item.slot_id"
+                :data-task-id="row.item.task_id"
+                :aria-busy="row.item.state === 'creating' ? 'true' : undefined"
+                :class="{
+                  selected: selectedSlotId === row.item.slot_id,
+                  'initializing-item': row.item.state === 'creating',
+                  subtask: row.depth > 0,
+                  'drop-target': row.item.task_id !== null && dropParentId === row.item.task_id,
+                }"
                 :style="subtaskIndentStyle(row.depth)"
                 @click="handleSelectItem(row.item)"
                 @dblclick.stop="startRename(row.item)"
               >
                 <input
-                  v-if="editingItemId === row.item.id"
+                  v-if="editingSlotId === row.item.slot_id"
                   class="rename-input"
                   v-model="editingValue"
                   v-bind="macOsTextInputAttrs"
-                  @keydown.enter="commitRename(row.item.id)"
+                  @keydown.enter="commitRename(row.item.slot_id)"
                   @keydown.escape="cancelRename()"
-                  @blur="commitRename(row.item.id)"
+                  @blur="commitRename(row.item.slot_id)"
                   @click.stop
                 />
                 <div v-else class="blocked-item-content">
@@ -858,26 +865,19 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   >
                     <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                   <span
-                    v-if="awaitingVerdictStage(row.item)"
-                    class="awaiting-verdict-badge"
-                    :title="awaitingVerdictLabel(row.item)"
-                    :aria-label="awaitingVerdictLabel(row.item)"
-                    :data-testid="`awaiting-verdict-badge-${row.item.id}`"
-                  >{{ t('sidebar.awaitingVerdictShort') }}</span>
-                  <span
-                    v-if="blockerNames?.[row.item.id]"
+                    v-if="row.item.task_id && blockerNames?.[row.item.task_id]"
                     class="blocked-by-text"
-                  >{{ $t('sidebar.blockedBy') }} {{ blockerNames[row.item.id] }}</span>
+                  >{{ $t('sidebar.blockedBy') }} {{ blockerNames[row.item.task_id] }}</span>
                 </div>
                 <button
-                  v-if="row.depth > 0 && editingItemId !== row.item.id"
+                  v-if="row.depth > 0 && row.item.state === 'ready' && editingSlotId !== row.item.slot_id"
                   type="button"
                   class="subtask-detach"
                   :title="$t('sidebar.detachSubtask')"
                   :aria-label="$t('sidebar.detachSubtask')"
-                  :data-testid="`detach-subtask-${row.item.id}`"
+                  :data-testid="`detach-subtask-${row.item.slot_id}`"
                   @mousedown.stop.prevent
-                  @click.stop="detachSubtask(row.item.id)"
+                  @click.stop="detachSubtask(row.item)"
                 >&times;</button>
               </div>
             </template>
@@ -889,21 +889,27 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             <div class="type-zone">
               <div
                 v-for="item in group.items"
-                :key="item.id"
+                :key="item.slot_id"
                 class="pipeline-item"
-                :data-task-id="item.id"
-                :class="{ selected: selectedItemId === item.id, 'drop-target': dropParentId === item.id }"
+                :data-slot-id="item.slot_id"
+                :data-task-id="item.task_id"
+                :aria-busy="item.state === 'creating' ? 'true' : undefined"
+                :class="{
+                  selected: selectedSlotId === item.slot_id,
+                  'initializing-item': item.state === 'creating',
+                  'drop-target': item.task_id !== null && dropParentId === item.task_id,
+                }"
                 @click="handleSelectItem(item)"
                 @dblclick.stop="startRename(item)"
               >
                 <input
-                  v-if="editingItemId === item.id"
+                  v-if="editingSlotId === item.slot_id"
                   class="rename-input"
                   v-model="editingValue"
                   v-bind="macOsTextInputAttrs"
-                  @keydown.enter="commitRename(item.id)"
+                  @keydown.enter="commitRename(item.slot_id)"
                   @keydown.escape="cancelRename()"
-                  @blur="commitRename(item.id)"
+                  @blur="commitRename(item.slot_id)"
                   @click.stop
                 />
                 <span
@@ -922,7 +928,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             </div>
           </template>
 
-          <div v-if="visibleItemCountForRepo(repo.id) === 0" class="no-items">
+          <div v-if="itemsForRepo(repo.id).length === 0" class="no-items">
             {{ hasActiveSearch
               ? $t('sidebar.noTasksMatching', { query: trimmedSearchQuery })
               : $t('sidebar.noTasks')
@@ -1213,11 +1219,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   outline: 1px solid var(--kn-accent);
 }
 
-.initializing-item .item-title {
-  color: var(--kn-text-secondary);
-  font-style: italic;
-}
-
 /* Highlighted while a dragged task hovers over it as a potential parent. */
 .pipeline-item.drop-target {
   background: var(--kn-bg-selected);
@@ -1241,6 +1242,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   flex: 1;
   min-width: 0;
   pointer-events: none;
+}
+
+.pipeline-item.initializing-item .item-title {
+  color: var(--kn-text-muted);
+  font-style: italic;
 }
 
 .remote-task-marker {

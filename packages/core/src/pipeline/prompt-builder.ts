@@ -1,3 +1,5 @@
+import { isAgentProvider, type AgentProvider } from "../config/agent-providers";
+
 export interface PromptContext {
   taskPrompt?: string;
   prevResult?: string;
@@ -78,7 +80,7 @@ export function buildKannaTaskContextLine(context?: KannaRuntimeContext): string
 
 // Mirrors kanna_mcp_launch_line in
 // crates/kanna-server/src/task_creator/commands.rs — keep the texts in sync.
-const MCP_LAUNCH_LINES: Record<string, string> = {
+const MCP_LAUNCH_LINES: Record<AgentProvider, string> = {
   claude:
     "Claude is launched with this config via `--mcp-config`, so Kanna MCP tools should be available automatically.",
   codex:
@@ -92,8 +94,8 @@ const MCP_LAUNCH_LINES: Record<string, string> = {
 };
 
 export function buildKannaMcpStatusLine(context?: KannaRuntimeContext): string | null {
-  if (!context?.mcpConfigured || !context.provider) return null;
-  return MCP_LAUNCH_LINES[context.provider] ?? null;
+  if (!context?.mcpConfigured || !isAgentProvider(context.provider)) return null;
+  return MCP_LAUNCH_LINES[context.provider];
 }
 
 export function buildKannaRuntimeSystemPrompt(context?: KannaRuntimeContext): string {

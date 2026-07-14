@@ -1,4 +1,5 @@
 import React from "react";
+import { AGENT_PROVIDERS, type AgentProvider } from "@kanna/agent-protocol";
 import {
   KeyboardAvoidingView,
   Modal,
@@ -32,13 +33,18 @@ interface CreateTaskComposerProps {
   onSubmit(): void;
 }
 
-const AGENT_OPTIONS: Array<{ provider: ComposerAgentProvider; label: string }> = [
-  { provider: "claude", label: "Claude" },
-  { provider: "copilot", label: "Copilot" },
-  { provider: "codex", label: "Codex" },
-  { provider: "opencode", label: "OpenCode" },
-  { provider: "antigravity", label: "Antigravity" }
-];
+const AGENT_LABELS: Record<AgentProvider, string> = {
+  claude: "Claude",
+  copilot: "Copilot",
+  codex: "Codex",
+  opencode: "OpenCode",
+  antigravity: "Antigravity"
+};
+
+const AGENT_OPTIONS = AGENT_PROVIDERS.map((provider) => ({
+  provider,
+  label: AGENT_LABELS[provider]
+}));
 
 export function CreateTaskComposer({
   isOpen,

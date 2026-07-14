@@ -20,6 +20,8 @@ interface SmokeElement {
 
 interface TaskTerminalLiveUi {
   getAgentMessageView(): Promise<SmokeElement>;
+  getAgentMessageReady?(): Promise<SmokeElement>;
+  getTaskDetailScreen(): Promise<SmokeElement>;
   getTerminalOverlay(): Promise<SmokeElement>;
   waitUntil(
     condition: () => Promise<boolean>,
@@ -87,6 +89,7 @@ type TerminalWebViewInspection =
 
 interface WebViewContextDriver {
   execute<T>(script: () => T): Promise<T>;
+  getNativeInspection?: () => Promise<string | null>;
   getContext?: () => Promise<string>;
   getContexts?: () => Promise<unknown[]>;
   switchContext?: (context: string) => Promise<unknown>;
@@ -111,6 +114,12 @@ function createSmokeUi(driver: Browser): SmokeUi {
     async getAgentMessageView() {
       return driver.$(selectors.agentMessageView);
     },
+    async getAgentMessageReady() {
+      return driver.$(selectors.agentMessageReady);
+    },
+    async getTaskDetailScreen() {
+      return driver.$(selectors.taskDetailScreen);
+    },
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
@@ -125,7 +134,22 @@ function createSmokeUi(driver: Browser): SmokeUi {
       return Array.from(taskRows);
     },
     async inspectTerminalWebView() {
-      return inspectTerminalWebView(driver as Browser & WebViewContextDriver);
+      return inspectTerminalWebView({
+        execute: async <T>(script: () => T) => await driver.execute(script) as T,
+        getContext: driver.getContext
+          ? async () => String(await driver.getContext?.())
+          : undefined,
+        getContexts: driver.getContexts
+          ? async () => await driver.getContexts?.() ?? []
+          : undefined,
+        getNativeInspection: async () => {
+          const marker = await driver.$(selectors.terminalInspection);
+          return marker.getAttribute("value").catch(() => null);
+        },
+        switchContext: driver.switchContext
+          ? async (context: string) => await driver.switchContext?.(context)
+          : undefined
+      });
     },
     async pause(ms) {
       return driver.pause(ms);
@@ -252,6 +276,22 @@ function contextName(context: unknown): string | null {
 export async function inspectTerminalWebView(
   driver: WebViewContextDriver
 ): Promise<TerminalWebViewInspection> {
+  const nativeInspection = await driver.getNativeInspection?.();
+  if (nativeInspection) {
+    try {
+      const parsed = JSON.parse(nativeInspection) as Omit<
+        Extract<TerminalWebViewInspection, { kind: "rendered" }>,
+        "kind"
+      >;
+      return { kind: "rendered", ...parsed };
+    } catch {
+      return {
+        kind: "unavailable",
+        reason: `Native terminal inspection was not valid JSON: ${nativeInspection}`
+      };
+    }
+  }
+
   if (!driver.getContexts || !driver.switchContext) {
     return {
       kind: "unavailable",
@@ -310,9 +350,17 @@ export async function inspectTerminalWebView(
 export async function waitForTaskTerminalLive(ui: TaskTerminalLiveUi): Promise<void> {
   await ui.waitUntil(
     async () => {
+      const taskDetailScreen = await ui.getTaskDetailScreen();
+      if (!(await taskDetailScreen.isExisting())) {
+        return false;
+      }
       const agentMessageView = await ui.getAgentMessageView();
       if (await agentMessageView.isExisting()) {
-        return true;
+        if (!ui.getAgentMessageReady) {
+          return false;
+        }
+        const agentMessageReady = await ui.getAgentMessageReady();
+        return agentMessageReady.isExisting();
       }
       const overlay = await ui.getTerminalOverlay();
       return !(await overlay.isExisting());
