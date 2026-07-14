@@ -99,7 +99,7 @@ describe("mergeCloudAndLanTasks", () => {
       repoName: "Cloud Repo",
       title: "Cloud title",
       stage: "review",
-      snippet: "cloud snippet",
+      waitingPromptSnippet: "cloud snippet",
       agentProvider: "claude",
       agentType: "pty",
       ownerDesktopId: "desktop-lan",
@@ -113,7 +113,7 @@ describe("mergeCloudAndLanTasks", () => {
       repoName: "LAN Repo",
       title: "LAN title",
       stage: "pr",
-      snippet: "LAN snippet",
+      waitingPromptSnippet: "LAN snippet",
       agentProvider: "codex",
       agentType: "agent"
     });
@@ -128,7 +128,7 @@ describe("mergeCloudAndLanTasks", () => {
         ...cloudTask,
         title: "LAN title",
         stage: "pr",
-        snippet: "LAN snippet",
+        waitingPromptSnippet: "LAN snippet",
         agentType: "agent"
       }
     ]);
@@ -2007,7 +2007,7 @@ describe("createCloudLanClient", () => {
       repoId: "cloud-only-repo",
       repoName: "Cloud Only Repo",
       title: "Cloud only",
-      snippet: "Contains NEEDLE in output",
+      waitingPromptSnippet: "Contains NEEDLE in output",
       ownerDesktopId: "desktop-cloud",
       ownerLocalTaskId: "cloud-local-task"
     });

@@ -1482,6 +1482,6 @@ function filterTasksForQuery(
   return tasks.filter(
     (task) =>
       task.title.toLowerCase().includes(normalizedQuery) ||
-      task.snippet?.toLowerCase().includes(normalizedQuery) === true
+      task.waitingPromptSnippet?.toLowerCase().includes(normalizedQuery) === true
   );
 }

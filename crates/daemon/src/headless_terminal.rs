@@ -167,9 +167,26 @@ impl HeadlessTerminal {
     }
 
     fn visible_footer_lines(&mut self, rows: usize) -> HeadlessTerminalResult<Vec<String>> {
+        self.visible_footer_lines_with_policy(rows, false)
+    }
+
+    fn visible_footer_lines_with_blank_boundaries(
+        &mut self,
+        rows: usize,
+    ) -> HeadlessTerminalResult<Vec<String>> {
+        self.visible_footer_lines_with_policy(rows, true)
+    }
+
+    fn visible_footer_lines_with_policy(
+        &mut self,
+        rows: usize,
+        preserve_blank_boundaries: bool,
+    ) -> HeadlessTerminalResult<Vec<String>> {
         let snapshot = self.render_state.update(&self.terminal)?;
         let cols = usize::from(snapshot.cols()?);
-        let mut rendered_rows = VecDeque::with_capacity(rows);
+        let mut rendered_rows: VecDeque<String> = VecDeque::with_capacity(rows.saturating_mul(2));
+        let mut meaningful_row_count = 0usize;
+        let mut pending_blank_boundary = false;
 
         let mut row_iteration = self.row_iterator.update(&snapshot)?;
         while let Some(row) = row_iteration.next() {
@@ -191,12 +208,33 @@ impl HeadlessTerminal {
                 }
             }
             let normalized = normalize_row_text(&rendered);
-            if !normalized.is_empty() {
-                if rendered_rows.len() == rows {
+            if normalized.is_empty() {
+                if preserve_blank_boundaries && meaningful_row_count > 0 {
+                    pending_blank_boundary = true;
+                }
+                continue;
+            }
+
+            if rows == 0 {
+                continue;
+            }
+            if meaningful_row_count == rows {
+                while let Some(expired) = rendered_rows.pop_front() {
+                    if !expired.is_empty() {
+                        meaningful_row_count -= 1;
+                        break;
+                    }
+                }
+                while rendered_rows.front().is_some_and(String::is_empty) {
                     rendered_rows.pop_front();
                 }
-                rendered_rows.push_back(normalized);
             }
+            if preserve_blank_boundaries && pending_blank_boundary && !rendered_rows.is_empty() {
+                rendered_rows.push_back(String::new());
+            }
+            pending_blank_boundary = false;
+            rendered_rows.push_back(normalized);
+            meaningful_row_count += 1;
         }
 
         Ok(rendered_rows.into_iter().collect())
@@ -238,7 +276,7 @@ impl HeadlessTerminal {
         let Some(provider) = provider else {
             return Ok(None);
         };
-        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
+        let footer_lines = self.visible_footer_lines_with_blank_boundaries(STATUS_ROWS)?;
         Ok(waiting_prompt_from_lines(&footer_lines, provider))
     }
 
@@ -873,6 +911,125 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("• The renamed title is synced to mobile.")
+        );
+    }
+
+    #[test]
+    fn codex_waiting_prompt_snippet_stops_at_blank_separator_after_tool_output() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "OpenAI Codex\r\n",
+                "• Ran cargo test -p kanna-daemon waiting_prompt\r\n",
+                "  └ test result: ok. 4 passed; 0 failed\r\n",
+                "\r\n",
+                "• Ready for review.\r\n",
+                "gpt-5.5 high · /tmp/project\r\n",
+                "────────────────────────────────\r\n",
+                "› \r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .unwrap()
+                .as_deref(),
+            Some("• Ready for review.")
+        );
+    }
+
+    #[test]
+    fn claude_waiting_prompt_snippet_stops_at_blank_separator_after_tool_output() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "⏺ Bash(cargo test -p kanna-daemon waiting_prompt)\r\n",
+                "  ⎿  test result: ok. 4 passed; 0 failed\r\n",
+                "\r\n",
+                "Ready for review.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ \r\n",
+                "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("Ready for review.")
+        );
+    }
+
+    #[test]
+    fn waiting_prompt_snippet_keeps_full_non_empty_footer_budget_around_blank_boundary() {
+        let mut terminal = HeadlessTerminal::new(120, 12, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "Do you want to allow Bash to run the focused tests?\r\n",
+                "\r\n",
+                "1. Yes\r\n",
+                "2. No\r\n",
+                "3. Always allow\r\n",
+                "4. Review command\r\n",
+                "5. Show details\r\n",
+                "6. Cancel\r\n",
+                "7. Help\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Waiting)
+        );
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("Do you want to allow Bash to run the focused tests?")
+        );
+    }
+
+    #[test]
+    fn codex_waiting_prompt_snippet_collapses_a_long_blank_gap_to_one_boundary() {
+        let mut terminal = HeadlessTerminal::new(120, 20, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "• Ready for review.\r\n",
+                "\r\n",
+                "\r\n",
+                "\r\n",
+                "\r\n",
+                "\r\n",
+                "\r\n",
+                "\r\n",
+                "\r\n",
+                "gpt-5.5 high · /tmp/project\r\n",
+                "────────────────────────────────\r\n",
+                "› \r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal.visible_status(Some(AgentProvider::Codex)).unwrap(),
+            Some(SessionStatus::Idle)
+        );
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .unwrap()
+                .as_deref(),
+            Some("• Ready for review.")
         );
     }
 

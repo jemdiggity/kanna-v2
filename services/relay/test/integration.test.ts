@@ -106,6 +106,7 @@ function publishedTask(activity: string, overrides: Record<string, unknown> = {}
     ownerLocalTaskId: "task-cloud-publish",
     title: "Server cloud publication",
     promptSnippet: "Server cloud publication",
+    waitingPromptSnippet: "Ready for review",
     displayName: null,
     stage: "in progress",
     activity,
@@ -568,6 +569,7 @@ describe("Relay integration", () => {
     expect(documents.docs[0]?.data()).toMatchObject({
       ownerLocalTaskId: "task-cloud-publish",
       activity: "idle",
+      waitingPromptSnippet: "Ready for review",
     });
 
     const activityAck = waitForMessage(ws, (message) =>

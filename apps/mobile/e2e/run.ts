@@ -275,6 +275,7 @@ async function main(): Promise<void> {
         input: relayHarness.menuInput,
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
         setTaskActivity: relayHarness.setTaskActivity,
+        taskRow: relayHarness.taskRow,
         waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity
       });
       await relayHarness.waitForFirstMenuSelection();

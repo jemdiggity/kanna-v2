@@ -620,14 +620,14 @@ describe("remote transport", () => {
         repoId: "repo-2",
         title: "Other task",
         stage: "review",
-        snippet: "Contains NEEDLE in output"
+        waitingPromptSnippet: "Contains NEEDLE in output"
       },
       {
         id: "cloud-no-match",
         repoId: "repo-3",
         title: "Unrelated task",
         stage: "pr",
-        snippet: "Nothing relevant"
+        waitingPromptSnippet: "Nothing relevant"
       }
     ]);
     const transport = createRemoteTransport({
@@ -649,7 +649,7 @@ describe("remote transport", () => {
         repoId: "repo-2",
         title: "Other task",
         stage: "review",
-        snippet: "Contains NEEDLE in output"
+        waitingPromptSnippet: "Contains NEEDLE in output"
       }
     ]);
     expect(listCloudTasks).toHaveBeenCalledTimes(1);

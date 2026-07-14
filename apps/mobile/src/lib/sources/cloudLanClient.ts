@@ -109,8 +109,11 @@ export function mergeCloudAndLanTasks({
       if (mergedTask.ownerLocalRepoId === undefined) {
         mergedTask.ownerLocalRepoId = lanTask.repoId;
       }
-      if (lanTask.snippet !== null && lanTask.snippet !== undefined) {
-        mergedTask.snippet = lanTask.snippet;
+      if (
+        lanTask.waitingPromptSnippet !== null &&
+        lanTask.waitingPromptSnippet !== undefined
+      ) {
+        mergedTask.waitingPromptSnippet = lanTask.waitingPromptSnippet;
       }
       if (lanTask.agentType !== null && lanTask.agentType !== undefined) {
         mergedTask.agentType = lanTask.agentType;
@@ -223,10 +226,10 @@ function mergeCloudWithPreservedLanProjection(
       mergedTask.ownerLocalRepoId = preservedTask.ownerLocalRepoId;
     }
     if (
-      preservedTask.snippet !== null &&
-      preservedTask.snippet !== undefined
+      preservedTask.waitingPromptSnippet !== null &&
+      preservedTask.waitingPromptSnippet !== undefined
     ) {
-      mergedTask.snippet = preservedTask.snippet;
+      mergedTask.waitingPromptSnippet = preservedTask.waitingPromptSnippet;
     }
     if (
       preservedTask.agentType !== null &&
@@ -996,7 +999,7 @@ export function createCloudLanClient(
       return (await listRecentTasks()).filter(
         (task) =>
           task.title.toLowerCase().includes(normalizedQuery) ||
-          task.snippet?.toLowerCase().includes(normalizedQuery) === true
+          task.waitingPromptSnippet?.toLowerCase().includes(normalizedQuery) === true
       );
     },
     createTask,

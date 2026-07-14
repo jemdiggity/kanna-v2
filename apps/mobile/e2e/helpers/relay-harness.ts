@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
 import type { TaskActivity } from "../../src/lib/api/types";
 
-const RELAY_TASK_TITLE = "Hybrid duplicate from LAN";
+const RELAY_TASK_TITLE = "Relay card current title";
+const RELAY_ORIGINAL_PROMPT = "Original relay request must stay hidden";
+const RELAY_REPO_LABEL = "Relay fixture repository";
+const RELAY_WAITING_PROMPT = "Agent is waiting for relay review.";
+const RELAY_TASK_STAGE = "in progress";
 const HYBRID_DUPLICATE_CLOUD_TITLE = "Hybrid duplicate from cloud";
 const HYBRID_CLOUD_ONLY_TITLE = "Hybrid cloud-only task";
 const HYBRID_CLOUD_ONLY_REFRESHED_TITLE = "Hybrid cloud-only task refreshed";
@@ -62,7 +66,12 @@ interface TerminalFlowModule {
   ): TerminalEventCollector;
   createScriptedTask(
     harness: RemoteHarness,
-    options: { displayName: string }
+    options: {
+      displayName: string;
+      prompt?: string;
+      repoName?: string;
+      waitingPromptSnippet?: string;
+    }
   ): Promise<ScriptedTask>;
   waitForTerminalOutput(
     collector: TerminalEventCollector,
@@ -100,6 +109,13 @@ export interface MobileRelayHarness {
   localTask: ScriptedTask;
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
+  taskRow: {
+    originalPromptSnippet: string;
+    repoLabel: string;
+    stage: string;
+    title: string;
+    waitingPromptSnippet: string;
+  };
   terminalEvents: TerminalEventCollector;
   publishHybridCloudRefresh(): Promise<void>;
   stop(): Promise<void>;
@@ -162,7 +178,14 @@ export async function startMobileRelayHarness(
     }
 
     const localTask = await remote.terminal.createScriptedTask(harness, {
-      displayName: RELAY_TASK_TITLE
+      displayName: RELAY_TASK_TITLE,
+      ...(mode === "relay"
+        ? {
+            prompt: RELAY_ORIGINAL_PROMPT,
+            repoName: RELAY_REPO_LABEL,
+            waitingPromptSnippet: RELAY_WAITING_PROMPT,
+          }
+        : {}),
     });
     const lanOnlyTask = mode === "hybrid"
       ? await remote.terminal.createScriptedTask(harness, {
@@ -259,6 +282,13 @@ export async function startMobileRelayHarness(
           harness,
           task: localTask
         });
+      },
+      taskRow: {
+        originalPromptSnippet: RELAY_ORIGINAL_PROMPT,
+        repoLabel: RELAY_REPO_LABEL,
+        stage: RELAY_TASK_STAGE,
+        title: RELAY_TASK_TITLE,
+        waitingPromptSnippet: RELAY_WAITING_PROMPT,
       },
       terminalEvents,
       publishHybridCloudRefresh: () =>
@@ -629,7 +659,10 @@ async function publishDesktopCredential(input: {
       revokedAt: nullValue(),
       uid: stringValue(input.auth.uid),
       updatedAt: stringValue(new Date().toISOString())
-    }
+    },
+    // Credential rules validate the complete canonical resource. A field-mask
+    // PATCH is suitable for mutable fixtures but is rejected for this create.
+    { updateMask: false },
   );
 }
 
@@ -648,6 +681,7 @@ function syntheticCloudTask(input: {
     ownerLocalTaskId: input.taskId,
     title: input.title,
     promptSnippet: "Run deterministic scripted task",
+    waitingPromptSnippet: null,
     displayName: input.displayName,
     stage: "in progress",
     activity: input.activity,
@@ -757,15 +791,18 @@ async function setFirestoreDocument(
   firestorePort: number,
   path: string[],
   bearerToken: string,
-  fields: FirestoreFields
+  fields: FirestoreFields,
+  options: { updateMask?: boolean } = {},
 ): Promise<void> {
   const encodedPath = path.map(encodeURIComponent).join("/");
   const url = new URL(
     `http://127.0.0.1:${firestorePort}/v1/projects/kanna-local/databases/(default)/documents/` +
       encodedPath
   );
-  for (const field of Object.keys(fields)) {
-    url.searchParams.append("updateMask.fieldPaths", field);
+  if (options.updateMask !== false) {
+    for (const field of Object.keys(fields)) {
+      url.searchParams.append("updateMask.fieldPaths", field);
+    }
   }
   const response = await fetch(url, {
     method: "PATCH",

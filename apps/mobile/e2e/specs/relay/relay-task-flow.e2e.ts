@@ -2,7 +2,6 @@ import type { Browser } from "webdriverio";
 import { extractTaskRowId, selectors } from "../../helpers/selectors";
 import {
   ensureTaskListVisible,
-  openPtyFixtureTask,
   inspectTerminalWebView,
   waitForRenderedPtyTerminal,
   waitForTaskTerminalLive,
@@ -25,7 +24,16 @@ interface RelayTaskFlowOptions {
   input: string;
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
+  taskRow: RelayTaskRowExpectation;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
+}
+
+export interface RelayTaskRowExpectation {
+  originalPromptSnippet: string;
+  repoLabel: string;
+  stage: string;
+  title: string;
+  waitingPromptSnippet: string;
 }
 
 interface RelayElement {
@@ -224,8 +232,43 @@ async function closeAccountSheet(driver: Browser, ui: RelayUi): Promise<void> {
   }
 }
 
-async function openRelayFixtureTask(ui: RelayUi, taskId: string): Promise<void> {
-  await openPtyFixtureTask(ui, taskId);
+export async function assertRelayTaskRowPresentation(
+  row: Pick<RelayElement, "getAttribute" | "getText">,
+  expected: RelayTaskRowExpectation,
+): Promise<void> {
+  const nativeLabel = await row.getAttribute("label").catch(() => null);
+  const label = nativeLabel?.trim() || (await row.getText()).trim();
+  const expectedLabel =
+    `${expected.title}. ${expected.stage}. ${expected.waitingPromptSnippet}`;
+  const forbidden = [
+    expected.originalPromptSnippet,
+    expected.repoLabel,
+    "TASK",
+    "RECENT",
+  ];
+  if (label !== expectedLabel || forbidden.some((value) => label.includes(value))) {
+    throw new Error(
+      `Relay task row rendered unexpected content: ${JSON.stringify(label)}; ` +
+        `expected ${JSON.stringify(expectedLabel)}`,
+    );
+  }
+}
+
+export async function openRelayFixtureTask(
+  ui: Pick<RelayUi, "getTaskRowById">,
+  taskId: string,
+  expected?: RelayTaskRowExpectation,
+): Promise<void> {
+  if (expected) {
+    const task = await ui.getTaskRowById(taskId);
+    await task.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    await assertRelayTaskRowPresentation(task, expected);
+    await task.click();
+    return;
+  }
+  const task = await ui.getTaskRowById(taskId);
+  await task.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await task.click();
 }
 
 async function returnToTaskListShell(ui: RelayUi): Promise<void> {
@@ -378,6 +421,9 @@ export async function runRelayTaskFlow(
     await signInToRelay(driver, ui, options.credentials);
   }
   await ensureTaskListVisible(ui);
+  const exactTaskRow = await ui.getTaskRowById(options.fixture.taskId);
+  await exactTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await assertRelayTaskRowPresentation(exactTaskRow, options.taskRow);
   await verifyRelayTaskActivityTransitions(
     ui,
     options.fixture.taskId,
