@@ -157,6 +157,7 @@ Use this branch as the default when the user does not specify a target branch. B
     attachWindowWorkspace,
     selectRepo: selection.selectRepo,
     selectItem: selection.selectItem,
+    persistSelection: selection.persistSelection,
     goBack: selection.goBack,
     goForward: selection.goForward,
 

@@ -729,6 +729,12 @@ describe("kanna query snapshot regressions", () => {
     expect(db["select"]).not.toHaveBeenCalled();
   });
 
+  it("exposes selection persistence for composables that claim local ownership", async () => {
+    const store = await createStore();
+
+    expect((store as unknown as { persistSelection?: unknown }).persistSelection).toBeTypeOf("function");
+  });
+
   it("hydrates a durable task into its acknowledged UI slot without changing its slot ID", async () => {
     const store = await createStore();
     store.taskUiSlots.splice(0, store.taskUiSlots.length, {
@@ -903,6 +909,162 @@ describe("kanna query snapshot regressions", () => {
       state: "ready",
       task: expect.objectContaining({ id: "item-1", display_name: "Newest task" }),
     });
+  });
+
+  it("retires creating slots and selection state when their local repo disappears", async () => {
+    const repo1 = mockState.makeRepo({ id: "repo-1" });
+    const repo2 = mockState.makeRepo({ id: "repo-2" });
+    const survivingItem = mockState.makeItem({ id: "item-1", repo_id: repo1.id });
+    const state = createStoreState();
+    state.repos.value = [repo1, repo2];
+    state.items.value = [
+      survivingItem,
+      mockState.makeItem({ id: "item-2", repo_id: repo2.id }),
+    ];
+    state.taskUiSlots.value = [
+      {
+        slot_id: "item-1",
+        task_id: "item-1",
+        state: "ready",
+        task: survivingItem,
+        draft: {
+          repo_id: repo1.id,
+          prompt: survivingItem.prompt ?? "",
+          display_name: null,
+          pipeline: "default",
+          stage: "in progress",
+          agent_type: "pty",
+          agent_provider: "claude",
+          created_at: survivingItem.created_at,
+        },
+      },
+      {
+        slot_id: "create:unacknowledged",
+        task_id: null,
+        state: "creating",
+        task: null,
+        authoritative_miss_grace_remaining: 0,
+        draft: {
+          repo_id: repo2.id,
+          prompt: "Creating before repo removal",
+          display_name: null,
+          pipeline: "default",
+          stage: "in progress",
+          agent_type: "pty",
+          agent_provider: "claude",
+          created_at: "2026-04-17T00:01:00.000Z",
+        },
+      },
+      {
+        slot_id: "create:acknowledged",
+        task_id: "task-acknowledged",
+        state: "creating",
+        task: null,
+        authoritative_miss_grace_remaining: 1,
+        draft: {
+          repo_id: repo2.id,
+          prompt: "Acknowledged before repo removal",
+          display_name: null,
+          pipeline: "default",
+          stage: "in progress",
+          agent_type: "pty",
+          agent_provider: "claude",
+          created_at: "2026-04-17T00:02:00.000Z",
+        },
+      },
+    ];
+    state.pendingCreateVisibility.set("create:unacknowledged", { bumpAt: 1 });
+    state.pendingCreateVisibility.set("create:acknowledged", { bumpAt: 2 });
+    state.pendingCreateVisibility.set("task-acknowledged", { bumpAt: 3 });
+    state.selectedRepoId.value = repo2.id;
+    state.selectedItemId.value = "create:acknowledged";
+    state.lastSelectedItemByRepo.value = {
+      [repo1.id]: "item-1",
+      [repo2.id]: "create:acknowledged",
+    };
+
+    const reconcileSelection = vi.fn(() => {
+      state.selectedRepoId.value = repo1.id;
+      state.selectedItemId.value = "item-1";
+    });
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(state, {} as never, {
+      fetchSnapshot: vi.fn(async (): Promise<KannaSnapshot> => ({
+        entries: [{ repo: repo1, items: [survivingItem] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      })),
+      reconcileSelection,
+      persistSelection,
+    });
+
+    await createQueriesApi(context).reloadSnapshot();
+
+    expect(state.taskUiSlots.value.map((slot) => slot.slot_id)).toEqual(["item-1"]);
+    expect(state.pendingCreateVisibility.has("create:unacknowledged")).toBe(false);
+    expect(state.pendingCreateVisibility.has("create:acknowledged")).toBe(false);
+    expect(state.pendingCreateVisibility.has("task-acknowledged")).toBe(false);
+    expect(state.lastSelectedItemByRepo.value).toEqual({ [repo1.id]: "item-1" });
+    expect(state.selectedRepoId.value).toBe(repo1.id);
+    expect(state.selectedItemId.value).toBe("item-1");
+    expect(reconcileSelection).toHaveBeenCalledTimes(1);
+    expect(persistSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a cloud-only selection while retiring a missing local repo", async () => {
+    const repo1 = mockState.makeRepo({ id: "repo-1" });
+    const repo2 = mockState.makeRepo({ id: "repo-2" });
+    const survivingItem = mockState.makeItem({ id: "item-1", repo_id: repo1.id });
+    const cloudRepoId = "cloud:repo-remote";
+    const cloudTaskId = "cloud:lan:peer:repo-remote:task-remote";
+    const state = createStoreState();
+    state.repos.value = [repo1, repo2];
+    state.items.value = [survivingItem];
+    state.taskUiSlots.value = [{
+      slot_id: "create:retired",
+      task_id: null,
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 0,
+      draft: {
+        repo_id: repo2.id,
+        prompt: "Retire with local repo",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-04-17T00:01:00.000Z",
+      },
+    }];
+    state.selectedRepoId.value = cloudRepoId;
+    state.selectedItemId.value = cloudTaskId;
+    state.lastSelectedItemByRepo.value = {
+      [repo2.id]: "create:retired",
+      [cloudRepoId]: cloudTaskId,
+    };
+    const reconcileSelection = vi.fn();
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(state, {} as never, {
+      fetchSnapshot: vi.fn(async (): Promise<KannaSnapshot> => ({
+        entries: [{ repo: repo1, items: [survivingItem] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      })),
+      reconcileSelection,
+      persistSelection,
+    });
+
+    await createQueriesApi(context).reloadSnapshot();
+
+    expect(state.taskUiSlots.value.every((slot) => slot.draft.repo_id !== repo2.id)).toBe(true);
+    expect(state.selectedRepoId.value).toBe(cloudRepoId);
+    expect(state.selectedItemId.value).toBe(cloudTaskId);
+    expect(state.lastSelectedItemByRepo.value).toEqual({ [cloudRepoId]: cloudTaskId });
+    expect(reconcileSelection).not.toHaveBeenCalled();
+    expect(persistSelection).not.toHaveBeenCalled();
   });
 
   it("restores an unhidden repo with its tasks from the same refresh path", async () => {

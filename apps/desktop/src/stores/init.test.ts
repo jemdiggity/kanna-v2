@@ -896,6 +896,63 @@ describe("createInitApi", () => {
     expect(persistSelection).not.toHaveBeenCalled();
   });
 
+  it("does not overwrite a newer remote selection after shared snapshot invalidation", async () => {
+    const localTask = mockState.makeItem({ id: "task-before-refresh", tags: "[]" });
+    const localSlot = makeReadyTaskSlot(localTask, "create:stable-local");
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [localTask];
+    state.taskUiSlots.value = [localSlot];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = localSlot.slot_id;
+    state.lastSelectedItemByRepo.value = { "repo-1": localSlot.slot_id };
+
+    const cloudRepoId = "cloud:repo-remote";
+    const cloudTaskId = "cloud:lan:peer-primary:repo-remote:task-remote";
+    const reloadSnapshot = vi.fn(async () => {
+      state.items.value = [];
+      state.taskUiSlots.value = [];
+      state.selectedRepoId.value = cloudRepoId;
+      state.selectedItemId.value = cloudTaskId;
+      state.lastSelectedItemByRepo.value = { [cloudRepoId]: cloudTaskId };
+    });
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const persistSelection = vi.fn(async () => {});
+    const currentTaskSlot = computed(() => {
+      const selectionId = state.selectedItemId.value;
+      return state.taskUiSlots.value.find((slot) =>
+        slot.slot_id === selectionId || slot.task_id === selectionId,
+      ) ?? null;
+    });
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      selectedTaskId: computed(() => currentTaskSlot.value?.task_id ?? null),
+      currentTaskSlot,
+      restoreSelection: vi.fn(),
+      windowWorkspace: { onSharedInvalidation, persistSelection },
+    } as never);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    await initApi.init(createDb());
+    await getSharedInvalidationHandler(onSharedInvalidation)();
+
+    expect(state.selectedRepoId.value).toBe(cloudRepoId);
+    expect(state.selectedItemId.value).toBe(cloudTaskId);
+    expect(state.lastSelectedItemByRepo.value).toEqual({ [cloudRepoId]: cloudTaskId });
+    expect(persistSelection).not.toHaveBeenCalled();
+  });
+
   it("uses the selected durable task when teardown exit chooses a replacement", async () => {
     const closingTask = mockState.makeItem({
       id: "task-closing",
