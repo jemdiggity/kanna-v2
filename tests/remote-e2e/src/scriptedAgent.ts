@@ -44,7 +44,9 @@ menu_choice=""
 carriage_return=$(printf '\\r')
 
 read_char() {
-  char=$(dd bs=1 count=1 2>/dev/null)
+  # The sentinel prevents command substitution from stripping newline-only bytes.
+  char=$(dd bs=1 count=1 2>/dev/null; printf '.')
+  char=\${char%.}
 }
 
 while :; do
