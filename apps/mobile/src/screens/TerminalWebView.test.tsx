@@ -110,6 +110,8 @@ async function renderTerminalWebView(input: {
   rows?: number | null;
   fullscreen?: boolean;
   bottomInset?: number;
+  onConsolePress?: () => void;
+  onOpenFile?: (path: string, line?: number) => void;
 }): Promise<ElementNode> {
   resetRenderState();
   const { TerminalWebView } = await import("./TerminalWebView");
@@ -120,7 +122,9 @@ async function renderTerminalWebView(input: {
     cols: input.cols ?? null,
     rows: input.rows ?? null,
     fullscreen: input.fullscreen,
-    bottomInset: input.bottomInset
+    bottomInset: input.bottomInset,
+    onConsolePress: input.onConsolePress,
+    onOpenFile: input.onOpenFile
   }) as ElementNode;
   lastTree = tree;
 
@@ -151,6 +155,76 @@ describe("TerminalWebView", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("forwards trimmed terminal file links to the native callback", async () => {
+    const onOpenFile = vi.fn();
+    const webView = await renderTerminalWebView({ onOpenFile });
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-file-link",
+          path: "  docs/spec.md  ",
+          line: 42
+        })
+      }
+    } as WebViewMessageEvent);
+
+    expect(onOpenFile).toHaveBeenCalledOnce();
+    expect(onOpenFile).toHaveBeenCalledWith("docs/spec.md", 42);
+  });
+
+  it("ignores terminal file links without a nonblank string path", async () => {
+    const onOpenFile = vi.fn();
+    const webView = await renderTerminalWebView({ onOpenFile });
+    const send = (payload: unknown) => {
+      (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: { data: JSON.stringify(payload) }
+      } as WebViewMessageEvent);
+    };
+
+    send({ type: "terminal-file-link", path: "   ", line: 1 });
+    send({ type: "terminal-file-link", path: 123, line: 1 });
+    send(null);
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: "not-json" }
+    } as WebViewMessageEvent);
+
+    expect(onOpenFile).not.toHaveBeenCalled();
+  });
+
+  it("omits invalid line values while still forwarding valid paths", async () => {
+    const onOpenFile = vi.fn();
+    const webView = await renderTerminalWebView({ onOpenFile });
+
+    for (const line of [0, -1, 1.5, "42", null]) {
+      (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: {
+          data: JSON.stringify({ type: "terminal-file-link", path: "README.md", line })
+        }
+      } as WebViewMessageEvent);
+    }
+
+    expect(onOpenFile).toHaveBeenCalledTimes(5);
+    for (const call of onOpenFile.mock.calls) {
+      expect(call).toEqual(["README.md"]);
+    }
+  });
+
+  it("preserves unrelated terminal message handling", async () => {
+    const onConsolePress = vi.fn();
+    const onOpenFile = vi.fn();
+    const webView = await renderTerminalWebView({ onConsolePress, onOpenFile });
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({ type: "terminal-tap" })
+      }
+    } as WebViewMessageEvent);
+
+    expect(onConsolePress).toHaveBeenCalledOnce();
+    expect(onOpenFile).not.toHaveBeenCalled();
   });
 
   it("exposes rendered terminal diagnostics to native E2E automation", async () => {

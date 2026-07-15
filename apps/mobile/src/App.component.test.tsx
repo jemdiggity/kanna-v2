@@ -172,6 +172,10 @@ function createClientMock() {
     }),
     closeTask: vi.fn<KannaClient["closeTask"]>().mockResolvedValue(undefined),
     sendTaskInput: vi.fn<KannaClient["sendTaskInput"]>().mockResolvedValue(undefined),
+    readTaskFile: vi.fn<KannaClient["readTaskFile"]>().mockResolvedValue({
+      path: "docs/spec.md",
+      content: "# Spec"
+    }),
     observeTaskTerminal: vi.fn<KannaClient["observeTaskTerminal"]>(() => ({
       close: vi.fn()
     })),
@@ -274,6 +278,31 @@ describe("App component wiring", () => {
     });
 
     expect(createTask).toHaveBeenCalledWith({ cols: 128, rows: 72 });
+  });
+
+  it("reads a file for the currently selected task", async () => {
+    const { client, model, sessionStore } = createModel("connected");
+    sessionStore.setRecentTasks([
+      {
+        id: "task-current",
+        repoId: "repo-1",
+        title: "Current task",
+        stage: "in progress",
+        agentType: "pty"
+      }
+    ]);
+    sessionStore.setSelectedTask("task-current");
+
+    const renderer = await mountModel(model);
+    const taskScreen = renderer.root.findByType("TaskScreen");
+    await expect(taskScreen.props.onReadTaskFile("docs/spec.md")).resolves.toEqual({
+      path: "docs/spec.md",
+      content: "# Spec"
+    });
+    expect(client.readTaskFile).toHaveBeenCalledWith(
+      "task-current",
+      "docs/spec.md"
+    );
   });
 
   it("exposes the accepted task snapshot to detail-only E2E synchronization", async () => {

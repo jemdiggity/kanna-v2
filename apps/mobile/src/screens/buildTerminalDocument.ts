@@ -15,6 +15,9 @@ interface BuildTerminalUpdateScriptOptions {
   status: TaskTerminalStatus;
 }
 
+const TERMINAL_FILE_PATH_PATTERN =
+  /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.[a-zA-Z][a-zA-Z0-9]*(?::\d+){0,2})/g.source;
+
 export function buildTerminalDocument({
   bottomInset,
   enableE2EInspection
@@ -152,6 +155,109 @@ export function buildTerminalDocument({
       term.open(root);
       term.onScroll(() => {
         stickyToBottom = isNearBottom();
+      });
+
+      const terminalFilePathRegex = new RegExp(
+        ${JSON.stringify(TERMINAL_FILE_PATH_PATTERN)},
+        "g"
+      );
+
+      function parseTerminalFileLink(raw) {
+        const parts = raw.split(":");
+        const suffixes = [];
+        while (parts.length > 1 && suffixes.length < 2) {
+          const maybeNumber = parts[parts.length - 1];
+          if (!maybeNumber || !/^\\d+$/.test(maybeNumber)) {
+            break;
+          }
+          suffixes.unshift(Number.parseInt(maybeNumber, 10));
+          parts.pop();
+        }
+
+        const path = parts.join(":");
+        if (path.split("/").includes("..")) {
+          return null;
+        }
+        return { path, line: suffixes[0] };
+      }
+
+      function notifyTerminalFileLink(path, line) {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+
+        const message = { type: "terminal-file-link", path };
+        if (line !== undefined) {
+          message.line = line;
+        }
+        window.ReactNativeWebView.postMessage(JSON.stringify(message));
+      }
+
+      function terminalCellBoundaries(line) {
+        const boundaries = new Map([[0, 0]]);
+        let stringOffset = 0;
+        for (let cellColumn = 0; cellColumn < line.length; cellColumn += 1) {
+          const cell = line.getCell(cellColumn);
+          if (!cell) continue;
+          const width = cell.getWidth();
+          if (width === 0) continue;
+          const chars = cell.getChars() || " ";
+          boundaries.set(stringOffset, cellColumn);
+          stringOffset += chars.length;
+          boundaries.set(stringOffset, cellColumn + width);
+        }
+        return boundaries;
+      }
+
+      function detectTerminalFileLinks(lineText, bufferLineNumber, line) {
+        const links = [];
+        const cellBoundaries = terminalCellBoundaries(line);
+        terminalFilePathRegex.lastIndex = 0;
+        let match;
+        while ((match = terminalFilePathRegex.exec(lineText)) !== null) {
+          const raw = match[1];
+          const parsed = parseTerminalFileLink(raw);
+          if (!parsed) {
+            continue;
+          }
+          const start = match.index + match[0].length - raw.length;
+          const startCell = cellBoundaries.get(start);
+          const endCell = cellBoundaries.get(start + raw.length);
+          if (startCell === undefined || endCell === undefined) {
+            continue;
+          }
+          links.push({
+            range: {
+              start: { x: startCell + 1, y: bufferLineNumber },
+              end: { x: endCell, y: bufferLineNumber }
+            },
+            text: raw,
+            decorations: {
+              pointerCursor: true,
+              underline: true
+            },
+            activate() {
+              notifyTerminalFileLink(parsed.path, parsed.line);
+            }
+          });
+        }
+        return links;
+      }
+
+      term.registerLinkProvider({
+        provideLinks(bufferLineNumber, callback) {
+          const line = term.buffer.active.getLine(bufferLineNumber - 1);
+          if (!line) {
+            callback(undefined);
+            return;
+          }
+          const links = detectTerminalFileLinks(
+            line.translateToString(true),
+            bufferLineNumber,
+            line
+          );
+          callback(links.length ? links : undefined);
+        }
       });
 
       function cellDimensions() {

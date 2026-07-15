@@ -740,6 +740,7 @@ function createDisconnectedClient(): KannaClient {
     markTaskRead: unavailable,
     closeTask: unavailable,
     sendTaskInput: unavailable,
+    readTaskFile: unavailable,
     observeTaskTerminal(taskId, listener) {
       listener({
         type: "error",
@@ -832,6 +833,8 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).closeTask(taskId),
     sendTaskInput: async (taskId, input) =>
       (await resolveClient(desktopId)).sendTaskInput(taskId, input),
+    readTaskFile: async (taskId, path) =>
+      (await resolveClient(desktopId)).readTaskFile(taskId, path),
     observeTaskTerminal: (taskId, listener) =>
       currentClient(desktopId).observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>
@@ -972,6 +975,7 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     markTaskRead: (taskId) => getClient().markTaskRead(taskId),
     closeTask: (taskId) => getClient().closeTask(taskId),
     sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
+    readTaskFile: (taskId, path) => getClient().readTaskFile(taskId, path),
     observeTaskTerminal: (taskId, listener) =>
       getClient().observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>

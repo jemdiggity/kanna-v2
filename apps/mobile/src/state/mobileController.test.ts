@@ -150,6 +150,10 @@ function createClientMock(): ClientMock {
       taskId: "task-1",
       activity: "idle"
     }),
+    readTaskFile: vi.fn().mockResolvedValue({
+      path: "docs/spec.md",
+      content: "# Spec"
+    }),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
     closeTask: vi.fn().mockResolvedValue(undefined),
     observeTaskTerminal: vi.fn().mockImplementation((_taskId, listener) => {
@@ -207,6 +211,22 @@ describe("createMobileController", () => {
     });
     expect(store.getState().recentTasks).toHaveLength(1);
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-1"]);
+  });
+
+  it("reads a task file through the client without mutating global errors", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    store.setErrorMessage("existing error");
+
+    await expect(
+      controller.readTaskFile("task-1", "docs/spec.md")
+    ).resolves.toEqual({
+      path: "docs/spec.md",
+      content: "# Spec"
+    });
+    expect(client.readTaskFile).toHaveBeenCalledWith("task-1", "docs/spec.md");
+    expect(store.getState().errorMessage).toBe("existing error");
   });
 
   it("queues a complete trailing bootstrap requested during an active run", async () => {

@@ -191,6 +191,9 @@ importers:
       firebase:
         specifier: ^12.12.1
         version: 12.12.1(@react-native-async-storage/async-storage@2.1.2(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0)))
+      markdown-it:
+        specifier: 14.1.1
+        version: 14.1.1
       react:
         specifier: 19.0.0
         version: 19.0.0
@@ -207,6 +210,9 @@ importers:
       '@expo/config-plugins':
         specifier: ~10.1.2
         version: 10.1.2
+      '@types/markdown-it':
+        specifier: 14.1.2
+        version: 14.1.2
       '@types/node':
         specifier: ^24.0.0
         version: 24.12.2

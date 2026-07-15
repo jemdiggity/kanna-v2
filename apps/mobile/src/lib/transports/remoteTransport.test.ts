@@ -16,6 +16,65 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 describe("remote transport", () => {
+  it("routes cloud task file reads to the owner desktop and encoded local task id", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      path: "docs/spec one.md",
+      content: "# Spec"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [{
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local/task-1",
+        ownerOnline: true
+      }]
+    });
+
+    await expect(
+      transport.readTaskFile("cloud-task-1", "docs/spec one.md")
+    ).resolves.toEqual({
+      path: "docs/spec one.md",
+      content: "# Spec"
+    });
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/tasks/local%2Ftask-1/files/content?path=docs%2Fspec%20one.md",
+      body: null
+    });
+  });
+
+  it("reads task files from the selected desktop when no cloud route exists", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      path: "README.md",
+      content: "Read me"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-selected",
+      invokeDesktop
+    });
+
+    await expect(
+      transport.readTaskFile("task/read", "README.md")
+    ).resolves.toEqual({
+      path: "README.md",
+      content: "Read me"
+    });
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-selected",
+      method: "GET",
+      path: "/v1/tasks/task%2Fread/files/content?path=README.md",
+      body: null
+    });
+  });
+
   it("posts mark-read to the selected remote desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       taskId: "task/read",

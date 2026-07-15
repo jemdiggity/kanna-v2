@@ -14,6 +14,7 @@ mod relay_client;
 mod runtime;
 mod session_replacements;
 mod task_creator;
+mod task_files;
 mod terminal_watcher;
 mod worktree_cleanup;
 

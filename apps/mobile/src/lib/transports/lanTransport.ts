@@ -14,6 +14,7 @@ import type {
   RepoSummary,
   TaskActionResponse,
   TaskActivityResponse,
+  TaskFileContent,
   TaskSummary
 } from "../api/types";
 
@@ -118,6 +119,11 @@ export function createLanTransport(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ input })
       }),
+    readTaskFile: async (_taskId: string, _path: string): Promise<TaskFileContent> => {
+      throw new Error(
+        "Task file preview requires an authenticated relay connection."
+      );
+    },
     observeTaskTerminal(taskId, listener) {
       const client = new StreamClient({
         url: buildKspWebSocketUrl(baseUrl),

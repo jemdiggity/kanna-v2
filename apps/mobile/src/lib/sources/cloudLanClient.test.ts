@@ -63,6 +63,10 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
     closeTask: vi.fn().mockResolvedValue(undefined),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
+    readTaskFile: vi.fn().mockResolvedValue({
+      path: "docs/spec.md",
+      content: "# Spec"
+    }),
     observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
     observeTaskAgent: vi.fn(() => agentSubscription()),
     createPairingSession: vi.fn().mockResolvedValue({
@@ -1016,6 +1020,78 @@ describe("createCloudLanClient", () => {
     expect(lan.runMergeAgent).toHaveBeenCalledWith("local-duplicate");
     expect(lan.markTaskRead).toHaveBeenCalledWith("local-duplicate");
     expect(cloud.markTaskRead).not.toHaveBeenCalled();
+  });
+
+  it("uses the authenticated cloud route for file content even when a LAN projection is selected", async () => {
+    let lanEnabled = true;
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({
+          id: "cloud-duplicate",
+          ownerDesktopId: "desktop-lan",
+          ownerLocalTaskId: "local-duplicate"
+        })
+      ]),
+      readTaskFile: vi.fn().mockResolvedValue({
+        path: "docs/spec.md",
+        content: "cloud"
+      })
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "local-duplicate" })
+      ]),
+      readTaskFile: vi.fn().mockResolvedValue({
+        path: "docs/spec.md",
+        content: "lan"
+      })
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => lanEnabled
+    });
+
+    await client.listRecentTasks();
+    await expect(
+      client.readTaskFile("cloud-duplicate", "docs/spec.md")
+    ).resolves.toEqual({
+      path: "docs/spec.md",
+      content: "cloud"
+    });
+    expect(lan.readTaskFile).not.toHaveBeenCalled();
+    expect(cloud.readTaskFile).toHaveBeenCalledWith(
+      "cloud-duplicate",
+      "docs/spec.md"
+    );
+
+    lanEnabled = false;
+    await expect(
+      client.readTaskFile("cloud-duplicate", "docs/spec.md")
+    ).resolves.toEqual({
+      path: "docs/spec.md",
+      content: "cloud"
+    });
+    expect(cloud.readTaskFile).toHaveBeenLastCalledWith(
+      "cloud-duplicate",
+      "docs/spec.md"
+    );
+  });
+
+  it("fails closed for a LAN-only task-file route without an authenticated cloud capability", async () => {
+    let lanEnabled = true;
+    const cloud = createClientMock();
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([task({ id: "lan-only" })])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => lanEnabled
+    });
+
+    await client.listRecentTasks();
+    await expect(
+      client.readTaskFile("lan-only", "docs/spec.md")
+    ).rejects.toThrow(/lan-only.*authenticated relay/i);
+    expect(cloud.readTaskFile).not.toHaveBeenCalled();
+    expect(lan.readTaskFile).not.toHaveBeenCalled();
   });
 
   it("translates routed action responses back to the displayed task identity", async () => {

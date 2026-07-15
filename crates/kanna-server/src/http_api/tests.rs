@@ -1,3 +1,4 @@
+pub(super) use super::task_files::AuthenticatedTaskFileAccess;
 pub(super) use super::task_input::{submit_task_input, task_input_message};
 pub(super) use super::test_support::{
     test_router, test_router_with_merge_agent_runner, test_router_with_revision_requester,

@@ -2,6 +2,7 @@ import type {
   CreateTaskResponse,
   RepoSummary,
   TaskActivity,
+  TaskFileContent,
   TaskSummary
 } from "../lib/api/types";
 import type {
@@ -47,6 +48,7 @@ export interface MobileController {
   recoverTaskCreation(): Promise<void>;
   runMergeAgent(taskId: string): Promise<void>;
   advanceDesktopTaskStage(taskId: string): Promise<void>;
+  readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
   interruptTaskAgent(taskId: string): void;
@@ -1675,6 +1677,10 @@ export function createMobileController(
       } catch (error) {
         fail(error);
       }
+    },
+
+    readTaskFile(taskId, path) {
+      return client.readTaskFile(taskId, path);
     },
 
     async sendTaskInput(taskId, input) {

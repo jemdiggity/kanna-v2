@@ -12,26 +12,91 @@ interface TouchPoint {
   clientY: number;
 }
 
+interface StubTerminalLink {
+  activate(): void;
+  decorations: {
+    pointerCursor: boolean;
+    underline: boolean;
+  };
+  range: {
+    start: { x: number; y: number };
+    end: { x: number; y: number };
+  };
+  text: string;
+}
+
+interface StubTerminalLinkProvider {
+  provideLinks(
+    bufferLineNumber: number,
+    callback: (links: StubTerminalLink[] | undefined) => void
+  ): void;
+}
+
+interface StubBufferCell {
+  getChars(): string;
+  getWidth(): number;
+}
+
+function terminalCells(text: string): Array<{ chars: string; width: number }> {
+  const cells: Array<{ chars: string; width: number }> = [];
+  for (const character of text) {
+    if (/\p{Mark}/u.test(character) && cells.length > 0) {
+      const previous = cells.findLast((cell) => cell.width > 0);
+      if (previous) previous.chars += character;
+      continue;
+    }
+    const width = /\p{Script=Han}/u.test(character) ? 2 : 1;
+    cells.push({ chars: character, width });
+    if (width === 2) cells.push({ chars: "", width: 0 });
+  }
+  return cells;
+}
+
 class StubTerminal {
   cols: number;
   rows = 0;
   options: { fontSize: number; smoothScrollDuration?: number };
+  linkProvider: StubTerminalLinkProvider | null = null;
+  bufferLines = new Map<number, string>();
+  getLineCalls: number[] = [];
+  translateToStringCalls: Array<{ index: number; trimRight: boolean | undefined }> = [];
+  buffer = {
+    active: {
+      baseY: 100,
+      viewportY: 100,
+      length: 101,
+      getLine: (index: number) => {
+        this.getLineCalls.push(index);
+        const text = this.bufferLines.get(index);
+        if (text === undefined) {
+          return undefined;
+        }
+        const cells = terminalCells(text);
+        return {
+          length: cells.length,
+          getCell: (cellIndex: number): StubBufferCell | undefined => {
+            const cell = cells[cellIndex];
+            return cell
+              ? {
+                  getChars: () => cell.chars,
+                  getWidth: () => cell.width
+                }
+              : undefined;
+          },
+          translateToString: (trimRight?: boolean) => {
+            this.translateToStringCalls.push({ index, trimRight });
+            return text;
+          }
+        };
+      }
+    }
+  };
   resizeCalls: Array<{ cols: number; rows: number }> = [];
   scrollToBottomCalls = 0;
   scrollToBottomHook: (() => void) | null = null;
   scrollToLineCalls: number[] = [];
   writes: unknown[] = [];
   resets = 0;
-  buffer = {
-    active: {
-      baseY: 100,
-      viewportY: 100,
-      length: 101,
-      getLine: (_index: number) => ({
-        translateToString: (_trimRight?: boolean) => ""
-      })
-    }
-  };
   dimensions = {
     css: {
       canvas: { width: 1980, height: 774 },
@@ -58,6 +123,11 @@ class StubTerminal {
   }
 
   loadAddon(): void {}
+
+  registerLinkProvider(provider: StubTerminalLinkProvider): { dispose(): void } {
+    this.linkProvider = provider;
+    return { dispose() {} };
+  }
 
   open(root: HTMLElement): void {
     const xterm = root.ownerDocument.createElement("div");
@@ -151,6 +221,22 @@ class StubTerminal {
       listener(this.buffer.active.viewportY);
     }
   }
+}
+
+function provideLinks(
+  terminal: StubTerminal,
+  bufferLineNumber: number,
+  lineText: string
+): StubTerminalLink[] | undefined {
+  terminal.bufferLines.set(bufferLineNumber - 1, lineText);
+  if (!terminal.linkProvider) {
+    throw new Error("generated terminal did not register a file link provider");
+  }
+  let result: StubTerminalLink[] | undefined;
+  terminal.linkProvider.provideLinks(bufferLineNumber, (links) => {
+    result = links;
+  });
+  return result;
 }
 
 class StubFitAddon {
@@ -268,6 +354,95 @@ function createExecutedTerminalDocument({
 }
 
 describe("buildTerminalDocument", () => {
+  it("provides bare, nested, and absolute file links with one-based ranges", () => {
+    const { messages, terminal } = createExecutedTerminalDocument();
+    const row = 7;
+    const line = "See README.md and docs/spec.md:42:7 then /tmp/task/notes.md:9";
+
+    const links = provideLinks(terminal, row, line);
+
+    expect(links?.map((link) => link.text)).toEqual([
+      "README.md",
+      "docs/spec.md:42:7",
+      "/tmp/task/notes.md:9"
+    ]);
+    expect(links?.map((link) => link.range)).toEqual(
+      ["README.md", "docs/spec.md:42:7", "/tmp/task/notes.md:9"].map((text) => {
+        const start = line.indexOf(text);
+        return {
+          start: { x: start + 1, y: row },
+          end: { x: start + text.length, y: row }
+        };
+      })
+    );
+    expect(links?.map((link) => link.decorations)).toEqual([
+      { pointerCursor: true, underline: true },
+      { pointerCursor: true, underline: true },
+      { pointerCursor: true, underline: true }
+    ]);
+
+    links?.[1]?.activate();
+    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
+      type: "terminal-file-link",
+      path: "docs/spec.md",
+      line: 42
+    });
+
+    links?.[2]?.activate();
+    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
+      type: "terminal-file-link",
+      path: "/tmp/task/notes.md",
+      line: 9
+    });
+  });
+
+  it("omits a line number when a file candidate has no numeric suffix", () => {
+    const { messages, terminal } = createExecutedTerminalDocument();
+    const links = provideLinks(terminal, 1, "README.md");
+
+    links?.[0]?.activate();
+
+    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
+      type: "terminal-file-link",
+      path: "README.md"
+    });
+  });
+
+  it("rejects literal parent segments and non-file-like rows", () => {
+    const { terminal } = createExecutedTerminalDocument();
+
+    expect(provideLinks(terminal, 2, "../secret.md docs/../escape.md")).toBeUndefined();
+    expect(provideLinks(terminal, 3, "No file path was written here")).toBeUndefined();
+  });
+
+  it("reads only the requested xterm row and trims its rendered right padding", () => {
+    const { terminal } = createExecutedTerminalDocument();
+    terminal.bufferLines.set(0, "README.md");
+    terminal.bufferLines.set(8, "docs/spec.md");
+
+    const links = provideLinks(terminal, 9, "docs/spec.md");
+
+    expect(links?.map((link) => link.text)).toEqual(["docs/spec.md"]);
+    expect(terminal.getLineCalls).toEqual([8]);
+    expect(terminal.translateToStringCalls).toEqual([{ index: 8, trimRight: true }]);
+  });
+
+  it("maps file-link ranges to terminal cells after wide and combining characters", () => {
+    const { terminal } = createExecutedTerminalDocument();
+
+    const wide = provideLinks(terminal, 4, "界 docs/spec.md");
+    expect(wide?.[0]?.range).toEqual({
+      start: { x: 4, y: 4 },
+      end: { x: 15, y: 4 }
+    });
+
+    const combining = provideLinks(terminal, 5, "e\u0301 docs/spec.md");
+    expect(combining?.[0]?.range).toEqual({
+      start: { x: 3, y: 5 },
+      end: { x: 14, y: 5 }
+    });
+  });
+
   it("omits terminal inspection traversal and messages outside E2E builds", () => {
     const { messages, window } = createExecutedTerminalDocument();
     const script = extractTerminalScript(
@@ -282,8 +457,8 @@ describe("buildTerminalDocument", () => {
 
     expect(script).not.toContain("terminal-inspection");
     expect(script).not.toContain("function renderedTerminalText");
-    expect(script).not.toContain("translateToString");
-    expect(script).not.toContain("buffer.getLine");
+    expect(script).not.toContain("const firstLine");
+    expect(script).not.toMatch(/for \(let index = firstLine; index < buffer\.length/);
     expect(script).not.toContain("recordTerminalFrame");
     expect(messages.map((message) => JSON.parse(message).type)).not.toContain(
       "terminal-inspection"

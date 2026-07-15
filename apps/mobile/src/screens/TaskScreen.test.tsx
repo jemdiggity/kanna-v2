@@ -1,7 +1,11 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const states: unknown[] = [];
-let stateHookIndex = 0;
+const hookHarness = vi.hoisted(() => ({
+  hookIndex: 0,
+  refIndex: 0,
+  refs: [] as Array<{ current: unknown }>,
+  stateValues: [] as unknown[]
+}));
 
 vi.mock("react", async (importActual) => {
   const actual = await importActual<typeof import("react")>();
@@ -9,19 +13,28 @@ vi.mock("react", async (importActual) => {
   return {
     ...actual,
     useEffect: vi.fn(),
-    useState: vi.fn((initialValue: unknown) => {
-      const index = stateHookIndex;
-      stateHookIndex += 1;
-      if (!(index in states)) {
-        states[index] = initialValue;
+    useRef: <T,>(initialValue: T) => {
+      const index = hookHarness.refIndex++;
+      hookHarness.refs[index] ??= { current: initialValue };
+      return hookHarness.refs[index] as { current: T };
+    },
+    useState: <T,>(initialValue: T | (() => T)) => {
+      const index = hookHarness.hookIndex++;
+      if (!(index in hookHarness.stateValues)) {
+        hookHarness.stateValues[index] =
+          typeof initialValue === "function"
+            ? (initialValue as () => T)()
+            : initialValue;
       }
-      return [states[index], (value: unknown) => {
-        states[index] =
-          typeof value === "function"
-            ? (value as (previous: unknown) => unknown)(states[index])
-            : value;
-      }];
-    })
+      const setValue = (nextValue: T | ((value: T) => T)) => {
+        const currentValue = hookHarness.stateValues[index] as T;
+        hookHarness.stateValues[index] =
+          typeof nextValue === "function"
+            ? (nextValue as (value: T) => T)(currentValue)
+            : nextValue;
+      };
+      return [hookHarness.stateValues[index] as T, vi.fn(setValue)] as const;
+    }
   };
 });
 
@@ -47,6 +60,10 @@ vi.mock("./TerminalWebView", () => ({
   TerminalWebView: "TerminalWebView"
 }));
 
+vi.mock("./TaskFilePreview", () => ({
+  TaskFilePreview: "TaskFilePreview"
+}));
+
 let TaskScreen: typeof import("./TaskScreen").TaskScreen | null = null;
 
 beforeAll(async () => {
@@ -54,8 +71,10 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  states.length = 0;
-  stateHookIndex = 0;
+  hookHarness.hookIndex = 0;
+  hookHarness.refIndex = 0;
+  hookHarness.refs.length = 0;
+  hookHarness.stateValues.length = 0;
 });
 
 interface ElementNode {
@@ -74,16 +93,23 @@ function renderTaskScreen(
     rows: null
   },
   e2eTaskSnapshotMarker?: string,
-  activity: "idle" | "working" | "unread" = "idle"
+  activity: "idle" | "working" | "unread" = "idle",
+  onReadTaskFile = vi.fn().mockResolvedValue({
+    path: "docs/spec.md",
+    content: "# Spec"
+  }),
+  taskId = "task-1"
 ): ElementNode {
   if (!TaskScreen) {
     throw new Error("TaskScreen was not loaded");
   }
 
-  stateHookIndex = 0;
+  hookHarness.hookIndex = 0;
+  hookHarness.refIndex = 0;
+
   return TaskScreen({
     task: {
-      id: "task-1",
+      id: taskId,
       repoId: "repo-1",
       title: "Task",
       stage: "in progress",
@@ -103,7 +129,8 @@ function renderTaskScreen(
     onOpenMore: vi.fn(),
     onSendInput: vi.fn(),
     onStopAgent: vi.fn(),
-    onResolveAgentPermission: vi.fn()
+    onResolveAgentPermission: vi.fn(),
+    onReadTaskFile
   }) as ElementNode;
 }
 
@@ -211,6 +238,97 @@ describe("TaskScreen", () => {
         expectedInset
       );
     }
+  });
+
+  it("opens terminal file links in a task preview and closes it", async () => {
+    const onReadTaskFile = vi.fn().mockResolvedValue({
+      path: "docs/spec.md",
+      content: "# Spec"
+    });
+    let tree = renderTaskScreen(
+      "pty",
+      undefined,
+      undefined,
+      "idle",
+      onReadTaskFile
+    );
+    const terminal = findByType(tree, "TerminalWebView");
+
+    expect(terminal?.props?.onOpenFile).toBeTypeOf("function");
+    (terminal?.props?.onOpenFile as (path: string, line?: number) => void)(
+      "docs/spec.md",
+      42
+    );
+
+    tree = renderTaskScreen(
+      "pty",
+      undefined,
+      undefined,
+      "idle",
+      onReadTaskFile
+    );
+    const preview = findByType(tree, "TaskFilePreview");
+    expect(preview?.props).toMatchObject({
+      path: "docs/spec.md",
+      initialLine: 42
+    });
+    await expect(
+      (preview?.props?.readFile as () => Promise<unknown>)()
+    ).resolves.toEqual({
+      path: "docs/spec.md",
+      content: "# Spec"
+    });
+    expect(onReadTaskFile).toHaveBeenCalledWith("docs/spec.md");
+
+    (preview?.props?.onClose as () => void)();
+    tree = renderTaskScreen(
+      "pty",
+      undefined,
+      undefined,
+      "idle",
+      onReadTaskFile
+    );
+    expect(findByType(tree, "TaskFilePreview")).toBeNull();
+  });
+
+  it("does not reopen a file preview after switching to another task and back", () => {
+    let tree = renderTaskScreen("pty");
+    const terminal = findByType(tree, "TerminalWebView");
+
+    expect(terminal?.props?.onOpenFile).toBeTypeOf("function");
+    (terminal?.props?.onOpenFile as (path: string, line?: number) => void)(
+      "README.md"
+    );
+
+    tree = renderTaskScreen(
+      "pty",
+      undefined,
+      undefined,
+      "idle",
+      undefined,
+      "task-2"
+    );
+    expect(findByType(tree, "TaskFilePreview")).toBeNull();
+
+    tree = renderTaskScreen("pty");
+    expect(findByType(tree, "TaskFilePreview")).toBeNull();
+  });
+
+  it("does not reopen a file preview after switching to an SDK agent and back", () => {
+    let tree = renderTaskScreen("pty");
+    const terminal = findByType(tree, "TerminalWebView");
+
+    expect(terminal?.props?.onOpenFile).toBeTypeOf("function");
+    (terminal?.props?.onOpenFile as (path: string, line?: number) => void)(
+      "README.md"
+    );
+
+    tree = renderTaskScreen("agent");
+    expect(findByType(tree, "TerminalWebView")).toBeNull();
+    expect(findByType(tree, "TaskFilePreview")).toBeNull();
+
+    tree = renderTaskScreen("pty");
+    expect(findByType(tree, "TaskFilePreview")).toBeNull();
   });
 
   it("renders an E2E-only accepted snapshot marker when provided", () => {

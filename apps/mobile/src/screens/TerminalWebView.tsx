@@ -26,6 +26,7 @@ interface TerminalWebViewProps {
   fullscreen?: boolean;
   bottomInset?: number;
   onConsolePress?: () => void;
+  onOpenFile?: (path: string, line?: number) => void;
 }
 
 const ENABLE_E2E_TERMINAL_INSPECTION =
@@ -57,7 +58,8 @@ export function TerminalWebView({
   rows,
   fullscreen = false,
   bottomInset,
-  onConsolePress
+  onConsolePress,
+  onOpenFile
 }: TerminalWebViewProps) {
   const webViewRef = useRef<TerminalWebViewHandle>(null);
   const bridgeReadyRef = useRef(false);
@@ -175,32 +177,58 @@ export function TerminalWebView({
   }, [bottomInsetScript]);
 
   const handleMessage = (event: WebViewMessageEvent) => {
-    let payload: { type?: string; inspection?: TerminalInspection } | null = null;
+    let payload: {
+      type?: unknown;
+      inspection?: TerminalInspection;
+      path?: unknown;
+      line?: unknown;
+    };
 
     try {
-      payload = JSON.parse(event.nativeEvent.data) as {
-        type?: string;
-        inspection?: TerminalInspection;
-      };
+      const parsed = JSON.parse(event.nativeEvent.data) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return;
+      }
+      payload = parsed;
     } catch {
       return;
     }
 
-    if (payload?.type === "terminal-tap") {
+    if (payload.type === "terminal-file-link") {
+      if (typeof payload.path !== "string") {
+        return;
+      }
+      const path = payload.path.trim();
+      if (!path) {
+        return;
+      }
+      if (
+        typeof payload.line === "number" &&
+        Number.isInteger(payload.line) &&
+        payload.line > 0
+      ) {
+        onOpenFile?.(path, payload.line);
+      } else {
+        onOpenFile?.(path);
+      }
+      return;
+    }
+
+    if (payload.type === "terminal-tap") {
       onConsolePress?.();
       return;
     }
 
     if (
       ENABLE_E2E_TERMINAL_INSPECTION &&
-      payload?.type === "terminal-inspection" &&
+      payload.type === "terminal-inspection" &&
       payload.inspection
     ) {
       setTerminalInspection(payload.inspection);
       return;
     }
 
-    if (payload?.type !== "terminal-ready") {
+    if (payload.type !== "terminal-ready") {
       return;
     }
 
