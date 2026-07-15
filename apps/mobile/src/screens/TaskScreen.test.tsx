@@ -389,19 +389,37 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
   });
 
-  it("opens quick replies on long press even with an empty draft", () => {
-    const tree = renderTaskScreen({ agentType: "agent" });
-    const sendButton = findByTestId(tree, "mobile.task-send-button");
+  it.each(["", "  \n\t"])(
+    "does not send or clear an empty normal draft %#",
+    (draftInput) => {
+      const tree = renderTaskScreen({ agentType: "agent", draftInput });
+      const sendButton = findByTestId(tree, "mobile.task-send-button");
 
-    expect(sendButton?.props).toMatchObject({
-      accessibilityHint: "Press and hold for quick replies.",
-      accessibilityLabel: "Send reply",
-      disabled: false
-    });
-    (sendButton?.props?.onLongPress as (() => void))();
+      (sendButton?.props?.onPress as (() => void))();
 
-    expect(componentMocks.showQuickReplyMenu).toHaveBeenCalledOnce();
-  });
+      expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+      expect(componentMocks.draftSetter).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["agent", "pty"] as const)(
+    "opens quick replies on long press with an empty %s draft",
+    (agentType) => {
+      const tree = renderTaskScreen({ agentType });
+      const sendButton = findByTestId(tree, "mobile.task-send-button");
+
+      expect(sendButton?.props).toMatchObject({
+        accessibilityHint: "Press and hold for quick replies.",
+        accessibilityLabel: "Send reply",
+        accessibilityRole: "button",
+        accessibilityState: { disabled: false },
+        disabled: false
+      });
+      (sendButton?.props?.onLongPress as (() => void))();
+
+      expect(componentMocks.showQuickReplyMenu).toHaveBeenCalledOnce();
+    }
+  );
 
   it("sends the selected quick reply plus the current draft and clears it", () => {
     const tree = renderTaskScreen({
@@ -422,21 +440,28 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
   });
 
-  it("disables ordinary and shortcut sends only when the composer is unavailable", () => {
-    const tree = renderTaskScreen({
-      agentType: "agent",
-      agentStatus: "error"
-    });
-    const sendButton = findByTestId(tree, "mobile.task-send-button");
+  it.each([
+    ["agent connecting", { agentType: "agent", agentStatus: "connecting" }],
+    ["agent error", { agentType: "agent", agentStatus: "error" }],
+    ["PTY connecting", { agentType: "pty", terminalStatus: "connecting" }],
+    ["PTY idle", { agentType: "pty", terminalStatus: "idle" }],
+    ["PTY error", { agentType: "pty", terminalStatus: "error" }],
+    ["PTY closed", { agentType: "pty", terminalStatus: "closed" }]
+  ] as const)(
+    "disables ordinary and shortcut sends while %s",
+    (_caseName, options) => {
+      const tree = renderTaskScreen(options);
+      const sendButton = findByTestId(tree, "mobile.task-send-button");
 
-    expect(sendButton?.props).toMatchObject({
-      accessibilityState: { disabled: true },
-      disabled: true
-    });
-    (sendButton?.props?.onLongPress as (() => void))();
-    (sendButton?.props?.onPress as (() => void))();
+      expect(sendButton?.props).toMatchObject({
+        accessibilityState: { disabled: true },
+        disabled: true
+      });
+      (sendButton?.props?.onLongPress as (() => void))();
+      (sendButton?.props?.onPress as (() => void))();
 
-    expect(componentMocks.showQuickReplyMenu).not.toHaveBeenCalled();
-    expect(componentMocks.onSendInput).not.toHaveBeenCalled();
-  });
+      expect(componentMocks.showQuickReplyMenu).not.toHaveBeenCalled();
+      expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+    }
+  );
 });

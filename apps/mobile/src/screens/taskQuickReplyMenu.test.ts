@@ -39,7 +39,7 @@ describe("showTaskQuickReplyMenu", () => {
     );
   });
 
-  it("selects only a valid iOS quick-reply index", () => {
+  it("selects the valid iOS quick-reply index", () => {
     const onSelect = vi.fn();
     showTaskQuickReplyMenu(onSelect);
     const callback = nativeMocks.actionSheet.mock.calls[0]![1] as (
@@ -47,11 +47,21 @@ describe("showTaskQuickReplyMenu", () => {
     ) => void;
 
     callback(0);
-    callback(1);
-    callback(99);
 
     expect(onSelect).toHaveBeenCalledOnce();
     expect(onSelect).toHaveBeenCalledWith(TASK_QUICK_REPLIES[0]);
+  });
+
+  it.each([1, 99])("ignores the iOS cancel or invalid index %s", (index) => {
+    const onSelect = vi.fn();
+    showTaskQuickReplyMenu(onSelect);
+    const callback = nativeMocks.actionSheet.mock.calls[0]![1] as (
+      buttonIndex: number
+    ) => void;
+
+    callback(index);
+
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it("shows equivalent shortcut and cancel actions off iOS", () => {
