@@ -14,6 +14,7 @@ import {
   type WebViewProps
 } from "react-native-webview";
 import type { TaskFileContent } from "../lib/api/types";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import {
   buildTaskFilePreviewDocument,
   prepareTaskFileMarkdown,
@@ -43,6 +44,8 @@ interface ModeState {
 }
 
 const WebView = NativeWebView as unknown as React.ComponentType<WebViewProps>;
+const ENABLE_E2E_WEBVIEW_INSPECTION =
+  process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -206,7 +209,7 @@ export function TaskFilePreview({
             <Text
               numberOfLines={2}
               style={styles.path}
-              testID="task-file-preview-path"
+              testID={MOBILE_E2E_IDS.taskFilePreviewPath}
             >
               {displayPath}
             </Text>
@@ -216,6 +219,7 @@ export function TaskFilePreview({
             hitSlop={10}
             onPress={onClose}
             style={styles.closeButton}
+            testID={MOBILE_E2E_IDS.taskFilePreviewClose}
           >
             <Text style={styles.closeText}>Close</Text>
           </Pressable>
@@ -228,8 +232,17 @@ export function TaskFilePreview({
           </View>
         ) : visibleState.status === "error" ? (
           <View style={styles.centeredState}>
-            <Text style={styles.errorTitle}>Couldn’t open file</Text>
-            <Text selectable style={styles.errorText}>
+            <Text
+              style={styles.errorTitle}
+              testID={MOBILE_E2E_IDS.taskFilePreviewError}
+            >
+              Couldn’t open file
+            </Text>
+            <Text
+              selectable
+              style={styles.errorText}
+              testID={MOBILE_E2E_IDS.taskFilePreviewErrorMessage}
+            >
               {visibleState.error}
             </Text>
             {visibleState.retryable ? (
@@ -246,7 +259,10 @@ export function TaskFilePreview({
           <View style={styles.content}>
             {isMarkdownPath(visibleState.file.path) ? (
               <View style={styles.modeBar}>
-                <Text style={styles.modeLabel}>
+                <Text
+                  style={styles.modeLabel}
+                  testID={MOBILE_E2E_IDS.taskFilePreviewMode}
+                >
                   {!renderedMarkdownAvailable
                     ? "Raw source · Rendered preview unavailable for large Markdown"
                     : mode === "rendered"
@@ -284,7 +300,30 @@ export function TaskFilePreview({
               source={{ html: previewDocument }}
               style={styles.webView}
               thirdPartyCookiesEnabled={false}
+              webviewDebuggingEnabled={ENABLE_E2E_WEBVIEW_INSPECTION}
             />
+            {ENABLE_E2E_WEBVIEW_INSPECTION ? (
+              <Text
+                accessibilityValue={{
+                  text: JSON.stringify({
+                    content: visibleState.file.content,
+                    initialLine: initialLine ?? null,
+                    mode,
+                    path: visibleState.file.path
+                  })
+                }}
+                pointerEvents="none"
+                style={styles.e2eInspection}
+                testID={MOBILE_E2E_IDS.taskFilePreviewInspection}
+              >
+                {JSON.stringify({
+                  content: visibleState.file.content,
+                  initialLine: initialLine ?? null,
+                  mode,
+                  path: visibleState.file.path
+                })}
+              </Text>
+            ) : null}
           </View>
         )}
       </SafeAreaView>
@@ -293,6 +332,12 @@ export function TaskFilePreview({
 }
 
 const styles = StyleSheet.create({
+  e2eInspection: {
+    height: 1,
+    opacity: 0.01,
+    position: "absolute",
+    width: 1
+  },
   safeArea: {
     backgroundColor: "#050B14",
     flex: 1

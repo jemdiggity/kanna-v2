@@ -66,6 +66,8 @@ vi.mock("react", async (importActual) => {
 });
 
 vi.mock("react-native", () => ({
+  Pressable: "Pressable",
+  ScrollView: "ScrollView",
   StyleSheet: {
     create: <T extends Record<string, unknown>>(styles: T) => styles
   },
@@ -154,25 +156,82 @@ describe("TerminalWebView", () => {
   });
 
   afterEach(() => {
+    delete process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED;
     vi.unstubAllGlobals();
   });
 
-  it("forwards trimmed terminal file links to the native callback", async () => {
+  it("makes the real terminal WebView inspectable for simulator E2E", async () => {
+    process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED = "1";
+    const webView = await renderTerminalWebView({});
+
+    expect(webView.props.webviewDebuggingEnabled).toBe(true);
+  });
+
+  it("opens a discovered file through an actual native button press", async () => {
     const onOpenFile = vi.fn();
     const webView = await renderTerminalWebView({ onOpenFile });
 
     (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
       nativeEvent: {
         data: JSON.stringify({
-          type: "terminal-file-link",
-          path: "  docs/spec.md  ",
-          line: 42
+          type: "terminal-file-links",
+          links: [{ raw: "docs/spec.md:42", path: "  docs/spec.md  ", line: 42 }]
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({ onOpenFile });
+
+    const strip = React.Children.toArray(lastTree?.props.children).find(
+      (child): child is ElementNode =>
+        typeof child === "object" && child !== null &&
+        "type" in child && (child as ElementNode).type === "ScrollView"
+    );
+    const button = React.Children.toArray(strip?.props.children).find(
+      (child): child is ElementNode =>
+        typeof child === "object" && child !== null &&
+        "type" in child && (child as ElementNode).type === "Pressable"
+    );
+    expect(button?.props.accessibilityLabel).toBe(
+      "Open file docs/spec.md at line 42"
+    );
+    (button?.props.onPress as () => void)();
+
+    expect(onOpenFile).toHaveBeenCalledOnce();
+    expect(onOpenFile).toHaveBeenCalledWith("docs/spec.md", 42);
+  });
+
+  it("clears discovered links when switching tasks", async () => {
+    const webView = await renderTerminalWebView({ taskId: "task-1" });
+    runEffects();
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-file-links",
+          links: [{ raw: "docs/old.md", path: "docs/old.md" }]
         })
       }
     } as WebViewMessageEvent);
 
-    expect(onOpenFile).toHaveBeenCalledOnce();
-    expect(onOpenFile).toHaveBeenCalledWith("docs/spec.md", 42);
+    await renderTerminalWebView({ taskId: "task-1" });
+    expect(
+      React.Children.toArray(lastTree?.props.children).some(
+        (child) =>
+          typeof child === "object" && child !== null &&
+          "type" in child && (child as ElementNode).type === "ScrollView"
+      )
+    ).toBe(true);
+    runEffects();
+
+    await renderTerminalWebView({ taskId: "task-2" });
+    runEffects();
+    await renderTerminalWebView({ taskId: "task-2" });
+    expect(
+      React.Children.toArray(lastTree?.props.children).some(
+        (child) =>
+          typeof child === "object" && child !== null &&
+          "type" in child && (child as ElementNode).type === "ScrollView"
+      )
+    ).toBe(false);
   });
 
   it("ignores terminal file links without a nonblank string path", async () => {

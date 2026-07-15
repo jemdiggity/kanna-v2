@@ -50,9 +50,11 @@ File content is more sensitive than the existing task metadata API. The network 
 
 ### Terminal link provider
 
-The generated mobile xterm document registers a row-scoped `ILinkProvider`. It follows the desktop provider's current grammar and one-based xterm row mapping. Link offsets are converted from JavaScript string positions to terminal cell columns through the requested `IBufferLine`, so wide and combining Unicode before a path cannot shift its hitbox. It does not scan the full terminal buffer, preserving the production performance constraint that keeps full-buffer traversal limited to explicit E2E instrumentation.
+The generated mobile xterm document registers a row-scoped `ILinkProvider`. It follows the desktop provider's current grammar and one-based xterm row mapping. Link offsets are converted from JavaScript string positions to terminal cell columns through the requested `IBufferLine`, so wide and combining Unicode before a path cannot shift its hitbox.
 
-Returned links are visibly underlined on mobile. Activation sends this bridge message:
+Xterm link decorations only become visible on hover, which does not exist on touch-only devices. The generated document therefore reports the six most recently mentioned unique paths to `TerminalWebView`, which maintains a persistent, horizontally scrollable native `Files` strip above the xterm surface. Refreshing the list scans at most the last 200 terminal rows after a render; it never traverses unbounded scrollback. The compact, middle-truncated buttons are persistently underlined, expose the full path and line through native assistive-technology labels, and use the same parser as the xterm provider. The document also retains semantic HTML buttons as a browser/WebView fallback.
+
+Touch movement and multi-touch gestures impose a short activation cooldown inside the generated document. A horizontal scroll or pinch over the native strip is handled by React Native's `ScrollView`, while the xterm surface keeps its existing pan and pinch behavior. Neither gesture opens a preview. A settled one-tap native button activation calls the same validated `onOpenFile(path, line)` boundary used by this document bridge message:
 
 ```json
 {
@@ -87,8 +89,9 @@ Markdown is rendered locally with `markdown-it`, with raw HTML and automatic URL
 ## Data Flow
 
 ```text
-PTY bytes -> mobile xterm row link provider
-  -> tap posts terminal-file-link
+PTY bytes -> mobile xterm buffer path detector
+  -> bridge reports recent paths to native Files strip
+  -> native button tap selects {path, line}
   -> TerminalWebView validates {path, line}
   -> TaskScreen opens TaskFilePreview
   -> MobileController.readTaskFile(taskId, path)
@@ -129,6 +132,7 @@ The preview presents these as concise errors. Missing files, missing worktrees, 
 - Unit-test relative and allowed absolute path resolution.
 - Reject parent traversal, existing and missing absolute paths outside the worktree, all symlinks, root-replacement races, sockets, directories, oversized files, and invalid UTF-8.
 - Route-test direct/browser-style denial, authenticated relay success, normalized responses, and each status class.
+- Route-test multiple task worktrees with tied timestamps and prove the newest inserted workspace is selected deterministically.
 
 ### Mobile client and routing
 
@@ -139,12 +143,14 @@ The preview presents these as concise errors. Missing files, missing worktrees, 
 
 ### Mobile terminal and UI
 
-- Execute the generated terminal document under happy-dom with a stub xterm link provider.
+- Execute the generated terminal document under happy-dom with a stub xterm implementation and activate its generated semantic file buttons through real DOM clicks.
 - Cover bare, nested, absolute, line, column, traversal, non-file-like candidates, and terminal-cell ranges after wide/combining Unicode.
-- Verify activation emits the bridge payload without full-buffer traversal.
+- Verify the persistent button strip is visible and assistive-technology accessible, retains the newest six unique paths, emits the bridge payload through an actual one-tap DOM activation, and bounds its production buffer scan.
+- Verify touch scrolling and pinch gestures over a path do not activate it.
 - Verify `TerminalWebView` rejects malformed payloads and forwards valid ones.
 - Cover preview loading, success, retry, close, rendered/raw Markdown, disabled navigation, raw text, line targeting, constant-node rendering for a newline-heavy 1 MiB file, safe raw fallback before parsing oversized or highly fragmented Markdown, and single preparation across stable React rerenders.
 - Cover `TaskScreen` wiring from terminal activation to the task-scoped read callback.
+- Run the simulator relay lane against a scripted PTY and a real Markdown file in the task worktree. After the simulator attaches, send path-bearing input through the authenticated owner route and wait for the real PTY output. Xterm detects those buffer paths and reports them through the React Native bridge; Appium then performs actual native button presses rather than invoking a callback. Assert fetched rendered content, raw line targeting, close behavior, a missing-file error, and gesture non-activation in the real preview modal. Direct Appium DOM/coordinate activation is not currently viable on the installed iOS 26.2 simulator: Appium discovers the inspectable WKWebView, but every `Runtime.evaluate` request fails with WebKit error `-32601 ('Runtime' domain was not found)`, and WKWebView DOM buttons are not projected into XCUITest's native tree. A WebKit/Appium combination that restores the Runtime domain would make CSS-coordinate coverage feasible. The native strip is the strongest real-component substitute: detection still occurs in the real xterm WebView, crosses the real bridge, and activation is an actual accessible one-tap UI interaction.
 
 ## Acceptance Criteria
 

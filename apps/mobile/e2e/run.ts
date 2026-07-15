@@ -271,6 +271,8 @@ async function main(): Promise<void> {
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {
         credentials: relayHarness.credentials,
+        emitFilePreviewLinks: relayHarness.emitFilePreviewLinks,
+        filePreview: relayHarness.filePreview,
         fixture: relayHarness.fixture,
         input: relayHarness.menuInput,
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,

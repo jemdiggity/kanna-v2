@@ -143,13 +143,29 @@ function buildRawContent(content: string, initialLine?: number): string {
 
   let lineStart = 0;
   for (let line = 1; line < initialLine!; line += 1) {
-    const newline = content.indexOf("\n", lineStart);
-    if (newline < 0) return escapeHtml(content);
-    lineStart = newline + 1;
+    let newline = lineStart;
+    while (
+      newline < content.length &&
+      content[newline] !== "\n" &&
+      content[newline] !== "\r"
+    ) {
+      newline += 1;
+    }
+    if (newline >= content.length) return escapeHtml(content);
+    lineStart =
+      content[newline] === "\r" && content[newline + 1] === "\n"
+        ? newline + 2
+        : newline + 1;
   }
 
-  const newline = content.indexOf("\n", lineStart);
-  const lineEnd = newline < 0 ? content.length : newline;
+  let lineEnd = lineStart;
+  while (
+    lineEnd < content.length &&
+    content[lineEnd] !== "\n" &&
+    content[lineEnd] !== "\r"
+  ) {
+    lineEnd += 1;
+  }
   const before = escapeHtml(content.slice(0, lineStart));
   const target = escapeHtml(content.slice(lineStart, lineEnd)) || "&#8203;";
   const after = escapeHtml(content.slice(lineEnd));

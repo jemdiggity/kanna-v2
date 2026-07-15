@@ -258,7 +258,7 @@ describe("TaskFilePreview", () => {
     await Promise.resolve();
     tree = renderPreview({ path: "/worktree/docs/./spec.md", readFile });
 
-    expect(textContent(findByTestId(tree, "task-file-preview-path"))).toBe(
+    expect(textContent(findByTestId(tree, "mobile.task-file-preview.path"))).toBe(
       "docs/spec.md"
     );
     expect(findByType(tree, "WebView")).not.toBeNull();
@@ -437,7 +437,7 @@ describe("TaskFilePreview", () => {
     await Promise.resolve();
     await Promise.resolve();
     tree = renderPreview({ path: "new.md", readFile: newRead });
-    expect(textContent(findByTestId(tree, "task-file-preview-path"))).toBe("new.md");
+    expect(textContent(findByTestId(tree, "mobile.task-file-preview.path"))).toBe("new.md");
     expect((findByType(tree, "WebView")?.props?.source as { html: string }).html).toContain(
       "<h1>New</h1>"
     );

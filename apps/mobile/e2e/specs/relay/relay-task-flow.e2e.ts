@@ -20,12 +20,25 @@ interface RelayCredentials {
 
 interface RelayTaskFlowOptions {
   credentials: RelayCredentials;
+  emitFilePreviewLinks(): Promise<void>;
+  filePreview: RelayFilePreviewFixture;
   fixture: PtyTerminalFixture;
   input: string;
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
+}
+
+interface RelayFilePreviewFixture {
+  expectedHeading: string;
+  expectedRawLine: string;
+  expectedRenderedText: string;
+  line: number;
+  missingLink: string;
+  path: string;
+  rawLink: string;
+  renderedLink: string;
 }
 
 export interface RelayTaskRowExpectation {
@@ -84,6 +97,13 @@ interface RelayWebViewContextDriver {
   getContext?: () => Promise<string>;
   getContexts?: () => Promise<unknown[]>;
   switchContext?: (context: string) => Promise<unknown>;
+}
+
+interface TaskFilePreviewInspection {
+  content: string;
+  initialLine: number | null;
+  mode: "raw" | "rendered";
+  path: string;
 }
 
 async function dismissSavePasswordPrompt(driver: Browser): Promise<void> {
@@ -201,6 +221,164 @@ function createWebViewContextDriver(driver: Browser): RelayWebViewContextDriver 
       ? async (context: string) => await driver.switchContext?.(context)
       : undefined
   };
+}
+
+function terminalFileLinkAccessibilityLabel(
+  path: string,
+  line?: number
+): string {
+  return line === undefined
+    ? `Open file ${path}`
+    : `Open file ${path} at line ${line}`;
+}
+
+async function terminalFileLink(
+  driver: Browser,
+  path: string,
+  line?: number
+) {
+  const link = await driver.$(`~${terminalFileLinkAccessibilityLabel(path, line)}`);
+  await link.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  return link;
+}
+
+async function inspectTaskFilePreview(
+  driver: Browser
+): Promise<TaskFilePreviewInspection> {
+  const marker = await driver.$(selectors.taskFilePreviewInspection);
+  await marker.waitForExist({ timeout: SCREEN_TIMEOUT_MS });
+  const value = await marker.getAttribute("value");
+  if (!value) throw new Error("Task file preview inspection had no value");
+  return JSON.parse(value) as TaskFilePreviewInspection;
+}
+
+async function expectNativeText(
+  driver: Browser,
+  selector: string,
+  expected: string | RegExp
+): Promise<void> {
+  let lastText = "";
+  await driver.waitUntil(
+    async () => {
+      const element = await driver.$(selector);
+      if (!(await element.isExisting().catch(() => false))) return false;
+      lastText = await element.getText().catch(() => "");
+      return typeof expected === "string"
+        ? lastText === expected
+        : expected.test(lastText);
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected ${selector} to contain ${String(expected)}; last text ${JSON.stringify(lastText)}`
+    }
+  );
+}
+
+async function closeTaskFilePreview(driver: Browser): Promise<void> {
+  const close = await driver.$(selectors.taskFilePreviewClose);
+  await close.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await close.click();
+  await driver.waitUntil(
+    async () => {
+      const path = await driver.$(selectors.taskFilePreviewPath);
+      return !(await path.isExisting().catch(() => false));
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected task file preview to close"
+    }
+  );
+}
+
+async function verifyTerminalFilePreviewFlow(
+  driver: Browser,
+  fixture: RelayFilePreviewFixture
+): Promise<void> {
+  const renderedLink = await terminalFileLink(driver, fixture.path);
+  await terminalFileLink(driver, fixture.path, fixture.line);
+
+  const [location, size] = await Promise.all([
+    renderedLink.getLocation(),
+    renderedLink.getSize()
+  ]);
+  const centerX = Math.round(location.x + size.width / 2);
+  const centerY = Math.round(location.y + size.height / 2);
+  await driver.actions([
+    driver
+      .action("pointer", { parameters: { pointerType: "touch" } })
+      .move(centerX - 8, centerY)
+      .down()
+      .move({ duration: 650, x: centerX - 42, y: centerY })
+      .up(),
+    driver
+      .action("pointer", { parameters: { pointerType: "touch" } })
+      .move(centerX + 8, centerY)
+      .down()
+      .move({ duration: 650, x: centerX + 42, y: centerY })
+      .up()
+  ]);
+  await driver
+    .action("pointer", { parameters: { pointerType: "touch" } })
+    .move(centerX + Math.min(60, size.width / 3), centerY)
+    .down()
+    .move({
+      duration: 650,
+      x: centerX - Math.min(60, size.width / 3),
+      y: centerY
+    })
+    .up()
+    .perform();
+  await driver.pause(650);
+  if (
+    await driver.$(selectors.taskFilePreviewPath).isExisting().catch(() => false)
+  ) {
+    throw new Error("Scroll or pinch over a terminal file path opened the preview");
+  }
+
+  await (await terminalFileLink(driver, fixture.path)).click();
+  await expectNativeText(driver, selectors.taskFilePreviewPath, fixture.path);
+  await expectNativeText(driver, selectors.taskFilePreviewMode, "Rendered Markdown");
+  let inspection = await inspectTaskFilePreview(driver);
+  if (
+    inspection.path !== fixture.path ||
+    inspection.mode !== "rendered" ||
+    !inspection.content.includes(`# ${fixture.expectedHeading}`) ||
+    !inspection.content.includes(fixture.expectedRenderedText)
+  ) {
+    throw new Error(
+      `Expected authenticated relay Markdown content in rendered preview; got ${JSON.stringify(inspection)}`
+    );
+  }
+  await closeTaskFilePreview(driver);
+
+  await (await terminalFileLink(driver, fixture.path, fixture.line)).click();
+  await expectNativeText(driver, selectors.taskFilePreviewPath, fixture.path);
+  await expectNativeText(driver, selectors.taskFilePreviewMode, "Raw source");
+  inspection = await inspectTaskFilePreview(driver);
+  if (
+    inspection.mode !== "raw" ||
+    inspection.initialLine !== fixture.line ||
+    !inspection.content
+      .split(/\r\n|\r|\n/)
+      [fixture.line - 1]?.includes(fixture.expectedRawLine)
+  ) {
+    throw new Error(
+      `Expected raw preview to target line ${fixture.line}; got ${JSON.stringify(inspection)}`
+    );
+  }
+  await closeTaskFilePreview(driver);
+
+  await (await terminalFileLink(driver, fixture.missingLink)).click();
+  await expectNativeText(driver, selectors.taskFilePreviewPath, fixture.missingLink);
+  await expectNativeText(driver, selectors.taskFilePreviewError, "Couldn’t open file");
+  await expectNativeText(
+    driver,
+    selectors.taskFilePreviewErrorMessage,
+    /file not found/i
+  );
+  await closeTaskFilePreview(driver);
 }
 
 async function isRelayConnected(driver: Browser, ui: RelayUi): Promise<boolean> {
@@ -448,6 +626,8 @@ export async function runRelayTaskFlow(
   await openRelayFixtureTask(ui, options.fixture.taskId);
   await waitForTaskTerminalLive(ui);
   await waitForRenderedPtyTerminal(ui, options.fixture);
+  await options.emitFilePreviewLinks();
+  await verifyTerminalFilePreviewFlow(driver, options.filePreview);
 
   const input = await ui.getTaskInput();
   await input.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });

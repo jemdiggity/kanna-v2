@@ -219,6 +219,27 @@ describe("buildTaskFilePreviewDocument", () => {
     ]);
   });
 
+  it.each([
+    ["LF", "first\nsecond\nthird", "first\n", "\nthird"],
+    ["CRLF", "first\r\nsecond\r\nthird", "first\r\n", "\r\nthird"],
+    ["bare CR", "first\rsecond\rthird", "first\r", "\rthird"]
+  ])(
+    "targets a raw line separated by %s without wrapping its line ending",
+    (_label, content, before, after) => {
+      const html = buildTaskFilePreviewDocument({
+        path: "src/file.ts",
+        content,
+        mode: "raw",
+        initialLine: 2
+      });
+
+      expect(html).toContain(
+        `${before}<span class="raw-line" data-line="2">second</span>${after}`
+      );
+      expect(html.match(/<span class="raw-line" data-line="2"/g)).toHaveLength(1);
+    }
+  );
+
   it("keeps worst-case newline-heavy files at constant DOM complexity", () => {
     const content = "\n".repeat(1024 * 1024);
     const html = buildTaskFilePreviewDocument({

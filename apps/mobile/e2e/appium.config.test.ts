@@ -45,6 +45,7 @@ describe("mobile Appium config", () => {
       "appium:deviceName": "iPhone 15",
       "appium:bundleId": "build.kanna.app",
       "appium:wdaLocalPort": 4724,
+      "appium:wdaLaunchTimeout": 180_000,
       "appium:noReset": false,
       "appium:autoDismissAlerts": true,
       "appium:includeSafariInWebviews": true,

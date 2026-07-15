@@ -200,8 +200,22 @@ class StubTerminal {
   write(data: unknown, done?: () => void): void {
     this.writes.push(data);
     const previousBaseY = this.buffer.active.baseY;
+    const text =
+      typeof data === "string"
+        ? data
+        : data instanceof Uint8Array
+          ? new TextDecoder().decode(data)
+          : "";
+    const parts = text.replace(/\r\n|\r/g, "\n").split("\n");
+    let lineIndex = Math.max(0, this.buffer.active.length - 1);
+    const firstLine = this.bufferLines.get(lineIndex) ?? "";
+    this.bufferLines.set(lineIndex, firstLine + (parts.shift() ?? ""));
+    for (const part of parts) {
+      lineIndex += 1;
+      this.bufferLines.set(lineIndex, part);
+    }
+    this.buffer.active.length = Math.max(this.buffer.active.length, lineIndex + 1);
     this.buffer.active.baseY += 1;
-    this.buffer.active.length += 1;
     if (this.buffer.active.viewportY === previousBaseY) {
       this.buffer.active.viewportY = this.buffer.active.baseY;
     }
@@ -211,6 +225,10 @@ class StubTerminal {
 
   reset(): void {
     this.resets += 1;
+    this.bufferLines.clear();
+    this.buffer.active.baseY = 0;
+    this.buffer.active.viewportY = 0;
+    this.buffer.active.length = 0;
   }
 
   emitScroll(viewportY?: number): void {
@@ -257,7 +275,7 @@ function createTouchEvent(
   window: Window,
   type: string,
   touches: TouchPoint[],
-  options: EventInit = { cancelable: true }
+  options: EventInit = { bubbles: true, cancelable: true }
 ): Event {
   const event = new window.Event(type, options);
   Object.defineProperty(event, "touches", {
@@ -381,31 +399,70 @@ describe("buildTerminalDocument", () => {
       { pointerCursor: true, underline: true }
     ]);
 
-    links?.[1]?.activate();
+    expect(
+      messages.map((message) => JSON.parse(message).type)
+    ).not.toContain("terminal-file-link");
+  });
+
+  it("renders persistent accessible file buttons and opens one through a real click", () => {
+    const { messages, window } = createExecutedTerminalDocument();
+
+    window.__replaceTerminalState({
+      text: "See README.md and docs/spec.md:42\n"
+    });
+
+    const region = window.document.getElementById("terminal-file-links");
+    const button = region?.querySelector<HTMLButtonElement>(
+      'button[data-terminal-file-raw="docs/spec.md:42"]'
+    );
+    expect(region?.getAttribute("role")).toBe("region");
+    expect(region?.getAttribute("aria-label")).toBe(
+      "Files mentioned in terminal"
+    );
+    expect(region?.hidden).toBe(false);
+    expect(button?.textContent).toBe("docs/spec.md:42");
+    expect(button?.getAttribute("aria-label")).toBe(
+      "Open file docs/spec.md at line 42"
+    );
+    expect(button?.classList.contains("terminal-file-link")).toBe(true);
+
+    button?.click();
+
     expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
       type: "terminal-file-link",
       path: "docs/spec.md",
       line: 42
     });
-
-    links?.[2]?.activate();
-    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
-      type: "terminal-file-link",
-      path: "/tmp/task/notes.md",
-      line: 9
-    });
   });
 
-  it("omits a line number when a file candidate has no numeric suffix", () => {
-    const { messages, terminal } = createExecutedTerminalDocument();
-    const links = provideLinks(terminal, 1, "README.md");
-
-    links?.[0]?.activate();
-
-    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
-      type: "terminal-file-link",
-      path: "README.md"
+  it("keeps the newest six unique file buttons visible", () => {
+    const { window } = createExecutedTerminalDocument();
+    window.__replaceTerminalState({
+      text: [
+        "docs/one.md",
+        "docs/two.md",
+        "docs/three.md",
+        "docs/four.md",
+        "docs/five.md",
+        "docs/six.md",
+        "docs/seven.md",
+        "docs/two.md"
+      ].join("\n")
     });
+
+    const buttons = Array.from(
+      window.document.querySelectorAll<HTMLButtonElement>(
+        "#terminal-file-links button"
+      )
+    );
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "docs/three.md",
+      "docs/four.md",
+      "docs/five.md",
+      "docs/six.md",
+      "docs/seven.md",
+      "docs/two.md"
+    ]);
   });
 
   it("rejects literal parent segments and non-file-like rows", () => {
@@ -457,8 +514,11 @@ describe("buildTerminalDocument", () => {
 
     expect(script).not.toContain("terminal-inspection");
     expect(script).not.toContain("function renderedTerminalText");
-    expect(script).not.toContain("const firstLine");
-    expect(script).not.toMatch(/for \(let index = firstLine; index < buffer\.length/);
+    expect(script).toContain("const MAX_FILE_LINK_SCAN_ROWS = 200;");
+    expect(script).toContain(
+      "Math.max(0, buffer.length - MAX_FILE_LINK_SCAN_ROWS)"
+    );
+    expect(script).not.toContain("const firstLine = 0");
     expect(script).not.toContain("recordTerminalFrame");
     expect(messages.map((message) => JSON.parse(message).type)).not.toContain(
       "terminal-inspection"
@@ -718,6 +778,41 @@ describe("buildTerminalDocument", () => {
     expect(terminal.resets).toBe(1);
     expect(terminal.writes).toHaveLength(1);
     expect(terminal.scrollToLineCalls).toEqual([]);
+  });
+
+  it.each([
+    [
+      "scroll",
+      [{ clientX: 220, clientY: 240 }],
+      [{ clientX: 150, clientY: 230 }]
+    ],
+    [
+      "pinch",
+      [
+        { clientX: 100, clientY: 200 },
+        { clientX: 200, clientY: 200 }
+      ],
+      [
+        { clientX: 60, clientY: 200 },
+        { clientX: 240, clientY: 200 }
+      ]
+    ]
+  ])("does not open a file after a %s gesture over its button", (_label, start, move) => {
+    const { messages, window } = createExecutedTerminalDocument();
+    window.__replaceTerminalState({ text: "docs/spec.md\n" });
+    const button = window.document.querySelector<HTMLButtonElement>(
+      "#terminal-file-links button"
+    );
+    expect(button).not.toBeNull();
+
+    button?.dispatchEvent(createTouchEvent(window, "touchstart", start));
+    button?.dispatchEvent(createTouchEvent(window, "touchmove", move));
+    button?.dispatchEvent(createTouchEvent(window, "touchend", []));
+    button?.click();
+
+    expect(
+      messages.map((message) => JSON.parse(message).type)
+    ).not.toContain("terminal-file-link");
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {

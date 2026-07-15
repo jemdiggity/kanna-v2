@@ -1779,6 +1779,30 @@ impl TaskFileRouteFixture {
         std::fs::write(target, content).expect("write route fixture file");
     }
 
+    fn add_newest_worktree_with_tied_timestamp(&self) -> PathBuf {
+        let newest = self._temp_dir.path().join("worktree-newest");
+        std::fs::create_dir_all(&newest).expect("create newest route fixture worktree");
+        let db = Db::open(self.db_path.to_str().expect("utf-8 fixture database path"))
+            .expect("open task file fixture database");
+        db.upsert_worktree(
+            "wt-task-file-newest",
+            "task-file",
+            newest.to_str().expect("utf-8 newest worktree path"),
+            "branch-task-file-newest",
+        )
+        .expect("insert newest fixture worktree");
+        drop(db);
+
+        let connection = Connection::open(&self.db_path).expect("open fixture timestamps");
+        connection
+            .execute(
+                "UPDATE worktree SET created_at = '2026-07-16 00:00:00' WHERE pipeline_item_id = 'task-file'",
+                [],
+            )
+            .expect("tie fixture worktree timestamps");
+        newest
+    }
+
     async fn get(&self, task_id: &str, encoded_path: &str) -> axum::response::Response {
         self.app
             .clone()
@@ -1894,6 +1918,28 @@ async fn task_file_route_allows_authenticated_relay_dispatch() {
         }))
     );
     assert_eq!(response.error, None);
+}
+
+#[tokio::test]
+async fn task_file_route_reads_from_newest_task_worktree_when_timestamps_tie() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("docs/spec.md", b"stale workspace");
+    let newest = fixture.add_newest_worktree_with_tied_timestamp();
+    std::fs::create_dir_all(newest.join("docs")).unwrap();
+    std::fs::write(newest.join("docs/spec.md"), "current workspace").unwrap();
+
+    let response = fixture
+        .get_through_authenticated_relay("task-file", "docs%2Fspec.md")
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK.as_u16());
+    assert_eq!(
+        response.body,
+        Some(serde_json::json!({
+            "path": "docs/spec.md",
+            "content": "current workspace"
+        }))
+    );
 }
 
 #[tokio::test]

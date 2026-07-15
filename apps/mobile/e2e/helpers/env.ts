@@ -78,10 +78,11 @@ export function resolveRequiredMobileE2eEnv(
   const defaultBundleId =
     appConfig.ios.bundleIdentifier.trim() || "build.kanna.app";
   const bundleId = env.KANNA_IOS_BUNDLE_ID?.trim() || defaultBundleId;
-  const configuredAppScheme = Array.isArray(appConfig.scheme)
-    ? appConfig.scheme[0]
-    : appConfig.scheme;
-  const appScheme = configuredAppScheme?.trim() || bundleId;
+  // Expo's development-client launcher is registered under the generated
+  // `exp+<slug>` scheme. The environment-specific scheme (for example
+  // `kanna-dev`) belongs to application deep links and does not route the
+  // `expo-development-client` URL on current Expo dev builds.
+  const appScheme = `exp+${appConfig.slug}`;
   const xcodeOrgId =
     env.KANNA_IOS_XCODE_ORG_ID?.trim() || appConfig.ios.appleTeamId.trim() || undefined;
   const xcodeSigningId = env.KANNA_IOS_XCODE_SIGNING_ID?.trim() || "Apple Development";

@@ -49,6 +49,10 @@ export function createSimulatorCapabilities(input: SimulatorCapabilityInput) {
       input.appiumPort,
       input.reservedPorts
     ),
+    // A cold Xcode 26 simulator build can exceed Appium's 60s default. If
+    // Appium retries while the first install is still finishing, that stale
+    // install replaces the live WDA runner and drops the automation session.
+    "appium:wdaLaunchTimeout": 180_000,
     "appium:newCommandTimeout": 120,
     "appium:noReset": false,
     ...(input.autoAcceptAlerts
