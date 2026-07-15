@@ -899,7 +899,9 @@ describe("remote transport", () => {
       repoId: "repo-1",
       prompt: "Ship it",
       desktopId: "desktop-created-here",
-      agentProvider: "codex"
+      agentProvider: "codex",
+      terminalCols: 80,
+      terminalRows: 48
     });
     expect(created.taskId).toBe(
       "cloud:desktop-created-here:repo-1:task-created"
@@ -911,7 +913,9 @@ describe("remote transport", () => {
       body: {
         repoId: "repo-1",
         prompt: "Ship it",
-        agentProvider: "codex"
+        agentProvider: "codex",
+        terminalCols: 80,
+        terminalRows: 48
       }
     });
     invokeDesktop.mockClear();

@@ -246,7 +246,36 @@ function hasText(root: ReactTestInstance, text: string): boolean {
   ).length > 0;
 }
 
+function runEffects(): void {
+  const effects = [...harness.effects];
+  harness.effects.length = 0;
+  for (const effect of effects) effect();
+}
+
 describe("App component wiring", () => {
+  it("creates tasks with geometry derived from the measured task-detail surface", async () => {
+    const { controller, model } = createModel("connected");
+    controller.openComposer();
+    controller.updateComposerPrompt("Measure the initial terminal");
+    const createTask = vi.spyOn(controller, "createTask");
+    const renderer = await mountModel(model);
+    const shell = renderer.root.find(
+      (node) => typeof node.props.onLayout === "function"
+    );
+
+    await act(async () => {
+      shell.props.onLayout({
+        nativeEvent: {
+          layout: { width: 1024, height: 1366, x: 0, y: 0 }
+        }
+      });
+      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)
+        .props.onPress();
+    });
+
+    expect(createTask).toHaveBeenCalledWith({ cols: 128, rows: 72 });
+  });
+
   it("exposes the accepted task snapshot to detail-only E2E synchronization", async () => {
     const previous = process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED;
     process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED = "1";
@@ -358,7 +387,9 @@ describe("App task provisioning integration", () => {
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
       agentProvider: "claude",
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 80,
+      terminalRows: 48
     });
 
     await act(async () => {

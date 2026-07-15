@@ -45,6 +45,8 @@ export interface PendingTaskCreation {
   prompt: string;
   desktopId: string;
   agentProvider: ComposerAgentProvider;
+  terminalCols?: number;
+  terminalRows?: number;
 }
 
 export type TaskCreationState =

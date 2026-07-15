@@ -981,6 +981,9 @@ pub(crate) fn prepare_task_for_api_with_error(
         .get_repo(&request.repo_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("repo not found: {}", request.repo_id))?;
+
+    let initial_terminal_geometry =
+        resolve_initial_terminal_geometry(request.terminal_cols, request.terminal_rows);
     let explicit_provider = request.agent_provider;
     let default_provider = if explicit_provider.is_none() {
         read_default_agent_provider_setting(db)?
@@ -1025,6 +1028,7 @@ pub(crate) fn prepare_task_for_api_with_error(
             explicit_provider,
             default_provider,
             agent_type: request.agent_type,
+            initial_terminal_geometry,
             model: request.model,
             permission_mode: request.permission_mode,
             allowed_tools: request.allowed_tools.unwrap_or_default(),
@@ -1094,6 +1098,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             explicit_provider: None,
             default_provider,
             agent_type: None,
+            initial_terminal_geometry: None,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -1187,6 +1192,7 @@ completion with status success so Kanna can run the commit post and close this i
             explicit_provider: dependent.agent_provider,
             default_provider: None,
             agent_type: dependent.agent_type,
+            initial_terminal_geometry: None,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -1552,6 +1558,25 @@ fn read_default_agent_provider_setting(db: &Db) -> Result<Option<String>, String
     Ok(Some(provider.as_str().to_string()))
 }
 
+// Cap API-selected grids so the daemon headless terminal's 10k-row scrollback
+// byte budget stays about 63 MiB; 320x256 remains far above expected mobile/iPad grids.
+const MAX_INITIAL_TERMINAL_COLS: u16 = 320;
+const MAX_INITIAL_TERMINAL_ROWS: u16 = 256;
+
+fn resolve_initial_terminal_geometry(cols: Option<u16>, rows: Option<u16>) -> Option<(u16, u16)> {
+    match (cols, rows) {
+        (Some(cols), Some(rows))
+            if cols > 0
+                && cols <= MAX_INITIAL_TERMINAL_COLS
+                && rows > 0
+                && rows <= MAX_INITIAL_TERMINAL_ROWS =>
+        {
+            Some((cols, rows))
+        }
+        _ => None,
+    }
+}
+
 struct ResolvedTaskSpawn {
     original_prompt: String,
     display_name: Option<String>,
@@ -1562,6 +1587,7 @@ struct ResolvedTaskSpawn {
     stage_agent: Option<String>,
     provider_candidates: Vec<AgentProvider>,
     requested_agent_type: Option<String>,
+    initial_terminal_geometry: Option<(u16, u16)>,
     stage_setup: Vec<String>,
     final_prompt: String,
     model: Option<String>,
@@ -1848,6 +1874,7 @@ fn resolve_task_spawn(
         stage_agent,
         provider_candidates,
         requested_agent_type: request.agent_type,
+        initial_terminal_geometry: request.initial_terminal_geometry,
         stage_setup: stage
             .environment
             .as_deref()
@@ -2058,7 +2085,7 @@ fn prepare_new_task_session(
             )
         })?;
     let agent_type = resolve_agent_type(resolved.requested_agent_type.as_deref(), provider)?;
-    let (session, provider_session_id) = build_prepared_session(
+    let (mut session, provider_session_id) = build_prepared_session(
         provider,
         agent_type,
         task_id,
@@ -2079,6 +2106,12 @@ fn prepare_new_task_session(
         false,
         resolved.resume_session_id.as_deref(),
     )?;
+    if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
+        if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {
+            *cols = initial_cols;
+            *rows = initial_rows;
+        }
+    }
     Ok(PreparedNewTaskSession {
         spawn_env,
         session,

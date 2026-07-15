@@ -12,6 +12,10 @@ import type {
 import { TaskCreationError } from "../lib/api/client";
 import type { MobileAuthSession } from "../lib/firebase/auth";
 import { isTaskDetailVisible } from "../appShell";
+import {
+  DEFAULT_MOBILE_TERMINAL_GEOMETRY,
+  type MobileTerminalGeometry
+} from "../mobileTerminalGeometry";
 import type {
   ComposerAgentProvider,
   MobileView,
@@ -38,7 +42,7 @@ export interface MobileController {
   setComposerOptionsExpanded(isExpanded: boolean): void;
   selectComposerAgentProvider(provider: ComposerAgentProvider): void;
   searchTasks(query: string): Promise<void>;
-  createTask(): Promise<void>;
+  createTask(terminalGeometry?: MobileTerminalGeometry): Promise<void>;
   backgroundTaskCreation(): void;
   recoverTaskCreation(): Promise<void>;
   runMergeAgent(taskId: string): Promise<void>;
@@ -1160,7 +1164,11 @@ export function createMobileController(
       prompt: attempt.prompt,
       desktopId: attempt.desktopId,
       agentProvider: attempt.agentProvider,
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols:
+        attempt.terminalCols ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols,
+      terminalRows:
+        attempt.terminalRows ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows
     });
 
   const completeTaskCreation = (
@@ -1420,7 +1428,7 @@ export function createMobileController(
       }
     },
 
-    createTask() {
+    createTask(terminalGeometry) {
       const state = store.getState();
       if (state.pendingTaskCreation) {
         if (
@@ -1444,12 +1452,16 @@ export function createMobileController(
         return Promise.resolve();
       }
 
+      const { cols, rows } =
+        terminalGeometry ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY;
       const attempt: PendingTaskCreation = {
         taskId: (options.createTaskId ?? generateTaskCreationId)(),
         repoId: state.composerRepoId,
         prompt: state.composerPrompt.trim(),
         desktopId: composerDesktopId,
-        agentProvider: state.composerAgentProvider
+        agentProvider: state.composerAgentProvider,
+        terminalCols: cols,
+        terminalRows: rows
       };
       recoveryStartedTaskId = null;
       store.setComposerRepo(attempt.repoId);
