@@ -3,6 +3,8 @@ import type { TaskTerminalStatus } from "../state/sessionStore";
 import { TASK_QUICK_REPLIES } from "./taskQuickReplies";
 
 const hookHarness = vi.hoisted(() => ({
+  effectDependencies: [] as Array<readonly unknown[] | undefined>,
+  effectIndex: 0,
   hookIndex: 0,
   refIndex: 0,
   refs: [] as Array<{ current: unknown }>,
@@ -20,7 +22,30 @@ vi.mock("react", async (importActual) => {
 
   return {
     ...actual,
-    useEffect: vi.fn(),
+    useEffect: vi.fn(
+      (
+        callback: () => void | (() => void),
+        dependencies?: readonly unknown[]
+      ) => {
+        const effectIndex = hookHarness.effectIndex;
+        hookHarness.effectIndex += 1;
+        const previousDependencies =
+          hookHarness.effectDependencies[effectIndex];
+        const dependenciesChanged =
+          dependencies === undefined ||
+          previousDependencies === undefined ||
+          dependencies.length !== previousDependencies.length ||
+          dependencies.some(
+            (dependency, index) =>
+              !Object.is(dependency, previousDependencies[index])
+          );
+
+        hookHarness.effectDependencies[effectIndex] = dependencies;
+        if (dependenciesChanged) {
+          callback();
+        }
+      }
+    ),
     useRef: <T,>(initialValue: T) => {
       const index = hookHarness.refIndex++;
       hookHarness.refs[index] ??= { current: initialValue };
@@ -86,6 +111,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  hookHarness.effectDependencies = [];
+  hookHarness.effectIndex = 0;
   hookHarness.hookIndex = 0;
   hookHarness.refIndex = 0;
   hookHarness.refs.length = 0;
@@ -94,7 +121,6 @@ beforeEach(() => {
   componentMocks.onSendInput.mockReset();
   componentMocks.showQuickReplyMenu.mockReset();
 });
-
 interface ElementNode {
   type: unknown;
   props?: {
@@ -105,8 +131,7 @@ interface ElementNode {
 }
 
 interface RenderTaskScreenOptions {
-  agentType: "agent" | "pty";
-  taskId?: string;
+  agentType?: "agent" | "pty";
   terminalDims?: { cols: number | null; rows: number | null };
   e2eTaskSnapshotMarker?: string;
   activity?: "idle" | "working" | "unread";
@@ -115,15 +140,16 @@ interface RenderTaskScreenOptions {
   agentStatus?: TaskTerminalStatus;
   onReadTaskFile?: (path: string) => Promise<{ path: string; content: string }>;
   taskId?: string;
+  title?: string;
 }
 
-function renderTaskScreen(options: RenderTaskScreenOptions): ElementNode {
+function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
   if (!TaskScreen) {
     throw new Error("TaskScreen was not loaded");
   }
 
   const {
-    agentType,
+    agentType = "pty",
     terminalDims = { cols: null, rows: null },
     e2eTaskSnapshotMarker,
     activity = "idle",
@@ -134,18 +160,19 @@ function renderTaskScreen(options: RenderTaskScreenOptions): ElementNode {
       path: "docs/spec.md",
       content: "# Spec"
     }),
-    taskId = "task-1"
+    taskId = "task-1",
+    title = "Task"
   } = options;
 
+  hookHarness.effectIndex = 0;
   hookHarness.hookIndex = 0;
   hookHarness.refIndex = 0;
   hookHarness.stateValues[0] = draftInput;
-
   return TaskScreen({
     task: {
       id: taskId,
       repoId: "repo-1",
-      title: "Task",
+      title,
       stage: "in progress",
       agentType,
       activity
@@ -211,6 +238,87 @@ function findByType(node: ElementNode | ElementNode[] | string | null | undefine
     return node;
   }
   return findByType(node.props?.children, type);
+}
+
+function findByTypeAndText(
+  node: ElementNode | ElementNode[] | string | null | undefined,
+  type: string,
+  text: string
+): ElementNode | null {
+  if (!node || typeof node === "string") {
+    return null;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const match = findByTypeAndText(child, type, text);
+      if (match) return match;
+    }
+    return null;
+  }
+  if (node.type === type && node.props?.children === text) {
+    return node;
+  }
+  return findByTypeAndText(node.props?.children, type, text);
+}
+
+function findPathByTestId(
+  node: ElementNode | ElementNode[] | string | null | undefined,
+  testID: string,
+  ancestors: ElementNode[] = []
+): ElementNode[] | null {
+  if (!node || typeof node === "string") {
+    return null;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const path = findPathByTestId(child, testID, ancestors);
+      if (path) return path;
+    }
+    return null;
+  }
+
+  const path = [...ancestors, node];
+  if (node.props?.testID === testID) {
+    return path;
+  }
+  return findPathByTestId(node.props?.children, testID, path);
+}
+
+function findCommonAncestor(
+  tree: ElementNode,
+  firstTestID: string,
+  secondTestID: string
+): ElementNode | null {
+  const firstPath = findPathByTestId(tree, firstTestID);
+  const secondPath = findPathByTestId(tree, secondTestID);
+  if (!firstPath || !secondPath) {
+    return null;
+  }
+
+  let commonAncestor: ElementNode | null = null;
+  for (let index = 0; index < Math.min(firstPath.length, secondPath.length); index += 1) {
+    if (firstPath[index] !== secondPath[index]) {
+      break;
+    }
+    commonAncestor = firstPath[index];
+  }
+  return commonAncestor;
+}
+
+function styleEntries(node: ElementNode | null): Array<Record<string, unknown>> {
+  const style = node?.props?.style;
+  const entries = Array.isArray(style) ? style : [style];
+
+  return entries.filter(
+    (entry): entry is Record<string, unknown> =>
+      Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)
+  );
+}
+
+function pressByTestId(tree: ElementNode, testID: string): void {
+  const onPress = findByTestId(tree, testID)?.props?.onPress;
+  expect(onPress).toBeTypeOf("function");
+  (onPress as () => void)();
 }
 
 describe("TaskScreen", () => {
@@ -376,7 +484,6 @@ describe("TaskScreen", () => {
       testID: "mobile.task-detail-title"
     });
   });
-
   it("sends a trimmed draft normally and clears the composer", () => {
     const tree = renderTaskScreen({
       agentType: "agent",
@@ -527,4 +634,198 @@ describe("TaskScreen", () => {
       expect(componentMocks.onSendInput).not.toHaveBeenCalled();
     }
   );
+  it("starts with the current long title collapsed and accessible", () => {
+    const title =
+      "Renamed task with a deliberately long terminal title that needs multiple lines";
+    const tree = renderTaskScreen({ activity: "unread", title });
+    const titleButton = findByTestId(tree, "mobile.task-title-button");
+    const titleText = findByTestId(tree, "mobile.task-detail-title");
+
+    expect(titleButton?.props).toMatchObject({
+      accessibilityHint: "Expand title",
+      accessibilityLabel: `in progress: ${title}`,
+      accessibilityRole: "button",
+      accessibilityState: { expanded: false }
+    });
+    expect(titleText?.props).toMatchObject({
+      accessibilityValue: { text: "unread" },
+      children: title,
+      numberOfLines: 1,
+      testID: "mobile.task-detail-title"
+    });
+    expect(findByTestId(tree, "mobile.task-title-dismiss-layer")).toBeNull();
+  });
+
+  it("expands the title and adds a full-screen outside-press layer", () => {
+    const title =
+      "Renamed task with a deliberately long terminal title that needs multiple lines";
+    let tree = renderTaskScreen({ title });
+
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({ title });
+
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityHint: "Collapse title",
+      accessibilityState: { expanded: true }
+    });
+    expect(
+      findByTestId(tree, "mobile.task-detail-title")?.props?.numberOfLines
+    ).toBeUndefined();
+    expect(findByTestId(tree, "mobile.task-title-dismiss-layer")?.props).toMatchObject({
+      accessible: false,
+      style: {
+        bottom: 0,
+        left: 0,
+        position: "absolute",
+        right: 0,
+        top: 0,
+        zIndex: 4
+      }
+    });
+  });
+
+  it("keeps the title text separate from the accessible overlay with 3/4/5 stacking", () => {
+    let tree = renderTaskScreen({ activity: "working" });
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({ activity: "working" });
+
+    const titleButton = findByTestId(tree, "mobile.task-title-button");
+    const dismissalLayer = findByTestId(
+      tree,
+      "mobile.task-title-dismiss-layer"
+    );
+    const titleText = findByTestId(tree, "mobile.task-detail-title");
+    const titleChip = findCommonAncestor(
+      tree,
+      "mobile.task-detail-title",
+      "mobile.task-title-button"
+    );
+    const topChrome = findCommonAncestor(
+      tree,
+      "mobile.task-back-button",
+      "mobile.task-title-button"
+    );
+    const bottomChrome = findCommonAncestor(
+      tree,
+      "mobile.task-more-button",
+      "mobile.task-input"
+    );
+
+    expect(findByTestId(titleButton?.props?.children, "mobile.task-detail-title")).toBeNull();
+    expect.soft(topChrome?.props?.pointerEvents).toBe("box-none");
+    expect.soft(dismissalLayer?.props?.focusable).toBe(false);
+    expect(titleChip?.props?.accessible).toBe(false);
+    expect(titleButton?.type).toBe("Pressable");
+    expect(titleButton?.props?.disabled).not.toBe(true);
+    expect(titleButton?.props).toMatchObject({
+      accessible: true,
+      style: {
+        backgroundColor: "transparent",
+        bottom: 0,
+        left: 0,
+        position: "absolute",
+        right: 0,
+        top: 0
+      }
+    });
+    expect(dismissalLayer?.type).toBe("Pressable");
+    expect(dismissalLayer?.props?.disabled).not.toBe(true);
+    expect(titleText?.type).toBe("Text");
+    expect(titleText?.props).toMatchObject({
+      accessibilityValue: { text: "working" },
+      children: "Task",
+      testID: "mobile.task-detail-title"
+    });
+    expect(findByTypeAndText(tree, "Text", "in progress")).not.toBeNull();
+    expect(styleEntries(topChrome)).toContainEqual(
+      expect.objectContaining({ zIndex: 5 })
+    );
+    expect(styleEntries(dismissalLayer)).toContainEqual(
+      expect.objectContaining({ zIndex: 4 })
+    );
+    expect(styleEntries(bottomChrome)).toContainEqual(
+      expect.objectContaining({ zIndex: 3 })
+    );
+  });
+
+  it("keeps a same-task title rename expanded and shows the current title", () => {
+    const taskId = "task-renamed";
+    let tree = renderTaskScreen({ taskId, title: "Original title" });
+
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({
+      taskId,
+      title: "Current renamed title that remains fully visible"
+    });
+    tree = renderTaskScreen({
+      taskId,
+      title: "Current renamed title that remains fully visible"
+    });
+
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityLabel:
+        "in progress: Current renamed title that remains fully visible",
+      accessibilityState: { expanded: true }
+    });
+    expect(findByTestId(tree, "mobile.task-detail-title")?.props).toMatchObject({
+      children: "Current renamed title that remains fully visible",
+      numberOfLines: undefined
+    });
+  });
+
+  it("collapses the expanded title when the title is pressed again", () => {
+    let tree = renderTaskScreen();
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen();
+
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen();
+
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityHint: "Expand title",
+      accessibilityState: { expanded: false }
+    });
+    expect(findByTestId(tree, "mobile.task-detail-title")?.props?.numberOfLines).toBe(
+      1
+    );
+    expect(findByTestId(tree, "mobile.task-title-dismiss-layer")).toBeNull();
+  });
+
+  it("collapses the expanded title on the first outside press", () => {
+    let tree = renderTaskScreen();
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen();
+
+    pressByTestId(tree, "mobile.task-title-dismiss-layer");
+    tree = renderTaskScreen();
+
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityState: { expanded: false }
+    });
+    expect(findByTestId(tree, "mobile.task-title-dismiss-layer")).toBeNull();
+  });
+
+  it("clears expansion when switching tasks so it cannot reappear on return", () => {
+    const title = "Shared task title";
+    let tree = renderTaskScreen({ taskId: "task-a", title });
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({ taskId: "task-a", title });
+
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityState: { expanded: true }
+    });
+
+    tree = renderTaskScreen({ taskId: "task-b", title });
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityLabel: `in progress: ${title}`,
+      accessibilityState: { expanded: false }
+    });
+    expect(findByTestId(tree, "mobile.task-title-dismiss-layer")).toBeNull();
+
+    tree = renderTaskScreen({ taskId: "task-a", title });
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityState: { expanded: false }
+    });
+    expect(findByTestId(tree, "mobile.task-title-dismiss-layer")).toBeNull();
+  });
 });
