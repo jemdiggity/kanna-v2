@@ -2,6 +2,122 @@ import { describe, expect, it } from "vitest";
 import { createSessionStore } from "./sessionStore";
 
 describe("createSessionStore", () => {
+  const pendingTaskCreation = {
+    taskId: "a1b2c3d4",
+    repoId: "repo-1",
+    prompt: "Add durable mobile task recovery",
+    desktopId: "desktop-e2e",
+    agentProvider: "codex" as const
+  };
+
+  it("starts with an idle task creation state and no composer repo", () => {
+    const store = createSessionStore();
+
+    expect(store.getState()).toMatchObject({
+      composerRepoId: null,
+      pendingTaskCreation: null,
+      taskCreationPhase: "idle"
+    });
+  });
+
+  it("sets a pending task creation attempt and phase atomically", () => {
+    const store = createSessionStore();
+
+    store.setTaskCreationState({
+      phase: "pending",
+      pendingTaskCreation
+    });
+
+    expect(store.getState()).toMatchObject({
+      pendingTaskCreation,
+      taskCreationPhase: "pending"
+    });
+  });
+
+  it("closing the composer does not cancel or downgrade pending creation", () => {
+    const store = createSessionStore();
+    store.setComposerState(true, pendingTaskCreation.prompt);
+    store.setTaskCreationState({
+      phase: "recovering",
+      pendingTaskCreation
+    });
+
+    store.setComposerState(false, pendingTaskCreation.prompt);
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: false,
+      pendingTaskCreation,
+      taskCreationPhase: "recovering"
+    });
+  });
+
+  it("clears an attempt without clearing the composer draft mirrors", () => {
+    const store = createSessionStore();
+    store.setComposerState(true, pendingTaskCreation.prompt);
+    store.setComposerRepo(pendingTaskCreation.repoId);
+    store.setComposerDesktop(pendingTaskCreation.desktopId);
+    store.setComposerAgentProvider(pendingTaskCreation.agentProvider);
+    store.setTaskCreationState({
+      phase: "uncertain",
+      pendingTaskCreation
+    });
+
+    store.setTaskCreationState({
+      phase: "idle",
+      pendingTaskCreation: null
+    });
+
+    expect(store.getState()).toMatchObject({
+      composerRepoId: pendingTaskCreation.repoId,
+      composerPrompt: pendingTaskCreation.prompt,
+      composerDesktopId: pendingTaskCreation.desktopId,
+      composerAgentProvider: pendingTaskCreation.agentProvider,
+      pendingTaskCreation: null,
+      taskCreationPhase: "idle"
+    });
+  });
+
+  it("hydrates a pending attempt as closed and uncertain with its draft restored", () => {
+    const store = createSessionStore();
+    store.setComposerState(true, "Stale draft");
+
+    store.hydrateContext({
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      activeView: "tasks",
+      pendingTaskCreation
+    });
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: false,
+      composerRepoId: pendingTaskCreation.repoId,
+      composerPrompt: pendingTaskCreation.prompt,
+      composerDesktopId: pendingTaskCreation.desktopId,
+      composerAgentProvider: pendingTaskCreation.agentProvider,
+      pendingTaskCreation,
+      taskCreationPhase: "uncertain"
+    });
+  });
+
+  it("persists only the pending attempt from task creation state", () => {
+    const store = createSessionStore();
+    store.setComposerState(true, pendingTaskCreation.prompt);
+    store.setComposerRepo(pendingTaskCreation.repoId);
+    store.setTaskCreationState({
+      phase: "recovering",
+      pendingTaskCreation
+    });
+
+    const persisted = store.getPersistedContext();
+
+    expect(persisted.pendingTaskCreation).toEqual(pendingTaskCreation);
+    expect(persisted).not.toHaveProperty("taskCreationPhase");
+    expect(persisted).not.toHaveProperty("isComposerOpen");
+    expect(persisted).not.toHaveProperty("composerPrompt");
+    expect(persisted).not.toHaveProperty("composerRepoId");
+  });
+
   it("switches the selected desktop without dropping the desktop list", () => {
     const store = createSessionStore();
     store.setDesktops([

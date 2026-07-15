@@ -427,7 +427,16 @@ export function createRemoteTransport({
       );
     },
     createTask: async (input: CreateTaskRequest) => {
-      const { desktopId: requestedDesktopId, ...taskInput } = input;
+      const {
+        desktopId: requestedDesktopId,
+        taskId,
+        ...taskInput
+      } = input;
+      const hasTaskId = taskId !== undefined;
+      const method = hasTaskId ? "PUT" : "POST";
+      const path = hasTaskId
+        ? `/v1/tasks/${encodeURIComponent(taskId)}`
+        : "/v1/tasks";
       const repoRoute = await resolveCloudRepoRoute(
         input.repoId,
         requestedDesktopId
@@ -435,8 +444,8 @@ export function createRemoteTransport({
       if (repoRoute) {
         const created = await requestDesktop<CreateTaskResponse>(
           repoRoute.desktopId,
-          "POST",
-          "/v1/tasks",
+          method,
+          path,
           { ...taskInput, repoId: repoRoute.localRepoId }
         );
         if (!listCloudTasks) {
@@ -467,7 +476,7 @@ export function createRemoteTransport({
         };
       }
 
-      return request<CreateTaskResponse>("POST", "/v1/tasks", taskInput);
+      return request<CreateTaskResponse>(method, path, taskInput);
     },
     runMergeAgent: (taskId: string) =>
       requestTaskAction(

@@ -2,6 +2,7 @@ use kanna_daemon::protocol::AgentProvider as DaemonAgentProvider;
 use std::collections::HashMap;
 
 pub(super) struct TaskCreationRequest {
+    pub(super) requested_task_id: Option<String>,
     pub(super) task_prompt: String,
     pub(super) display_name: Option<String>,
     pub(super) pipeline_name: Option<String>,
@@ -23,6 +24,27 @@ pub(super) struct TaskCreationRequest {
     pub(super) resume_session_id: Option<String>,
     pub(super) notify_task_id: Option<String>,
     pub(super) parent_task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrepareTaskError {
+    RequestedTaskIdAlreadyExists,
+    Other(String),
+}
+
+impl From<String> for PrepareTaskError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl std::fmt::Display for PrepareTaskError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestedTaskIdAlreadyExists => formatter.write_str("task id already exists"),
+            Self::Other(error) => formatter.write_str(error),
+        }
+    }
 }
 
 #[derive(Clone)]

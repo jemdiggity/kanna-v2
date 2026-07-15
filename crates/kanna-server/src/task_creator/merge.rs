@@ -70,6 +70,7 @@ fn build_merge_task_request(repo_path: &str) -> Result<TaskCreationRequest, Stri
     // bundled definitions before creating any DB/worktree state.
     super::definitions::read_agent_definition(repo_path, "merge")?;
     Ok(TaskCreationRequest {
+        requested_task_id: None,
         task_prompt: String::new(),
         display_name: Some("Merge Master".to_string()),
         pipeline_name: Some(pipeline_name),

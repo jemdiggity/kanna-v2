@@ -7,6 +7,66 @@ import {
 } from "./lanTransport";
 
 describe("createLanTransport", () => {
+  it("puts an identified task at its encoded route without routing fields in the body", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        taskId: "a1b2/c3d4",
+        repoId: "repo-1",
+        title: "Ship it",
+        stage: "in progress"
+      })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await transport.createTask({
+      taskId: "a1b2/c3d4",
+      repoId: "repo-1",
+      prompt: "Ship it",
+      desktopId: "desktop-route"
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/a1b2%2Fc3d4",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repoId: "repo-1",
+          prompt: "Ship it"
+        })
+      }
+    );
+  });
+
+  it("never downgrades a present but invalid task identity to legacy POST", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => null
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.createTask({
+      taskId: "",
+      repoId: "repo-1",
+      prompt: "Ship it"
+    })).rejects.toThrow("LAN request failed (404)");
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repoId: "repo-1",
+          prompt: "Ship it"
+        })
+      }
+    );
+  });
+
   it("posts mark-read through the LAN task action route", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

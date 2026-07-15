@@ -317,13 +317,17 @@ export default function App() {
           prompt={state.composerPrompt}
           repos={state.repos}
           desktops={state.desktops}
-          selectedRepoId={state.selectedRepoId}
+          selectedRepoId={state.composerRepoId}
           selectedDesktopId={state.composerDesktopId}
           selectedAgentProvider={state.composerAgentProvider}
           isOptionsExpanded={state.isComposerOptionsExpanded}
           errorMessage={state.composerErrorMessage}
-          isSubmitting={state.isComposerSubmitting}
+          taskCreationPhase={state.taskCreationPhase}
           onClose={() => controller.closeComposer()}
+          onContinueInBackground={() => controller.backgroundTaskCreation()}
+          onRecover={() => {
+            void controller.recoverTaskCreation();
+          }}
           onSelectDesktop={(desktopId) => controller.selectComposerDesktop(desktopId)}
           onSelectAgentProvider={(provider) => controller.selectComposerAgentProvider(provider)}
           onToggleOptions={() =>

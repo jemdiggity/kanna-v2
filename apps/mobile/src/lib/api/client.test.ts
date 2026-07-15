@@ -1,8 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
-import { createKannaClient } from "./client";
+import { createKannaClient, TaskCreationError } from "./client";
 import type { KannaTransport } from "./client";
 
 describe("createKannaClient", () => {
+  it("classifies an untyped create rejection as an unknown result", async () => {
+    const cause = new Error("lost create response");
+    const transport = {
+      createTask: vi.fn().mockRejectedValue(cause)
+    } as unknown as KannaTransport;
+    const client = createKannaClient(transport);
+
+    await expect(client.createTask({
+      repoId: "repo-1",
+      prompt: "Ship it",
+      taskId: "a1b2c3d4"
+    } as Parameters<typeof client.createTask>[0])).rejects.toMatchObject({
+      name: "TaskCreationError",
+      outcome: "unknown",
+      message: "lost create response",
+      cause
+    });
+  });
+
+  it("preserves a typed task creation outcome from the transport", async () => {
+    const failure = new TaskCreationError(
+      "not-created",
+      "request did not leave the device"
+    );
+    const transport = {
+      createTask: vi.fn().mockRejectedValue(failure)
+    } as unknown as KannaTransport;
+    const client = createKannaClient(transport);
+
+    await expect(client.createTask({
+      repoId: "repo-1",
+      prompt: "Ship it"
+    })).rejects.toBe(failure);
+  });
+
   it("forwards desktop and task queries to the transport", async () => {
     const transport: KannaTransport = {
       getStatus: vi.fn().mockResolvedValue({

@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
+import type { TaskCreationPhase } from "../state/sessionStore";
 
 vi.mock("react-native", () => ({
   ActivityIndicator: "ActivityIndicator",
@@ -91,8 +92,10 @@ function renderComposer(
     selectedAgentProvider: string;
     isOptionsExpanded: boolean;
     errorMessage: string | null;
-    isSubmitting: boolean;
+    taskCreationPhase: TaskCreationPhase;
     onClose: () => void;
+    onContinueInBackground: () => void;
+    onRecover: () => void;
     onSelectDesktop: (desktopId: string) => void;
     onSelectAgentProvider: (provider: string) => void;
     onToggleOptions: () => void;
@@ -119,9 +122,11 @@ function renderComposer(
     isOptionsExpanded: overrides.isOptionsExpanded ?? false,
     errorMessage:
       overrides.errorMessage === undefined ? null : overrides.errorMessage,
-    isSubmitting: overrides.isSubmitting ?? false,
+    taskCreationPhase: overrides.taskCreationPhase ?? "idle",
     onChangePrompt: vi.fn(),
     onClose: overrides.onClose ?? vi.fn(),
+    onContinueInBackground: overrides.onContinueInBackground ?? vi.fn(),
+    onRecover: overrides.onRecover ?? vi.fn(),
     onSelectDesktop: overrides.onSelectDesktop ?? vi.fn(),
     onSelectAgentProvider: overrides.onSelectAgentProvider ?? vi.fn(),
     onToggleOptions: overrides.onToggleOptions ?? vi.fn(),
@@ -129,7 +134,7 @@ function renderComposer(
   } as Parameters<NonNullable<typeof CreateTaskComposer>>[0] & {
     selectedAgentProvider: string;
     errorMessage: string | null;
-    isSubmitting: boolean;
+    taskCreationPhase: TaskCreationPhase;
     onSelectDesktop(desktopId: string): void;
     onSelectAgentProvider(provider: string): void;
     onToggleOptions(): void;
@@ -223,7 +228,7 @@ describe("CreateTaskComposer", () => {
       selectedDesktopId: "desktop-1",
       selectedAgentProvider: "claude",
       errorMessage: "Desktop unavailable",
-      isSubmitting: false,
+      taskCreationPhase: "idle",
       onSubmit
     });
     const promptInput = findNodeByTestId(tree, "mobile.create-task.prompt");
@@ -244,7 +249,7 @@ describe("CreateTaskComposer", () => {
 
   it("replaces the composer with a technical provisioning panel", () => {
     const tree = renderComposer({
-      isSubmitting: true,
+      taskCreationPhase: "pending",
       selectedAgentProvider: "codex"
     });
     const provisioning = findNodeByTestId(
@@ -280,7 +285,7 @@ describe("CreateTaskComposer", () => {
   });
 
   it("announces provisioning as an indeterminate accessible operation", () => {
-    const tree = renderComposer({ isSubmitting: true });
+    const tree = renderComposer({ taskCreationPhase: "pending" });
     const provisioning = findNodeByTestId(
       tree,
       "mobile.create-task.provisioning"
@@ -298,7 +303,7 @@ describe("CreateTaskComposer", () => {
 
   it("uses defensive route labels when selections are unavailable", () => {
     const tree = renderComposer({
-      isSubmitting: true,
+      taskCreationPhase: "pending",
       selectedRepoId: null,
       selectedDesktopId: null
     });
@@ -318,15 +323,23 @@ describe("CreateTaskComposer", () => {
     );
   });
 
-  it("blocks every composer dismissal path while provisioning", () => {
-    const onClose = vi.fn();
-    const tree = renderComposer({ isSubmitting: true, onClose });
+  it("continues provisioning in the background from request-close or the explicit action", () => {
+    const onContinueInBackground = vi.fn();
+    const tree = renderComposer({
+      taskCreationPhase: "pending",
+      onContinueInBackground
+    });
     const modal = findNodeByType(tree, "Modal");
     const keyboardAvoider = findNodeByType(tree, "KeyboardAvoidingView");
     const backdrop = flattenChildren(keyboardAvoider?.props?.children)[0];
+    const backgroundButton = findNodeByTestId(
+      tree,
+      "mobile.create-task.provisioning.background"
+    );
 
     (modal?.props?.onRequestClose as (() => void) | undefined)?.();
     (backdrop?.props?.onPress as (() => void) | undefined)?.();
+    (backgroundButton?.props?.onPress as (() => void) | undefined)?.();
 
     expect(backdrop?.props).toMatchObject({
       accessibilityElementsHidden: true,
@@ -334,7 +347,65 @@ describe("CreateTaskComposer", () => {
       disabled: true,
       importantForAccessibility: "no-hide-descendants"
     });
-    expect(onClose).not.toHaveBeenCalled();
+    expect(backgroundButton?.props?.accessibilityRole).toBe("button");
+    expect(onContinueInBackground).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["pending", "uncertain"] as const)(
+    "recovers the frozen task identity without exposing a fresh create while %s",
+    (taskCreationPhase) => {
+      const onRecover = vi.fn();
+      const tree = renderComposer({ taskCreationPhase, onRecover });
+      const recoverButton = findNodeByTestId(
+        tree,
+        "mobile.create-task.provisioning.recover"
+      );
+
+      expect(findNodeByTestId(tree, "mobile.create-task.prompt")).toBeNull();
+      expect(findNodeByTestId(tree, "mobile.create-task.submit")).toBeNull();
+      expect(findNodeByText(tree, "Cancel")).toBeNull();
+      expect(recoverButton?.props?.disabled).toBe(false);
+      expect(recoverButton?.props?.accessibilityRole).toBe("button");
+
+      (recoverButton?.props?.onPress as (() => void) | undefined)?.();
+      expect(onRecover).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it("keeps recovery single-flight in the UI while reconciliation is running", () => {
+    const onRecover = vi.fn();
+    const tree = renderComposer({ taskCreationPhase: "recovering", onRecover });
+    const recoverButton = findNodeByTestId(
+      tree,
+      "mobile.create-task.provisioning.recover"
+    );
+
+    expect(recoverButton?.props?.disabled).toBe(true);
+    expect(findNodeByText(tree, "Recovering…")).not.toBeNull();
+    (recoverButton?.props?.onPress as (() => void) | undefined)?.();
+    expect(onRecover).not.toHaveBeenCalled();
+  });
+
+  it("explains an ambiguous result without claiming that creation failed", () => {
+    const tree = renderComposer({
+      taskCreationPhase: "uncertain",
+      errorMessage: "Relay connection closed."
+    });
+
+    expect(findNodeByText(tree, "Task result unknown")).not.toBeNull();
+    expect(
+      findNodeByText(
+        tree,
+        "The desktop may already have created this task. Recover checks the same task identity."
+      )
+    ).not.toBeNull();
+    expect(findNodeByText(tree, "Relay connection closed.")).not.toBeNull();
+    expect(
+      findNodeByTestId(tree, "mobile.create-task.provisioning")?.props
+        ?.accessibilityLabel
+    ).toBe(
+      "Task result unknown for Repo One on Studio Mac. Relay connection closed."
+    );
   });
 
   it("keeps normal composer dismissal available before submission", () => {

@@ -24,6 +24,11 @@ export const selectors = {
   accountPasswordToggle: `~${MOBILE_E2E_IDS.accountPasswordToggle}`,
   accountSignInButton: `~${MOBILE_E2E_IDS.accountSignInButton}`,
   accountSignOutButton: `~${MOBILE_E2E_IDS.accountSignOutButton}`,
+  createTaskProvisioning: `~${MOBILE_E2E_IDS.createTaskProvisioning}`,
+  createTaskProvisioningBackground:
+    `~${MOBILE_E2E_IDS.createTaskProvisioningBackground}`,
+  createTaskProvisioningRecover:
+    `~${MOBILE_E2E_IDS.createTaskProvisioningRecover}`,
   tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,

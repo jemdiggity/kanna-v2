@@ -50,6 +50,387 @@ async fn create_task_route_uses_task_creator() {
 }
 
 #[tokio::test]
+async fn create_task_route_rejects_invalid_requested_task_ids_before_creation() {
+    let create_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let create_calls_for_creator = Arc::clone(&create_calls);
+    let app = super::test_router_with_task_creator(
+        "desktop-invalid-task-id",
+        "Studio Mac",
+        Arc::new(move |payload| {
+            create_calls_for_creator.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CreateTaskResponse {
+                task_id: "generated1".to_string(),
+                repo_id: payload.repo_id,
+                title: payload.prompt,
+                stage: "in progress".to_string(),
+                agent_type: "agent".to_string(),
+                worktree_path: Some("/tmp/worktree".to_string()),
+            })
+        }),
+    );
+
+    for task_id in [
+        "0123456",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+        "ABCDEF12",
+        "0123456-",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/v1/tasks/{task_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "repoId": "repo-1",
+                            "prompt": "Ship it"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{task_id}");
+    }
+
+    assert_eq!(create_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn concurrent_requested_task_creation_is_rejected_until_owner_failure_releases_flight() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let task_id = "c1d2e3f4a5b60718";
+    let create_calls = Arc::new(AtomicUsize::new(0));
+    let create_calls_for_creator = Arc::clone(&create_calls);
+    let (owner_started_tx, owner_started_rx) = mpsc::channel();
+    let (release_owner_tx, release_owner_rx) = mpsc::channel();
+    let release_owner_rx = Arc::new(std::sync::Mutex::new(Some(release_owner_rx)));
+    let release_owner_rx_for_creator = Arc::clone(&release_owner_rx);
+    let app = super::test_router_with_task_creator(
+        "desktop-concurrent-task-id",
+        "Studio Mac",
+        Arc::new(move |payload| {
+            let call = create_calls_for_creator.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                owner_started_tx.send(()).unwrap();
+                let release = release_owner_rx_for_creator.lock().unwrap().take().unwrap();
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+                return Err("owner failed".to_string());
+            }
+
+            Ok(CreateTaskResponse {
+                task_id: task_id.to_string(),
+                repo_id: payload.repo_id,
+                title: payload.prompt,
+                stage: "in progress".to_string(),
+                agent_type: "agent".to_string(),
+                worktree_path: Some("/tmp/worktree".to_string()),
+            })
+        }),
+    );
+    let request_body = serde_json::json!({
+        "repoId": "repo-1",
+        "prompt": "Ship exactly once"
+    })
+    .to_string();
+
+    let owner_app = app.clone();
+    let owner_body = request_body.clone();
+    let owner = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                owner_app.oneshot(
+                    Request::put(format!("/v1/tasks/{task_id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(owner_body))
+                        .unwrap(),
+                ),
+            )
+            .unwrap()
+    });
+    owner_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+
+    let concurrent_response = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let concurrent_status = concurrent_response.status();
+    let concurrent_body = axum::body::to_bytes(concurrent_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_calls_while_owner_held = create_calls.load(Ordering::SeqCst);
+
+    release_owner_tx.send(()).unwrap();
+    let owner_response = owner.join().unwrap();
+
+    assert_eq!(concurrent_status, StatusCode::CONFLICT);
+    assert_eq!(
+        String::from_utf8(concurrent_body.to_vec()).unwrap(),
+        format!("task creation already in progress: {task_id}")
+    );
+    assert_eq!(create_calls_while_owner_held, 1);
+    assert_eq!(owner_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let retry_response = app
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    assert_eq!(create_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn create_task_route_replays_requested_task_id_without_preparing_or_spawning_twice() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let task_id = "a1b2c3d4e5f60718";
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-replay-{unique}"));
+    init_test_git_repo(&repo_root);
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-replay-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let session_id = match command {
+            DaemonCommand::Spawn {
+                session_id, cwd, ..
+            } => {
+                assert_eq!(session_id, task_id);
+                assert!(cwd.ends_with(&format!("/task-{task_id}")));
+                session_id
+            }
+            other => panic!("expected spawn command, got {:?}", other),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-create-replay-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-create-replay-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let request_body = serde_json::json!({
+        "repoId": "repo-1",
+        "prompt": "Ship idempotently",
+        "displayName": "Idempotent task",
+        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+        "agentProvider": "claude"
+    })
+    .to_string();
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: CreateTaskResponse = from_slice(&first_body).unwrap();
+    assert_eq!(created.task_id, task_id);
+
+    daemon_server.await.unwrap();
+    std::fs::remove_file(&socket_path).unwrap();
+
+    let replay_response = app
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_response.status(), StatusCode::OK);
+    let replay_body = axum::body::to_bytes(replay_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let replayed: CreateTaskResponse = from_slice(&replay_body).unwrap();
+    assert_eq!(replayed, created);
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(
+        db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+        1
+    );
+    assert_eq!(db.list_stage_runs_for_task(task_id).unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn create_task_route_rejects_requested_task_id_with_mismatched_task_data() {
+    let task_id = "b1c2d3e4f5a60718";
+    let app = super::test_router_with_seed("desktop-create-task-mismatch", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_repo("repo-2", "Repo Two").unwrap();
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "Original prompt",
+            Some("Original title"),
+            "review",
+            "2026-07-15 00:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_agent_type(task_id, "agent")
+            .unwrap();
+    });
+
+    for (repo_id, prompt) in [
+        ("repo-1", "Different prompt"),
+        ("repo-2", "Original prompt"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/v1/tasks/{task_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "repoId": repo_id,
+                            "prompt": prompt
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+}
+
+#[test]
+fn create_task_prepare_error_replays_only_requested_id_collision() {
+    let task_id = "d1e2f3a4b5c60718";
+    let state = super::test_state_with_seed("desktop-create-task-race", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "Race prompt",
+            Some("Race title"),
+            "review",
+            "2026-07-15 00:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_agent_type(task_id, "agent")
+            .unwrap();
+        db.upsert_worktree(
+            "wt-create-race",
+            task_id,
+            "/tmp/task-create-race",
+            "task-d1e2f3a4b5c60718",
+        )
+        .unwrap();
+    });
+    let db = Db::open(&state.config.db_path).unwrap();
+
+    let replayed = super::super::tasks::resolve_create_task_prepare_error(
+        &db,
+        crate::task_creator::PrepareTaskError::RequestedTaskIdAlreadyExists,
+        Some((task_id, "repo-1", "Race prompt")),
+    )
+    .unwrap();
+    assert_eq!(
+        replayed,
+        CreateTaskResponse {
+            task_id: task_id.to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Race title".to_string(),
+            stage: "review".to_string(),
+            agent_type: "agent".to_string(),
+            worktree_path: Some("/tmp/task-create-race".to_string()),
+        }
+    );
+
+    let unrelated = super::super::tasks::resolve_create_task_prepare_error(
+        &db,
+        crate::task_creator::PrepareTaskError::Other("setup failed".to_string()),
+        Some((task_id, "repo-1", "Race prompt")),
+    )
+    .unwrap_err();
+    assert_eq!(unrelated.0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(unrelated.1, "setup failed");
+}
+
+#[tokio::test]
 async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_provider() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -153,6 +534,11 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
         .await
         .unwrap();
     let created: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(created.task_id.len(), 8);
+    assert!(created
+        .task_id
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     let db = Db::open(&config.db_path).unwrap();
     let created_source = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
     assert_eq!(created_source.agent_provider.as_deref(), Some("copilot"));
@@ -758,7 +1144,7 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
     let response = app
         .clone()
         .oneshot(
-            Request::post("/v1/tasks")
+            Request::put("/v1/tasks/f1a2b3c4d5e60718")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
@@ -785,6 +1171,7 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
     let items = db.list_recent_pipeline_items().unwrap();
     assert_eq!(items.len(), 1);
     let task_id = items[0].id.clone();
+    assert_eq!(task_id, "f1a2b3c4d5e60718");
     assert_eq!(items[0].activity.as_deref(), Some("unread"));
     let runs = db.list_stage_runs_for_task(&task_id).unwrap();
     assert_eq!(runs.len(), 1);
@@ -876,7 +1263,7 @@ async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
     let response = app
         .oneshot(
-            Request::post("/v1/tasks")
+            Request::put("/v1/tasks/a2b3c4d5e6f70819")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
@@ -905,6 +1292,7 @@ async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() 
         .await
         .unwrap();
     let created: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(created.task_id, "a2b3c4d5e6f70819");
     assert_eq!(created.repo_id, "repo-1");
     assert_eq!(created.stage, "in progress");
     assert_eq!(created.worktree_path, None);

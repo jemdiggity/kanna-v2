@@ -41,7 +41,8 @@ use types::{
     RunWorkspaceSpec, TaskCreationRequest,
 };
 pub(crate) use types::{
-    PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn, PreparedWorkspaceTeardown,
+    PrepareTaskError, PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn,
+    PreparedWorkspaceTeardown,
 };
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
@@ -767,11 +768,21 @@ fn build_prepared_session(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_task_for_api(
     db: &Db,
     config: &Config,
     request: crate::mobile_api::CreateTaskRequest,
 ) -> Result<PreparedTaskSpawn, String> {
+    prepare_task_for_api_with_error(db, config, request, None).map_err(|error| error.to_string())
+}
+
+pub(crate) fn prepare_task_for_api_with_error(
+    db: &Db,
+    config: &Config,
+    request: crate::mobile_api::CreateTaskRequest,
+    requested_task_id: Option<String>,
+) -> Result<PreparedTaskSpawn, PrepareTaskError> {
     let repo = db
         .get_repo(&request.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -796,18 +807,20 @@ pub(crate) fn prepare_task_for_api(
             return Err(format!(
                 "parent task belongs to a different repo: {}",
                 parent_task_id
-            ));
+            )
+            .into());
         }
         Some(parent_task_id)
     } else {
         None
     };
 
-    prepare_task_spawn(
+    prepare_task_spawn_with_error(
         db,
         config,
         &repo,
         TaskCreationRequest {
+            requested_task_id,
             task_prompt: request.prompt.clone(),
             display_name: request.display_name,
             pipeline_name: request.pipeline_name,
@@ -874,6 +887,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
         config,
         &repo,
         TaskCreationRequest {
+            requested_task_id: None,
             task_prompt: message.to_string(),
             display_name,
             pipeline_name: Some(pipeline_name),
@@ -963,6 +977,7 @@ completion with status success so Kanna can run the commit post and close this i
         config,
         &repo,
         TaskCreationRequest {
+            requested_task_id: None,
             task_prompt: prompt,
             display_name: Some(format!("Integrate: {dependent_name}")),
             pipeline_name: Some(pipeline_name),
@@ -988,10 +1003,11 @@ completion with status success so Kanna can run the commit post and close this i
     )
 }
 
-pub(crate) fn create_dormant_task_for_api(
+pub(crate) fn create_dormant_task_for_api_with_error(
     db: &Db,
     request: crate::mobile_api::CreateTaskRequest,
-) -> Result<crate::mobile_api::CreateTaskResponse, String> {
+    requested_task_id: Option<String>,
+) -> Result<crate::mobile_api::CreateTaskResponse, PrepareTaskError> {
     let repo = db
         .get_repo(&request.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -1016,7 +1032,8 @@ pub(crate) fn create_dormant_task_for_api(
             return Err(format!(
                 "parent task belongs to a different repo: {}",
                 parent_task_id
-            ));
+            )
+            .into());
         }
         Some(parent_task_id)
     } else {
@@ -1058,7 +1075,11 @@ pub(crate) fn create_dormant_task_for_api(
         &repo.path,
     )?;
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
-    let task_id = generate_task_id()?;
+    let has_requested_task_id = requested_task_id.is_some();
+    let task_id = match requested_task_id {
+        Some(task_id) => task_id,
+        None => generate_task_id()?,
+    };
     let branch = format!("task-{}", task_id);
     let stage_name = stage.name.clone();
 
@@ -1081,7 +1102,7 @@ pub(crate) fn create_dormant_task_for_api(
         notify_task_id: request.notify_task_id.as_deref(),
         parent_task_id: parent_task_id.as_deref(),
     })
-    .map_err(|e| format!("db error: {}", e))?;
+    .map_err(|error| classify_pipeline_item_insert_error(error, has_requested_task_id))?;
 
     Ok(crate::mobile_api::CreateTaskResponse {
         task_id,
@@ -1365,7 +1386,18 @@ pub(in crate::task_creator) fn prepare_task_spawn(
     repo: &Repo,
     request: TaskCreationRequest,
 ) -> Result<PreparedTaskSpawn, String> {
+    prepare_task_spawn_with_error(db, config, repo, request).map_err(|error| error.to_string())
+}
+
+fn prepare_task_spawn_with_error(
+    db: &Db,
+    config: &Config,
+    repo: &Repo,
+    request: TaskCreationRequest,
+) -> Result<PreparedTaskSpawn, PrepareTaskError> {
     let repo_config = read_repo_config(&repo.path)?;
+    let requested_task_id = request.requested_task_id.clone();
+    let has_requested_task_id = requested_task_id.is_some();
     let resolved = resolve_task_spawn(repo, request, &repo_config)?;
     let stage_run_model = resolved.model.clone();
     let provisional_provider = *resolved
@@ -1377,7 +1409,10 @@ pub(in crate::task_creator) fn prepare_task_spawn(
     // candidate here: setup may install a later, compatible fallback.
     let provisional_agent_type = resolve_agent_type(None, provisional_provider)?;
 
-    let task_id = generate_task_id()?;
+    let task_id = match requested_task_id {
+        Some(task_id) => task_id,
+        None => generate_task_id()?,
+    };
     let branch = format!("task-{}", task_id);
     let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
 
@@ -1389,6 +1424,7 @@ pub(in crate::task_creator) fn prepare_task_spawn(
         &resolved,
         provisional_provider,
         provisional_agent_type,
+        has_requested_task_id,
     )?;
 
     let prepared = (|| {
@@ -1416,7 +1452,7 @@ pub(in crate::task_creator) fn prepare_task_spawn(
         Ok(prepared) => prepared,
         Err(err) => {
             record_task_prepare_failure(db, &task_id, &worktree_path, &resolved, &err)?;
-            return Err(format!("task {task_id} failed to prepare: {err}"));
+            return Err(format!("task {task_id} failed to prepare: {err}").into());
         }
     };
     db.update_pipeline_item_agent_binding(&task_id, provider.as_str(), agent_type.as_str())
@@ -1640,9 +1676,10 @@ fn insert_new_task_record(
     resolved: &ResolvedTaskSpawn,
     provider: AgentProvider,
     agent_type: AgentSessionType,
-) -> Result<(), String> {
+    has_requested_task_id: bool,
+) -> Result<(), PrepareTaskError> {
     let agent_spawn_options_json = agent_spawn_options_json(resolved)?;
-    db.insert_pipeline_item(NewPipelineItem {
+    let result = db.insert_pipeline_item(NewPipelineItem {
         id: task_id,
         repo_id: &repo.id,
         prompt: &resolved.original_prompt,
@@ -1660,8 +1697,34 @@ fn insert_new_task_record(
         base_ref: resolved.stored_base_ref.as_deref(),
         notify_task_id: resolved.notify_task_id.as_deref(),
         parent_task_id: resolved.parent_task_id.as_deref(),
-    })
-    .map_err(|e| format!("db error: {}", e))
+    });
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(classify_pipeline_item_insert_error(
+            error,
+            has_requested_task_id,
+        )),
+    }
+}
+
+fn classify_pipeline_item_insert_error(
+    error: rusqlite::Error,
+    has_requested_task_id: bool,
+) -> PrepareTaskError {
+    if has_requested_task_id && is_pipeline_item_primary_key_violation(&error) {
+        PrepareTaskError::RequestedTaskIdAlreadyExists
+    } else {
+        PrepareTaskError::Other(format!("db error: {error}"))
+    }
+}
+
+fn is_pipeline_item_primary_key_violation(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, message)
+            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                && message.as_deref() == Some("UNIQUE constraint failed: pipeline_item.id")
+    )
 }
 
 fn agent_spawn_options_json(resolved: &ResolvedTaskSpawn) -> Result<String, String> {

@@ -40,6 +40,7 @@ export interface PairingSession {
 }
 
 export interface CreateTaskRequest {
+  taskId?: string;
   repoId: string;
   prompt: string;
   desktopId?: string;

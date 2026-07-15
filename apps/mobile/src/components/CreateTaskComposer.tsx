@@ -13,7 +13,10 @@ import {
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { DesktopSummary, RepoSummary } from "../lib/api/types";
-import type { ComposerAgentProvider } from "../state/sessionStore";
+import type {
+  ComposerAgentProvider,
+  TaskCreationPhase
+} from "../state/sessionStore";
 
 interface CreateTaskComposerProps {
   isOpen: boolean;
@@ -25,8 +28,10 @@ interface CreateTaskComposerProps {
   selectedAgentProvider: ComposerAgentProvider;
   isOptionsExpanded: boolean;
   errorMessage: string | null;
-  isSubmitting: boolean;
+  taskCreationPhase: TaskCreationPhase;
   onClose(): void;
+  onContinueInBackground(): void;
+  onRecover(): void;
   onSelectDesktop(desktopId: string): void;
   onSelectAgentProvider(provider: ComposerAgentProvider): void;
   onToggleOptions(): void;
@@ -57,8 +62,10 @@ export function CreateTaskComposer({
   selectedAgentProvider = "claude",
   isOptionsExpanded = false,
   errorMessage = null,
-  isSubmitting = false,
+  taskCreationPhase = "idle",
   onClose,
+  onContinueInBackground,
+  onRecover,
   onSelectDesktop,
   onSelectAgentProvider,
   onToggleOptions,
@@ -72,21 +79,43 @@ export function CreateTaskComposer({
     AGENT_OPTIONS.find((option) => option.provider === selectedAgentProvider)?.label ??
     selectedAgentProvider;
   const canSubmit =
-    Boolean(selectedRepoId && selectedDesktop && prompt.trim()) && !isSubmitting;
+    Boolean(selectedRepoId && selectedDesktop && prompt.trim());
   const selectedDesktopLabel = selectedDesktop
     ? `${selectedDesktop.name} (${selectedDesktop.online ? "online" : "offline"})`
     : "Choose machine";
 
-  if (isSubmitting) {
+  if (taskCreationPhase !== "idle") {
     const provisioningRepoLabel = selectedRepo?.name ?? "Selected repo";
     const provisioningDesktopLabel = selectedDesktop?.name ?? "Selected machine";
     const provisioningRoute =
       `${provisioningRepoLabel} → ${provisioningDesktopLabel} · ${selectedAgentLabel}`;
+    const isRecovering = taskCreationPhase === "recovering";
+    const isBusy = taskCreationPhase !== "uncertain";
+    const provisioningTitle = taskCreationPhase === "uncertain"
+      ? "Task result unknown"
+      : isRecovering
+        ? "Recovering task"
+        : "Provisioning task";
+    const provisioningEyebrow = taskCreationPhase === "uncertain"
+      ? "Response lost"
+      : isRecovering
+        ? "Identity replay"
+        : "Workspace boot";
+    const provisioningStatusCopy = taskCreationPhase === "uncertain"
+      ? "The desktop may already have created this task. Recover checks the same task identity."
+      : isRecovering
+        ? "Checking the desktop with the same task identity…"
+        : `Creating worktree and starting ${selectedAgentLabel}…`;
+    const accessibilityLabel = taskCreationPhase === "uncertain"
+      ? `Task result unknown for ${provisioningRepoLabel} on ${provisioningDesktopLabel}` +
+        (errorMessage ? `. ${errorMessage}` : "")
+      : `${isRecovering ? "Recovering" : "Provisioning"} task for ` +
+        `${provisioningRepoLabel} on ${provisioningDesktopLabel} with ${selectedAgentLabel}`;
 
     return (
       <Modal
         animationType="slide"
-        onRequestClose={() => undefined}
+        onRequestClose={onContinueInBackground}
         transparent
         visible={isOpen}
       >
@@ -105,12 +134,11 @@ export function CreateTaskComposer({
             <View
               accessible
               accessibilityLabel={
-                `Provisioning task for ${provisioningRepoLabel} on ` +
-                `${provisioningDesktopLabel} with ${selectedAgentLabel}`
+                accessibilityLabel
               }
               accessibilityLiveRegion="polite"
-              accessibilityRole="progressbar"
-              accessibilityState={{ busy: true }}
+              accessibilityRole={isBusy ? "progressbar" : "alert"}
+              accessibilityState={{ busy: isBusy }}
               style={styles.provisioning}
               testID={MOBILE_E2E_IDS.createTaskProvisioning}
             >
@@ -121,16 +149,22 @@ export function CreateTaskComposer({
                   importantForAccessibility="no-hide-descendants"
                   style={styles.terminalTile}
                 >
-                  <Text style={styles.terminalPrompt}>{">_"}</Text>
-                  <ActivityIndicator
-                    color="#8FC5FF"
-                    size="small"
-                    style={styles.provisioningIndicator}
-                  />
+                  <Text style={styles.terminalPrompt}>
+                    {taskCreationPhase === "uncertain" ? "?_" : ">_"}
+                  </Text>
+                  {isBusy ? (
+                    <ActivityIndicator
+                      color="#8FC5FF"
+                      size="small"
+                      style={styles.provisioningIndicator}
+                    />
+                  ) : null}
                 </View>
                 <View style={styles.provisioningHeading}>
-                  <Text style={styles.provisioningEyebrow}>Workspace boot</Text>
-                  <Text style={styles.provisioningTitle}>Provisioning task</Text>
+                  <Text style={styles.provisioningEyebrow}>
+                    {provisioningEyebrow}
+                  </Text>
+                  <Text style={styles.provisioningTitle}>{provisioningTitle}</Text>
                 </View>
               </View>
 
@@ -143,9 +177,38 @@ export function CreateTaskComposer({
               <View style={styles.provisioningStatus}>
                 <Text style={styles.provisioningStatusPrompt}>{"›"}</Text>
                 <Text style={styles.provisioningStatusCopy}>
-                  {`Creating worktree and starting ${selectedAgentLabel}…`}
+                  {provisioningStatusCopy}
                 </Text>
               </View>
+            </View>
+
+            {taskCreationPhase === "uncertain" && errorMessage ? (
+              <Text style={styles.errorText}>{errorMessage}</Text>
+            ) : null}
+
+            <View style={styles.actions}>
+              <Pressable
+                accessibilityRole="button"
+                style={styles.secondaryButton}
+                testID={MOBILE_E2E_IDS.createTaskProvisioningBackground}
+                onPress={onContinueInBackground}
+              >
+                <Text style={styles.secondaryLabel}>Continue in background</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={isRecovering}
+                style={[
+                  styles.primaryButton,
+                  isRecovering ? styles.primaryButtonDisabled : null
+                ]}
+                testID={MOBILE_E2E_IDS.createTaskProvisioningRecover}
+                onPress={isRecovering ? undefined : onRecover}
+              >
+                <Text style={styles.primaryLabel}>
+                  {isRecovering ? "Recovering…" : "Recover task"}
+                </Text>
+              </Pressable>
             </View>
           </View>
         </KeyboardAvoidingView>
@@ -292,7 +355,7 @@ export function CreateTaskComposer({
               onPress={canSubmit ? onSubmit : undefined}
             >
               <Text style={styles.primaryLabel}>
-                {isSubmitting ? "Creating..." : "Create"}
+                Create
               </Text>
             </Pressable>
           </View>

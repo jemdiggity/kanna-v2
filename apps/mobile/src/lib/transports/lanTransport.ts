@@ -81,9 +81,17 @@ export function createLanTransport(
     searchTasks: (query) =>
       request<TaskSummary[]>(`/v1/tasks/search?query=${encodeURIComponent(query)}`),
     createTask: (input: CreateTaskRequest) => {
-      const { desktopId: _desktopId, ...taskInput } = input;
-      return request<CreateTaskResponse>("/v1/tasks", {
-        method: "POST",
+      const {
+        desktopId: _desktopId,
+        taskId,
+        ...taskInput
+      } = input;
+      const hasTaskId = taskId !== undefined;
+      const path = hasTaskId
+        ? `/v1/tasks/${encodeURIComponent(taskId)}`
+        : "/v1/tasks";
+      return request<CreateTaskResponse>(path, {
+        method: hasTaskId ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(taskInput)
       });
