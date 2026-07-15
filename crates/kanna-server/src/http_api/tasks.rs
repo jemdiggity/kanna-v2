@@ -427,6 +427,7 @@ fn existing_create_task_response(
         task_id: item.id,
         repo_id: item.repo_id,
         title,
+        prompt: prompt.to_string(),
         stage,
         agent_type,
         worktree_path,

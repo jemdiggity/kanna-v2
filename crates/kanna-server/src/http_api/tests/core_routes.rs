@@ -1373,13 +1373,14 @@ async fn list_recent_tasks_route_returns_open_tasks_in_updated_order() {
 
 #[tokio::test]
 async fn get_task_route_returns_full_task_detail_by_id() {
-    const FULL_PROMPT: &str = "Review MCP task detail.\nKeep every canonical prompt line.\nPROMPT_END_SENTINEL";
-    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+    let full_prompt = format!("{}PROMPT_END_SENTINEL", "p".repeat(520));
+    let seed_prompt = full_prompt.clone();
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", move |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_pipeline_item(
             "task-1",
             "repo-1",
-            FULL_PROMPT,
+            &seed_prompt,
             Some("Review MCP"),
             "in progress",
             "2026-04-18 10:00:00",
@@ -1405,7 +1406,12 @@ async fn get_task_route_returns_full_task_detail_by_id() {
     assert_eq!(task.id, "task-1");
     assert_eq!(task.repo_id, "repo-1");
     assert_eq!(task.title, "Review MCP");
-    assert_eq!(task.prompt.as_deref(), Some(FULL_PROMPT));
+    assert_eq!(task.prompt.as_deref(), Some(full_prompt.as_str()));
+    assert!(task
+        .prompt
+        .as_deref()
+        .unwrap()
+        .contains("PROMPT_END_SENTINEL"));
     assert_eq!(task.stage.as_deref(), Some("in progress"));
     assert_eq!(task.activity.as_deref(), Some("idle"));
     assert_eq!(task.agent_type.as_deref(), Some("pty"));

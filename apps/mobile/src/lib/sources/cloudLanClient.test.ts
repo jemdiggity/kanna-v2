@@ -51,6 +51,10 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     listRepos: vi.fn().mockResolvedValue([]),
     listRepoTasks: vi.fn().mockResolvedValue([]),
     listRecentTasks: vi.fn().mockResolvedValue([]),
+    getTask: vi.fn().mockImplementation(async (taskId: string) => ({
+      ...task({ id: taskId }),
+      prompt: "Full canonical prompt"
+    })),
     searchTasks: vi.fn().mockResolvedValue([]),
     createTask: vi.fn().mockResolvedValue({
       taskId: "task-created",
@@ -1003,6 +1007,8 @@ describe("createCloudLanClient", () => {
     await client.advanceTaskStage("cloud-only");
     await client.runMergeAgent("cloud-duplicate");
     await client.markTaskRead("cloud-duplicate");
+    await client.getTask?.("cloud-duplicate");
+    await client.getTask?.("cloud-only");
 
     expect(lan.observeTaskAgent).toHaveBeenCalledWith(
       "local-duplicate",
@@ -1029,6 +1035,8 @@ describe("createCloudLanClient", () => {
     expect(lan.runMergeAgent).toHaveBeenCalledWith("local-duplicate");
     expect(lan.markTaskRead).toHaveBeenCalledWith("local-duplicate");
     expect(cloud.markTaskRead).not.toHaveBeenCalled();
+    expect(lan.getTask).toHaveBeenCalledWith("local-duplicate");
+    expect(cloud.getTask).toHaveBeenCalledWith("cloud-only");
   });
 
   it("uses the authenticated cloud route for file content even when a LAN projection is selected", async () => {

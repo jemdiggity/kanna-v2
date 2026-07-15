@@ -108,3 +108,15 @@ export interface TaskSummary {
   ownerOnline?: boolean;
   activity?: TaskActivity | null;
 }
+
+export interface TaskDetail extends TaskSummary {
+  pipelineName?: string | null;
+  stageTransition?: string | null;
+  branch?: string | null;
+  prUrl?: string | null;
+  closedAt?: string | null;
+  worktreePath?: string | null;
+  commitsAhead?: number;
+  commitsBehind?: number;
+  dirty?: boolean;
+}

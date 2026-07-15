@@ -3276,6 +3276,129 @@ describe("createAppModel cloud routing", () => {
     expect(taskIndex.listRecentTasks).not.toHaveBeenCalled();
   });
 
+  it("hydrates a cloud-only terminal prompt through its relay owner detail route", async () => {
+    const fullPrompt = `${"p".repeat(520)}END-OF-CANONICAL-PROMPT`;
+    const promptSnippet = fullPrompt.slice(0, 500);
+    const taskId = "cloud:desktop-owner:repo-cloud:task-long";
+    const { authSession } = createMutableAuthSession(signedInState());
+    let pushCloudTasks:
+      | ((tasks: Awaited<ReturnType<CloudTaskIndex["listRecentTasks"]>>) => void)
+      | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const invokeDesktop = vi.fn<RelayDesktopClient["invokeDesktop"]>(
+      async (request) => {
+        if (
+          request.method === "GET" &&
+          request.path === "/v1/tasks/task-long"
+        ) {
+          return {
+            id: "task-long",
+            repoId: "repo-local",
+            title: "Long cloud task",
+            prompt: fullPrompt,
+            stage: "in progress",
+            agentType: "pty"
+          };
+        }
+        throw new Error(`Unexpected relay invocation: ${request.path}`);
+      }
+    );
+    const observeTaskTerminal = vi.fn(() => ({ close: vi.fn() }));
+    const relayClient: RelayDesktopClient = {
+      close: vi.fn(),
+      invokeDesktop,
+      observeTaskTerminal,
+      observeTaskAgent: vi.fn(() => ({
+        close: vi.fn(),
+        sendInput: vi.fn(),
+        sendPermission: vi.fn(),
+        interrupt: vi.fn()
+      })),
+      listActiveDesktopIds: vi.fn().mockResolvedValue(
+        new Set(["desktop-owner"])
+      )
+    };
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => relayClient
+      }
+    });
+
+    await app.initialize();
+    pushCloudTasks?.([cloudTask({
+      id: taskId,
+      repoId: "repo-cloud",
+      title: "Long cloud task",
+      prompt: promptSnippet,
+      agentType: "pty",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-long"
+    })]);
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks[0]?.prompt).toBe(
+        promptSnippet
+      );
+    });
+
+    app.controller.openTask(taskId);
+
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks[0]?.prompt).toBe(
+        fullPrompt
+      );
+    });
+    expect(promptSnippet).toHaveLength(500);
+    expect(promptSnippet).not.toContain("END-OF-CANONICAL-PROMPT");
+    expect(app.sessionStore.getState().recentTasks[0]?.prompt).toContain(
+      "END-OF-CANONICAL-PROMPT"
+    );
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/tasks/task-long",
+      body: null
+    });
+    expect(observeTaskTerminal).toHaveBeenCalledWith(
+      { desktopId: "desktop-owner", taskId: "task-long" },
+      expect.any(Function)
+    );
+
+    pushCloudTasks?.([cloudTask({
+      id: taskId,
+      repoId: "repo-cloud",
+      title: "Long cloud task",
+      prompt: promptSnippet,
+      activity: "working",
+      agentType: "pty",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-long"
+    })]);
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().recentTasks[0]?.activity).toBe(
+        "working"
+      );
+    });
+    expect(app.sessionStore.getState().recentTasks[0]?.prompt).toBe(fullPrompt);
+  });
+
   it("rebinds an open agent exactly once when a live task keeps its display id but changes owner route", async () => {
     const { authSession } = createMutableAuthSession({
       status: "signedIn",

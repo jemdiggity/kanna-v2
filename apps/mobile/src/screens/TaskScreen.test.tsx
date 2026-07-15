@@ -703,7 +703,7 @@ describe("TaskScreen", () => {
   });
 
   it("uses one accessible title-prompt toggle while keeping Back above the dismissal layer", () => {
-    const prompt = "Canonical prompt\nPROMPT_END_SENTINEL";
+    const prompt = `${"p".repeat(520)}PROMPT_END_SENTINEL`;
     let tree = renderTaskScreen({
       activity: "working",
       prompt
@@ -742,7 +742,7 @@ describe("TaskScreen", () => {
     expect(promptText?.type).toBe("Text");
     expect(promptText?.props).toMatchObject({
       accessible: false,
-      children: "Canonical prompt\nPROMPT_END_SENTINEL",
+      children: prompt,
       testID: "mobile.task-expanded-prompt"
     });
     expect(findByTypeAndText(tree, "Text", "in progress")).not.toBeNull();

@@ -71,6 +71,13 @@ describe("createKannaClient", () => {
           waitingPromptSnippet: "Latest agent output preview"
         }
       ]),
+      getTask: vi.fn().mockResolvedValue({
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Refactor mobile client",
+        prompt: "Full canonical prompt",
+        stage: "in progress"
+      }),
       searchTasks: vi.fn().mockResolvedValue([
         { id: "task-2", repoId: "repo-1", title: "Search result", stage: "pr" }
       ]),
@@ -119,6 +126,9 @@ describe("createKannaClient", () => {
     expect(await client.listRecentTasks()).toHaveLength(1);
     expect((await client.listRecentTasks())[0]?.waitingPromptSnippet).toBe(
       "Latest agent output preview"
+    );
+    await expect(client.getTask?.("task-1")).resolves.toEqual(
+      expect.objectContaining({ prompt: "Full canonical prompt" })
     );
     expect(await client.searchTasks("search")).toHaveLength(1);
     expect(await client.createTask({

@@ -50,6 +50,35 @@ substitutes are the server route tests for full prompt serialization, cloud/LAN
 mapping tests, focused `TaskScreen` interaction/accessibility tests, and the
 Appium journey contract test using a fake driver.
 
+The cloud-only full-prompt revision cannot use that smoke as proof of relay
+routing. The smoke resolves `KANNA_E2E_PTY_TASK_ID` metadata directly from
+`KANNA_E2E_DESKTOP_SERVER_URL`, so its prompt comes from the LAN desktop API
+rather than a privacy-bounded Firestore publication. The current fixture tools
+cannot create one controlled PTY task that is simultaneously published to the
+cloud index, reachable through an authenticated relay owner route, and seeded
+with deterministic terminal output. That missing cloud publication + relay
+owner fixture prevents a true live Appium E2E without depending on external
+Firebase, relay, and agent CLI state.
+
+The narrower integration coverage for this path is intentionally layered:
+
+- `src/appModel.cloudFallback.test.ts` publishes a 500-character cloud-only
+  prompt snippet, opens its PTY terminal, verifies the terminal is routed to the
+  owner through the relay, verifies authenticated `GET /v1/tasks/{id}` detail
+  routing, and observes the mobile store gain the end sentinel beyond character
+  500.
+- `src/lib/transports/remoteTransport.test.ts` and
+  `src/lib/sources/cloudLanClient.test.ts` verify canonical cloud identity and
+  hybrid source routing for task detail.
+- `src/state/mobileController.test.ts` verifies legacy/error fallback and rejects
+  stale detail responses after task navigation.
+- `src/screens/TaskScreen.test.tsx` expands a prompt longer than 500 characters
+  through its end sentinel.
+- `crates/kanna-server/src/cloud_task_publisher.rs` keeps the published snippet
+  at 500 characters, while the `/v1/tasks/{id}` route test in
+  `crates/kanna-server/src/http_api/tests/core_routes.rs` returns the full prompt
+  through the sentinel.
+
 True native gesture E2E for terminal scrolling and composer clearance has the
 same fixture constraint plus an Appium/WebView gesture gap: the test must drive
 native pan and keyboard input into the WebView while switching contexts to

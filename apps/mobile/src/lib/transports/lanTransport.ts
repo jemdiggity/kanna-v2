@@ -15,6 +15,7 @@ import type {
   TaskActionResponse,
   TaskActivityResponse,
   TaskFileContent,
+  TaskDetail,
   TaskSummary
 } from "../api/types";
 
@@ -79,6 +80,8 @@ export function createLanTransport(
     listRepoTasks: (repoId: string) =>
       request<TaskSummary[]>(`/v1/repos/${encodeURIComponent(repoId)}/tasks`),
     listRecentTasks: () => request<TaskSummary[]>("/v1/tasks/recent"),
+    getTask: (taskId: string) =>
+      request<TaskDetail>(`/v1/tasks/${encodeURIComponent(taskId)}`),
     searchTasks: (query) =>
       request<TaskSummary[]>(`/v1/tasks/search?query=${encodeURIComponent(query)}`),
     createTask: (input: CreateTaskRequest) => {

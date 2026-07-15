@@ -121,6 +121,7 @@ export interface SessionStore {
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
   setTaskActivity(taskId: string, activity: TaskActivity): void;
+  setTaskPrompt(taskId: string, prompt: string): void;
   setSelectedTask(taskId: string | null): void;
   retagTaskIdentity(previousTaskId: string, nextTaskId: string): void;
   setActiveView(view: MobileView): void;
@@ -427,6 +428,24 @@ export function createSessionStore(): SessionStore {
           }
           changed = true;
           return { ...task, activity };
+        });
+      const repoTasks = updateTasks(state.repoTasks);
+      const recentTasks = updateTasks(state.recentTasks);
+      const searchResults = updateTasks(state.searchResults);
+      if (!changed) return;
+
+      state = { ...state, repoTasks, recentTasks, searchResults };
+      publish();
+    },
+    setTaskPrompt(taskId, prompt) {
+      let changed = false;
+      const updateTasks = (tasks: readonly TaskSummary[]): TaskSummary[] =>
+        tasks.map((task) => {
+          if (task.id !== taskId || task.prompt === prompt) {
+            return task;
+          }
+          changed = true;
+          return { ...task, prompt };
         });
       const repoTasks = updateTasks(state.repoTasks);
       const recentTasks = updateTasks(state.recentTasks);

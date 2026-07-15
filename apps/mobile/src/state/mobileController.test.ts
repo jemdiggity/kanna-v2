@@ -313,6 +313,140 @@ describe("createMobileController", () => {
     expect(client.observeTaskAgent).not.toHaveBeenCalled();
   });
 
+  it("replaces a bounded cloud prompt with full owner detail while its terminal is open", async () => {
+    const fullPrompt = `${"p".repeat(520)}END-OF-CANONICAL-PROMPT`;
+    const promptSnippet = fullPrompt.slice(0, 500);
+    const cloudTask: TaskSummary = {
+      id: "cloud-task-1",
+      repoId: "cloud-repo-1",
+      title: "Long cloud task",
+      prompt: promptSnippet,
+      stage: "in progress",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "local-repo-1",
+      ownerLocalTaskId: "local-task-1"
+    };
+    const detail = createDeferred<Awaited<ReturnType<NonNullable<KannaClient["getTask"]>>>>();
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRecentTasks.mockResolvedValue([cloudTask]);
+    client.listRepoTasks.mockResolvedValue([cloudTask]);
+    client.getTask = vi.fn(() => detail.promise);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask(cloudTask.id);
+
+    expect(client.getTask).toHaveBeenCalledWith(cloudTask.id);
+    expect(store.getState().recentTasks[0]?.prompt).toBe(promptSnippet);
+
+    detail.resolve({ ...cloudTask, prompt: fullPrompt });
+    await flushMicrotasks();
+
+    expect(store.getState().selectedTaskId).toBe(cloudTask.id);
+    expect(store.getState().recentTasks[0]?.prompt).toBe(fullPrompt);
+    expect(store.getState().repoTasks[0]?.prompt).toBe(fullPrompt);
+    expect(store.getState().recentTasks[0]?.prompt).toContain(
+      "END-OF-CANONICAL-PROMPT"
+    );
+  });
+
+  it("keeps the bounded prompt fallback when owner task detail fails", async () => {
+    const promptSnippet = "p".repeat(500);
+    const cloudTask: TaskSummary = {
+      id: "cloud-task-1",
+      repoId: "cloud-repo-1",
+      title: "Long cloud task",
+      prompt: promptSnippet,
+      stage: "in progress"
+    };
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRecentTasks.mockResolvedValue([cloudTask]);
+    client.listRepoTasks.mockResolvedValue([cloudTask]);
+    client.getTask = vi.fn().mockRejectedValue(new Error("owner offline"));
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask(cloudTask.id);
+    await flushMicrotasks();
+
+    expect(store.getState().recentTasks[0]?.prompt).toBe(promptSnippet);
+    expect(store.getState().selectedTaskId).toBe(cloudTask.id);
+    expect(store.getState().taskTerminalTaskId).toBe(cloudTask.id);
+    expect(store.getState().errorMessage).toBeNull();
+  });
+
+  it("allows a later detail retry when a legacy owner omits prompt", async () => {
+    const cloudTask = {
+      id: "cloud-task-1",
+      repoId: "cloud-repo-1",
+      title: "Legacy cloud task",
+      prompt: "bounded prompt",
+      stage: "in progress"
+    } satisfies TaskSummary;
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRecentTasks.mockResolvedValue([cloudTask]);
+    client.listRepoTasks.mockResolvedValue([cloudTask]);
+    client.getTask = vi.fn()
+      .mockResolvedValueOnce({ ...cloudTask, prompt: null })
+      .mockResolvedValueOnce({ ...cloudTask, prompt: "Full prompt after retry" });
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask(cloudTask.id);
+    await flushMicrotasks();
+    controller.openTask(cloudTask.id);
+    await flushMicrotasks();
+
+    expect(client.getTask).toHaveBeenCalledTimes(2);
+    expect(store.getState().recentTasks[0]?.prompt).toBe(
+      "Full prompt after retry"
+    );
+  });
+
+  it("ignores owner detail that resolves after a different task is opened", async () => {
+    const firstTask = {
+      id: "cloud-task-1",
+      repoId: "repo-1",
+      title: "First task",
+      prompt: "first snippet",
+      stage: "in progress"
+    } satisfies TaskSummary;
+    const secondTask = {
+      id: "cloud-task-2",
+      repoId: "repo-1",
+      title: "Second task",
+      prompt: "second snippet",
+      stage: "in progress"
+    } satisfies TaskSummary;
+    const firstDetail = createDeferred<Awaited<ReturnType<NonNullable<KannaClient["getTask"]>>>>();
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRecentTasks.mockResolvedValue([firstTask, secondTask]);
+    client.listRepoTasks.mockResolvedValue([firstTask, secondTask]);
+    client.getTask = vi.fn((taskId: string) =>
+      taskId === firstTask.id
+        ? firstDetail.promise
+        : Promise.resolve(secondTask)
+    );
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask(firstTask.id);
+    controller.openTask(secondTask.id);
+    firstDetail.resolve({
+      ...firstTask,
+      prompt: `${"p".repeat(520)}STALE-END-SENTINEL`
+    });
+    await flushMicrotasks();
+
+    expect(store.getState().selectedTaskId).toBe(secondTask.id);
+    expect(store.getState().recentTasks.find((task) => task.id === firstTask.id)?.prompt)
+      .toBe("first snippet");
+  });
+
   it("preserves last-good remote collections until the first live snapshot without polling", async () => {
     const store = createSessionStore();
     const client = createClientMock();
