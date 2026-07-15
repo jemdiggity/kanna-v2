@@ -262,6 +262,7 @@ export function TaskScreen({
           }`}
           accessibilityRole="button"
           accessibilityState={{ expanded: isTitleExpanded }}
+          accessibilityValue={{ text: effectiveActivity }}
           style={[
             styles.titleChip,
             isTitleExpanded ? styles.titleChipExpanded : null
@@ -294,7 +295,6 @@ export function TaskScreen({
           ) : (
             <Text
               accessible={false}
-              accessibilityValue={{ text: effectiveActivity }}
               numberOfLines={1}
               style={styles.title}
               testID={MOBILE_E2E_IDS.taskDetailTitle}

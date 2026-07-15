@@ -481,12 +481,12 @@ describe("TaskScreen", () => {
 
   it("exposes selected task activity without grouping the detail controls", () => {
     const tree = renderTaskScreen({ agentType: "pty", activity: "unread" });
-    const title = findByTestId(tree, "mobile.task-detail-title");
+    const titleButton = findByTestId(tree, "mobile.task-title-button");
 
-    expect(title?.props).toMatchObject({
+    expect(titleButton?.props).toMatchObject({
+      accessible: true,
       accessibilityValue: { text: "unread" },
-      children: "Task",
-      testID: "mobile.task-detail-title"
+      testID: "mobile.task-title-button"
     });
   });
   it("sends a trimmed draft normally and clears the composer", () => {
@@ -653,10 +653,10 @@ describe("TaskScreen", () => {
       accessibilityHint: "Expand title",
       accessibilityLabel: `in progress: ${title}`,
       accessibilityRole: "button",
-      accessibilityState: { expanded: false }
+      accessibilityState: { expanded: false },
+      accessibilityValue: { text: "unread" }
     });
     expect(titleText?.props).toMatchObject({
-      accessibilityValue: { text: "unread" },
       accessible: false,
       children: title,
       numberOfLines: 1,
@@ -734,7 +734,8 @@ describe("TaskScreen", () => {
     expect(titleButton?.type).toBe("Pressable");
     expect(titleButton?.props?.disabled).not.toBe(true);
     expect(titleButton?.props).toMatchObject({
-      accessible: true
+      accessible: true,
+      accessibilityValue: { text: "working" }
     });
     expect(dismissalLayer?.type).toBe("Pressable");
     expect(dismissalLayer?.props?.disabled).not.toBe(true);
