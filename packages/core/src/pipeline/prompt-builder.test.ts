@@ -66,7 +66,9 @@ describe("buildStagePrompt", () => {
       prevResult: "ignored",
       branch: "ignored",
     });
-    expect(result).toBe("Agent base prompt.\n\nNo variables here.");
+    expect(result).toBe(
+      "## Agent Instructions\n\nAgent base prompt.\n\n## Your Task\n\nNo variables here."
+    );
   });
 
   it("replaces undefined/missing variables with empty string", () => {
@@ -75,7 +77,9 @@ describe("buildStagePrompt", () => {
       "Task: $TASK_PROMPT, Prev: $PREV_RESULT, Branch: $BRANCH, Base: $BASE_REF, Source: $SOURCE_WORKTREE",
       {}
     );
-    expect(result).toBe("Base.\n\nTask: , Prev: , Branch: , Base: , Source: ");
+    expect(result).toBe(
+      "## Agent Instructions\n\nBase.\n\n## Your Task\n\nTask: , Prev: , Branch: , Base: , Source: "
+    );
   });
 
   it("combines agent base prompt with stage prompt separated by double newline", () => {
@@ -84,14 +88,56 @@ describe("buildStagePrompt", () => {
       "Stage specific prompt.",
       {}
     );
-    expect(result).toBe("Agent base prompt.\n\nStage specific prompt.");
+    expect(result).toBe(
+      "## Agent Instructions\n\nAgent base prompt.\n\n## Your Task\n\nStage specific prompt."
+    );
   });
 
   it("uses only the agent prompt when stage prompt is undefined", () => {
     const result = buildStagePrompt("Agent base prompt only.", undefined, {
       taskPrompt: "task",
     });
-    expect(result).toBe("Agent base prompt only.");
+    expect(result).toBe("## Agent Instructions\n\nAgent base prompt only.");
+  });
+
+  it("uses only the stage prompt when the agent prompt is whitespace", () => {
+    const result = buildStagePrompt(" \n\t", "  Stage prompt only.\n", {});
+
+    expect(result).toBe("## Your Task\n\nStage prompt only.");
+  });
+
+  it("trims nonempty agent and stage prompt bodies", () => {
+    const result = buildStagePrompt(
+      "  Agent base prompt.\n",
+      "\nStage specific prompt.  ",
+      {}
+    );
+
+    expect(result).toBe(
+      "## Agent Instructions\n\nAgent base prompt.\n\n## Your Task\n\nStage specific prompt."
+    );
+  });
+
+  it("omits a whitespace-only stage prompt", () => {
+    const result = buildStagePrompt("  Agent base prompt only.\n", " \n\t", {});
+
+    expect(result).toBe("## Agent Instructions\n\nAgent base prompt only.");
+  });
+
+  it("returns an empty prompt when both sections are blank", () => {
+    const result = buildStagePrompt(" \n", "\t", {});
+
+    expect(result).toBe("");
+  });
+
+  it("omits a section whose rendered body is empty", () => {
+    const result = buildStagePrompt(
+      "Follow the review policy.",
+      "$TASK_PROMPT",
+      { taskPrompt: "" }
+    );
+
+    expect(result).toBe("## Agent Instructions\n\nFollow the review policy.");
   });
 
   it("substitutes variables in both agent prompt and stage prompt", () => {
@@ -100,7 +146,9 @@ describe("buildStagePrompt", () => {
       "Task: $TASK_PROMPT",
       { branch: "main", taskPrompt: "do it" }
     );
-    expect(result).toBe("Agent for main.\n\nTask: do it");
+    expect(result).toBe(
+      "## Agent Instructions\n\nAgent for main.\n\n## Your Task\n\nTask: do it"
+    );
   });
 
   it("replaces all occurrences of a variable", () => {
@@ -109,7 +157,44 @@ describe("buildStagePrompt", () => {
       "$TASK_PROMPT and also $TASK_PROMPT",
       { taskPrompt: "hello" }
     );
-    expect(result).toBe("Base.\n\nhello and also hello");
+    expect(result).toBe(
+      "## Agent Instructions\n\nBase.\n\n## Your Task\n\nhello and also hello"
+    );
+  });
+
+  it("does not rescan reserved tokens introduced by substitution", () => {
+    const result = buildStagePrompt(
+      "Agent context: $TASK_PROMPT",
+      "Previous result: $PREV_RESULT",
+      { taskPrompt: "$PREV_RESULT", prevResult: "sensitive result" }
+    );
+
+    expect(result).toBe(
+      "## Agent Instructions\n\nAgent context: $PREV_RESULT\n\n## Your Task\n\nPrevious result: sensitive result"
+    );
+  });
+
+  it("matches Rust braced variables and bare-token boundaries", () => {
+    const result = buildStagePrompt(
+      "Braced task: ${TASK_PROMPT}",
+      "Unknown suffix: $TASK_PROMPT_SUFFIX",
+      { taskPrompt: "ship it" }
+    );
+
+    expect(result).toBe(
+      "## Agent Instructions\n\nBraced task: ship it\n\n## Your Task\n\nUnknown suffix: $TASK_PROMPT_SUFFIX"
+    );
+  });
+
+  it("labels agent instructions separately from the actual task", () => {
+    const result = buildStagePrompt(
+      "Generic agent guidance.\n\n## Completion\nSummarize the work.",
+      "$TASK_PROMPT",
+      { taskPrompt: "Fix the buried task." }
+    );
+    expect(result).toBe(
+      "## Agent Instructions\n\nGeneric agent guidance.\n\n## Completion\nSummarize the work.\n\n## Your Task\n\nFix the buried task."
+    );
   });
 });
 
@@ -299,5 +384,34 @@ describe("buildKannaRuntimeUserPrompt", () => {
     const taskIndex = result.indexOf("## Your Task");
     expect(guidanceIndex).toBeGreaterThan(-1);
     expect(taskIndex).toBeGreaterThan(guidanceIndex);
+  });
+
+  it("does not duplicate an existing task section", () => {
+    const prompt = "## Agent Instructions\n\nFollow policy.\n\n## Your Task\n\nShip it";
+    const result = buildKannaRuntimeUserPrompt(prompt);
+    expect(result.match(/^## Your Task$/gm)).toHaveLength(1);
+    expect(result).toMatch(/## Agent Instructions[\s\S]*## Your Task\n\nShip it$/);
+  });
+
+  it("preserves an agent-only section without adding an empty task section", () => {
+    const prompt = "## Agent Instructions\n\nFollow policy.";
+    const result = buildKannaRuntimeUserPrompt(prompt);
+
+    expect(result).toMatch(/## Agent Instructions\n\nFollow policy\.$/);
+    expect(result).not.toMatch(/^## Your Task$/gm);
+  });
+
+  it("does not add a task section for a blank prompt", () => {
+    const result = buildKannaRuntimeUserPrompt(" \n\t");
+
+    expect(result).toBe(buildKannaRuntimeSystemPrompt());
+  });
+
+  it("frames a raw prompt even when its content contains a nested task heading", () => {
+    const prompt = "Explain this excerpt:\n\n## Your Task\n\nNested text";
+    const result = buildKannaRuntimeUserPrompt(prompt);
+
+    expect(result).toMatch(/## Your Task\n\nExplain this excerpt:/);
+    expect(result.match(/^## Your Task$/gm)).toHaveLength(2);
   });
 });

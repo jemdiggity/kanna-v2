@@ -1697,7 +1697,7 @@ fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
     // environment ($KANNA_TASK_ID) — a config var can never shadow them.
     assert_eq!(
         prompt,
-        "Use squash for platform. Keep origin/main and $KANNA_TASK_ID runtime-bound."
+        "## Agent Instructions\n\nUse squash for platform. Keep origin/main and $KANNA_TASK_ID runtime-bound."
     );
 
     let _ = std::fs::remove_dir_all(&repo_root);
@@ -1728,7 +1728,7 @@ fn build_stage_prompt_does_not_reexpand_reserved_tokens_in_var_values() {
     // literal while the template's own $TASK_PROMPT binds normally.
     assert_eq!(
         prompt,
-        "See $TASK_PROMPT for full context.\n\nTask: actual task prompt"
+        "## Agent Instructions\n\nSee $TASK_PROMPT for full context.\n\nTask: actual task prompt"
     );
 }
 
@@ -1747,7 +1747,61 @@ fn build_stage_prompt_leaves_unknown_vars_literal() {
         },
     );
 
-    assert_eq!(prompt, "Ping $UNKNOWN_NAME and ${ALSO_UNKNOWN}.");
+    assert_eq!(
+        prompt,
+        "## Agent Instructions\n\nPing $UNKNOWN_NAME and ${ALSO_UNKNOWN}."
+    );
+}
+
+#[test]
+fn build_stage_prompt_labels_agent_instructions_and_the_actual_task() {
+    let prompt = build_stage_prompt(
+        "Generic agent guidance.\n\n## Completion\nSummarize the work.",
+        Some("$TASK_PROMPT"),
+        &PromptContext {
+            task_prompt: Some("Fix the buried task."),
+            prev_result: None,
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            vars: None,
+        },
+    );
+    assert_eq!(prompt, "## Agent Instructions\n\nGeneric agent guidance.\n\n## Completion\nSummarize the work.\n\n## Your Task\n\nFix the buried task.");
+}
+
+#[test]
+fn build_stage_prompt_omits_empty_prompt_sections() {
+    let context = PromptContext {
+        task_prompt: Some("Ship it."),
+        prev_result: None,
+        branch: None,
+        base_ref: None,
+        source_worktree: None,
+        vars: None,
+    };
+    assert_eq!(
+        build_stage_prompt(" \n\t", Some(" \n$TASK_PROMPT\t "), &context),
+        "## Your Task\n\nShip it."
+    );
+    assert_eq!(
+        build_stage_prompt(" \nFollow the review policy.\t ", Some("\n \t"), &context,),
+        "## Agent Instructions\n\nFollow the review policy."
+    );
+    assert_eq!(build_stage_prompt("\n \t", Some(" \t\n"), &context), "");
+
+    let empty_task_context = PromptContext {
+        task_prompt: Some(""),
+        ..context
+    };
+    assert_eq!(
+        build_stage_prompt(
+            "Follow the review policy.",
+            Some("$TASK_PROMPT"),
+            &empty_task_context,
+        ),
+        "## Agent Instructions\n\nFollow the review policy."
+    );
 }
 
 #[test]
@@ -1767,8 +1821,42 @@ fn build_stage_prompt_replaces_base_ref() {
 
     assert_eq!(
         prompt,
-        "Review changes since origin/main.\n\nCurrent branch task-source."
+        "## Agent Instructions\n\nReview changes since origin/main.\n\n## Your Task\n\nCurrent branch task-source."
     );
+}
+
+#[test]
+fn build_target_stage_prompt_sections_a_carried_task_without_rescanning_it() {
+    let repo_root = init_git_repo_without_provider_fixtures("agentless-stage-prompt");
+    publish_origin_main(&repo_root, "publish agentless prompt fixture");
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+    let stage = super::super::definitions::PipelineStage {
+        name: "gate".to_string(),
+        description: None,
+        agent: None,
+        prompt: None,
+        agent_provider: None,
+        environment: None,
+        policy: super::super::definitions::PipelineStagePolicy {
+            transition: PipelineStageTransition::Manual,
+        },
+        post: None,
+    };
+
+    let prompt = super::super::prompt::build_target_stage_prompt(
+        &definitions,
+        &repo_root.to_string_lossy(),
+        &stage,
+        "Carry $PREV_RESULT literally.",
+        Some("do not reveal"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(prompt, "## Your Task\n\nCarry $PREV_RESULT literally.");
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]

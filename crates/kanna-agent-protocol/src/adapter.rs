@@ -115,16 +115,27 @@ pub trait ProviderAdapter: Send {
 }
 
 /// Join the Kanna preamble and the task prompt into one message for providers
-/// without a native system-prompt channel. A `## Your Task` heading closes the
-/// preamble's `## Kanna Task Environment` section so the agent can tell where
-/// the environment guidance ends and its assignment begins. The TS mirror is
+/// without a native system-prompt channel. Stage composition owns sectioning,
+/// so an already-sectioned prompt is preserved; raw prompts receive a
+/// compatibility `## Your Task` heading. The TS mirror is
 /// `buildKannaRuntimeUserPrompt` in `packages/core/src/pipeline/prompt-builder.ts`
 /// — keep the formats in sync.
 pub fn prompt_with_system_prompt(system_prompt: Option<&str>, prompt: &str) -> String {
     match system_prompt.filter(|value| !value.trim().is_empty()) {
+        Some(system_prompt) if prompt.trim().is_empty() => system_prompt.to_string(),
+        Some(system_prompt) if has_outer_prompt_section(prompt) => {
+            format!("{system_prompt}\n\n{prompt}")
+        }
         Some(system_prompt) => format!("{system_prompt}\n\n## Your Task\n\n{prompt}"),
         None => prompt.to_string(),
     }
+}
+
+fn has_outer_prompt_section(prompt: &str) -> bool {
+    matches!(
+        prompt.lines().map(str::trim).find(|line| !line.is_empty()),
+        Some("## Agent Instructions") | Some("## Your Task")
+    )
 }
 
 #[cfg(test)]
@@ -141,6 +152,55 @@ mod tests {
         assert_eq!(
             prompt_with_system_prompt(Some("Kanna task context"), "ship it"),
             "Kanna task context\n\n## Your Task\n\nship it"
+        );
+    }
+
+    #[test]
+    fn prompt_with_system_prompt_does_not_duplicate_an_existing_task_section() {
+        let prompt = "## Agent Instructions\n\nFollow policy.\n\n## Your Task\n\nShip it";
+        let result = prompt_with_system_prompt(Some("Kanna task context"), prompt);
+        assert_eq!(result, format!("Kanna task context\n\n{prompt}"));
+        assert_eq!(
+            result
+                .lines()
+                .filter(|line| *line == "## Your Task")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn prompt_with_system_prompt_preserves_an_agent_only_section() {
+        let prompt = "## Agent Instructions\n\nFollow policy.";
+        let result = prompt_with_system_prompt(Some("Kanna task context"), prompt);
+
+        assert_eq!(result, format!("Kanna task context\n\n{prompt}"));
+        assert!(!result.lines().any(|line| line == "## Your Task"));
+    }
+
+    #[test]
+    fn prompt_with_system_prompt_does_not_add_a_section_for_a_blank_prompt() {
+        assert_eq!(
+            prompt_with_system_prompt(Some("Kanna task context"), " \n\t"),
+            "Kanna task context"
+        );
+    }
+
+    #[test]
+    fn prompt_with_system_prompt_frames_a_raw_prompt_with_a_nested_task_heading() {
+        let prompt = "Explain this excerpt:\n\n## Your Task\n\nNested text";
+        let result = prompt_with_system_prompt(Some("Kanna task context"), prompt);
+
+        assert_eq!(
+            result,
+            format!("Kanna task context\n\n## Your Task\n\n{prompt}")
+        );
+        assert_eq!(
+            result
+                .lines()
+                .filter(|line| *line == "## Your Task")
+                .count(),
+            2
         );
     }
 

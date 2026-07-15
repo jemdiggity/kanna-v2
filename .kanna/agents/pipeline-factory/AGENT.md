@@ -57,7 +57,7 @@ Pipeline files may reference the bundled schema with `"$schema": "./schema.json"
 | `name` | string | yes | Stage identifier, unique within pipeline |
 | `description` | string | no | Human-readable description |
 | `agent` | string | no | Agent directory name (resolves to `.kanna/agents/{name}/AGENT.md`). Omit for gate stages (no agent spawns, just waits for manual advance). |
-| `prompt` | string | no | Stage-specific prompt appended to the agent's base instructions. Can reference `$TASK_PROMPT`, `$PREV_RESULT`, `$BRANCH`, `$BASE_REF`, and `$SOURCE_WORKTREE`. |
+| `prompt` | string | no | Stage-specific assignment rendered under `## Your Task` after the agent's `## Agent Instructions` section. Can reference `$TASK_PROMPT`, `$PREV_RESULT`, `$BRANCH`, `$BASE_REF`, and `$SOURCE_WORKTREE`. |
 | `agent_provider` | string or string[] | no | Override agent provider for this stage. Valid providers: `claude`, `copilot`, `codex`, `opencode`, `antigravity`. Use a string for one required provider, or an ordered array so Kanna chooses the first installed provider from that list. |
 | `environment` | string | no | Environment name from the `environments` map. Null = no setup/teardown. |
 | `policy` | object | yes | Stage policy. `policy.transition` is `"manual"` or `"auto"`. Optional `policy.execution: "continue"` keeps the same task, worktree, branch, and agent session, updates the stage in place, and sends the stage prompt to the existing agent. Omit `execution` for a new next-stage task/worktree. |

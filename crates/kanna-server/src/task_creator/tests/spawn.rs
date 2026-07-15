@@ -169,6 +169,7 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
     match command {
         kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
             assert_eq!(session_id, task_id);
+            assert_eq!(params.prompt, "## Your Task\n\nExercise Kanna context");
             let mcp_config = params
                 .env
                 .get("KANNA_MCP_CONFIG")
@@ -286,7 +287,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             // consumes the positional prompt as a second config file and
             // exits ("MCP config file not found: <prompt>").
             assert!(
-                shell_command.contains("-- 'Use Claude PTY'"),
+                shell_command.contains("-- '## Your Task\n\nUse Claude PTY'"),
                 "prompt must follow an option terminator: {shell_command}"
             );
         }

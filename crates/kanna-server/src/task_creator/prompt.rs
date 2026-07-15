@@ -12,6 +12,31 @@ pub(super) fn build_target_stage_prompt(
     base_ref: Option<&str>,
     source_worktree_branch: Option<&str>,
 ) -> Result<String, String> {
+    build_target_stage_prompt_with_instructions(
+        definitions,
+        repo_path,
+        stage,
+        task_prompt,
+        prev_result,
+        branch,
+        base_ref,
+        source_worktree_branch,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_target_stage_prompt_with_instructions(
+    definitions: &RepoDefinitions,
+    repo_path: &str,
+    stage: &PipelineStage,
+    task_prompt: &str,
+    prev_result: Option<&str>,
+    branch: Option<&str>,
+    base_ref: Option<&str>,
+    source_worktree_branch: Option<&str>,
+    additional_agent_instructions: Option<&str>,
+) -> Result<String, String> {
     let source_worktree =
         source_worktree_branch.map(|branch| format!("{repo_path}/.kanna-worktrees/{branch}"));
     let context = PromptContext {
@@ -24,8 +49,17 @@ pub(super) fn build_target_stage_prompt(
     };
     if let Some(agent_name) = stage.agent.as_deref() {
         let agent = definitions.agent(agent_name)?;
+        let agent_prompt = [
+            agent.prompt.as_str(),
+            additional_agent_instructions.unwrap_or(""),
+        ]
+        .into_iter()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
         return Ok(build_stage_prompt(
-            &agent.prompt,
+            &agent_prompt,
             stage.prompt.as_deref(),
             &context,
         ));
@@ -33,10 +67,18 @@ pub(super) fn build_target_stage_prompt(
     // An agent-less stage (or post) still owns its prompt; only when it
     // declares none does the task's own prompt carry over.
     if stage.prompt.is_some() {
-        return Ok(build_stage_prompt("", stage.prompt.as_deref(), &context));
+        return Ok(build_stage_prompt(
+            additional_agent_instructions.unwrap_or(""),
+            stage.prompt.as_deref(),
+            &context,
+        ));
     }
 
-    Ok(task_prompt.to_string())
+    Ok(build_stage_prompt(
+        additional_agent_instructions.unwrap_or(""),
+        Some("$TASK_PROMPT"),
+        &context,
+    ))
 }
 
 pub(super) struct PromptContext<'a> {
@@ -79,7 +121,7 @@ fn prompt_var_value<'a>(name: &str, context: &'a PromptContext<'_>) -> Option<&'
     }
 }
 
-/// Single left-to-right substitution pass over the assembled prompt.
+/// Single left-to-right substitution pass over one prompt template.
 /// Spliced values are appended to the output and never rescanned, so a
 /// config var value containing a reserved token (e.g. `$TASK_PROMPT`)
 /// stays literal instead of being expanded a second time.
@@ -133,6 +175,24 @@ fn substitute_prompt_vars(template: &str, context: &PromptContext<'_>) -> String
     out
 }
 
+fn build_prompt_section(
+    heading: &str,
+    template: &str,
+    context: &PromptContext<'_>,
+) -> Option<String> {
+    let template = template.trim();
+    if template.is_empty() {
+        return None;
+    }
+
+    let body = substitute_prompt_vars(template, context);
+    if body.trim().is_empty() {
+        return None;
+    }
+
+    Some(format!("{heading}\n\n{body}"))
+}
+
 /// Composed revision context: what the task originally was plus what the
 /// reviewer wants changed. Used as the `$TASK_PROMPT` substitution when a
 /// revision spawns a fresh agent (which otherwise never sees the original
@@ -179,15 +239,15 @@ pub(super) fn build_stage_prompt(
     stage_prompt: Option<&str>,
     context: &PromptContext<'_>,
 ) -> String {
-    let mut parts = Vec::new();
-    if !agent_prompt.trim().is_empty() {
-        parts.push(agent_prompt.trim());
+    let mut sections = Vec::new();
+    if let Some(section) = build_prompt_section("## Agent Instructions", agent_prompt, context) {
+        sections.push(section);
     }
     if let Some(stage_prompt) = stage_prompt {
-        if !stage_prompt.trim().is_empty() {
-            parts.push(stage_prompt.trim());
+        if let Some(section) = build_prompt_section("## Your Task", stage_prompt, context) {
+            sections.push(section);
         }
     }
 
-    substitute_prompt_vars(&parts.join("\n\n"), context)
+    sections.join("\n\n")
 }

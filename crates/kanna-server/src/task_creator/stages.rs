@@ -8,6 +8,7 @@ use super::definitions::{
 use super::prepare_stage_run_spawn;
 use super::prompt::{
     build_revision_resume_message, build_revision_task_prompt, build_target_stage_prompt,
+    build_target_stage_prompt_with_instructions,
 };
 use super::resume::{claude_transcript_exists, current_branch, rev_parse_head};
 use super::types::{
@@ -248,11 +249,15 @@ fn prepare_post_dispatch(
         post_as_stage(owner).ok_or_else(|| format!("stage has no post: {}", owner.name))?;
     let run_stage = post_stage.name.clone();
 
-    // The fallback spawn doubles as the source of the composed post prompt
-    // (post agent body + post prompt with $VAR substitution) and the resolved
-    // session id. `item_stage` stays the owner: a post never moves the
-    // task's stage.
-    let (fallback, final_prompt) = prepare_stage_run_for_target_returning_prompt(
+    // The fallback spawn resolves the post session and keeps its normal
+    // auto-stage prompt. The returned live-session message is recomposed with
+    // an explicit completion instruction before the post's task section.
+    // `item_stage` stays the owner: a post never moves the task's stage.
+    let task_id = context.source_task_id;
+    let completion_instruction = format!(
+        "When this work is complete, record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline."
+    );
+    let (fallback, message) = prepare_stage_run_for_target_returning_prompt(
         db,
         config,
         context,
@@ -262,11 +267,8 @@ fn prepare_post_dispatch(
         None,
         None,
         None,
+        Some(&completion_instruction),
     )?;
-    let task_id = context.source_task_id;
-    let message = format!(
-        "{final_prompt}\n\nWhen this work is complete, record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline."
-    );
 
     Ok(PreparedStageTransition::Post(Box::new(
         PreparedPostDispatch {
@@ -325,6 +327,7 @@ fn prepare_stage_run_for_target_with_provider(
         prompt_override,
         feedback,
         provider_override,
+        None,
     )
     .map(|(run, _)| run)
 }
@@ -340,6 +343,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     prompt_override: Option<&str>,
     feedback: Option<String>,
     provider_override: Option<String>,
+    additional_agent_instructions: Option<&str>,
 ) -> Result<(PreparedStageRunSpawn, String), String> {
     let source_task = context.source_task;
     let source_branch =
@@ -374,6 +378,20 @@ fn prepare_stage_run_for_target_returning_prompt(
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
     )?;
+    let returned_prompt = match additional_agent_instructions {
+        Some(instructions) => build_target_stage_prompt_with_instructions(
+            context.definitions,
+            &context.repo.path,
+            target_stage,
+            task_prompt,
+            prev_result.as_deref(),
+            prompt_branch.as_deref(),
+            source_task.base_ref.as_deref(),
+            source_task.branch.as_deref(),
+            Some(instructions),
+        )?,
+        None => final_prompt.clone(),
+    };
     // Stage transitions let the target stage and agent definition own the
     // provider. Only a real override (for example a revision pin) is
     // explicit; the task's stored provider remains the final fallback.
@@ -418,7 +436,7 @@ fn prepare_stage_run_for_target_returning_prompt(
             branch,
         );
     }
-    Ok((run, final_prompt))
+    Ok((run, returned_prompt))
 }
 
 pub(crate) fn previous_stage_result(
