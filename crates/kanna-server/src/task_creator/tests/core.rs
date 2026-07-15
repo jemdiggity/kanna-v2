@@ -153,8 +153,12 @@ fn workspace_config_env_merges_values_and_resolves_path_entries_against_worktree
 fn task_creation_uses_one_remote_default_branch_definition_context() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _sidecar_guard = crate::test_sidecar_guard();
     let repo_root = init_git_repo_without_provider_fixtures("remote-task-creation-context");
-    let config = test_config("remote-task-creation-context");
+    let mut config = test_config("remote-task-creation-context");
+    let kanna_cli_sidecar = ensure_test_sidecar("kanna-cli");
+    let kanna_mcp_sidecar = ensure_test_sidecar("kanna-mcp");
+    config.kanna_cli_path = Some(kanna_cli_sidecar.path().to_string_lossy().into_owned());
     let db = Db::open_for_tests(&config.db_path).unwrap();
 
     let write_definitions = |prefix: &str, provider: &str| {
@@ -179,7 +183,16 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
                 "reserved_port_offsets": [1],
                 "vars": {format!("{prefix}_VAR"): format!("{prefix}_VALUE")},
                 "workspace": {
-                    "env": {format!("{prefix}_ENV"): "yes"},
+                    "env": {
+                        format!("{prefix}_ENV"): "yes",
+                        format!("{prefix}_PORT"): "workspace-port-override",
+                        "KANNA_TASK_ID": "workspace-task-override",
+                        "KANNA_SOCKET_PATH": "/tmp/workspace-socket-override",
+                        "KANNA_SERVER_BASE_URL": "http://workspace.invalid",
+                        "KANNA_CLI_PATH": "/tmp/workspace-cli-override",
+                        "KANNA_MCP_PATH": "/tmp/workspace-mcp-override",
+                        "PATH": format!("{prefix}_WORKSPACE_PATH")
+                    },
                     "path": {
                         "prepend": [format!("{lower}-bin")],
                         "append": [format!("{lower}-tail")]
@@ -279,11 +292,68 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
         prepared.env.get("REMOTE_PORT").map(String::as_str),
         Some("49102")
     );
+    assert_eq!(
+        prepared.env.get("KANNA_TASK_ID").map(String::as_str),
+        Some(prepared.created_task.task_id.as_str())
+    );
+    let expected_socket_path = kanna_runtime_defaults::socket_path(
+        &std::path::Path::new(&config.daemon_dir).join("pipeline"),
+    );
+    assert_eq!(
+        prepared.env.get("KANNA_SOCKET_PATH").map(String::as_str),
+        Some(expected_socket_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        prepared
+            .env
+            .get("KANNA_SERVER_BASE_URL")
+            .map(String::as_str),
+        Some("http://127.0.0.1:48120")
+    );
+    assert_eq!(
+        prepared.env.get("KANNA_CLI_PATH").map(String::as_str),
+        Some(kanna_cli_sidecar.path().to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        prepared.env.get("KANNA_MCP_PATH").map(String::as_str),
+        Some(kanna_mcp_sidecar.path().to_string_lossy().as_ref())
+    );
     let path = prepared.env.get("PATH").unwrap();
     let expected_prepend = format!("{}/remote-bin", prepared.cwd);
     let expected_append = format!("{}/remote-tail", prepared.cwd);
-    assert_eq!(path.split(':').next(), Some(expected_prepend.as_str()));
-    assert_eq!(path.split(':').last(), Some(expected_append.as_str()));
+    let path_entries = path.split(':').collect::<Vec<_>>();
+    let runtime_bin = kanna_cli_sidecar.path().parent().unwrap().to_string_lossy();
+    let runtime_bin_position = path_entries
+        .iter()
+        .position(|entry| *entry == runtime_bin)
+        .expect("PATH should retain the authoritative runtime binary directory");
+    let workspace_env_position = path_entries
+        .iter()
+        .position(|entry| *entry == "REMOTE_WORKSPACE_PATH")
+        .expect("PATH should retain the workspace.env value");
+    assert_eq!(
+        path_entries.first().copied(),
+        Some(expected_prepend.as_str())
+    );
+    assert!(
+        runtime_bin_position < workspace_env_position,
+        "runtime binaries must remain inside the workspace PATH layers: {path}"
+    );
+    assert_eq!(path_entries.last().copied(), Some(expected_append.as_str()));
+    let mcp_config_path = prepared
+        .env
+        .get("KANNA_MCP_CONFIG")
+        .expect("task env should include an MCP config");
+    let mcp_config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(mcp_config_path).unwrap()).unwrap();
+    assert_eq!(
+        mcp_config["mcpServers"]["kanna-mcp"]["command"],
+        kanna_mcp_sidecar.path().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        mcp_config["mcpServers"]["kanna-mcp"]["env"]["KANNA_SERVER_BASE_URL"],
+        "http://127.0.0.1:48120"
+    );
     assert!(std::path::Path::new(&prepared.cwd)
         .join("remote-setup.marker")
         .is_file());
@@ -812,15 +882,102 @@ fn local_only_committed_definitions_without_remote_tracking_ref_are_ignored() {
 }
 
 #[test]
+fn repo_config_normalization_matches_shared_parser_behavior() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-config-normalization");
+    std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
+    let cases = [
+        (
+            "invalid string arrays preserve valid siblings",
+            serde_json::json!({
+                "pipeline": "qa",
+                "setup": ["pnpm install"],
+                "test": "must-be-an-array",
+                "stage_order": ["review", 42]
+            }),
+            serde_json::json!({
+                "pipeline": "qa",
+                "setup": ["pnpm install"]
+            }),
+        ),
+        (
+            "mixed maps and reserved ports retain valid entries",
+            serde_json::json!({
+                "ports": {"DEV_PORT": 1420, "BAD_PORT": "nope"},
+                "flavors": {"pr": "draft", "merge": 42},
+                "vars": {"TEAM": "platform", "COUNT": 3},
+                "reserved_port_offsets": [0, "bad", -1, 1.5, 2],
+                "reserved_ports": [5432, "bad", 0, 65536, 6379]
+            }),
+            serde_json::json!({
+                "ports": {"DEV_PORT": 1420},
+                "flavors": {"pr": "draft"},
+                "vars": {"TEAM": "platform"},
+                "reserved_port_offsets": [0, 2],
+                "reserved_ports": [5432, 6379]
+            }),
+        ),
+        (
+            "workspace maps and path arrays filter entries independently",
+            serde_json::json!({
+                "workspace": {
+                    "env": {"GOOD": "yes", "BAD": 42},
+                    "path": {
+                        "prepend": ["./bin", 1],
+                        "append": "not-an-array"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "workspace": {
+                    "env": {"GOOD": "yes"},
+                    "path": {"prepend": ["./bin"]}
+                }
+            }),
+        ),
+        (
+            "valid optional arrays remain intact",
+            serde_json::json!({
+                "test": ["pnpm test", "cargo test"],
+                "stage_order": ["review", "in progress"]
+            }),
+            serde_json::json!({
+                "test": ["pnpm test", "cargo test"],
+                "stage_order": ["review", "in progress"]
+            }),
+        ),
+        (
+            "non-object roots normalize to empty config",
+            serde_json::json!(["not", "an", "object"]),
+            serde_json::json!({}),
+        ),
+    ];
+
+    for (name, input, expected) in cases {
+        std::fs::write(
+            repo_root.join(".kanna/config.json"),
+            serde_json::to_string(&input).unwrap(),
+        )
+        .unwrap();
+        publish_origin_main(&repo_root, name);
+
+        let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main"))
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            serde_json::to_value(definitions.config()).unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
 fn malformed_remote_definitions_report_path_ref_and_revision_without_fallback() {
     let config_repo = init_git_repo_without_provider_fixtures("definitions-bad-config");
     std::fs::create_dir_all(config_repo.join(".kanna")).unwrap();
-    std::fs::write(
-        config_repo.join(".kanna/config.json"),
-        r#"{"test":"must-be-an-array"}"#,
-    )
-    .unwrap();
-    let config_revision = publish_origin_main(&config_repo, "publish malformed config field");
+    std::fs::write(config_repo.join(".kanna/config.json"), "{").unwrap();
+    let config_revision = publish_origin_main(&config_repo, "publish invalid config JSON");
     let config_error = RepoDefinitions::resolve(&definition_repo(&config_repo, "main"))
         .err()
         .expect("malformed remote config should fail");
@@ -829,10 +986,7 @@ fn malformed_remote_definitions_report_path_ref_and_revision_without_fallback() 
         config_error.contains("invalid repo config"),
         "{config_error}"
     );
-    assert!(
-        config_error.contains("expected a sequence"),
-        "{config_error}"
-    );
+    assert!(config_error.contains("EOF"), "{config_error}");
 
     let pipeline_repo = init_git_repo_without_provider_fixtures("definitions-bad-pipeline");
     std::fs::create_dir_all(pipeline_repo.join(".kanna/pipelines")).unwrap();
@@ -2025,7 +2179,14 @@ fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
     let kanna_cli_sidecar = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp_sidecar = ensure_test_sidecar("kanna-mcp");
     config.kanna_cli_path = Some(kanna_cli_sidecar.path().to_string_lossy().to_string());
-    let env = build_spawn_env(&config, "task-1", &HashMap::new()).unwrap();
+    let env = build_spawn_env(
+        &config,
+        "task-1",
+        &HashMap::new(),
+        "/tmp/worktree",
+        &Default::default(),
+    )
+    .unwrap();
     let cli_path = env
         .get("KANNA_CLI_PATH")
         .expect("test host should resolve kanna-cli");
@@ -2897,7 +3058,14 @@ fn build_spawn_env_prefers_configured_kanna_cli_path() {
     let mut config = test_config("spawn-env-configured-kanna-cli-path");
     config.kanna_cli_path = Some("/Applications/Kanna.app/Contents/MacOS/kanna-cli".to_string());
 
-    let env = build_spawn_env(&config, "task-1", &HashMap::new()).unwrap();
+    let env = build_spawn_env(
+        &config,
+        "task-1",
+        &HashMap::new(),
+        "/tmp/worktree",
+        &Default::default(),
+    )
+    .unwrap();
 
     assert_eq!(
         env.get("KANNA_CLI_PATH").map(String::as_str),

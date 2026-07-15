@@ -14,12 +14,13 @@ vi.mock("../invoke", () => ({
 }));
 
 function createTaskCreationHarness() {
-  const showNewTaskModal = ref(true);
+  const showNewTaskModal = ref(false);
   const availablePipelines = ref<string[]>([]);
   const defaultPipelineName = ref<string | undefined>(undefined);
   const onAgentChoiceUsed = vi.fn(async () => {});
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
+  const toast = { warning: vi.fn(), error: vi.fn() };
   const store = {
     selectedRepoId: "repo-1",
     selectedItemId: null as string | null,
@@ -43,7 +44,7 @@ function createTaskCreationHarness() {
 
   const creation = useAppTaskCreation({
     store: store as never,
-    toast: { warning: vi.fn(), error: vi.fn() } as never,
+    toast: toast as never,
     t: (key: string) => key,
     sidebarRepos: computed(() => [{ id: "repo-1" }]),
     remoteSnapshot: computed(() => ({ repos: [], items: [] }) as never),
@@ -71,6 +72,7 @@ function createTaskCreationHarness() {
     onAgentChoiceUsed,
     selectedCloudRepoId,
     selectedCloudItemId,
+    toast,
   };
 }
 
@@ -120,7 +122,7 @@ describe("useAppTaskCreation", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("read_text_file", expect.anything());
   });
 
-  it("propagates manifest failures without trying local definition files", async () => {
+  it("shows a definition error and opens a usable modal without local fallback", async () => {
     const error = new Error("remote definitions unavailable");
     const fetchRepoAgentProviders = vi.fn(async (): Promise<["claude"]> => ["claude"]);
     updateDesktopServerClientHandlersForTests({
@@ -129,11 +131,26 @@ describe("useAppTaskCreation", () => {
       },
       fetchRepoAgentProviders,
     });
-    const { creation } = createTaskCreationHarness();
+    const {
+      creation,
+      showNewTaskModal,
+      availablePipelines,
+      defaultPipelineName,
+      toast,
+    } = createTaskCreationHarness();
 
-    await expect(creation.openNewTaskModal()).rejects.toBe(error);
+    await expect(creation.openNewTaskModal()).resolves.toBeUndefined();
 
-    expect(fetchRepoAgentProviders).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(
+      "toasts.repoDefinitionsFailed: remote definitions unavailable",
+    );
+    expect(showNewTaskModal.value).toBe(true);
+    expect(availablePipelines.value).toEqual([]);
+    expect(defaultPipelineName.value).toBeUndefined();
+    expect(fetchRepoAgentProviders).toHaveBeenCalledWith("repo-1");
+    expect(creation.availableAgentProviders.value).toEqual(["claude"]);
+    expect(invokeMock).toHaveBeenCalledWith("git_default_branch", { repoPath: "/repo" });
+    expect(invokeMock).toHaveBeenCalledWith("git_list_base_branches", { repoPath: "/repo" });
     expect(invokeMock).not.toHaveBeenCalledWith("list_dir", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("read_text_file", expect.anything());
   });

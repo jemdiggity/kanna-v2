@@ -2076,6 +2076,58 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
   });
 
+  it("keeps sidebar tasks visible and opens New Task with an error when definitions fail", async () => {
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => {
+        throw new Error("definition endpoint unavailable");
+      },
+    });
+    store.items = [{
+      id: "task-visible",
+      repo_id: "repo-1",
+      prompt: "Keep this task visible",
+      stage: "in progress",
+      tags: "[]",
+      pinned: 0,
+      pin_order: null,
+      created_at: "2026-07-16T00:00:00.000Z",
+      updated_at: "2026-07-16T00:00:00.000Z",
+    }];
+    store.taskUiSlots = [readyTaskSlot("slot:visible", store.items[0])];
+    const SidebarWithTaskStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["new-task"],
+      template: `
+        <div>
+          <span v-for="slot in taskSlots" :key="slot.slot_id" data-testid="sidebar-task">
+            {{ slot.task_id }}
+          </span>
+          <button data-testid="open-new-task" @click="$emit('new-task', 'repo-1')">open</button>
+        </div>
+      `,
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const wrapper = await mountApp(SidebarWithTaskStub);
+    try {
+      expect(wrapper.get('[data-testid="sidebar-task"]').text()).toBe("task-visible");
+      await wrapper.get('[data-testid="open-new-task"]').trigger("click");
+      await flushPromises();
+      await flushPromises();
+
+      expect(wrapper.get('[data-testid="sidebar-task"]').text()).toBe("task-visible");
+      expect(wrapper.find("textarea").exists()).toBe(true);
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "toasts.repoDefinitionsFailed: definition endpoint unavailable",
+      );
+    } finally {
+      consoleError.mockRestore();
+      wrapper.unmount();
+    }
+  });
+
   it("warns when Cmd+Shift+N is pressed without any repositories loaded", async () => {
     store.repos = [];
     store.selectedRepoId = null;

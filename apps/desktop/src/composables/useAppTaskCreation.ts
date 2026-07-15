@@ -85,8 +85,13 @@ export function useAppTaskCreation({
     const targetRepo = store.repos.find((r) => r.id === targetRepoId);
     const repoPath = targetRepo?.path;
     if (repoPath) {
-      const manifest = await fetchDesktopRepoKannaDefinitions(targetRepo.id);
-      const [defaultBranch, baseBranches, repoAgentProviders] = await Promise.all([
+      const [manifest, defaultBranch, baseBranches, repoAgentProviders] = await Promise.all([
+        fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error("[App] failed to load repo definitions for new task modal:", error);
+          toast.error(`${t("toasts.repoDefinitionsFailed")}: ${message}`);
+          return null;
+        }),
         invoke<string>("git_default_branch", { repoPath }).catch((error) => {
           console.debug("[App] failed to read default branch for new task modal:", error);
           return "";
@@ -101,8 +106,8 @@ export function useAppTaskCreation({
         }),
       ]);
       availableAgentProviders.value = repoAgentProviders;
-      availablePipelines.value = manifest.pipelines;
-      defaultPipelineName.value = manifest.defaultPipeline;
+      availablePipelines.value = manifest?.pipelines ?? [];
+      defaultPipelineName.value = manifest?.defaultPipeline;
       repoDefaultBranchName.value = defaultBranch || undefined;
       availableBaseBranches.value = baseBranches;
       defaultBaseBranchName.value =

@@ -116,9 +116,20 @@ fn write_remote_definitions(repo: &Path) {
         repo.join(".kanna/config.json"),
         json!({
             "pipeline": "remote-qa",
-            "vars": {"SOURCE": "remote"},
+            "test": "must-be-an-array",
+            "ports": {"REMOTE_PORT": 49100, "BAD_PORT": "nope"},
+            "flavors": {"review": "strict", "bad": 42},
+            "vars": {"SOURCE": "remote", "BAD_VAR": false},
             "stage_order": ["review", "in progress"],
-            "reserved_ports": [48120]
+            "reserved_port_offsets": [0, "bad", -1, 2],
+            "reserved_ports": [48120, 0, 65536, "bad"],
+            "workspace": {
+                "env": {"REMOTE_ENV": "yes", "BAD_ENV": 42},
+                "path": {
+                    "prepend": ["remote-bin", 1],
+                    "append": "not-an-array"
+                }
+            }
         })
         .to_string(),
     )
@@ -285,6 +296,19 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     assert_eq!(manifest["revision"], fixture.revision);
     assert_eq!(manifest["refName"], "origin/dev");
     assert_eq!(manifest["config"]["vars"]["SOURCE"], "remote");
+    assert_eq!(manifest["config"]["ports"], json!({"REMOTE_PORT": 49100}));
+    assert_eq!(manifest["config"]["flavors"], json!({"review": "strict"}));
+    assert_eq!(manifest["config"]["reserved_port_offsets"], json!([0, 2]));
+    assert_eq!(manifest["config"]["reserved_ports"], json!([48120]));
+    assert_eq!(
+        manifest["config"]["workspace"],
+        json!({
+            "env": {"REMOTE_ENV": "yes"},
+            "path": {"prepend": ["remote-bin"]}
+        })
+    );
+    assert!(manifest["config"].get("test").is_none());
+    assert!(manifest["config"]["vars"].get("BAD_VAR").is_none());
     assert_eq!(
         manifest["config"]["stage_order"],
         json!(["review", "in progress"])

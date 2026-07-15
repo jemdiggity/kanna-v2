@@ -134,6 +134,7 @@
   },
   "toasts": {
     "taskCreationFailed": "Task creation failed",
+    "repoDefinitionsFailed": "Could not load repository definitions",
     "prCreationFailed": "PR creation failed",
     "repoCreationFailed": "Failed to create repo",
     "repoImportFailed": "Failed to import repo",

@@ -522,18 +522,31 @@ describe("kanna query snapshot regressions", () => {
     expect(fetchRepoKannaDefinitions).toHaveBeenNthCalledWith(1, repo.id);
   });
 
-  it("propagates manifest failures during snapshot reload without reading local config", async () => {
+  it("publishes authoritative task state when one repo manifest fails", async () => {
     const error = new Error("stage-order manifest unavailable");
+    const healthyRepo = mockState.makeRepo({ id: "repo-stage-healthy" });
+    const failingRepo = mockState.makeRepo({ id: "repo-stage-error" });
+    const healthyItem = mockState.makeItem({ id: "item-stage-healthy", repo_id: healthyRepo.id });
+    const failingItem = mockState.makeItem({ id: "item-stage-error", repo_id: failingRepo.id });
     updateDesktopServerClientHandlersForTests({
-      fetchRepoKannaDefinitions: async () => {
-        throw error;
+      fetchRepoKannaDefinitions: async (repoId) => {
+        if (repoId === failingRepo.id) throw error;
+        return {
+          revision: "healthy-revision",
+          refName: "origin/main",
+          config: { stage_order: ["review", "in progress"] },
+          defaultPipeline: "default",
+          pipelines: ["default"],
+        };
       },
     });
-    const repo = mockState.makeRepo({ id: "repo-stage-error" });
     const state = createStoreState();
     const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
       fetchSnapshot: async () => ({
-        entries: [{ repo, items: [] }],
+        entries: [
+          { repo: healthyRepo, items: [healthyItem] },
+          { repo: failingRepo, items: [failingItem] },
+        ],
         taskBlockers: [],
         worktreePaths: {},
         settings: {},
@@ -542,9 +555,17 @@ describe("kanna query snapshot regressions", () => {
     const queries = createQueriesApi(context);
     mockState.invokeMock.mockClear();
 
-    await expect(queries.reloadSnapshot()).rejects.toBe(error);
+    await expect(queries.reloadSnapshot()).resolves.toBeUndefined();
 
-    expect(queries.snapshot.error.value).toBe(error);
+    expect(state.repos.value.map((repo) => repo.id)).toEqual([healthyRepo.id, failingRepo.id]);
+    expect(state.items.value.map((item) => item.id)).toEqual([healthyItem.id, failingItem.id]);
+    expect(queries.snapshot.data.value.entries).toHaveLength(2);
+    expect(queries.snapshot.error.value).toBeNull();
+    expect(state.stageOrderCache.get(healthyRepo.id)).toEqual({
+      revision: "healthy-revision",
+      stageOrder: ["review", "in progress"],
+    });
+    expect(state.stageOrderCache.has(failingRepo.id)).toBe(false);
     expect(mockState.invokeMock).not.toHaveBeenCalledWith(
       "read_text_file",
       expect.objectContaining({ path: expect.stringContaining("/.kanna/config.json") }),

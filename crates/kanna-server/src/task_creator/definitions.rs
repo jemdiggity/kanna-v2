@@ -283,15 +283,8 @@ impl RepoDefinitions {
         let snapshot = RepoDefinitionSnapshot::resolve(repo_path, default_branch)?;
         let config_path = ".kanna/config.json";
         let config = match read_snapshot_utf8(&snapshot, config_path)? {
-            // Known-field type errors are intentionally fatal: malformed
-            // remote definitions must not silently degrade to defaults.
-            Some(content) => serde_json::from_str(&content).map_err(|error| {
-                definition_error(
-                    &snapshot,
-                    config_path,
-                    format!("invalid repo config: {error}"),
-                )
-            })?,
+            Some(content) => parse_repo_config(&content)
+                .map_err(|error| definition_error(&snapshot, config_path, error))?,
             None => RepoConfig::default(),
         };
         Ok(Self { snapshot, config })
@@ -392,6 +385,105 @@ impl RepoDefinitions {
         }
         Ok(names.into_iter().collect())
     }
+}
+
+fn parse_repo_config(content: &str) -> Result<RepoConfig, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(content).map_err(|error| format!("invalid repo config: {error}"))?;
+    let Some(raw) = value.as_object() else {
+        return Ok(RepoConfig::default());
+    };
+
+    let string_array = |name: &str| {
+        raw.get(name).and_then(|value| {
+            let values = value.as_array()?;
+            values
+                .iter()
+                .map(|value| value.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+        })
+    };
+
+    let string_map = |value: Option<&serde_json::Value>| {
+        let values = value?.as_object()?;
+        let normalized = values
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .as_str()
+                    .map(|value| (name.clone(), value.to_string()))
+            })
+            .collect::<HashMap<_, _>>();
+        (!normalized.is_empty()).then_some(normalized)
+    };
+
+    let ports = raw.get("ports").and_then(|value| {
+        let values = value.as_object()?;
+        let normalized = values
+            .iter()
+            .filter_map(|(name, value)| {
+                let port = value.as_u64().and_then(|value| u16::try_from(value).ok())?;
+                Some((name.clone(), port))
+            })
+            .collect::<HashMap<_, _>>();
+        (!normalized.is_empty()).then_some(normalized)
+    });
+
+    let integer_array = |name: &str, valid: fn(i64) -> bool| {
+        raw.get(name)
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_i64)
+                    .filter(|value| valid(*value))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|values| !values.is_empty())
+            .unwrap_or_default()
+    };
+
+    let workspace = raw
+        .get("workspace")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|workspace_raw| {
+            let env = string_map(workspace_raw.get("env"));
+            let path = workspace_raw
+                .get("path")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|path_raw| {
+                    let filtered_entries = |name: &str| {
+                        let entries = path_raw.get(name)?.as_array()?;
+                        let entries = entries
+                            .iter()
+                            .filter_map(|entry| entry.as_str().map(str::to_string))
+                            .collect::<Vec<_>>();
+                        (!entries.is_empty()).then_some(entries)
+                    };
+                    let prepend = filtered_entries("prepend");
+                    let append = filtered_entries("append");
+                    (prepend.is_some() || append.is_some())
+                        .then_some(RepoWorkspacePathConfig { prepend, append })
+                });
+            (env.is_some() || path.is_some()).then_some(RepoWorkspaceConfig { env, path })
+        });
+
+    Ok(RepoConfig {
+        pipeline: raw
+            .get("pipeline")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        setup: string_array("setup"),
+        teardown: string_array("teardown"),
+        test: string_array("test"),
+        ports,
+        flavors: string_map(raw.get("flavors")),
+        vars: string_map(raw.get("vars")),
+        reserved_port_offsets: integer_array("reserved_port_offsets", |value| value >= 0),
+        reserved_ports: integer_array("reserved_ports", |value| (1..=65535).contains(&value)),
+        stage_order: string_array("stage_order"),
+        workspace,
+    })
 }
 
 fn read_snapshot_utf8(

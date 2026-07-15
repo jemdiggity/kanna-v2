@@ -24,8 +24,8 @@ use definitions::{
     PipelineStage, PipelineStagePolicy, PipelineStageTransition, RepoConfig, RepoDefinitions,
 };
 use environment::{
-    append_executable_parent_to_path, apply_workspace_config_env, build_spawn_env,
-    build_workspace_search_path, claim_task_ports, resolve_headless_agent_executable,
+    append_executable_parent_to_path, build_spawn_env, build_workspace_search_path,
+    claim_task_ports, kanna_server_base_url, resolve_headless_agent_executable,
     resolve_provider_executable, run_workspace_setup_commands, write_kanna_mcp_config,
 };
 use prompt::{build_stage_prompt, PromptContext};
@@ -360,9 +360,13 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .map_err(|e| format!("db error: {}", e))?;
     }
     let port_env = claim_task_ports(db, task_id, repo_config)?;
-    let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
-    apply_workspace_config_env(&mut spawn_env, &worktree_path, repo_config);
-    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+    let mut spawn_env = build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config)?;
+    let mcp_config_path = write_kanna_mcp_config(
+        &config.daemon_dir,
+        task_id,
+        &kanna_server_base_url(config),
+        &mut spawn_env,
+    )?;
     let stage_setup = current_stage
         .environment
         .as_deref()
@@ -504,9 +508,14 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     let prepared_session = (|| {
         let repo_config = definitions.config();
         let port_env = claim_task_ports(db, task_id, repo_config)?;
-        let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
-        apply_workspace_config_env(&mut spawn_env, &worktree_path, repo_config);
-        let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+        let mut spawn_env =
+            build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config)?;
+        let mcp_config_path = write_kanna_mcp_config(
+            &config.daemon_dir,
+            task_id,
+            &kanna_server_base_url(config),
+            &mut spawn_env,
+        )?;
         // A forked workspace is fresh disk: run the repo's worktree setup
         // (the same commands task creation runs) before any stage-specific
         // setup. Current and resumed workspaces are already set up.
@@ -739,8 +748,8 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
     }
 
     let port_env = claim_task_ports(db, task_id, repo_config).ok()?;
-    let mut spawn_env = build_spawn_env(config, task_id, &port_env).ok()?;
-    apply_workspace_config_env(&mut spawn_env, &worktree_path, repo_config);
+    let spawn_env =
+        build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config).ok()?;
     let session_id = format!("td-{branch}");
     let shell_command = build_teardown_shell_command(&teardown);
     Some(PreparedWorkspaceTeardown {
@@ -1466,13 +1475,17 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         return Err(rollback_start(error.into()));
     }
 
-    let mut spawn_env = match build_spawn_env(config, task_id, &port_env) {
-        Ok(spawn_env) => spawn_env,
-        Err(error) => return Err(rollback_start(error.into())),
-    };
-    apply_workspace_config_env(&mut spawn_env, &worktree_path, repo_config);
-    let mcp_config_path = match write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)
-    {
+    let mut spawn_env =
+        match build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config) {
+            Ok(spawn_env) => spawn_env,
+            Err(error) => return Err(rollback_start(error.into())),
+        };
+    let mcp_config_path = match write_kanna_mcp_config(
+        &config.daemon_dir,
+        task_id,
+        &kanna_server_base_url(config),
+        &mut spawn_env,
+    ) {
         Ok(path) => path,
         Err(error) => return Err(rollback_start(error.into())),
     };
@@ -2012,9 +2025,13 @@ fn prepare_new_task_session(
     repo_config: &RepoConfig,
     resolved: &ResolvedTaskSpawn,
 ) -> Result<PreparedNewTaskSession, String> {
-    let mut spawn_env = build_spawn_env(config, task_id, port_env)?;
-    apply_workspace_config_env(&mut spawn_env, worktree_path, repo_config);
-    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+    let mut spawn_env = build_spawn_env(config, task_id, port_env, worktree_path, repo_config)?;
+    let mcp_config_path = write_kanna_mcp_config(
+        &config.daemon_dir,
+        task_id,
+        &kanna_server_base_url(config),
+        &mut spawn_env,
+    )?;
     let setup = new_task_setup_cmds(repo_config, &resolved.stage_setup, &resolved.setup_cmds);
     run_workspace_setup_commands(&setup, worktree_path, &spawn_env)?;
     let provider = resolved

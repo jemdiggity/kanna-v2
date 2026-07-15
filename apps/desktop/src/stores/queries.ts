@@ -150,26 +150,6 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
 
       debugLog(`[perf:items] refresh start #${runId}: repos=${loadedRepos.length}`);
 
-      for (const { repo } of snapshot.entries) {
-        const repoStart = performance.now();
-        debugLog(`[perf:items] refresh repo #${runId} ${repo.id}: ${(performance.now() - repoStart).toFixed(1)}ms`);
-
-        const manifest = await fetchDesktopRepoKannaDefinitions(repo.id);
-        if (runId !== refreshRunId.value) return;
-        const cachedStageOrder = context.state.stageOrderCache.get(repo.id);
-        if (!cachedStageOrder || cachedStageOrder.revision !== manifest.revision) {
-          context.state.stageOrderCache.set(repo.id, {
-            revision: manifest.revision,
-            stageOrder: manifest.config.stage_order ?? null,
-          });
-        }
-      }
-
-      debugLog(
-        `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
-      );
-
-      if (runId !== refreshRunId.value) return;
       const previousLocalRepoIds = new Set(context.state.repos.value.map((repo) => repo.id));
       const previousItems = [...context.state.items.value];
       const previousSlots = [...context.state.taskUiSlots.value];
@@ -192,6 +172,32 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         );
         context.state.pendingCreateVisibility.delete(item.id);
       }
+
+      for (const { repo } of snapshot.entries) {
+        const repoStart = performance.now();
+        debugLog(`[perf:items] refresh repo #${runId} ${repo.id}: ${(performance.now() - repoStart).toFixed(1)}ms`);
+
+        let manifest;
+        try {
+          manifest = await fetchDesktopRepoKannaDefinitions(repo.id);
+        } catch (error) {
+          if (runId !== refreshRunId.value) return;
+          console.warn(`[store] failed to refresh definitions for repo ${repo.id}:`, error);
+          continue;
+        }
+        if (runId !== refreshRunId.value) return;
+        const cachedStageOrder = context.state.stageOrderCache.get(repo.id);
+        if (!cachedStageOrder || cachedStageOrder.revision !== manifest.revision) {
+          context.state.stageOrderCache.set(repo.id, {
+            revision: manifest.revision,
+            stageOrder: manifest.config.stage_order ?? null,
+          });
+        }
+      }
+
+      debugLog(
+        `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
+      );
     } catch (error) {
       if (runId !== refreshRunId.value) return;
       snapshotError.value = error;
