@@ -408,9 +408,14 @@ fn map_task_detail(
         .zip(pipeline_name.as_deref())
         .zip(item.stage.as_deref())
         .and_then(|((repo, pipeline_name), stage_name)| {
-            crate::task_creator::resolve_stage_transition(&repo.path, pipeline_name, stage_name)
-                .ok()
-                .flatten()
+            crate::task_creator::resolve_stage_transition(
+                repo,
+                pipeline_name,
+                item.pipeline_def.as_deref(),
+                stage_name,
+            )
+            .ok()
+            .flatten()
         });
     let waiting_prompt_snippet = item.last_output_preview.clone();
     TaskDetail {
@@ -902,6 +907,57 @@ mod tests {
             tasks[0].waiting_prompt_snippet.as_deref(),
             Some("Latest agent output preview")
         );
+    }
+
+    #[test]
+    fn task_detail_uses_stored_pipeline_transition_when_origin_definition_is_unavailable() {
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: Db::test_db_path("task-detail-stored-transition"),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        // This path intentionally has no Git repository or origin definition.
+        // A durable task snapshot must be sufficient for task-detail metadata.
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-stored",
+            "repo-1",
+            "frozen task",
+            Some("Frozen Task"),
+            "frozen",
+            "2026-04-17 09:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_pipeline_def(
+            "task-stored",
+            &json!({
+                "name": "default",
+                "stages": [{
+                    "name": "frozen",
+                    "transition": "manual"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let api = super::MobileApi::new(config, db);
+        let detail = api.get_task("task-stored").unwrap().unwrap();
+
+        assert_eq!(detail.stage_transition.as_deref(), Some("manual"));
     }
 
     #[test]

@@ -85,23 +85,9 @@ pub(super) fn build_spawn_env(
     config: &Config,
     task_id: &str,
     port_env: &HashMap<String, String>,
+    worktree_path: &str,
+    repo_config: &RepoConfig,
 ) -> Result<HashMap<String, String>, String> {
-    let mut env = HashMap::from([
-        ("TERM".to_string(), "xterm-256color".to_string()),
-        ("COLORTERM".to_string(), "truecolor".to_string()),
-        ("TERM_PROGRAM".to_string(), "kanna".to_string()),
-        ("KANNA_WORKTREE".to_string(), "1".to_string()),
-        ("KANNA_TASK_ID".to_string(), task_id.to_string()),
-        (
-            "KANNA_SOCKET_PATH".to_string(),
-            pipeline_socket_path(&config.daemon_dir),
-        ),
-        (
-            "KANNA_SERVER_BASE_URL".to_string(),
-            format!("http://127.0.0.1:{}", config.lan_port),
-        ),
-    ]);
-    env.extend(port_env.clone());
     let kanna_cli_path = if let Some(path) = config
         .kanna_cli_path
         .as_deref()
@@ -112,19 +98,16 @@ pub(super) fn build_spawn_env(
     } else {
         which_binary("kanna-cli")?
     };
-    if let Some(path) = kanna_cli_path {
-        if let Some(parent) = Path::new(&path).parent() {
-            let runtime_path = prepend_path_entry(
-                std::env::var("PATH").ok().as_deref(),
-                parent.to_string_lossy().as_ref(),
-            );
-            env.insert("PATH".to_string(), runtime_path);
-        }
-        env.insert("KANNA_CLI_PATH".to_string(), path);
-    }
+    let kanna_mcp_path = which_binary("kanna-mcp").ok().flatten();
+    let mut env = HashMap::from([
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("COLORTERM".to_string(), "truecolor".to_string()),
+        ("TERM_PROGRAM".to_string(), "kanna".to_string()),
+    ]);
 
-    if let Ok(Some(path)) = which_binary("kanna-mcp") {
-        if let Some(parent) = Path::new(&path).parent() {
+    apply_workspace_env(&mut env, repo_config);
+    for executable in [&kanna_cli_path, &kanna_mcp_path].into_iter().flatten() {
+        if let Some(parent) = Path::new(executable).parent() {
             let existing_path = env
                 .get("PATH")
                 .cloned()
@@ -133,6 +116,40 @@ pub(super) fn build_spawn_env(
                 prepend_path_entry(existing_path.as_deref(), parent.to_string_lossy().as_ref());
             env.insert("PATH".to_string(), runtime_path);
         }
+    }
+    apply_workspace_path_env(&mut env, worktree_path, repo_config);
+    env.extend(port_env.clone());
+
+    // Repo configuration is intentionally layered before this metadata. A
+    // checkout may customize its workspace, but it cannot redirect Kanna's
+    // task identity or control-plane binaries and endpoints.
+    for key in [
+        "KANNA_WORKTREE",
+        "KANNA_TASK_ID",
+        "KANNA_SOCKET_PATH",
+        "KANNA_SERVER_BASE_URL",
+        "KANNA_CLI_PATH",
+        "KANNA_MCP_PATH",
+        "KANNA_MCP_CONFIG",
+    ] {
+        env.remove(key);
+    }
+    env.insert("KANNA_WORKTREE".to_string(), "1".to_string());
+    env.insert("KANNA_TASK_ID".to_string(), task_id.to_string());
+    env.insert(
+        "KANNA_SOCKET_PATH".to_string(),
+        pipeline_socket_path(&config.daemon_dir),
+    );
+    env.insert(
+        "KANNA_SERVER_BASE_URL".to_string(),
+        kanna_server_base_url(config),
+    );
+
+    if let Some(path) = kanna_cli_path {
+        env.insert("KANNA_CLI_PATH".to_string(), path);
+    }
+
+    if let Some(path) = kanna_mcp_path {
         env.insert("KANNA_MCP_PATH".to_string(), path);
     }
     Ok(env)
@@ -141,15 +158,12 @@ pub(super) fn build_spawn_env(
 pub(super) fn write_kanna_mcp_config(
     daemon_dir: &str,
     task_id: &str,
+    server_base_url: &str,
     env: &mut HashMap<String, String>,
 ) -> Result<Option<String>, String> {
     let Some(mcp_path) = env.get("KANNA_MCP_PATH").cloned() else {
         return Ok(None);
     };
-    let server_base_url = env
-        .get("KANNA_SERVER_BASE_URL")
-        .cloned()
-        .unwrap_or_else(|| "http://127.0.0.1:48120".to_string());
     let config_path = Path::new(daemon_dir)
         .join("runtime")
         .join("mcp")
@@ -178,7 +192,30 @@ pub(super) fn write_kanna_mcp_config(
     Ok(Some(path))
 }
 
-pub(super) fn apply_workspace_path_env(
+pub(super) fn kanna_server_base_url(config: &Config) -> String {
+    format!("http://127.0.0.1:{}", config.lan_port)
+}
+
+pub(super) fn apply_workspace_config_env(
+    env: &mut HashMap<String, String>,
+    worktree_path: &str,
+    repo_config: &RepoConfig,
+) {
+    apply_workspace_env(env, repo_config);
+    apply_workspace_path_env(env, worktree_path, repo_config);
+}
+
+fn apply_workspace_env(env: &mut HashMap<String, String>, repo_config: &RepoConfig) {
+    let Some(workspace_config) = repo_config.workspace.as_ref() else {
+        return;
+    };
+
+    if let Some(config_env) = workspace_config.env.as_ref() {
+        env.extend(config_env.clone());
+    }
+}
+
+fn apply_workspace_path_env(
     env: &mut HashMap<String, String>,
     worktree_path: &str,
     repo_config: &RepoConfig,
@@ -291,7 +328,7 @@ pub(super) fn build_workspace_search_path(
     repo_config: &RepoConfig,
 ) -> Option<String> {
     let mut env = HashMap::new();
-    apply_workspace_path_env(&mut env, workspace_root, repo_config);
+    apply_workspace_config_env(&mut env, workspace_root, repo_config);
     env.remove("PATH")
 }
 

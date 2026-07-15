@@ -1,4 +1,5 @@
 mod commands;
+mod definition_source;
 mod definitions;
 mod environment;
 mod lifecycle;
@@ -20,13 +21,11 @@ use commands::{
     build_teardown_shell_command,
 };
 use definitions::{
-    read_agent_definition, read_pipeline_definition, read_repo_config,
-    read_task_pipeline_definition, PipelineStage, PipelineStagePolicy, PipelineStageTransition,
-    RepoConfig,
+    PipelineStage, PipelineStagePolicy, PipelineStageTransition, RepoConfig, RepoDefinitions,
 };
 use environment::{
-    append_executable_parent_to_path, apply_workspace_path_env, build_spawn_env,
-    build_workspace_search_path, claim_task_ports, resolve_headless_agent_executable,
+    append_executable_parent_to_path, build_spawn_env, build_workspace_search_path,
+    claim_task_ports, kanna_server_base_url, resolve_headless_agent_executable,
     resolve_provider_executable, run_workspace_setup_commands, write_kanna_mcp_config,
 };
 use prompt::{build_stage_prompt, PromptContext};
@@ -64,15 +63,151 @@ pub(crate) use stages::{
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
+#[derive(Debug)]
+pub(crate) enum DefinitionLookupError {
+    InvalidName(String),
+    NotFound(String),
+    Other(String),
+}
+
+impl std::fmt::Display for DefinitionLookupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName(message) | Self::NotFound(message) | Self::Other(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RepoKannaDefinitions {
+    revision: Option<String>,
+    ref_name: String,
+    config: RepoConfig,
+    default_pipeline: String,
+    pipelines: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RevisionedPipelineDefinition {
+    revision: Option<String>,
+    definition: definitions::PipelineDefinition,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RevisionedAgentDefinition {
+    revision: Option<String>,
+    definition: definitions::AgentDefinition,
+}
+
+pub(crate) fn load_repo_kanna_definitions(
+    repo: &Repo,
+) -> Result<RepoKannaDefinitions, DefinitionLookupError> {
+    let definitions = RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other)?;
+    let pipelines = definitions
+        .pipeline_names()
+        .map_err(DefinitionLookupError::Other)?
+        .into_iter()
+        .filter(|name| validate_definition_component(name, "pipeline name").is_ok())
+        .collect();
+    let default_pipeline = definitions
+        .config()
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    Ok(RepoKannaDefinitions {
+        revision: definitions.revision().map(str::to_string),
+        ref_name: definitions.ref_name().to_string(),
+        config: definitions.config().clone(),
+        default_pipeline,
+        pipelines,
+    })
+}
+
+pub(crate) fn load_repo_pipeline_definition(
+    repo: &Repo,
+    pipeline_name: &str,
+) -> Result<RevisionedPipelineDefinition, DefinitionLookupError> {
+    validate_definition_component(pipeline_name, "pipeline name")?;
+    let definitions = RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other)?;
+    let mut definition = definitions
+        .pipeline_optional(pipeline_name)
+        .map_err(DefinitionLookupError::Other)?
+        .ok_or_else(|| {
+            DefinitionLookupError::NotFound(format!(
+                "pipeline definition not found: {pipeline_name}"
+            ))
+        })?;
+    if definition.name.is_none() {
+        definition.name = Some(pipeline_name.to_string());
+    }
+    Ok(RevisionedPipelineDefinition {
+        revision: definitions.revision().map(str::to_string),
+        definition,
+    })
+}
+
+pub(crate) fn load_repo_agent_definition(
+    repo: &Repo,
+    agent_selector: &str,
+) -> Result<RevisionedAgentDefinition, DefinitionLookupError> {
+    validate_agent_selector(agent_selector)?;
+    let definitions = RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other)?;
+    let definition = definitions
+        .agent_optional(agent_selector)
+        .map_err(DefinitionLookupError::Other)?
+        .ok_or_else(|| {
+            DefinitionLookupError::NotFound(format!("agent definition not found: {agent_selector}"))
+        })?;
+    Ok(RevisionedAgentDefinition {
+        revision: definitions.revision().map(str::to_string),
+        definition,
+    })
+}
+
+fn validate_agent_selector(selector: &str) -> Result<(), DefinitionLookupError> {
+    let mut parts = selector.split('@');
+    let role = parts.next().unwrap_or_default();
+    let flavor = parts.next();
+    if parts.next().is_some() {
+        return Err(DefinitionLookupError::InvalidName(format!(
+            "invalid agent selector `{selector}`: expected role or role@flavor"
+        )));
+    }
+    validate_definition_component(role, "agent role")?;
+    if let Some(flavor) = flavor {
+        validate_definition_component(flavor, "agent flavor")?;
+    }
+    Ok(())
+}
+
+fn validate_definition_component(value: &str, label: &str) -> Result<(), DefinitionLookupError> {
+    let invalid = value.is_empty()
+        || matches!(value, "." | "..")
+        || value
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0') || character.is_control());
+    if invalid {
+        return Err(DefinitionLookupError::InvalidName(format!(
+            "invalid {label} `{value}`: expected one nonempty safe path component"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_available_agent_providers(
-    repo_path: &str,
+    repo: &Repo,
 ) -> Result<Vec<(AgentProvider, String)>, String> {
-    let repo_config = read_repo_config(repo_path)?;
-    let search_path = build_workspace_search_path(repo_path, &repo_config);
+    let definitions = RepoDefinitions::resolve(repo)?;
+    let search_path = build_workspace_search_path(&repo.path, definitions.config());
     Ok(AgentProvider::ALL
         .into_iter()
         .filter_map(|provider| {
-            resolve_provider_executable(provider, search_path.as_deref(), repo_path)
+            resolve_provider_executable(provider, search_path.as_deref(), &repo.path)
                 .ok()
                 .map(|executable| (provider, executable))
         })
@@ -128,6 +263,8 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .get_repo(&source_task.repo_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("repo not found for task: {}", task_id))?;
+    let definitions = RepoDefinitions::resolve(&repo)?;
+    let repo_config = definitions.config();
     let pipeline_name = source_task
         .pipeline
         .clone()
@@ -136,11 +273,8 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .stage
         .clone()
         .ok_or_else(|| format!("task has no stage: {}", task_id))?;
-    let pipeline = read_task_pipeline_definition(
-        &repo.path,
-        &pipeline_name,
-        source_task.pipeline_def.as_deref(),
-    )?;
+    let pipeline =
+        definitions.task_pipeline(&pipeline_name, source_task.pipeline_def.as_deref())?;
     // A legacy in-flight task can be parked at a folded post name (e.g.
     // `commit`); rerunning it respawns the post as a fresh session.
     let (current_stage, run_kind): (PipelineStage, &'static str) =
@@ -159,7 +293,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         };
     let current_stage = &current_stage;
     let agent = match current_stage.agent.as_deref() {
-        Some(agent_name) => Some(read_agent_definition(&repo.path, agent_name)?),
+        Some(agent_name) => Some(definitions.agent(agent_name)?),
         None => None,
     };
     let source_worktree = source_task
@@ -168,7 +302,6 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .filter(|base_ref| base_ref.starts_with("task-"))
         .map(|base_ref| format!("{}/.kanna-worktrees/{base_ref}", repo.path));
     let prev_result = stages::previous_stage_result(db, task_id, &source_task)?;
-    let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
     let prompt = build_stage_prompt(
         agent
             .as_ref()
@@ -181,7 +314,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
             branch: Some(branch),
             base_ref: source_task.base_ref.as_deref(),
             source_worktree: source_worktree.as_deref(),
-            vars: repo_vars.as_ref(),
+            vars: repo_config.vars.as_ref(),
         },
     );
     let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
@@ -190,9 +323,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
     } else {
         repo.path.as_str()
     };
-    let provider_repo_config = read_repo_config(provider_workspace_root)?;
-    let provider_search_path =
-        build_workspace_search_path(provider_workspace_root, &provider_repo_config);
+    let provider_search_path = build_workspace_search_path(provider_workspace_root, repo_config);
     let provider = resolve_agent_provider(
         None,
         current_stage.agent_provider.as_deref(),
@@ -228,12 +359,14 @@ pub(crate) fn prepare_rerun_stage_for_api(
         )
         .map_err(|e| format!("db error: {}", e))?;
     }
-    let repo_config = read_repo_config(&repo.path)?;
-    let worktree_repo_config = read_repo_config(&worktree_path)?;
-    let port_env = claim_task_ports(db, task_id, &repo_config)?;
-    let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
-    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
-    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+    let port_env = claim_task_ports(db, task_id, repo_config)?;
+    let mut spawn_env = build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config)?;
+    let mcp_config_path = write_kanna_mcp_config(
+        &config.daemon_dir,
+        task_id,
+        &kanna_server_base_url(config),
+        &mut spawn_env,
+    )?;
     let stage_setup = current_stage
         .environment
         .as_deref()
@@ -303,6 +436,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     db: &Db,
     config: &Config,
     repo: &Repo,
+    definitions: &RepoDefinitions,
     task_id: &str,
     pipeline_name: &str,
     pipeline: &definitions::PipelineDefinition,
@@ -318,7 +452,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     fallback_provider: Option<&str>,
 ) -> Result<PreparedStageRunSpawn, String> {
     let agent = match target_stage.agent.as_deref() {
-        Some(agent_name) => Some(read_agent_definition(&repo.path, agent_name)?),
+        Some(agent_name) => Some(definitions.agent(agent_name)?),
         None => None,
     };
     let provider_candidates = resolve_agent_provider_candidates(
@@ -372,17 +506,21 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     };
 
     let prepared_session = (|| {
-        let repo_config = read_repo_config(&repo.path)?;
-        let worktree_repo_config = read_repo_config(&worktree_path)?;
-        let port_env = claim_task_ports(db, task_id, &repo_config)?;
-        let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
-        apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
-        let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+        let repo_config = definitions.config();
+        let port_env = claim_task_ports(db, task_id, repo_config)?;
+        let mut spawn_env =
+            build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config)?;
+        let mcp_config_path = write_kanna_mcp_config(
+            &config.daemon_dir,
+            task_id,
+            &kanna_server_base_url(config),
+            &mut spawn_env,
+        )?;
         // A forked workspace is fresh disk: run the repo's worktree setup
         // (the same commands task creation runs) before any stage-specific
         // setup. Current and resumed workspaces are already set up.
         let mut setup = if matches!(workspace, PreparedRunWorkspace::Forked(_)) {
-            worktree_repo_config.setup.clone().unwrap_or_default()
+            repo_config.setup.clone().unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -508,22 +646,78 @@ pub(crate) fn prepare_workspace_teardown_for_close(
     config: &Config,
     task_id: &str,
 ) -> Option<PreparedWorkspaceTeardown> {
-    let source_task = db.get_task_stage_source(task_id).ok().flatten()?;
-    let branch = source_task.branch.as_deref()?;
-    let stage_name = source_task.stage.as_deref()?;
-    let repo = db.get_repo(&source_task.repo_id).ok().flatten()?;
+    match try_prepare_workspace_teardown_for_close(db, config, task_id) {
+        Ok(teardown) => teardown,
+        Err(error) => {
+            log::warn!("failed to prepare workspace teardown for task {task_id}: {error}");
+            None
+        }
+    }
+}
+
+fn try_prepare_workspace_teardown_for_close(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+) -> Result<Option<PreparedWorkspaceTeardown>, String> {
+    let Some(source_task) = db
+        .get_task_stage_source(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let Some(branch) = source_task.branch.as_deref() else {
+        return Ok(None);
+    };
+    let Some(stage_name) = source_task.stage.as_deref() else {
+        return Ok(None);
+    };
+    let Some(repo) = db
+        .get_repo(&source_task.repo_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let definitions = RepoDefinitions::resolve(&repo)?;
     let pipeline_name = source_task
         .pipeline
         .clone()
         .unwrap_or_else(|| "default".to_string());
-    let pipeline = read_task_pipeline_definition(
-        &repo.path,
-        &pipeline_name,
-        source_task.pipeline_def.as_deref(),
-    )
-    .ok()?;
-    let mut teardown =
-        prepare_workspace_teardown(db, config, &repo, task_id, &pipeline, stage_name, branch)?;
+    let pipeline =
+        definitions.task_pipeline(&pipeline_name, source_task.pipeline_def.as_deref())?;
+    Ok(prepare_workspace_teardown_for_transition_close(
+        db,
+        config,
+        &repo,
+        &definitions,
+        task_id,
+        &pipeline,
+        stage_name,
+        branch,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::task_creator) fn prepare_workspace_teardown_for_transition_close(
+    db: &Db,
+    config: &Config,
+    repo: &Repo,
+    definitions: &RepoDefinitions,
+    task_id: &str,
+    pipeline: &definitions::PipelineDefinition,
+    stage_name: &str,
+    branch: &str,
+) -> Option<PreparedWorkspaceTeardown> {
+    let mut teardown = prepare_workspace_teardown(
+        db,
+        config,
+        repo,
+        definitions,
+        task_id,
+        pipeline,
+        stage_name,
+        branch,
+    )?;
     append_close_cleanup_to_teardown(&mut teardown, &config.db_path, &repo.path, task_id);
     Some(teardown)
 }
@@ -532,6 +726,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
     db: &Db,
     config: &Config,
     repo: &Repo,
+    definitions: &RepoDefinitions,
     task_id: &str,
     pipeline: &definitions::PipelineDefinition,
     stage_name: &str,
@@ -545,17 +740,16 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
     if !std::path::Path::new(&worktree_path).is_dir() {
         return None;
     }
-    let repo_config = read_repo_config(&repo.path).ok()?;
-    let worktree_repo_config = read_repo_config(&worktree_path).unwrap_or_default();
+    let repo_config = definitions.config();
     let mut teardown = stage_environment_teardown(pipeline, stage_name);
-    teardown.extend(worktree_repo_config.teardown.clone().unwrap_or_default());
+    teardown.extend(repo_config.teardown.clone().unwrap_or_default());
     if teardown.is_empty() {
         return None;
     }
 
-    let port_env = claim_task_ports(db, task_id, &repo_config).ok()?;
-    let mut spawn_env = build_spawn_env(config, task_id, &port_env).ok()?;
-    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
+    let port_env = claim_task_ports(db, task_id, repo_config).ok()?;
+    let spawn_env =
+        build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config).ok()?;
     let session_id = format!("td-{branch}");
     let shell_command = build_teardown_shell_command(&teardown);
     Some(PreparedWorkspaceTeardown {
@@ -787,7 +981,6 @@ pub(crate) fn prepare_task_for_api_with_error(
         .get_repo(&request.repo_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("repo not found: {}", request.repo_id))?;
-
     let explicit_provider = request.agent_provider;
     let default_provider = if explicit_provider.is_none() {
         read_default_agent_provider_setting(db)?
@@ -861,8 +1054,10 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
     let pipeline_name = format!("singleton-{agent_name}");
     let pipeline = definitions::PipelineDefinition {
         name: Some(pipeline_name.clone()),
+        description: None,
         stages: vec![PipelineStage {
             name: "in progress".to_string(),
+            description: None,
             agent: Some(agent_name.to_string()),
             prompt: Some("$TASK_PROMPT".to_string()),
             agent_provider: None,
@@ -949,8 +1144,10 @@ completion with status success so Kanna can run the commit post and close this i
     let pipeline_name = "integration".to_string();
     let pipeline = definitions::PipelineDefinition {
         name: Some(pipeline_name.clone()),
+        description: None,
         stages: vec![PipelineStage {
             name: "in progress".to_string(),
+            description: None,
             agent: None,
             prompt: Some("$TASK_PROMPT".to_string()),
             agent_provider: None,
@@ -960,6 +1157,7 @@ completion with status success so Kanna can run the commit post and close this i
             },
             post: Some(definitions::PipelinePost {
                 name: "commit".to_string(),
+                description: None,
                 agent: Some("commit".to_string()),
                 prompt: Some(format!(
                     "Commit the reconciled blocker integration for dependent task {dependent_task_id}."
@@ -1012,6 +1210,8 @@ pub(crate) fn create_dormant_task_for_api_with_error(
         .get_repo(&request.repo_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("repo not found: {}", request.repo_id))?;
+    let definitions = RepoDefinitions::resolve(&repo)?;
+    let repo_config = definitions.config();
 
     let explicit_provider = request.agent_provider;
     let default_provider = if explicit_provider.is_none() {
@@ -1040,12 +1240,11 @@ pub(crate) fn create_dormant_task_for_api_with_error(
         None
     };
 
-    let repo_config = read_repo_config(&repo.path)?;
     let pipeline_name = request
         .pipeline_name
         .or(repo_config.pipeline.clone())
         .unwrap_or_else(|| "default".to_string());
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
+    let pipeline = definitions.pipeline(&pipeline_name)?;
     let pipeline_def_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
     let stage = if let Some(stage_name) = request.stage.as_deref() {
@@ -1061,11 +1260,11 @@ pub(crate) fn create_dormant_task_for_api_with_error(
             .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?
     };
     let agent = if let Some(agent_name) = stage.agent.as_deref() {
-        Some(read_agent_definition(&repo.path, agent_name)?)
+        Some(definitions.agent(agent_name)?)
     } else {
         None
     };
-    let provider_search_path = build_workspace_search_path(&repo.path, &repo_config);
+    let provider_search_path = build_workspace_search_path(&repo.path, repo_config);
     let provider = resolve_agent_provider(
         explicit_provider.as_deref(),
         stage.agent_provider.as_deref(),
@@ -1142,14 +1341,14 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     if !std::path::Path::new(&repo.path).exists() {
         return Ok(None);
     }
+    let definitions = RepoDefinitions::resolve(&repo)?;
+    let repo_config = definitions.config();
 
-    let repo_config = read_repo_config(&repo.path)?;
     let pipeline_name = item
         .pipeline
         .clone()
         .unwrap_or_else(|| "default".to_string());
-    let pipeline =
-        read_task_pipeline_definition(&repo.path, &pipeline_name, item.pipeline_def.as_deref())?;
+    let pipeline = definitions.task_pipeline(&pipeline_name, item.pipeline_def.as_deref())?;
     let stage_name = item
         .stage
         .clone()
@@ -1161,11 +1360,11 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
     let stage_agent = stage.agent.clone();
     let agent = if let Some(agent_name) = stage_agent.as_deref() {
-        Some(read_agent_definition(&repo.path, agent_name)?)
+        Some(definitions.agent(agent_name)?)
     } else {
         None
     };
-    let provider_search_path = build_workspace_search_path(&repo.path, &repo_config);
+    let provider_search_path = build_workspace_search_path(&repo.path, repo_config);
     let provider = resolve_agent_provider(
         None,
         stage.agent_provider.as_deref(),
@@ -1188,7 +1387,6 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .or_else(|| item.base_ref.clone())
         .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
 
-    let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
     let final_prompt = build_stage_prompt(
         agent
             .as_ref()
@@ -1201,7 +1399,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
             branch: base_ref.as_deref(),
             base_ref: base_ref.as_deref(),
             source_worktree: None,
-            vars: repo_vars.as_ref(),
+            vars: repo_config.vars.as_ref(),
         },
     );
 
@@ -1263,7 +1461,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         return Err(rollback_start(error.into()));
     }
 
-    let port_env = match claim_task_ports(db, task_id, &repo_config) {
+    let port_env = match claim_task_ports(db, task_id, repo_config) {
         Ok(port_env) => port_env,
         Err(error) => return Err(rollback_start(error.into())),
     };
@@ -1277,17 +1475,17 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         return Err(rollback_start(error.into()));
     }
 
-    let worktree_repo_config = match read_repo_config(&worktree_path) {
-        Ok(repo_config) => repo_config,
-        Err(error) => return Err(rollback_start(error.into())),
-    };
-    let mut spawn_env = match build_spawn_env(config, task_id, &port_env) {
-        Ok(spawn_env) => spawn_env,
-        Err(error) => return Err(rollback_start(error.into())),
-    };
-    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
-    let mcp_config_path = match write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)
-    {
+    let mut spawn_env =
+        match build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config) {
+            Ok(spawn_env) => spawn_env,
+            Err(error) => return Err(rollback_start(error.into())),
+        };
+    let mcp_config_path = match write_kanna_mcp_config(
+        &config.daemon_dir,
+        task_id,
+        &kanna_server_base_url(config),
+        &mut spawn_env,
+    ) {
         Ok(path) => path,
         Err(error) => return Err(rollback_start(error.into())),
     };
@@ -1309,7 +1507,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         mcp_config_path,
         &spawn_env,
         &worktree_path,
-        worktree_repo_config.setup.as_deref().unwrap_or(&[]),
+        repo_config.setup.as_deref().unwrap_or(&[]),
         false,
         None,
     ) {
@@ -1395,10 +1593,11 @@ fn prepare_task_spawn_with_error(
     repo: &Repo,
     request: TaskCreationRequest,
 ) -> Result<PreparedTaskSpawn, PrepareTaskError> {
-    let repo_config = read_repo_config(&repo.path)?;
+    let definitions = RepoDefinitions::resolve(repo)?;
+    let repo_config = definitions.config();
     let requested_task_id = request.requested_task_id.clone();
     let has_requested_task_id = requested_task_id.is_some();
-    let resolved = resolve_task_spawn(repo, request, &repo_config)?;
+    let resolved = resolve_task_spawn(repo, request, &definitions)?;
     let stage_run_model = resolved.model.clone();
     let provisional_provider = *resolved
         .provider_candidates
@@ -1428,7 +1627,7 @@ fn prepare_task_spawn_with_error(
     )?;
 
     let prepared = (|| {
-        let port_env = claim_task_ports(db, &task_id, &repo_config)?;
+        let port_env = claim_task_ports(db, &task_id, repo_config)?;
         persist_task_ports(db, &task_id, &port_env)?;
 
         create_new_task_worktree(
@@ -1440,7 +1639,14 @@ fn prepare_task_spawn_with_error(
             resolved.base_ref.as_deref(),
         )?;
 
-        prepare_new_task_session(config, &task_id, &worktree_path, &port_env, &resolved)
+        prepare_new_task_session(
+            config,
+            &task_id,
+            &worktree_path,
+            &port_env,
+            repo_config,
+            &resolved,
+        )
     })();
     let PreparedNewTaskSession {
         spawn_env,
@@ -1528,10 +1734,11 @@ fn generate_failure_run_id(task_id: &str) -> String {
 }
 
 fn resolve_task_spawn(
-    repo: &Repo,
+    _repo: &Repo,
     request: TaskCreationRequest,
-    repo_config: &RepoConfig,
+    definitions: &RepoDefinitions,
 ) -> Result<ResolvedTaskSpawn, String> {
+    let repo_config = definitions.config();
     let original_prompt = request.task_prompt.clone();
     let display_name = request.display_name.clone();
     let pipeline_name = request
@@ -1539,11 +1746,7 @@ fn resolve_task_spawn(
         .clone()
         .or(repo_config.pipeline.clone())
         .unwrap_or_else(|| "default".to_string());
-    let pipeline = if request.pipeline_def.is_some() {
-        read_task_pipeline_definition(&repo.path, &pipeline_name, request.pipeline_def.as_deref())?
-    } else {
-        read_pipeline_definition(&repo.path, &pipeline_name)?
-    };
+    let pipeline = definitions.task_pipeline(&pipeline_name, request.pipeline_def.as_deref())?;
     let pipeline_def_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
     let stage = if let Some(stage_name) = request.stage_override.as_deref() {
@@ -1563,7 +1766,7 @@ fn resolve_task_spawn(
 
     let stage_agent = request.agent.clone().or_else(|| stage.agent.clone());
     let agent = if let Some(agent_name) = stage_agent.as_deref() {
-        Some(read_agent_definition(&repo.path, agent_name)?)
+        Some(definitions.agent(agent_name)?)
     } else {
         None
     };
@@ -1571,7 +1774,6 @@ fn resolve_task_spawn(
     let final_prompt = if request.stage_override.is_some() {
         original_prompt.clone()
     } else {
-        let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
         build_stage_prompt(
             agent
                 .as_ref()
@@ -1587,7 +1789,7 @@ fn resolve_task_spawn(
                     .as_deref()
                     .or(request.base_ref.as_deref()),
                 source_worktree: None,
-                vars: repo_vars.as_ref(),
+                vars: repo_config.vars.as_ref(),
             },
         )
     };
@@ -1771,15 +1973,11 @@ pub(crate) fn reopen_task_for_api(db: &Db, task_or_branch_id: &str) -> Result<St
         .get_repo(&item.repo_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("repo not found for task: {task_id}"))?;
-    let config_root = db
-        .get_task_worktree_path(&task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .unwrap_or(repo.path);
-    let repo_config = read_repo_config(&config_root)?;
+    let definitions = RepoDefinitions::resolve(&repo)?;
 
     db.release_task_ports(&task_id)
         .map_err(|e| format!("db error: {}", e))?;
-    let port_env = claim_task_ports(db, &task_id, &repo_config)?;
+    let port_env = claim_task_ports(db, &task_id, definitions.config())?;
     persist_task_ports(db, &task_id, &port_env)?;
     db.reopen_pipeline_item(&task_id)
         .map_err(|e| format!("db error: {}", e))?;
@@ -1824,17 +2022,17 @@ fn prepare_new_task_session(
     task_id: &str,
     worktree_path: &str,
     port_env: &HashMap<String, String>,
+    repo_config: &RepoConfig,
     resolved: &ResolvedTaskSpawn,
 ) -> Result<PreparedNewTaskSession, String> {
-    let worktree_repo_config = read_repo_config(worktree_path)?;
-    let mut spawn_env = build_spawn_env(config, task_id, port_env)?;
-    apply_workspace_path_env(&mut spawn_env, worktree_path, &worktree_repo_config);
-    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
-    let setup = new_task_setup_cmds(
-        &worktree_repo_config,
-        &resolved.stage_setup,
-        &resolved.setup_cmds,
-    );
+    let mut spawn_env = build_spawn_env(config, task_id, port_env, worktree_path, repo_config)?;
+    let mcp_config_path = write_kanna_mcp_config(
+        &config.daemon_dir,
+        task_id,
+        &kanna_server_base_url(config),
+        &mut spawn_env,
+    )?;
+    let setup = new_task_setup_cmds(repo_config, &resolved.stage_setup, &resolved.setup_cmds);
     run_workspace_setup_commands(&setup, worktree_path, &spawn_env)?;
     let provider = resolved
         .provider_candidates

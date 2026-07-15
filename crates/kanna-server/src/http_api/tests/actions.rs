@@ -210,7 +210,7 @@ async fn close_task_route_releases_claimed_ports() {
 }
 
 #[tokio::test]
-async fn reopen_task_route_reopens_and_reclaims_ports_from_worktree_config() {
+async fn reopen_task_route_reopens_and_reclaims_ports_from_remote_default_config() {
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -220,11 +220,31 @@ async fn reopen_task_route_reopens_and_reclaims_ports_from_worktree_config() {
             .as_nanos()
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-reopen-ports-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"ports":{"KANNA_DEV_PORT":1420,"API_PORT":3000}}"#,
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna/config.json"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "publish port config"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+
     let worktree_path = repo_root.join(".kanna-worktrees").join("task-closed");
     std::fs::create_dir_all(worktree_path.join(".kanna")).unwrap();
     std::fs::write(
         worktree_path.join(".kanna/config.json"),
-        r#"{"ports":{"KANNA_DEV_PORT":1420,"API_PORT":3000}}"#,
+        r#"{"ports":{"LOCAL_STALE_PORT":9999}}"#,
     )
     .unwrap();
 
@@ -901,6 +921,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
         .status()
         .unwrap()
         .success());
+    super::publish_test_origin_main(&repo_root);
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(&repo_root)
@@ -2914,7 +2935,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/reviewer/AGENT.md"),
-        "---\nagent_provider: claude\n---\nReview task $TASK_PROMPT",
+        "---\nname: Reviewer\ndescription: Test review agent\nagent_provider: claude\n---\nReview task $TASK_PROMPT",
     )
     .unwrap();
     assert!(Command::new("git")
@@ -2929,6 +2950,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         .status()
         .unwrap()
         .success());
+    super::publish_test_origin_main(&repo_root);
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(&repo_root)
@@ -3133,6 +3155,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
         .status()
         .unwrap()
         .success());
+    super::publish_test_origin_main(&repo_root);
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(&repo_root)
@@ -3412,6 +3435,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         .status()
         .unwrap()
         .success());
+    super::publish_test_origin_main(&repo_root);
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(&repo_root)
@@ -3620,8 +3644,16 @@ async fn complete_stage_route_uses_stage_completer() {
 
 #[tokio::test]
 async fn complete_stage_route_finishes_latest_running_stage_run() {
-    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
-        db.insert_test_repo("repo-1", "Repo One").unwrap();
+    let repo_temp = tempfile::Builder::new()
+        .prefix("kanna-http-complete-stage-run-")
+        .tempdir()
+        .unwrap();
+    let repo_root = repo_temp.path().join("repo");
+    init_test_git_repo(&repo_root);
+    let repo_path = repo_root.to_string_lossy().to_string();
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", move |db| {
+        db.insert_test_repo_with_path("repo-1", &repo_path, "Repo One")
+            .unwrap();
         db.insert_test_pipeline_item(
             "task-1",
             "repo-1",
@@ -3696,8 +3728,16 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
 
 #[tokio::test]
 async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
-    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
-        db.insert_test_repo("repo-1", "Repo One").unwrap();
+    let repo_temp = tempfile::Builder::new()
+        .prefix("kanna-http-complete-stage-summary-")
+        .tempdir()
+        .unwrap();
+    let repo_root = repo_temp.path().join("repo");
+    init_test_git_repo(&repo_root);
+    let repo_path = repo_root.to_string_lossy().to_string();
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", move |db| {
+        db.insert_test_repo_with_path("repo-1", &repo_path, "Repo One")
+            .unwrap();
         db.insert_test_pipeline_item(
             "task-1",
             "repo-1",

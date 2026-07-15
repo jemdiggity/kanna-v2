@@ -195,7 +195,7 @@ const store = {
   renameItem: vi.fn(async () => {}),
   hideRepo: vi.fn(async () => {}),
   spawnPtySession: vi.fn(async () => {}),
-  loadAgent: vi.fn(async (_repoPath: string, agentName: string) => ({
+  loadAgent: vi.fn(async (_repoId: string, agentName: string) => ({
     prompt: agentName === "setup"
       ? "Configure the GitHub flow by composing stock flavors instead of writing agents from scratch."
       : "Use https://schemas.kanna.build/config.schema.json when writing .kanna/config.json.",
@@ -748,6 +748,13 @@ describe("App", () => {
     dbMock.execute.mockReset();
     dbMock.execute.mockResolvedValue({ rowsAffected: 0 });
     updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      }),
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
       claimPendingIncomingTransfer: async (transferId) => {
         const result = await dbMock.execute(
@@ -2067,6 +2074,58 @@ describe("App", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
+  });
+
+  it("keeps sidebar tasks visible and opens New Task with an error when definitions fail", async () => {
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => {
+        throw new Error("definition endpoint unavailable");
+      },
+    });
+    store.items = [{
+      id: "task-visible",
+      repo_id: "repo-1",
+      prompt: "Keep this task visible",
+      stage: "in progress",
+      tags: "[]",
+      pinned: 0,
+      pin_order: null,
+      created_at: "2026-07-16T00:00:00.000Z",
+      updated_at: "2026-07-16T00:00:00.000Z",
+    }];
+    store.taskUiSlots = [readyTaskSlot("slot:visible", store.items[0])];
+    const SidebarWithTaskStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["new-task"],
+      template: `
+        <div>
+          <span v-for="slot in taskSlots" :key="slot.slot_id" data-testid="sidebar-task">
+            {{ slot.task_id }}
+          </span>
+          <button data-testid="open-new-task" @click="$emit('new-task', 'repo-1')">open</button>
+        </div>
+      `,
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const wrapper = await mountApp(SidebarWithTaskStub);
+    try {
+      expect(wrapper.get('[data-testid="sidebar-task"]').text()).toBe("task-visible");
+      await wrapper.get('[data-testid="open-new-task"]').trigger("click");
+      await flushPromises();
+      await flushPromises();
+
+      expect(wrapper.get('[data-testid="sidebar-task"]').text()).toBe("task-visible");
+      expect(wrapper.find("textarea").exists()).toBe(true);
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "toasts.repoDefinitionsFailed: definition endpoint unavailable",
+      );
+    } finally {
+      consoleError.mockRestore();
+      wrapper.unmount();
+    }
   });
 
   it("warns when Cmd+Shift+N is pressed without any repositories loaded", async () => {
@@ -3608,7 +3667,7 @@ describe("App", () => {
     await wrapper.get('[data-command-id="setup-repo"]').trigger("click");
     await flushPromises();
 
-    expect(store.loadAgent).toHaveBeenCalledWith("/tmp/repo", "setup");
+    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "setup");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-1",
       "/tmp/repo",
@@ -3630,7 +3689,7 @@ describe("App", () => {
     await createConfigButton.trigger("click");
     await flushPromises();
 
-    expect(store.loadAgent).toHaveBeenCalledWith("/tmp/repo", "config-factory");
+    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "config-factory");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-1",
       "/tmp/repo",
@@ -3676,7 +3735,7 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.importRepo).toHaveBeenCalledWith("/tmp/imported", "imported", "main");
-    expect(store.loadAgent).toHaveBeenCalledWith("/tmp/imported", "setup");
+    expect(store.loadAgent).toHaveBeenCalledWith("repo-imported", "setup");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-imported",
       "/tmp/imported",

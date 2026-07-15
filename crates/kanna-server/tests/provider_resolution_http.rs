@@ -108,22 +108,22 @@ fn init_provider_repo(root: &Path) -> PathBuf {
     .expect("repo config should be written");
     std::fs::write(
         agent_dir.join("AGENT.md"),
-        "---\nname: fallback\nagent_provider:\n  - codex\n  - claude\n---\n\n$TASK_PROMPT\n",
+        "---\nname: fallback\ndescription: Test fallback agent\nagent_provider:\n  - codex\n  - claude\n---\n\n$TASK_PROMPT\n",
     )
     .expect("agent definition should be written");
     std::fs::write(
         implement_agent_dir.join("AGENT.md"),
-        "---\nname: implement\n---\n\nImplement $TASK_PROMPT\n",
+        "---\nname: implement\ndescription: Test implementation agent\n---\n\nImplement $TASK_PROMPT\n",
     )
     .expect("implement agent definition should be written");
     std::fs::write(
         review_agent_dir.join("AGENT.md"),
-        "---\nname: review\n---\n\nReview $TASK_PROMPT\n",
+        "---\nname: review\ndescription: Test review agent\n---\n\nReview $TASK_PROMPT\n",
     )
     .expect("review agent definition should be written");
     std::fs::write(
         commit_agent_dir.join("AGENT.md"),
-        "---\nname: commit\n---\n\nCommit $TASK_PROMPT\n",
+        "---\nname: commit\ndescription: Test commit agent\n---\n\nCommit $TASK_PROMPT\n",
     )
     .expect("commit agent definition should be written");
     std::fs::write(
@@ -169,6 +169,12 @@ fn init_provider_repo(root: &Path) -> PathBuf {
             .expect("git command should run");
         assert!(status.success(), "git fixture command should succeed");
     }
+    let status = StdCommand::new("git")
+        .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
+        .current_dir(&repo)
+        .status()
+        .expect("remote-tracking ref should be published");
+    assert!(status.success(), "remote-tracking ref should be published");
     repo
 }
 

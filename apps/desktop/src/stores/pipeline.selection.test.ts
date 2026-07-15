@@ -2,6 +2,10 @@
 
 import { computed } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  setDesktopServerClientHandlersForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 import type { PipelineItem, Repo } from "../types/kanna";
 import { createPipelineApi } from "./pipeline";
 import { createStoreContext, createStoreState } from "./state";
@@ -30,6 +34,21 @@ function makeItem(id: string, stage: string): PipelineItem {
   } as PipelineItem;
 }
 
+function mockDefaultPipeline() {
+  const fetchRepoPipelineDefinition = vi.fn(async () => ({
+    revision: "rev-1",
+    definition: {
+      name: "default",
+      stages: [
+        { name: "in progress", policy: { transition: "manual" as const } },
+        { name: "pr", policy: { transition: "manual" as const } },
+      ],
+    },
+  }));
+  updateDesktopServerClientHandlersForTests({ fetchRepoPipelineDefinition });
+  return fetchRepoPipelineDefinition;
+}
+
 describe("advanceStage durable selection", () => {
   beforeEach(() => {
     invokeMock.mockResolvedValue(null);
@@ -37,6 +56,7 @@ describe("advanceStage durable selection", () => {
   });
 
   afterEach(() => {
+    setDesktopServerClientHandlersForTests(null);
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -49,13 +69,7 @@ describe("advanceStage durable selection", () => {
     state.items.value = [source, next];
     state.selectedRepoId.value = "repo-1";
     state.selectedItemId.value = "create:stable";
-    state.pipelineCache.set("/tmp/repo::default", {
-      name: "default",
-      stages: [
-        { name: "in progress", policy: { transition: "manual" } },
-        { name: "pr", policy: { transition: "manual" } },
-      ],
-    });
+    const fetchRepoPipelineDefinition = mockDefaultPipeline();
 
     const selectItem = vi.fn(async (taskId: string) => {
       expect(taskId).toBe("task-next");
@@ -84,6 +98,7 @@ describe("advanceStage durable selection", () => {
 
     expect(selectItem).toHaveBeenCalledOnce();
     expect(state.selectedItemId.value).toBe("create:next-stable");
+    expect(fetchRepoPipelineDefinition).toHaveBeenCalledWith("repo-1", "default");
   });
 
   it("clears and persists the stable selection when the final-stage task has no replacement", async () => {
@@ -97,10 +112,7 @@ describe("advanceStage durable selection", () => {
       "repo-1": "create:stable",
       "repo-other": "create:other",
     };
-    state.pipelineCache.set("/tmp/repo::default", {
-      name: "default",
-      stages: [{ name: "pr", policy: { transition: "manual" } }],
-    });
+    mockDefaultPipeline();
 
     const persistedSlotIds: Array<string | null> = [];
     const persistSelection = vi.fn(async () => {

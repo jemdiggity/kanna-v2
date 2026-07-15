@@ -2,14 +2,21 @@ use super::*;
 
 #[test]
 fn builtin_qa_pipeline_ships_approve_as_pr_stage_post() {
-    let repo_root =
-        std::env::temp_dir().join(format!("kanna-builtin-qa-pipeline-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(&repo_root).unwrap();
-
-    let pipeline =
-        super::super::definitions::read_pipeline_definition(&repo_root.to_string_lossy(), "qa")
-            .unwrap();
+    let repo_root = init_git_repo_without_provider_fixtures("builtin-qa-pipeline");
+    let repo = crate::db::Repo {
+        id: "repo-builtin-qa".to_string(),
+        path: repo_root.to_string_lossy().into_owned(),
+        name: "Builtin QA".to_string(),
+        default_branch: Some("main".to_string()),
+        hidden: None,
+        sort_order: None,
+        created_at: None,
+        last_opened_at: None,
+    };
+    let pipeline = super::super::definitions::RepoDefinitions::resolve(&repo)
+        .unwrap()
+        .pipeline("qa")
+        .unwrap();
 
     let pr_stage = pipeline
         .stages
@@ -24,6 +31,168 @@ fn builtin_qa_pipeline_ships_approve_as_pr_stage_post() {
         .as_deref()
         .unwrap_or_default()
         .contains("$PREV_RESULT"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
+    let repo_root = init_git_repo("stage-operation-pinned-revision");
+    let config = test_config("stage-operation-pinned-revision");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+
+    let write_version = |version: &str| {
+        let lower = version.to_ascii_lowercase();
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/config.json"),
+            serde_json::json!({
+                "teardown": [format!("printf {version}_REPO_TEARDOWN")],
+                "vars": {"PIN_VAR": format!("{version}_VAR")},
+                "workspace": {
+                    "env": {format!("{version}_ENV"): "yes"},
+                    "path": {"prepend": [".kanna/test-provider-bin"]}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/pipelines/pinned.json"),
+            serde_json::json!({
+                "name": "pinned",
+                "stages": [{
+                    "name": "review",
+                    "agent": "reviewer",
+                    "prompt": format!("{version}_STAGE $TASK_PROMPT $PIN_VAR"),
+                    "environment": "dev",
+                    "transition": "manual"
+                }],
+                "environments": {
+                    "dev": {
+                        "setup": [format!("printf {version}_STAGE_SETUP > {lower}-stage.marker")],
+                        "teardown": [format!("printf {version}_STAGE_TEARDOWN")]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+            format!(
+                "---\nname: reviewer\ndescription: {version} reviewer\nagent_provider: codex\nmodel: {lower}-model\npermission_mode: dontAsk\nallowed_tools:\n  - Read\n---\n{version}_AGENT\n"
+            ),
+        )
+        .unwrap();
+    };
+
+    write_version("V1");
+    let v1_revision = publish_origin_main(&repo_root, "publish v1 stage definitions");
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    let repo = db.get_repo("repo-1").unwrap().unwrap();
+    let definitions = super::super::definitions::RepoDefinitions::resolve(&repo).unwrap();
+    let pipeline = definitions.pipeline("pinned").unwrap();
+    assert_eq!(definitions.revision(), Some(v1_revision.as_str()));
+
+    write_version("V2");
+    let v2_revision = publish_origin_main(&repo_root, "publish v2 stage definitions");
+    assert_ne!(v1_revision, v2_revision);
+
+    let branch = "branch-task-pin";
+    let worktree = repo_root.join(".kanna-worktrees").join(branch);
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    run_git_fixture(
+        &repo_root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            worktree.to_string_lossy().as_ref(),
+            "HEAD",
+        ],
+    );
+    db.insert_test_pipeline_item(
+        "task-pin",
+        "repo-1",
+        "Pinned task",
+        Some("Pinned task"),
+        "review",
+        "2026-07-15 00:00:00",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-task-pin",
+        "task-pin",
+        worktree.to_string_lossy().as_ref(),
+        branch,
+    )
+    .unwrap();
+
+    let stage = &pipeline.stages[0];
+    let prompt = super::super::prompt::build_target_stage_prompt(
+        &definitions,
+        &repo.path,
+        stage,
+        "Pinned task",
+        None,
+        Some(branch),
+        Some("origin/main"),
+        Some(branch),
+    )
+    .unwrap();
+    assert!(prompt.contains("V1_AGENT"), "{prompt}");
+    assert!(prompt.contains("V1_STAGE Pinned task V1_VAR"), "{prompt}");
+    assert!(!prompt.contains("V2"), "{prompt}");
+
+    let run = super::super::prepare_stage_run_spawn(
+        &db,
+        &config,
+        &repo,
+        &definitions,
+        "task-pin",
+        "pinned",
+        &pipeline,
+        stage,
+        "review",
+        "main",
+        super::super::types::RunWorkspaceSpec::Current,
+        prompt,
+        branch,
+        None,
+        Some("agent"),
+        None,
+        Some("claude"),
+    )
+    .unwrap();
+    assert_eq!(run.env.get("V1_ENV").map(String::as_str), Some("yes"));
+    assert!(!run.env.contains_key("V2_ENV"));
+    assert_eq!(run.model.as_deref(), Some("v1-model"));
+    assert!(worktree.join("v1-stage.marker").is_file());
+    assert!(!worktree.join("v2-stage.marker").exists());
+
+    let teardown = super::super::prepare_workspace_teardown(
+        &db,
+        &config,
+        &repo,
+        &definitions,
+        "task-pin",
+        &pipeline,
+        "review",
+        branch,
+    )
+    .unwrap();
+    let teardown_command = match teardown.session {
+        PreparedSessionSpawn::Pty { args, .. } => args.join(" "),
+        PreparedSessionSpawn::Agent { .. } => panic!("teardown should use a PTY"),
+    };
+    assert!(teardown_command.contains("V1_STAGE_TEARDOWN"));
+    assert!(teardown_command.contains("V1_REPO_TEARDOWN"));
+    assert!(!teardown_command.contains("V2"), "{teardown_command}");
+    assert_eq!(teardown.env.get("V1_ENV").map(String::as_str), Some("yes"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -68,6 +237,7 @@ fn prepare_merge_agent_creates_in_progress_task() {
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish merge agent fixture");
 
     let config = test_config("prepare-merge-agent-in-progress");
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -137,14 +307,15 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/AGENT.md"),
-        "---\nname: implement\nagent_provider: claude\n---\nImplement agent.",
+        "---\nname: implement\ndescription: Implements changes\nagent_provider: claude\n---\nImplement agent.",
     )
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/commit/AGENT.md"),
-        "---\nname: commit\nagent_provider: claude\n---\nCommit agent.",
+        "---\nname: commit\ndescription: Commits changes\nagent_provider: claude\n---\nCommit agent.",
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish rerun post definitions");
     let worktree = repo_root.join(".kanna-worktrees/task-source");
     std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
     assert!(Command::new("git")
@@ -293,12 +464,12 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/reviewer/AGENT.md"),
-        "---\nagent_provider: claude\n---\nSnapshot agent: $TASK_PROMPT",
+        "---\nname: reviewer\ndescription: Reviews snapshot changes\nagent_provider: claude\n---\nSnapshot agent: $TASK_PROMPT",
     )
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/qa/AGENT.md"),
-        "---\nagent_provider: claude\n---\nLive agent: $TASK_PROMPT",
+        "---\nname: qa\ndescription: Reviews live changes\nagent_provider: claude\n---\nLive agent: $TASK_PROMPT",
     )
     .unwrap();
     install_test_provider_binaries(&repo_root);
@@ -334,6 +505,7 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish stored pipeline source definitions");
     assert!(Command::new("git")
         .args(["branch", "task-old-branch"])
         .current_dir(&repo_root)
@@ -353,6 +525,10 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
 }"#,
     )
     .unwrap();
+    publish_origin_main(
+        &repo_root,
+        "publish replacement pipeline after task snapshot",
+    );
 
     let config = test_config("stage-snapshot-resolution");
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -428,7 +604,7 @@ fn prepare_advance_stage_applies_repo_agent_extension() {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/reviewer/AGENT.md"),
-        "---\nagent_provider: claude\n---\nBase reviewer: $TASK_PROMPT",
+        "---\nname: reviewer\ndescription: Reviews changes\nagent_provider: claude\n---\nBase reviewer: $TASK_PROMPT",
     )
     .unwrap();
     std::fs::write(
@@ -469,6 +645,7 @@ fn prepare_advance_stage_applies_repo_agent_extension() {
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish agent extension fixture");
     assert!(Command::new("git")
         .args(["branch", "task-ext-branch"])
         .current_dir(&repo_root)
@@ -549,7 +726,7 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/reviewer/AGENT.md"),
-        "---\nagent_provider: claude\n---\nReview $TASK_PROMPT",
+        "---\nname: reviewer\ndescription: Reviews changes\nagent_provider: claude\n---\nReview $TASK_PROMPT",
     )
     .unwrap();
     install_test_provider_binaries(&repo_root);
@@ -585,6 +762,7 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish previous-result fixture");
     assert!(Command::new("git")
         .args(["branch", "task-old-branch"])
         .current_dir(&repo_root)
@@ -661,27 +839,9 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
 
 #[test]
 fn prepare_advance_stage_rejects_closed_source_task_even_when_stage_is_active() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-stage-advance-closed-source-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
-    std::fs::write(
-        repo_root.join(".kanna/pipelines/default.json"),
-        r#"{
-  "stages": [
-    { "name": "review", "transition": "manual" },
-    { "name": "pr", "transition": "manual", "mode": "continue" }
-  ]
-}"#,
-    )
-    .unwrap();
-
     let config = test_config("advance-stage-closed-source");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
-        .unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
     db.insert_test_pipeline_item(
         "task-1",
         "repo-1",
@@ -716,22 +876,13 @@ fn prepare_advance_stage_rejects_closed_source_task_even_when_stage_is_active() 
         err.contains("task is closed: task-1"),
         "unexpected error: {err}"
     );
-
-    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]
 fn prepare_advance_stage_rejects_blocked_source_task() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-stage-advance-blocked-source-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
-
     let config = test_config("advance-stage-blocked-source");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
-        .unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
     db.insert_test_pipeline_item(
         "task-1",
         "repo-1",
@@ -761,8 +912,28 @@ fn prepare_advance_stage_rejects_blocked_source_task() {
         err.contains("task is blocked: task-1"),
         "unexpected error: {err}"
     );
+}
 
-    let _ = std::fs::remove_dir_all(&repo_root);
+#[test]
+fn prepare_stage_completion_for_closed_task_is_idempotent_without_definitions() {
+    let config = test_config("complete-stage-closed-source");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Closed prompt",
+        Some("Closed task"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    db.close_pipeline_item("task-1").unwrap();
+
+    let prepared =
+        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main")).unwrap();
+
+    assert!(prepared.is_none());
 }
 
 #[tokio::test]
@@ -782,7 +953,7 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/reviewer/AGENT.md"),
-        "---\nagent_provider: claude\n---\nReview task: $TASK_PROMPT",
+        "---\nname: reviewer\ndescription: Reviews task changes\nagent_provider: claude\n---\nReview task: $TASK_PROMPT",
     )
     .unwrap();
     assert!(Command::new("git")
@@ -797,6 +968,7 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish stage fork definitions");
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(&repo_root)
@@ -986,6 +1158,7 @@ async fn prompt_only_stage_provider_overrides_source_task_provider_in_daemon_spa
         .to_string(),
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish prompt-only stage definitions");
 
     let config = test_config("prompt-only-stage-provider");
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1068,7 +1241,7 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/reviewer/AGENT.md"),
-        "---\nagent_provider: claude\n---\nReview agent.",
+        "---\nname: reviewer\ndescription: Review changes\nagent_provider: claude\n---\nReview agent.",
     )
     .unwrap();
     assert!(Command::new("git")
@@ -1083,6 +1256,7 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish teardown definitions");
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(&repo_root)
@@ -1228,6 +1402,7 @@ async fn headless_rerun_runs_environment_setup_after_killing_previous_session() 
         .to_string(),
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish headless rerun setup definitions");
     let worktree = repo_root.join(".kanna-worktrees/task-source");
     std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
     assert!(Command::new("git")
@@ -1360,6 +1535,10 @@ async fn headless_rerun_setup_failure_records_durable_diagnostics_after_kill() {
         .to_string(),
     )
     .unwrap();
+    publish_origin_main(
+        &repo_root,
+        "publish failing headless rerun setup definitions",
+    );
     let worktree = repo_root.join(".kanna-worktrees/task-source");
     std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
     assert!(Command::new("git")
@@ -1520,7 +1699,7 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/pr/AGENT.md"),
-        "---\nagent_provider: claude\n---\nPR agent for $TASK_PROMPT",
+        "---\nname: pr\ndescription: Create the pull request\nagent_provider: claude\n---\nPR agent for $TASK_PROMPT",
     )
     .unwrap();
     assert!(Command::new("git")
@@ -1535,6 +1714,7 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish auto completion definitions");
     assert!(Command::new("git")
         .args(["branch", "task-source"])
         .current_dir(&repo_root)
@@ -1687,19 +1867,20 @@ fn write_post_pipeline_fixtures(repo_root: &std::path::Path) {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/AGENT.md"),
-        "---\nagent_provider: claude\n---\nImplement agent.",
+        "---\nname: implement\ndescription: Implement the task\nagent_provider: claude\n---\nImplement agent.",
     )
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/commit/AGENT.md"),
-        "---\nagent_provider: claude\n---\nCommit agent.",
+        "---\nname: commit\ndescription: Commit the implementation\nagent_provider: claude\n---\nCommit agent.",
     )
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/pr/AGENT.md"),
-        "---\nagent_provider: claude\n---\nPR agent.",
+        "---\nname: pr\ndescription: Create the pull request\nagent_provider: claude\n---\nPR agent.",
     )
     .unwrap();
+    publish_origin_main(repo_root, "publish post pipeline definitions");
 }
 
 fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
@@ -2211,6 +2392,7 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
         .to_string(),
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish prompt-only post definitions");
 
     let config = test_config("prompt-only-post-provider");
     let db = Db::open_for_tests(&config.db_path).unwrap();

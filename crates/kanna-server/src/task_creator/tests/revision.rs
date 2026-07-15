@@ -69,18 +69,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         .status()
         .unwrap()
         .success());
-    assert!(Command::new("git")
-        .args(["add", "README.md", ".kanna"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["commit", "-m", "init"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
+    publish_origin_main(&repo_root, "publish revision spawn definitions");
     assert!(Command::new("git")
         .args(["branch", "task-reviewed-branch"])
         .current_dir(&repo_root)
@@ -183,21 +172,10 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/AGENT.md"),
-        "---\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
+        "---\nname: implement\ndescription: Implements requested revisions\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
     )
     .unwrap();
-    assert!(Command::new("git")
-        .args(["add", ".kanna"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["commit", "-m", "add qa pipeline"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
+    publish_origin_main(&repo_root, "publish revision feedback definitions");
     assert!(Command::new("git")
         .args(["branch", "task-reviewed"])
         .current_dir(&repo_root)
@@ -342,28 +320,9 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
 
 #[test]
 fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-stage-revision-closed-source-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
-    std::fs::write(
-        repo_root.join(".kanna/pipelines/qa.json"),
-        r#"{
-  "stages": [
-    { "name": "in progress", "transition": "manual" },
-    { "name": "review", "transition": "manual" },
-    { "name": "pr", "transition": "manual" }
-  ]
-}"#,
-    )
-    .unwrap();
-
     let config = test_config("revision-stage-closed-source");
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
-        .unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
     db.insert_test_pipeline_item(
         "review-task",
         "repo-1",
@@ -404,8 +363,6 @@ fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() 
         err.contains("task is closed: review-task"),
         "unexpected error: {err}"
     );
-
-    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 /// Repo with a claude implement stage, an implement worktree (`task-impl`)
@@ -428,21 +385,12 @@ fn init_resume_revision_fixture(label: &str, config: &Config) -> (std::path::Pat
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/AGENT.md"),
-        "---\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
+        "---\nname: implement\ndescription: Implements resumed revisions\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
     )
     .unwrap();
-    for args in [
-        vec!["add", ".kanna"],
-        vec!["commit", "-m", "add qa pipeline"],
-        vec!["branch", "task-impl"],
-        vec!["branch", "task-review"],
-    ] {
-        assert!(Command::new("git")
-            .args(&args)
-            .current_dir(&repo_root)
-            .status()
-            .unwrap()
-            .success());
+    publish_origin_main(&repo_root, "publish resume revision definitions");
+    for branch in ["task-impl", "task-review"] {
+        run_git_fixture(&repo_root, &["branch", branch]);
     }
     for branch in ["task-impl", "task-review"] {
         let worktree = repo_root.join(".kanna-worktrees").join(branch);
@@ -734,21 +682,11 @@ fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/AGENT.md"),
-        "---\nagent_provider: codex, claude, copilot, opencode, antigravity\n---\nImplement:\n$TASK_PROMPT",
+        "---\nname: implement\ndescription: Implements provider inheritance revisions\nagent_provider: codex, claude, copilot, opencode, antigravity\n---\nImplement:\n$TASK_PROMPT",
     )
     .unwrap();
-    for args in [
-        vec!["add", ".kanna"],
-        vec!["commit", "-m", "add qa pipeline"],
-        vec!["branch", "task-reviewed"],
-    ] {
-        assert!(Command::new("git")
-            .args(&args)
-            .current_dir(&repo_root)
-            .status()
-            .unwrap()
-            .success());
-    }
+    publish_origin_main(&repo_root, "publish provider inheritance definitions");
+    run_git_fixture(&repo_root, &["branch", "task-reviewed"]);
     let worktree = repo_root.join(".kanna-worktrees/task-reviewed");
     assert!(Command::new("git")
         .args([

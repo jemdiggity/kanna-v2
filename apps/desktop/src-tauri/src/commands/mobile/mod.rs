@@ -1953,6 +1953,12 @@ mod tests {
             .status()
             .expect("git commit should run")
             .success());
+        assert!(StdCommand::new("git")
+            .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
+            .current_dir(repo_root)
+            .status()
+            .expect("origin/main fixture ref should be published")
+            .success());
     }
 
     fn write_test_server_config(

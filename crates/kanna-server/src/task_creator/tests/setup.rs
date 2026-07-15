@@ -69,18 +69,7 @@ fn write_setup_repo(
         )
         .unwrap();
     }
-    assert!(Command::new("git")
-        .args(["add", ".kanna"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["commit", "-m", "add setup-provisioned provider"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
+    publish_origin_main(&repo_root, "publish setup-provisioned provider");
     repo_root
 }
 
@@ -421,6 +410,7 @@ fn headless_post_preparation_does_not_run_fallback_environment_setup() {
         .to_string(),
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish post fallback setup pipeline");
     let config = test_config("headless-post-fallback-setup");
     let db = Db::open_for_tests(&config.db_path).unwrap();
     let source_worktree = seed_source_task(&config, &db, &repo_root, "agent");

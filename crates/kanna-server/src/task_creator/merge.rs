@@ -23,7 +23,7 @@ pub(crate) fn prepare_merge_agent_for_api(
     source_task_id: &str,
 ) -> Result<PreparedTaskSpawn, String> {
     let repo = load_merge_source_repo(db, source_task_id)?;
-    let request = build_merge_task_request(&repo.path)?;
+    let request = build_merge_task_request()?;
     super::prepare_task_spawn(db, config, &repo, request)
 }
 
@@ -47,12 +47,14 @@ fn load_merge_source_repo(db: &Db, source_task_id: &str) -> Result<Repo, String>
         .ok_or_else(|| format!("repo not found for task: {}", source_task_id))
 }
 
-fn build_merge_task_request(repo_path: &str) -> Result<TaskCreationRequest, String> {
+fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
     let pipeline_name = "singleton-merge".to_string();
     let pipeline = PipelineDefinition {
         name: Some(pipeline_name.clone()),
+        description: None,
         stages: vec![PipelineStage {
             name: "in progress".to_string(),
+            description: None,
             agent: Some("merge".to_string()),
             prompt: Some("$TASK_PROMPT".to_string()),
             agent_provider: None,
@@ -66,9 +68,6 @@ fn build_merge_task_request(repo_path: &str) -> Result<TaskCreationRequest, Stri
     };
     let pipeline_def =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
-    // Validate the merge agent can be resolved from either repo-local or
-    // bundled definitions before creating any DB/worktree state.
-    super::definitions::read_agent_definition(repo_path, "merge")?;
     Ok(TaskCreationRequest {
         requested_task_id: None,
         task_prompt: String::new(),

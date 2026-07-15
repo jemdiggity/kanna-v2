@@ -411,7 +411,7 @@ export function useAppTaskNavigation({
       let resolvedTask = task;
 
       if (task.agent) {
-        const agent = await store.loadAgent(repo.path, task.agent);
+        const agent = await store.loadAgent(repo.id, task.agent);
 
         resolvedTask = {
           ...task,
@@ -503,7 +503,7 @@ export function useAppTaskNavigation({
     const repo = store.repos.find((r) => r.id === store.selectedRepoId);
     if (!repo) return;
     try {
-      const agent = await store.loadAgent(repo.path, "config-factory");
+      const agent = await store.loadAgent(repo.id, "config-factory");
       await store.createItem(
         store.selectedRepoId,
         repo.path,
@@ -538,7 +538,7 @@ export function useAppTaskNavigation({
     const repo = store.repos.find((r) => r.id === store.selectedRepoId);
     if (!repo) return;
     try {
-      const agent = await store.loadAgent(repo.path, "setup");
+      const agent = await store.loadAgent(repo.id, "setup");
       await store.createItem(
         store.selectedRepoId,
         repo.path,

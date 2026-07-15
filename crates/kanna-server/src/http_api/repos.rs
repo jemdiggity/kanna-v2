@@ -205,6 +205,75 @@ pub(super) struct AvailableAgentProvidersResponse {
     providers: Vec<AvailableAgentProvider>,
 }
 
+type HttpError = (axum::http::StatusCode, String);
+
+fn get_definition_repo(state: &AppState, repo_id: &str) -> Result<crate::db::Repo, HttpError> {
+    let db = Db::open(&state.config.db_path).map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {error}"),
+        )
+    })?;
+    db.get_repo(repo_id)
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("repo not found: {repo_id}"),
+            )
+        })
+}
+
+fn map_definition_lookup_error(error: crate::task_creator::DefinitionLookupError) -> HttpError {
+    let status = match &error {
+        crate::task_creator::DefinitionLookupError::InvalidName(_) => {
+            axum::http::StatusCode::BAD_REQUEST
+        }
+        crate::task_creator::DefinitionLookupError::NotFound(_) => {
+            axum::http::StatusCode::NOT_FOUND
+        }
+        crate::task_creator::DefinitionLookupError::Other(_) => {
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    (status, error.to_string())
+}
+
+pub(super) async fn get_repo_kanna_definitions(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+) -> Result<Json<crate::task_creator::RepoKannaDefinitions>, HttpError> {
+    let repo = get_definition_repo(&state, &repo_id)?;
+    crate::task_creator::load_repo_kanna_definitions(&repo)
+        .map(Json)
+        .map_err(map_definition_lookup_error)
+}
+
+pub(super) async fn get_repo_pipeline_definition(
+    State(state): State<Arc<AppState>>,
+    Path((repo_id, pipeline_name)): Path<(String, String)>,
+) -> Result<Json<crate::task_creator::RevisionedPipelineDefinition>, HttpError> {
+    let repo = get_definition_repo(&state, &repo_id)?;
+    crate::task_creator::load_repo_pipeline_definition(&repo, &pipeline_name)
+        .map(Json)
+        .map_err(map_definition_lookup_error)
+}
+
+pub(super) async fn get_repo_agent_definition(
+    State(state): State<Arc<AppState>>,
+    Path((repo_id, agent_selector)): Path<(String, String)>,
+) -> Result<Json<crate::task_creator::RevisionedAgentDefinition>, HttpError> {
+    let repo = get_definition_repo(&state, &repo_id)?;
+    crate::task_creator::load_repo_agent_definition(&repo, &agent_selector)
+        .map(Json)
+        .map_err(map_definition_lookup_error)
+}
+
 pub(super) async fn list_available_agent_providers(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -229,7 +298,7 @@ pub(super) async fn list_available_agent_providers(
                 format!("repo not found: {repo_id}"),
             )
         })?;
-    let providers = crate::task_creator::resolve_available_agent_providers(&repo.path)
+    let providers = crate::task_creator::resolve_available_agent_providers(&repo)
         .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?
         .into_iter()
         .map(|(id, executable)| AvailableAgentProvider { id, executable })

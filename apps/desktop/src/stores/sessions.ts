@@ -19,7 +19,7 @@ import {
 import { shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
-import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
+import { fetchRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { applyDesktopTaskRuntimeStatus, putDesktopTaskAgentSession } from "../services/desktopServerClient";
 
@@ -196,13 +196,17 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     fallbackCwd?: string | null,
   ): Promise<void> {
     const parsedPortEnv = parsePortEnv(portEnv);
+    const shellTaskId = isWorktree ? taskIdFromWorktreeShellSessionId(sessionId) : null;
+    const shellTask = shellTaskId
+      ? context.state.items.value.find((candidate) => candidate.id === shellTaskId)
+      : null;
     let env: Record<string, string> = { ...getShellTerminalEnv() };
     if (isWorktree) {
       env.KANNA_WORKTREE = "1";
       env = buildWorktreeSessionEnv({
         worktreePath: cwd,
         baseEnv: env,
-        repoConfig: await readRepoConfig(cwd),
+        repoConfig: shellTask ? await fetchRepoConfig(shellTask.repo_id) : {},
         portEnv: parsedPortEnv,
         inheritedPath: await readInheritedPath(env.PATH),
       });
@@ -212,7 +216,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const runtimePath = await readInheritedPath(env.PATH);
     const resolvedKannaCliPath = await whichBinaryOptional("kanna-cli");
 
-    const shellTaskId = isWorktree ? taskIdFromWorktreeShellSessionId(sessionId) : null;
     if (shellTaskId) {
       try {
         const [socketPath, serverBaseUrl] = await Promise.all([
@@ -303,13 +306,11 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
   async function buildAgentSessionEnv(
     sessionId: string,
+    repoId: string,
     worktreePath: string,
     portEnv: Record<string, string>,
   ): Promise<{ env: Record<string, string>; mcpConfigPath?: string }> {
-    const repoConfig = await readRepoConfig(worktreePath).catch((error) => {
-      console.error("[store] failed to read SDK task config during session recovery:", error);
-      return {};
-    });
+    const repoConfig = await fetchRepoConfig(repoId);
     const inheritedPath = await readEnvVarOptional("PATH");
     const agentBaseEnv = buildWorktreeSessionEnv({
       worktreePath,
@@ -362,12 +363,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       }
     }
 
-    if (worktreePath && !repoConfig) {
-      try {
-        repoConfig = await readRepoConfig(worktreePath);
-      } catch (error) {
-        console.error("[store] failed to read setup config:", error);
-      }
+    if (repoConfig === undefined && item) {
+      repoConfig = await fetchRepoConfig(item.repo_id);
     }
 
     if (setupCmds.length === 0 && repoConfig?.setup?.length) {
@@ -508,7 +505,12 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const spawnOptions = parseAgentSpawnRecoveryOptions(item.agent_spawn_options);
 
     if (item.agent_type === "agent" || item.agent_type === "sdk") {
-      const { env, mcpConfigPath } = await buildAgentSessionEnv(sessionId, worktreePath, portEnv);
+      const { env, mcpConfigPath } = await buildAgentSessionEnv(
+        sessionId,
+        item.repo_id,
+        worktreePath,
+        portEnv,
+      );
       await invoke("spawn_agent_session", {
         sessionId,
         cwd: worktreePath,

@@ -134,6 +134,7 @@
   },
   "toasts": {
     "taskCreationFailed": "タスクの作成に失敗しました",
+    "repoDefinitionsFailed": "リポジトリ定義を読み込めませんでした",
     "prCreationFailed": "PRの作成に失敗しました",
     "repoCreationFailed": "リポジトリの作成に失敗しました",
     "repoImportFailed": "リポジトリのインポートに失敗しました",

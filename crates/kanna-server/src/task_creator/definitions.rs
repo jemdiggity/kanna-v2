@@ -1,53 +1,80 @@
+use super::definition_source::RepoDefinitionSnapshot;
+use crate::db::Repo;
 use kanna_agent_protocol::AgentProvider;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct RepoConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) pipeline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) setup: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) teardown: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) test: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) ports: Option<HashMap<String, u16>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) flavors: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) vars: Option<HashMap<String, String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) reserved_ports: Vec<i64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) reserved_port_offsets: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) stage_order: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) workspace: Option<RepoWorkspaceConfig>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct RepoWorkspaceConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) env: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) path: Option<RepoWorkspacePathConfig>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct RepoWorkspacePathConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) prepend: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) append: Option<Vec<String>>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct PipelineDefinition {
     #[allow(dead_code)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) description: Option<String>,
     pub(super) stages: Vec<PipelineStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) environments: Option<HashMap<String, PipelineEnvironment>>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct PipelineStage {
     pub(super) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) agent_provider: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) environment: Option<String>,
     pub(super) policy: PipelineStagePolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) post: Option<PipelinePost>,
 }
 
@@ -55,21 +82,25 @@ pub(super) struct PipelineStage {
 /// the stage transitions forward. `agent` is the fallback used to spawn a
 /// fresh session (and the prompt-body source) when the task's session is
 /// dead; a live session keeps whatever agent is already running.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct PipelinePost {
     pub(super) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) agent_provider: Option<Vec<String>>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct PipelineStagePolicy {
     pub(super) transition: PipelineStageTransition,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum PipelineStageTransition {
     Manual,
@@ -85,9 +116,11 @@ impl PipelineStageTransition {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct PipelineEnvironment {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) setup: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) teardown: Option<Vec<String>>,
 }
 
@@ -130,6 +163,7 @@ pub(super) fn resolve_stage_position(
 pub(super) fn post_as_stage(owner: &PipelineStage) -> Option<PipelineStage> {
     owner.post.as_ref().map(|post| PipelineStage {
         name: post.name.clone(),
+        description: post.description.clone(),
         agent: post.agent.clone(),
         prompt: post.prompt.clone(),
         agent_provider: post.agent_provider.clone(),
@@ -144,6 +178,7 @@ pub(super) fn post_as_stage(owner: &PipelineStage) -> Option<PipelineStage> {
 #[derive(Deserialize)]
 struct RawPipelineDefinition {
     name: Option<String>,
+    description: Option<String>,
     stages: Vec<RawPipelineStage>,
     environments: Option<HashMap<String, PipelineEnvironment>>,
 }
@@ -151,6 +186,7 @@ struct RawPipelineDefinition {
 #[derive(Deserialize)]
 struct RawPipelineStage {
     name: String,
+    description: Option<String>,
     agent: Option<String>,
     prompt: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
@@ -172,6 +208,7 @@ struct RawPipelineStagePolicy {
 #[derive(Deserialize)]
 struct RawPipelinePost {
     name: String,
+    description: Option<String>,
     agent: Option<String>,
     prompt: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
@@ -181,6 +218,7 @@ struct RawPipelinePost {
 #[derive(Deserialize)]
 struct RawPipelinePostAction {
     name: String,
+    description: Option<String>,
     agent: Option<String>,
     prompt: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
@@ -198,6 +236,8 @@ enum RawPipelineStageExecution {
 
 #[derive(Default, Deserialize)]
 struct AgentFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_yaml_value")]
     agent_provider: Option<YamlValue>,
     model: Option<String>,
@@ -205,48 +245,276 @@ struct AgentFrontmatter {
     allowed_tools: Option<Vec<String>>,
 }
 
+#[derive(Clone, Debug, Serialize)]
 pub(super) struct AgentDefinition {
+    pub(super) name: String,
+    pub(super) description: String,
     pub(super) prompt: String,
+    #[serde(rename = "agent_provider", skip_serializing_if = "Vec::is_empty")]
     pub(super) agent_providers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) allowed_tools: Vec<String>,
 }
 
 struct AgentExtension {
     prompt: String,
-    agent_providers: Vec<String>,
+    description: Option<String>,
+    agent_providers: Option<Vec<String>>,
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Option<Vec<String>>,
 }
 
-pub(super) fn read_repo_config(repo_path: &str) -> Result<RepoConfig, String> {
-    let path = Path::new(repo_path).join(".kanna/config.json");
-    match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            serde_json::from_str(&content).map_err(|e| format!("invalid repo config: {}", e))
+pub(super) struct RepoDefinitions {
+    snapshot: RepoDefinitionSnapshot,
+    config: RepoConfig,
+}
+
+impl RepoDefinitions {
+    pub(super) fn resolve(repo: &Repo) -> Result<Self, String> {
+        Self::resolve_path(&repo.path, repo.default_branch.as_deref())
+    }
+
+    fn resolve_path(repo_path: &str, default_branch: Option<&str>) -> Result<Self, String> {
+        let snapshot = RepoDefinitionSnapshot::resolve(repo_path, default_branch)?;
+        let config_path = ".kanna/config.json";
+        let config = match read_snapshot_utf8(&snapshot, config_path)? {
+            Some(content) => parse_repo_config(&content)
+                .map_err(|error| definition_error(&snapshot, config_path, error))?,
+            None => RepoConfig::default(),
+        };
+        Ok(Self { snapshot, config })
+    }
+
+    pub(super) fn revision(&self) -> Option<&str> {
+        self.snapshot.revision()
+    }
+
+    pub(super) fn ref_name(&self) -> &str {
+        self.snapshot.ref_name()
+    }
+
+    pub(super) fn config(&self) -> &RepoConfig {
+        &self.config
+    }
+
+    pub(super) fn pipeline(&self, name: &str) -> Result<PipelineDefinition, String> {
+        self.pipeline_optional(name)?
+            .ok_or_else(|| format!("compiled resource not found: .kanna/pipelines/{name}.json"))
+    }
+
+    pub(super) fn pipeline_optional(
+        &self,
+        name: &str,
+    ) -> Result<Option<PipelineDefinition>, String> {
+        let path = format!(".kanna/pipelines/{name}.json");
+        match read_snapshot_utf8(&self.snapshot, &path)? {
+            Some(content) => parse_pipeline_definition(&content)
+                .map(Some)
+                .map_err(|error| definition_error(&self.snapshot, &path, error)),
+            None => compiled_builtin_resource(&path)
+                .map(parse_pipeline_definition)
+                .transpose()
+                .map_err(|error| format!("invalid compiled resource `{path}`: {error}")),
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(RepoConfig::default()),
-        Err(err) => Err(format!("failed to read repo config: {}", err)),
+    }
+
+    pub(super) fn task_pipeline(
+        &self,
+        name: &str,
+        stored: Option<&str>,
+    ) -> Result<PipelineDefinition, String> {
+        if let Some(stored) = stored.filter(|value| !value.trim().is_empty()) {
+            return parse_stored_pipeline_definition(stored);
+        }
+        self.pipeline(name)
+    }
+
+    pub(super) fn agent(&self, selector: &str) -> Result<AgentDefinition, String> {
+        self.agent_optional(selector)?.ok_or_else(|| {
+            let (role, _) = split_agent_selector(selector);
+            format!("compiled resource not found: .kanna/agents/{role}/AGENT.md")
+        })
+    }
+
+    pub(super) fn agent_optional(&self, selector: &str) -> Result<Option<AgentDefinition>, String> {
+        let selector = AgentSelector::resolve(selector, self.config.flavors.as_ref());
+        let agent_path = format!(".kanna/agents/{}/AGENT.md", selector.repo_agent_dir());
+        let mut definition = match read_snapshot_utf8(&self.snapshot, &agent_path)? {
+            Some(content) => parse_agent_definition(&content)
+                .map_err(|error| definition_error(&self.snapshot, &agent_path, error))?,
+            None => {
+                let Some(content) = optional_builtin_agent_resource(&selector) else {
+                    return Ok(None);
+                };
+                parse_agent_definition(&content).map_err(|error| {
+                    format!(
+                        "invalid compiled agent resource for selector `{}`: {error}",
+                        selector.display()
+                    )
+                })?
+            }
+        };
+
+        let extension_path = format!(".kanna/agents/{}/EXTEND.md", selector.repo_agent_dir());
+        if let Some(extension) = read_snapshot_utf8(&self.snapshot, &extension_path)? {
+            apply_agent_extension(&mut definition, &extension)
+                .map_err(|error| definition_error(&self.snapshot, &extension_path, error))?;
+        }
+        Ok(Some(definition))
+    }
+
+    pub(super) fn pipeline_names(&self) -> Result<Vec<String>, String> {
+        let path = ".kanna/pipelines";
+        let entries = self
+            .snapshot
+            .list_direct_entries(path)
+            .map_err(|error| definition_error(&self.snapshot, path, error))?;
+        let mut names = BTreeSet::from(["default".to_string(), "qa".to_string()]);
+        for entry in entries {
+            let Some(name) = entry.strip_suffix(".json") else {
+                continue;
+            };
+            if !name.is_empty() && name != "schema" {
+                names.insert(name.to_string());
+            }
+        }
+        Ok(names.into_iter().collect())
     }
 }
 
-pub(super) fn read_pipeline_definition(
-    repo_path: &str,
-    pipeline_name: &str,
-) -> Result<PipelineDefinition, String> {
-    let path = Path::new(repo_path).join(format!(".kanna/pipelines/{pipeline_name}.json"));
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(_) => read_builtin_resource(&format!(".kanna/pipelines/{pipeline_name}.json"))?,
+fn parse_repo_config(content: &str) -> Result<RepoConfig, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(content).map_err(|error| format!("invalid repo config: {error}"))?;
+    let Some(raw) = value.as_object() else {
+        return Ok(RepoConfig::default());
     };
-    let value: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("invalid pipeline definition: {}", e))?;
+
+    let string_array = |name: &str| {
+        raw.get(name).and_then(|value| {
+            let values = value.as_array()?;
+            values
+                .iter()
+                .map(|value| value.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+        })
+    };
+
+    let string_map = |value: Option<&serde_json::Value>| {
+        let values = value?.as_object()?;
+        let normalized = values
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .as_str()
+                    .map(|value| (name.clone(), value.to_string()))
+            })
+            .collect::<HashMap<_, _>>();
+        (!normalized.is_empty()).then_some(normalized)
+    };
+
+    let ports = raw.get("ports").and_then(|value| {
+        let values = value.as_object()?;
+        let normalized = values
+            .iter()
+            .filter_map(|(name, value)| {
+                let port = value.as_u64().and_then(|value| u16::try_from(value).ok())?;
+                Some((name.clone(), port))
+            })
+            .collect::<HashMap<_, _>>();
+        (!normalized.is_empty()).then_some(normalized)
+    });
+
+    let integer_array = |name: &str, valid: fn(i64) -> bool| {
+        raw.get(name)
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_i64)
+                    .filter(|value| valid(*value))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|values| !values.is_empty())
+            .unwrap_or_default()
+    };
+
+    let workspace = raw
+        .get("workspace")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|workspace_raw| {
+            let env = string_map(workspace_raw.get("env"));
+            let path = workspace_raw
+                .get("path")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|path_raw| {
+                    let filtered_entries = |name: &str| {
+                        let entries = path_raw.get(name)?.as_array()?;
+                        let entries = entries
+                            .iter()
+                            .filter_map(|entry| entry.as_str().map(str::to_string))
+                            .collect::<Vec<_>>();
+                        (!entries.is_empty()).then_some(entries)
+                    };
+                    let prepend = filtered_entries("prepend");
+                    let append = filtered_entries("append");
+                    (prepend.is_some() || append.is_some())
+                        .then_some(RepoWorkspacePathConfig { prepend, append })
+                });
+            (env.is_some() || path.is_some()).then_some(RepoWorkspaceConfig { env, path })
+        });
+
+    Ok(RepoConfig {
+        pipeline: raw
+            .get("pipeline")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        setup: string_array("setup"),
+        teardown: string_array("teardown"),
+        test: string_array("test"),
+        ports,
+        flavors: string_map(raw.get("flavors")),
+        vars: string_map(raw.get("vars")),
+        reserved_port_offsets: integer_array("reserved_port_offsets", |value| value >= 0),
+        reserved_ports: integer_array("reserved_ports", |value| (1..=65535).contains(&value)),
+        stage_order: string_array("stage_order"),
+        workspace,
+    })
+}
+
+fn read_snapshot_utf8(
+    snapshot: &RepoDefinitionSnapshot,
+    relative_path: &str,
+) -> Result<Option<String>, String> {
+    snapshot
+        .read_optional_utf8(relative_path)
+        .map_err(|error| definition_error(snapshot, relative_path, error))
+}
+
+fn definition_error(
+    snapshot: &RepoDefinitionSnapshot,
+    relative_path: &str,
+    error: impl std::fmt::Display,
+) -> String {
+    format!(
+        "repository definition `{relative_path}` from `{}` at revision `{}`: {error}",
+        snapshot.ref_name(),
+        snapshot.revision().unwrap_or("<none>"),
+    )
+}
+
+fn parse_pipeline_definition(content: &str) -> Result<PipelineDefinition, String> {
+    let value: serde_json::Value = serde_json::from_str(content)
+        .map_err(|error| format!("invalid pipeline definition: {error}"))?;
     reject_explicit_null_pipeline_providers(&value)?;
-    let raw: RawPipelineDefinition =
-        serde_json::from_value(value).map_err(|e| format!("invalid pipeline definition: {}", e))?;
+    let raw: RawPipelineDefinition = serde_json::from_value(value)
+        .map_err(|error| format!("invalid pipeline definition: {error}"))?;
     normalize_pipeline_definition(raw)
+        .map_err(|error| format!("invalid pipeline definition: {error}"))
 }
 
 fn reject_explicit_null_pipeline_providers(value: &serde_json::Value) -> Result<(), String> {
@@ -278,20 +546,16 @@ fn reject_explicit_null_pipeline_providers(value: &serde_json::Value) -> Result<
     Ok(())
 }
 
-pub(super) fn read_task_pipeline_definition(
-    repo_path: &str,
-    pipeline_name: &str,
-    pipeline_def: Option<&str>,
+pub(super) fn parse_stored_pipeline_definition(
+    content: &str,
 ) -> Result<PipelineDefinition, String> {
-    if let Some(pipeline_def) = pipeline_def.filter(|value| !value.trim().is_empty()) {
-        let mut value: serde_json::Value = serde_json::from_str(pipeline_def)
-            .map_err(|e| format!("invalid stored pipeline definition: {}", e))?;
-        normalize_legacy_pipeline_provider_csv(&mut value);
-        let raw: RawPipelineDefinition = serde_json::from_value(value)
-            .map_err(|e| format!("invalid stored pipeline definition: {}", e))?;
-        return normalize_pipeline_definition(raw);
-    }
-    read_pipeline_definition(repo_path, pipeline_name)
+    let mut value: serde_json::Value = serde_json::from_str(content)
+        .map_err(|error| format!("invalid stored pipeline definition: {error}"))?;
+    normalize_legacy_pipeline_provider_csv(&mut value);
+    let raw: RawPipelineDefinition = serde_json::from_value(value)
+        .map_err(|error| format!("invalid stored pipeline definition: {error}"))?;
+    normalize_pipeline_definition(raw)
+        .map_err(|error| format!("invalid stored pipeline definition: {error}"))
 }
 
 fn normalize_legacy_pipeline_provider_csv(value: &mut serde_json::Value) {
@@ -335,45 +599,6 @@ fn normalize_legacy_provider_csv(value: &mut serde_json::Value) {
     );
 }
 
-pub(super) fn read_agent_definition(
-    repo_path: &str,
-    agent_name: &str,
-) -> Result<AgentDefinition, String> {
-    let config = read_repo_config(repo_path)?;
-    let selector = AgentSelector::resolve(agent_name, config.flavors.as_ref());
-    let path = Path::new(repo_path).join(format!(
-        ".kanna/agents/{}/AGENT.md",
-        selector.repo_agent_dir()
-    ));
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(_) => read_builtin_agent_resource(&selector)?,
-    };
-    let mut definition = parse_agent_definition(&content)?;
-
-    // Repo-local extension: layered onto the resolved agent (repo override or
-    // built-in) so a repo can customize a default agent without rewriting it.
-    let extend_path = Path::new(repo_path).join(format!(
-        ".kanna/agents/{}/EXTEND.md",
-        selector.repo_agent_dir()
-    ));
-    match std::fs::read_to_string(&extend_path) {
-        Ok(extension) => {
-            apply_agent_extension(&mut definition, &extension)
-                .map_err(|e| format!("invalid agent extension {}: {}", extend_path.display(), e))?;
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(format!(
-                "failed to read agent extension {}: {}",
-                extend_path.display(),
-                err
-            ))
-        }
-    }
-    Ok(definition)
-}
-
 struct AgentSelector {
     role: String,
     explicit_flavor: Option<String>,
@@ -403,6 +628,13 @@ impl AgentSelector {
     fn repo_agent_dir(&self) -> String {
         self.role.clone()
     }
+
+    fn display(&self) -> String {
+        match self.selected_flavor() {
+            Some(flavor) => format!("{}@{flavor}", self.role),
+            None => self.role.clone(),
+        }
+    }
 }
 
 fn split_agent_selector(agent_name: &str) -> (String, Option<String>) {
@@ -415,37 +647,19 @@ fn split_agent_selector(agent_name: &str) -> (String, Option<String>) {
     (role.to_string(), Some(flavor.to_string()))
 }
 
-fn read_builtin_agent_resource(selector: &AgentSelector) -> Result<String, String> {
+fn optional_builtin_agent_resource(selector: &AgentSelector) -> Option<String> {
     if let Some(flavor) = selector.selected_flavor() {
         let flavor_path = format!(
             ".kanna/agents/{}/flavors/{}/AGENT.md",
             selector.role, flavor
         );
-        if let Ok(content) = read_builtin_resource(&flavor_path) {
-            return Ok(content);
+        if let Some(content) = compiled_builtin_resource(&flavor_path) {
+            return Some(content.to_string());
         }
     }
 
-    read_builtin_resource(&format!(".kanna/agents/{}/AGENT.md", selector.role))
-}
-
-fn read_builtin_resource(relative_path: &str) -> Result<String, String> {
-    if let Some(content) = compiled_builtin_resource(relative_path) {
-        return Ok(content.to_string());
-    }
-
-    let mut dir = std::env::current_dir().map_err(|e| format!("failed to read cwd: {}", e))?;
-    for _ in 0..10 {
-        let candidate = dir.join(relative_path);
-        if candidate.exists() {
-            return std::fs::read_to_string(&candidate)
-                .map_err(|e| format!("failed to read builtin resource: {}", e));
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    Err(format!("resource not found: {}", relative_path))
+    compiled_builtin_resource(&format!(".kanna/agents/{}/AGENT.md", selector.role))
+        .map(str::to_string)
 }
 
 fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
@@ -505,6 +719,9 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
 fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Result<(), String> {
     let extension = parse_agent_extension(content)?;
 
+    if let Some(description) = extension.description {
+        definition.description = description;
+    }
     if !extension.prompt.is_empty() {
         if definition.prompt.is_empty() {
             definition.prompt = extension.prompt;
@@ -512,8 +729,8 @@ fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Res
             definition.prompt = format!("{}\n\n{}", definition.prompt, extension.prompt);
         }
     }
-    if !extension.agent_providers.is_empty() {
-        definition.agent_providers = extension.agent_providers;
+    if let Some(agent_providers) = extension.agent_providers {
+        definition.agent_providers = agent_providers;
     }
     if extension.model.is_some() {
         definition.model = extension.model;
@@ -525,7 +742,8 @@ fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Res
         definition.allowed_tools = allowed_tools;
     }
 
-    Ok(())
+    validate_agent_definition(definition)
+        .map_err(|error| format!("invalid extended agent: {error}"))
 }
 
 fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {
@@ -537,13 +755,17 @@ fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {
         None => AgentFrontmatter::default(),
     };
 
-    Ok(AgentDefinition {
+    let definition = AgentDefinition {
+        name: fm.name.unwrap_or_default(),
+        description: fm.description.unwrap_or_default(),
         prompt: body.trim().to_string(),
         agent_providers: parse_agent_providers(fm.agent_provider)?,
         model: fm.model,
-        permission_mode: fm.permission_mode,
+        permission_mode: validate_permission_mode(fm.permission_mode)?,
         allowed_tools: fm.allowed_tools.unwrap_or_default(),
-    })
+    };
+    validate_agent_definition(&definition).map_err(|error| format!("invalid AGENT.md: {error}"))?;
+    Ok(definition)
 }
 
 fn parse_agent_extension(content: &str) -> Result<AgentExtension, String> {
@@ -555,18 +777,45 @@ fn parse_agent_extension(content: &str) -> Result<AgentExtension, String> {
         None => AgentFrontmatter::default(),
     };
 
-    let agent_providers = match fm.agent_provider {
-        Some(value) => parse_agent_providers(Some(value))?,
-        None => Vec::new(),
-    };
+    let agent_providers = fm
+        .agent_provider
+        .map(|value| parse_agent_providers(Some(value)))
+        .transpose()?;
 
     Ok(AgentExtension {
         prompt: body.trim().to_string(),
+        description: fm.description,
         agent_providers,
         model: fm.model,
-        permission_mode: fm.permission_mode,
+        permission_mode: validate_permission_mode(fm.permission_mode)?,
         allowed_tools: fm.allowed_tools,
     })
+}
+
+fn validate_permission_mode(permission_mode: Option<String>) -> Result<Option<String>, String> {
+    let Some(permission_mode) = permission_mode else {
+        return Ok(None);
+    };
+    if matches!(
+        permission_mode.as_str(),
+        "default" | "acceptEdits" | "dontAsk"
+    ) {
+        Ok(Some(permission_mode))
+    } else {
+        Err(format!(
+            "permission_mode must be one of: default, acceptEdits, dontAsk (got \"{permission_mode}\")"
+        ))
+    }
+}
+
+fn validate_agent_definition(definition: &AgentDefinition) -> Result<(), String> {
+    if definition.name.trim().is_empty() {
+        return Err("name is required and must be a non-empty string".to_string());
+    }
+    if definition.description.trim().is_empty() {
+        return Err("description is required and must be a non-empty string".to_string());
+    }
+    Ok(())
 }
 
 fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
@@ -631,6 +880,7 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
     for stage in raw.stages {
         let RawPipelineStage {
             name,
+            description,
             agent,
             prompt,
             agent_provider,
@@ -662,6 +912,7 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
                 if previous.post.is_none() {
                     previous.post = Some(PipelinePost {
                         name,
+                        description,
                         agent,
                         prompt,
                         agent_provider,
@@ -674,12 +925,14 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
         let post = match (post, post_action) {
             (Some(post), _) => Some(PipelinePost {
                 name: post.name,
+                description: post.description,
                 agent: post.agent,
                 prompt: post.prompt,
                 agent_provider: post.agent_provider,
             }),
             (None, Some(post_action)) => Some(PipelinePost {
                 name: post_action.name,
+                description: post_action.description,
                 agent: post_action.agent,
                 prompt: post_action.prompt,
                 agent_provider: post_action.agent_provider,
@@ -689,6 +942,7 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
 
         stages.push(PipelineStage {
             name,
+            description,
             agent,
             prompt,
             agent_provider,
@@ -700,6 +954,7 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
 
     Ok(PipelineDefinition {
         name: raw.name,
+        description: raw.description,
         stages,
         environments: raw.environments,
     })

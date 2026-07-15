@@ -411,6 +411,13 @@ describe("kanna runtime status reconciliation", () => {
       deleteSetting: async () => {},
       putSetting: async (key, value) => ({ key, value }),
       postOperatorEvents: async () => {},
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      }),
       releaseTaskPorts: async () => {},
       closeTask: async (taskId) => {
         const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);

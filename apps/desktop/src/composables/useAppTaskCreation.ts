@@ -1,6 +1,5 @@
 import { ref, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
-import { parseRepoConfig } from "@kanna/core";
 import type { AgentProvider } from "../types/kanna";
 import type { AgentExecutionType } from "../stores/agentExecutionType";
 
@@ -10,7 +9,10 @@ import { parseRepoInput } from "../utils/parseRepoInput";
 import { defaultReposHome } from "../utils/reposHome";
 import { fileExistsSafe } from "../utils/invokeHelpers";
 import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
-import { fetchDesktopRepoAgentProviders } from "../services/desktopServerClient";
+import {
+  fetchDesktopRepoAgentProviders,
+  fetchDesktopRepoKannaDefinitions,
+} from "../services/desktopServerClient";
 import type { useKannaStore } from "../stores/kanna";
 import { claimLocalTaskSelectionOwnership } from "./localTaskSelectionOwnership";
 import type { useToast } from "./useToast";
@@ -83,15 +85,12 @@ export function useAppTaskCreation({
     const targetRepo = store.repos.find((r) => r.id === targetRepoId);
     const repoPath = targetRepo?.path;
     if (repoPath) {
-      const pipelinesDir = `${repoPath}/.kanna/pipelines`;
-      const [files, configContent, defaultBranch, baseBranches, repoAgentProviders] = await Promise.all([
-        invoke<string[]>("list_dir", { path: pipelinesDir }).catch((error) => {
-          console.debug("[App] no custom pipelines directory available for new task modal:", error);
-          return [] as string[];
-        }),
-        invoke<string>("read_text_file", { path: `${repoPath}/.kanna/config.json` }).catch((error) => {
-          console.debug("[App] no repo config available for new task modal:", error);
-          return "";
+      const [manifest, defaultBranch, baseBranches, repoAgentProviders] = await Promise.all([
+        fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error("[App] failed to load repo definitions for new task modal:", error);
+          toast.error(`${t("toasts.repoDefinitionsFailed")}: ${message}`);
+          return null;
         }),
         invoke<string>("git_default_branch", { repoPath }).catch((error) => {
           console.debug("[App] failed to read default branch for new task modal:", error);
@@ -107,20 +106,8 @@ export function useAppTaskCreation({
         }),
       ]);
       availableAgentProviders.value = repoAgentProviders;
-      availablePipelines.value = files
-        .filter((f) => f.endsWith(".json") && f !== "schema.json")
-        .map((f) => f.replace(/\.json$/, ""));
-      if (configContent) {
-        try {
-          const config = parseRepoConfig(configContent);
-          defaultPipelineName.value = config.pipeline;
-        } catch (error) {
-          console.debug("[App] failed to parse repo config while opening new task modal:", error);
-          defaultPipelineName.value = undefined;
-        }
-      } else {
-        defaultPipelineName.value = undefined;
-      }
+      availablePipelines.value = manifest?.pipelines ?? [];
+      defaultPipelineName.value = manifest?.defaultPipeline;
       repoDefaultBranchName.value = defaultBranch || undefined;
       availableBaseBranches.value = baseBranches;
       defaultBaseBranchName.value =
@@ -254,7 +241,7 @@ export function useAppTaskCreation({
   async function launchSetupTask(repoId: string | null | undefined, repoPath: string) {
     if (!repoId) return;
     try {
-      const agent = await store.loadAgent(repoPath, "setup");
+      const agent = await store.loadAgent(repoId, "setup");
       claimLocalTaskOwnership(repoId);
       await store.createItem(
         repoId,

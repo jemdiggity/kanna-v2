@@ -59,6 +59,7 @@ async fn repo_agent_provider_route_uses_workspace_local_executables() {
             .as_nanos()
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-provider-availability-{unique}"));
+    init_test_git_repo(&repo_root);
     let provider_dir = repo_root.join(".kanna/provider-bin");
     std::fs::create_dir_all(&provider_dir).unwrap();
     std::fs::write(
@@ -74,6 +75,19 @@ async fn repo_agent_provider_route_uses_workspace_local_executables() {
     let mut permissions = std::fs::metadata(&local_antigravity).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&local_antigravity, permissions).unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna/config.json", ".kanna/provider-bin/agy"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "configure workspace-local provider"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    publish_test_origin_main(&repo_root);
 
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
