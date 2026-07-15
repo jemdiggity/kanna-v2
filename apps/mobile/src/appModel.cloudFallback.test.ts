@@ -445,7 +445,10 @@ describe("createAppModel cloud routing", () => {
             : []
         );
       }
-      if (url.pathname === "/v1/tasks" && init?.method === "POST") {
+      if (
+        /^\/v1\/tasks\/[0-9a-f]{32}$/.test(url.pathname) &&
+        init?.method === "PUT"
+      ) {
         lanTaskCreated = true;
         return response({
           taskId: "task-created",
@@ -568,8 +571,10 @@ describe("createAppModel cloud routing", () => {
     });
     expect(terminalSocket.close).not.toHaveBeenCalled();
     expect(fetchImpl).toHaveBeenCalledWith(
-      "http://owner.local:48120/v1/tasks",
-      expect.objectContaining({ method: "POST" })
+      expect.stringMatching(
+        /^http:\/\/owner\.local:48120\/v1\/tasks\/[0-9a-f]{32}$/
+      ),
+      expect.objectContaining({ method: "PUT" })
     );
     expect(terminalSocket.send.mock.calls.map(([frame]) => JSON.parse(frame))).toContainEqual({
       type: "attach",
@@ -610,7 +615,10 @@ describe("createAppModel cloud routing", () => {
     const observeTaskAgent = vi.fn(() => mergeAgentSubscription);
     const invokeDesktop = vi.fn<RelayDesktopClient["invokeDesktop"]>(
       async (request) => {
-        if (request.method === "POST" && request.path === "/v1/tasks") {
+        if (
+          request.method === "PUT" &&
+          /^\/v1\/tasks\/[0-9a-f]{32}$/.test(request.path)
+        ) {
           return {
             taskId: "task-created",
             repoId: "repo-1",

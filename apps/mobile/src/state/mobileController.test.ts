@@ -9,7 +9,7 @@ import type {
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../lib/api/client";
-import { createKannaClient } from "../lib/api/client";
+import { createKannaClient, TaskCreationError } from "../lib/api/client";
 import type { TaskSummary } from "../lib/api/types";
 import { createCloudLanClient } from "../lib/sources/cloudLanClient";
 import { createRemoteTransport, type RemoteDesktopInvoker } from "../lib/transports/remoteTransport";
@@ -188,6 +188,7 @@ function createAuthSessionMock(): MobileAuthSession {
 describe("createMobileController", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("bootstraps connection, desktops, repos, and recent tasks", async () => {
@@ -2171,6 +2172,452 @@ describe("createMobileController", () => {
     expect(store.getState().composerPrompt).toBe("");
   });
 
+  it("issues one durable create while an ordinary submission is pending", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const pendingCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    client.createTask.mockReturnValue(pendingCreate.promise);
+    const persistSessionContext = vi.fn().mockResolvedValue(undefined);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "0123456789abcdef0123456789abcdef",
+      persistSessionContext
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+
+    const firstCreate = controller.createTask();
+    const secondCreate = controller.createTask();
+    await flushMicrotasks();
+
+    expect(secondCreate).toBe(firstCreate);
+    expect(persistSessionContext).toHaveBeenCalledOnce();
+    expect(client.createTask).toHaveBeenCalledOnce();
+    expect(client.createTask).toHaveBeenCalledWith({
+      taskId: "0123456789abcdef0123456789abcdef",
+      repoId: "repo-2",
+      prompt: "Ship mobile shell",
+      desktopId: "desktop-1",
+      agentProvider: "claude",
+      agentType: "pty"
+    });
+
+    pendingCreate.resolve({
+      taskId: "0123456789abcdef0123456789abcdef",
+      repoId: "repo-2",
+      title: "Ship mobile shell",
+      stage: "in progress"
+    });
+    await firstCreate;
+  });
+
+  it("falls back to a valid unique-shaped identity when native crypto is unavailable", async () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: () => {
+        throw new Error("randomUUID unavailable");
+      },
+      getRandomValues: () => {
+        throw new Error("getRandomValues unavailable");
+      }
+    });
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Use fallback identity");
+
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: expect.stringMatching(/^[0-9a-f]{32}$/)
+      })
+    );
+  });
+
+  it("does not dispatch create when persisting the frozen attempt fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const persistenceBarrier = createDeferred<void>();
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "11111111111111111111111111111111",
+      persistSessionContext: () => persistenceBarrier.promise
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Persist before dispatch");
+
+    const createPromise = controller.createTask();
+    await flushMicrotasks();
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      taskCreationPhase: "pending",
+      pendingTaskCreation: {
+        taskId: "11111111111111111111111111111111"
+      }
+    });
+
+    persistenceBarrier.reject(new Error("Could not save pending task"));
+    await createPromise;
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerPrompt: "Persist before dispatch",
+      composerErrorMessage: "Could not save pending task",
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null
+    });
+  });
+
+  it("holds immediate recovery behind the live attempt persistence barrier", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const persistenceBarrier = createDeferred<void>();
+    const originalCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    const recoveryCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    client.createTask
+      .mockReturnValueOnce(originalCreate.promise)
+      .mockReturnValueOnce(recoveryCreate.promise);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "99999999999999999999999999999999",
+      persistSessionContext: () => persistenceBarrier.promise
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Persist before either request");
+
+    const originalPromise = controller.createTask();
+    const firstRecovery = controller.recoverTaskCreation();
+    const secondRecovery = controller.recoverTaskCreation();
+    await flushMicrotasks();
+
+    expect(secondRecovery).toBe(firstRecovery);
+    expect(client.createTask).not.toHaveBeenCalled();
+
+    persistenceBarrier.resolve();
+    await flushMicrotasks();
+
+    expect(client.createTask).toHaveBeenCalledTimes(2);
+    for (const [request] of client.createTask.mock.calls) {
+      expect(request).toEqual({
+        taskId: "99999999999999999999999999999999",
+        repoId: "repo-2",
+        prompt: "Persist before either request",
+        desktopId: "desktop-1",
+        agentProvider: "claude",
+        agentType: "pty"
+      });
+    }
+
+    recoveryCreate.resolve({
+      taskId: "99999999999999999999999999999999",
+      repoId: "repo-2",
+      title: "Persist before either request",
+      stage: "in progress"
+    });
+    await firstRecovery;
+    originalCreate.resolve({
+      taskId: "99999999999999999999999999999999",
+      repoId: "repo-2",
+      title: "Persist before either request",
+      stage: "in progress"
+    });
+    await originalPromise;
+  });
+
+  it("does not let immediate recovery suppress a rejected persistence barrier", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const persistenceBarrier = createDeferred<void>();
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      persistSessionContext: () => persistenceBarrier.promise
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Stay editable when save fails");
+
+    const originalPromise = controller.createTask();
+    const recoveryPromise = controller.recoverTaskCreation();
+    await flushMicrotasks();
+
+    expect(client.createTask).not.toHaveBeenCalled();
+
+    persistenceBarrier.reject(new Error("Pending attempt was not saved"));
+    await Promise.all([originalPromise, recoveryPromise]);
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerPrompt: "Stay editable when save fails",
+      composerErrorMessage: "Pending attempt was not saved",
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null
+    });
+  });
+
+  it("recovers a backgrounded uncertain create with the exact frozen identity", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const originalCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    const recoveryCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    client.createTask
+      .mockReturnValueOnce(originalCreate.promise)
+      .mockReturnValueOnce(recoveryCreate.promise);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "22222222222222222222222222222222",
+      persistSessionContext: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Recover exactly once");
+    void controller.createTask();
+    await flushMicrotasks();
+
+    controller.backgroundTaskCreation();
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: false,
+      taskCreationPhase: "pending",
+      pendingTaskCreation: {
+        taskId: "22222222222222222222222222222222",
+        repoId: "repo-2",
+        prompt: "Recover exactly once",
+        desktopId: "desktop-1",
+        agentProvider: "claude"
+      }
+    });
+
+    const firstRecovery = controller.recoverTaskCreation();
+    const secondRecovery = controller.recoverTaskCreation();
+    await flushMicrotasks();
+
+    expect(secondRecovery).toBe(firstRecovery);
+    expect(client.createTask).toHaveBeenCalledTimes(2);
+    expect(client.createTask).toHaveBeenLastCalledWith({
+      taskId: "22222222222222222222222222222222",
+      repoId: "repo-2",
+      prompt: "Recover exactly once",
+      desktopId: "desktop-1",
+      agentProvider: "claude",
+      agentType: "pty"
+    });
+    expect(store.getState().taskCreationPhase).toBe("recovering");
+
+    recoveryCreate.resolve({
+      taskId: "22222222222222222222222222222222",
+      repoId: "repo-2",
+      title: "Recover exactly once",
+      stage: "in progress"
+    });
+    await firstRecovery;
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: false,
+      selectedTaskId: null,
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null
+    });
+    expect(store.getState().recentTasks[0]?.id).toBe(
+      "22222222222222222222222222222222"
+    );
+  });
+
+  it("reopens a restarted uncertain attempt without allowing its identity to drift", async () => {
+    const store = createSessionStore();
+    const pendingTaskCreation = {
+      taskId: "33333333333333333333333333333333",
+      repoId: "repo-2",
+      prompt: "Resume this exact task",
+      desktopId: "desktop-2",
+      agentProvider: "codex" as const
+    };
+    store.hydrateContext({
+      selectedDesktopId: "desktop-1",
+      selectedRepoId: "repo-2",
+      selectedTaskId: null,
+      activeView: "tasks",
+      pendingTaskCreation
+    });
+    const client = createClientMock();
+    client.createTask.mockResolvedValueOnce({
+      taskId: pendingTaskCreation.taskId,
+      repoId: pendingTaskCreation.repoId,
+      title: pendingTaskCreation.prompt,
+      stage: "in progress"
+    });
+    const controller = createMobileController(client, store);
+
+    controller.openComposer();
+    controller.updateComposerPrompt("Do not replace this prompt");
+    controller.selectComposerDesktop("desktop-1");
+    controller.selectComposerAgentProvider("claude");
+    controller.closeComposer();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: false,
+      composerPrompt: pendingTaskCreation.prompt,
+      composerRepoId: pendingTaskCreation.repoId,
+      composerDesktopId: pendingTaskCreation.desktopId,
+      composerAgentProvider: pendingTaskCreation.agentProvider,
+      taskCreationPhase: "uncertain",
+      pendingTaskCreation
+    });
+
+    controller.openComposer();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerPrompt: pendingTaskCreation.prompt,
+      composerRepoId: pendingTaskCreation.repoId,
+      composerDesktopId: pendingTaskCreation.desktopId,
+      composerAgentProvider: pendingTaskCreation.agentProvider,
+      taskCreationPhase: "uncertain",
+      pendingTaskCreation
+    });
+
+    await controller.recoverTaskCreation();
+
+    expect(client.createTask).toHaveBeenCalledOnce();
+    expect(client.createTask).toHaveBeenCalledWith({
+      taskId: pendingTaskCreation.taskId,
+      repoId: pendingTaskCreation.repoId,
+      prompt: pendingTaskCreation.prompt,
+      desktopId: pendingTaskCreation.desktopId,
+      agentProvider: pendingTaskCreation.agentProvider,
+      agentType: "pty"
+    });
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: false,
+      selectedTaskId: pendingTaskCreation.taskId,
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null
+    });
+  });
+
+  it("does not let the original flight clear an in-progress recovery", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const originalCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    const recoveryCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    client.createTask
+      .mockReturnValueOnce(originalCreate.promise)
+      .mockReturnValueOnce(recoveryCreate.promise);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "66666666666666666666666666666666"
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Recover despite late original failure");
+    const originalPromise = controller.createTask();
+    await flushMicrotasks();
+    const recoveryPromise = controller.recoverTaskCreation();
+    await flushMicrotasks();
+
+    originalCreate.reject(
+      new TaskCreationError("not-created", "Original path rejected")
+    );
+    await originalPromise;
+
+    expect(store.getState()).toMatchObject({
+      taskCreationPhase: "recovering",
+      pendingTaskCreation: {
+        taskId: "66666666666666666666666666666666"
+      }
+    });
+
+    recoveryCreate.resolve({
+      taskId: "66666666666666666666666666666666",
+      repoId: "repo-2",
+      title: "Recovered task",
+      stage: "in progress"
+    });
+    await recoveryPromise;
+
+    expect(store.getState()).toMatchObject({
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null,
+      selectedTaskId: "66666666666666666666666666666666"
+    });
+  });
+
+  it("keeps an attempt uncertain after recovery ambiguity and a later definite original failure", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const originalCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    const recoveryCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    client.createTask
+      .mockReturnValueOnce(originalCreate.promise)
+      .mockReturnValueOnce(recoveryCreate.promise);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "88888888888888888888888888888888"
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Keep recovery ambiguity durable");
+    const originalPromise = controller.createTask();
+    await flushMicrotasks();
+    const recoveryPromise = controller.recoverTaskCreation();
+    recoveryCreate.reject(new Error("Recovery response was lost"));
+    await recoveryPromise;
+
+    expect(store.getState()).toMatchObject({
+      taskCreationPhase: "uncertain",
+      pendingTaskCreation: {
+        taskId: "88888888888888888888888888888888"
+      }
+    });
+
+    originalCreate.reject(
+      new TaskCreationError("not-created", "Original request was rejected")
+    );
+    await originalPromise;
+
+    expect(store.getState()).toMatchObject({
+      taskCreationPhase: "uncertain",
+      pendingTaskCreation: {
+        taskId: "88888888888888888888888888888888",
+        prompt: "Keep recovery ambiguity durable"
+      }
+    });
+  });
+
   it("strictly removes a raw create result that is absent from the next live snapshot", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -2552,6 +2999,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
+      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
@@ -2638,6 +3086,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
+      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
@@ -2728,6 +3177,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
+      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-2",
@@ -2764,7 +3214,12 @@ describe("createMobileController", () => {
     const createPromise = controller.createTask();
 
     expect(store.getState()).toMatchObject({
-      isComposerSubmitting: true,
+      taskCreationPhase: "pending",
+      pendingTaskCreation: {
+        taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+        repoId: "repo-2",
+        prompt: "Ship mobile shell"
+      },
       composerErrorMessage: null
     });
 
@@ -2776,7 +3231,80 @@ describe("createMobileController", () => {
     });
     await createPromise;
 
-    expect(store.getState().isComposerSubmitting).toBe(false);
+    expect(store.getState()).toMatchObject({
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null
+    });
+  });
+
+  it("keeps the exact attempt uncertain when the create result is ambiguous", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.createTask.mockRejectedValueOnce(new Error("Desktop unavailable"));
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "44444444444444444444444444444444"
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+    controller.selectComposerDesktop("desktop-2");
+    controller.selectComposerAgentProvider("codex");
+
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith({
+      taskId: "44444444444444444444444444444444",
+      repoId: "repo-2",
+      prompt: "Ship mobile shell",
+      desktopId: "desktop-2",
+      agentProvider: "codex",
+      agentType: "pty"
+    });
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: null,
+      isComposerOpen: true,
+      composerPrompt: "Ship mobile shell",
+      composerDesktopId: "desktop-2",
+      composerAgentProvider: "codex",
+      composerErrorMessage: "Desktop unavailable",
+      taskCreationPhase: "uncertain",
+      pendingTaskCreation: {
+        taskId: "44444444444444444444444444444444",
+        repoId: "repo-2",
+        prompt: "Ship mobile shell",
+        desktopId: "desktop-2",
+        agentProvider: "codex"
+      }
+    });
+  });
+
+  it("restores the editable draft after a definite pre-creation failure", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.createTask.mockRejectedValueOnce(
+      new TaskCreationError("not-created", "Prompt was rejected")
+    );
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "55555555555555555555555555555555"
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Fix the prompt and retry");
+
+    await controller.createTask();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerPrompt: "Fix the prompt and retry",
+      composerErrorMessage: "Prompt was rejected",
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null
+    });
   });
 
   it("shows missing task details as a composer error instead of a global connection error", async () => {
@@ -2796,7 +3324,8 @@ describe("createMobileController", () => {
       errorMessage: null,
       isComposerOpen: true,
       composerErrorMessage: "Choose a repo and enter a task prompt first.",
-      isComposerSubmitting: false
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null
     });
   });
 
@@ -2816,6 +3345,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
+      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",

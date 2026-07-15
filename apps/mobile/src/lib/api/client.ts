@@ -89,6 +89,24 @@ export interface KannaClient {
   createPairingSession(): Promise<PairingSession>;
 }
 
+export type TaskCreationOutcome = "not-created" | "unknown";
+
+export class TaskCreationError extends Error {
+  readonly outcome: TaskCreationOutcome;
+  readonly cause: unknown;
+
+  constructor(
+    outcome: TaskCreationOutcome,
+    message: string,
+    cause?: unknown
+  ) {
+    super(message);
+    this.name = "TaskCreationError";
+    this.outcome = outcome;
+    this.cause = cause;
+  }
+}
+
 export function createKannaClient(transport: KannaTransport): KannaClient {
   return {
     ...(transport.getTaskRouteIdentity
@@ -103,7 +121,20 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     listRepoTasks: (repoId) => transport.listRepoTasks(repoId),
     listRecentTasks: () => transport.listRecentTasks(),
     searchTasks: (query) => transport.searchTasks(query),
-    createTask: (input) => transport.createTask(input),
+    createTask: async (input) => {
+      try {
+        return await transport.createTask(input);
+      } catch (error) {
+        if (error instanceof TaskCreationError) {
+          throw error;
+        }
+        throw new TaskCreationError(
+          "unknown",
+          error instanceof Error ? error.message : String(error),
+          error
+        );
+      }
+    },
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
     markTaskRead: (taskId) => transport.markTaskRead(taskId),

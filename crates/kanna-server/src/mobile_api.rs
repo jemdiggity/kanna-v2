@@ -651,6 +651,19 @@ mod tests {
     }
 
     #[test]
+    fn create_task_request_does_not_retain_body_task_id() {
+        let request: CreateTaskRequest = serde_json::from_value(json!({
+            "taskId": "0123456789abcdef",
+            "repoId": "repo-1",
+            "prompt": "Build the view"
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(request).unwrap();
+        assert!(serialized.get("taskId").is_none());
+    }
+
+    #[test]
     fn create_task_request_accepts_display_name_snake_case_alias() {
         let request: CreateTaskRequest = serde_json::from_value(json!({
             "repoId": "repo-1",

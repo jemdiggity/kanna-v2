@@ -9,9 +9,15 @@ import type {
   TaskAgentSubscription,
   TaskTerminalSubscription
 } from "../lib/api/client";
+import { TaskCreationError } from "../lib/api/client";
 import type { MobileAuthSession } from "../lib/firebase/auth";
 import { isTaskDetailVisible } from "../appShell";
-import type { ComposerAgentProvider, MobileView, SessionStore } from "./sessionStore";
+import type {
+  ComposerAgentProvider,
+  MobileView,
+  PendingTaskCreation,
+  SessionStore
+} from "./sessionStore";
 
 export interface MobileController {
   bootstrap(): Promise<void>;
@@ -33,6 +39,8 @@ export interface MobileController {
   selectComposerAgentProvider(provider: ComposerAgentProvider): void;
   searchTasks(query: string): Promise<void>;
   createTask(): Promise<void>;
+  backgroundTaskCreation(): void;
+  recoverTaskCreation(): Promise<void>;
   runMergeAgent(taskId: string): Promise<void>;
   advanceDesktopTaskStage(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
@@ -61,6 +69,51 @@ export interface MobileControllerOptions {
     ) => void,
     onError?: (error: unknown) => void,
   ) => () => void;
+  createTaskId?: () => string;
+  persistSessionContext?: () => Promise<void>;
+}
+
+let fallbackTaskCreationCounter = 0;
+
+function generateTaskCreationId(): string {
+  const cryptoObject = (globalThis as {
+    crypto?: {
+      randomUUID?: () => string;
+      getRandomValues?: (values: Uint8Array) => Uint8Array;
+    };
+  }).crypto;
+  try {
+    const uuid = cryptoObject?.randomUUID?.().replace(/-/g, "").toLowerCase();
+    if (uuid && /^[0-9a-f]{32}$/.test(uuid)) {
+      return uuid;
+    }
+  } catch {
+    // Some React Native runtimes expose a partial crypto shim. Try the next
+    // source before falling back to the time/counter identity below.
+  }
+
+  try {
+    if (cryptoObject?.getRandomValues) {
+      const bytes = cryptoObject.getRandomValues(new Uint8Array(16));
+      return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {
+    // Fall through to a process-local collision-resistant identity.
+  }
+
+  fallbackTaskCreationCounter = (fallbackTaskCreationCounter + 1) >>> 0;
+  const timestamp = Date.now().toString(16).padStart(12, "0").slice(-12);
+  const counter = fallbackTaskCreationCounter
+    .toString(16)
+    .padStart(8, "0")
+    .slice(-8);
+  let entropy = "";
+  while (entropy.length < 12) {
+    entropy += Math.floor(Math.random() * 0x100000000)
+      .toString(16)
+      .padStart(8, "0");
+  }
+  return `${timestamp}${counter}${entropy.slice(0, 12)}`;
 }
 
 export function createMobileController(
@@ -107,6 +160,16 @@ export function createMobileController(
   let lastExplicitRepos: RepoSummary[] = [];
   let desktopCollectionsRevision = 0;
   let refreshDesktopsInFlight: Promise<void> | null = null;
+  let ordinaryTaskCreationFlight:
+    | { taskId: string; promise: Promise<void> }
+    | null = null;
+  let recoveryTaskCreationFlight:
+    | { taskId: string; promise: Promise<void> }
+    | null = null;
+  let taskCreationPersistenceFlight:
+    | { taskId: string; promise: Promise<void> }
+    | null = null;
+  let recoveryStartedTaskId: string | null = null;
   const pendingTaskIdentities = new Map<
     string,
     {
@@ -1090,6 +1153,69 @@ export function createMobileController(
       }
     };
 
+  const submitFrozenTaskCreation = (attempt: PendingTaskCreation) =>
+    client.createTask({
+      taskId: attempt.taskId,
+      repoId: attempt.repoId,
+      prompt: attempt.prompt,
+      desktopId: attempt.desktopId,
+      agentProvider: attempt.agentProvider,
+      agentType: "pty"
+    });
+
+  const completeTaskCreation = (
+    attempt: PendingTaskCreation,
+    created: CreateTaskResponse
+  ) => {
+    const currentState = store.getState();
+    if (currentState.pendingTaskCreation?.taskId !== attempt.taskId) {
+      return;
+    }
+
+    const shouldOpenCreatedTask = currentState.isComposerOpen;
+    const createdRoute = getClientResolvedTaskRoute(created);
+    if (createdRoute) {
+      pendingTaskIdentities.set(created.taskId, createdRoute);
+    }
+    taskCollectionsRevision += 1;
+    const createdTask = mapCreatedTask(created);
+    store.setRecentTasks([
+      createdTask,
+      ...currentState.recentTasks.filter((task) => task.id !== createdTask.id)
+    ]);
+    if (currentState.selectedRepoId === createdTask.repoId) {
+      store.setRepoTasks([
+        createdTask,
+        ...currentState.repoTasks.filter((task) => task.id !== createdTask.id)
+      ]);
+    }
+    store.upsertRepoCreationProfile({
+      repoId: attempt.repoId,
+      desktopId: attempt.desktopId,
+      agentProvider: attempt.agentProvider,
+      updatedAt: new Date().toISOString()
+    });
+    store.setTaskCreationState({
+      phase: "idle",
+      pendingTaskCreation: null
+    });
+    if (taskCreationPersistenceFlight?.taskId === attempt.taskId) {
+      taskCreationPersistenceFlight = null;
+    }
+    if (recoveryStartedTaskId === attempt.taskId) {
+      recoveryStartedTaskId = null;
+    }
+    store.setComposerState(false, "");
+    setUnownedErrorMessage(null);
+    if (shouldOpenCreatedTask) {
+      taskCollectionsRevision += 1;
+      store.setSelectedTask(createdTask.id);
+      store.setActiveView("tasks");
+      reconcileSelectedTaskRead();
+      startTaskView(createdTask.id);
+    }
+  };
+
   return {
     bootstrap,
 
@@ -1197,6 +1323,14 @@ export function createMobileController(
 
     openComposer() {
       const state = store.getState();
+      const pendingTaskCreation = state.pendingTaskCreation;
+      if (pendingTaskCreation) {
+        store.setComposerRepo(pendingTaskCreation.repoId);
+        store.setComposerDesktop(pendingTaskCreation.desktopId);
+        store.setComposerAgentProvider(pendingTaskCreation.agentProvider);
+        store.setComposerState(true, pendingTaskCreation.prompt);
+        return;
+      }
       const selectedRepoId = state.selectedRepoId;
       const profile = selectedRepoId
         ? state.repoCreationProfiles.find((candidate) => candidate.repoId === selectedRepoId)
@@ -1208,6 +1342,7 @@ export function createMobileController(
             ? inferComposerDesktopId(selectedRepoId)
             : null;
 
+      store.setComposerRepo(selectedRepoId);
       store.setComposerDesktop(composerDesktopId);
       store.setComposerAgentProvider(profile?.agentProvider ?? "claude");
       store.setComposerOptionsExpanded(!composerDesktopId);
@@ -1215,22 +1350,47 @@ export function createMobileController(
     },
 
     closeComposer() {
+      const state = store.getState();
+      if (state.pendingTaskCreation) {
+        store.setComposerState(false, state.composerPrompt);
+        return;
+      }
       store.setComposerState(false, "");
     },
 
+    backgroundTaskCreation() {
+      const state = store.getState();
+      if (!state.pendingTaskCreation) {
+        return;
+      }
+      store.setComposerState(false, state.composerPrompt);
+    },
+
     updateComposerPrompt(prompt) {
+      if (store.getState().pendingTaskCreation) {
+        return;
+      }
       store.setComposerState(store.getState().isComposerOpen, prompt);
     },
 
     selectComposerDesktop(desktopId) {
+      if (store.getState().pendingTaskCreation) {
+        return;
+      }
       store.setComposerDesktop(desktopId);
     },
 
     setComposerOptionsExpanded(isExpanded) {
+      if (store.getState().pendingTaskCreation) {
+        return;
+      }
       store.setComposerOptionsExpanded(isExpanded);
     },
 
     selectComposerAgentProvider(provider) {
+      if (store.getState().pendingTaskCreation) {
+        return;
+      }
       store.setComposerAgentProvider(provider);
     },
 
@@ -1260,12 +1420,20 @@ export function createMobileController(
       }
     },
 
-    async createTask() {
+    createTask() {
       const state = store.getState();
-      if (!state.selectedRepoId || !state.composerPrompt.trim()) {
+      if (state.pendingTaskCreation) {
+        if (
+          ordinaryTaskCreationFlight?.taskId ===
+          state.pendingTaskCreation.taskId
+        ) {
+          return ordinaryTaskCreationFlight.promise;
+        }
+        return Promise.resolve();
+      }
+      if (!state.composerRepoId || !state.composerPrompt.trim()) {
         store.setComposerErrorMessage("Choose a repo and enter a task prompt first.");
-        store.setComposerSubmitting(false);
-        return;
+        return Promise.resolve();
       }
 
       const composerDesktopId = resolveKnownDesktopId(state.composerDesktopId);
@@ -1273,53 +1441,142 @@ export function createMobileController(
         store.setComposerDesktop(null);
         store.setComposerErrorMessage("Choose a machine for this repo first.");
         store.setComposerOptionsExpanded(true);
-        store.setComposerSubmitting(false);
-        return;
+        return Promise.resolve();
       }
 
-      store.setComposerSubmitting(true);
+      const attempt: PendingTaskCreation = {
+        taskId: (options.createTaskId ?? generateTaskCreationId)(),
+        repoId: state.composerRepoId,
+        prompt: state.composerPrompt.trim(),
+        desktopId: composerDesktopId,
+        agentProvider: state.composerAgentProvider
+      };
+      recoveryStartedTaskId = null;
+      store.setComposerRepo(attempt.repoId);
+      store.setTaskCreationState({
+        phase: "pending",
+        pendingTaskCreation: attempt
+      });
       store.setComposerErrorMessage(null);
+      let persistenceReady: Promise<void>;
       try {
-        const created = await client.createTask({
-          repoId: state.selectedRepoId,
-          prompt: state.composerPrompt.trim(),
-          desktopId: composerDesktopId,
-          agentProvider: state.composerAgentProvider,
-          agentType: "pty"
-        });
-        const createdRoute = getClientResolvedTaskRoute(created);
-        if (createdRoute) {
-          pendingTaskIdentities.set(created.taskId, createdRoute);
-        }
-        taskCollectionsRevision += 1;
-        const createdTask = mapCreatedTask(created);
-        const recentTasks = [
-          createdTask,
-          ...state.recentTasks.filter((task) => task.id !== createdTask.id)
-        ];
-        const repoTasks =
-          state.selectedRepoId === createdTask.repoId
-            ? [createdTask, ...state.repoTasks.filter((task) => task.id !== createdTask.id)]
-            : state.repoTasks;
-
-        store.setRecentTasks(recentTasks);
-        store.setRepoTasks(repoTasks);
-        store.upsertRepoCreationProfile({
-          repoId: state.selectedRepoId,
-          desktopId: composerDesktopId,
-          agentProvider: state.composerAgentProvider,
-          updatedAt: new Date().toISOString()
-        });
-        store.setComposerState(false, "");
-        setUnownedErrorMessage(null);
-        this.openTask(createdTask.id);
+        persistenceReady =
+          options.persistSessionContext?.() ?? Promise.resolve();
       } catch (error) {
-        store.setComposerErrorMessage(
-          error instanceof Error ? error.message : "Task creation failed"
-        );
-      } finally {
-        store.setComposerSubmitting(false);
+        persistenceReady = Promise.reject(error);
       }
+      taskCreationPersistenceFlight = {
+        taskId: attempt.taskId,
+        promise: persistenceReady
+      };
+      let taskCreationPromise!: Promise<void>;
+      taskCreationPromise = (async () => {
+        let requestDispatched = false;
+        try {
+          await persistenceReady;
+          requestDispatched = true;
+          const created = await submitFrozenTaskCreation(attempt);
+          completeTaskCreation(attempt, created);
+        } catch (error) {
+          const currentAttempt = store.getState().pendingTaskCreation;
+          if (currentAttempt?.taskId !== attempt.taskId) {
+            return;
+          }
+          if (recoveryStartedTaskId === attempt.taskId) {
+            return;
+          }
+          if (
+            !requestDispatched ||
+            (error instanceof TaskCreationError && error.outcome === "not-created")
+          ) {
+            if (taskCreationPersistenceFlight?.taskId === attempt.taskId) {
+              taskCreationPersistenceFlight = null;
+            }
+            store.setTaskCreationState({
+              phase: "idle",
+              pendingTaskCreation: null
+            });
+          } else {
+            store.setTaskCreationState({
+              phase: "uncertain",
+              pendingTaskCreation: attempt
+            });
+          }
+          store.setComposerErrorMessage(
+            error instanceof Error ? error.message : "Task creation failed"
+          );
+        }
+      })().finally(() => {
+        if (ordinaryTaskCreationFlight?.promise === taskCreationPromise) {
+          ordinaryTaskCreationFlight = null;
+        }
+      });
+      ordinaryTaskCreationFlight = {
+        taskId: attempt.taskId,
+        promise: taskCreationPromise
+      };
+      return taskCreationPromise;
+    },
+
+    recoverTaskCreation() {
+      const attempt = store.getState().pendingTaskCreation;
+      if (!attempt) {
+        return Promise.resolve();
+      }
+      if (recoveryTaskCreationFlight?.taskId === attempt.taskId) {
+        return recoveryTaskCreationFlight.promise;
+      }
+
+      const persistenceReady =
+        taskCreationPersistenceFlight?.taskId === attempt.taskId
+          ? taskCreationPersistenceFlight.promise
+          : Promise.resolve();
+      store.setTaskCreationState({
+        phase: "recovering",
+        pendingTaskCreation: attempt
+      });
+      store.setComposerErrorMessage(null);
+      let recoveryPromise!: Promise<void>;
+      recoveryPromise = (async () => {
+        let requestDispatched = false;
+        try {
+          await persistenceReady;
+          if (
+            store.getState().pendingTaskCreation?.taskId !== attempt.taskId
+          ) {
+            return;
+          }
+          recoveryStartedTaskId = attempt.taskId;
+          requestDispatched = true;
+          const created = await submitFrozenTaskCreation(attempt);
+          completeTaskCreation(attempt, created);
+        } catch (error) {
+          if (
+            store.getState().pendingTaskCreation?.taskId !== attempt.taskId
+          ) {
+            return;
+          }
+          if (!requestDispatched) {
+            return;
+          }
+          store.setTaskCreationState({
+            phase: "uncertain",
+            pendingTaskCreation: attempt
+          });
+          store.setComposerErrorMessage(
+            error instanceof Error ? error.message : "Task recovery failed"
+          );
+        }
+      })().finally(() => {
+        if (recoveryTaskCreationFlight?.promise === recoveryPromise) {
+          recoveryTaskCreationFlight = null;
+        }
+      });
+      recoveryTaskCreationFlight = {
+        taskId: attempt.taskId,
+        promise: recoveryPromise
+      };
+      return recoveryPromise;
     },
 
     async runMergeAgent(taskId) {

@@ -16,6 +16,124 @@ function createMemoryStorage(): StorageAdapter & { values: Map<string, string> }
 }
 
 describe("createSessionPersistence", () => {
+  it("round-trips a valid pending task creation attempt", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    const pendingTaskCreation = {
+      taskId: "a1b2c3d4",
+      repoId: "repo-1",
+      prompt: "Add durable mobile task recovery",
+      desktopId: "desktop-e2e",
+      agentProvider: "codex" as const
+    };
+
+    await persistence.save({
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      activeView: "tasks",
+      pendingTaskCreation
+    });
+
+    await expect(persistence.load()).resolves.toMatchObject({
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: "repo-1",
+      pendingTaskCreation
+    });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["non-object", "pending"],
+    ["short task id", {
+      taskId: "abcdef0",
+      repoId: "repo-1",
+      prompt: "Build it",
+      desktopId: "desktop-e2e",
+      agentProvider: "claude"
+    }],
+    ["uppercase task id", {
+      taskId: "ABCDEF12",
+      repoId: "repo-1",
+      prompt: "Build it",
+      desktopId: "desktop-e2e",
+      agentProvider: "claude"
+    }],
+    ["overlong task id", {
+      taskId: "a".repeat(65),
+      repoId: "repo-1",
+      prompt: "Build it",
+      desktopId: "desktop-e2e",
+      agentProvider: "claude"
+    }],
+    ["blank repo", {
+      taskId: "abcdef12",
+      repoId: "   ",
+      prompt: "Build it",
+      desktopId: "desktop-e2e",
+      agentProvider: "claude"
+    }],
+    ["blank prompt", {
+      taskId: "abcdef12",
+      repoId: "repo-1",
+      prompt: "\n\t",
+      desktopId: "desktop-e2e",
+      agentProvider: "claude"
+    }],
+    ["blank desktop", {
+      taskId: "abcdef12",
+      repoId: "repo-1",
+      prompt: "Build it",
+      desktopId: " ",
+      agentProvider: "claude"
+    }],
+    ["unknown provider", {
+      taskId: "abcdef12",
+      repoId: "repo-1",
+      prompt: "Build it",
+      desktopId: "desktop-e2e",
+      agentProvider: "future-agent"
+    }]
+  ])("loads a %s pending attempt as null without discarding context", async (_label, pendingTaskCreation) => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    storage.values.set("kanna.mobile.context.v1", JSON.stringify({
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: "repo-1",
+      selectedTaskId: "task-existing",
+      activeView: "recent",
+      pendingTaskCreation
+    }));
+
+    await expect(persistence.load()).resolves.toMatchObject({
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: "repo-1",
+      selectedTaskId: "task-existing",
+      activeView: "recent",
+      pendingTaskCreation: null
+    });
+  });
+
+  it("accepts a 64-character lowercase hexadecimal task id", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    storage.values.set("kanna.mobile.context.v1", JSON.stringify({
+      selectedDesktopId: null,
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks",
+      pendingTaskCreation: {
+        taskId: "f".repeat(64),
+        repoId: "repo-1",
+        prompt: "Build it",
+        desktopId: "desktop-e2e",
+        agentProvider: "opencode"
+      }
+    }));
+
+    expect((await persistence.load())?.pendingTaskCreation?.taskId).toBe("f".repeat(64));
+  });
+
   it("preserves a trusted desktop identity without cached LAN endpoints", async () => {
     const storage = createMemoryStorage();
     const persistence = createSessionPersistence(storage);

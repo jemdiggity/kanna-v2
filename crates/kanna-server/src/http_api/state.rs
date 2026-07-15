@@ -2,8 +2,9 @@ use crate::config::Config;
 use crate::pairing::{self, PairingSession};
 use kanna_agent_protocol::{ServerFrame, StateChangeScope};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, Mutex};
 
 #[derive(Clone)]
@@ -11,6 +12,7 @@ pub struct AppState {
     pub(super) config: Config,
     pub(super) pairing_session: Arc<Mutex<Option<PairingSession>>>,
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
+    requested_task_creation_flights: Arc<StdMutex<HashSet<String>>>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
@@ -28,6 +30,20 @@ pub struct AppState {
     pub(super) stage_completer: Option<TestStageCompleter>,
     #[cfg(test)]
     pub(super) revision_requester: Option<TestRevisionRequester>,
+}
+
+pub(super) struct RequestedTaskCreationFlight {
+    task_id: String,
+    flights: Arc<StdMutex<HashSet<String>>>,
+}
+
+impl Drop for RequestedTaskCreationFlight {
+    fn drop(&mut self) {
+        self.flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.task_id);
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +142,7 @@ impl AppState {
             config,
             pairing_session: Arc::new(Mutex::new(None)),
             session_replacements: crate::session_replacements::SessionReplacements::default(),
+            requested_task_creation_flights: Arc::new(StdMutex::new(HashSet::new())),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
             task_creator: None,
@@ -160,6 +177,23 @@ impl AppState {
 
     pub fn publish_state_changed(&self, scope: StateChangeScope) {
         let _ = self.state_changes.send(ServerFrame::StateChanged { scope });
+    }
+
+    pub(super) fn begin_requested_task_creation(
+        &self,
+        task_id: &str,
+    ) -> Option<RequestedTaskCreationFlight> {
+        let mut flights = self
+            .requested_task_creation_flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !flights.insert(task_id.to_string()) {
+            return None;
+        }
+        Some(RequestedTaskCreationFlight {
+            task_id: task_id.to_string(),
+            flights: Arc::clone(&self.requested_task_creation_flights),
+        })
     }
 
     #[cfg(test)]

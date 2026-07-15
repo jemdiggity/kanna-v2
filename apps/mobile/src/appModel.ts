@@ -1,4 +1,8 @@
-import { createKannaClient, type KannaClient } from "./lib/api/client";
+import {
+  createKannaClient,
+  TaskCreationError,
+  type KannaClient
+} from "./lib/api/client";
 import {
   createBonjourBrowser,
   type BonjourBrowser
@@ -216,7 +220,53 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     previousClient.dispose();
   };
   const client = createDelegatingClient(() => activeClient.client);
+  let persistencePromise: Promise<SessionPersistence> | null = persistence
+    ? Promise.resolve(persistence)
+    : null;
+
+  const getPersistence = () => {
+    if (!persistencePromise) {
+      persistencePromise = createDefaultSessionPersistence();
+    }
+
+    return persistencePromise;
+  };
+
+  let lastEnqueuedContextJson: string | null = null;
+  let lastEnqueuedSave: Promise<void> = Promise.resolve();
+  let persistenceTail: Promise<void> = Promise.resolve();
+  const persistContext = (): Promise<void> => {
+    const context = sessionStore.getPersistedContext();
+    const serializedContext = JSON.stringify(context);
+    if (serializedContext === lastEnqueuedContextJson) {
+      return lastEnqueuedSave;
+    }
+
+    const save = persistenceTail
+      .catch(() => undefined)
+      .then(async () => {
+        const resolvedPersistence = await getPersistence();
+        await resolvedPersistence.save(context);
+      });
+    lastEnqueuedContextJson = serializedContext;
+    lastEnqueuedSave = save;
+    persistenceTail = save;
+    return save;
+  };
+
+  const hydratePersistedContext = async () => {
+    const resolvedPersistence = await getPersistence();
+    const persistedContext = await resolvedPersistence.load();
+    if (persistedContext) {
+      const serializedContext = JSON.stringify(persistedContext);
+      lastEnqueuedContextJson = serializedContext;
+      lastEnqueuedSave = Promise.resolve();
+      sessionStore.hydrateContext(persistedContext);
+    }
+    replaceActiveClient();
+  };
   const controller = createMobileController(client, sessionStore, authSession, {
+    persistSessionContext: persistContext,
     subscribeCloudTasks: (uid, onUpdate, onError) => {
       const epoch = ++liveSubscriptionEpoch;
       let updateRevision = 0;
@@ -463,40 +513,9 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       };
     },
   });
-  let persistencePromise: Promise<SessionPersistence> | null = persistence
-    ? Promise.resolve(persistence)
-    : null;
-
-  const getPersistence = () => {
-    if (!persistencePromise) {
-      persistencePromise = createDefaultSessionPersistence();
-    }
-
-    return persistencePromise;
-  };
-
-  let lastSavedContextJson: string | null = null;
-  const hydratePersistedContext = async () => {
-    const resolvedPersistence = await getPersistence();
-    const persistedContext = await resolvedPersistence.load();
-    if (persistedContext) {
-      sessionStore.hydrateContext(persistedContext);
-      lastSavedContextJson = JSON.stringify(persistedContext);
-    }
-    replaceActiveClient();
-  };
-  const persistContext = () => {
-    const context = sessionStore.getPersistedContext();
-    const serializedContext = JSON.stringify(context);
-    if (serializedContext === lastSavedContextJson) {
-      return;
-    }
-
-    lastSavedContextJson = serializedContext;
-    void getPersistence().then((resolvedPersistence) => resolvedPersistence.save(context));
-  };
-
-  sessionStore.subscribe(persistContext);
+  sessionStore.subscribe(() => {
+    void persistContext().catch(() => undefined);
+  });
   authSession.subscribe((authState) => {
     const nextAuthUid = signedInUid(authState);
     if (nextAuthUid !== activeAuthUid) {
@@ -692,8 +711,13 @@ function normalizeOptionalString(value: string | null | undefined): string | nul
 }
 
 function createDisconnectedClient(): KannaClient {
+  const unavailableMessage =
+    "No trusted desktop is available. Sign in or pair a desktop.";
   const unavailable = async () => {
-    throw new Error("No trusted desktop is available. Sign in or pair a desktop.");
+    throw new Error(unavailableMessage);
+  };
+  const createUnavailable = async () => {
+    throw new TaskCreationError("not-created", unavailableMessage);
   };
 
   return {
@@ -710,7 +734,7 @@ function createDisconnectedClient(): KannaClient {
     listRepoTasks: async () => [],
     listRecentTasks: async () => [],
     searchTasks: async () => [],
-    createTask: unavailable,
+    createTask: createUnavailable,
     runMergeAgent: unavailable,
     advanceTaskStage: unavailable,
     markTaskRead: unavailable,

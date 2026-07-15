@@ -708,6 +708,109 @@ describe("remote transport", () => {
     });
   });
 
+  it("puts an identified task through the selected desktop without the identity in the body", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "a1b2/c3d4",
+      repoId: "repo-1",
+      title: "Ship it",
+      stage: "in progress"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    await transport.createTask({
+      taskId: "a1b2/c3d4",
+      repoId: "repo-1",
+      prompt: "Ship it"
+    });
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      method: "PUT",
+      path: "/v1/tasks/a1b2%2Fc3d4",
+      body: {
+        repoId: "repo-1",
+        prompt: "Ship it"
+      }
+    });
+  });
+
+  it("never downgrades a present but invalid task identity to legacy POST", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockRejectedValue(
+      new Error("route not found")
+    );
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    await expect(transport.createTask({
+      taskId: "",
+      repoId: "repo-1",
+      prompt: "Ship it"
+    })).rejects.toThrow("route not found");
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      method: "PUT",
+      path: "/v1/tasks/",
+      body: {
+        repoId: "repo-1",
+        prompt: "Ship it"
+      }
+    });
+  });
+
+  it("preserves an identified task while mapping a cloud repo to its owner", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "a1b2c3d4",
+      repoId: "repo-local",
+      title: "Ship it",
+      stage: "in progress"
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-existing",
+          repoId: "repo-cloud",
+          title: "Existing task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-2",
+          ownerLocalRepoId: "repo-local",
+          ownerLocalTaskId: "task-existing"
+        }
+      ]
+    });
+
+    await expect(transport.createTask({
+      taskId: "a1b2c3d4",
+      repoId: "repo-cloud",
+      prompt: "Ship it",
+      desktopId: "desktop-2",
+      agentProvider: "codex"
+    })).resolves.toMatchObject({
+      taskId: "cloud:desktop-2:repo-local:a1b2c3d4",
+      ownerLocalTaskId: "a1b2c3d4"
+    });
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-2",
+      method: "PUT",
+      path: "/v1/tasks/a1b2c3d4",
+      body: {
+        repoId: "repo-local",
+        prompt: "Ship it",
+        agentProvider: "codex"
+      }
+    });
+  });
+
   it("falls back to the selected desktop when a cloud repo has no owner mapping", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       taskId: "task-created",

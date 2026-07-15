@@ -26,7 +26,7 @@ use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
 use super::tasks::{
-    create_task, get_task, list_closed_task_identities, list_recent_tasks, search_tasks,
+    create_task, get_task, list_closed_task_identities, list_recent_tasks, put_task, search_tasks,
     update_task,
 };
 use super::transfers::{
@@ -82,7 +82,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(list_closed_task_identities),
         )
         .route("/v1/tasks", post(create_task))
-        .route("/v1/tasks/{task_id}", get(get_task).patch(update_task))
+        .route(
+            "/v1/tasks/{task_id}",
+            get(get_task).put(put_task).patch(update_task),
+        )
         .route(
             "/v1/tasks/{task_id}/dependent-tasks-exist",
             get(dependent_tasks_exist),

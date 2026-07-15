@@ -27,5 +27,14 @@ describe("MOBILE_E2E_IDS", () => {
     );
     expect(MOBILE_E2E_IDS.accountSignInButton).toBe("mobile.account-sign-in");
     expect(MOBILE_E2E_IDS.accountSignOutButton).toBe("mobile.account-sign-out");
+    expect(MOBILE_E2E_IDS.createTaskProvisioning).toBe(
+      "mobile.create-task.provisioning"
+    );
+    expect(MOBILE_E2E_IDS.createTaskProvisioningBackground).toBe(
+      "mobile.create-task.provisioning.background"
+    );
+    expect(MOBILE_E2E_IDS.createTaskProvisioningRecover).toBe(
+      "mobile.create-task.provisioning.recover"
+    );
   });
 });

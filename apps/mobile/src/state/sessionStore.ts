@@ -37,6 +37,22 @@ export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "er
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type AuthState = MobileAuthState;
 export type ComposerAgentProvider = AgentProvider;
+export type TaskCreationPhase = "idle" | "pending" | "recovering" | "uncertain";
+
+export interface PendingTaskCreation {
+  taskId: string;
+  repoId: string;
+  prompt: string;
+  desktopId: string;
+  agentProvider: ComposerAgentProvider;
+}
+
+export type TaskCreationState =
+  | { phase: "idle"; pendingTaskCreation: null }
+  | {
+      phase: Exclude<TaskCreationPhase, "idle">;
+      pendingTaskCreation: PendingTaskCreation;
+    };
 
 export interface SessionState {
   connectionMode: DesktopMode | null;
@@ -62,11 +78,13 @@ export interface SessionState {
   pairingCode: string | null;
   isComposerOpen: boolean;
   composerPrompt: string;
+  composerRepoId: string | null;
   composerDesktopId: string | null;
   composerAgentProvider: ComposerAgentProvider;
   isComposerOptionsExpanded: boolean;
   composerErrorMessage: string | null;
-  isComposerSubmitting: boolean;
+  pendingTaskCreation: PendingTaskCreation | null;
+  taskCreationPhase: TaskCreationPhase;
   taskTerminalTaskId: string | null;
   taskTerminalStatus: TaskTerminalStatus;
   taskTerminalOutput: string;
@@ -106,11 +124,12 @@ export interface SessionStore {
   setActiveView(view: MobileView): void;
   setPairingCode(code: string | null): void;
   setComposerState(isOpen: boolean, prompt: string): void;
+  setComposerRepo(repoId: string | null): void;
   setComposerDesktop(desktopId: string | null): void;
   setComposerAgentProvider(provider: ComposerAgentProvider): void;
   setComposerOptionsExpanded(isExpanded: boolean): void;
   setComposerErrorMessage(message: string | null): void;
-  setComposerSubmitting(isSubmitting: boolean): void;
+  setTaskCreationState(taskCreationState: TaskCreationState): void;
   beginTaskTerminal(taskId: string, initialOutput: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
@@ -148,11 +167,13 @@ export function createSessionStore(): SessionStore {
     pairingCode: null,
     isComposerOpen: false,
     composerPrompt: "",
+    composerRepoId: null,
     composerDesktopId: null,
     composerAgentProvider: "claude",
     isComposerOptionsExpanded: true,
     composerErrorMessage: null,
-    isComposerSubmitting: false,
+    pendingTaskCreation: null,
+    taskCreationPhase: "idle",
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
     taskTerminalOutput: "",
@@ -233,10 +254,12 @@ export function createSessionStore(): SessionStore {
         activeView: state.activeView,
         authUser: state.auth.status === "signedIn" ? state.auth.user : null,
         trustedDesktops: state.trustedDesktops,
-        repoCreationProfiles: state.repoCreationProfiles
+        repoCreationProfiles: state.repoCreationProfiles,
+        pendingTaskCreation: state.pendingTaskCreation
       };
     },
     hydrateContext(context) {
+      const pendingTaskCreation = context.pendingTaskCreation ?? null;
       state = {
         ...state,
         selectedDesktopId: context.selectedDesktopId,
@@ -247,7 +270,19 @@ export function createSessionStore(): SessionStore {
           ? { status: "signedIn", user: context.authUser }
           : state.auth,
         trustedDesktops: context.trustedDesktops ?? [],
-        repoCreationProfiles: context.repoCreationProfiles ?? []
+        repoCreationProfiles: context.repoCreationProfiles ?? [],
+        isComposerOpen: pendingTaskCreation ? false : state.isComposerOpen,
+        composerPrompt: pendingTaskCreation?.prompt ?? state.composerPrompt,
+        composerRepoId: pendingTaskCreation?.repoId ?? state.composerRepoId,
+        composerDesktopId:
+          pendingTaskCreation?.desktopId ?? state.composerDesktopId,
+        composerAgentProvider:
+          pendingTaskCreation?.agentProvider ?? state.composerAgentProvider,
+        composerErrorMessage: pendingTaskCreation
+          ? null
+          : state.composerErrorMessage,
+        pendingTaskCreation,
+        taskCreationPhase: pendingTaskCreation ? "uncertain" : "idle"
       };
       publish();
     },
@@ -470,9 +505,12 @@ export function createSessionStore(): SessionStore {
         composerErrorMessage:
           !isComposerOpen || composerPrompt !== state.composerPrompt
             ? null
-            : state.composerErrorMessage,
-        isComposerSubmitting: isComposerOpen ? state.isComposerSubmitting : false
+            : state.composerErrorMessage
       };
+      publish();
+    },
+    setComposerRepo(composerRepoId) {
+      state = { ...state, composerRepoId, composerErrorMessage: null };
       publish();
     },
     setComposerDesktop(composerDesktopId) {
@@ -491,8 +529,12 @@ export function createSessionStore(): SessionStore {
       state = { ...state, composerErrorMessage };
       publish();
     },
-    setComposerSubmitting(isComposerSubmitting) {
-      state = { ...state, isComposerSubmitting };
+    setTaskCreationState(taskCreationState) {
+      state = {
+        ...state,
+        pendingTaskCreation: taskCreationState.pendingTaskCreation,
+        taskCreationPhase: taskCreationState.phase
+      };
       publish();
     },
     beginTaskTerminal(taskId, initialOutput) {

@@ -1,4 +1,8 @@
-import type { ComposerAgentProvider, MobileView } from "./sessionStore";
+import type {
+  ComposerAgentProvider,
+  MobileView,
+  PendingTaskCreation
+} from "./sessionStore";
 import type { MobileAuthUser } from "../lib/firebase/auth";
 import { isAgentProvider } from "@kanna/agent-protocol";
 
@@ -12,6 +16,7 @@ export interface PersistedSessionContext {
   authUser?: MobileAuthUser | null;
   trustedDesktops?: TrustedDesktopRecord[];
   repoCreationProfiles?: RepoCreationProfile[];
+  pendingTaskCreation?: PendingTaskCreation | null;
 }
 
 export interface RepoCreationProfile {
@@ -83,7 +88,8 @@ function parsePersistedSessionContext(
       activeView: parsed.activeView,
       authUser: parsePersistedAuthUser(parsed.authUser),
       trustedDesktops: parseTrustedDesktops(parsed.trustedDesktops),
-      repoCreationProfiles: parseRepoCreationProfiles(parsed.repoCreationProfiles)
+      repoCreationProfiles: parseRepoCreationProfiles(parsed.repoCreationProfiles),
+      pendingTaskCreation: parsePendingTaskCreation(parsed.pendingTaskCreation)
     };
   } catch {
     return null;
@@ -187,6 +193,36 @@ function parseRepoCreationProfiles(value: unknown): RepoCreationProfile[] {
   }
 
   return Array.from(profiles.values());
+}
+
+function parsePendingTaskCreation(value: unknown): PendingTaskCreation | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<PendingTaskCreation>;
+  if (
+    typeof candidate.taskId !== "string" ||
+    !/^[0-9a-f]{8,64}$/.test(candidate.taskId) ||
+    !isNonBlankString(candidate.repoId) ||
+    !isNonBlankString(candidate.prompt) ||
+    !isNonBlankString(candidate.desktopId) ||
+    !isAgentProvider(candidate.agentProvider)
+  ) {
+    return null;
+  }
+
+  return {
+    taskId: candidate.taskId,
+    repoId: candidate.repoId,
+    prompt: candidate.prompt,
+    desktopId: candidate.desktopId,
+    agentProvider: candidate.agentProvider
+  };
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function parseTrustedDesktopLanEndpoints(value: unknown): TrustedDesktopLanEndpoint[] {

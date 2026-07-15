@@ -1508,6 +1508,204 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
 }
 
 #[test]
+fn prepare_task_for_api_uses_requested_task_id() {
+    let repo_root = init_git_repo("requested-task-id");
+    let config = test_config("requested-task-id");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api_with_error(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Create with a requested id".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+        Some("0123456789abcdef".to_string()),
+    )
+    .unwrap();
+
+    assert_eq!(prepared.task_id(), "0123456789abcdef");
+    assert!(prepared.cwd.ends_with("/task-0123456789abcdef"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn create_dormant_task_for_api_uses_requested_task_id() {
+    let repo_root = init_git_repo("dormant-requested-task-id");
+    let config = test_config("dormant-requested-task-id");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let created = create_dormant_task_for_api_with_error(
+        &db,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Create a dormant task with a requested id".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+        Some("fedcba9876543210".to_string()),
+    )
+    .unwrap();
+
+    assert_eq!(created.task_id, "fedcba9876543210");
+    assert_eq!(created.worktree_path, None);
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
+    let task_id = "c1d2e3f4a5b60718";
+    let repo_root = init_git_repo("requested-task-id-collision");
+    let config = test_config("requested-task-id-collision");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        task_id,
+        "repo-1",
+        "Create once",
+        None,
+        "in progress",
+        "2026-07-15 00:00:00",
+    )
+    .unwrap();
+
+    let error = match prepare_task_for_api_with_error(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Create once".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+        Some(task_id.to_string()),
+    ) {
+        Ok(_) => panic!("duplicate requested task id should fail preparation"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PrepareTaskError::RequestedTaskIdAlreadyExists
+    ));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collision() {
+    let task_id = "e1f2a3b4c5d60718";
+    let repo_root = init_git_repo("dormant-requested-task-id-collision");
+    let config = test_config("dormant-requested-task-id-collision");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        task_id,
+        "repo-1",
+        "Create dormant once",
+        None,
+        "in progress",
+        "2026-07-15 00:00:00",
+    )
+    .unwrap();
+
+    let error = match create_dormant_task_for_api_with_error(
+        &db,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Create dormant once".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+        Some(task_id.to_string()),
+    ) {
+        Ok(_) => panic!("duplicate requested dormant task id should fail creation"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PrepareTaskError::RequestedTaskIdAlreadyExists
+    ));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
     let _sidecar_guard = crate::test_sidecar_guard();
     let codex_sidecar = ensure_test_sidecar("codex");
