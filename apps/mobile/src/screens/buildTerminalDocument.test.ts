@@ -12,26 +12,91 @@ interface TouchPoint {
   clientY: number;
 }
 
+interface StubTerminalLink {
+  activate(): void;
+  decorations: {
+    pointerCursor: boolean;
+    underline: boolean;
+  };
+  range: {
+    start: { x: number; y: number };
+    end: { x: number; y: number };
+  };
+  text: string;
+}
+
+interface StubTerminalLinkProvider {
+  provideLinks(
+    bufferLineNumber: number,
+    callback: (links: StubTerminalLink[] | undefined) => void
+  ): void;
+}
+
+interface StubBufferCell {
+  getChars(): string;
+  getWidth(): number;
+}
+
+function terminalCells(text: string): Array<{ chars: string; width: number }> {
+  const cells: Array<{ chars: string; width: number }> = [];
+  for (const character of text) {
+    if (/\p{Mark}/u.test(character) && cells.length > 0) {
+      const previous = cells.findLast((cell) => cell.width > 0);
+      if (previous) previous.chars += character;
+      continue;
+    }
+    const width = /\p{Script=Han}/u.test(character) ? 2 : 1;
+    cells.push({ chars: character, width });
+    if (width === 2) cells.push({ chars: "", width: 0 });
+  }
+  return cells;
+}
+
 class StubTerminal {
   cols: number;
   rows = 0;
   options: { fontSize: number; smoothScrollDuration?: number };
+  linkProvider: StubTerminalLinkProvider | null = null;
+  bufferLines = new Map<number, string>();
+  getLineCalls: number[] = [];
+  translateToStringCalls: Array<{ index: number; trimRight: boolean | undefined }> = [];
+  buffer = {
+    active: {
+      baseY: 100,
+      viewportY: 100,
+      length: 101,
+      getLine: (index: number) => {
+        this.getLineCalls.push(index);
+        const text = this.bufferLines.get(index);
+        if (text === undefined) {
+          return undefined;
+        }
+        const cells = terminalCells(text);
+        return {
+          length: cells.length,
+          getCell: (cellIndex: number): StubBufferCell | undefined => {
+            const cell = cells[cellIndex];
+            return cell
+              ? {
+                  getChars: () => cell.chars,
+                  getWidth: () => cell.width
+                }
+              : undefined;
+          },
+          translateToString: (trimRight?: boolean) => {
+            this.translateToStringCalls.push({ index, trimRight });
+            return text;
+          }
+        };
+      }
+    }
+  };
   resizeCalls: Array<{ cols: number; rows: number }> = [];
   scrollToBottomCalls = 0;
   scrollToBottomHook: (() => void) | null = null;
   scrollToLineCalls: number[] = [];
   writes: unknown[] = [];
   resets = 0;
-  buffer = {
-    active: {
-      baseY: 100,
-      viewportY: 100,
-      length: 101,
-      getLine: (_index: number) => ({
-        translateToString: (_trimRight?: boolean) => ""
-      })
-    }
-  };
   dimensions = {
     css: {
       canvas: { width: 1980, height: 774 },
@@ -58,6 +123,11 @@ class StubTerminal {
   }
 
   loadAddon(): void {}
+
+  registerLinkProvider(provider: StubTerminalLinkProvider): { dispose(): void } {
+    this.linkProvider = provider;
+    return { dispose() {} };
+  }
 
   open(root: HTMLElement): void {
     const xterm = root.ownerDocument.createElement("div");
@@ -130,8 +200,22 @@ class StubTerminal {
   write(data: unknown, done?: () => void): void {
     this.writes.push(data);
     const previousBaseY = this.buffer.active.baseY;
+    const text =
+      typeof data === "string"
+        ? data
+        : data instanceof Uint8Array
+          ? new TextDecoder().decode(data)
+          : "";
+    const parts = text.replace(/\r\n|\r/g, "\n").split("\n");
+    let lineIndex = Math.max(0, this.buffer.active.length - 1);
+    const firstLine = this.bufferLines.get(lineIndex) ?? "";
+    this.bufferLines.set(lineIndex, firstLine + (parts.shift() ?? ""));
+    for (const part of parts) {
+      lineIndex += 1;
+      this.bufferLines.set(lineIndex, part);
+    }
+    this.buffer.active.length = Math.max(this.buffer.active.length, lineIndex + 1);
     this.buffer.active.baseY += 1;
-    this.buffer.active.length += 1;
     if (this.buffer.active.viewportY === previousBaseY) {
       this.buffer.active.viewportY = this.buffer.active.baseY;
     }
@@ -141,6 +225,10 @@ class StubTerminal {
 
   reset(): void {
     this.resets += 1;
+    this.bufferLines.clear();
+    this.buffer.active.baseY = 0;
+    this.buffer.active.viewportY = 0;
+    this.buffer.active.length = 0;
   }
 
   emitScroll(viewportY?: number): void {
@@ -151,6 +239,22 @@ class StubTerminal {
       listener(this.buffer.active.viewportY);
     }
   }
+}
+
+function provideLinks(
+  terminal: StubTerminal,
+  bufferLineNumber: number,
+  lineText: string
+): StubTerminalLink[] | undefined {
+  terminal.bufferLines.set(bufferLineNumber - 1, lineText);
+  if (!terminal.linkProvider) {
+    throw new Error("generated terminal did not register a file link provider");
+  }
+  let result: StubTerminalLink[] | undefined;
+  terminal.linkProvider.provideLinks(bufferLineNumber, (links) => {
+    result = links;
+  });
+  return result;
 }
 
 class StubFitAddon {
@@ -171,7 +275,7 @@ function createTouchEvent(
   window: Window,
   type: string,
   touches: TouchPoint[],
-  options: EventInit = { cancelable: true }
+  options: EventInit = { bubbles: true, cancelable: true }
 ): Event {
   const event = new window.Event(type, options);
   Object.defineProperty(event, "touches", {
@@ -268,6 +372,134 @@ function createExecutedTerminalDocument({
 }
 
 describe("buildTerminalDocument", () => {
+  it("provides bare, nested, and absolute file links with one-based ranges", () => {
+    const { messages, terminal } = createExecutedTerminalDocument();
+    const row = 7;
+    const line = "See README.md and docs/spec.md:42:7 then /tmp/task/notes.md:9";
+
+    const links = provideLinks(terminal, row, line);
+
+    expect(links?.map((link) => link.text)).toEqual([
+      "README.md",
+      "docs/spec.md:42:7",
+      "/tmp/task/notes.md:9"
+    ]);
+    expect(links?.map((link) => link.range)).toEqual(
+      ["README.md", "docs/spec.md:42:7", "/tmp/task/notes.md:9"].map((text) => {
+        const start = line.indexOf(text);
+        return {
+          start: { x: start + 1, y: row },
+          end: { x: start + text.length, y: row }
+        };
+      })
+    );
+    expect(links?.map((link) => link.decorations)).toEqual([
+      { pointerCursor: true, underline: true },
+      { pointerCursor: true, underline: true },
+      { pointerCursor: true, underline: true }
+    ]);
+
+    expect(
+      messages.map((message) => JSON.parse(message).type)
+    ).not.toContain("terminal-file-link");
+  });
+
+  it("renders persistent accessible file buttons and opens one through a real click", () => {
+    const { messages, window } = createExecutedTerminalDocument();
+
+    window.__replaceTerminalState({
+      text: "See README.md and docs/spec.md:42\n"
+    });
+
+    const region = window.document.getElementById("terminal-file-links");
+    const button = region?.querySelector<HTMLButtonElement>(
+      'button[data-terminal-file-raw="docs/spec.md:42"]'
+    );
+    expect(region?.getAttribute("role")).toBe("region");
+    expect(region?.getAttribute("aria-label")).toBe(
+      "Files mentioned in terminal"
+    );
+    expect(region?.hidden).toBe(false);
+    expect(button?.textContent).toBe("docs/spec.md:42");
+    expect(button?.getAttribute("aria-label")).toBe(
+      "Open file docs/spec.md at line 42"
+    );
+    expect(button?.classList.contains("terminal-file-link")).toBe(true);
+
+    button?.click();
+
+    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
+      type: "terminal-file-link",
+      path: "docs/spec.md",
+      line: 42
+    });
+  });
+
+  it("keeps the newest six unique file buttons visible", () => {
+    const { window } = createExecutedTerminalDocument();
+    window.__replaceTerminalState({
+      text: [
+        "docs/one.md",
+        "docs/two.md",
+        "docs/three.md",
+        "docs/four.md",
+        "docs/five.md",
+        "docs/six.md",
+        "docs/seven.md",
+        "docs/two.md"
+      ].join("\n")
+    });
+
+    const buttons = Array.from(
+      window.document.querySelectorAll<HTMLButtonElement>(
+        "#terminal-file-links button"
+      )
+    );
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "docs/three.md",
+      "docs/four.md",
+      "docs/five.md",
+      "docs/six.md",
+      "docs/seven.md",
+      "docs/two.md"
+    ]);
+  });
+
+  it("rejects literal parent segments and non-file-like rows", () => {
+    const { terminal } = createExecutedTerminalDocument();
+
+    expect(provideLinks(terminal, 2, "../secret.md docs/../escape.md")).toBeUndefined();
+    expect(provideLinks(terminal, 3, "No file path was written here")).toBeUndefined();
+  });
+
+  it("reads only the requested xterm row and trims its rendered right padding", () => {
+    const { terminal } = createExecutedTerminalDocument();
+    terminal.bufferLines.set(0, "README.md");
+    terminal.bufferLines.set(8, "docs/spec.md");
+
+    const links = provideLinks(terminal, 9, "docs/spec.md");
+
+    expect(links?.map((link) => link.text)).toEqual(["docs/spec.md"]);
+    expect(terminal.getLineCalls).toEqual([8]);
+    expect(terminal.translateToStringCalls).toEqual([{ index: 8, trimRight: true }]);
+  });
+
+  it("maps file-link ranges to terminal cells after wide and combining characters", () => {
+    const { terminal } = createExecutedTerminalDocument();
+
+    const wide = provideLinks(terminal, 4, "界 docs/spec.md");
+    expect(wide?.[0]?.range).toEqual({
+      start: { x: 4, y: 4 },
+      end: { x: 15, y: 4 }
+    });
+
+    const combining = provideLinks(terminal, 5, "e\u0301 docs/spec.md");
+    expect(combining?.[0]?.range).toEqual({
+      start: { x: 3, y: 5 },
+      end: { x: 14, y: 5 }
+    });
+  });
+
   it("omits terminal inspection traversal and messages outside E2E builds", () => {
     const { messages, window } = createExecutedTerminalDocument();
     const script = extractTerminalScript(
@@ -282,8 +514,11 @@ describe("buildTerminalDocument", () => {
 
     expect(script).not.toContain("terminal-inspection");
     expect(script).not.toContain("function renderedTerminalText");
-    expect(script).not.toContain("translateToString");
-    expect(script).not.toContain("buffer.getLine");
+    expect(script).toContain("const MAX_FILE_LINK_SCAN_ROWS = 200;");
+    expect(script).toContain(
+      "Math.max(0, buffer.length - MAX_FILE_LINK_SCAN_ROWS)"
+    );
+    expect(script).not.toContain("const firstLine = 0");
     expect(script).not.toContain("recordTerminalFrame");
     expect(messages.map((message) => JSON.parse(message).type)).not.toContain(
       "terminal-inspection"
@@ -543,6 +778,41 @@ describe("buildTerminalDocument", () => {
     expect(terminal.resets).toBe(1);
     expect(terminal.writes).toHaveLength(1);
     expect(terminal.scrollToLineCalls).toEqual([]);
+  });
+
+  it.each([
+    [
+      "scroll",
+      [{ clientX: 220, clientY: 240 }],
+      [{ clientX: 150, clientY: 230 }]
+    ],
+    [
+      "pinch",
+      [
+        { clientX: 100, clientY: 200 },
+        { clientX: 200, clientY: 200 }
+      ],
+      [
+        { clientX: 60, clientY: 200 },
+        { clientX: 240, clientY: 200 }
+      ]
+    ]
+  ])("does not open a file after a %s gesture over its button", (_label, start, move) => {
+    const { messages, window } = createExecutedTerminalDocument();
+    window.__replaceTerminalState({ text: "docs/spec.md\n" });
+    const button = window.document.querySelector<HTMLButtonElement>(
+      "#terminal-file-links button"
+    );
+    expect(button).not.toBeNull();
+
+    button?.dispatchEvent(createTouchEvent(window, "touchstart", start));
+    button?.dispatchEvent(createTouchEvent(window, "touchmove", move));
+    button?.dispatchEvent(createTouchEvent(window, "touchend", []));
+    button?.click();
+
+    expect(
+      messages.map((message) => JSON.parse(message).type)
+    ).not.toContain("terminal-file-link");
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {

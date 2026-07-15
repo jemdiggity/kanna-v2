@@ -39,6 +39,7 @@
     "expo-modules-core": "2.5.0",
     "expo-updates": "~0.28.18",
     "firebase": "^12.12.1",
+    "markdown-it": "14.1.1",
     "react": "19.0.0",
     "react-native": "0.79.6",
     "react-native-webview": "13.13.5"
@@ -46,6 +47,7 @@
   "devDependencies": {
     "@babel/parser": "^7.29.3",
     "@expo/config-plugins": "~10.1.2",
+    "@types/markdown-it": "14.1.2",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.14",
     "@types/react-test-renderer": "19.0.0",

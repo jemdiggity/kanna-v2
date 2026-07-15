@@ -10,6 +10,7 @@ import type {
   DesktopSummary,
   RepoSummary,
   TaskActionResponse,
+  TaskFileContent,
   TaskSummary
 } from "../api/types";
 import {
@@ -645,6 +646,7 @@ export function createCloudLanClient(
         taskId: string;
         desktopId: string;
         client: KannaClient;
+        cloudFallbackTaskId?: string;
       }
     | Extract<DisplayTaskRoute, { source: "unavailable" }>;
 
@@ -1029,6 +1031,21 @@ export function createCloudLanClient(
       invokeTaskRoute(taskId, (client, routedTaskId) =>
         client.sendTaskInput(routedTaskId, input)
       ),
+    readTaskFile: async (taskId, path): Promise<TaskFileContent> => {
+      const route = routeForTask(taskId);
+      if (route.source === "unavailable") {
+        throw new Error(route.message);
+      }
+      if (route.source === "lan") {
+        if (route.cloudFallbackTaskId) {
+          return cloud.readTaskFile(route.cloudFallbackTaskId, path);
+        }
+        throw new Error(
+          `Task file preview for LAN-only task "${taskId}" requires an authenticated relay connection.`
+        );
+      }
+      return route.client.readTaskFile(route.taskId, path);
+    },
     observeTaskTerminal(
       taskId: string,
       listener: (event: TaskTerminalStreamEvent) => void

@@ -18,6 +18,7 @@ mod task_actions;
 mod task_activity;
 mod task_agent_session;
 mod task_blockers;
+mod task_files;
 mod task_input;
 mod task_logs;
 mod task_ports;
@@ -44,6 +45,15 @@ pub async fn dispatch_http_invoke(
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
     routes::dispatch_http_invoke(state, method, path, body).await
+}
+
+pub(crate) async fn dispatch_authenticated_http_invoke(
+    state: std::sync::Arc<AppState>,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> HttpInvokeResponse {
+    routes::dispatch_authenticated_http_invoke(state, method, path, body).await
 }
 
 pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {

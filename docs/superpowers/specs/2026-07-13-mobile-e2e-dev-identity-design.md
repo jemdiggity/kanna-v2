@@ -20,10 +20,10 @@ Identity precedence remains:
 
 This produces `build.kanna.app.dev` and `build.kanna.app.dev.webdriveragentrunner` for ordinary local runs. Explicit `staging` and `prod` environments keep their existing identities. Hybrid mode remains simulator-only and continues forcing the development environment.
 
-The resolver will also expose the environment's configured app scheme. Simulator automation must use that scheme when opening the Expo development-client URL instead of the shared generated `exp+kanna-mobile` scheme. For a normal local run, Appium will launch `build.kanna.app.dev` and the runner will open:
+The resolver also exposes Expo's generated development-client scheme. Simulator automation must use that scheme when opening the Expo development-client URL; the environment-specific `kanna-dev` scheme is reserved for application deep links and does not route the development-client URL on current Expo builds. For a normal local run, Appium launches `build.kanna.app.dev` and the runner opens:
 
 ```text
-kanna-dev://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A<workspace-port>&disableOnboarding=1
+exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A<workspace-port>&disableOnboarding=1
 ```
 
 This routes the workspace Metro URL to the same environment-specific app identity without rebuilding the native client for every worktree port. The installed binary's baked Metro port remains only a fallback.

@@ -2944,6 +2944,7 @@ dependencies = [
  "kanna-agent-protocol",
  "kanna-daemon",
  "kanna-runtime-defaults",
+ "libc",
  "log",
  "mdns-sd",
  "reqwest 0.12.28",

@@ -174,6 +174,9 @@ export default function App() {
           agentStatus={state.taskAgentStatus}
           onBack={() => controller.closeTask()}
           onOpenMore={() => controller.showView("more")}
+          onReadTaskFile={(path) =>
+            controller.readTaskFile(selectedTask.id, path)
+          }
           onSendInput={(input) => {
             void controller.sendTaskInput(selectedTask.id, input);
           }}

@@ -85,6 +85,21 @@ function createFetchMock(): FetchLike {
       } as Response;
     }
 
+    if (
+      url.endsWith(
+        "/v1/tasks/task%2Fread/files/content?path=docs%2Fspec%20one.md"
+      )
+    ) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          path: "docs/spec one.md",
+          content: "# Spec"
+        })
+      } as Response;
+    }
+
     throw new Error(`Unexpected request: ${url}`);
   }) as FetchLike;
 }
@@ -311,6 +326,9 @@ describe("createAppModel", () => {
     expect(typeof model.controller.bootstrap).toBe("function");
     await model.initialize();
     expect((await model.client.getStatus()).desktopName).toBe("Studio Mac");
+    await expect(
+      model.client.readTaskFile("task/read", "docs/spec one.md")
+    ).rejects.toThrow(/authenticated relay/i);
   });
 
   it("uses cloud task index for a signed-in model with relay config", async () => {
@@ -452,6 +470,9 @@ describe("createAppModel", () => {
       recentTasks: [],
       repoTasks: []
     });
+    await expect(
+      model.client.readTaskFile("task-1", "README.md")
+    ).rejects.toThrow("No trusted desktop is available");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 

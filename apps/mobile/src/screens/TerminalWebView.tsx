@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import {
   WebView as NativeWebView,
   type WebViewMessageEvent,
@@ -26,6 +26,7 @@ interface TerminalWebViewProps {
   fullscreen?: boolean;
   bottomInset?: number;
   onConsolePress?: () => void;
+  onOpenFile?: (path: string, line?: number) => void;
 }
 
 const ENABLE_E2E_TERMINAL_INSPECTION =
@@ -45,6 +46,12 @@ interface TerminalInspection {
   text: string;
 }
 
+interface TerminalFileLink {
+  line?: number;
+  path: string;
+  raw: string;
+}
+
 const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<
   WebViewProps & React.RefAttributes<TerminalWebViewHandle>
 >;
@@ -57,7 +64,8 @@ export function TerminalWebView({
   rows,
   fullscreen = false,
   bottomInset,
-  onConsolePress
+  onConsolePress,
+  onOpenFile
 }: TerminalWebViewProps) {
   const webViewRef = useRef<TerminalWebViewHandle>(null);
   const bridgeReadyRef = useRef(false);
@@ -68,6 +76,7 @@ export function TerminalWebView({
   const [terminalInspection, setTerminalInspection] = useState<TerminalInspection | null>(null);
   const resolvedBottomInset =
     bottomInset ?? (fullscreen ? DEFAULT_TERMINAL_BOTTOM_INSET : 24);
+  const [terminalFileLinks, setTerminalFileLinks] = useState<TerminalFileLink[]>([]);
   const document = useMemo(
     () =>
       buildTerminalDocument({
@@ -129,6 +138,7 @@ export function TerminalWebView({
     const taskChanged = previousTaskIdRef.current !== taskId;
 
     if (taskChanged) {
+      setTerminalFileLinks([]);
       previousTaskIdRef.current = taskId;
       previousOutputRef.current = output;
       previousStatusRef.current = status;
@@ -175,32 +185,82 @@ export function TerminalWebView({
   }, [bottomInsetScript]);
 
   const handleMessage = (event: WebViewMessageEvent) => {
-    let payload: { type?: string; inspection?: TerminalInspection } | null = null;
+    let payload: {
+      type?: unknown;
+      inspection?: TerminalInspection;
+      links?: unknown;
+      path?: unknown;
+      line?: unknown;
+    };
 
     try {
-      payload = JSON.parse(event.nativeEvent.data) as {
-        type?: string;
-        inspection?: TerminalInspection;
-      };
+      const parsed = JSON.parse(event.nativeEvent.data) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return;
+      }
+      payload = parsed;
     } catch {
       return;
     }
 
-    if (payload?.type === "terminal-tap") {
+    if (payload.type === "terminal-file-link") {
+      if (typeof payload.path !== "string") {
+        return;
+      }
+      const path = payload.path.trim();
+      if (!path) {
+        return;
+      }
+      if (
+        typeof payload.line === "number" &&
+        Number.isInteger(payload.line) &&
+        payload.line > 0
+      ) {
+        onOpenFile?.(path, payload.line);
+      } else {
+        onOpenFile?.(path);
+      }
+      return;
+    }
+
+    if (payload.type === "terminal-file-links" && Array.isArray(payload.links)) {
+      const links: TerminalFileLink[] = [];
+      for (const candidate of payload.links.slice(-6)) {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+          continue;
+        }
+        const record = candidate as Record<string, unknown>;
+        const path = typeof record.path === "string" ? record.path.trim() : "";
+        const raw = typeof record.raw === "string" ? record.raw.trim() : "";
+        if (!path || !raw) continue;
+        const line = record.line;
+        links.push({
+          path,
+          raw,
+          ...(typeof line === "number" && Number.isInteger(line) && line > 0
+            ? { line }
+            : {})
+        });
+      }
+      setTerminalFileLinks(links);
+      return;
+    }
+
+    if (payload.type === "terminal-tap") {
       onConsolePress?.();
       return;
     }
 
     if (
       ENABLE_E2E_TERMINAL_INSPECTION &&
-      payload?.type === "terminal-inspection" &&
+      payload.type === "terminal-inspection" &&
       payload.inspection
     ) {
       setTerminalInspection(payload.inspection);
       return;
     }
 
-    if (payload?.type !== "terminal-ready") {
+    if (payload.type !== "terminal-ready") {
       return;
     }
 
@@ -231,6 +291,40 @@ export function TerminalWebView({
           {JSON.stringify(terminalInspection)}
         </Text>
       ) : null}
+      {terminalFileLinks.length ? (
+        <ScrollView
+          accessible={false}
+          horizontal
+          keyboardShouldPersistTaps="handled"
+          showsHorizontalScrollIndicator={false}
+          style={styles.fileLinks}
+        >
+          <Text
+            accessibilityLabel="Files mentioned in terminal"
+            accessibilityRole="header"
+            style={styles.fileLinksLabel}
+          >
+            Files
+          </Text>
+          {terminalFileLinks.map((link) => (
+            <Pressable
+              accessibilityLabel={
+                link.line === undefined
+                  ? `Open file ${link.path}`
+                  : `Open file ${link.path} at line ${link.line}`
+              }
+              accessibilityRole="button"
+              key={link.raw}
+              onPress={() => onOpenFile?.(link.path, link.line)}
+              style={styles.fileLink}
+            >
+              <Text ellipsizeMode="middle" numberOfLines={1} style={styles.fileLinkText}>
+                {link.raw}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : null}
       <WebView
         ref={webViewRef}
         originWhitelist={["*"]}
@@ -251,12 +345,48 @@ export function TerminalWebView({
         scrollEnabled
         source={{ html: document }}
         style={fullscreen ? styles.webviewFullscreen : styles.webview}
+        webviewDebuggingEnabled={ENABLE_E2E_TERMINAL_INSPECTION}
       />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  fileLink: {
+    alignItems: "center",
+    backgroundColor: "#10213A",
+    borderColor: "#365B83",
+    borderRadius: 7,
+    borderWidth: 1,
+    height: 32,
+    justifyContent: "center",
+    marginRight: 7,
+    maxWidth: 96,
+    paddingHorizontal: 10
+  },
+  fileLinks: {
+    backgroundColor: "#07101D",
+    borderBottomColor: "#1D2C43",
+    borderBottomWidth: 1,
+    flexGrow: 0,
+    maxHeight: 43,
+    paddingHorizontal: 9,
+    paddingVertical: 5
+  },
+  fileLinksLabel: {
+    color: "#8292A9",
+    fontSize: 10,
+    fontWeight: "700",
+    lineHeight: 32,
+    marginRight: 8,
+    textTransform: "uppercase"
+  },
+  fileLinkText: {
+    color: "#A9D7FF",
+    fontFamily: "Menlo",
+    fontSize: 11,
+    textDecorationLine: "underline"
+  },
   wrap: {
     backgroundColor: "#050B14",
     borderColor: "#15243C",

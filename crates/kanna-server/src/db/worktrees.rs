@@ -33,7 +33,10 @@ impl Db {
     ) -> Result<Option<String>, rusqlite::Error> {
         self.conn
             .query_row(
-                "SELECT path FROM worktree WHERE pipeline_item_id = ? ORDER BY created_at DESC LIMIT 1",
+                "SELECT path FROM worktree
+                 WHERE pipeline_item_id = ?
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT 1",
                 [pipeline_item_id],
                 |row| row.get(0),
             )

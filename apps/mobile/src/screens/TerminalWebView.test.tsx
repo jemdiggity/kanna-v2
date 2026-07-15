@@ -66,6 +66,8 @@ vi.mock("react", async (importActual) => {
 });
 
 vi.mock("react-native", () => ({
+  Pressable: "Pressable",
+  ScrollView: "ScrollView",
   StyleSheet: {
     create: <T extends Record<string, unknown>>(styles: T) => styles
   },
@@ -110,6 +112,8 @@ async function renderTerminalWebView(input: {
   rows?: number | null;
   fullscreen?: boolean;
   bottomInset?: number;
+  onConsolePress?: () => void;
+  onOpenFile?: (path: string, line?: number) => void;
 }): Promise<ElementNode> {
   resetRenderState();
   const { TerminalWebView } = await import("./TerminalWebView");
@@ -120,7 +124,9 @@ async function renderTerminalWebView(input: {
     cols: input.cols ?? null,
     rows: input.rows ?? null,
     fullscreen: input.fullscreen,
-    bottomInset: input.bottomInset
+    bottomInset: input.bottomInset,
+    onConsolePress: input.onConsolePress,
+    onOpenFile: input.onOpenFile
   }) as ElementNode;
   lastTree = tree;
 
@@ -150,7 +156,134 @@ describe("TerminalWebView", () => {
   });
 
   afterEach(() => {
+    delete process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED;
     vi.unstubAllGlobals();
+  });
+
+  it("makes the real terminal WebView inspectable for simulator E2E", async () => {
+    process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED = "1";
+    const webView = await renderTerminalWebView({});
+
+    expect(webView.props.webviewDebuggingEnabled).toBe(true);
+  });
+
+  it("opens a discovered file through an actual native button press", async () => {
+    const onOpenFile = vi.fn();
+    const webView = await renderTerminalWebView({ onOpenFile });
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-file-links",
+          links: [{ raw: "docs/spec.md:42", path: "  docs/spec.md  ", line: 42 }]
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({ onOpenFile });
+
+    const strip = React.Children.toArray(lastTree?.props.children).find(
+      (child): child is ElementNode =>
+        typeof child === "object" && child !== null &&
+        "type" in child && (child as ElementNode).type === "ScrollView"
+    );
+    const button = React.Children.toArray(strip?.props.children).find(
+      (child): child is ElementNode =>
+        typeof child === "object" && child !== null &&
+        "type" in child && (child as ElementNode).type === "Pressable"
+    );
+    expect(button?.props.accessibilityLabel).toBe(
+      "Open file docs/spec.md at line 42"
+    );
+    (button?.props.onPress as () => void)();
+
+    expect(onOpenFile).toHaveBeenCalledOnce();
+    expect(onOpenFile).toHaveBeenCalledWith("docs/spec.md", 42);
+  });
+
+  it("clears discovered links when switching tasks", async () => {
+    const webView = await renderTerminalWebView({ taskId: "task-1" });
+    runEffects();
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-file-links",
+          links: [{ raw: "docs/old.md", path: "docs/old.md" }]
+        })
+      }
+    } as WebViewMessageEvent);
+
+    await renderTerminalWebView({ taskId: "task-1" });
+    expect(
+      React.Children.toArray(lastTree?.props.children).some(
+        (child) =>
+          typeof child === "object" && child !== null &&
+          "type" in child && (child as ElementNode).type === "ScrollView"
+      )
+    ).toBe(true);
+    runEffects();
+
+    await renderTerminalWebView({ taskId: "task-2" });
+    runEffects();
+    await renderTerminalWebView({ taskId: "task-2" });
+    expect(
+      React.Children.toArray(lastTree?.props.children).some(
+        (child) =>
+          typeof child === "object" && child !== null &&
+          "type" in child && (child as ElementNode).type === "ScrollView"
+      )
+    ).toBe(false);
+  });
+
+  it("ignores terminal file links without a nonblank string path", async () => {
+    const onOpenFile = vi.fn();
+    const webView = await renderTerminalWebView({ onOpenFile });
+    const send = (payload: unknown) => {
+      (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: { data: JSON.stringify(payload) }
+      } as WebViewMessageEvent);
+    };
+
+    send({ type: "terminal-file-link", path: "   ", line: 1 });
+    send({ type: "terminal-file-link", path: 123, line: 1 });
+    send(null);
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: "not-json" }
+    } as WebViewMessageEvent);
+
+    expect(onOpenFile).not.toHaveBeenCalled();
+  });
+
+  it("omits invalid line values while still forwarding valid paths", async () => {
+    const onOpenFile = vi.fn();
+    const webView = await renderTerminalWebView({ onOpenFile });
+
+    for (const line of [0, -1, 1.5, "42", null]) {
+      (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: {
+          data: JSON.stringify({ type: "terminal-file-link", path: "README.md", line })
+        }
+      } as WebViewMessageEvent);
+    }
+
+    expect(onOpenFile).toHaveBeenCalledTimes(5);
+    for (const call of onOpenFile.mock.calls) {
+      expect(call).toEqual(["README.md"]);
+    }
+  });
+
+  it("preserves unrelated terminal message handling", async () => {
+    const onConsolePress = vi.fn();
+    const onOpenFile = vi.fn();
+    const webView = await renderTerminalWebView({ onConsolePress, onOpenFile });
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({ type: "terminal-tap" })
+      }
+    } as WebViewMessageEvent);
+
+    expect(onConsolePress).toHaveBeenCalledOnce();
+    expect(onOpenFile).not.toHaveBeenCalled();
   });
 
   it("exposes rendered terminal diagnostics to native E2E automation", async () => {

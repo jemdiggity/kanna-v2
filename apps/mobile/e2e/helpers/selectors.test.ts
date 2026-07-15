@@ -2,6 +2,17 @@ import { describe, expect, it } from "vitest";
 import * as selectorHelpers from "./selectors";
 
 describe("mobile E2E selector helpers", () => {
+  it("exposes native file-preview controls for the relay smoke", () => {
+    expect(selectorHelpers.selectors).toMatchObject({
+      taskFilePreviewClose: "~mobile.task-file-preview.close",
+      taskFilePreviewError: "~mobile.task-file-preview.error",
+      taskFilePreviewErrorMessage: "~mobile.task-file-preview.error-message",
+      taskFilePreviewInspection: "~mobile.task-file-preview.inspection",
+      taskFilePreviewMode: "~mobile.task-file-preview.mode",
+      taskFilePreviewPath: "~mobile.task-file-preview.path"
+    });
+  });
+
   it("extracts the exact display-task id from an Appium task-row name", () => {
     const extractTaskRowId = (
       selectorHelpers as typeof selectorHelpers & {

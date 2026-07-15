@@ -23,6 +23,7 @@ use super::task_actions::{
 use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
 use super::task_blockers::{block_task, unblock_task};
+use super::task_files::get_task_file;
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
@@ -99,6 +100,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{task_id}",
             get(get_task).put(put_task).patch(update_task),
         )
+        .route("/v1/tasks/{task_id}/files/content", get(get_task_file))
         .route(
             "/v1/tasks/{task_id}/dependent-tasks-exist",
             get(dependent_tasks_exist),
@@ -238,6 +240,25 @@ pub async fn dispatch_http_invoke(
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
+    dispatch_http_invoke_with_access(state, method, path, body, false).await
+}
+
+pub async fn dispatch_authenticated_http_invoke(
+    state: Arc<AppState>,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> HttpInvokeResponse {
+    dispatch_http_invoke_with_access(state, method, path, body, true).await
+}
+
+async fn dispatch_http_invoke_with_access(
+    state: Arc<AppState>,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+    authenticated_file_access: bool,
+) -> HttpInvokeResponse {
     let method = match method.parse::<axum::http::Method>() {
         Ok(method) => method,
         Err(error) => {
@@ -293,6 +314,11 @@ pub async fn dispatch_http_invoke(
             [127, 0, 0, 1],
             0,
         ))));
+    if authenticated_file_access {
+        request
+            .extensions_mut()
+            .insert(super::task_files::AuthenticatedTaskFileAccess);
+    }
 
     match router(state).oneshot(request).await {
         Ok(response) => response_to_http_invoke(response).await,

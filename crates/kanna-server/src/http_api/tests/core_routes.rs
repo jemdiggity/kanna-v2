@@ -1722,6 +1722,405 @@ async fn get_task_route_returns_not_found_for_unknown_task() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+struct TaskFileRouteFixture {
+    app: axum::Router,
+    state: Arc<AppState>,
+    worktree: PathBuf,
+    db_path: PathBuf,
+    _temp_dir: tempfile::TempDir,
+}
+
+impl TaskFileRouteFixture {
+    fn new() -> Self {
+        let temp_dir = tempfile::tempdir().expect("create task file route fixture");
+        let worktree = temp_dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("create route fixture worktree");
+        let worktree_string = worktree.to_string_lossy().to_string();
+        let repo_path = temp_dir.path().to_string_lossy().to_string();
+        let state = super::test_state_with_seed("desktop-task-files", "Studio Mac", |db| {
+            db.insert_test_repo_with_path("repo-task-files", &repo_path, "Task Files")
+                .unwrap();
+            for task_id in ["task-file", "task-file-no-workspace"] {
+                db.insert_test_pipeline_item(
+                    task_id,
+                    "repo-task-files",
+                    "Read task file",
+                    Some("Read task file"),
+                    "in progress",
+                    "2026-07-15 10:00:00",
+                )
+                .unwrap();
+            }
+            db.upsert_worktree(
+                "wt-task-file",
+                "task-file",
+                &worktree_string,
+                "branch-task-file",
+            )
+            .unwrap();
+        });
+        let db_path = PathBuf::from(&state.config().db_path);
+        let app = super::router(Arc::clone(&state));
+
+        Self {
+            app,
+            state,
+            worktree,
+            db_path,
+            _temp_dir: temp_dir,
+        }
+    }
+
+    fn write(&self, path: &str, content: &[u8]) {
+        let target = self.worktree.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).expect("create route fixture file parent");
+        }
+        std::fs::write(target, content).expect("write route fixture file");
+    }
+
+    fn add_newest_worktree_with_tied_timestamp(&self) -> PathBuf {
+        let newest = self._temp_dir.path().join("worktree-newest");
+        std::fs::create_dir_all(&newest).expect("create newest route fixture worktree");
+        let db = Db::open(self.db_path.to_str().expect("utf-8 fixture database path"))
+            .expect("open task file fixture database");
+        db.upsert_worktree(
+            "wt-task-file-newest",
+            "task-file",
+            newest.to_str().expect("utf-8 newest worktree path"),
+            "branch-task-file-newest",
+        )
+        .expect("insert newest fixture worktree");
+        drop(db);
+
+        let connection = Connection::open(&self.db_path).expect("open fixture timestamps");
+        connection
+            .execute(
+                "UPDATE worktree SET created_at = '2026-07-16 00:00:00' WHERE pipeline_item_id = 'task-file'",
+                [],
+            )
+            .expect("tie fixture worktree timestamps");
+        newest
+    }
+
+    async fn get(&self, task_id: &str, encoded_path: &str) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/tasks/{task_id}/files/content?path={encoded_path}"
+                ))
+                .extension(AuthenticatedTaskFileAccess)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn get_unauthenticated(
+        &self,
+        task_id: &str,
+        encoded_path: &str,
+    ) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/tasks/{task_id}/files/content?path={encoded_path}"
+                ))
+                .header("origin", "https://attacker.example")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn get_through_authenticated_relay(
+        &self,
+        task_id: &str,
+        encoded_path: &str,
+    ) -> crate::http_api::HttpInvokeResponse {
+        crate::http_api::dispatch_authenticated_http_invoke(
+            Arc::clone(&self.state),
+            "GET",
+            &format!("/v1/tasks/{task_id}/files/content?path={encoded_path}"),
+            serde_json::Value::Null,
+        )
+        .await
+    }
+}
+
+impl Drop for TaskFileRouteFixture {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.db_path.as_os_str().to_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(path));
+        }
+    }
+}
+
+async fn task_file_response_text(response: axum::response::Response) -> String {
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn task_file_route_returns_normalized_content() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("docs/spec.md", b"# Spec\n");
+
+    let response = fixture.get("task-file", "docs%2F.%2Fspec.md").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let file: crate::task_files::TaskFileContent = from_slice(&body).unwrap();
+    assert_eq!(file.path, "docs/spec.md");
+    assert_eq!(file.content, "# Spec\n");
+}
+
+#[tokio::test]
+async fn task_file_route_denies_ordinary_http_requests_before_reading_the_path() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("docs/spec.md", b"# Spec\n");
+
+    let response = fixture
+        .get_unauthenticated("task-file", "docs%2Fspec.md")
+        .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("authenticated relay"));
+}
+
+#[tokio::test]
+async fn task_file_route_allows_authenticated_relay_dispatch() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("docs/spec.md", b"# Spec\n");
+
+    let response = fixture
+        .get_through_authenticated_relay("task-file", "docs%2Fspec.md")
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK.as_u16());
+    assert_eq!(
+        response.body,
+        Some(serde_json::json!({
+            "path": "docs/spec.md",
+            "content": "# Spec\n"
+        }))
+    );
+    assert_eq!(response.error, None);
+}
+
+#[tokio::test]
+async fn task_file_route_reads_from_newest_task_worktree_when_timestamps_tie() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("docs/spec.md", b"stale workspace");
+    let newest = fixture.add_newest_worktree_with_tied_timestamp();
+    std::fs::create_dir_all(newest.join("docs")).unwrap();
+    std::fs::write(newest.join("docs/spec.md"), "current workspace").unwrap();
+
+    let response = fixture
+        .get_through_authenticated_relay("task-file", "docs%2Fspec.md")
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK.as_u16());
+    assert_eq!(
+        response.body,
+        Some(serde_json::json!({
+            "path": "docs/spec.md",
+            "content": "current workspace"
+        }))
+    );
+}
+
+#[tokio::test]
+async fn task_file_route_maps_disallowed_paths_and_directories_to_bad_request() {
+    let fixture = TaskFileRouteFixture::new();
+    std::fs::create_dir_all(fixture.worktree.join("docs")).unwrap();
+
+    let traversal = fixture.get("task-file", "%2E%2E%2Foutside.md").await;
+    assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+    assert!(task_file_response_text(traversal)
+        .await
+        .contains("stay within the task workspace"));
+
+    let directory = fixture.get("task-file", "docs").await;
+    assert_eq!(directory.status(), StatusCode::BAD_REQUEST);
+    assert!(task_file_response_text(directory)
+        .await
+        .contains("regular file"));
+}
+
+#[tokio::test]
+async fn task_file_route_maps_embedded_nul_to_bad_request() {
+    let fixture = TaskFileRouteFixture::new();
+
+    let response = fixture.get("task-file", "docs%2Fbad%00name.md").await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("stay within the task workspace"));
+}
+
+#[tokio::test]
+async fn task_file_route_maps_traversal_through_regular_file_to_bad_request() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("README.md", b"read me");
+
+    let response = fixture.get("task-file", "README.md%2Fchild.md").await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("stay within the task workspace"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn task_file_route_maps_symlink_loop_to_bad_request() {
+    let fixture = TaskFileRouteFixture::new();
+    std::os::unix::fs::symlink("loop-b.md", fixture.worktree.join("loop-a.md")).unwrap();
+    std::os::unix::fs::symlink("loop-a.md", fixture.worktree.join("loop-b.md")).unwrap();
+
+    let response = fixture.get("task-file", "loop-a.md").await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("stay within the task workspace"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn task_file_route_maps_unreadable_file_to_bad_request() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("private.md", b"private");
+    std::fs::set_permissions(
+        fixture.worktree.join("private.md"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+
+    let response = fixture.get("task-file", "private.md").await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("stay within the task workspace"));
+}
+
+#[tokio::test]
+async fn task_file_route_maps_unknown_task_and_missing_file_to_not_found() {
+    let fixture = TaskFileRouteFixture::new();
+
+    let unknown_task = fixture.get("missing-task", "README.md").await;
+    assert_eq!(unknown_task.status(), StatusCode::NOT_FOUND);
+    assert!(task_file_response_text(unknown_task)
+        .await
+        .contains("task not found"));
+
+    let missing_file = fixture.get("task-file", "missing.md").await;
+    assert_eq!(missing_file.status(), StatusCode::NOT_FOUND);
+    assert!(task_file_response_text(missing_file)
+        .await
+        .contains("file not found"));
+}
+
+#[tokio::test]
+async fn task_file_route_maps_unavailable_workspace_to_conflict() {
+    let fixture = TaskFileRouteFixture::new();
+
+    let response = fixture.get("task-file-no-workspace", "README.md").await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("workspace unavailable"));
+}
+
+#[tokio::test]
+async fn task_file_route_maps_oversized_file_to_payload_too_large() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write(
+        "large.md",
+        &vec![b'x'; crate::task_files::MAX_TASK_FILE_BYTES as usize + 1],
+    );
+
+    let response = fixture.get("task-file", "large.md").await;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("1 MiB limit"));
+}
+
+#[tokio::test]
+async fn task_file_route_maps_non_utf8_file_to_unsupported_media_type() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("binary.md", &[0xff, 0xfe]);
+
+    let response = fixture.get("task-file", "binary.md").await;
+
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("valid UTF-8"));
+}
+
+#[tokio::test]
+async fn task_file_route_maps_database_failure_to_internal_server_error() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("kanna.sqlite");
+    drop(Connection::open(&db_path).unwrap());
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: temp_dir.path().join("daemon").to_string_lossy().to_string(),
+        db_path: db_path.to_string_lossy().to_string(),
+        kanna_cli_path: None,
+        desktop_id: "desktop-task-file-error".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "0.0.0.0".to_string(),
+        lan_port: 48120,
+        pairing_store_path: temp_dir
+            .path()
+            .join("pairings.json")
+            .to_string_lossy()
+            .to_string(),
+    };
+    let app = super::router(Arc::new(super::AppState::new(config)));
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-file-error/files/content?path=README.md")
+                .extension(AuthenticatedTaskFileAccess)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(task_file_response_text(response).await.contains("db error"));
+}
+
 #[tokio::test]
 async fn task_logs_route_renders_agent_journal_tail() {
     let task_id = format!(

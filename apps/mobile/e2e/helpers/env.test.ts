@@ -30,7 +30,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
       })
     ).toMatchObject({
       appEnv: "dev",
-      appScheme: "kanna-dev",
+      appScheme: "exp+kanna-mobile",
       appiumPort: 4723,
       metroPort: 1430,
       bundleId: "build.kanna.app.dev",
@@ -48,7 +48,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
       })
     ).toMatchObject({
       appEnv: "staging",
-      appScheme: "kanna-staging",
+      appScheme: "exp+kanna-mobile",
       bundleId: "build.kanna.app.staging"
     });
   });

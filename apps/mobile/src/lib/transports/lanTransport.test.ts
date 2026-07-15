@@ -67,6 +67,23 @@ describe("createLanTransport", () => {
     );
   });
 
+  it("fails closed instead of requesting task file contents over unauthenticated LAN", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        path: "docs/spec one.md",
+        content: "# Spec"
+      })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(
+      transport.readTaskFile("task/read", "docs/spec one.md")
+    ).rejects.toThrow(/authenticated relay/i);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("posts mark-read through the LAN task action route", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

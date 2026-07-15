@@ -92,6 +92,10 @@ describe("createKannaClient", () => {
       }),
       closeTask: vi.fn().mockResolvedValue(undefined),
       sendTaskInput: vi.fn().mockResolvedValue(undefined),
+      readTaskFile: vi.fn().mockResolvedValue({
+        path: "docs/spec one.md",
+        content: "# Spec"
+      }),
       observeTaskTerminal: vi.fn().mockReturnValue({
         close: vi.fn()
       }),
@@ -138,6 +142,17 @@ describe("createKannaClient", () => {
     });
     await expect(client.closeTask("task-1")).resolves.toBeUndefined();
     await expect(client.sendTaskInput("task-1", "continue")).resolves.toBeUndefined();
+    await expect(
+      client.readTaskFile("task/read", "docs/spec one.md")
+    ).resolves.toEqual({
+      path: "docs/spec one.md",
+      content: "# Spec"
+    });
+    expect(transport.readTaskFile).toHaveBeenCalledOnce();
+    expect(transport.readTaskFile).toHaveBeenCalledWith(
+      "task/read",
+      "docs/spec one.md"
+    );
     expect(typeof client.observeTaskTerminal("task-1", vi.fn()).close).toBe("function");
     expect((await client.createPairingSession()).code).toBe("ABC123");
   });

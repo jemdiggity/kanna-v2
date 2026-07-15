@@ -12,6 +12,7 @@ import type {
   PairingSession,
   TaskActionResponse,
   TaskActivityResponse,
+  TaskFileContent,
   TaskSummary
 } from "./types";
 
@@ -53,6 +54,7 @@ export interface KannaTransport {
   markTaskRead(taskId: string): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
+  readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   observeTaskTerminal(
     taskId: string,
     listener: (event: TaskTerminalStreamEvent) => void
@@ -78,6 +80,7 @@ export interface KannaClient {
   markTaskRead(taskId: string): Promise<TaskActivityResponse>;
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
+  readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   observeTaskTerminal(
     taskId: string,
     listener: (event: TaskTerminalStreamEvent) => void
@@ -140,6 +143,7 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     markTaskRead: (taskId) => transport.markTaskRead(taskId),
     closeTask: (taskId) => transport.closeTask(taskId),
     sendTaskInput: (taskId, input) => transport.sendTaskInput(taskId, input),
+    readTaskFile: (taskId, path) => transport.readTaskFile(taskId, path),
     observeTaskTerminal: (taskId, listener) =>
       transport.observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>

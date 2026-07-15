@@ -15,6 +15,9 @@ interface BuildTerminalUpdateScriptOptions {
   status: TaskTerminalStatus;
 }
 
+const TERMINAL_FILE_PATH_PATTERN =
+  /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.[a-zA-Z][a-zA-Z0-9]*(?::\d+){0,2})/g.source;
+
 export function buildTerminalDocument({
   bottomInset,
   enableE2EInspection
@@ -88,10 +91,91 @@ export function buildTerminalDocument({
       .xterm .xterm-scrollable-element {
         overscroll-behavior: contain;
       }
+
+      .terminal-file-links {
+        align-items: center;
+        backdrop-filter: blur(12px);
+        background: rgba(9, 17, 29, 0.94);
+        border: 1px solid #2a4267;
+        border-radius: 12px;
+        bottom: ${bottomInset + 8}px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.34);
+        display: flex;
+        gap: 8px;
+        left: 12px;
+        max-width: calc(100vw - 24px);
+        overflow-x: auto;
+        padding: 7px 8px;
+        position: fixed;
+        scrollbar-width: none;
+        touch-action: pan-x pinch-zoom;
+        z-index: 5;
+      }
+
+      .terminal-file-links[hidden] {
+        display: none;
+      }
+
+      .terminal-file-links::-webkit-scrollbar {
+        display: none;
+      }
+
+      #terminal-file-link-buttons {
+        display: flex;
+        gap: 8px;
+      }
+
+      .terminal-file-links-label {
+        color: #8da4c4;
+        flex: 0 0 auto;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        padding-left: 2px;
+        text-transform: uppercase;
+      }
+
+      .terminal-file-link {
+        appearance: none;
+        background: #12233a;
+        border: 1px solid #365a87;
+        border-radius: 8px;
+        color: #9fd7ff;
+        flex: 0 0 auto;
+        font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+        font-size: 12px;
+        line-height: 18px;
+        max-width: min(72vw, 460px);
+        overflow: hidden;
+        padding: 5px 8px;
+        text-decoration: underline;
+        text-decoration-thickness: 1px;
+        text-overflow: ellipsis;
+        text-underline-offset: 3px;
+        touch-action: pan-x pinch-zoom;
+        white-space: nowrap;
+      }
+
+      .terminal-file-link:focus-visible {
+        outline: 2px solid #7dd3fc;
+        outline-offset: 2px;
+      }
     </style>
   </head>
   <body>
     <div class="viewport" id="viewport">
+      <div
+        aria-label="Files mentioned in terminal"
+        aria-live="polite"
+        class="terminal-file-links"
+        hidden
+        id="terminal-file-links"
+        role="region"
+      >
+        <span aria-hidden="true" class="terminal-file-links-label">Files</span>
+        <div id="terminal-file-link-buttons"></div>
+      </div>
       <div id="terminal-root"></div>
     </div>
     <script>${XTERM_WEBVIEW_SCRIPT}</script>
@@ -99,6 +183,8 @@ export function buildTerminalDocument({
     <script>
       const root = document.getElementById("terminal-root");
       const viewport = document.getElementById("viewport");
+      const terminalFileLinks = document.getElementById("terminal-file-links");
+      const terminalFileLinkButtons = document.getElementById("terminal-file-link-buttons");
       const TerminalCtor = globalThis.Terminal;
       const FitAddonCtor = globalThis.FitAddon && globalThis.FitAddon.FitAddon;
       const TERMINAL_COLS = 220;
@@ -106,6 +192,9 @@ export function buildTerminalDocument({
       const MIN_FONT_SCALE = 0.75;
       const MAX_FONT_SCALE = 1.8;
       const SMOOTH_SCROLL_DURATION_MS = 80;
+      const MAX_DISCOVERABLE_FILE_LINKS = 6;
+      const MAX_FILE_LINK_SCAN_ROWS = 200;
+      const FILE_LINK_GESTURE_COOLDOWN_MS = 450;
       const term = new TerminalCtor({
         cols: TERMINAL_COLS,
         fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
@@ -147,11 +236,197 @@ export function buildTerminalDocument({
       let fontScale = 1;
       let touchScroll = null;
       let pinch = null;
+      let touchGestureMoved = false;
+      let suppressFileLinkActivationUntil = 0;
 
       term.loadAddon(fitAddon);
       term.open(root);
       term.onScroll(() => {
         stickyToBottom = isNearBottom();
+      });
+
+      const terminalFilePathRegex = new RegExp(
+        ${JSON.stringify(TERMINAL_FILE_PATH_PATTERN)},
+        "g"
+      );
+
+      function parseTerminalFileLink(raw) {
+        const parts = raw.split(":");
+        const suffixes = [];
+        while (parts.length > 1 && suffixes.length < 2) {
+          const maybeNumber = parts[parts.length - 1];
+          if (!maybeNumber || !/^\\d+$/.test(maybeNumber)) {
+            break;
+          }
+          suffixes.unshift(Number.parseInt(maybeNumber, 10));
+          parts.pop();
+        }
+
+        const path = parts.join(":");
+        if (path.split("/").includes("..")) {
+          return null;
+        }
+        return { path, line: suffixes[0] };
+      }
+
+      function notifyTerminalFileLink(path, line) {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+
+        const message = { type: "terminal-file-link", path };
+        if (line !== undefined) {
+          message.line = line;
+        }
+        window.ReactNativeWebView.postMessage(JSON.stringify(message));
+      }
+
+      function suppressTerminalFileLinkActivation() {
+        suppressFileLinkActivationUntil = Math.max(
+          suppressFileLinkActivationUntil,
+          Date.now() + FILE_LINK_GESTURE_COOLDOWN_MS
+        );
+      }
+
+      function activateTerminalFileLink(path, line) {
+        if (Date.now() < suppressFileLinkActivationUntil) {
+          return false;
+        }
+        notifyTerminalFileLink(path, line);
+        return true;
+      }
+
+      function terminalFileCandidates(lineText) {
+        const candidates = [];
+        terminalFilePathRegex.lastIndex = 0;
+        let match;
+        while ((match = terminalFilePathRegex.exec(lineText)) !== null) {
+          const raw = match[1];
+          const parsed = parseTerminalFileLink(raw);
+          if (!parsed) {
+            continue;
+          }
+          candidates.push({
+            parsed,
+            raw,
+            start: match.index + match[0].length - raw.length
+          });
+        }
+        return candidates;
+      }
+
+      function terminalCellBoundaries(line) {
+        const boundaries = new Map([[0, 0]]);
+        let stringOffset = 0;
+        for (let cellColumn = 0; cellColumn < line.length; cellColumn += 1) {
+          const cell = line.getCell(cellColumn);
+          if (!cell) continue;
+          const width = cell.getWidth();
+          if (width === 0) continue;
+          const chars = cell.getChars() || " ";
+          boundaries.set(stringOffset, cellColumn);
+          stringOffset += chars.length;
+          boundaries.set(stringOffset, cellColumn + width);
+        }
+        return boundaries;
+      }
+
+      function detectTerminalFileLinks(lineText, bufferLineNumber, line) {
+        const links = [];
+        const cellBoundaries = terminalCellBoundaries(line);
+        for (const { parsed, raw, start } of terminalFileCandidates(lineText)) {
+          const startCell = cellBoundaries.get(start);
+          const endCell = cellBoundaries.get(start + raw.length);
+          if (startCell === undefined || endCell === undefined) {
+            continue;
+          }
+          links.push({
+            range: {
+              start: { x: startCell + 1, y: bufferLineNumber },
+              end: { x: endCell, y: bufferLineNumber }
+            },
+            text: raw,
+            decorations: {
+              pointerCursor: true,
+              underline: true
+            },
+            activate() {
+              activateTerminalFileLink(parsed.path, parsed.line);
+            }
+          });
+        }
+        return links;
+      }
+
+      function refreshTerminalFileLinks() {
+        const buffer = term.buffer.active;
+        const firstLine = Math.max(0, buffer.length - MAX_FILE_LINK_SCAN_ROWS);
+        const discoverable = new Map();
+
+        for (let index = firstLine; index < buffer.length; index += 1) {
+          const line = buffer.getLine(index);
+          if (!line) continue;
+          for (const candidate of terminalFileCandidates(line.translateToString(true))) {
+            if (discoverable.has(candidate.raw)) {
+              discoverable.delete(candidate.raw);
+            }
+            discoverable.set(candidate.raw, candidate);
+          }
+        }
+
+        const visible = Array.from(discoverable.values()).slice(
+          -MAX_DISCOVERABLE_FILE_LINKS
+        );
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(
+            JSON.stringify({
+              type: "terminal-file-links",
+              links: visible.map(({ parsed, raw }) => ({
+                raw,
+                path: parsed.path,
+                ...(parsed.line === undefined ? {} : { line: parsed.line })
+              }))
+            })
+          );
+        }
+        terminalFileLinkButtons.replaceChildren();
+        for (const { parsed, raw } of visible) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "terminal-file-link";
+          button.dataset.terminalFileRaw = raw;
+          button.textContent = raw;
+          button.setAttribute(
+            "aria-label",
+            parsed.line === undefined
+              ? "Open file " + parsed.path
+              : "Open file " + parsed.path + " at line " + parsed.line
+          );
+          button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            if (!activateTerminalFileLink(parsed.path, parsed.line)) {
+              event.preventDefault();
+            }
+          });
+          terminalFileLinkButtons.append(button);
+        }
+        terminalFileLinks.hidden = visible.length === 0;
+      }
+
+      term.registerLinkProvider({
+        provideLinks(bufferLineNumber, callback) {
+          const line = term.buffer.active.getLine(bufferLineNumber - 1);
+          if (!line) {
+            callback(undefined);
+            return;
+          }
+          const links = detectTerminalFileLinks(
+            line.translateToString(true),
+            bufferLineNumber,
+            line
+          );
+          callback(links.length ? links : undefined);
+        }
       });
 
       function cellDimensions() {
@@ -291,6 +566,8 @@ export function buildTerminalDocument({
       function installPinchZoomFallback() {
         viewport.addEventListener("touchstart", (event) => {
           if (event.touches.length === 2) {
+            touchGestureMoved = true;
+            suppressTerminalFileLinkActivation();
             pinch = {
               distance: touchDistance(event.touches),
               scale: fontScale
@@ -302,10 +579,13 @@ export function buildTerminalDocument({
           if (event.touches.length !== 1) {
             touchScroll = null;
             pinch = null;
+            touchGestureMoved = true;
+            suppressTerminalFileLinkActivation();
             return;
           }
 
           const touch = event.touches[0];
+          touchGestureMoved = false;
           touchScroll = {
             axis: null,
             x: touch.clientX,
@@ -317,6 +597,8 @@ export function buildTerminalDocument({
 
         viewport.addEventListener("touchmove", (event) => {
           if (event.touches.length === 2 && pinch) {
+            touchGestureMoved = true;
+            suppressTerminalFileLinkActivation();
             const distance = touchDistance(event.touches);
             if (pinch.distance > 0) {
               applyFontScale(pinch.scale * (distance / pinch.distance));
@@ -341,6 +623,9 @@ export function buildTerminalDocument({
             return;
           }
 
+          touchGestureMoved = true;
+          suppressTerminalFileLinkActivation();
+
           if (touchScroll.axis === null) {
             touchScroll.axis = absDeltaY > absDeltaX ? "vertical" : "horizontal";
           }
@@ -364,17 +649,23 @@ export function buildTerminalDocument({
         }, { passive: false, capture: true });
 
         viewport.addEventListener("touchend", (event) => {
+          if (pinch || touchGestureMoved) {
+            suppressTerminalFileLinkActivation();
+          }
           if (event.touches.length < 2) {
             pinch = null;
           }
           if (event.touches.length === 0) {
             touchScroll = null;
+            touchGestureMoved = false;
           }
         }, { passive: true, capture: true });
 
         viewport.addEventListener("touchcancel", () => {
           touchScroll = null;
           pinch = null;
+          touchGestureMoved = false;
+          suppressTerminalFileLinkActivation();
         }, { passive: true, capture: true });
       }
 
@@ -414,6 +705,8 @@ export function buildTerminalDocument({
           scrollToBottomImmediately();
         }
         scheduleViewportAlignment();
+
+        refreshTerminalFileLinks();
 
         ${enableE2EInspection ? "notifyTerminalInspection();" : ""}
       }

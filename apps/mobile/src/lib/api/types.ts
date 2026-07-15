@@ -86,6 +86,11 @@ export interface TaskActivityResponse {
   activity: TaskActivity | null;
 }
 
+export interface TaskFileContent {
+  path: string;
+  content: string;
+}
+
 export interface TaskSummary {
   id: string;
   repoId: string;

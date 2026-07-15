@@ -354,7 +354,7 @@ pub(crate) async fn run_relay_loop(
                             RelayInvoke::Http { method, path, body } => {
                                 log::info!("HTTP invoke #{}: {} {}", id, method, path);
 
-                                let invoke_response = http_api::dispatch_http_invoke(
+                                let invoke_response = http_api::dispatch_authenticated_http_invoke(
                                     Arc::clone(&http_state),
                                     &method,
                                     &path,

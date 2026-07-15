@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
 import type { TaskActivity } from "../../src/lib/api/types";
 
@@ -23,9 +25,37 @@ const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
 
+export const MOBILE_RELAY_FILE_PREVIEW_FIXTURE = {
+  content: [
+    "# Mobile Relay Preview",
+    "",
+    "Rendered through the authenticated owner relay.",
+    "TARGET RAW LINE"
+  ].join("\n"),
+  expectedHeading: "Mobile Relay Preview",
+  expectedRenderedText: "Rendered through the authenticated owner relay.",
+  expectedRawLine: "TARGET RAW LINE",
+  line: 4,
+  missingLink: "docs/mobile-preview-missing.md",
+  path: "docs/mobile-file-preview.md",
+  rawLink: "docs/mobile-file-preview.md:4",
+  renderedLink: "docs/mobile-file-preview.md"
+} as const;
+
+export type MobileRelayFilePreviewFixture =
+  typeof MOBILE_RELAY_FILE_PREVIEW_FIXTURE;
+
 type MobileRelayHarnessMode = "relay" | "hybrid";
 
 interface RemoteHarness {
+  client: {
+    invokeDesktop(input: {
+      desktopId: string;
+      method: string;
+      path: string;
+      body?: unknown;
+    }): Promise<unknown>;
+  };
   desktopId: string;
   lanBaseUrl: string;
   ports: {
@@ -101,12 +131,14 @@ export interface MobileRelayHarness {
   };
   env: Record<string, string>;
   fixture: PtyTerminalFixture;
+  filePreview: MobileRelayFilePreviewFixture;
   harness: RemoteHarness;
   hybridEnv: Record<string, string>;
   hybridFixture: MobileHybridFixture;
   menuInput: string;
   lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
+  emitFilePreviewLinks(): Promise<void>;
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: {
@@ -187,6 +219,7 @@ export async function startMobileRelayHarness(
           }
         : {}),
     });
+    await seedMobileRelayFilePreview(localTask);
     const lanOnlyTask = mode === "hybrid"
       ? await remote.terminal.createScriptedTask(harness, {
           displayName: HYBRID_LAN_ONLY_TITLE
@@ -216,7 +249,6 @@ export async function startMobileRelayHarness(
     terminalEvents = remote.terminal.collectTerminalEvents(harness, localTask.taskId);
     await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_TASK_SENTINEL);
     await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_MENU_CURSOR_MARKER);
-
     const terminalFixture: PtyTerminalFixture = {
       taskId: cloudTaskId,
       sentinel: RELAY_TASK_SENTINEL,
@@ -261,12 +293,29 @@ export async function startMobileRelayHarness(
       },
       env: mobileRelayExpoEnv(harness),
       fixture: terminalFixture,
+      filePreview: MOBILE_RELAY_FILE_PREVIEW_FIXTURE,
       harness,
       hybridEnv: mobileRelayExpoEnv(harness, { forceCloud: false }),
       hybridFixture,
       menuInput: "1",
       lanOnlyTask,
       localTask,
+      async emitFilePreviewLinks() {
+        for (const link of [
+          MOBILE_RELAY_FILE_PREVIEW_FIXTURE.renderedLink,
+          MOBILE_RELAY_FILE_PREVIEW_FIXTURE.rawLink,
+          MOBILE_RELAY_FILE_PREVIEW_FIXTURE.missingLink
+        ]) {
+          // Emit after the simulator has attached so the paths cannot age out
+          // of the bounded xterm scan while Metro and WebDriverAgent start.
+          // The space also mirrors agent prose and creates a path boundary.
+          await postScriptedTaskInput(harness, localTask.taskId, ` ${link}`);
+          await remote.terminal.waitForTerminalOutput(
+            terminalEvents!,
+            `SCRIPT_INPUT: ${link}`
+          );
+        }
+      },
       async prepareTaskUnreadForMarkRead() {
         await setPublishedTaskActivity({
           activity: "unread",
@@ -323,6 +372,30 @@ export async function startMobileRelayHarness(
     await harness.stop();
     throw error;
   }
+}
+
+async function seedMobileRelayFilePreview(task: ScriptedTask): Promise<void> {
+  if (!task.worktreePath) {
+    throw new Error(
+      `Scripted task ${task.taskId} did not return a worktree for file-preview E2E`
+    );
+  }
+  const target = join(task.worktreePath, MOBILE_RELAY_FILE_PREVIEW_FIXTURE.path);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, MOBILE_RELAY_FILE_PREVIEW_FIXTURE.content, "utf8");
+}
+
+async function postScriptedTaskInput(
+  harness: RemoteHarness,
+  taskId: string,
+  input: string
+): Promise<void> {
+  await harness.client.invokeDesktop({
+    desktopId: harness.desktopId,
+    method: "POST",
+    path: `/v1/tasks/${encodeURIComponent(taskId)}/input`,
+    body: { input }
+  });
 }
 
 async function publishHybridCloudRefresh(input: {

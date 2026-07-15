@@ -14,6 +14,7 @@ import type {
   RepoSummary,
   TaskActionResponse,
   TaskActivityResponse,
+  TaskFileContent,
   TaskSummary,
 } from "../api/types";
 import {
@@ -526,6 +527,14 @@ export function createRemoteTransport({
         { input }
       );
     },
+    readTaskFile: (taskId: string, path: string) =>
+      requestTask<TaskFileContent>(
+        taskId,
+        "GET",
+        (localTaskId) =>
+          `/v1/tasks/${encodeURIComponent(localTaskId)}/files/content?path=${encodeURIComponent(path)}`,
+        null
+      ),
     observeTaskTerminal(
       taskId: string,
       listener: (event: TaskTerminalStreamEvent) => void

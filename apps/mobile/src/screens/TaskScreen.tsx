@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Keyboard,
   Pressable,
@@ -8,10 +8,11 @@ import {
   View
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import type { TaskSummary } from "../lib/api/types";
+import type { TaskFileContent, TaskSummary } from "../lib/api/types";
 import type { TaskTerminalStatus } from "../state/sessionStore";
 import type { FrameAgentEvent, PermissionDecision } from "@kanna/agent-protocol";
 import { AgentMessageView } from "./AgentMessageView";
+import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
 import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
@@ -31,6 +32,7 @@ interface TaskScreenProps {
   agentErrorMessage: string | null;
   onBack(): void;
   onOpenMore(): void;
+  onReadTaskFile(path: string): Promise<TaskFileContent>;
   onSendInput(input: string): void;
   onStopAgent(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
@@ -49,6 +51,7 @@ export function TaskScreen({
   agentErrorMessage,
   onBack,
   onOpenMore,
+  onReadTaskFile,
   onSendInput,
   onStopAgent,
   onResolveAgentPermission
@@ -62,7 +65,32 @@ export function TaskScreen({
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [screenHeight, setScreenHeight] = useState(0);
   const [composerTop, setComposerTop] = useState<number | null>(null);
+  const [selectedFile, setSelectedFile] = useState<{
+    path: string;
+    line?: number;
+    previewRevision: number;
+  } | null>(null);
   const isAgentTask = task.agentType === "agent";
+  const previewScopeRef = useRef({
+    isAgentTask,
+    revision: 0,
+    taskId: task.id
+  });
+  if (
+    previewScopeRef.current.taskId !== task.id ||
+    previewScopeRef.current.isAgentTask !== isAgentTask
+  ) {
+    previewScopeRef.current = {
+      isAgentTask,
+      revision: previewScopeRef.current.revision + 1,
+      taskId: task.id
+    };
+  }
+  const previewRevision = previewScopeRef.current.revision;
+  const activeSelectedFile =
+    !isAgentTask && selectedFile?.previewRevision === previewRevision
+      ? selectedFile
+      : null;
   const effectiveActivity =
     task.activity === "working" || task.activity === "unread"
       ? task.activity
@@ -132,6 +160,9 @@ export function TaskScreen({
             taskId={task.id}
             bottomInset={terminalBottomInset}
             onConsolePress={Keyboard.dismiss}
+            onOpenFile={(path, line) => {
+              setSelectedFile({ path, line, previewRevision });
+            }}
           />
         ) : (
           <View style={styles.terminalSkeleton}>
@@ -208,6 +239,15 @@ export function TaskScreen({
           </Pressable>
         </View>
       </View>
+
+      {activeSelectedFile ? (
+        <TaskFilePreview
+          initialLine={activeSelectedFile.line}
+          path={activeSelectedFile.path}
+          readFile={() => onReadTaskFile(activeSelectedFile.path)}
+          onClose={() => setSelectedFile(null)}
+        />
+      ) : null}
     </View>
   );
 }

@@ -2,6 +2,25 @@ import { describe, expect, it } from "vitest";
 import * as relayHarness from "./relay-harness";
 
 describe("mobile relay harness helpers", () => {
+  it("describes the real Markdown file and routed failure used by Appium", () => {
+    expect(relayHarness.MOBILE_RELAY_FILE_PREVIEW_FIXTURE).toEqual({
+      content: [
+        "# Mobile Relay Preview",
+        "",
+        "Rendered through the authenticated owner relay.",
+        "TARGET RAW LINE"
+      ].join("\n"),
+      expectedHeading: "Mobile Relay Preview",
+      expectedRenderedText: "Rendered through the authenticated owner relay.",
+      expectedRawLine: "TARGET RAW LINE",
+      line: 4,
+      missingLink: "docs/mobile-preview-missing.md",
+      path: "docs/mobile-file-preview.md",
+      rawLink: "docs/mobile-file-preview.md:4",
+      renderedLink: "docs/mobile-file-preview.md"
+    });
+  });
+
   it("builds a hybrid Expo environment with cloud forcing disabled", () => {
     const buildEnv = (
       relayHarness as typeof relayHarness & {
