@@ -168,7 +168,10 @@ export interface StoreServices {
   sortedItemsAllRepos?: ComputedRef<PipelineItem[]>;
   isItemHidden?: (item: PipelineItem) => boolean;
   getStageOrder?: (repoId: string) => readonly string[];
-  selectRepo?: (repoId: string) => Promise<void>;
+  selectRepo?: (
+    repoId: string,
+    options?: { persistWindowSelection?: boolean },
+  ) => Promise<void>;
   selectItem?: (itemId: string, options?: { previousItemId?: string | null }) => Promise<void>;
   selectReplacementAfterItemRemoval?: (removedItem: PipelineItem) => Promise<string | null>;
   reconcileSelection?: () => void;

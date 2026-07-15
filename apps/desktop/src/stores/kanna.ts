@@ -47,8 +47,6 @@ export const useKannaStore = defineStore("kanna", () => {
   services.selectReplacementAfterItemRemoval = selection.selectReplacementAfterItemRemoval;
   services.reconcileSelection = selection.reconcileSelection;
   services.restoreSelection = selection.restoreSelection;
-  services.goBack = selection.goBack;
-  services.goForward = selection.goForward;
 
   services.applyTaskRuntimeStatus = sessions.applyTaskRuntimeStatus;
   services.syncTaskStatusesFromDaemon = sessions.syncTaskStatusesFromDaemon;
@@ -157,9 +155,10 @@ Use this branch as the default when the user does not specify a target branch. B
     attachWindowWorkspace,
     selectRepo: selection.selectRepo,
     selectItem: selection.selectItem,
+    recordNavigation: selection.recordNavigation,
+    takeBackTarget: selection.takeBackTarget,
+    takeForwardTarget: selection.takeForwardTarget,
     persistSelection: selection.persistSelection,
-    goBack: selection.goBack,
-    goForward: selection.goForward,
 
     importRepo: tasks.importRepo,
     createRepo: tasks.createRepo,

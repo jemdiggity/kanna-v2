@@ -41,9 +41,9 @@ export type ActionName =
   | "nextTab"
   | "focusSearch"
   | "goToOldestUnread"
-  | "goToNewestUnread"
+  | "goToOldestUnreadAllRepos"
   | "goToOldestRead"
-  | "goToNewestRead";
+  | "goToOldestReadAllRepos";
 
 export type KeyboardActions = Record<ActionName, () => void | boolean | Promise<void>>;
 
@@ -110,9 +110,9 @@ export const shortcuts: ShortcutDef[] = [
   { action: "toggleTreeExplorer", labelKey: "shortcuts.treeExplorer", groupKey: "shortcuts.groupOpenInspect", key: ["E", "e"], meta: true, shift: true, display: "⇧⌘E", context: PREVIEW_MODAL_CONTEXTS },
   { action: "showAnalytics", labelKey: "shortcuts.analytics",      groupKey: "shortcuts.groupOpenInspect", key: ["A", "a"],                     meta: true, shift: true,  display: "⇧⌘A",     context: ["main"] },
   { action: "goToOldestUnread", labelKey: "shortcuts.oldestUnread", groupKey: "shortcuts.groupMoveAround", key: "u", meta: true, display: "⌘U", context: ["main"] },
-  { action: "goToNewestUnread", labelKey: "shortcuts.newestUnread", groupKey: "shortcuts.groupMoveAround", key: ["U", "u"], meta: true, shift: true, display: "⇧⌘U", context: ["main"] },
+  { action: "goToOldestUnreadAllRepos", labelKey: "shortcuts.oldestUnreadAllRepos", groupKey: "shortcuts.groupMoveAround", key: ["U", "u"], meta: true, shift: true, display: "⇧⌘U", context: ["main"] },
   { action: "goToOldestRead", labelKey: "shortcuts.oldestRead", groupKey: "shortcuts.groupMoveAround", key: "r", meta: true, display: "⌘R", context: ["main"] },
-  { action: "goToNewestRead", labelKey: "shortcuts.newestRead", groupKey: "shortcuts.groupMoveAround", key: ["R", "r"], meta: true, shift: true, display: "⇧⌘R", context: ["main"] },
+  { action: "goToOldestReadAllRepos", labelKey: "shortcuts.oldestReadAllRepos", groupKey: "shortcuts.groupMoveAround", key: ["R", "r"], meta: true, shift: true, display: "⇧⌘R", context: ["main"] },
   // Help — global app controls and help entry points
   { action: "openPreferences", labelKey: "shortcuts.preferences", groupKey: "shortcuts.groupAppHelp", key: ",",                            meta: true,               display: "⌘,",       context: ["main"] },
   // Help — ⇧⌘/ must come before ⌘/ so the more specific shortcut matches first

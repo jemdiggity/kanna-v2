@@ -59,6 +59,8 @@ function createHarness(options: {
 } = {}) {
   const openWindow = vi.fn(async () => {});
   const advanceStage = vi.fn(async () => {});
+  const navigateBack = vi.fn(async () => {});
+  const navigateForward = vi.fn(async () => {});
   const store = {
     selectedRepoId: "repo-1",
     selectedItemId: options.selectedSlotId ?? "create:stable",
@@ -72,8 +74,10 @@ function createHarness(options: {
     selectedWorkspaceTask: computed(() => options.workspaceTask ?? null),
     currentShortcutContext: computed(() => "main"),
     showShortcutsModal: ref(false),
+    navigateBack,
+    navigateForward,
   } as unknown as Parameters<typeof useAppKeyboardActions>[0]);
-  return { keyboardActions, openWindow, advanceStage };
+  return { keyboardActions, openWindow, advanceStage, navigateBack, navigateForward };
 }
 
 describe("useAppKeyboardActions durable selection", () => {
@@ -118,5 +122,15 @@ describe("useAppKeyboardActions durable selection", () => {
     keyboardActions.advanceStage();
 
     expect(advanceStage).toHaveBeenCalledWith("task-durable");
+  });
+
+  it("routes history shortcuts through workspace-aware navigation", async () => {
+    const { keyboardActions, navigateBack, navigateForward } = createHarness();
+
+    await keyboardActions.goBack();
+    await keyboardActions.goForward();
+
+    expect(navigateBack).toHaveBeenCalledOnce();
+    expect(navigateForward).toHaveBeenCalledOnce();
   });
 });

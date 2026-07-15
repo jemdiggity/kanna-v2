@@ -43,6 +43,12 @@ export function createInitApi(
   ports: import("./ports").PortsStore,
   tasks: Pick<import("./tasks").TasksApi, "checkUnblocked" | "handleAgentFinished" | "restoreUnblockedTask">,
 ): InitApi {
+  interface FocusedSelectionBeforeRefresh {
+    taskId: string | null;
+    selectedRepoId: string | null;
+    selectedItemId: string | null;
+  }
+
   function isVisibleItemInSelectedRepo(item: PipelineItem | null | undefined): item is PipelineItem {
     return Boolean(
       item
@@ -51,18 +57,36 @@ export function createInitApi(
     );
   }
 
-  function resolveFocusedTaskIdBeforeExternalRefresh(): string | null {
+  function resolveFocusedSelectionBeforeExternalRefresh(): FocusedSelectionBeforeRefresh {
     const selectedSlot = requireService(context.services.currentTaskSlot, "currentTaskSlot").value;
-    if (isVisibleItemInSelectedRepo(selectedSlot?.task)) return selectedSlot.task.id;
+    const selectedTaskId = isVisibleItemInSelectedRepo(selectedSlot?.task)
+      ? selectedSlot.task.id
+      : null;
 
     const currentItem = context.services.currentItem?.value ?? null;
-    if (isVisibleItemInSelectedRepo(currentItem)) return currentItem.id;
-
-    return null;
+    return {
+      taskId: selectedTaskId
+        ?? (isVisibleItemInSelectedRepo(currentItem) ? currentItem.id : null),
+      selectedRepoId: context.state.selectedRepoId.value,
+      selectedItemId: context.state.selectedItemId.value,
+    };
   }
 
-  async function preserveFocusedTaskAfterExternalRefresh(taskId: string | null): Promise<void> {
+  async function preserveFocusedTaskAfterExternalRefresh(
+    selectionBeforeRefresh: FocusedSelectionBeforeRefresh,
+  ): Promise<void> {
+    const { taskId, selectedRepoId, selectedItemId } = selectionBeforeRefresh;
     if (!taskId) return;
+
+    // Snapshot refreshes are asynchronous. A task selected while one is in
+    // flight is newer intent and must not be replaced by the focus captured
+    // before the refresh started.
+    if (
+      context.state.selectedRepoId.value !== selectedRepoId
+      || context.state.selectedItemId.value !== selectedItemId
+    ) {
+      return;
+    }
 
     const selectedSlot = requireService(context.services.currentTaskSlot, "currentTaskSlot").value;
     if (isVisibleItemInSelectedRepo(selectedSlot?.task) && selectedSlot.task.id === taskId) return;
@@ -330,9 +354,9 @@ export function createInitApi(
       getSharedStreamClient().then((client) => {
         client.onStateChanged((scope) => {
           void (async () => {
-            const focusedTaskId = resolveFocusedTaskIdBeforeExternalRefresh();
+            const focusedSelection = resolveFocusedSelectionBeforeExternalRefresh();
             await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-            await preserveFocusedTaskAfterExternalRefresh(focusedTaskId);
+            await preserveFocusedTaskAfterExternalRefresh(focusedSelection);
             console.debug(`[store] refreshed snapshot after KSP state change: ${scope}`);
           })().catch((error) => {
             console.error("[store] KSP state change handler failed:", error);
@@ -347,9 +371,9 @@ export function createInitApi(
       const sessionId = readSessionId(event);
       if (!sessionId || !isTaskAgentSession(sessionId)) return;
 
-      const focusedTaskId = resolveFocusedTaskIdBeforeExternalRefresh();
+      const focusedSelection = resolveFocusedSelectionBeforeExternalRefresh();
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-      await preserveFocusedTaskAfterExternalRefresh(focusedTaskId);
+      await preserveFocusedTaskAfterExternalRefresh(focusedSelection);
       await context.services.syncTaskStatusesFromDaemon?.();
     });
 

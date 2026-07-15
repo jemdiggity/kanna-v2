@@ -1229,7 +1229,12 @@ describe("kanna query snapshot regressions", () => {
     await store.hideRepo("repo-2");
     await flushStore();
 
-    store.goBack();
+    const backTarget = store.takeBackTarget(
+      store.selectedItemId!,
+      new Set(store.taskUiSlots.map((slot) => slot.slot_id)),
+    );
+    expect(backTarget).toBe("item-1");
+    await store.selectItem(backTarget!, { recordNavigation: false });
     await flushStore();
 
     expect(store.selectedRepo?.id).toBe("repo-1");
@@ -1247,13 +1252,23 @@ describe("kanna query snapshot regressions", () => {
     await store.selectItem("item-2", { previousItemId: "item-1" });
     await flushStore();
 
-    store.goBack();
+    const backTarget = store.takeBackTarget(
+      store.selectedItemId!,
+      new Set(store.taskUiSlots.map((slot) => slot.slot_id)),
+    );
+    expect(backTarget).toBe("item-1");
+    await store.selectItem(backTarget!, { recordNavigation: false });
     await flushStore();
 
     expect(store.selectedRepo?.id).toBe("repo-1");
     expect(store.currentItem?.id).toBe("item-1");
 
-    store.goForward();
+    const forwardTarget = store.takeForwardTarget(
+      store.selectedItemId!,
+      new Set(store.taskUiSlots.map((slot) => slot.slot_id)),
+    );
+    expect(forwardTarget).toBe("item-2");
+    await store.selectItem(forwardTarget!, { recordNavigation: false });
     await flushStore();
 
     expect(store.selectedRepo?.id).toBe("repo-2");

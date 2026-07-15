@@ -275,6 +275,7 @@ describe("Sidebar", () => {
     expect(row.attributes("data-task-id")).toBe("durable-pending");
     expect(wrapper.get(".repo-count").text()).toBe("1");
     expect(wrapper.emitted("select-item")).toEqual([["create:acknowledged"]]);
+    expect(wrapper.emitted("select-repo")).toBeUndefined();
   });
 
   it("emits slot ids for selection and durable ids for ready mutations", async () => {
@@ -285,6 +286,7 @@ describe("Sidebar", () => {
 
     await wrapper.get('[data-slot-id="slot:ready-distinct"]').trigger("click");
     expect(wrapper.emitted("select-item")).toEqual([["slot:ready-distinct"]]);
+    expect(wrapper.emitted("select-repo")).toBeUndefined();
 
     await wrapper.get('[data-slot-id="slot:ready-distinct"]').trigger("dblclick");
     const input = wrapper.get<HTMLInputElement>(".rename-input");

@@ -301,7 +301,6 @@ function handleSelectRepo(repoId: string) {
 }
 
 function handleSelectItem(item: SidebarTaskItem) {
-  emit("select-repo", item.repo_id);
   emit("select-item", item.slot_id);
 }
 

@@ -88,7 +88,7 @@ describe("keyboard shortcuts", () => {
       `const cb = arguments[arguments.length - 1];
        const ctx = ${CTX_SCRIPT};
        const selectRepo = ctx.handleSelectRepo || ctx.store.selectRepo.bind(ctx.store);
-       const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+       const selectItem = ctx.selectSidebarItemById || ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
        Promise.resolve(ctx.refreshAllItems())
          .then(function() { return selectRepo(${JSON.stringify(repoId)}); })
          .then(function() { return selectItem(${JSON.stringify(itemId)}); })
@@ -653,7 +653,7 @@ describe("keyboard shortcuts", () => {
        if (remoteSnapshot.__v_isRef) remoteSnapshot.value = snapshot;
        else Object.assign(remoteSnapshot, snapshot);
        const selectRepo = ctx.handleSelectRepo || ctx.store.selectRepo.bind(ctx.store);
-       const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+       const selectItem = ctx.selectSidebarItemById || ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
        Promise.resolve(selectRepo(${JSON.stringify(remoteRepoId)}))
          .then(function() { return selectItem(${JSON.stringify(remoteTaskId)}); })
          .then(function() { cb("ok"); })
@@ -762,7 +762,7 @@ describe("keyboard shortcuts", () => {
         `const cb = arguments[arguments.length - 1];
          const ctx = ${CTX_SCRIPT};
          const selectRepo = ctx.handleSelectRepo || ctx.store.selectRepo.bind(ctx.store);
-         const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+         const selectItem = ctx.selectSidebarItemById || ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
          Promise.resolve(selectRepo(${JSON.stringify(remoteRepoId)}))
            .then(function() { return selectItem(${JSON.stringify(remoteTaskId)}); })
            .then(function() { cb("ok"); })
@@ -917,22 +917,22 @@ describe("keyboard shortcuts", () => {
     expect(await getVueState(client, "selectedItemId")).toBe("shortcut-normal-old");
   });
 
-  it("read and unread shortcuts select the absolute oldest and newest task by created_at", async () => {
+  it("read and unread shortcuts select the absolute oldest task by created_at", async () => {
     await ensureRepoImported();
     const repoId = await getVueState(client, "selectedRepoId") as string;
 
     const seedRowsAndSelectCurrent = async (prefix: string) => {
       await execDb(client, "DELETE FROM pipeline_item WHERE repo_id = ?", [repoId]);
       const rows = [
-        [`${prefix}-cmd-r-read-oldest`, repoId, "Read oldest", "in progress", "idle", "2026-03-31T00:00:00.000Z", "[]"],
+        [`${prefix}-read-oldest`, repoId, "Read oldest", "in progress", "idle", "2026-03-31T00:00:00.000Z", "[]"],
         [`${prefix}-near-read-older`, repoId, "Read near older", "in progress", "idle", "2026-03-31T01:00:00.000Z", "[]"],
-        [`${prefix}-cmd-u-unread-oldest`, repoId, "Unread oldest", "in progress", "unread", "2026-03-31T01:30:00.000Z", "[]"],
+        [`${prefix}-unread-oldest`, repoId, "Unread oldest", "in progress", "unread", "2026-03-31T01:30:00.000Z", "[]"],
         [`${prefix}-near-unread-older`, repoId, "Unread near older", "in progress", "unread", "2026-03-31T02:00:00.000Z", "[]"],
         [`${prefix}-current`, repoId, "Current task", "in progress", "idle", "2026-03-31T03:00:00.000Z", "[]"],
         [`${prefix}-near-unread-newer`, repoId, "Unread near newer", "in progress", "unread", "2026-03-31T04:00:00.000Z", "[]"],
-        [`${prefix}-shift-cmd-u-unread-newest`, repoId, "Unread newest", "in progress", "unread", "2026-03-31T04:30:00.000Z", "[]"],
+        [`${prefix}-unread-newest`, repoId, "Unread newest", "in progress", "unread", "2026-03-31T04:30:00.000Z", "[]"],
         [`${prefix}-near-read-newer`, repoId, "Read near newer", "in progress", "idle", "2026-03-31T05:00:00.000Z", "[]"],
-        [`${prefix}-shift-cmd-r-read-newest`, repoId, "Read newest", "in progress", "idle", "2026-03-31T06:00:00.000Z", "[]"],
+        [`${prefix}-read-newest`, repoId, "Read newest", "in progress", "idle", "2026-03-31T06:00:00.000Z", "[]"],
       ] as const;
       for (const row of rows) {
         await execDb(
@@ -947,19 +947,19 @@ describe("keyboard shortcuts", () => {
 
     await seedRowsAndSelectCurrent("shortcut");
     await pressKey("u", { meta: true });
-    await waitForSelection({ repoId, itemId: "shortcut-cmd-u-unread-oldest" });
+    await waitForSelection({ repoId, itemId: "shortcut-unread-oldest" });
 
     await seedRowsAndSelectCurrent("shortcut");
     await pressKey("U", { meta: true, shift: true });
-    await waitForSelection({ repoId, itemId: "shortcut-shift-cmd-u-unread-newest" });
+    await waitForSelection({ repoId, itemId: "shortcut-unread-oldest" });
 
     await seedRowsAndSelectCurrent("shortcut");
     await pressKey("r", { meta: true });
-    await waitForSelection({ repoId, itemId: "shortcut-cmd-r-read-oldest" });
+    await waitForSelection({ repoId, itemId: "shortcut-read-oldest" });
 
     await seedRowsAndSelectCurrent("shortcut");
     await pressKey("R", { meta: true, shift: true });
-    await waitForSelection({ repoId, itemId: "shortcut-shift-cmd-r-read-newest" });
+    await waitForSelection({ repoId, itemId: "shortcut-read-oldest" });
   });
 
   it("unread shortcuts use created_at when unread_at ordering differs", async () => {
@@ -987,10 +987,10 @@ describe("keyboard shortcuts", () => {
 
     await refreshItemsAndSelect(repoId, `${prefix}-current-unread-at-order`);
     await pressKey("U", { meta: true, shift: true });
-    await waitForSelection({ repoId, itemId: `${prefix}-created-newest-unread-oldest` });
+    await waitForSelection({ repoId, itemId: `${prefix}-created-oldest-unread-newest` });
   });
 
-  it("read and unread shortcuts stay scoped to the selected local repo", async () => {
+  it("keeps unshifted activity shortcuts local and searches all visible local repos when shifted", async () => {
     await resetDatabase(client);
     await client.executeSync("location.reload()");
     await client.waitForAppReady();
@@ -1008,14 +1008,14 @@ describe("keyboard shortcuts", () => {
       const currentTaskId = `${prefix}-current`;
       const rows = [
         [currentTaskId, repoOneId, "Current local task", "idle", "2026-03-31T03:00:00.000Z"],
-        [`${prefix}-cmd-u-unread-local`, repoOneId, "Selected repo unread older", "unread", "2026-03-31T02:00:00.000Z"],
-        [`${prefix}-shift-cmd-u-unread-local`, repoOneId, "Selected repo unread newer", "unread", "2026-03-31T04:00:00.000Z"],
-        [`${prefix}-cmd-r-read-local`, repoOneId, "Selected repo read older", "idle", "2026-03-31T01:00:00.000Z"],
-        [`${prefix}-shift-cmd-r-read-local`, repoOneId, "Selected repo read newer", "idle", "2026-03-31T05:00:00.000Z"],
-        [`${prefix}-cmd-u-unread-other`, repoTwoId, "Other repo unread oldest", "unread", "2026-03-31T00:30:00.000Z"],
-        [`${prefix}-shift-cmd-u-unread-other`, repoTwoId, "Other repo unread newest", "unread", "2026-03-31T06:30:00.000Z"],
-        [`${prefix}-cmd-r-read-other`, repoTwoId, "Other repo read oldest", "idle", "2026-03-31T00:00:00.000Z"],
-        [`${prefix}-shift-cmd-r-read-other`, repoTwoId, "Other repo read newest", "idle", "2026-03-31T07:00:00.000Z"],
+        [`${prefix}-unread-local-oldest`, repoOneId, "Selected repo unread oldest", "unread", "2026-03-31T02:00:00.000Z"],
+        [`${prefix}-unread-local-newest`, repoOneId, "Selected repo unread newest", "unread", "2026-03-31T04:00:00.000Z"],
+        [`${prefix}-read-local-oldest`, repoOneId, "Selected repo read oldest", "idle", "2026-03-31T01:00:00.000Z"],
+        [`${prefix}-read-local-newest`, repoOneId, "Selected repo read newest", "idle", "2026-03-31T05:00:00.000Z"],
+        [`${prefix}-unread-global-oldest`, repoTwoId, "Globally oldest unread", "unread", "2026-03-31T00:30:00.000Z"],
+        [`${prefix}-unread-global-newest`, repoTwoId, "Other repo unread newest", "unread", "2026-03-31T06:30:00.000Z"],
+        [`${prefix}-read-global-oldest`, repoTwoId, "Globally oldest read", "idle", "2026-03-31T00:00:00.000Z"],
+        [`${prefix}-read-global-newest`, repoTwoId, "Other repo read newest", "idle", "2026-03-31T07:00:00.000Z"],
       ] as const;
 
       for (const row of rows) {
@@ -1031,22 +1031,22 @@ describe("keyboard shortcuts", () => {
 
     await seedRowsAndSelectCurrent("shortcut-cross-local");
     await pressKey("u", { meta: true });
-    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-cmd-u-unread-local" });
+    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-unread-local-oldest" });
 
     await seedRowsAndSelectCurrent("shortcut-cross-local");
     await pressKey("U", { meta: true, shift: true });
-    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-shift-cmd-u-unread-local" });
+    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-unread-global-oldest" });
 
     await seedRowsAndSelectCurrent("shortcut-cross-local");
     await pressKey("r", { meta: true });
-    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-cmd-r-read-local" });
+    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-read-local-oldest" });
 
     await seedRowsAndSelectCurrent("shortcut-cross-local");
     await pressKey("R", { meta: true, shift: true });
-    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-shift-cmd-r-read-local" });
+    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-read-global-oldest" });
   });
 
-  it("read and unread shortcuts stay scoped to the selected remote-only repo", async () => {
+  it("keeps unshifted activity shortcuts in the selected cloud repo and searches all visible repos when shifted", async () => {
     await resetDatabase(client);
     await client.executeSync("location.reload()");
     await client.waitForAppReady();
@@ -1084,6 +1084,7 @@ describe("keyboard shortcuts", () => {
       [otherRemoteRepoId, "remote-read-newest-other", "Other remote read newest", "idle", "2026-03-31T07:00:00.000Z"],
     ] as const;
     const remoteItemId = (repoId: string, suffix: string) => `${repoId}:${suffix}`;
+    const remoteSlotId = (repoId: string, suffix: string) => `remote:${repoId}:owner-local:${suffix}`;
     const remoteSnapshot = {
       repos: [
         {
@@ -1154,7 +1155,7 @@ describe("keyboard shortcuts", () => {
       const result = await client.executeAsync<string>(
         `const cb = arguments[arguments.length - 1];
          const ctx = ${CTX_SCRIPT};
-         const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+         const selectItem = ctx.selectSidebarItemById || ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
          Promise.resolve(selectItem(${JSON.stringify(itemId)}))
            .then(function() { cb("ok"); })
            .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
@@ -1168,99 +1169,92 @@ describe("keyboard shortcuts", () => {
         `const cb = arguments[arguments.length - 1];
          const ctx = ${CTX_SCRIPT};
          const selectRepo = ctx.handleSelectRepo || ctx.store.selectRepo.bind(ctx.store);
-         const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+         const selectItem = ctx.selectSidebarItemById || ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
          Promise.resolve(selectRepo(${JSON.stringify(remoteRepoId)}))
            .then(function() { return selectItem(${JSON.stringify(remoteItemId(remoteRepoId, "remote-read-older"))}); })
            .then(function() { cb("ok"); })
            .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
       );
       expect(selectRepoResult).toBe("ok");
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-read-older") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteSlotId(remoteRepoId, "remote-read-older") });
 
       await pressKey("u", { meta: true });
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-unread-older") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteSlotId(remoteRepoId, "remote-unread-older") });
 
       await injectCloudSnapshot(remoteSnapshot);
       await selectRemoteTask(remoteItemId(remoteRepoId, "remote-read-older"));
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-read-older") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteSlotId(remoteRepoId, "remote-read-older") });
       await pressKey("U", { meta: true, shift: true });
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-unread-newer") });
+      await waitForSelection({
+        repoId: otherRemoteRepoId,
+        itemId: remoteSlotId(otherRemoteRepoId, "remote-unread-oldest-other"),
+      });
 
       await injectCloudSnapshot(remoteSnapshot);
       await selectRemoteTask(remoteItemId(remoteRepoId, "remote-unread-older"));
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-unread-older") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteSlotId(remoteRepoId, "remote-unread-older") });
       await pressKey("r", { meta: true });
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-read-older") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteSlotId(remoteRepoId, "remote-read-older") });
 
       await injectCloudSnapshot(remoteSnapshot);
       await selectRemoteTask(remoteItemId(remoteRepoId, "remote-unread-older"));
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-unread-older") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteSlotId(remoteRepoId, "remote-unread-older") });
       await pressKey("R", { meta: true, shift: true });
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-read-newer") });
+      await waitForSelection({
+        repoId: otherRemoteRepoId,
+        itemId: remoteSlotId(otherRemoteRepoId, "remote-read-oldest-other"),
+      });
     } finally {
       await injectCloudSnapshot({ repos: [], items: [], terminalRefs: {} });
       await refreshItemsAndSelect(localRepoId, currentTaskId).catch(() => undefined);
     }
   });
 
-  it("unread shortcuts fall back to absolute read tasks when no unread tasks exist", async () => {
-    await ensureRepoImported();
-    const repoId = await getVueState(client, "selectedRepoId") as string;
+  it("unread shortcuts fall back to the oldest read task in their scope when no unread tasks exist", async () => {
+    await resetDatabase(client);
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
 
-    const seedResult = await client.executeAsync<string>(
-      `const cb = arguments[arguments.length - 1];
-       const ctx = window.__KANNA_E2E__.setupState;
-       const db = ctx.db.value || ctx.db;
-       const rows = [
-         ["shortcut-blocked-old", "${repoId}", "Blocked old read", "in progress", "idle", "2026-03-31T00:00:00.000Z"],
-         ["shortcut-read-old", "${repoId}", "Read old", "in progress", "idle", "2026-03-31T01:00:00.000Z"],
-         ["shortcut-read-near-old", "${repoId}", "Read near old", "in progress", "idle", "2026-03-31T02:00:00.000Z"],
-         ["shortcut-current-read-fallback", "${repoId}", "Current", "in progress", "idle", "2026-03-31T03:00:00.000Z"],
-         ["shortcut-read-near-new", "${repoId}", "Read near new", "in progress", "idle", "2026-03-31T04:00:00.000Z"],
-         ["shortcut-read-new", "${repoId}", "Read new", "in progress", "idle", "2026-03-31T05:00:00.000Z"],
-         ["shortcut-blocked-new", "${repoId}", "Blocked new read", "in progress", "idle", "2026-03-31T06:00:00.000Z"],
-       ];
-       // Blocked-ness comes from task_blocker rows on open blockers, not tags.
-       const blockerEdges = [
-         ["shortcut-blocked-old", "shortcut-read-old"],
-         ["shortcut-blocked-new", "shortcut-read-new"],
-       ];
-       db.execute("DELETE FROM pipeline_item WHERE repo_id = ?", ["${repoId}"])
-         .then(function() {
-           return Promise.all(rows.map(function(row) {
-             return db.execute(
-               "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-               [row[0], row[1], row[2], row[3], row[4], row[5], ${JSON.stringify(KEYBOARD_FIXTURE_AGENT_TYPE)}]
-             );
-           }));
-         })
-         .then(function() {
-           return Promise.all(blockerEdges.map(function(edge) {
-             return db.execute(
-               "INSERT OR IGNORE INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?)",
-               [edge[0], edge[1]]
-             );
-           }));
-         })
-         .then(function() { return ctx.loadItems("${repoId}"); })
-         .then(function() { return ctx.store.selectItem("shortcut-current-read-fallback"); })
-         .then(function() { cb("ok"); })
-         .catch(function(e) { cb("err:" + e); });`
+    const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-read-fallback-one");
+    const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "keyboard-read-fallback-two");
+    repoImported = true;
+
+    await execDb(client, "UPDATE repo SET sort_order = 0 WHERE id = ?", [repoOneId]);
+    await execDb(client, "UPDATE repo SET sort_order = 1 WHERE id = ?", [repoTwoId]);
+
+    const currentTaskId = "shortcut-current-read-fallback";
+    const rows = [
+      ["shortcut-blocked-global-oldest", repoOneId, "Blocked globally oldest read", "2026-03-31T00:00:00.000Z"],
+      ["shortcut-read-global-oldest", repoTwoId, "Globally oldest eligible read", "2026-03-31T00:30:00.000Z"],
+      ["shortcut-read-local-oldest", repoOneId, "Selected repo oldest eligible read", "2026-03-31T01:00:00.000Z"],
+      ["shortcut-read-local-near", repoOneId, "Selected repo nearby read", "2026-03-31T02:00:00.000Z"],
+      [currentTaskId, repoOneId, "Current read fallback task", "2026-03-31T03:00:00.000Z"],
+      ["shortcut-read-local-newest", repoOneId, "Selected repo newest read", "2026-03-31T05:00:00.000Z"],
+      ["shortcut-read-global-newest", repoTwoId, "Other repo newest read", "2026-03-31T06:00:00.000Z"],
+    ] as const;
+
+    for (const row of rows) {
+      await execDb(
+        client,
+        "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [row[0], row[1], row[2], "in progress", "idle", row[3], row[3], KEYBOARD_FIXTURE_AGENT_TYPE],
+      );
+    }
+    // Blocked-ness comes from task_blocker rows on open blockers, not tags.
+    await execDb(
+      client,
+      "INSERT INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?)",
+      ["shortcut-blocked-global-oldest", "shortcut-read-local-oldest"],
     );
-    expect(seedResult).toBe("ok");
-    await waitForSelection({ repoId, itemId: "shortcut-current-read-fallback" });
 
+    await refreshItemsAndSelect(repoOneId, currentTaskId);
     await pressKey("u", { meta: true });
-    await waitForSelection({ repoId, itemId: "shortcut-read-old" });
+    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-read-local-oldest" });
 
-    await client.executeAsync<string>(
-      `const cb = arguments[arguments.length - 1];
-       ${CTX_SCRIPT}.store.selectItem("shortcut-current-read-fallback").then(function() { cb("ok"); }).catch(function(e) { cb("err:" + e); });`,
-    );
-    await waitForSelection({ repoId, itemId: "shortcut-current-read-fallback" });
-
+    await refreshItemsAndSelect(repoOneId, currentTaskId);
     await pressKey("U", { meta: true, shift: true });
-    await waitForSelection({ repoId, itemId: "shortcut-read-new" });
+    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-read-global-oldest" });
   });
 
   it("shows the Option+Cmd+P file preview shortcut in the file picker shortcut menu", async () => {
