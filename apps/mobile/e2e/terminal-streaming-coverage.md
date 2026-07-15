@@ -35,24 +35,43 @@ test-only desktop/mobile-server fixture path that can spawn a fake PTY command o
 register a synthetic terminal session with controlled output and dimensions, then
 surface that task through the normal `/v1/tasks` list and KSP terminal stream.
 
-True gesture E2E for mobile terminal pinch zoom and bidirectional scrolling has
-the same fixture constraint plus an Appium/WebView gesture gap: the test must
-drive native two-finger pinch and pan input into the WebView while inspecting the
-xterm DOM state after each gesture. The current smoke can switch into the
-WebView and inspect state, but it does not have a stable terminal fixture or a
-cross-driver helper that reliably injects multi-touch gestures into the embedded
-WebView. Making that coverage deterministic requires the fixture path above and
-a gesture helper that can issue native pinch/pan actions, then assert
-`#viewport.scrollLeft`, `.xterm-viewport.scrollTop`, `data-kanna-font-scale`,
-and rendered terminal bytes in the same selected task.
+True native gesture E2E for terminal scrolling and composer clearance has the
+same fixture constraint plus an Appium/WebView gesture gap: the test must drive
+native pan and keyboard input into the WebView while switching contexts to
+inspect xterm's public buffer state and rendered geometry. The current smoke can
+switch into the WebView and inspect state, but it cannot create a controlled PTY
+task or reliably coordinate a native gesture with WebView inspection. Making
+that coverage deterministic requires the synthetic terminal-session fixture
+path above and a cross-context gesture helper that can issue native pan/input
+actions, then assert `buffer.active.viewportY`, the real
+`.xterm-scrollable-element` bounds, `data-kanna-bottom-inset`, and rendered
+terminal bytes for the same selected task.
+
+The deterministic substitute is the Playwright check in `tests/tui-fidelity`.
+It executes `buildTerminalDocument` with the repository's bundled xterm script
+and fit addon in Chromium, rather than a DOM stub. It proves clearance for 132,
+212, 446, and 526 px obstructions (normal, multiline, keyboard-shifted, and
+keyboard-plus-multiline composer layouts), uses a real wheel event to enter
+scrollback, verifies append does not move `viewportY` or the top line, and
+verifies following resumes near the bottom. Run it directly with:
+
+```bash
+pnpm --filter @kanna/tui-fidelity test:terminal-safe-region
+```
 
 The simulator-free coverage is:
 
-- `src/screens/TerminalWebView.test.tsx` for pending resize-before-snapshot
-  script ordering.
+- `src/screens/terminalSafeArea.test.ts` and `src/screens/TaskScreen.test.tsx`
+  for measured normal, multiline, and keyboard-shifted composer geometry.
+- `src/screens/TerminalWebView.test.tsx` for resize/inset/snapshot ordering,
+  pre-ready inset coalescing, immediate updates, and stable document identity.
 - `src/screens/buildTerminalDocument.test.ts` for large newline-delimited
-  base64 frame preservation, the resize bridge, executable fallback touch
-  scrolling, pinch scale clamping, and the generated terminal script path.
+  base64 frame preservation, the actual xterm DOM/public-buffer contract,
+  manual scrollback following, dynamic safe-region alignment, the resize
+  bridge, executable fallback touch scrolling, pinch scale clamping, and the
+  generated terminal script path.
+- `tests/tui-fidelity/src/terminalSafeRegion.ts` for the real-browser bundled-
+  xterm integration described above.
 - `src/state/sessionStore.test.ts` for preserving large base64 frames without
   slicing mid-token.
 - `src/state/mobileController.test.ts` for applying ready-event PTY dimensions

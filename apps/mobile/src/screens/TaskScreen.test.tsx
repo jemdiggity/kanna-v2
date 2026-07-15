@@ -1,4 +1,7 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+const states: unknown[] = [];
+let stateHookIndex = 0;
 
 vi.mock("react", async (importActual) => {
   const actual = await importActual<typeof import("react")>();
@@ -6,7 +9,19 @@ vi.mock("react", async (importActual) => {
   return {
     ...actual,
     useEffect: vi.fn(),
-    useState: <T,>(initialValue: T) => [initialValue, vi.fn()] as const
+    useState: vi.fn((initialValue: unknown) => {
+      const index = stateHookIndex;
+      stateHookIndex += 1;
+      if (!(index in states)) {
+        states[index] = initialValue;
+      }
+      return [states[index], (value: unknown) => {
+        states[index] =
+          typeof value === "function"
+            ? (value as (previous: unknown) => unknown)(states[index])
+            : value;
+      }];
+    })
   };
 });
 
@@ -38,6 +53,11 @@ beforeAll(async () => {
   TaskScreen = (await import("./TaskScreen")).TaskScreen;
 });
 
+beforeEach(() => {
+  states.length = 0;
+  stateHookIndex = 0;
+});
+
 interface ElementNode {
   type: unknown;
   props?: {
@@ -60,6 +80,7 @@ function renderTaskScreen(
     throw new Error("TaskScreen was not loaded");
   }
 
+  stateHookIndex = 0;
   return TaskScreen({
     task: {
       id: "task-1",
@@ -84,6 +105,17 @@ function renderTaskScreen(
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn()
   }) as ElementNode;
+}
+
+function invokeLayout(
+  node: ElementNode | null,
+  layout: { height: number; width: number; x: number; y: number }
+): void {
+  const onLayout = node?.props?.onLayout;
+  if (typeof onLayout !== "function") {
+    throw new Error("expected node to expose an onLayout callback");
+  }
+  onLayout({ nativeEvent: { layout } });
 }
 
 function findByTestId(node: ElementNode | ElementNode[] | string | null | undefined, testID: string): ElementNode | null {
@@ -144,6 +176,43 @@ describe("TaskScreen", () => {
       rows: 43
     });
   });
+
+  it("passes normal, multiline, and keyboard-shifted composer geometry to the terminal", () => {
+    let tree = renderTaskScreen("pty");
+
+    invokeLayout(findByTestId(tree, "mobile.task-detail-screen"), {
+      height: 800,
+      width: 390,
+      x: 0,
+      y: 0
+    });
+    invokeLayout(findByTestId(tree, "mobile.task-composer-chrome"), {
+      height: 110,
+      width: 362,
+      x: 14,
+      y: 676
+    });
+    tree = renderTaskScreen("pty");
+    expect(findByType(tree, "TerminalWebView")?.props?.bottomInset).toBe(132);
+
+    for (const [composerTop, expectedInset] of [
+      [596, 212],
+      [362, 446],
+      [282, 526]
+    ] as const) {
+      invokeLayout(findByTestId(tree, "mobile.task-composer-chrome"), {
+        height: 800 - composerTop,
+        width: 362,
+        x: 14,
+        y: composerTop
+      });
+      tree = renderTaskScreen("pty");
+      expect(findByType(tree, "TerminalWebView")?.props?.bottomInset).toBe(
+        expectedInset
+      );
+    }
+  });
+
   it("renders an E2E-only accepted snapshot marker when provided", () => {
     const marker = "cloud-only:Cloud task refreshed";
     const tree = renderTaskScreen("agent", undefined, marker);

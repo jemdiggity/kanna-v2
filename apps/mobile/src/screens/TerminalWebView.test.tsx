@@ -108,6 +108,8 @@ async function renderTerminalWebView(input: {
   status?: TaskTerminalStatus;
   cols?: number | null;
   rows?: number | null;
+  fullscreen?: boolean;
+  bottomInset?: number;
 }): Promise<ElementNode> {
   resetRenderState();
   const { TerminalWebView } = await import("./TerminalWebView");
@@ -116,7 +118,9 @@ async function renderTerminalWebView(input: {
     output: input.output ?? `${Buffer.from("large snapshot").toString("base64")}\n`,
     status: input.status ?? "live",
     cols: input.cols ?? null,
-    rows: input.rows ?? null
+    rows: input.rows ?? null,
+    fullscreen: input.fullscreen,
+    bottomInset: input.bottomInset
   }) as ElementNode;
   lastTree = tree;
 
@@ -133,6 +137,10 @@ async function renderTerminalWebView(input: {
   }
 
   return webView;
+}
+
+function bottomInsetScript(bottomInset: number): string {
+  return `window.__setTerminalBottomInset(${JSON.stringify({ bottomInset })}); true;`;
 }
 
 describe("TerminalWebView", () => {
@@ -241,5 +249,90 @@ describe("TerminalWebView", () => {
         status: "live"
       })
     );
+  });
+
+  it("coalesces measured insets after resize and before terminal state", async () => {
+    const output = `${Buffer.from("large snapshot").toString("base64")}\n`;
+    const initialWebView = await renderTerminalWebView({
+      output,
+      cols: 132,
+      rows: 43,
+      fullscreen: true,
+      bottomInset: 132
+    });
+    (initialWebView.props.onLoadStart as () => void)();
+    runEffects();
+
+    await renderTerminalWebView({
+      output,
+      cols: 132,
+      rows: 43,
+      fullscreen: true,
+      bottomInset: 212
+    });
+    runEffects();
+    await renderTerminalWebView({
+      output,
+      cols: 132,
+      rows: 43,
+      fullscreen: true,
+      bottomInset: 526
+    });
+    runEffects();
+
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({ type: "terminal-ready" })
+      }
+    } as WebViewMessageEvent);
+
+    const insetScripts = injectedScripts.filter((script) =>
+      script.includes("__setTerminalBottomInset")
+    );
+    expect(insetScripts).toEqual([bottomInsetScript(526)]);
+    expect(injectedScripts[0]).toBe(buildTerminalResizeScript(132, 43));
+    expect(injectedScripts[1]).toBe(bottomInsetScript(526));
+    expect(injectedScripts.some((script) => script.includes("__replaceTerminalState"))).toBe(
+      true
+    );
+  });
+
+  it("injects measured inset changes immediately after the bridge is ready", async () => {
+    const initialWebView = await renderTerminalWebView({
+      fullscreen: true,
+      bottomInset: 132
+    });
+    (initialWebView.props.onLoadStart as () => void)();
+    runEffects();
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({ type: "terminal-ready" })
+      }
+    } as WebViewMessageEvent);
+    injectedScripts.length = 0;
+
+    await renderTerminalWebView({
+      fullscreen: true,
+      bottomInset: 212
+    });
+    runEffects();
+
+    expect(injectedScripts).toContain(bottomInsetScript(212));
+  });
+
+  it("keeps generated HTML stable when only measured inset changes", async () => {
+    const initialWebView = await renderTerminalWebView({
+      fullscreen: true,
+      bottomInset: 132
+    });
+    const initialHtml = (initialWebView.props.source as { html: string }).html;
+
+    const multilineWebView = await renderTerminalWebView({
+      fullscreen: true,
+      bottomInset: 212
+    });
+    const multilineHtml = (multilineWebView.props.source as { html: string }).html;
+
+    expect(multilineHtml).toBe(initialHtml);
   });
 });

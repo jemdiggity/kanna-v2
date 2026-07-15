@@ -8,15 +8,22 @@ raw PTY bytes -> daemon HeadlessTerminal snapshot -> KSP term frames -> real mob
 
 The oracle renders the same raw fixture bytes directly into a fresh xterm.js instance at the fixture's PTY dimensions. The harness compares the mobile-path grid against that oracle cell-by-cell, including text, width, foreground, background, and attributes.
 
-The harness also covers two mobile layers that are easy to bypass accidentally:
+The harness also covers three mobile layers that are easy to bypass accidentally:
 
 - Snapshot dimensions: `term_snapshot.cols`/`rows` are applied through the mobile document's `__setTerminalDims` hook before replay. The `bottom-anchored-80x24` fixture fails if mobile rendering drops the PTY dimensions and falls back to the old fixed 220-column, viewport-fitted grid.
 - Session accumulation: `large-session-store-snapshot` sends a large snapshot plus live frames through the real `sessionStore` accumulation/cap path before mobile replay. It fails if a large base64 snapshot is sliced mid-frame or renders blank after store replay.
+- Composer safe region: Chromium loads the generated mobile document with the bundled xterm 6.1 beta runtime, applies normal, multiline, keyboard-shifted, and keyboard-plus-multiline obstructions, and verifies that the real `.xterm-scrollable-element` stays clear. It also verifies that an append preserves manual scrollback and that following resumes within one row of the live bottom.
 
 ## Run
 
 ```bash
 pnpm test:tui-fidelity
+```
+
+To run only the composer-safe-region regression:
+
+```bash
+pnpm --filter @kanna/tui-fidelity test:terminal-safe-region
 ```
 
 The first run on a new machine may need:

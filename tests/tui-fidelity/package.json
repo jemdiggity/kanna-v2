@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test:tui-fidelity": "tsx src/run.ts",
+    "test:terminal-safe-region": "tsx src/run-terminal-safe-region.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -6,6 +6,7 @@ export const MOBILE_E2E_IDS = {
   taskSnapshotMarker: "mobile.task-snapshot-marker",
   taskBackButton: "mobile.task-back-button",
   taskMoreButton: "mobile.task-more-button",
+  taskComposerChrome: "mobile.task-composer-chrome",
   taskInput: "mobile.task-input",
   taskSendButton: "mobile.task-send-button",
   taskStopButton: "mobile.task-stop-button",

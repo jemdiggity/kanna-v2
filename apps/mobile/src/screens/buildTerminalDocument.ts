@@ -19,6 +19,10 @@ export function buildTerminalDocument({
   bottomInset,
   enableE2EInspection
 }: BuildTerminalDocumentOptions): string {
+  const initialBottomInset = Number.isFinite(bottomInset)
+    ? Math.max(0, Math.ceil(bottomInset))
+    : 0;
+
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -56,7 +60,7 @@ export function buildTerminalDocument({
         height: 100%;
         overflow-x: auto;
         overflow-y: auto;
-        padding-bottom: ${bottomInset}px;
+        padding-bottom: ${initialBottomInset}px;
         touch-action: pan-x pan-y pinch-zoom;
       }
 
@@ -73,13 +77,15 @@ export function buildTerminalDocument({
       .xterm,
       #terminal-root,
       .xterm .xterm-screen,
-      .xterm .xterm-viewport {
+      .xterm .xterm-viewport,
+      .xterm .xterm-scrollable-element {
         background: transparent !important;
         touch-action: pan-x pan-y pinch-zoom;
       }
 
       .xterm .xterm-screen,
-      .xterm .xterm-viewport {
+      .xterm .xterm-viewport,
+      .xterm .xterm-scrollable-element {
         overscroll-behavior: contain;
       }
     </style>
@@ -132,7 +138,7 @@ export function buildTerminalDocument({
         }
       });
       const fitAddon = new FitAddonCtor();
-      let terminalViewport = null;
+      let bottomInset = ${initialBottomInset};
       let stickyToBottom = true;
       let pinnedCols = 0;
       let pinnedRows = 0;
@@ -143,47 +149,34 @@ export function buildTerminalDocument({
       term.loadAddon(fitAddon);
       term.open(root);
 
-      function syncViewport() {
-        const nextViewport = root.querySelector(".xterm-viewport");
-        if (!nextViewport || nextViewport === terminalViewport) {
-          return;
-        }
-
-        terminalViewport = nextViewport;
-        terminalViewport.style.overflowX = "visible";
-        applyViewportInset();
-
-        if (terminalViewport.dataset.kannaScrollBound !== "1") {
-          terminalViewport.dataset.kannaScrollBound = "1";
-          terminalViewport.addEventListener(
-            "scroll",
-            () => {
-              stickyToBottom = isNearBottom();
-              applyViewportInset();
-            },
-            { passive: true }
-          );
-        }
-      }
-
-      function applyViewportInset() {
-        if (!terminalViewport) {
-          return;
-        }
-
-        terminalViewport.style.bottom = stickyToBottom ? "${bottomInset}px" : "0px";
-      }
+      term.onScroll(() => {
+        stickyToBottom = isNearBottom();
+      });
 
       function cellDimensions() {
-        try {
-          const cell = term._core._renderService.dimensions.css.cell;
-          if (cell && cell.width && cell.height) {
-            return { width: cell.width, height: cell.height };
-          }
-        } catch (_error) {
-          // Render service not ready yet; fall back to an estimate.
+        const cell = term.dimensions && term.dimensions.css.cell;
+        if (cell && cell.width && cell.height) {
+          return { width: cell.width, height: cell.height };
         }
         return { width: 8, height: 17 };
+      }
+
+      function alignViewportToSafeRegion() {
+        viewport.scrollTop = Math.max(
+          0,
+          viewport.scrollHeight - viewport.clientHeight
+        );
+      }
+
+      function scheduleViewportAlignment() {
+        alignViewportToSafeRegion();
+        requestAnimationFrame(alignViewportToSafeRegion);
+      }
+
+      function applyBottomInset() {
+        viewport.style.paddingBottom = bottomInset + "px";
+        root.dataset.kannaBottomInset = String(bottomInset);
+        scheduleViewportAlignment();
       }
 
       function applyPinnedSize() {
@@ -202,6 +195,7 @@ export function buildTerminalDocument({
         if (!dims || !dims.cols || !dims.rows) {
           return;
         }
+        const shouldStick = stickyToBottom || isNearBottom();
         pinnedCols = dims.cols;
         pinnedRows = dims.rows;
         try {
@@ -210,7 +204,27 @@ export function buildTerminalDocument({
           // Resize can throw mid-layout; a later call will retry.
         }
         applyPinnedSize();
-        syncViewport();
+        scheduleViewportAlignment();
+        stickyToBottom = shouldStick;
+        if (shouldStick) {
+          term.scrollToBottom();
+        }
+      };
+
+      window.__setTerminalBottomInset = function setTerminalBottomInset(state) {
+        const nextBottomInset = Number(state && state.bottomInset);
+        if (!Number.isFinite(nextBottomInset)) {
+          return;
+        }
+        const shouldStick = stickyToBottom || isNearBottom();
+        bottomInset = Math.max(0, Math.ceil(nextBottomInset));
+        applyBottomInset();
+        fitTerminal();
+        stickyToBottom = shouldStick;
+        if (shouldStick) {
+          term.scrollToBottom();
+        }
+        scheduleViewportAlignment();
       };
 
       function fitTerminal() {
@@ -218,7 +232,7 @@ export function buildTerminalDocument({
         // (current font, scroll on overflow) instead of refitting to the device.
         if (pinnedCols && pinnedRows) {
           applyPinnedSize();
-          syncViewport();
+          scheduleViewportAlignment();
           return;
         }
         try {
@@ -235,7 +249,7 @@ export function buildTerminalDocument({
             viewport.clientWidth,
             TERMINAL_COLS * 8
           ) + "px";
-          syncViewport();
+          scheduleViewportAlignment();
         } catch {
           // WebView layout is still settling. The next resize tick will retry.
         }
@@ -252,11 +266,13 @@ export function buildTerminalDocument({
       }
 
       function applyFontScale(nextScale) {
+        const shouldStick = stickyToBottom || isNearBottom();
         fontScale = clamp(nextScale, MIN_FONT_SCALE, MAX_FONT_SCALE);
         term.options.fontSize = Math.round(BASE_FONT_SIZE * fontScale);
         root.dataset.kannaFontScale = fontScale.toFixed(2);
         fitTerminal();
-        if (stickyToBottom) {
+        stickyToBottom = shouldStick;
+        if (shouldStick) {
           term.scrollToBottom();
         }
       }
@@ -282,8 +298,7 @@ export function buildTerminalDocument({
           touchScroll = {
             x: touch.clientX,
             y: touch.clientY,
-            scrollLeft: viewport.scrollLeft,
-            terminalScrollTop: terminalViewport ? terminalViewport.scrollTop : 0
+            scrollLeft: viewport.scrollLeft
           };
         }, { passive: true, capture: true });
 
@@ -339,16 +354,15 @@ export function buildTerminalDocument({
       }
 
       function isNearBottom() {
-        if (!terminalViewport) {
+        const buffer = term.buffer && term.buffer.active;
+        if (!buffer) {
           return true;
         }
-
-        const distanceFromBottom =
-          terminalViewport.scrollHeight -
-          terminalViewport.clientHeight -
-          terminalViewport.scrollTop;
-        return distanceFromBottom <= 24;
+        const distanceInRows = Math.max(0, buffer.baseY - buffer.viewportY);
+        return distanceInRows * cellDimensions().height <= 24;
       }
+
+      applyBottomInset();
 
       requestAnimationFrame(() => {
         fitTerminal();
@@ -359,20 +373,22 @@ export function buildTerminalDocument({
       });
 
       window.addEventListener("resize", () => {
+        const shouldStick = stickyToBottom || isNearBottom();
         fitTerminal();
-        if (stickyToBottom) {
-          applyViewportInset();
+        stickyToBottom = shouldStick;
+        if (shouldStick) {
           term.scrollToBottom();
         }
+        scheduleViewportAlignment();
       });
 
       function finalizeRender(shouldStick) {
         stickyToBottom = shouldStick;
-        applyViewportInset();
 
         if (shouldStick) {
           term.scrollToBottom();
         }
+        scheduleViewportAlignment();
 
         ${enableE2EInspection ? "notifyTerminalInspection();" : ""}
       }
@@ -595,6 +611,10 @@ export function buildTerminalAppendScript(chunk: string): string {
 
 export function buildTerminalResizeScript(cols: number, rows: number): string {
   return `window.__setTerminalDims(${JSON.stringify({ cols, rows })}); true;`;
+}
+
+export function buildTerminalBottomInsetScript(bottomInset: number): string {
+  return `window.__setTerminalBottomInset(${JSON.stringify({ bottomInset })}); true;`;
 }
 
 function getStatusCopy(status: TaskTerminalStatus): string {

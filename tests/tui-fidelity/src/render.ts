@@ -6,7 +6,10 @@ import { ARTIFACT_DIR, PACKAGE_ROOT, REPO_ROOT } from "./paths.ts";
 import type { EmitterOutput, GridSnapshot, TermSnapshotFrame } from "./types.ts";
 
 interface MobileDocumentModule {
-  buildTerminalDocument(options: { bottomInset: number }): string;
+  buildTerminalDocument(options: {
+    bottomInset: number;
+    enableE2EInspection: boolean;
+  }): string;
 }
 
 interface BrowserGridSnapshot {
@@ -136,13 +139,15 @@ export async function renderReferenceGrid(
   }
 }
 
-async function buildInstrumentedMobileDocument(): Promise<string> {
+export async function buildInstrumentedMobileDocument(
+  bottomInset: number = 0
+): Promise<string> {
   const moduleUrl = pathToFileURL(
     path.join(REPO_ROOT, "apps/mobile/src/screens/buildTerminalDocument.ts")
   ).href;
   const mod = (await import(moduleUrl)) as MobileDocumentModule;
   return mod
-    .buildTerminalDocument({ bottomInset: 0 })
+    .buildTerminalDocument({ bottomInset, enableE2EInspection: false })
     .replace("    <script>", `    <script>${terminalProbeScript()}</script>\n    <script>`);
 }
 
@@ -241,7 +246,7 @@ function terminalChunksFromOutput(output: string): string[] {
     .filter((chunk) => chunk.length > 0);
 }
 
-async function waitForWrites(page: Page): Promise<void> {
+export async function waitForWrites(page: Page): Promise<void> {
   await page.waitForFunction(() => window.__kannaPendingWrites === 0, undefined, {
     timeout: 5000
   });
@@ -354,6 +359,7 @@ declare global {
     };
     __appendTerminalChunk: (state: TerminalHookState) => void;
     __replaceTerminalState: (state: TerminalHookState) => void;
+    __setTerminalBottomInset: (state: { bottomInset: number }) => void;
     __setTerminalDims: (dims: { cols: number; rows: number }) => void;
     __kannaPendingWrites: number;
     __kannaSerializeAddon: { serialize: () => string };
@@ -389,8 +395,10 @@ declare global {
       buffer: {
         active: {
           baseY: number;
+          viewportY: number;
           getLine: (row: number) =>
             | {
+                translateToString: (trimRight?: boolean) => string;
                 getCell: (col: number) =>
                   | {
                       getChars: () => string;
@@ -415,6 +423,7 @@ declare global {
         };
       };
       loadAddon: (addon: { serialize: () => string }) => void;
+      scrollToLine: (line: number) => void;
       write: (text: string | Uint8Array, callback?: () => void) => void;
     }>;
   }
