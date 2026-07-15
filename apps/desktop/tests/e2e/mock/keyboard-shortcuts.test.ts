@@ -102,13 +102,23 @@ describe("keyboard shortcuts", () => {
   async function injectCloudSnapshot(
     snapshot: { repos: Array<Record<string, unknown>>; items: Array<Record<string, unknown>>; terminalRefs?: Record<string, unknown> },
   ): Promise<void> {
+    const disposeResult = await client.executeSync<string>(
+      `const ctx = ${CTX_SCRIPT};
+       if (typeof ctx.disposeDesktopCloudWorkspace === "function") {
+         ctx.disposeDesktopCloudWorkspace();
+       }
+       return "ok";`,
+    );
+    expect(disposeResult).toBe("ok");
+    await sleep(250);
+
     const result = await client.executeSync<string>(
       `const ctx = ${CTX_SCRIPT};
        const snapshot = ${JSON.stringify(snapshot)};
-       const cloudSnapshot = ctx.cloudSnapshot;
-       if (!cloudSnapshot) return "cloud-snapshot-unavailable";
-       if (cloudSnapshot.__v_isRef) cloudSnapshot.value = snapshot;
-       else Object.assign(cloudSnapshot, snapshot);
+       const remoteSnapshot = ctx.lanSnapshot;
+       if (!remoteSnapshot) return "remote-snapshot-unavailable";
+       if (remoteSnapshot.__v_isRef) remoteSnapshot.value = snapshot;
+       else Object.assign(remoteSnapshot, snapshot);
        return "ok";`,
     );
     expect(result).toBe("ok");
@@ -658,6 +668,157 @@ describe("keyboard shortcuts", () => {
       "return window.__KANNA_E2E__.appMetrics.snapshot();",
     );
     expect(metrics.invokeCounts.advance_transfer_peer_task_stage ?? 0).toBeGreaterThan(0);
+  });
+
+  it("keeps a cloud-only main-panel selection through a local snapshot refresh", async () => {
+    await resetDatabase(client);
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+
+    const localRepoId = await importRepoWithoutSetupTask(testRepoPath, "cloud-refresh-local-fallback");
+    repoImported = true;
+    const localTaskId = "cloud-refresh-local-task";
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        localTaskId,
+        localRepoId,
+        "Local fallback task",
+        "in progress",
+        "idle",
+        "2026-04-17T09:00:00.000Z",
+        "2026-04-17T09:00:00.000Z",
+        KEYBOARD_FIXTURE_AGENT_TYPE,
+      ],
+    );
+
+    const remoteRepoId = "cloud:keyboard-refresh-remote";
+    const remoteTaskId = "cloud:lan:peer-owner:keyboard-refresh-remote:task-remote";
+    const remoteSnapshot = {
+      repos: [{
+        id: remoteRepoId,
+        path: "cloud",
+        name: "Keyboard Refresh Remote",
+        remote_url: "https://example.invalid/kanna/keyboard-refresh-remote.git",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 1,
+        created_at: "2026-04-17T10:00:00.000Z",
+        last_opened_at: "2026-04-17T10:00:00.000Z",
+      }],
+      items: [{
+        id: remoteTaskId,
+        repo_id: remoteRepoId,
+        prompt: "Remote selection survives refresh",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-04-17T10:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote selection survives refresh",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-04-17T10:00:00.000Z",
+        updated_at: "2026-04-17T10:00:00.000Z",
+      }],
+      terminalRefs: {
+        [remoteTaskId]: {
+          ownerDesktopId: "peer-owner",
+          ownerLocalTaskId: "task-remote",
+          transport: "lan",
+        },
+      },
+    };
+
+    try {
+      await injectCloudSnapshot(remoteSnapshot);
+      const projectedItemIds = await client.executeSync<string[]>(
+        `const ctx = ${CTX_SCRIPT};
+         const unwrap = (value) => value?.__v_isRef ? value.value : value;
+         return Array.from(unwrap(ctx.sidebarItems) ?? []).map((item) => item.id);`,
+      );
+      expect(projectedItemIds).toContain(remoteTaskId);
+      const selectResult = await client.executeAsync<string>(
+        `const cb = arguments[arguments.length - 1];
+         const ctx = ${CTX_SCRIPT};
+         const selectRepo = ctx.handleSelectRepo || ctx.store.selectRepo.bind(ctx.store);
+         const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+         Promise.resolve(selectRepo(${JSON.stringify(remoteRepoId)}))
+           .then(function() { return selectItem(${JSON.stringify(remoteTaskId)}); })
+           .then(function() { cb("ok"); })
+           .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
+      );
+      expect(selectResult).toBe("ok");
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteTaskId });
+
+      const refreshResult = await client.executeAsync<string>(
+        `const cb = arguments[arguments.length - 1];
+         const ctx = ${CTX_SCRIPT};
+         Promise.resolve(ctx.store.savePreference("ideCommand", "code"))
+           .then(function() { cb("ok"); })
+           .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
+      );
+      expect(refreshResult).toBe("ok");
+
+      const selection = await client.executeSync<{
+        repoId: string | null;
+        itemId: string | null;
+        rememberedItemId: string | null;
+        mainPanelItemId: string | null;
+        mainPanelIsCloudTask: boolean;
+        cloudTerminalVisible: boolean;
+        localTerminalVisible: boolean;
+        selectedSidebarTaskId: string | null;
+      }>(
+        `const ctx = ${CTX_SCRIPT};
+         const unwrap = (value) => value?.__v_isRef ? value.value : value;
+         const remembered = unwrap(ctx.store?.lastSelectedItemByRepo) ?? {};
+         const mainPanelItem = unwrap(ctx.mainPanelItem);
+         return {
+           repoId: unwrap(ctx.store?.selectedRepoId) ?? null,
+           itemId: unwrap(ctx.store?.selectedItemId) ?? null,
+           rememberedItemId: remembered[${JSON.stringify(remoteRepoId)}] ?? null,
+           mainPanelItemId: mainPanelItem?.id ?? null,
+           mainPanelIsCloudTask: Boolean(unwrap(ctx.mainPanelIsCloudTask)),
+           cloudTerminalVisible: Boolean(document.querySelector(".cloud-terminal-shell")),
+           localTerminalVisible: Boolean(document.querySelector(".terminal-panel")),
+           selectedSidebarTaskId: document.querySelector(".pipeline-item.selected")?.getAttribute("data-task-id") ?? null,
+         };`,
+      );
+
+      expect(selection).toEqual({
+        repoId: remoteRepoId,
+        itemId: remoteTaskId,
+        rememberedItemId: remoteTaskId,
+        mainPanelItemId: remoteTaskId,
+        mainPanelIsCloudTask: true,
+        cloudTerminalVisible: true,
+        localTerminalVisible: false,
+        selectedSidebarTaskId: remoteTaskId,
+      });
+    } finally {
+      await injectCloudSnapshot({ repos: [], items: [], terminalRefs: {} });
+    }
   });
 
   it("uses native repo-navigation events to navigate repos", async () => {

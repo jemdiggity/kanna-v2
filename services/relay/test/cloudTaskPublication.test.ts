@@ -13,6 +13,7 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     ownerLocalTaskId: "task-1",
     title: "Publish from server",
     promptSnippet: "Publish from server",
+    waitingPromptSnippet: "Ready for review",
     displayName: null,
     stage: "in progress",
     activity: "idle",
@@ -58,9 +59,29 @@ describe("cloud task publication validation", () => {
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
       activity: "idle",
+      waitingPromptSnippet: "Ready for review",
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("normalizes missing waiting prompts and bounds them by Unicode scalar count", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ waitingPromptSnippet: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.waitingPromptSnippet).toBeNull();
+
+    const bounded = validateCloudTaskPublication(
+      publication([task({ waitingPromptSnippet: "🙂".repeat(240) })]),
+      "desktop-1",
+    );
+    expect(bounded.tasks[0]?.waitingPromptSnippet).toBe("🙂".repeat(240));
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({ waitingPromptSnippet: "🙂".repeat(241) })]),
+      "desktop-1",
+    )).toThrow(/waitingPromptSnippet/);
   });
 
   it("rejects malformed, cross-desktop, duplicate, and oversized publications", () => {

@@ -417,7 +417,7 @@ export function createRemoteTransport({
         return (await listFreshCloudTasks()).filter(
           (task) =>
             task.title.toLowerCase().includes(normalizedQuery) ||
-            task.snippet?.toLowerCase().includes(normalizedQuery) === true
+            task.waitingPromptSnippet?.toLowerCase().includes(normalizedQuery) === true
         );
       }
       return request<TaskSummary[]>(

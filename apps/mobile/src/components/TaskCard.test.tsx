@@ -87,8 +87,6 @@ function renderTaskCard(activity?: TaskActivity): ElementNode {
   };
 
   return TaskCard({
-    isRecentView: false,
-    repoName: "Kanna",
     task,
     onPress: vi.fn()
   }) as ElementNode;
@@ -99,8 +97,6 @@ describe("TaskCard", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
 
     const tree = TaskCard({
-      isRecentView: true,
-      repoName: "Kanna",
       task: {
         id: "task-1",
         repoId: "repo-1",
@@ -113,6 +109,72 @@ describe("TaskCard", () => {
     expect(tree.props.testID).toBe("mobile.task-row.task-1");
     expect(tree.props.accessibilityLabel).toContain("Repair cloud task sync");
     expect(tree.props.accessibilityLabel).not.toBe("mobile.task-row.task-1");
+  });
+
+  it("renders only the title, stage, and waiting prompt text", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        repoName: "Repository label must stay hidden",
+        title: "Current title",
+        stage: "review",
+        waitingPromptSnippet: "Please confirm the final UI."
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    const text = textContent(tree);
+    expect(text).toContain("Current title");
+    expect(text).toContain("review");
+    expect(text).toContain("Please confirm the final UI.");
+    expect(text.toUpperCase()).not.toContain("TASK");
+    expect(text.toUpperCase()).not.toContain("RECENT");
+    expect(text).not.toContain("repo-1");
+    expect(text).not.toContain("Repository label must stay hidden");
+
+    const title = findTextNodeByCompleteText(tree, "Current title");
+    const waitingPrompt = findTextNodeByCompleteText(
+      tree,
+      "Please confirm the final UI."
+    );
+    expect(title?.props?.numberOfLines).toBe(2);
+    expect(waitingPrompt?.props?.numberOfLines).toBe(3);
+    expect(tree.props?.accessibilityRole).toBe("button");
+    expect(tree.props?.accessibilityLabel).toBe(
+      "Current title. review. Please confirm the final UI."
+    );
+  });
+
+  it("renders a normalized multiline prompt only once in text and accessibility", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const title = "Fix the duplicated\n  mobile task prompt";
+    const duplicatePrompt = "Fix the duplicated mobile task prompt";
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title,
+        stage: "in progress",
+        waitingPromptSnippet: duplicatePrompt
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(textContent(tree)).toBe(`${title}in progress`);
+    expect(tree.props?.accessibilityLabel).toBe(`${title}. in progress`);
+  });
+
+  it("styles the pre-capture ellipsis as a muted placeholder", () => {
+    const tree = renderTaskCard();
+    const placeholder = findTextNodeByCompleteText(tree, "…");
+
+    expect(flattenStyle(placeholder?.props?.style)).toMatchObject({
+      color: "#6F819E"
+    });
   });
 
   it.each([

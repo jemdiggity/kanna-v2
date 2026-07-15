@@ -200,7 +200,9 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         })),
       }),
       run,
-      reconcile: requireService(context.services.reloadSnapshot, "reloadSnapshot"),
+      reconcile: async () => {
+        await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+      },
     });
   }
 

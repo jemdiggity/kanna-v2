@@ -9,6 +9,7 @@ import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createFirestoreTaskIndex,
+  type CloudTaskSummary,
   type CloudTaskIndex,
 } from "../../../../mobile/src/lib/firebase/taskIndex";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
@@ -18,6 +19,9 @@ import { execDb, tauriInvoke } from "../helpers/vue";
 
 const { primary } = createPrimaryAndSecondaryClients();
 const TASK_ID = "mobile-index-activity-task";
+const TASK_TITLE = "Desktop owner publication";
+const ORIGINAL_PROMPT = "Original desktop prompt that must remain separate";
+const WAITING_PROMPT = "Ready for review from the desktop agent";
 let testRepoPath = "";
 let repoId = "";
 let desktopId = "";
@@ -88,7 +92,7 @@ async function createAuthenticatedMobileTaskIndex(): Promise<void> {
   mobileTaskIndex = createFirestoreTaskIndex(firestore);
 }
 
-async function waitForMobileActivity(activity: string): Promise<void> {
+async function waitForMobileActivity(activity: string): Promise<CloudTaskSummary> {
   const deadline = Date.now() + 30_000;
   let lastTasks: unknown = null;
   while (Date.now() < deadline) {
@@ -96,10 +100,28 @@ async function waitForMobileActivity(activity: string): Promise<void> {
     lastTasks = tasks;
     const task = tasks.find((candidate) =>
       candidate.ownerDesktopId === desktopId && candidate.ownerLocalTaskId === TASK_ID);
-    if (task?.activity === activity) return;
+    if (task?.activity === activity) return task;
     await sleep(200);
   }
   throw new Error(`mobile task index did not observe ${activity}: ${JSON.stringify(lastTasks)}`);
+}
+
+async function waitForMobileWaitingPrompt(
+  waitingPromptSnippet: string,
+): Promise<CloudTaskSummary> {
+  const deadline = Date.now() + 30_000;
+  let lastTasks: unknown = null;
+  while (Date.now() < deadline) {
+    const tasks = await mobileTaskIndex!.listRecentTasks(mobileUid);
+    lastTasks = tasks;
+    const task = tasks.find((candidate) =>
+      candidate.ownerDesktopId === desktopId && candidate.ownerLocalTaskId === TASK_ID);
+    if (task?.waitingPromptSnippet === waitingPromptSnippet) return task;
+    await sleep(200);
+  }
+  throw new Error(
+    `mobile task index did not observe waiting prompt ${JSON.stringify(waitingPromptSnippet)}: ${JSON.stringify(lastTasks)}`,
+  );
 }
 
 describe("server-owned publication through the mobile task index", () => {
@@ -122,17 +144,17 @@ describe("server-owned publication through the mobile task index", () => {
     await primary.deleteSession().catch(() => undefined);
   });
 
-  it("observes an activity transition to working through kanna-server, relay, Firestore, and the mobile index", async () => {
+  it("observes a waiting-prompt and activity change through kanna-server, relay, Firestore, and the mobile index", async () => {
     await execDb(
       primary,
       `INSERT INTO pipeline_item
          (id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider,
-          activity, activity_changed_at, base_ref, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          activity, activity_changed_at, display_name, base_ref, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         TASK_ID,
         repoId,
-        "Mobile index activity transition",
+        ORIGINAL_PROMPT,
         "default",
         "in progress",
         `task-${TASK_ID}`,
@@ -140,12 +162,26 @@ describe("server-owned publication through the mobile task index", () => {
         "codex",
         "idle",
         "2026-07-14T00:00:00.000Z",
+        TASK_TITLE,
         "origin/main",
         "2026-07-14T00:00:00.000Z",
         "2026-07-14T00:00:00.000Z",
       ],
     );
-    await waitForMobileActivity("idle");
+    const initialTask = await waitForMobileActivity("idle");
+    expect(initialTask.title).toBe(TASK_TITLE);
+    expect(initialTask.waitingPromptSnippet).toBeUndefined();
+
+    await execDb(
+      primary,
+      `UPDATE pipeline_item
+       SET last_output_preview = ?, updated_at = ?
+       WHERE id = ?`,
+      [WAITING_PROMPT, "2026-07-14T00:00:01.000Z", TASK_ID],
+    );
+    const waitingTask = await waitForMobileWaitingPrompt(WAITING_PROMPT);
+    expect(waitingTask.title).toBe(TASK_TITLE);
+    expect(waitingTask.waitingPromptSnippet).not.toBe(ORIGINAL_PROMPT);
 
     const response = await fetch(
       `http://127.0.0.1:${lanPort}/v1/tasks/${TASK_ID}/actions/runtime-status`,

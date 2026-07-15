@@ -10,7 +10,7 @@ describe("buildMoreCommandSections", () => {
         repoId: "repo-1",
         title: "Review mobile shell",
         stage: "pr",
-        snippet: "Agent says the branch is ready for review."
+        waitingPromptSnippet: "Agent says the branch is ready for review."
       }
     });
 
@@ -58,7 +58,7 @@ describe("buildMoreCommandSections", () => {
           repoId: "repo-1",
           title: "Review mobile shell",
           stage: "pr",
-          snippet: "Agent says the branch is ready for review."
+          waitingPromptSnippet: "Agent says the branch is ready for review."
         }
       },
       "merge"

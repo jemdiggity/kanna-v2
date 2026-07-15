@@ -112,6 +112,8 @@ export function useAppTaskNavigation({
   openPeerPicker,
   openPairPeerPicker,
 }: UseAppTaskNavigationOptions) {
+  let selectionIntentVersion = 0;
+
   function visibleSidebarItemsForRepo(
     repoId: string,
     options: { currentRepoScope?: boolean } = {},
@@ -179,18 +181,21 @@ export function useAppTaskNavigation({
   async function selectSidebarItem(
     item: Pick<SidebarTaskItem, "slot_id" | "task_id" | "repo_id">,
     previousItemId?: string | null,
+    selectionIntent = ++selectionIntentVersion,
   ) {
+    if (selectionIntent !== selectionIntentVersion) return;
     if (item.repo_id !== store.selectedRepoId) {
       const previous = previousItemId !== undefined ? previousItemId : store.selectedItemId;
-      await handleSelectRepo(item.repo_id);
-      await handleSelectItem(item.slot_id, previous);
+      await handleSelectRepo(item.repo_id, selectionIntent);
+      if (selectionIntent !== selectionIntentVersion) return;
+      await handleSelectItem(item.slot_id, previous, selectionIntent);
       return;
     }
 
     if (previousItemId !== undefined) {
-      await handleSelectItem(item.slot_id, previousItemId);
+      await handleSelectItem(item.slot_id, previousItemId, selectionIntent);
     } else {
-      await handleSelectItem(item.slot_id);
+      await handleSelectItem(item.slot_id, undefined, selectionIntent);
     }
   }
 
@@ -218,6 +223,7 @@ export function useAppTaskNavigation({
   }
 
   async function navigateRepos(direction: -1 | 1) {
+    const selectionIntent = ++selectionIntentVersion;
     const visibleRepos = sidebarRepos.value;
     if (visibleRepos.length === 0) return;
     const currentIndex = visibleRepos.findIndex((r) => r.id === store.selectedRepoId);
@@ -243,9 +249,10 @@ export function useAppTaskNavigation({
       : undefined;
     const targetItem = lastItem ?? visibleSidebarItemsForRepo(nextRepo.id)[0];
 
-    await handleSelectRepo(nextRepo.id);
+    await handleSelectRepo(nextRepo.id, selectionIntent);
+    if (selectionIntent !== selectionIntentVersion) return;
     if (targetItem) {
-      await handleSelectItem(targetItem.slot_id, previousItemId);
+      await handleSelectItem(targetItem.slot_id, previousItemId, selectionIntent);
     }
   }
 
@@ -620,7 +627,11 @@ export function useAppTaskNavigation({
     return cmds;
   });
 
-  async function handleSelectRepo(repoId: string) {
+  async function handleSelectRepo(
+    repoId: string,
+    selectionIntent = ++selectionIntentVersion,
+  ) {
+    if (selectionIntent !== selectionIntentVersion) return;
     if (repoId.startsWith("cloud:")) {
       const rememberedSelectionId = store.lastSelectedItemByRepo[repoId] ?? null;
       const rememberedItem = sidebarItemForSelection(rememberedSelectionId);
@@ -640,7 +651,12 @@ export function useAppTaskNavigation({
     await store.selectRepo(repoId);
   }
 
-  async function handleSelectItem(presentationSlotId: string, previousItemId?: string | null) {
+  async function handleSelectItem(
+    presentationSlotId: string,
+    previousItemId?: string | null,
+    selectionIntent = ++selectionIntentVersion,
+  ) {
+    if (selectionIntent !== selectionIntentVersion) return;
     const fallbackItem = store.items.find((item) => item.id === presentationSlotId);
     const projectedItem = sidebarItemForSelection(presentationSlotId)
       ?? (fallbackItem ? canonicalSidebarTaskItem(fallbackItem) : null);
@@ -676,6 +692,50 @@ export function useAppTaskNavigation({
       await store.selectItem(localSelectionId);
     }
   }
+
+  watch(
+    () => {
+      const presentationSlotId = selectedCloudItemId.value;
+      if (!presentationSlotId) return null;
+      const workspaceTask = workspaceTasksByItemId.value.get(presentationSlotId);
+      if (!workspaceTask || workspaceTask.owner.kind === "local") return null;
+      const currentRepoKey = selectedCloudRepoId.value ?? store.selectedRepoId;
+      if (currentRepoKey === workspaceTask.repoKey) return null;
+      const projectedItem = sidebarItemForSelection(presentationSlotId);
+      return {
+        currentRepoKey,
+        durableTaskId: projectedItem?.task_id ?? workspaceTask.item.id,
+        presentationSlotId,
+        repoKey: workspaceTask.repoKey,
+      };
+    },
+    (remoteSelection) => {
+      if (!remoteSelection) return;
+      const {
+        currentRepoKey,
+        durableTaskId,
+        presentationSlotId,
+        repoKey,
+      } = remoteSelection;
+      if (
+        currentRepoKey
+        && currentRepoKey !== repoKey
+        && store.lastSelectedItemByRepo[currentRepoKey] === presentationSlotId
+      ) {
+        delete store.lastSelectedItemByRepo[currentRepoKey];
+      }
+      selectedCloudRepoId.value = repoKey;
+      store.selectedRepoId = repoKey;
+      store.lastSelectedItemByRepo[repoKey] = presentationSlotId;
+      void windowWorkspace.persistSelection({
+        selectedRepoId: repoKey,
+        selectedItemId: durableTaskId,
+      }).catch((error) => {
+        console.error("[App] failed to persist rekeyed remote task selection:", error);
+      });
+    },
+    { flush: "sync" },
+  );
 
   watch(
     () => {

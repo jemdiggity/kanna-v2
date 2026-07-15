@@ -34,6 +34,7 @@ struct CloudTaskSnapshot {
     owner_local_task_id: String,
     title: String,
     prompt_snippet: Option<String>,
+    waiting_prompt_snippet: Option<String>,
     display_name: Option<String>,
     stage: String,
     activity: String,
@@ -161,6 +162,7 @@ fn map_task(
         owner_local_task_id: item.id,
         title: truncate(&title, 512),
         prompt_snippet: (!prompt.is_empty()).then(|| prompt.chars().take(500).collect()),
+        waiting_prompt_snippet: truncate_option(item.last_output_preview, 240),
         display_name: truncate_option(item.display_name, 512),
         stage: truncate(&item.stage, 64),
         activity: truncate(&item.activity, 32),
@@ -390,7 +392,7 @@ mod tests {
                     unread_at: None,
                     port_offset: None,
                     display_name: Some("Cloud publication".into()),
-                    last_output_preview: None,
+                    last_output_preview: Some("Ready for review".into()),
                     port_env: None,
                     agent_spawn_options: None,
                     pinned: 0,
@@ -431,6 +433,10 @@ mod tests {
             "Implement publication\nwith detail"
         );
         assert_eq!(json["tasks"][0]["activity"], "working");
+        assert_eq!(
+            json["tasks"][0]["waitingPromptSnippet"],
+            "Ready for review"
+        );
         assert_eq!(json["tasks"][0]["status"], "blocked");
         assert_eq!(
             json["tasks"][0]["blockedByTaskIds"],
@@ -455,6 +461,19 @@ mod tests {
         let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
         let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
         assert_ne!(idle.fingerprint(), working.fingerprint());
+    }
+
+    #[test]
+    fn waiting_prompt_only_change_changes_snapshot_fingerprint() {
+        let mut first = ui_snapshot("idle");
+        first.entries[0].items[0].last_output_preview = Some("First answer".into());
+        let mut second = ui_snapshot("idle");
+        second.entries[0].items[0].last_output_preview = Some("Second answer".into());
+
+        let first = map_ui_snapshot("desktop-1", "Studio Mac", first);
+        let second = map_ui_snapshot("desktop-1", "Studio Mac", second);
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
     }
 
     #[test]

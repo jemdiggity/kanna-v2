@@ -59,6 +59,7 @@ pub struct TaskSummary {
     pub stage: Option<String>,
     pub activity: Option<String>,
     pub snippet: Option<String>,
+    pub waiting_prompt_snippet: Option<String>,
     pub agent_type: Option<String>,
 }
 
@@ -73,6 +74,7 @@ pub struct TaskDetail {
     pub stage_transition: Option<String>,
     pub activity: Option<String>,
     pub snippet: Option<String>,
+    pub waiting_prompt_snippet: Option<String>,
     pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
     pub branch: Option<String>,
@@ -368,13 +370,15 @@ fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
         .clone()
         .or(item.prompt.clone())
         .unwrap_or_else(|| item.id.clone());
+    let waiting_prompt_snippet = item.last_output_preview.clone();
     TaskSummary {
         id: item.id,
         repo_id: item.repo_id,
         title,
         stage: item.stage,
         activity: item.activity,
-        snippet: item.last_output_preview,
+        snippet: waiting_prompt_snippet.clone(),
+        waiting_prompt_snippet,
         agent_type: item.agent_type,
     }
 }
@@ -408,6 +412,7 @@ fn map_task_detail(
                 .ok()
                 .flatten()
         });
+    let waiting_prompt_snippet = item.last_output_preview.clone();
     TaskDetail {
         id: item.id,
         repo_id: item.repo_id,
@@ -416,7 +421,8 @@ fn map_task_detail(
         pipeline_name,
         stage_transition,
         activity: item.activity,
-        snippet: item.last_output_preview,
+        snippet: waiting_prompt_snippet.clone(),
+        waiting_prompt_snippet,
         agent_type: item.agent_type,
         agent_provider: item.agent_provider,
         branch: item.branch,
@@ -838,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn list_recent_tasks_includes_last_output_preview() {
+    fn list_recent_tasks_includes_waiting_prompt_snippet() {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
@@ -877,6 +883,10 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(
             tasks[0].snippet.as_deref(),
+            Some("Latest agent output preview")
+        );
+        assert_eq!(
+            tasks[0].waiting_prompt_snippet.as_deref(),
             Some("Latest agent output preview")
         );
     }

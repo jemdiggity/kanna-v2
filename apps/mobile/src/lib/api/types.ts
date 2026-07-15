@@ -89,7 +89,7 @@ export interface TaskSummary {
   repoName?: string | null;
   title: string;
   stage: string | null;
-  snippet?: string | null;
+  waitingPromptSnippet?: string | null;
   agentProvider?: string | null;
   agentType?: "pty" | "agent" | null;
   ownerDesktopId?: string;

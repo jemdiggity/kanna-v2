@@ -22,6 +22,7 @@ export interface CloudTaskSnapshot {
   ownerLocalTaskId: string;
   title: string;
   promptSnippet?: string | null;
+  waitingPromptSnippet?: string | null;
   displayName?: string | null;
   stage: string;
   activity?: string | null;
@@ -257,6 +258,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     ownerLocalTaskId: requiredString(value.ownerLocalTaskId, "ownerLocalTaskId"),
     title: requiredString(value.title, "title"),
     promptSnippet: optionalNullableString(value.promptSnippet),
+    waitingPromptSnippet: optionalNullableString(value.waitingPromptSnippet),
     displayName: optionalNullableString(value.displayName),
     stage: requiredString(value.stage, "stage"),
     activity: optionalNullableString(value.activity),
@@ -311,7 +313,7 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     repoName: snapshot.repo.name,
     title: snapshot.displayName ?? snapshot.title,
     stage: snapshot.stage,
-    snippet: snapshot.promptSnippet ?? undefined,
+    waitingPromptSnippet: snapshot.waitingPromptSnippet ?? undefined,
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),
     activity: normalizeTaskActivity(snapshot.activity),

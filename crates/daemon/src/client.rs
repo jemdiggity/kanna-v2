@@ -48,6 +48,7 @@ pub(crate) async fn replay_current_status(
     let event = Event::StatusChanged {
         session_id: session_id.to_string(),
         status,
+        waiting_prompt_snippet: None,
     };
     let _ = write_event(&mut *writer.lock().await, &event).await;
 }

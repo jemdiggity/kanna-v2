@@ -27,6 +27,35 @@ impl Db {
         Ok(())
     }
 
+    pub fn mutate_setting(
+        &self,
+        key: &str,
+        mutate: impl FnOnce(Option<String>) -> Result<String, rusqlite::Error>,
+    ) -> Result<String, rusqlite::Error> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let current = self
+                .conn
+                .query_row("SELECT value FROM settings WHERE key = ?", [key], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            let next = mutate(current)?;
+            self.conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, &next),
+            )?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(next)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
     pub fn select_raw(&self, query: &str, bind_values: &[Value]) -> Result<Value, rusqlite::Error> {
         // SECURITY: reject non-SELECT queries
         let trimmed = query.trim_start().to_uppercase();

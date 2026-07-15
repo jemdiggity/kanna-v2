@@ -197,6 +197,18 @@ impl AgentJournal {
         self.provider_session_id.clone()
     }
 
+    pub fn latest_assistant_prompt(&self) -> Option<String> {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.event {
+                AgentEvent::AssistantText { text, .. } => {
+                    crate::headless_terminal::bound_waiting_prompt(text)
+                }
+                _ => None,
+            })
+    }
+
     pub fn set_provider_session_id(&mut self, provider_session_id: &str) {
         if self.provider_session_id.as_deref() == Some(provider_session_id) {
             return;
@@ -309,6 +321,7 @@ pub struct AgentSessionRecord {
     pub pid: u32,
     pub provider_session_id: Option<String>,
     pub status: SessionStatus,
+    pub last_assistant_prompt: Option<String>,
     /// Tool names auto-approved for the rest of the session (AllowSession).
     pub session_allowed_tools: HashSet<String>,
     /// Permission request ids awaiting a decision.
@@ -601,6 +614,30 @@ mod tests {
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].seq, 1);
         assert!(journal.events_from(99).is_empty());
+    }
+
+    #[test]
+    fn journal_returns_latest_bounded_assistant_text() {
+        let (_dir, mut journal) = journal_in_temp();
+        journal.append(AgentEvent::AssistantText {
+            text: "Older response".into(),
+            truncated: false,
+        });
+        journal.append(AgentEvent::ToolResult {
+            call_id: "tool-1".into(),
+            output: "ignored tool output".into(),
+            truncated: false,
+            is_error: false,
+        });
+        journal.append(AgentEvent::AssistantText {
+            text: "Latest answer\nwith spacing".into(),
+            truncated: false,
+        });
+
+        assert_eq!(
+            journal.latest_assistant_prompt().as_deref(),
+            Some("Latest answer with spacing")
+        );
     }
 
     #[test]

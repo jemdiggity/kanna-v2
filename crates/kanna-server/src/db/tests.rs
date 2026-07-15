@@ -25,6 +25,60 @@ fn database_open_flags_use_sqlite_mutexes_for_shared_desktop_db() {
 }
 
 #[test]
+fn setting_mutations_are_serialized_across_connections() {
+    let path = temp_db_path();
+    let path_string = path.to_string_lossy().to_string();
+    let seed = Db::open_for_tests(&path_string).expect("seed db");
+    seed.set_setting("window_workspace_v1", r#"{"windows":[]}"#)
+        .expect("seed setting");
+    drop(seed);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for window_id in ["main", "window-2"] {
+        let barrier = barrier.clone();
+        let path = path_string.clone();
+        handles.push(std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open shared db");
+            barrier.wait();
+            db.mutate_setting("window_workspace_v1", |current| {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(current.as_deref().unwrap_or(r#"{"windows":[]}"#))
+                        .expect("parse setting");
+                value["windows"]
+                    .as_array_mut()
+                    .expect("windows array")
+                    .push(serde_json::json!({ "windowId": window_id }));
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                Ok(value.to_string())
+            })
+            .expect("mutate setting");
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("mutation thread");
+    }
+
+    let db = Db::open(&path_string).expect("reopen db");
+    let value: serde_json::Value = serde_json::from_str(
+        &db.get_setting("window_workspace_v1")
+            .expect("read setting")
+            .expect("setting exists"),
+    )
+    .expect("parse final setting");
+    let mut ids = value["windows"]
+        .as_array()
+        .expect("windows array")
+        .iter()
+        .filter_map(|window| window["windowId"].as_str())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["main", "window-2"]);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn open_applies_desktop_compatible_pragmas() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");
@@ -490,6 +544,39 @@ fn resolves_pipeline_item_id_from_task_branch_name() {
             .as_deref(),
         Some("710917fb")
     );
+}
+
+#[test]
+fn waiting_prompt_update_is_change_aware() {
+    let path = temp_db_path();
+    let db = Db::open_for_tests(path.to_str().unwrap()).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Original prompt",
+        Some("Current title"),
+        "in progress",
+        "2026-07-11 00:00:00",
+    )
+    .unwrap();
+
+    assert!(db
+        .update_pipeline_item_waiting_prompt("task-1", "Ready for review")
+        .unwrap());
+    assert!(!db
+        .update_pipeline_item_waiting_prompt("task-1", "Ready for review")
+        .unwrap());
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .last_output_preview
+            .as_deref(),
+        Some("Ready for review")
+    );
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

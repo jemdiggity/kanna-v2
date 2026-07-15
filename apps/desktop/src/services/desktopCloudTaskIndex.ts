@@ -22,6 +22,7 @@ export interface DesktopCloudTaskSnapshot {
   ownerLocalTaskId: string;
   title: string;
   promptSnippet: string | null;
+  waitingPromptSnippet?: string | null;
   displayName: string | null;
   stage: string;
   activity?: string;
@@ -303,7 +304,7 @@ export function mapDesktopCloudTasks(
       agent_type: snapshot.agent?.type ?? "pty",
       teardown_started_at: null,
       parent_task_id: null,
-      last_output_preview: null,
+      last_output_preview: snapshot.waitingPromptSnippet ?? null,
       notify_task_id: null,
       notified_at: null,
       created_at: snapshot.createdAt,

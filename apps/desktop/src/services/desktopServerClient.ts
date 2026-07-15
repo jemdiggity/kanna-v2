@@ -28,6 +28,9 @@ export interface DesktopServerClientHandlersForTests {
   ensureMobileServer?: () => MaybePromise<void>;
   getSetting?: (key: string) => MaybePromise<string | null>;
   putSetting?: (key: string, value: string) => MaybePromise<DesktopSettingResponse | void>;
+  mutateWindowWorkspace?: (
+    mutation: DesktopWindowWorkspaceMutation,
+  ) => MaybePromise<DesktopWindowWorkspaceSnapshot>;
   deleteSetting?: (key: string) => MaybePromise<void>;
   postOperatorEvents?: (events: DesktopOperatorEventInput[]) => MaybePromise<void>;
   createBackup?: () => MaybePromise<DesktopBackupResponse>;
@@ -215,6 +218,49 @@ export async function fetchDesktopRepoAgentProviders(repoId: string): Promise<Ag
 export interface DesktopSettingResponse {
   key: string;
   value: string;
+}
+
+export interface DesktopWorkspaceWindowState {
+  windowId: string;
+  selectedRepoId: string | null;
+  selectedItemId: string | null;
+  sidebarHidden: boolean;
+  sidebarWidth: number;
+  order: number;
+}
+
+export interface DesktopWindowWorkspaceSnapshot {
+  windows: DesktopWorkspaceWindowState[];
+}
+
+export type DesktopWindowWorkspaceMutation =
+  | { operation: "ensure"; window: DesktopWorkspaceWindowState }
+  | { operation: "restore"; window: DesktopWorkspaceWindowState }
+  | {
+      operation: "updateSelection";
+      windowId: string;
+      selectedRepoId: string | null;
+      selectedItemId: string | null;
+    }
+  | { operation: "updateSidebarHidden"; windowId: string; sidebarHidden: boolean }
+  | { operation: "updateSidebarWidth"; windowId: string; sidebarWidth: number }
+  | {
+      operation: "remove";
+      windowId: string;
+      observedWindowIds?: string[];
+      liveWindowIds?: string[];
+    };
+
+export async function mutateDesktopWindowWorkspace(
+  mutation: DesktopWindowWorkspaceMutation,
+): Promise<DesktopWindowWorkspaceSnapshot> {
+  if (clientHandlersForTests?.mutateWindowWorkspace) {
+    return await clientHandlersForTests.mutateWindowWorkspace(mutation);
+  }
+  return await requestJson<DesktopWindowWorkspaceSnapshot>("/v1/window-workspace/mutations", {
+    method: "POST",
+    body: mutation,
+  });
 }
 
 export async function putDesktopSetting(key: string, value: string): Promise<DesktopSettingResponse> {

@@ -23,6 +23,7 @@ mod task_logs;
 mod task_ports;
 mod tasks;
 mod transfers;
+mod window_workspace;
 
 #[cfg(test)]
 mod test_support;

@@ -6,6 +6,7 @@ import {
   fetchDesktopSnapshot,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
+  mutateDesktopWindowWorkspace,
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
 } from "./desktopServerClient";
@@ -185,6 +186,40 @@ describe("desktopServerClient", () => {
     await expect(getDesktopSetting("window_workspace_v1")).resolves.toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "mobile_server_status")).toHaveLength(2);
+  });
+
+  it("sends narrow window workspace mutations to the atomic server endpoint", async () => {
+    const response = {
+      windows: [{
+        windowId: "window-2",
+        selectedRepoId: "repo-new",
+        selectedItemId: "task-new",
+        sidebarHidden: false,
+        sidebarWidth: 260,
+        order: 0,
+      }],
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const mutation = {
+      operation: "updateSelection" as const,
+      windowId: "window-2",
+      selectedRepoId: "repo-new",
+      selectedItemId: "task-new",
+    };
+
+    await expect(mutateDesktopWindowWorkspace(mutation)).resolves.toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/window-workspace/mutations",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(mutation),
+      },
+    );
   });
 
   it("normalizes pending incoming transfers returned by the server", async () => {

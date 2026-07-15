@@ -2,7 +2,11 @@ import type { DbHandle } from "./types/kanna";
 
 import { emit } from "./emit";
 import { listen } from "./listen";
-import { getDesktopSetting, putDesktopSetting } from "./services/desktopServerClient";
+import {
+  getDesktopSetting,
+  mutateDesktopWindowWorkspace,
+  type DesktopWindowWorkspaceMutation,
+} from "./services/desktopServerClient";
 import { isTauri } from "./tauri-mock";
 
 export interface WindowBootstrap {
@@ -21,16 +25,35 @@ export interface WorkspaceSnapshot {
   windows: WorkspaceWindowState[];
 }
 
+export interface LoadWorkspaceSnapshotOptions {
+  authoritative?: boolean;
+}
+
+export class WindowWorkspaceRemovalError extends Error {
+  readonly removedWindow: WorkspaceWindowState | null;
+  override readonly cause: unknown;
+
+  constructor(removedWindow: WorkspaceWindowState | null, cause: unknown) {
+    super("window workspace removal could not be confirmed");
+    this.name = "WindowWorkspaceRemovalError";
+    this.removedWindow = removedWindow;
+    this.cause = cause;
+  }
+}
+
 export interface WindowWorkspaceController {
   bootstrap: WindowBootstrap;
-  loadSnapshot: () => Promise<WorkspaceSnapshot>;
-  saveSnapshot: (snapshot: WorkspaceSnapshot) => Promise<void>;
+  initialize: () => Promise<void>;
+  loadSnapshot: (options?: LoadWorkspaceSnapshotOptions) => Promise<WorkspaceSnapshot>;
   openWindow: (selection: {
     selectedRepoId: string | null;
     selectedItemId: string | null;
   }) => Promise<void>;
   closeWindow: () => Promise<void>;
-  forgetCurrentWindow: () => Promise<void>;
+  destroyNativeWindow: () => Promise<void>;
+  forgetCurrentWindow: () => Promise<WorkspaceWindowState | null>;
+  restoreCurrentWindow: (window: WorkspaceWindowState) => Promise<void>;
+  notifyWindowMembershipChanged: () => Promise<void>;
   persistSelection: (selection: {
     selectedRepoId: string | null;
     selectedItemId: string | null;
@@ -44,6 +67,7 @@ export interface WindowWorkspaceController {
 
 export const WINDOW_WORKSPACE_SETTINGS_KEY = "window_workspace_v1";
 export const WINDOW_WORKSPACE_INVALIDATED_EVENT = "kanna://window-workspace-invalidated";
+export const WINDOW_WORKSPACE_MEMBERSHIP_REASON = "windowMembership";
 export const WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT = "kanna://native-new-window";
 export const WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT = "kanna://native-close-window";
 export const WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_UP_EVENT = "kanna://native-navigate-task-up";
@@ -119,6 +143,60 @@ function normalizeWorkspaceSnapshot(snapshot: WorkspaceSnapshot): WorkspaceSnaps
   };
 }
 
+export function applyWindowWorkspaceMutation(
+  snapshot: WorkspaceSnapshot,
+  mutation: DesktopWindowWorkspaceMutation,
+): WorkspaceSnapshot {
+  const next = normalizeWorkspaceSnapshot(snapshot);
+  switch (mutation.operation) {
+    case "ensure":
+      if (!next.windows.some((entry) => entry.windowId === mutation.window.windowId)) {
+        next.windows.push(mutation.window);
+      }
+      break;
+    case "restore":
+      if (!next.windows.some((entry) => entry.windowId === mutation.window.windowId)) {
+        // A window recovering from a failed native close rejoins at the end so
+        // it does not disturb the surviving windows' stable display order.
+        next.windows.push({
+          ...mutation.window,
+          order: next.windows.length,
+        });
+      }
+      break;
+    case "updateSelection": {
+      const entry = next.windows.find((candidate) => candidate.windowId === mutation.windowId);
+      if (entry) {
+        entry.selectedRepoId = mutation.selectedRepoId;
+        entry.selectedItemId = mutation.selectedItemId;
+      }
+      break;
+    }
+    case "updateSidebarHidden": {
+      const entry = next.windows.find((candidate) => candidate.windowId === mutation.windowId);
+      if (entry) entry.sidebarHidden = mutation.sidebarHidden;
+      break;
+    }
+    case "updateSidebarWidth": {
+      const entry = next.windows.find((candidate) => candidate.windowId === mutation.windowId);
+      if (entry) entry.sidebarWidth = normalizeSidebarWidth(mutation.sidebarWidth);
+      break;
+    }
+    case "remove": {
+      if (mutation.observedWindowIds && mutation.liveWindowIds) {
+        const observed = new Set(mutation.observedWindowIds);
+        const live = new Set(mutation.liveWindowIds);
+        next.windows = next.windows.filter((entry) =>
+          !observed.has(entry.windowId) || live.has(entry.windowId),
+        );
+      }
+      next.windows = next.windows.filter((entry) => entry.windowId !== mutation.windowId);
+      break;
+    }
+  }
+  return normalizeWorkspaceSnapshot(next);
+}
+
 function buildWindowUrl(state: WindowBootstrap): string {
   const params = new URLSearchParams();
   params.set("windowId", state.windowId);
@@ -179,11 +257,6 @@ export async function readWorkspaceSnapshot(db: DbHandle): Promise<WorkspaceSnap
   }
 }
 
-export async function writeWorkspaceSnapshot(db: DbHandle, snapshot: WorkspaceSnapshot): Promise<void> {
-  void db;
-  await putDesktopSetting(WINDOW_WORKSPACE_SETTINGS_KEY, JSON.stringify(normalizeWorkspaceSnapshot(snapshot)));
-}
-
 export async function resolveWindowBootstrap(
   db: DbHandle,
   bootstrap: WindowBootstrap,
@@ -211,24 +284,87 @@ export function createWindowWorkspace(input: {
   bootstrap: WindowBootstrap;
 }): WindowWorkspaceController {
   const { db, bootstrap } = input;
+  let currentWindowUpdateQueue = Promise.resolve();
 
-  async function loadSnapshot(): Promise<WorkspaceSnapshot> {
-    return reconcileWorkspaceSnapshot(await readWorkspaceSnapshot(db), bootstrap.windowId);
+  async function mutateWorkspace(
+    mutation: DesktopWindowWorkspaceMutation,
+  ): Promise<WorkspaceSnapshot> {
+    const snapshot = await mutateDesktopWindowWorkspace(mutation);
+    return normalizeWorkspaceSnapshot(snapshot);
   }
 
-  async function saveSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
-    await writeWorkspaceSnapshot(db, reconcileWorkspaceSnapshot(snapshot, bootstrap.windowId));
+  async function loadSnapshot(
+    options: LoadWorkspaceSnapshotOptions = {},
+  ): Promise<WorkspaceSnapshot> {
+    const persisted = await readWorkspaceSnapshot(db);
+    return options.authoritative
+      ? persisted
+      : reconcileWorkspaceSnapshot(persisted, bootstrap.windowId);
   }
 
-  async function forgetCurrentWindow(): Promise<void> {
-    const snapshot = await loadSnapshot();
+  async function initialize(): Promise<void> {
+    const snapshot = await readWorkspaceSnapshot(db);
+    await mutateWorkspace({
+      operation: "ensure",
+      window: {
+        windowId: bootstrap.windowId,
+        selectedRepoId: bootstrap.selectedRepoId,
+        selectedItemId: bootstrap.selectedItemId,
+        sidebarHidden: false,
+        sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+        order: snapshot.windows.length,
+      },
+    });
+    try {
+      await notifyWindowMembershipChanged();
+    } catch (error) {
+      // The durable membership is sufficient for this window to initialize;
+      // the notification only prompts peer renderers to refresh sooner.
+      console.warn("[windowWorkspace] failed to notify initialized membership:", error);
+    }
+  }
+
+  async function forgetCurrentWindow(): Promise<WorkspaceWindowState | null> {
+    // Capture only a durable row. loadSnapshot() synthesizes a default row for
+    // missing windows, which is not safe compensation state for an ambiguous
+    // remove response.
+    await currentWindowUpdateQueue.catch(() => undefined);
+    const snapshot = await readWorkspaceSnapshot(db);
+    const currentWindow = snapshot.windows.find(
+      (entry) => entry.windowId === bootstrap.windowId,
+    ) ?? null;
     const openWindowIds = await readOpenWorkspaceWindowIds();
-    const liveSnapshot = openWindowIds
-      ? {
-          windows: snapshot.windows.filter((entry) => openWindowIds.has(entry.windowId)),
-        }
-      : snapshot;
-    await writeWorkspaceSnapshot(db, removeWindowFromWorkspaceSnapshot(liveSnapshot, bootstrap.windowId));
+    try {
+      await mutateWorkspace({
+        operation: "remove",
+        windowId: bootstrap.windowId,
+        ...(openWindowIds
+          ? {
+              observedWindowIds: snapshot.windows.map((entry) => entry.windowId),
+              liveWindowIds: [...openWindowIds],
+            }
+          : {}),
+      });
+    } catch (error) {
+      // The server may have committed even when its response is lost. Preserve
+      // the pre-remove row so the close coordinator can restore idempotently.
+      throw new WindowWorkspaceRemovalError(currentWindow, error);
+    }
+    return currentWindow;
+  }
+
+  async function restoreCurrentWindow(window: WorkspaceWindowState): Promise<void> {
+    if (window.windowId !== bootstrap.windowId) {
+      throw new Error(`cannot restore workspace window ${window.windowId} from ${bootstrap.windowId}`);
+    }
+    await mutateWorkspace({ operation: "restore", window });
+  }
+
+  async function notifyWindowMembershipChanged(): Promise<void> {
+    await emit(WINDOW_WORKSPACE_INVALIDATED_EVENT, {
+      reason: WINDOW_WORKSPACE_MEMBERSHIP_REASON,
+      sourceWindowId: bootstrap.windowId,
+    });
   }
 
   async function spawnWindow(state: WindowBootstrap): Promise<void> {
@@ -236,13 +372,19 @@ export function createWindowWorkspace(input: {
 
     if (isTauri) {
       const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      new WebviewWindow(`window-${state.windowId}`, {
-        url,
-        title: "",
-        width: 1200,
-        height: 800,
-        minWidth: 800,
-        minHeight: 600,
+      await new Promise<void>((resolve, reject) => {
+        const webview = new WebviewWindow(`window-${state.windowId}`, {
+          url,
+          title: "",
+          width: 1200,
+          height: 800,
+          minWidth: 800,
+          minHeight: 600,
+        });
+        void webview.once("tauri://created", () => resolve());
+        void webview.once("tauri://error", (event) => {
+          reject(new Error(`failed to create window: ${String(event.payload)}`));
+        });
       });
       return;
     }
@@ -250,32 +392,33 @@ export function createWindowWorkspace(input: {
     window.open(url, "_blank");
   }
 
-  async function closeCurrentWindow(): Promise<void> {
+  async function destroyNativeWindow(): Promise<void> {
     if (isTauri) {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      await getCurrentWindow().close();
+      // `close()` emits another CloseRequested event. This path runs only
+      // after membership removal, so bypass that event and destroy exactly
+      // once instead of reopening the close-request race.
+      await getCurrentWindow().destroy();
       return;
     }
 
     window.close();
   }
 
-  async function updateCurrentWindow(
-    apply: (entry: WorkspaceWindowState) => WorkspaceWindowState,
+  function queueCurrentWindowMutation(
+    mutation: DesktopWindowWorkspaceMutation,
   ): Promise<void> {
-    const snapshot = await loadSnapshot();
-    const next = normalizeWorkspaceSnapshot({
-      windows: snapshot.windows.map((entry) =>
-        entry.windowId === bootstrap.windowId ? apply(entry) : entry,
-      ),
+    const update = currentWindowUpdateQueue.catch(() => undefined).then(async () => {
+      await mutateWorkspace(mutation);
     });
-    await saveSnapshot(next);
+    currentWindowUpdateQueue = update;
+    return update;
   }
 
   return {
     bootstrap,
+    initialize,
     loadSnapshot,
-    saveSnapshot,
     openWindow: async (selection) => {
       const windowId = createWindowId();
       const snapshot = await loadSnapshot();
@@ -287,34 +430,61 @@ export function createWindowWorkspace(input: {
         sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
         order: snapshot.windows.length,
       };
-      await saveSnapshot({
-        windows: [...snapshot.windows, nextWindow],
-      });
       await spawnWindow(nextWindow);
     },
     forgetCurrentWindow,
+    restoreCurrentWindow,
+    notifyWindowMembershipChanged,
+    destroyNativeWindow,
     closeWindow: async () => {
-      await forgetCurrentWindow();
-      await closeCurrentWindow();
+      let removedWindow: WorkspaceWindowState | null = null;
+      try {
+        removedWindow = await forgetCurrentWindow();
+        await notifyWindowMembershipChanged();
+        await destroyNativeWindow();
+      } catch (error) {
+        if (error instanceof WindowWorkspaceRemovalError) {
+          removedWindow = error.removedWindow;
+        }
+        if (removedWindow) {
+          try {
+            await restoreCurrentWindow(removedWindow);
+          } catch (recoveryError) {
+            console.warn("[windowWorkspace] failed to restore membership after close failure:", recoveryError);
+          }
+          try {
+            // Notify even when the restore response was lost: the idempotent
+            // mutation may still have committed and peers should refresh from
+            // the authoritative snapshot.
+            await notifyWindowMembershipChanged();
+          } catch (notificationError) {
+            console.warn("[windowWorkspace] failed to notify restored membership:", notificationError);
+          }
+        }
+        throw error;
+      }
     },
     persistSelection: async (selection) => {
-      await updateCurrentWindow((entry) => ({
-        ...entry,
+      await queueCurrentWindowMutation({
+        operation: "updateSelection",
+        windowId: bootstrap.windowId,
         selectedRepoId: selection.selectedRepoId,
         selectedItemId: selection.selectedItemId,
-      }));
+      });
     },
     persistSidebarHidden: async (hidden) => {
-      await updateCurrentWindow((entry) => ({
-        ...entry,
+      await queueCurrentWindowMutation({
+        operation: "updateSidebarHidden",
+        windowId: bootstrap.windowId,
         sidebarHidden: hidden,
-      }));
+      });
     },
     persistSidebarWidth: async (width) => {
-      await updateCurrentWindow((entry) => ({
-        ...entry,
+      await queueCurrentWindowMutation({
+        operation: "updateSidebarWidth",
+        windowId: bootstrap.windowId,
         sidebarWidth: normalizeSidebarWidth(width),
-      }));
+      });
     },
     invalidateSharedData: async (reason) => {
       await emit(WINDOW_WORKSPACE_INVALIDATED_EVENT, {

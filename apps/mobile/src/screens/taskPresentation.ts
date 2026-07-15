@@ -1,57 +1,68 @@
 import type { TaskSummary } from "../lib/api/types";
 
+const TASK_TITLE_LIMIT = 80;
+const WAITING_PROMPT_LIMIT = 240;
+
 export interface TaskListItemModel {
-  preview: string;
-  repoLabel: string;
-  scopeLabel: string;
   stageLabel: string;
+  title: string;
+  waitingPromptSnippet: string | null;
+  isWaitingPromptPlaceholder: boolean;
 }
 
-export interface TaskWorkspaceHeaderModel {
-  desktopLabel: string;
-  repoLabel: string;
-  snippetLabel: string;
-  stageLabel: string;
+export function truncateVisibleText(value: string, limit: number): string {
+  if (limit <= 0) return "";
+  const characters = Array.from(value.trim());
+  if (characters.length <= limit) return characters.join("");
+  return `${characters.slice(0, limit - 1).join("")}…`;
 }
 
-export function buildTaskListItemModel(
-  task: TaskSummary,
-  repoName: string | null,
-  isRecentView: boolean
-): TaskListItemModel {
-  return {
-    preview: resolveTaskPreview(task),
-    repoLabel: repoName ?? task.repoId,
-    scopeLabel: isRecentView ? "Recent" : "Task",
-    stageLabel: task.stage ?? "unknown"
-  };
+function isUnicodeWhitespace(character: string): boolean {
+  const codePoint = character.codePointAt(0) ?? 0;
+  return (
+    (codePoint >= 0x0009 && codePoint <= 0x000d) ||
+    codePoint === 0x0020 ||
+    codePoint === 0x0085 ||
+    codePoint === 0x00a0 ||
+    codePoint === 0x1680 ||
+    (codePoint >= 0x2000 && codePoint <= 0x200a) ||
+    codePoint === 0x2028 ||
+    codePoint === 0x2029 ||
+    codePoint === 0x202f ||
+    codePoint === 0x205f ||
+    codePoint === 0x3000
+  );
 }
 
-export function buildTaskWorkspaceHeaderModel(options: {
-  desktopName: string | null;
-  repoName: string | null;
-  task: TaskSummary;
-}): TaskWorkspaceHeaderModel {
-  const { desktopName, repoName, task } = options;
-
-  return {
-    desktopLabel: desktopName ?? "Unknown desktop",
-    repoLabel: repoName ?? task.repoId,
-    snippetLabel:
-      task.snippet?.trim() ||
-      "Live terminal output will appear here as the desktop daemon streams data.",
-    stageLabel: task.stage ?? "unknown"
-  };
-}
-
-function resolveTaskPreview(task: TaskSummary): string {
-  if (task.snippet?.trim()) {
-    return task.snippet.trim();
+function daemonWaitingPromptRepresentation(value: string): string {
+  let normalized = "";
+  let pendingSpace = false;
+  for (const character of value) {
+    if (isUnicodeWhitespace(character)) {
+      pendingSpace = normalized.length > 0;
+      continue;
+    }
+    if (pendingSpace) normalized += " ";
+    normalized += character;
+    pendingSpace = false;
   }
+  const characters = Array.from(normalized);
+  if (characters.length <= WAITING_PROMPT_LIMIT) return normalized;
+  return `${characters.slice(0, WAITING_PROMPT_LIMIT - 1).join("")}…`;
+}
 
-  if (task.stage === "pr") {
-    return "Ready for review.";
-  }
-
-  return "Open the task for the latest output.";
+export function buildTaskListItemModel(task: TaskSummary): TaskListItemModel {
+  const prompt = task.waitingPromptSnippet?.trim() ?? "";
+  const isDuplicatePrompt =
+    Boolean(prompt) && prompt === daemonWaitingPromptRepresentation(task.title);
+  return {
+    stageLabel: task.stage ?? "unknown",
+    title: truncateVisibleText(task.title, TASK_TITLE_LIMIT),
+    waitingPromptSnippet: isDuplicatePrompt
+      ? null
+      : prompt
+      ? truncateVisibleText(prompt, WAITING_PROMPT_LIMIT)
+      : "…",
+    isWaitingPromptPlaceholder: !prompt && !isDuplicatePrompt
+  };
 }

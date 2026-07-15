@@ -100,6 +100,7 @@ pub async fn handle_spawn_agent(
         pid: spawned.pid,
         provider_session_id: None,
         status: SessionStatus::Busy,
+        last_assistant_prompt: None,
         session_allowed_tools: HashSet::new(),
         pending_permissions: HashSet::new(),
         exited: false,
@@ -129,6 +130,7 @@ pub async fn handle_spawn_agent(
         &Event::StatusChanged {
             session_id,
             status: SessionStatus::Busy,
+            waiting_prompt_snippet: None,
         },
     );
 }
@@ -340,7 +342,13 @@ pub async fn handle_agent_input(
     {
         let mut registry = agents.lock().await;
         if let Some(record) = registry.get_mut(&session_id) {
-            set_status(record, &broadcast_tx, &session_id, SessionStatus::Busy);
+            set_status(
+                record,
+                &broadcast_tx,
+                &session_id,
+                SessionStatus::Busy,
+                None,
+            );
         }
     }
     reply(&writer, &Event::Ok).await;
@@ -445,7 +453,13 @@ pub async fn handle_agent_permission(
             }
         }
 
-        set_status(record, &broadcast_tx, &session_id, SessionStatus::Busy);
+        set_status(
+            record,
+            &broadcast_tx,
+            &session_id,
+            SessionStatus::Busy,
+            None,
+        );
         record.shared.clone()
     };
 

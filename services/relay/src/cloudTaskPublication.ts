@@ -102,6 +102,11 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     ownerLocalTaskId,
     title: requiredString(task.title, `${path}.title`, 512),
     promptSnippet: nullableString(task.promptSnippet, `${path}.promptSnippet`, 500),
+    waitingPromptSnippet: optionalNullableUnicodeString(
+      task.waitingPromptSnippet,
+      `${path}.waitingPromptSnippet`,
+      240,
+    ),
     displayName: nullableString(task.displayName, `${path}.displayName`, 512),
     stage: requiredString(task.stage, `${path}.stage`, 64),
     activity: requiredString(task.activity, `${path}.activity`, 32),
@@ -265,6 +270,18 @@ function requiredString(value: unknown, field: string, maxLength: number): strin
 function nullableString(value: unknown, field: string, maxLength: number): string | null {
   if (value === null) return null;
   if (typeof value !== "string" || value.length > maxLength) {
+    throw new Error(`${field} must be null or a string of at most ${maxLength} characters`);
+  }
+  return value;
+}
+
+function optionalNullableUnicodeString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || Array.from(value).length > maxLength) {
     throw new Error(`${field} must be null or a string of at most ${maxLength} characters`);
   }
   return value;

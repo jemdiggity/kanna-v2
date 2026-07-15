@@ -553,8 +553,17 @@ describe("new window", () => {
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
     await waitForCurrentItemId(client, taskAId);
+    const secondaryWindowId = await client.executeSync<string>(
+      "return window.__KANNA_E2E__.setupState.windowWorkspace.bootstrap.windowId;",
+    );
 
     await switchToWindow(client, sourceHandle);
+    const sourceWindowId = await client.executeSync<string>(
+      "return window.__KANNA_E2E__.setupState.windowWorkspace.bootstrap.windowId;",
+    );
+    expect(await readWorkspaceWindowIds(client)).toEqual(
+      expect.arrayContaining([sourceWindowId, secondaryWindowId]),
+    );
     await closeFocusedWindowThroughAppAction(client);
 
     const remainingHandles = await waitForWindowCount(client, initialHandles.length);
@@ -564,6 +573,7 @@ describe("new window", () => {
     await switchToWindow(client, secondHandle ?? "");
     await client.waitForAppReady();
     await waitForCurrentItemId(client, taskAId);
+    expect(await readWorkspaceWindowIds(client)).toEqual([secondaryWindowId]);
 
     const secondWindowItems = await getVueState(client, "items") as Array<{ id: string }>;
     expect(secondWindowItems.map((item) => item.id)).toEqual(

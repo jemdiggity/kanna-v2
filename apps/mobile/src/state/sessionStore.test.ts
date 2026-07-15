@@ -211,7 +211,7 @@ describe("createSessionStore", () => {
         repoId: "repo-1",
         title: "Keep scroll position",
         stage: "in progress",
-        snippet: "latest output"
+        waitingPromptSnippet: "latest output"
       }
     ]);
     publishes = 0;
@@ -222,7 +222,7 @@ describe("createSessionStore", () => {
         repoId: "repo-1",
         title: "Keep scroll position",
         stage: "in progress",
-        snippet: "latest output"
+        waitingPromptSnippet: "latest output"
       }
     ]);
 
@@ -242,7 +242,7 @@ describe("createSessionStore", () => {
         repoId: "repo-2",
         title: "Recent task",
         stage: "pr",
-        snippet: "ready for review"
+        waitingPromptSnippet: "ready for review"
       }
     ]);
     publishes = 0;
@@ -253,7 +253,7 @@ describe("createSessionStore", () => {
         repoId: "repo-2",
         title: "Recent task",
         stage: "pr",
-        snippet: "ready for review"
+        waitingPromptSnippet: "ready for review"
       }
     ]);
 
@@ -273,7 +273,7 @@ describe("createSessionStore", () => {
         repoId: "repo-2",
         title: "Recent task",
         stage: "pr",
-        snippet: "ready for review",
+        waitingPromptSnippet: "ready for review",
         activity: "idle"
       }
     ]);
@@ -285,7 +285,7 @@ describe("createSessionStore", () => {
         repoId: "repo-2",
         title: "Recent task",
         stage: "pr",
-        snippet: "ready for review",
+        waitingPromptSnippet: "ready for review",
         activity: "working"
       }
     ]);
@@ -307,7 +307,7 @@ describe("createSessionStore", () => {
         repoId: "repo-1",
         title: "Keep scroll position",
         stage: "in progress",
-        snippet: "latest output"
+        waitingPromptSnippet: "latest output"
       }
     ]);
     publishes = 0;
@@ -318,7 +318,7 @@ describe("createSessionStore", () => {
         repoId: "repo-1",
         title: "Keep scroll position",
         stage: "in progress",
-        snippet: "latest output",
+        waitingPromptSnippet: "latest output",
         activity: "idle"
       }
     ]);

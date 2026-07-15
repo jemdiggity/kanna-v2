@@ -85,6 +85,7 @@ export function createInitApi(
 
     const selectedSlot = requireService(context.services.currentTaskSlot, "currentTaskSlot").value;
     if (selectedSlot?.task_id === selectedTaskIdBeforeRefresh) return;
+    if (context.state.selectedItemId.value !== selectedSlotIdBeforeRefresh) return;
 
     const selectedItem = context.state.items.value.find((candidate) => candidate.id === selectedTaskIdBeforeRefresh);
     if (isVisibleItemInSelectedRepo(selectedItem)) {

@@ -5,14 +5,19 @@ import type { TaskSummary } from "../lib/api/types";
 import { buildTaskListItemModel } from "../screens/taskPresentation";
 
 interface TaskCardProps {
-  isRecentView: boolean;
-  repoName: string | null;
   task: TaskSummary;
   onPress(): void;
 }
 
-export function TaskCard({ isRecentView, repoName, task, onPress }: TaskCardProps) {
-  const model = buildTaskListItemModel(task, repoName, isRecentView);
+export function TaskCard({ task, onPress }: TaskCardProps) {
+  const model = buildTaskListItemModel(task);
+  const accessibilityLabel = [
+    model.title,
+    model.stageLabel,
+    model.waitingPromptSnippet
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(". ");
   const effectiveActivity =
     task.activity === "working" || task.activity === "unread"
       ? task.activity
@@ -26,26 +31,35 @@ export function TaskCard({ isRecentView, repoName, task, onPress }: TaskCardProp
 
   return (
     <Pressable
-      accessibilityLabel={`${task.title}, ${model.repoLabel}, ${model.stageLabel}`}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole="button"
       accessibilityValue={{ text: effectiveActivity }}
       accessible
       style={styles.card}
       testID={MOBILE_E2E_IDS.taskListItem(task.id)}
       onPress={onPress}
     >
-      <View style={styles.topRow}>
-        <Text style={styles.scopeLabel}>{model.scopeLabel}</Text>
-        <Text style={styles.repoLabel}>{model.repoLabel}</Text>
-      </View>
       <View style={styles.row}>
-        <Text style={[styles.title, titleActivityStyle]}>{task.title}</Text>
+        <Text numberOfLines={2} style={[styles.title, titleActivityStyle]}>
+          {model.title}
+        </Text>
         <View style={styles.stagePill}>
           <Text style={styles.stageLabel}>{model.stageLabel}</Text>
         </View>
       </View>
-      <Text numberOfLines={3} style={styles.preview}>
-        {model.preview}
-      </Text>
+      {model.waitingPromptSnippet ? (
+        <Text
+          numberOfLines={3}
+          style={[
+            styles.preview,
+            model.isWaitingPromptPlaceholder
+              ? styles.previewPlaceholder
+              : null
+          ]}
+        >
+          {model.waitingPromptSnippet}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }
@@ -59,27 +73,10 @@ const styles = StyleSheet.create({
     gap: 10,
     padding: 16
   },
-  topRow: {
-    alignItems: "center",
-    flexDirection: "row",
-    justifyContent: "space-between"
-  },
   row: {
     flexDirection: "row",
     gap: 10,
     justifyContent: "space-between"
-  },
-  scopeLabel: {
-    color: "#7FA7D9",
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.5,
-    textTransform: "uppercase"
-  },
-  repoLabel: {
-    color: "#8EA3C4",
-    fontSize: 12,
-    fontWeight: "600"
   },
   title: {
     color: "#F3F7FF",
@@ -115,5 +112,8 @@ const styles = StyleSheet.create({
     color: "#B8C6DB",
     fontSize: 14,
     lineHeight: 20
+  },
+  previewPlaceholder: {
+    color: "#6F819E"
   }
 });

@@ -270,6 +270,7 @@ const {
 
 let keyboardActions = {} as KeyboardActions;
 const {
+  fatalInitializationError,
   focusAgentTerminal,
   requestCloseCurrentWindow,
 } = useAppLifecycle({
@@ -374,7 +375,16 @@ const modalLayerController = {
 </script>
 
 <template>
-  <div class="app" :class="{ mobile: isMobile }">
+  <main
+    v-if="fatalInitializationError"
+    class="fatal-initialization-error"
+    data-testid="fatal-initialization-error"
+    role="alert"
+  >
+    <h1>Kanna couldn't start safely</h1>
+    <p>{{ fatalInitializationError }}</p>
+  </main>
+  <div v-else class="app" :class="{ mobile: isMobile }">
     <div
       v-if="!maximized && !sidebarHidden && (!isMobile || !store.selectedItemId)"
       class="sidebar-shell"
@@ -450,6 +460,23 @@ html, body, #app {
   display: flex;
   height: 100%;
   width: 100%;
+}
+.fatal-initialization-error {
+  display: flex;
+  height: 100%;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px;
+  background: var(--kn-bg-app);
+  color: var(--kn-text-primary);
+  text-align: center;
+}
+.fatal-initialization-error p {
+  max-width: 560px;
+  color: var(--kn-text-secondary);
 }
 .sidebar-shell {
   position: relative;

@@ -15,7 +15,9 @@ use std::process::{Child, Command as StdCommand};
 use std::time::{Duration, Instant};
 
 use kanna_agent_protocol::{AgentEvent, PermissionDecision, SessionEndReason};
-use kanna_daemon::protocol::{AgentProvider, AgentSpawnParams, Command, Event, SeqAgentEvent};
+use kanna_daemon::protocol::{
+    AgentProvider, AgentSpawnParams, Command, Event, SeqAgentEvent, SessionStatus,
+};
 
 // ---- Harness ----
 
@@ -148,6 +150,45 @@ impl ClientConn {
             }
         }
     }
+
+    /// Attach to an agent and collect replayed plus live events until one
+    /// matches `stop` (inclusive).
+    fn attach_and_collect_agent_events_until<F: Fn(&AgentEvent) -> bool>(
+        &mut self,
+        session_id: &str,
+        from_seq: u64,
+        stop: F,
+    ) -> Vec<AgentEvent> {
+        self.send(&Command::AttachAgent {
+            session_id: session_id.to_string(),
+            from_seq,
+        });
+
+        let snapshot = self.recv_until(|event| {
+            matches!(
+                event,
+                Event::AgentSnapshot {
+                    session_id: snapshot_session_id,
+                    ..
+                } if snapshot_session_id == session_id
+            )
+        });
+        let mut events = match snapshot {
+            Event::AgentSnapshot { events, .. } => events
+                .into_iter()
+                .map(|sequenced| sequenced.event)
+                .collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+
+        if let Some(stop_index) = events.iter().position(&stop) {
+            events.truncate(stop_index + 1);
+            return events;
+        }
+
+        events.extend(self.collect_agent_events_until(stop));
+        events
+    }
 }
 
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -257,6 +298,25 @@ done
 const CODEX_SLEEPER_AGENT: &str = r#"#!/bin/sh
 echo '{"type":"thread.started","thread_id":"fake-thread"}'
 echo '{"type":"turn.started"}'
+echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"interim answer"}}'
+sleep 30
+"#;
+
+/// Fake persistent agent that emits an interim answer, then crashes before a
+/// successful turn-completed event can make that answer publishable.
+const CRASHING_AGENT: &str = r#"#!/bin/sh
+read -r first
+echo '{"type":"system","subtype":"init","session_id":"fake-sess-crash","model":"fake-model"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"interim answer"}]}}'
+exit 7
+"#;
+
+/// Fake persistent agent that remains busy after an interim answer so the
+/// orchestrated-kill path can be asserted independently from normal completion.
+const BUSY_ASSISTANT_AGENT: &str = r#"#!/bin/sh
+read -r first
+echo '{"type":"system","subtype":"init","session_id":"fake-sess-kill","model":"fake-model"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"interim answer"}]}}'
 sleep 30
 "#;
 
@@ -290,6 +350,42 @@ fn is_turn_completed(event: &AgentEvent) -> bool {
 }
 
 // ---- Tests ----
+
+#[test]
+fn idle_status_broadcast_carries_latest_assistant_text() {
+    let dir = temp_dir("waiting-prompt-status");
+    let script = write_script(&dir, "fake-agent.sh", STEERABLE_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Command::Subscribe);
+    assert!(matches!(subscriber.recv(), Event::Ok));
+
+    let mut control = daemon.connect();
+    control.send(&Command::SpawnAgent {
+        session_id: "agent-waiting-prompt".to_string(),
+        params: spawn_params(&dir, &script, "do the thing"),
+    });
+    control.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    let status = subscriber.recv_until(|event| {
+        matches!(
+            event,
+            Event::StatusChanged {
+                session_id,
+                status: SessionStatus::Idle,
+                ..
+            } if session_id == "agent-waiting-prompt"
+        )
+    });
+    assert!(matches!(
+        status,
+        Event::StatusChanged {
+            waiting_prompt_snippet: Some(prompt),
+            ..
+        } if prompt == "hello from fake"
+    ));
+}
 
 #[test]
 fn spawn_attach_replay_and_steer() {
@@ -586,6 +682,10 @@ fn interrupt_is_surfaced_as_interrupted_not_crashed() {
     let script = write_script(&dir, "codex-sleeper.sh", CODEX_SLEEPER_AGENT);
     let daemon = DaemonHandle::start_in(&dir);
 
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Command::Subscribe);
+    assert!(matches!(subscriber.recv(), Event::Ok));
+
     let mut conn = daemon.connect();
     let mut params = spawn_params(&dir, &script, "do work");
     params.agent_provider = AgentProvider::Codex;
@@ -597,11 +697,11 @@ fn interrupt_is_surfaced_as_interrupted_not_crashed() {
 
     // Attach and wait until the turn is actually running, so the interrupt
     // lands on a live child rather than racing the spawn.
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-int".to_string(),
-        from_seq: 0,
-    });
-    conn.collect_agent_events_until(|e| matches!(e, AgentEvent::TurnStarted { .. }));
+    conn.attach_and_collect_agent_events_until(
+        "agent-int",
+        0,
+        |e| matches!(e, AgentEvent::AssistantText { text, .. } if text == "interim answer"),
+    );
 
     conn.send(&Command::AgentInterrupt {
         session_id: "agent-int".to_string(),
@@ -620,6 +720,60 @@ fn interrupt_is_surfaced_as_interrupted_not_crashed() {
         ),
         "stopping the agent must read as interrupted, not crashed: {ended:?}"
     );
+
+    let idle = subscriber.recv_until(|event| {
+        matches!(
+            event,
+            Event::StatusChanged {
+                session_id,
+                status: SessionStatus::Idle,
+                ..
+            } if session_id == "agent-int"
+        )
+    });
+    assert!(matches!(
+        idle,
+        Event::StatusChanged {
+            waiting_prompt_snippet: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn crash_does_not_publish_interim_assistant_text_as_a_waiting_prompt() {
+    let dir = temp_dir("crash-waiting-prompt");
+    let script = write_script(&dir, "crashing-agent.sh", CRASHING_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Command::Subscribe);
+    assert!(matches!(subscriber.recv(), Event::Ok));
+
+    let mut control = daemon.connect();
+    control.send(&Command::SpawnAgent {
+        session_id: "agent-crash".to_string(),
+        params: spawn_params(&dir, &script, "crash now"),
+    });
+    control.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    let idle = subscriber.recv_until(|event| {
+        matches!(
+            event,
+            Event::StatusChanged {
+                session_id,
+                status: SessionStatus::Idle,
+                ..
+            } if session_id == "agent-crash"
+        )
+    });
+    assert!(matches!(
+        idle,
+        Event::StatusChanged {
+            waiting_prompt_snippet: None,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -701,8 +855,12 @@ fn set_model_writes_a_control_line_to_stdin() {
 #[test]
 fn kill_removes_agent_session() {
     let dir = temp_dir("kill");
-    let script = write_script(&dir, "fake-agent.sh", STEERABLE_AGENT);
+    let script = write_script(&dir, "fake-agent.sh", BUSY_ASSISTANT_AGENT);
     let daemon = DaemonHandle::start_in(&dir);
+
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Command::Subscribe);
+    assert!(matches!(subscriber.recv(), Event::Ok));
 
     let mut conn = daemon.connect();
     conn.send(&Command::SpawnAgent {
@@ -710,11 +868,36 @@ fn kill_removes_agent_session() {
         params: spawn_params(&dir, &script, "kill me"),
     });
     conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
+    conn.send(&Command::AttachAgent {
+        session_id: "agent-k".to_string(),
+        from_seq: 0,
+    });
+    conn.collect_agent_events_until(
+        |e| matches!(e, AgentEvent::AssistantText { text, .. } if text == "interim answer"),
+    );
 
     conn.send(&Command::Kill {
         session_id: "agent-k".to_string(),
     });
     conn.recv_until(|e| matches!(e, Event::Ok));
+
+    let idle = subscriber.recv_until(|event| {
+        matches!(
+            event,
+            Event::StatusChanged {
+                session_id,
+                status: SessionStatus::Idle,
+                ..
+            } if session_id == "agent-k"
+        )
+    });
+    assert!(matches!(
+        idle,
+        Event::StatusChanged {
+            waiting_prompt_snippet: None,
+            ..
+        }
+    ));
 
     // Session is gone: attach now fails.
     conn.send(&Command::AttachAgent {

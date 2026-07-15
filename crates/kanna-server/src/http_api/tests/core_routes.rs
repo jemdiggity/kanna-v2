@@ -567,6 +567,91 @@ async fn settings_routes_get_and_put_setting_values() {
 }
 
 #[tokio::test]
+async fn window_workspace_mutations_do_not_resurrect_a_concurrently_removed_window() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.set_test_setting(
+            "window_workspace_v1",
+            &serde_json::json!({
+                "windows": [
+                    {
+                        "windowId": "main",
+                        "selectedRepoId": null,
+                        "selectedItemId": null,
+                        "sidebarHidden": false,
+                        "sidebarWidth": 260,
+                        "order": 0
+                    },
+                    {
+                        "windowId": "window-2",
+                        "selectedRepoId": "repo-old",
+                        "selectedItemId": null,
+                        "sidebarHidden": false,
+                        "sidebarWidth": 260,
+                        "order": 1
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    });
+
+    let update_selection = app.clone().oneshot(
+        Request::post("/v1/window-workspace/mutations")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "operation": "updateSelection",
+                    "windowId": "window-2",
+                    "selectedRepoId": "repo-new",
+                    "selectedItemId": "task-new"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    );
+    let remove_main = app.clone().oneshot(
+        Request::post("/v1/window-workspace/mutations")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "operation": "remove",
+                    "windowId": "main",
+                    "observedWindowIds": ["main", "window-2"],
+                    "liveWindowIds": ["main", "window-2"]
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    );
+
+    let (updated, removed) = tokio::join!(update_selection, remove_main);
+    assert_eq!(updated.unwrap().status(), StatusCode::OK);
+    assert_eq!(removed.unwrap().status(), StatusCode::OK);
+
+    let final_response = app
+        .oneshot(
+            Request::get("/v1/settings/window_workspace_v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let final_body = axum::body::to_bytes(final_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let final_json: serde_json::Value = from_slice(&final_body).unwrap();
+    let snapshot: serde_json::Value =
+        serde_json::from_str(final_json["value"].as_str().unwrap()).unwrap();
+
+    assert_eq!(snapshot["windows"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["windows"][0]["windowId"], "window-2");
+    assert_eq!(snapshot["windows"][0]["selectedRepoId"], "repo-new");
+    assert_eq!(snapshot["windows"][0]["selectedItemId"], "task-new");
+    assert_eq!(snapshot["windows"][0]["order"], 0);
+}
+
+#[tokio::test]
 async fn operator_events_route_inserts_batched_events() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

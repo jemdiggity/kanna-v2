@@ -76,6 +76,22 @@ function readyTaskSlot(slotId: string, task: { id: string; repo_id: string; [key
 const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
+const nativeCloseRegistrationHarness = {
+  error: null as Error | null,
+};
+const nativeWindowDestroyMock = vi.fn(async () => {});
+
+function dispatchNativeCloseRequest() {
+  const event = { preventDefault: vi.fn() };
+  const handler = closeRequestedHandler;
+  const completion = (async () => {
+    if (handler) await handler(event);
+    if (!handler || event.preventDefault.mock.calls.length === 0) {
+      await nativeWindowDestroyMock();
+    }
+  })();
+  return { completion, event };
+}
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
 const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   vi.fn((_uid: string, onSnapshot: (snapshot: { repos: unknown[]; items: unknown[]; terminalRefs: Record<string, unknown> }) => void) => {
@@ -198,16 +214,28 @@ const mockWindowWorkspace = {
     selectedRepoId: null,
     selectedItemId: null,
   },
+  initialize: vi.fn(async () => {}),
   loadSnapshot: vi.fn(async () => ({ windows: [] })),
   saveSnapshot: vi.fn(async () => {}),
   openWindow: vi.fn(async () => {}),
   closeWindow: vi.fn(async () => {}),
-  forgetCurrentWindow: vi.fn(async () => {}),
+  destroyNativeWindow: vi.fn(async () => {}),
+  forgetCurrentWindow: vi.fn(async () => null as {
+    windowId: string;
+    selectedRepoId: string | null;
+    selectedItemId: string | null;
+    sidebarHidden: boolean;
+    sidebarWidth: number;
+    order: number;
+  } | null),
+  restoreCurrentWindow: vi.fn(async () => {}),
+  notifyWindowMembershipChanged: vi.fn(async () => {}),
   persistSelection: vi.fn(async () => {}),
   persistSidebarHidden: vi.fn(async () => {}),
   persistSidebarWidth: vi.fn(async () => {}),
   invalidateSharedData: vi.fn(async () => {}),
   restoreAdditionalWindows: vi.fn(async () => {}),
+  onSharedInvalidation: vi.fn(async () => vi.fn()),
 };
 
 let capturedKeyboardActions: KeyboardActions | null = null;
@@ -239,6 +267,9 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     setTheme: nativeWindowSetThemeMock,
     onCloseRequested: vi.fn(async (handler: (event: { preventDefault: () => void }) => void | Promise<void>) => {
+      if (nativeCloseRegistrationHarness.error) {
+        throw nativeCloseRegistrationHarness.error;
+      }
       closeRequestedHandler = handler;
       return () => {
         closeRequestedHandler = null;
@@ -594,9 +625,9 @@ async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof Sidebar
       },
     },
   });
-  await flushPromises();
-  await flushPromises();
-  await flushPromises();
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await flushPromises();
+  }
   return wrapper;
 }
 
@@ -637,9 +668,9 @@ async function mountAppWithOverrides(
       },
     },
   });
-  await flushPromises();
-  await flushPromises();
-  await flushPromises();
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await flushPromises();
+  }
   return wrapper;
 }
 
@@ -690,12 +721,22 @@ describe("App", () => {
     listenHandlers.clear();
     currentWebviewWindowListenHandlers.clear();
     closeRequestedHandler = null;
+    nativeCloseRegistrationHarness.error = null;
+    nativeWindowDestroyMock.mockClear();
     capturedKeyboardActions = null;
     mockWindowWorkspace.loadSnapshot.mockClear();
     mockWindowWorkspace.saveSnapshot.mockClear();
     mockWindowWorkspace.openWindow.mockClear();
     mockWindowWorkspace.closeWindow.mockClear();
+    mockWindowWorkspace.initialize.mockClear();
+    mockWindowWorkspace.destroyNativeWindow.mockReset();
+    mockWindowWorkspace.destroyNativeWindow.mockImplementation(async () => {
+      await nativeWindowDestroyMock();
+    });
     mockWindowWorkspace.forgetCurrentWindow.mockClear();
+    mockWindowWorkspace.forgetCurrentWindow.mockResolvedValue(null);
+    mockWindowWorkspace.restoreCurrentWindow.mockClear();
+    mockWindowWorkspace.notifyWindowMembershipChanged.mockClear();
     mockWindowWorkspace.persistSelection.mockClear();
     mockWindowWorkspace.persistSidebarHidden.mockClear();
     mockWindowWorkspace.persistSidebarWidth.mockClear();
@@ -795,6 +836,36 @@ describe("App", () => {
     expect(associateDesktopCloudCredentialMock).not.toHaveBeenCalled();
     expect(cloudTasksMock).not.toHaveBeenCalled();
 
+    wrapper.unmount();
+  });
+
+  it("initializes cloud association and read subscriptions in a restored secondary window", async () => {
+    mockWindowWorkspace.bootstrap.windowId = "window-2";
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    expect(associateDesktopCloudCredentialMock).toHaveBeenCalledTimes(1);
+    expect(subscribeDesktopCloudTasksMock).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+  });
+
+  it("shows a fatal startup state when native close protection cannot register", async () => {
+    nativeCloseRegistrationHarness.error = new Error("listener unavailable");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="fatal-initialization-error"]').text()).toContain(
+      "Native window-close protection is unavailable",
+    );
+    expect(mockWindowWorkspace.initialize).not.toHaveBeenCalled();
+    expect(store.init).not.toHaveBeenCalled();
+    expect(associateDesktopCloudCredentialMock).not.toHaveBeenCalled();
+
+    errorSpy.mockRestore();
     wrapper.unmount();
   });
 
@@ -2378,13 +2449,16 @@ describe("App", () => {
     });
   });
 
-  it("closes the focused window through the workspace controller", async () => {
+  it("safely closes the focused window through the workspace controller", async () => {
     await mountApp(SidebarWithRepoStub);
     expect(capturedKeyboardActions).not.toBeNull();
 
     await capturedKeyboardActions?.closeWindow();
 
-    expect(mockWindowWorkspace.closeWindow).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.notifyWindowMembershipChanged).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.destroyNativeWindow).toHaveBeenCalledTimes(1);
+    expect(nativeWindowDestroyMock).toHaveBeenCalledTimes(1);
   });
 
   it("opens a new window when the native window-open event arrives", async () => {
@@ -2405,7 +2479,7 @@ describe("App", () => {
     });
   });
 
-  it("closes the current window when the native window-close event arrives", async () => {
+  it("safely closes the current window when the native window-close event arrives", async () => {
     await mountApp(SidebarWithRepoStub);
     expect(listenHandlers.has(WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT)).toBe(false);
     const handler = currentWebviewWindowListenHandlers.get(WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT);
@@ -2413,10 +2487,13 @@ describe("App", () => {
 
     await handler?.({});
 
-    expect(mockWindowWorkspace.closeWindow).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.notifyWindowMembershipChanged).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.destroyNativeWindow).toHaveBeenCalledTimes(1);
+    expect(nativeWindowDestroyMock).toHaveBeenCalledTimes(1);
   });
 
-  it("persists workspace closure and lets Tauri finish a native window close request", async () => {
+  it("persists workspace closure before explicitly destroying the native window", async () => {
     await mountApp(SidebarWithRepoStub);
     const handler = await waitForNativeCloseRequestedHandler();
     expect(handler).toBeTypeOf("function");
@@ -2426,7 +2503,98 @@ describe("App", () => {
 
     expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
     expect(mockWindowWorkspace.closeWindow).not.toHaveBeenCalled();
-    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(mockWindowWorkspace.notifyWindowMembershipChanged).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.destroyNativeWindow).toHaveBeenCalledTimes(1);
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(nativeWindowDestroyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("prevents overlapping native closes until membership removal completes", async () => {
+    const removal = createDeferred<null>();
+    mockWindowWorkspace.forgetCurrentWindow.mockImplementationOnce(
+      async () => removal.promise,
+    );
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    expect(await waitForNativeCloseRequestedHandler()).toBeTypeOf("function");
+
+    const firstClose = dispatchNativeCloseRequest();
+    await flushPromises();
+    const secondClose = dispatchNativeCloseRequest();
+    await secondClose.completion;
+
+    expect(firstClose.event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(secondClose.event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.destroyNativeWindow).not.toHaveBeenCalled();
+    expect(nativeWindowDestroyMock).not.toHaveBeenCalled();
+
+    removal.resolve(null);
+    await firstClose.completion;
+
+    expect(mockWindowWorkspace.notifyWindowMembershipChanged).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.destroyNativeWindow).toHaveBeenCalledTimes(1);
+    expect(nativeWindowDestroyMock).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+  });
+
+  it("prevents overlapping native closes while workspace initialization is pending", async () => {
+    const initialization = createDeferred<void>();
+    mockWindowWorkspace.initialize.mockImplementationOnce(
+      async () => initialization.promise,
+    );
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    expect(await waitForNativeCloseRequestedHandler()).toBeTypeOf("function");
+
+    const firstClose = dispatchNativeCloseRequest();
+    await flushPromises();
+    const secondClose = dispatchNativeCloseRequest();
+    await secondClose.completion;
+
+    expect(firstClose.event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(secondClose.event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.forgetCurrentWindow).not.toHaveBeenCalled();
+    expect(mockWindowWorkspace.destroyNativeWindow).not.toHaveBeenCalled();
+    expect(nativeWindowDestroyMock).not.toHaveBeenCalled();
+
+    initialization.resolve();
+    await firstClose.completion;
+
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.destroyNativeWindow).toHaveBeenCalledTimes(1);
+    expect(nativeWindowDestroyMock).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+  });
+
+  it("prevents overlapping native closes while final window destruction is pending", async () => {
+    const finalDestruction = createDeferred<void>();
+    mockWindowWorkspace.destroyNativeWindow.mockImplementationOnce(async () => {
+      await finalDestruction.promise;
+      await nativeWindowDestroyMock();
+    });
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    expect(await waitForNativeCloseRequestedHandler()).toBeTypeOf("function");
+
+    const firstClose = dispatchNativeCloseRequest();
+    await waitForCondition(
+      () => mockWindowWorkspace.destroyNativeWindow.mock.calls.length === 1,
+    );
+    const secondClose = dispatchNativeCloseRequest();
+    await secondClose.completion;
+
+    expect(firstClose.event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(secondClose.event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.destroyNativeWindow).toHaveBeenCalledTimes(1);
+    expect(nativeWindowDestroyMock).not.toHaveBeenCalled();
+
+    finalDestruction.resolve();
+    await firstClose.completion;
+
+    expect(nativeWindowDestroyMock).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
   });
 
   it("keeps the native window open if workspace closure persistence fails", async () => {
@@ -2440,6 +2608,44 @@ describe("App", () => {
 
     expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.destroyNativeWindow).not.toHaveBeenCalled();
+    expect(nativeWindowDestroyMock).not.toHaveBeenCalled();
+  });
+
+  it("restores window membership when final native destruction fails", async () => {
+    const removedWindow = {
+      windowId: "main",
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+      sidebarHidden: true,
+      sidebarWidth: 347,
+      order: 0,
+    };
+    mockWindowWorkspace.forgetCurrentWindow.mockResolvedValue(removedWindow);
+    mockWindowWorkspace.destroyNativeWindow.mockRejectedValueOnce(
+      new Error("destroy failed"),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    const firstClose = dispatchNativeCloseRequest();
+    await firstClose.completion;
+
+    expect(firstClose.event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.restoreCurrentWindow).toHaveBeenCalledWith(removedWindow);
+    expect(mockWindowWorkspace.notifyWindowMembershipChanged).toHaveBeenCalledTimes(2);
+    expect(nativeWindowDestroyMock).not.toHaveBeenCalled();
+
+    const retryClose = dispatchNativeCloseRequest();
+    await retryClose.completion;
+
+    expect(retryClose.event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(2);
+    expect(mockWindowWorkspace.destroyNativeWindow).toHaveBeenCalledTimes(2);
+    expect(nativeWindowDestroyMock).toHaveBeenCalledTimes(1);
+
+    errorSpy.mockRestore();
+    wrapper.unmount();
   });
 
   it("navigates tasks when the native task-navigation event arrives", async () => {
@@ -2838,6 +3044,7 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
+          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -3865,6 +4072,7 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
+          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -3919,6 +4127,7 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
+          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,
@@ -4236,6 +4445,7 @@ describe("App", () => {
         provide: {
           db: dbMock,
           dbName: "test.db",
+          windowWorkspace: mockWindowWorkspace,
         },
         mocks: {
           $t: (key: string) => key,

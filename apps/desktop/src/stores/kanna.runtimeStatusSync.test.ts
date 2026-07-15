@@ -244,6 +244,8 @@ vi.mock("./kannaCleanup", () => ({
 }));
 
 vi.mock("./agent-provider", () => ({
+  normalizeAgentProviderCandidates: vi.fn((providers?: string | string[]) =>
+    providers == null ? [] : (Array.isArray(providers) ? providers : [providers])),
   getPreferredAgentProviders: vi.fn(() => "claude"),
   requireResolvedAgentProvider: vi.fn((provider?: string) => provider ?? "claude"),
   resolveAgentProvider: vi.fn((provider?: string | string[]) => Array.isArray(provider) ? provider[0] : (provider ?? "claude")),
@@ -626,6 +628,7 @@ describe("kanna runtime status reconciliation", () => {
       saveSnapshot: vi.fn(async () => {}),
       openWindow: vi.fn(async () => {}),
       closeWindow: vi.fn(async () => {}),
+      destroyNativeWindow: vi.fn(async () => {}),
       forgetCurrentWindow: vi.fn(async () => {}),
       persistSelection: vi.fn(async () => {}),
       persistSidebarHidden: vi.fn(async () => {}),
@@ -696,6 +699,7 @@ describe("kanna runtime status reconciliation", () => {
       saveSnapshot: vi.fn(async () => {}),
       openWindow: vi.fn(async () => {}),
       closeWindow: vi.fn(async () => {}),
+      destroyNativeWindow: vi.fn(async () => {}),
       forgetCurrentWindow: vi.fn(async () => {}),
       persistSelection: vi.fn(async () => {}),
       persistSidebarHidden: vi.fn(async () => {}),

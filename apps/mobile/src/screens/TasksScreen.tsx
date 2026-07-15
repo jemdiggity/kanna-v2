@@ -25,7 +25,6 @@ export function TasksScreen({
   const filteredTasks = !isRecentView && selectedRepoId
     ? tasks.filter((task) => task.repoId === selectedRepoId)
     : tasks;
-  const repoNameById = Object.fromEntries(repos.map((repo) => [repo.id, repo.name]));
 
   return (
     <ScrollView
@@ -66,8 +65,6 @@ export function TasksScreen({
 
         <TaskList
           emptyLabel="No tasks yet."
-          isRecentView={isRecentView}
-          repoNameById={repoNameById}
           tasks={filteredTasks}
           testID={MOBILE_E2E_IDS.tasksScreen}
           onOpenTask={onOpenTask}

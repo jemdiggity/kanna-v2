@@ -9,7 +9,7 @@ describe("buildTaskWorkspaceModel", () => {
         repoId: "repo-1",
         title: "Fix task reactivity in mobile app after desktop daemon reconnect regression",
         stage: "in progress",
-        snippet: "recent output"
+        waitingPromptSnippet: "recent output"
       },
       terminalStatus: "live"
     });

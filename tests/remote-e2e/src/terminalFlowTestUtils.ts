@@ -73,7 +73,13 @@ export async function connectRawRelayClient(harness: RemoteHarness): Promise<Raw
 
 export async function createScriptedTask(
   harness: RemoteHarness,
-  options: { displayName: string; notifyTaskId?: string }
+  options: {
+    displayName: string;
+    notifyTaskId?: string;
+    prompt?: string;
+    repoName?: string;
+    waitingPromptSnippet?: string;
+  }
 ): Promise<ScriptedTask> {
   const repoPath = join(
     harness.paths.root,
@@ -87,7 +93,7 @@ export async function createScriptedTask(
     path: "/v1/repos",
     body: {
       path: repoPath,
-      name: options.displayName
+      name: options.repoName ?? options.displayName
     }
   }));
 
@@ -97,13 +103,26 @@ export async function createScriptedTask(
     path: "/v1/tasks",
     body: {
       repoId: repo.id,
-      prompt: `Run deterministic scripted task for ${options.displayName}`,
+      prompt: options.prompt ?? `Run deterministic scripted task for ${options.displayName}`,
       displayName: options.displayName,
       agentProvider: "codex",
       agentType: "pty",
       notifyTaskId: options.notifyTaskId
     }
   }));
+
+  if (options.waitingPromptSnippet !== undefined) {
+    const sql = [
+      "PRAGMA busy_timeout=5000;",
+      "UPDATE pipeline_item",
+      `SET last_output_preview = ${sqliteString(options.waitingPromptSnippet)}, updated_at = datetime('now')`,
+      `WHERE id = ${sqliteString(task.taskId)};`
+    ].join(" ");
+    await execFileAsync("sqlite3", [harness.paths.dbPath, sql], {
+      cwd: harness.repoRoot,
+      env: process.env
+    });
+  }
 
   return {
     taskId: task.taskId,

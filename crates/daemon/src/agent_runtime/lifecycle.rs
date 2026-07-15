@@ -59,6 +59,7 @@ pub async fn kill_agent_session(
         &Event::StatusChanged {
             session_id: session_id.to_string(),
             status: SessionStatus::Idle,
+            waiting_prompt_snippet: None,
         },
     );
     true

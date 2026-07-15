@@ -13,9 +13,16 @@ vi.mock("../invoke", () => ({
 function createTaskCreationHarness() {
   const showNewTaskModal = ref(true);
   const onAgentChoiceUsed = vi.fn(async () => {});
+  const selectedCloudRepoId = ref<string | null>(null);
+  const selectedCloudItemId = ref<string | null>(null);
   const store = {
     selectedRepoId: "repo-1",
+    selectedItemId: null as string | null,
     repos: [{ id: "repo-1", path: "/repo" }],
+    items: [],
+    taskUiSlots: [],
+    lastSelectedItemByRepo: {} as Record<string, string>,
+    persistSelection: vi.fn(async () => {}),
     createItem: vi.fn(async () => {}),
     createRepo: vi.fn(async () => "repo-1"),
     importRepo: vi.fn(async () => "repo-1"),
@@ -36,8 +43,8 @@ function createTaskCreationHarness() {
     sidebarRepos: computed(() => [{ id: "repo-1" }]),
     remoteSnapshot: computed(() => ({ repos: [], items: [] }) as never),
     mainPanelIsCloudTask: computed(() => false),
-    selectedCloudRepoId: ref(null),
-    selectedCloudItemId: ref(null),
+    selectedCloudRepoId,
+    selectedCloudItemId,
     showNewTaskModal,
     availablePipelines: ref([]),
     defaultPipelineName: ref(undefined),
@@ -50,7 +57,14 @@ function createTaskCreationHarness() {
     onAgentChoiceUsed,
   });
 
-  return { creation, store, showNewTaskModal, onAgentChoiceUsed };
+  return {
+    creation,
+    store,
+    showNewTaskModal,
+    onAgentChoiceUsed,
+    selectedCloudRepoId,
+    selectedCloudItemId,
+  };
 }
 
 describe("useAppTaskCreation", () => {
@@ -94,6 +108,60 @@ describe("useAppTaskCreation", () => {
     await creation.handleNewTaskSubmit("Ship MRU", "copilot", "default", "origin/main", "pty");
 
     expect(onAgentChoiceUsed).not.toHaveBeenCalled();
+  });
+
+  it("clears remote selection ownership before creating in an existing local repo", async () => {
+    const {
+      creation,
+      store,
+      selectedCloudRepoId,
+      selectedCloudItemId,
+    } = createTaskCreationHarness();
+    selectedCloudRepoId.value = "repo-1";
+    selectedCloudItemId.value = "cloud:repo-1:task-remote";
+
+    await creation.handleNewTaskSubmit("Create locally", "claude", "default", "origin/main", "pty");
+
+    expect(selectedCloudRepoId.value).toBeNull();
+    expect(selectedCloudItemId.value).toBeNull();
+    expect(store.createItem).toHaveBeenCalled();
+  });
+
+  it("keeps a durable selection owned by a noncanonical local task slot", async () => {
+    const {
+      creation,
+      store,
+      selectedCloudRepoId,
+      selectedCloudItemId,
+    } = createTaskCreationHarness();
+    store.selectedItemId = "task-local";
+    store.lastSelectedItemByRepo = { "repo-1": "task-local" };
+    store.taskUiSlots = [{
+      slot_id: "create:stable-local",
+      task_id: "task-local",
+      state: "creating",
+      task: null,
+      authoritative_miss_grace_remaining: 1,
+      draft: {
+        repo_id: "repo-1",
+        prompt: "Create locally",
+        display_name: null,
+        pipeline: "default",
+        stage: "in progress",
+        agent_type: "pty",
+        agent_provider: "claude",
+        created_at: "2026-07-14T00:00:00.000Z",
+      },
+    }] as never;
+    selectedCloudRepoId.value = "cloud:repo-1";
+    selectedCloudItemId.value = "cloud:repo-1:task-remote";
+
+    await creation.handleNewTaskSubmit("Create locally", "claude", "default", "origin/main", "pty");
+
+    expect(store.selectedItemId).toBe("task-local");
+    expect(store.lastSelectedItemByRepo).toEqual({ "repo-1": "task-local" });
+    expect(selectedCloudRepoId.value).toBeNull();
+    expect(selectedCloudItemId.value).toBeNull();
   });
 
   it("does not reopen the new task modal before recording the submitted agent choice", async () => {
