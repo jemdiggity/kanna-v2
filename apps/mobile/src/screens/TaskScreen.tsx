@@ -16,6 +16,11 @@ import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
 import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
+import { showTaskQuickReplyMenu } from "./taskQuickReplyMenu";
+import {
+  buildTaskQuickReply,
+  type TaskQuickReply
+} from "./taskQuickReplies";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
 import { getTerminalBottomInset } from "./terminalSafeArea";
 
@@ -98,16 +103,24 @@ export function TaskScreen({
   const isComposerDisabled = isAgentTask
     ? agentStatus === "connecting" || agentStatus === "error"
     : model.isComposerDisabled;
-  const sendDisabled = isComposerDisabled || !draftInput.trim();
   const terminalBottomInset = getTerminalBottomInset(screenHeight, composerTop);
-  const sendDraftInput = () => {
-    const nextInput = draftInput.trim();
+  const submitInput = (input: string) => {
+    const nextInput = input.trim();
     if (!nextInput || isComposerDisabled) {
       return;
     }
 
     onSendInput(nextInput);
     setDraftInput("");
+  };
+  const sendDraftInput = () => submitInput(draftInput);
+  const sendQuickReply = (quickReply: TaskQuickReply) => {
+    submitInput(buildTaskQuickReply(quickReply, draftInput));
+  };
+  const openQuickReplyMenu = () => {
+    if (!isComposerDisabled) {
+      showTaskQuickReplyMenu(sendQuickReply);
+    }
   };
 
   useEffect(() => {
@@ -230,9 +243,17 @@ export function TaskScreen({
             value={draftInput}
           />
           <Pressable
-            disabled={sendDisabled}
-            style={[styles.sendButton, sendDisabled ? styles.sendButtonDisabled : null]}
+            accessibilityHint="Press and hold for quick replies."
+            accessibilityLabel="Send reply"
+            accessibilityRole="button"
+            accessibilityState={{ disabled: isComposerDisabled }}
+            disabled={isComposerDisabled}
+            style={[
+              styles.sendButton,
+              isComposerDisabled ? styles.sendButtonDisabled : null
+            ]}
             testID={MOBILE_E2E_IDS.taskSendButton}
+            onLongPress={openQuickReplyMenu}
             onPress={sendDraftInput}
           >
             <Text style={styles.sendButtonLabel}>Send</Text>
