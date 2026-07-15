@@ -12,6 +12,10 @@ import type { TaskActivity } from "../../../src/lib/api/types";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
+const QUICK_REPLY_LABEL = "SGTM. Proceed.";
+const QUICK_REPLY_MENU_TITLE = "Quick Replies";
+const QUICK_REPLY_LONG_PRESS_MS = 800;
+const TASK_COMPOSER_PLACEHOLDER = "Reply…";
 
 interface RelayCredentials {
   email: string;
@@ -22,8 +26,8 @@ interface RelayTaskFlowOptions {
   credentials: RelayCredentials;
   emitFilePreviewLinks(): Promise<void>;
   filePreview: RelayFilePreviewFixture;
+  draft: string;
   fixture: PtyTerminalFixture;
-  input: string;
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
@@ -55,6 +59,7 @@ interface RelayElement {
   getAttribute(name: string): Promise<string | null>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
+  longPress(options: { duration: number }): Promise<unknown>;
   setValue(value: string): Promise<unknown>;
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
 }
@@ -72,6 +77,8 @@ interface RelayUi {
   getAgentMessageView(): Promise<RelayElement>;
   getAgentMessageReady(): Promise<RelayElement>;
   getBackButton(): Promise<RelayElement>;
+  getQuickRepliesMenuTitle(): Promise<RelayElement>;
+  getQuickReplyOption(label: string): Promise<RelayElement>;
   getTaskInput(): Promise<RelayElement>;
   getTaskDetailScreen(): Promise<RelayElement>;
   getTaskDetailActivity(): Promise<RelayElement>;
@@ -169,6 +176,12 @@ function createRelayUi(driver: Browser): RelayUi {
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
+    async getQuickRepliesMenuTitle() {
+      return driver.$(`~${QUICK_REPLY_MENU_TITLE}`);
+    },
+    async getQuickReplyOption(label) {
+      return driver.$(`~${label}`);
+    },
     async getTaskInput() {
       return driver.$(selectors.taskInput);
     },
@@ -200,6 +213,44 @@ function createRelayUi(driver: Browser): RelayUi {
       return driver.waitUntil(condition, options);
     }
   };
+}
+
+export async function verifyRelayQuickReplyJourney(
+  ui: Pick<
+    RelayUi,
+    | "getQuickRepliesMenuTitle"
+    | "getQuickReplyOption"
+    | "getTaskInput"
+    | "getTaskSendButton"
+    | "waitUntil"
+  >,
+  draft: string,
+): Promise<void> {
+  const input = await ui.getTaskInput();
+  await input.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await input.setValue(draft);
+
+  const send = await ui.getTaskSendButton();
+  await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await send.longPress({ duration: QUICK_REPLY_LONG_PRESS_MS });
+
+  const menuTitle = await ui.getQuickRepliesMenuTitle();
+  await menuTitle.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const quickReply = await ui.getQuickReplyOption(QUICK_REPLY_LABEL);
+  await quickReply.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await quickReply.click();
+
+  await ui.waitUntil(
+    async () => {
+      const value = await input.getAttribute("value").catch(() => null);
+      return value === "" || value === TASK_COMPOSER_PLACEHOLDER;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the task composer to clear after selecting a quick reply",
+    },
+  );
 }
 
 function createWebViewContextDriver(driver: Browser): RelayWebViewContextDriver {
@@ -629,9 +680,5 @@ export async function runRelayTaskFlow(
   await options.emitFilePreviewLinks();
   await verifyTerminalFilePreviewFlow(driver, options.filePreview);
 
-  const input = await ui.getTaskInput();
-  await input.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await input.setValue(options.input);
-  const send = await ui.getTaskSendButton();
-  await send.click();
+  await verifyRelayQuickReplyJourney(ui, options.draft);
 }

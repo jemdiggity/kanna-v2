@@ -273,14 +273,16 @@ async function main(): Promise<void> {
         credentials: relayHarness.credentials,
         emitFilePreviewLinks: relayHarness.emitFilePreviewLinks,
         filePreview: relayHarness.filePreview,
+        draft: relayHarness.quickReply.draft,
         fixture: relayHarness.fixture,
-        input: relayHarness.menuInput,
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
         setTaskActivity: relayHarness.setTaskActivity,
         taskRow: relayHarness.taskRow,
         waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity
       });
-      await relayHarness.waitForFirstMenuSelection();
+      await relayHarness.waitForQuickReplyInput(
+        relayHarness.quickReply.expectedInput
+      );
     } else if (mode === "hybrid" && relayHarness) {
       await seedTrustedDesktopThroughDeepLink({
         bundleId: env.bundleId,
