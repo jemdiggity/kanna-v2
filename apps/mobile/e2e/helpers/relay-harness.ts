@@ -19,8 +19,9 @@ const HYBRID_CLOUD_ONLY_LOCAL_TASK_ID = "mobile-hybrid-cloud-only-task";
 const HYBRID_UNRESOLVED_TASK_ID = "mobile-hybrid-unresolved-selection";
 const RELAY_TASK_SENTINEL = "SCRIPT_READY";
 const RELAY_MENU_CURSOR_MARKER = "SCRIPT_MENU_CURSOR:2";
-const RELAY_MENU_OPTION_ONE_MARKER = "SCRIPT_MENU_OPTION_1_HIGHLIGHTED";
-const RELAY_MENU_SELECTION_MARKER = "SCRIPT_MENU_SELECTED:1";
+const RELAY_QUICK_REPLY_DRAFT = "  Preserve the relay fixture.  ";
+const RELAY_QUICK_REPLY_EXPECTED_INPUT =
+  "SGTM. Proceed.\n\nPreserve the relay fixture.";
 const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
@@ -135,7 +136,10 @@ export interface MobileRelayHarness {
   harness: RemoteHarness;
   hybridEnv: Record<string, string>;
   hybridFixture: MobileHybridFixture;
-  menuInput: string;
+  quickReply: {
+    draft: string;
+    expectedInput: string;
+  };
   lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
   emitFilePreviewLinks(): Promise<void>;
@@ -151,8 +155,33 @@ export interface MobileRelayHarness {
   terminalEvents: TerminalEventCollector;
   publishHybridCloudRefresh(): Promise<void>;
   stop(): Promise<void>;
-  waitForFirstMenuSelection(timeoutMs?: number): Promise<string>;
+  waitForQuickReplyInput(
+    expectedInput: string,
+    timeoutMs?: number,
+  ): Promise<string>;
   waitForLocalTaskActivity(activity: TaskActivity, timeoutMs?: number): Promise<void>;
+}
+
+export function assertSingleSubmittedTaskInput(
+  output: string,
+  expectedInput: string,
+): void {
+  const normalizedOutput = output.replace(/\r\n/g, "\n");
+  const submittedInputCount = normalizedOutput.match(/SCRIPT_INPUT:/g)?.length ?? 0;
+  if (submittedInputCount !== 1) {
+    throw new Error(
+      `Expected exactly one task input, observed ${submittedInputCount}. ` +
+        `Terminal output:\n${output}`,
+    );
+  }
+
+  const expectedMarker = `SCRIPT_INPUT:${expectedInput}\n`;
+  if (!normalizedOutput.includes(expectedMarker)) {
+    throw new Error(
+      `Expected exact task input ${JSON.stringify(expectedInput)}. ` +
+        `Terminal output:\n${output}`,
+    );
+  }
 }
 
 export interface MobileHybridFixture {
@@ -297,7 +326,10 @@ export async function startMobileRelayHarness(
       harness,
       hybridEnv: mobileRelayExpoEnv(harness, { forceCloud: false }),
       hybridFixture,
-      menuInput: "1",
+      quickReply: {
+        draft: RELAY_QUICK_REPLY_DRAFT,
+        expectedInput: RELAY_QUICK_REPLY_EXPECTED_INPUT,
+      },
       lanOnlyTask,
       localTask,
       async emitFilePreviewLinks() {
@@ -346,22 +378,19 @@ export async function startMobileRelayHarness(
         terminalEvents?.close();
         await harness.stop();
       },
-      async waitForFirstMenuSelection(timeoutMs = 10_000) {
+      async waitForQuickReplyInput(expectedInput, timeoutMs = 10_000) {
         const output = await remote.terminal.waitForTerminalOutput(
           terminalEvents!,
-          RELAY_MENU_SELECTION_MARKER,
+          `SCRIPT_INPUT:${expectedInput.split("\n", 1)[0]}`,
           timeoutMs
         );
-        const cursor = output.indexOf(RELAY_MENU_CURSOR_MARKER);
-        const highlighted = output.indexOf(RELAY_MENU_OPTION_ONE_MARKER);
-        const selected = output.indexOf(RELAY_MENU_SELECTION_MARKER);
-        if (cursor < 0 || highlighted < cursor || selected < highlighted) {
-          throw new Error(
-            "Expected the scripted menu to start on option 2, highlight option 1, then select option 1. " +
-            `Terminal output:\n${output}`
-          );
-        }
-        return output;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        const settledOutput = terminalEvents!.outputText();
+        assertSingleSubmittedTaskInput(
+          settledOutput,
+          expectedInput,
+        );
+        return settledOutput || output;
       },
       waitForLocalTaskActivity(activity, timeoutMs) {
         return waitForLocalTaskActivity(harness, localTask, activity, timeoutMs);

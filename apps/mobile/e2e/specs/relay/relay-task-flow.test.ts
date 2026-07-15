@@ -1,11 +1,114 @@
 import { describe, expect, it, vi } from "vitest";
+import { assertSingleSubmittedTaskInput } from "../../helpers/relay-harness";
 import {
   assertRelayTaskRowPresentation,
   openRelayFixtureTask,
+  verifyRelayQuickReplyJourney,
   verifyRelayTaskActivityTransitions,
   verifyRelayTaskMarkedRead,
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
+
+describe("relay quick reply journey", () => {
+  it("long-presses Send, selects SGTM, and waits for the composer to clear", async () => {
+    const calls: string[] = [];
+    let composerValue = "";
+    const input = {
+      getAttribute: vi.fn(async (name: string) => {
+        calls.push(`input.getAttribute:${name}`);
+        return composerValue;
+      }),
+      setValue: vi.fn(async (value: string) => {
+        calls.push(`input.setValue:${JSON.stringify(value)}`);
+        composerValue = value;
+      }),
+      waitForDisplayed: vi.fn(async () => {
+        calls.push("input.waitForDisplayed");
+      }),
+    };
+    const send = {
+      click: vi.fn(async () => {
+        calls.push("send.click");
+      }),
+      longPress: vi.fn(async ({ duration }: { duration: number }) => {
+        calls.push(`send.longPress:${duration}`);
+      }),
+      waitForDisplayed: vi.fn(async () => {
+        calls.push("send.waitForDisplayed");
+      }),
+    };
+    const title = {
+      waitForDisplayed: vi.fn(async () => {
+        calls.push("title.waitForDisplayed");
+      }),
+    };
+    const quickReply = {
+      click: vi.fn(async () => {
+        calls.push("quickReply.click");
+        composerValue = "Reply…";
+      }),
+      waitForDisplayed: vi.fn(async () => {
+        calls.push("quickReply.waitForDisplayed");
+      }),
+    };
+    const ui = {
+      getQuickRepliesMenuTitle: vi.fn(async () => title),
+      getQuickReplyOption: vi.fn(async (label: string) => {
+        calls.push(`ui.getQuickReplyOption:${label}`);
+        return quickReply;
+      }),
+      getTaskInput: vi.fn(async () => input),
+      getTaskSendButton: vi.fn(async () => send),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+    await verifyRelayQuickReplyJourney(
+      ui as never,
+      "  Preserve the relay fixture.  ",
+    );
+
+    expect(send.click).not.toHaveBeenCalled();
+    expect(calls).toEqual([
+      "input.waitForDisplayed",
+      'input.setValue:"  Preserve the relay fixture.  "',
+      "send.waitForDisplayed",
+      "send.longPress:800",
+      "title.waitForDisplayed",
+      "ui.getQuickReplyOption:SGTM. Proceed.",
+      "quickReply.waitForDisplayed",
+      "quickReply.click",
+      "input.getAttribute:value",
+    ]);
+  });
+});
+
+describe("relay quick reply transport observation", () => {
+  const expectedInput = "SGTM. Proceed.\n\nPreserve the relay fixture.";
+
+  function assertSingleTaskInput(output: string): void {
+    assertSingleSubmittedTaskInput(output, expectedInput);
+  }
+
+  it("accepts one exact multiline task input after normalizing PTY newlines", () => {
+    expect(() =>
+      assertSingleTaskInput(
+        "SCRIPT_READY\r\nSCRIPT_INPUT:SGTM. Proceed.\r\n\r\n" +
+          "Preserve the relay fixture.\r\nSCRIPT_HEARTBEAT 1\r\n",
+      )
+    ).not.toThrow();
+  });
+
+  it("rejects a duplicate normal send before the quick reply", () => {
+    expect(() =>
+      assertSingleTaskInput(
+        "SCRIPT_INPUT:Preserve the relay fixture.\r\n" +
+          "SCRIPT_INPUT:SGTM. Proceed.\r\n\r\nPreserve the relay fixture.\r\n",
+      )
+    ).toThrow(/exactly one task input.*observed 2/i);
+  });
+});
 
 const taskRowExpectation: RelayTaskRowExpectation = {
   title: "Relay card current title",

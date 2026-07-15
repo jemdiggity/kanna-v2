@@ -16,6 +16,8 @@ import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
 import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
+import { showTaskQuickReplyMenu } from "./taskQuickReplyMenu";
+import { buildTaskQuickReply } from "./taskQuickReplies";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
 import { getTerminalBottomInset } from "./terminalSafeArea";
 
@@ -98,16 +100,54 @@ export function TaskScreen({
   const isComposerDisabled = isAgentTask
     ? agentStatus === "connecting" || agentStatus === "error"
     : model.isComposerDisabled;
-  const sendDisabled = isComposerDisabled || !draftInput.trim();
   const terminalBottomInset = getTerminalBottomInset(screenHeight, composerTop);
-  const sendDraftInput = () => {
-    const nextInput = draftInput.trim();
-    if (!nextInput || isComposerDisabled) {
+  const composerSnapshotRef = useRef({
+    taskId: task.id,
+    draftInput,
+    isComposerDisabled,
+    onSendInput
+  });
+  composerSnapshotRef.current = {
+    taskId: task.id,
+    draftInput,
+    isComposerDisabled,
+    onSendInput
+  };
+  const updateDraftInput = (nextDraftInput: string) => {
+    composerSnapshotRef.current.draftInput = nextDraftInput;
+    setDraftInput(nextDraftInput);
+  };
+  const clearDraftInput = () => {
+    composerSnapshotRef.current.draftInput = "";
+    setDraftInput("");
+  };
+  const submitInput = (input: string) => {
+    const snapshot = composerSnapshotRef.current;
+    const nextInput = input.trim();
+    if (!nextInput || snapshot.isComposerDisabled) {
       return;
     }
 
-    onSendInput(nextInput);
-    setDraftInput("");
+    snapshot.onSendInput(nextInput);
+    clearDraftInput();
+  };
+  const sendDraftInput = () => submitInput(composerSnapshotRef.current.draftInput);
+  const openQuickReplyMenu = () => {
+    const openedTaskId = composerSnapshotRef.current.taskId;
+    if (composerSnapshotRef.current.isComposerDisabled) {
+      return;
+    }
+
+    showTaskQuickReplyMenu((quickReply) => {
+      const currentSnapshot = composerSnapshotRef.current;
+      if (
+        currentSnapshot.taskId !== openedTaskId ||
+        currentSnapshot.isComposerDisabled
+      ) {
+        return;
+      }
+      submitInput(buildTaskQuickReply(quickReply, currentSnapshot.draftInput));
+    });
   };
 
   useEffect(() => {
@@ -119,6 +159,7 @@ export function TaskScreen({
     });
 
     return () => {
+      composerSnapshotRef.current.isComposerDisabled = true;
       showSubscription.remove();
       hideSubscription.remove();
     };
@@ -222,7 +263,7 @@ export function TaskScreen({
           <TextInput
             {...TASK_COMPOSER_TEXT_INPUT_PROPS}
             editable={!isComposerDisabled}
-            onChangeText={setDraftInput}
+            onChangeText={updateDraftInput}
             placeholder="Reply…"
             placeholderTextColor="#6F89AE"
             style={[styles.inputField, isComposerDisabled ? styles.inputFieldDisabled : null]}
@@ -230,9 +271,17 @@ export function TaskScreen({
             value={draftInput}
           />
           <Pressable
-            disabled={sendDisabled}
-            style={[styles.sendButton, sendDisabled ? styles.sendButtonDisabled : null]}
+            accessibilityHint="Press and hold for quick replies."
+            accessibilityLabel="Send reply"
+            accessibilityRole="button"
+            accessibilityState={{ disabled: isComposerDisabled }}
+            disabled={isComposerDisabled}
+            style={[
+              styles.sendButton,
+              isComposerDisabled ? styles.sendButtonDisabled : null
+            ]}
             testID={MOBILE_E2E_IDS.taskSendButton}
+            onLongPress={openQuickReplyMenu}
             onPress={sendDraftInput}
           >
             <Text style={styles.sendButtonLabel}>Send</Text>

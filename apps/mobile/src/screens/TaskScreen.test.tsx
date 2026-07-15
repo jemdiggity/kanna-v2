@@ -1,10 +1,18 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { TaskTerminalStatus } from "../state/sessionStore";
+import { TASK_QUICK_REPLIES } from "./taskQuickReplies";
 
 const hookHarness = vi.hoisted(() => ({
   hookIndex: 0,
   refIndex: 0,
   refs: [] as Array<{ current: unknown }>,
   stateValues: [] as unknown[]
+}));
+
+const componentMocks = vi.hoisted(() => ({
+  draftSetter: vi.fn(),
+  onSendInput: vi.fn(),
+  showQuickReplyMenu: vi.fn()
 }));
 
 vi.mock("react", async (importActual) => {
@@ -30,8 +38,11 @@ vi.mock("react", async (importActual) => {
         const currentValue = hookHarness.stateValues[index] as T;
         hookHarness.stateValues[index] =
           typeof nextValue === "function"
-            ? (nextValue as (value: T) => T)(currentValue)
+             ? (nextValue as (value: T) => T)(currentValue)
             : nextValue;
+        if (index === 0) {
+          componentMocks.draftSetter(hookHarness.stateValues[index]);
+        }
       };
       return [hookHarness.stateValues[index] as T, vi.fn(setValue)] as const;
     }
@@ -64,6 +75,10 @@ vi.mock("./TaskFilePreview", () => ({
   TaskFilePreview: "TaskFilePreview"
 }));
 
+vi.mock("./taskQuickReplyMenu", () => ({
+  showTaskQuickReplyMenu: componentMocks.showQuickReplyMenu
+}));
+
 let TaskScreen: typeof import("./TaskScreen").TaskScreen | null = null;
 
 beforeAll(async () => {
@@ -75,6 +90,9 @@ beforeEach(() => {
   hookHarness.refIndex = 0;
   hookHarness.refs.length = 0;
   hookHarness.stateValues.length = 0;
+  componentMocks.draftSetter.mockReset();
+  componentMocks.onSendInput.mockReset();
+  componentMocks.showQuickReplyMenu.mockReset();
 });
 
 interface ElementNode {
@@ -86,26 +104,42 @@ interface ElementNode {
   };
 }
 
-function renderTaskScreen(
-  agentType: "agent" | "pty",
-  terminalDims: { cols: number | null; rows: number | null } = {
-    cols: null,
-    rows: null
-  },
-  e2eTaskSnapshotMarker?: string,
-  activity: "idle" | "working" | "unread" = "idle",
-  onReadTaskFile = vi.fn().mockResolvedValue({
-    path: "docs/spec.md",
-    content: "# Spec"
-  }),
-  taskId = "task-1"
-): ElementNode {
+interface RenderTaskScreenOptions {
+  agentType: "agent" | "pty";
+  taskId?: string;
+  terminalDims?: { cols: number | null; rows: number | null };
+  e2eTaskSnapshotMarker?: string;
+  activity?: "idle" | "working" | "unread";
+  draftInput?: string;
+  terminalStatus?: TaskTerminalStatus;
+  agentStatus?: TaskTerminalStatus;
+  onReadTaskFile?: (path: string) => Promise<{ path: string; content: string }>;
+  taskId?: string;
+}
+
+function renderTaskScreen(options: RenderTaskScreenOptions): ElementNode {
   if (!TaskScreen) {
     throw new Error("TaskScreen was not loaded");
   }
 
+  const {
+    agentType,
+    terminalDims = { cols: null, rows: null },
+    e2eTaskSnapshotMarker,
+    activity = "idle",
+    draftInput = "",
+    terminalStatus = "live",
+    agentStatus = "live",
+    onReadTaskFile = vi.fn().mockResolvedValue({
+      path: "docs/spec.md",
+      content: "# Spec"
+    }),
+    taskId = "task-1"
+  } = options;
+
   hookHarness.hookIndex = 0;
   hookHarness.refIndex = 0;
+  hookHarness.stateValues[0] = draftInput;
 
   return TaskScreen({
     task: {
@@ -117,17 +151,17 @@ function renderTaskScreen(
       activity
     },
     terminalOutput: "terminal",
-    terminalStatus: "live",
+    terminalStatus,
     terminalCols: terminalDims.cols,
     terminalRows: terminalDims.rows,
     terminalErrorMessage: null,
     agentEvents: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
-    agentStatus: "live",
+    agentStatus,
     agentErrorMessage: null,
     e2eTaskSnapshotMarker,
     onBack: vi.fn(),
     onOpenMore: vi.fn(),
-    onSendInput: vi.fn(),
+    onSendInput: componentMocks.onSendInput,
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn(),
     onReadTaskFile
@@ -181,21 +215,24 @@ function findByType(node: ElementNode | ElementNode[] | string | null | undefine
 
 describe("TaskScreen", () => {
   it("routes agent tasks to the native agent message view", () => {
-    const tree = renderTaskScreen("agent");
+    const tree = renderTaskScreen({ agentType: "agent" });
 
     expect(findByType(tree, "AgentMessageView")).not.toBeNull();
     expect(findByType(tree, "TerminalWebView")).toBeNull();
   });
 
   it("keeps PTY tasks on the terminal WebView", () => {
-    const tree = renderTaskScreen("pty");
+    const tree = renderTaskScreen({ agentType: "pty" });
 
     expect(findByType(tree, "TerminalWebView")).not.toBeNull();
     expect(findByType(tree, "AgentMessageView")).toBeNull();
   });
 
   it("passes desktop PTY dimensions to the terminal WebView", () => {
-    const tree = renderTaskScreen("pty", { cols: 132, rows: 43 });
+    const tree = renderTaskScreen({
+      agentType: "pty",
+      terminalDims: { cols: 132, rows: 43 }
+    });
     const terminal = findByType(tree, "TerminalWebView");
 
     expect(terminal?.props).toMatchObject({
@@ -205,7 +242,7 @@ describe("TaskScreen", () => {
   });
 
   it("passes normal, multiline, and keyboard-shifted composer geometry to the terminal", () => {
-    let tree = renderTaskScreen("pty");
+    let tree = renderTaskScreen({ agentType: "pty" });
 
     invokeLayout(findByTestId(tree, "mobile.task-detail-screen"), {
       height: 800,
@@ -219,7 +256,7 @@ describe("TaskScreen", () => {
       x: 14,
       y: 676
     });
-    tree = renderTaskScreen("pty");
+    tree = renderTaskScreen({ agentType: "pty" });
     expect(findByType(tree, "TerminalWebView")?.props?.bottomInset).toBe(132);
 
     for (const [composerTop, expectedInset] of [
@@ -233,7 +270,7 @@ describe("TaskScreen", () => {
         x: 14,
         y: composerTop
       });
-      tree = renderTaskScreen("pty");
+      tree = renderTaskScreen({ agentType: "pty" });
       expect(findByType(tree, "TerminalWebView")?.props?.bottomInset).toBe(
         expectedInset
       );
@@ -245,13 +282,7 @@ describe("TaskScreen", () => {
       path: "docs/spec.md",
       content: "# Spec"
     });
-    let tree = renderTaskScreen(
-      "pty",
-      undefined,
-      undefined,
-      "idle",
-      onReadTaskFile
-    );
+    let tree = renderTaskScreen({ agentType: "pty", onReadTaskFile });
     const terminal = findByType(tree, "TerminalWebView");
 
     expect(terminal?.props?.onOpenFile).toBeTypeOf("function");
@@ -260,13 +291,7 @@ describe("TaskScreen", () => {
       42
     );
 
-    tree = renderTaskScreen(
-      "pty",
-      undefined,
-      undefined,
-      "idle",
-      onReadTaskFile
-    );
+    tree = renderTaskScreen({ agentType: "pty", onReadTaskFile });
     const preview = findByType(tree, "TaskFilePreview");
     expect(preview?.props).toMatchObject({
       path: "docs/spec.md",
@@ -281,18 +306,12 @@ describe("TaskScreen", () => {
     expect(onReadTaskFile).toHaveBeenCalledWith("docs/spec.md");
 
     (preview?.props?.onClose as () => void)();
-    tree = renderTaskScreen(
-      "pty",
-      undefined,
-      undefined,
-      "idle",
-      onReadTaskFile
-    );
+    tree = renderTaskScreen({ agentType: "pty", onReadTaskFile });
     expect(findByType(tree, "TaskFilePreview")).toBeNull();
   });
 
   it("does not reopen a file preview after switching to another task and back", () => {
-    let tree = renderTaskScreen("pty");
+    let tree = renderTaskScreen({ agentType: "pty" });
     const terminal = findByType(tree, "TerminalWebView");
 
     expect(terminal?.props?.onOpenFile).toBeTypeOf("function");
@@ -300,22 +319,15 @@ describe("TaskScreen", () => {
       "README.md"
     );
 
-    tree = renderTaskScreen(
-      "pty",
-      undefined,
-      undefined,
-      "idle",
-      undefined,
-      "task-2"
-    );
+    tree = renderTaskScreen({ agentType: "pty", taskId: "task-2" });
     expect(findByType(tree, "TaskFilePreview")).toBeNull();
 
-    tree = renderTaskScreen("pty");
+    tree = renderTaskScreen({ agentType: "pty" });
     expect(findByType(tree, "TaskFilePreview")).toBeNull();
   });
 
   it("does not reopen a file preview after switching to an SDK agent and back", () => {
-    let tree = renderTaskScreen("pty");
+    let tree = renderTaskScreen({ agentType: "pty" });
     const terminal = findByType(tree, "TerminalWebView");
 
     expect(terminal?.props?.onOpenFile).toBeTypeOf("function");
@@ -323,17 +335,20 @@ describe("TaskScreen", () => {
       "README.md"
     );
 
-    tree = renderTaskScreen("agent");
+    tree = renderTaskScreen({ agentType: "agent" });
     expect(findByType(tree, "TerminalWebView")).toBeNull();
     expect(findByType(tree, "TaskFilePreview")).toBeNull();
 
-    tree = renderTaskScreen("pty");
+    tree = renderTaskScreen({ agentType: "pty" });
     expect(findByType(tree, "TaskFilePreview")).toBeNull();
   });
 
   it("renders an E2E-only accepted snapshot marker when provided", () => {
     const marker = "cloud-only:Cloud task refreshed";
-    const tree = renderTaskScreen("agent", undefined, marker);
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      e2eTaskSnapshotMarker: marker
+    });
 
     expect(findByTestId(tree, "mobile.task-snapshot-marker")?.props).toMatchObject({
       accessibilityLabel: marker
@@ -341,11 +356,10 @@ describe("TaskScreen", () => {
   });
 
   it("exposes the visible task title independently from the snapshot marker", () => {
-    const tree = renderTaskScreen(
-      "pty",
-      undefined,
-      "other-task:Task\ntask-1:Task"
-    );
+    const tree = renderTaskScreen({
+      agentType: "pty",
+      e2eTaskSnapshotMarker: "other-task:Task\ntask-1:Task"
+    });
 
     expect(findByTestId(tree, "mobile.task-detail-title")?.props).toMatchObject({
       children: "Task"
@@ -353,7 +367,7 @@ describe("TaskScreen", () => {
   });
 
   it("exposes selected task activity without grouping the detail controls", () => {
-    const tree = renderTaskScreen("pty", undefined, undefined, "unread");
+    const tree = renderTaskScreen({ agentType: "pty", activity: "unread" });
     const title = findByTestId(tree, "mobile.task-detail-title");
 
     expect(title?.props).toMatchObject({
@@ -362,4 +376,155 @@ describe("TaskScreen", () => {
       testID: "mobile.task-detail-title"
     });
   });
+
+  it("sends a trimmed draft normally and clears the composer", () => {
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "  Use the smaller API.  "
+    });
+    const sendButton = findByTestId(tree, "mobile.task-send-button");
+
+    (sendButton?.props?.onPress as (() => void))();
+
+    expect(componentMocks.onSendInput).toHaveBeenCalledWith("Use the smaller API.");
+    expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
+  });
+
+  it.each(["", "  \n\t"])(
+    "does not send or clear an empty normal draft %#",
+    (draftInput) => {
+      const tree = renderTaskScreen({ agentType: "agent", draftInput });
+      const sendButton = findByTestId(tree, "mobile.task-send-button");
+
+      (sendButton?.props?.onPress as (() => void))();
+
+      expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+      expect(componentMocks.draftSetter).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["agent", "pty"] as const)(
+    "opens quick replies on long press with an empty %s draft",
+    (agentType) => {
+      const tree = renderTaskScreen({ agentType });
+      const sendButton = findByTestId(tree, "mobile.task-send-button");
+
+      expect(sendButton?.props).toMatchObject({
+        accessibilityHint: "Press and hold for quick replies.",
+        accessibilityLabel: "Send reply",
+        accessibilityRole: "button",
+        accessibilityState: { disabled: false },
+        disabled: false
+      });
+      (sendButton?.props?.onLongPress as (() => void))();
+
+      expect(componentMocks.showQuickReplyMenu).toHaveBeenCalledOnce();
+    }
+  );
+
+  it("sends the selected quick reply plus the current draft and clears it", () => {
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "  Also add regression tests.  "
+    });
+    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    (sendButton?.props?.onLongPress as (() => void))();
+    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
+      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    ) => void;
+
+    onSelect(TASK_QUICK_REPLIES[0]!);
+
+    expect(componentMocks.onSendInput).toHaveBeenCalledWith(
+      "SGTM. Proceed.\n\nAlso add regression tests."
+    );
+    expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
+  });
+
+  it("uses the current draft when a pending quick reply is selected", () => {
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "Initial detail."
+    });
+    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    const input = findByTestId(tree, "mobile.task-input");
+    (sendButton?.props?.onLongPress as (() => void))();
+    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
+      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    ) => void;
+
+    (input?.props?.onChangeText as ((value: string) => void))("Latest detail.");
+    onSelect(TASK_QUICK_REPLIES[0]!);
+
+    expect(componentMocks.onSendInput).toHaveBeenCalledWith(
+      "SGTM. Proceed.\n\nLatest detail."
+    );
+    expect(componentMocks.draftSetter).toHaveBeenLastCalledWith("");
+  });
+
+  it("ignores a pending quick reply after the composer becomes unavailable", () => {
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "Keep this draft."
+    });
+    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    (sendButton?.props?.onLongPress as (() => void))();
+    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
+      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    ) => void;
+
+    renderTaskScreen({
+      agentType: "agent",
+      agentStatus: "error",
+      draftInput: "Keep this draft."
+    });
+    onSelect(TASK_QUICK_REPLIES[0]!);
+
+    expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+    expect(componentMocks.draftSetter).not.toHaveBeenCalled();
+  });
+
+  it("ignores a pending quick reply after the selected task changes", () => {
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "Task one detail.",
+      taskId: "task-1"
+    });
+    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    (sendButton?.props?.onLongPress as (() => void))();
+    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
+      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    ) => void;
+
+    renderTaskScreen({ agentType: "agent", taskId: "task-2" });
+    onSelect(TASK_QUICK_REPLIES[0]!);
+
+    expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+    expect(componentMocks.draftSetter).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["agent connecting", { agentType: "agent", agentStatus: "connecting" }],
+    ["agent error", { agentType: "agent", agentStatus: "error" }],
+    ["PTY connecting", { agentType: "pty", terminalStatus: "connecting" }],
+    ["PTY idle", { agentType: "pty", terminalStatus: "idle" }],
+    ["PTY error", { agentType: "pty", terminalStatus: "error" }],
+    ["PTY closed", { agentType: "pty", terminalStatus: "closed" }]
+  ] as const)(
+    "disables ordinary and shortcut sends while %s",
+    (_caseName, options) => {
+      const tree = renderTaskScreen(options);
+      const sendButton = findByTestId(tree, "mobile.task-send-button");
+
+      expect(sendButton?.props).toMatchObject({
+        accessibilityState: { disabled: true },
+        disabled: true
+      });
+      (sendButton?.props?.onLongPress as (() => void))();
+      (sendButton?.props?.onPress as (() => void))();
+
+      expect(componentMocks.showQuickReplyMenu).not.toHaveBeenCalled();
+      expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+    }
+  );
 });
