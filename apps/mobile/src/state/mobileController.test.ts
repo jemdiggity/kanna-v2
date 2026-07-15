@@ -2779,6 +2779,40 @@ describe("createMobileController", () => {
     expect(store.getState().isComposerSubmitting).toBe(false);
   });
 
+  it("preserves a valid composer for retry when task creation fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.createTask.mockRejectedValueOnce(new Error("Desktop unavailable"));
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+    controller.selectComposerDesktop("desktop-2");
+    controller.selectComposerAgentProvider("codex");
+
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith({
+      repoId: "repo-2",
+      prompt: "Ship mobile shell",
+      desktopId: "desktop-2",
+      agentProvider: "codex",
+      agentType: "pty"
+    });
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: null,
+      isComposerOpen: true,
+      composerPrompt: "Ship mobile shell",
+      composerDesktopId: "desktop-2",
+      composerAgentProvider: "codex",
+      composerErrorMessage: "Desktop unavailable",
+      isComposerSubmitting: false
+    });
+  });
+
   it("shows missing task details as a composer error instead of a global connection error", async () => {
     const store = createSessionStore();
     const client = createClientMock();

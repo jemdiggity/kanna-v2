@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 
 vi.mock("react-native", () => ({
+  ActivityIndicator: "ActivityIndicator",
   KeyboardAvoidingView: "KeyboardAvoidingView",
   Modal: "Modal",
   Platform: {
@@ -91,6 +92,7 @@ function renderComposer(
     isOptionsExpanded: boolean;
     errorMessage: string | null;
     isSubmitting: boolean;
+    onClose: () => void;
     onSelectDesktop: (desktopId: string) => void;
     onSelectAgentProvider: (provider: string) => void;
     onToggleOptions: () => void;
@@ -119,7 +121,7 @@ function renderComposer(
       overrides.errorMessage === undefined ? null : overrides.errorMessage,
     isSubmitting: overrides.isSubmitting ?? false,
     onChangePrompt: vi.fn(),
-    onClose: vi.fn(),
+    onClose: overrides.onClose ?? vi.fn(),
     onSelectDesktop: overrides.onSelectDesktop ?? vi.fn(),
     onSelectAgentProvider: overrides.onSelectAgentProvider ?? vi.fn(),
     onToggleOptions: overrides.onToggleOptions ?? vi.fn(),
@@ -213,11 +215,146 @@ describe("CreateTaskComposer", () => {
     expect(createButton?.props?.disabled).toBe(false);
   });
 
-  it("disables create and shows progress while submitting", () => {
-    const tree = renderComposer({ isSubmitting: true });
-    const createButton = findNodeByText(tree, "Creating...");
+  it("restores a failed valid submission so it can be retried", () => {
+    const onSubmit = vi.fn();
+    const tree = renderComposer({
+      prompt: "Ship mobile shell",
+      selectedRepoId: "repo-1",
+      selectedDesktopId: "desktop-1",
+      selectedAgentProvider: "claude",
+      errorMessage: "Desktop unavailable",
+      isSubmitting: false,
+      onSubmit
+    });
+    const promptInput = findNodeByTestId(tree, "mobile.create-task.prompt");
+    const inlineError = findNodeByTestId(tree, "mobile.create-task.error");
+    const submitButton = findNodeByTestId(tree, "mobile.create-task.submit");
 
-    expect(createButton?.props?.disabled).toBe(true);
+    expect(findNodeByTestId(tree, "mobile.create-task.provisioning")).toBeNull();
+    expect(promptInput?.props?.value).toBe("Ship mobile shell");
+    expect(findNodeByText(tree, "Studio Mac (online) · Claude")).not.toBeNull();
+    expect(textContent(inlineError)).toBe("Desktop unavailable");
+    expect(submitButton).not.toBeNull();
+    expect(submitButton?.props?.disabled).toBe(false);
+
+    (submitButton?.props?.onPress as (() => void) | undefined)?.();
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces the composer with a technical provisioning panel", () => {
+    const tree = renderComposer({
+      isSubmitting: true,
+      selectedAgentProvider: "codex"
+    });
+    const provisioning = findNodeByTestId(
+      tree,
+      "mobile.create-task.provisioning"
+    );
+
+    expect(provisioning).not.toBeNull();
+    expect(findNodeByType(provisioning as ElementNode, "ActivityIndicator")).not.toBeNull();
+    const terminalTile = findNodeByText(provisioning as ElementNode, ">_");
+    expect(terminalTile?.props).toMatchObject({
+      accessibilityElementsHidden: true,
+      accessible: false,
+      importantForAccessibility: "no-hide-descendants"
+    });
+    expect(findNodeByText(provisioning as ElementNode, "Workspace boot")).not.toBeNull();
+    expect(findNodeByText(provisioning as ElementNode, "Provisioning task")).not.toBeNull();
+    expect(
+      findNodeByText(
+        provisioning as ElementNode,
+        "Repo One → Studio Mac · Codex"
+      )
+    ).not.toBeNull();
+    expect(
+      findNodeByText(
+        provisioning as ElementNode,
+        "Creating worktree and starting Codex…"
+      )
+    ).not.toBeNull();
+    expect(findNodeByTestId(tree, "mobile.create-task.prompt")).toBeNull();
+    expect(findNodeByTestId(tree, "mobile.create-task.submit")).toBeNull();
+    expect(findNodeByText(tree, "Cancel")).toBeNull();
+  });
+
+  it("announces provisioning as an indeterminate accessible operation", () => {
+    const tree = renderComposer({ isSubmitting: true });
+    const provisioning = findNodeByTestId(
+      tree,
+      "mobile.create-task.provisioning"
+    );
+
+    expect(provisioning?.props).toMatchObject({
+      accessible: true,
+      accessibilityLabel:
+        "Provisioning task for Repo One on Studio Mac with Claude",
+      accessibilityLiveRegion: "polite",
+      accessibilityRole: "progressbar",
+      accessibilityState: { busy: true }
+    });
+  });
+
+  it("uses defensive route labels when selections are unavailable", () => {
+    const tree = renderComposer({
+      isSubmitting: true,
+      selectedRepoId: null,
+      selectedDesktopId: null
+    });
+    const provisioning = findNodeByTestId(
+      tree,
+      "mobile.create-task.provisioning"
+    );
+
+    expect(
+      findNodeByText(
+        provisioning as ElementNode,
+        "Selected repo → Selected machine · Claude"
+      )
+    ).not.toBeNull();
+    expect(provisioning?.props?.accessibilityLabel).toBe(
+      "Provisioning task for Selected repo on Selected machine with Claude"
+    );
+  });
+
+  it("blocks every composer dismissal path while provisioning", () => {
+    const onClose = vi.fn();
+    const tree = renderComposer({ isSubmitting: true, onClose });
+    const modal = findNodeByType(tree, "Modal");
+    const keyboardAvoider = findNodeByType(tree, "KeyboardAvoidingView");
+    const backdrop = flattenChildren(keyboardAvoider?.props?.children)[0];
+
+    (modal?.props?.onRequestClose as (() => void) | undefined)?.();
+    (backdrop?.props?.onPress as (() => void) | undefined)?.();
+
+    expect(backdrop?.props).toMatchObject({
+      accessibilityElementsHidden: true,
+      accessible: false,
+      disabled: true,
+      importantForAccessibility: "no-hide-descendants"
+    });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps normal composer dismissal available before submission", () => {
+    const onClose = vi.fn();
+    const tree = renderComposer({ onClose });
+    const modal = findNodeByType(tree, "Modal");
+    const keyboardAvoider = findNodeByType(tree, "KeyboardAvoidingView");
+    const backdrop = flattenChildren(keyboardAvoider?.props?.children)[0];
+
+    (modal?.props?.onRequestClose as (() => void) | undefined)?.();
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    (backdrop?.props?.onPress as (() => void) | undefined)?.();
+
+    expect(backdrop?.props).toMatchObject({
+      accessibilityElementsHidden: true,
+      accessible: false,
+      importantForAccessibility: "no-hide-descendants"
+    });
+    expect(onClose).toHaveBeenCalledTimes(2);
   });
 
   it("shows composer validation errors next to the create controls", () => {
@@ -228,6 +365,7 @@ describe("CreateTaskComposer", () => {
     const createButton = findNodeByText(tree, "Create");
 
     expect(findNodeByText(tree, "Choose a repo and enter a task prompt first.")).not.toBeNull();
+    expect(findNodeByTestId(tree, "mobile.create-task.provisioning")).toBeNull();
     expect(createButton?.props?.disabled).toBe(true);
   });
 

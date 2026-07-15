@@ -26,6 +26,7 @@ export const MOBILE_E2E_IDS = {
   accountSignInButton: "mobile.account-sign-in",
   accountSignOutButton: "mobile.account-sign-out",
   createTaskPromptInput: "mobile.create-task.prompt",
+  createTaskProvisioning: "mobile.create-task.provisioning",
   createTaskSubmitButton: "mobile.create-task.submit",
   createTaskError: "mobile.create-task.error",
   createTaskOptionsToggle: "mobile.create-task.options-toggle",

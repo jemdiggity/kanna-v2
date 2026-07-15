@@ -1,6 +1,7 @@
 import React from "react";
 import { AGENT_PROVIDERS, type AgentProvider } from "@kanna/agent-protocol";
 import {
+  ActivityIndicator,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -76,13 +77,95 @@ export function CreateTaskComposer({
     ? `${selectedDesktop.name} (${selectedDesktop.online ? "online" : "offline"})`
     : "Choose machine";
 
+  if (isSubmitting) {
+    const provisioningRepoLabel = selectedRepo?.name ?? "Selected repo";
+    const provisioningDesktopLabel = selectedDesktop?.name ?? "Selected machine";
+    const provisioningRoute =
+      `${provisioningRepoLabel} → ${provisioningDesktopLabel} · ${selectedAgentLabel}`;
+
+    return (
+      <Modal
+        animationType="slide"
+        onRequestClose={() => undefined}
+        transparent
+        visible={isOpen}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.overlay}
+        >
+          <Pressable
+            accessibilityElementsHidden
+            accessible={false}
+            disabled
+            importantForAccessibility="no-hide-descendants"
+            style={StyleSheet.absoluteFill}
+          />
+          <View style={styles.sheet}>
+            <View
+              accessible
+              accessibilityLabel={
+                `Provisioning task for ${provisioningRepoLabel} on ` +
+                `${provisioningDesktopLabel} with ${selectedAgentLabel}`
+              }
+              accessibilityLiveRegion="polite"
+              accessibilityRole="progressbar"
+              accessibilityState={{ busy: true }}
+              style={styles.provisioning}
+              testID={MOBILE_E2E_IDS.createTaskProvisioning}
+            >
+              <View style={styles.provisioningHeader}>
+                <View
+                  accessibilityElementsHidden
+                  accessible={false}
+                  importantForAccessibility="no-hide-descendants"
+                  style={styles.terminalTile}
+                >
+                  <Text style={styles.terminalPrompt}>{">_"}</Text>
+                  <ActivityIndicator
+                    color="#8FC5FF"
+                    size="small"
+                    style={styles.provisioningIndicator}
+                  />
+                </View>
+                <View style={styles.provisioningHeading}>
+                  <Text style={styles.provisioningEyebrow}>Workspace boot</Text>
+                  <Text style={styles.provisioningTitle}>Provisioning task</Text>
+                </View>
+              </View>
+
+              <View style={styles.provisioningRouteCard}>
+                <Text numberOfLines={2} style={styles.provisioningRoute}>
+                  {provisioningRoute}
+                </Text>
+              </View>
+
+              <View style={styles.provisioningStatus}>
+                <Text style={styles.provisioningStatusPrompt}>{"›"}</Text>
+                <Text style={styles.provisioningStatusCopy}>
+                  {`Creating worktree and starting ${selectedAgentLabel}…`}
+                </Text>
+              </View>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+    );
+  }
+
   return (
     <Modal animationType="slide" onRequestClose={onClose} transparent visible={isOpen}>
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         style={styles.overlay}
       >
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <Pressable
+          accessibilityElementsHidden
+          accessible={false}
+          importantForAccessibility="no-hide-descendants"
+          style={StyleSheet.absoluteFill}
+          onPress={onClose}
+        />
         <View style={styles.sheet}>
           <Text style={styles.eyebrow}>New task</Text>
           <Text numberOfLines={1} style={styles.title}>
@@ -235,6 +318,87 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 18,
     zIndex: 1
+  },
+  provisioning: {
+    gap: 20,
+    paddingBottom: 8,
+    paddingTop: 6
+  },
+  provisioningHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 14
+  },
+  terminalTile: {
+    alignItems: "center",
+    backgroundColor: "#09111F",
+    borderColor: "#2A4268",
+    borderRadius: 16,
+    borderWidth: 1,
+    height: 64,
+    justifyContent: "center",
+    width: 64
+  },
+  terminalPrompt: {
+    color: "#CBE1FF",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    fontSize: 18,
+    fontWeight: "700"
+  },
+  provisioningIndicator: {
+    bottom: 6,
+    position: "absolute",
+    right: 6,
+    transform: [{ scale: 0.72 }]
+  },
+  provisioningHeading: {
+    flex: 1,
+    gap: 4
+  },
+  provisioningEyebrow: {
+    color: "#8FC5FF",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    textTransform: "uppercase"
+  },
+  provisioningTitle: {
+    color: "#F5F7FB",
+    fontSize: 22,
+    fontWeight: "700"
+  },
+  provisioningRouteCard: {
+    backgroundColor: "#101B2D",
+    borderColor: "#263A5B",
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  provisioningRoute: {
+    color: "#BFD2EF",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    fontSize: 12,
+    lineHeight: 18
+  },
+  provisioningStatus: {
+    alignItems: "flex-start",
+    flexDirection: "row",
+    gap: 8
+  },
+  provisioningStatusPrompt: {
+    color: "#8FC5FF",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    fontSize: 15,
+    fontWeight: "800",
+    lineHeight: 20
+  },
+  provisioningStatusCopy: {
+    color: "#A9B8D1",
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "700",
+    lineHeight: 20
   },
   eyebrow: {
     color: "#A9B8D1",
