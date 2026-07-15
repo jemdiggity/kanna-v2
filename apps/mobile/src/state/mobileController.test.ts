@@ -138,6 +138,7 @@ function createClientMock(): ClientMock {
       taskId: "task-3",
       repoId: "repo-2",
       title: "Ship mobile shell",
+      prompt: "Ship mobile shell with the canonical requirements",
       stage: "in progress"
     }),
     runMergeAgent: vi.fn().mockResolvedValue({
@@ -2185,7 +2186,8 @@ describe("createMobileController", () => {
     expect(store.getState().recentTasks[0]).toMatchObject({
       id: "task-3",
       repoId: "repo-2",
-      title: "Ship mobile shell"
+      title: "Ship mobile shell",
+      prompt: "Ship mobile shell with the canonical requirements"
     });
     expect(store.getState().selectedTaskId).toBe("task-3");
     expect(store.getState().isComposerOpen).toBe(false);

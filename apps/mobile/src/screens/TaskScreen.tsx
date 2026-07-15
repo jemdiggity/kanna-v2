@@ -2,9 +2,11 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   Keyboard,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
@@ -75,6 +77,7 @@ export function TaskScreen({
   const [expandedTitleTaskId, setExpandedTitleTaskId] = useState<string | null>(
     null
   );
+  const { height: windowHeight } = useWindowDimensions();
   const isAgentTask = task.agentType === "agent";
   const previewScopeRef = useRef({
     isAgentTask,
@@ -97,6 +100,8 @@ export function TaskScreen({
       ? selectedFile
       : null;
   const isTitleExpanded = expandedTitleTaskId === task.id;
+  const expandedPrompt = task.prompt?.trim() ? task.prompt : task.title;
+  const expandedPromptMaxHeight = Math.min(320, windowHeight * 0.45);
   const effectiveActivity =
     task.activity === "working" || task.activity === "unread"
       ? task.activity
@@ -247,39 +252,57 @@ export function TaskScreen({
         >
           <Text style={styles.backLabel}>{"<"}</Text>
         </Pressable>
-        <View
-          accessible={false}
+        <Pressable
+          accessible
+          accessibilityHint={
+            isTitleExpanded ? "Collapse title" : "Expand title"
+          }
+          accessibilityLabel={`${model.stageLabel}: ${
+            isTitleExpanded ? expandedPrompt : model.title
+          }`}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: isTitleExpanded }}
           style={[
             styles.titleChip,
             isTitleExpanded ? styles.titleChipExpanded : null
           ]}
+          testID={MOBILE_E2E_IDS.taskTitleButton}
+          onPress={() =>
+            setExpandedTitleTaskId((currentTaskId) =>
+              currentTaskId === task.id ? null : task.id
+            )
+          }
         >
-          <Text style={styles.stageLabel}>{model.stageLabel}</Text>
-          <Text
-            accessibilityValue={{ text: effectiveActivity }}
-            numberOfLines={isTitleExpanded ? undefined : 1}
-            style={styles.title}
-            testID={MOBILE_E2E_IDS.taskDetailTitle}
-          >
-            {model.title}
+          <Text accessible={false} style={styles.stageLabel}>
+            {model.stageLabel}
           </Text>
-          <Pressable
-            accessible
-            accessibilityHint={
-              isTitleExpanded ? "Collapse title" : "Expand title"
-            }
-            accessibilityLabel={`${model.stageLabel}: ${model.title}`}
-            accessibilityRole="button"
-            accessibilityState={{ expanded: isTitleExpanded }}
-            style={styles.titleButton}
-            testID={MOBILE_E2E_IDS.taskTitleButton}
-            onPress={() =>
-              setExpandedTitleTaskId((currentTaskId) =>
-                currentTaskId === task.id ? null : task.id
-              )
-            }
-          />
-        </View>
+          {isTitleExpanded ? (
+            <ScrollView
+              accessible={false}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator
+              style={[styles.promptScroll, { maxHeight: expandedPromptMaxHeight }]}
+            >
+              <Text
+                accessible={false}
+                style={styles.prompt}
+                testID={MOBILE_E2E_IDS.taskExpandedPrompt}
+              >
+                {expandedPrompt}
+              </Text>
+            </ScrollView>
+          ) : (
+            <Text
+              accessible={false}
+              accessibilityValue={{ text: effectiveActivity }}
+              numberOfLines={1}
+              style={styles.title}
+              testID={MOBILE_E2E_IDS.taskDetailTitle}
+            >
+              {model.title}
+            </Text>
+          )}
+        </Pressable>
       </View>
 
       <View
@@ -405,7 +428,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8
   },
   topChrome: {
-    alignItems: "center",
+    alignItems: "flex-start",
     flexDirection: "row",
     gap: 10,
     left: 14,
@@ -444,16 +467,8 @@ const styles = StyleSheet.create({
     paddingVertical: 10
   },
   titleChipExpanded: {
-    alignItems: "flex-start"
-  },
-  titleButton: {
-    backgroundColor: "transparent",
-    bottom: 0,
-    left: 0,
-    position: "absolute",
-    right: 0,
-    top: 0,
-    zIndex: 1
+    alignItems: "stretch",
+    flexDirection: "column"
   },
   titleDismissLayer: {
     backgroundColor: "transparent",
@@ -478,6 +493,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
     lineHeight: 17
+  },
+  promptScroll: {
+    alignSelf: "stretch",
+    flexGrow: 0
+  },
+  prompt: {
+    color: "#F5F7FB",
+    fontSize: 14,
+    fontWeight: "600",
+    lineHeight: 20,
+    paddingBottom: 2
   },
   bottomChrome: {
     left: 14,

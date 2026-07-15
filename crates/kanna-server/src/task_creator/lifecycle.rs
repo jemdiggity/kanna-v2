@@ -64,6 +64,7 @@ pub(crate) async fn spawn_prepared_task_for_api(
         task_id: created.task_id,
         repo_id: created.repo_id,
         title: created.title,
+        prompt: created.prompt,
         stage: created.stage,
         agent_type: created.agent_type,
         worktree_path: Some(created.worktree_path),

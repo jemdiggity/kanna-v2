@@ -60,6 +60,7 @@ export interface CreateTaskResponse {
   taskId: string;
   repoId: string;
   title: string;
+  prompt?: string;
   stage: string;
   agentType?: "pty" | "agent" | null;
   /** Client-resolved owner route when taskId is mobile-canonical. */
@@ -96,6 +97,7 @@ export interface TaskSummary {
   repoId: string;
   repoName?: string | null;
   title: string;
+  prompt?: string | null;
   stage: string | null;
   waitingPromptSnippet?: string | null;
   agentProvider?: string | null;

@@ -80,11 +80,13 @@ vi.mock("react-native", () => ({
     dismiss: vi.fn()
   },
   Pressable: "Pressable",
+  ScrollView: "ScrollView",
   StyleSheet: {
     create: <T extends Record<string, unknown>>(styles: T) => styles
   },
   Text: "Text",
   TextInput: "TextInput",
+  useWindowDimensions: () => ({ height: 800, width: 390 }),
   View: "View"
 }));
 
@@ -141,6 +143,7 @@ interface RenderTaskScreenOptions {
   onReadTaskFile?: (path: string) => Promise<{ path: string; content: string }>;
   taskId?: string;
   title?: string;
+  prompt?: string;
 }
 
 function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
@@ -161,7 +164,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       content: "# Spec"
     }),
     taskId = "task-1",
-    title = "Task"
+    title = "Task",
+    prompt
   } = options;
 
   hookHarness.effectIndex = 0;
@@ -173,6 +177,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       id: taskId,
       repoId: "repo-1",
       title,
+      prompt,
       stage: "in progress",
       agentType,
       activity
@@ -634,10 +639,13 @@ describe("TaskScreen", () => {
       expect(componentMocks.onSendInput).not.toHaveBeenCalled();
     }
   );
-  it("starts with the current long title collapsed and accessible", () => {
-    const title =
-      "Renamed task with a deliberately long terminal title that needs multiple lines";
-    const tree = renderTaskScreen({ activity: "unread", title });
+  it("starts with the renamed display title collapsed and accessible", () => {
+    const title = "Short renamed task";
+    const tree = renderTaskScreen({
+      activity: "unread",
+      title,
+      prompt: "Canonical prompt that differs from the title"
+    });
     const titleButton = findByTestId(tree, "mobile.task-title-button");
     const titleText = findByTestId(tree, "mobile.task-detail-title");
 
@@ -649,6 +657,7 @@ describe("TaskScreen", () => {
     });
     expect(titleText?.props).toMatchObject({
       accessibilityValue: { text: "unread" },
+      accessible: false,
       children: title,
       numberOfLines: 1,
       testID: "mobile.task-detail-title"
@@ -656,21 +665,30 @@ describe("TaskScreen", () => {
     expect(findByTestId(tree, "mobile.task-title-dismiss-layer")).toBeNull();
   });
 
-  it("expands the title and adds a full-screen outside-press layer", () => {
-    const title =
-      "Renamed task with a deliberately long terminal title that needs multiple lines";
-    let tree = renderTaskScreen({ title });
+  it("expands to the bounded scrollable canonical prompt through its end", () => {
+    const title = "Short renamed task";
+    const prompt = `${"Detailed canonical prompt line.\n".repeat(80)}PROMPT_END_SENTINEL`;
+    let tree = renderTaskScreen({ title, prompt });
 
     pressByTestId(tree, "mobile.task-title-button");
-    tree = renderTaskScreen({ title });
+    tree = renderTaskScreen({ title, prompt });
 
     expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
       accessibilityHint: "Collapse title",
+      accessibilityLabel: `in progress: ${prompt}`,
       accessibilityState: { expanded: true }
     });
-    expect(
-      findByTestId(tree, "mobile.task-detail-title")?.props?.numberOfLines
-    ).toBeUndefined();
+    expect(findByTestId(tree, "mobile.task-detail-title")).toBeNull();
+    expect(findByTestId(tree, "mobile.task-expanded-prompt")?.props).toMatchObject({
+      accessible: false,
+      children: prompt
+    });
+    const promptScroll = findByType(tree, "ScrollView");
+    expect(promptScroll?.props).toMatchObject({
+      accessible: false,
+      nestedScrollEnabled: true
+    });
+    expect(styleEntries(promptScroll)).toContainEqual({ maxHeight: 320 });
     expect(findByTestId(tree, "mobile.task-title-dismiss-layer")?.props).toMatchObject({
       accessible: false,
       style: {
@@ -684,22 +702,21 @@ describe("TaskScreen", () => {
     });
   });
 
-  it("keeps the title text separate from the accessible overlay with 3/4/5 stacking", () => {
-    let tree = renderTaskScreen({ activity: "working" });
+  it("uses one accessible title-prompt toggle while keeping Back above the dismissal layer", () => {
+    const prompt = "Canonical prompt\nPROMPT_END_SENTINEL";
+    let tree = renderTaskScreen({
+      activity: "working",
+      prompt
+    });
     pressByTestId(tree, "mobile.task-title-button");
-    tree = renderTaskScreen({ activity: "working" });
+    tree = renderTaskScreen({ activity: "working", prompt });
 
     const titleButton = findByTestId(tree, "mobile.task-title-button");
     const dismissalLayer = findByTestId(
       tree,
       "mobile.task-title-dismiss-layer"
     );
-    const titleText = findByTestId(tree, "mobile.task-detail-title");
-    const titleChip = findCommonAncestor(
-      tree,
-      "mobile.task-detail-title",
-      "mobile.task-title-button"
-    );
+    const promptText = findByTestId(tree, "mobile.task-expanded-prompt");
     const topChrome = findCommonAncestor(
       tree,
       "mobile.task-back-button",
@@ -711,34 +728,25 @@ describe("TaskScreen", () => {
       "mobile.task-input"
     );
 
-    expect(findByTestId(titleButton?.props?.children, "mobile.task-detail-title")).toBeNull();
+    expect(findByTestId(titleButton?.props?.children, "mobile.task-expanded-prompt")).not.toBeNull();
     expect.soft(topChrome?.props?.pointerEvents).toBe("box-none");
     expect.soft(dismissalLayer?.props?.focusable).toBe(false);
-    expect(titleChip?.props?.accessible).toBe(false);
     expect(titleButton?.type).toBe("Pressable");
     expect(titleButton?.props?.disabled).not.toBe(true);
     expect(titleButton?.props).toMatchObject({
-      accessible: true,
-      style: {
-        backgroundColor: "transparent",
-        bottom: 0,
-        left: 0,
-        position: "absolute",
-        right: 0,
-        top: 0
-      }
+      accessible: true
     });
     expect(dismissalLayer?.type).toBe("Pressable");
     expect(dismissalLayer?.props?.disabled).not.toBe(true);
-    expect(titleText?.type).toBe("Text");
-    expect(titleText?.props).toMatchObject({
-      accessibilityValue: { text: "working" },
-      children: "Task",
-      testID: "mobile.task-detail-title"
+    expect(promptText?.type).toBe("Text");
+    expect(promptText?.props).toMatchObject({
+      accessible: false,
+      children: "Canonical prompt\nPROMPT_END_SENTINEL",
+      testID: "mobile.task-expanded-prompt"
     });
     expect(findByTypeAndText(tree, "Text", "in progress")).not.toBeNull();
     expect(styleEntries(topChrome)).toContainEqual(
-      expect.objectContaining({ zIndex: 5 })
+      expect.objectContaining({ alignItems: "flex-start", zIndex: 5 })
     );
     expect(styleEntries(dismissalLayer)).toContainEqual(
       expect.objectContaining({ zIndex: 4 })
@@ -748,28 +756,30 @@ describe("TaskScreen", () => {
     );
   });
 
-  it("keeps a same-task title rename expanded and shows the current title", () => {
+  it("keeps a same-task rename expanded and continues to show the canonical prompt", () => {
     const taskId = "task-renamed";
-    let tree = renderTaskScreen({ taskId, title: "Original title" });
+    const prompt = "Canonical full prompt\nPROMPT_END_SENTINEL";
+    let tree = renderTaskScreen({ taskId, title: "Original title", prompt });
 
     pressByTestId(tree, "mobile.task-title-button");
     tree = renderTaskScreen({
       taskId,
-      title: "Current renamed title that remains fully visible"
+      title: "Current renamed title",
+      prompt
     });
     tree = renderTaskScreen({
       taskId,
-      title: "Current renamed title that remains fully visible"
+      title: "Current renamed title",
+      prompt
     });
 
     expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
       accessibilityLabel:
-        "in progress: Current renamed title that remains fully visible",
+        `in progress: ${prompt}`,
       accessibilityState: { expanded: true }
     });
-    expect(findByTestId(tree, "mobile.task-detail-title")?.props).toMatchObject({
-      children: "Current renamed title that remains fully visible",
-      numberOfLines: undefined
+    expect(findByTestId(tree, "mobile.task-expanded-prompt")?.props).toMatchObject({
+      children: prompt
     });
   });
 
@@ -789,6 +799,34 @@ describe("TaskScreen", () => {
       1
     );
     expect(findByTestId(tree, "mobile.task-title-dismiss-layer")).toBeNull();
+  });
+
+  it("falls back to the display title when an older task has no prompt", () => {
+    let tree = renderTaskScreen({ title: "Legacy task title" });
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({ title: "Legacy task title" });
+
+    expect(findByTestId(tree, "mobile.task-expanded-prompt")?.props).toMatchObject({
+      children: "Legacy task title"
+    });
+  });
+
+  it("preserves canonical prompt whitespace while treating whitespace-only prompts as absent", () => {
+    const prompt = "  Indented first line\nPROMPT_END_SENTINEL\n";
+    let tree = renderTaskScreen({ title: "Renamed", prompt });
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({ title: "Renamed", prompt });
+    expect(findByTestId(tree, "mobile.task-expanded-prompt")?.props).toMatchObject({
+      children: prompt
+    });
+
+    hookHarness.stateValues = [];
+    tree = renderTaskScreen({ title: "Whitespace fallback", prompt: " \n\t " });
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({ title: "Whitespace fallback", prompt: " \n\t " });
+    expect(findByTestId(tree, "mobile.task-expanded-prompt")?.props).toMatchObject({
+      children: "Whitespace fallback"
+    });
   });
 
   it("collapses the expanded title on the first outside press", () => {

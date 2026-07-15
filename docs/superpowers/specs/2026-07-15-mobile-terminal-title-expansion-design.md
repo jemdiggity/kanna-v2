@@ -1,51 +1,55 @@
-# Mobile Terminal Title Expansion
+# Mobile Terminal Prompt Expansion
 
 ## Goal
 
-Let a mobile user reveal the complete current task title from the agent terminal screen when the compact one-line title no longer provides enough context.
+Let a mobile user tap the compact terminal header title to recover the canonical task prompt, even when the visible task title has been renamed to a shorter display name.
+
+## Data Contract
+
+`TaskSummary.title` remains the current display title used by collapsed task chrome and task lists. `TaskSummary.prompt` carries the task-creation prompt separately.
+
+The LAN server maps `pipeline_item.display_name` (falling back to the prompt or task id) into `title` and maps the unmodified `pipeline_item.prompt` into `prompt`. Cloud documents retain their existing privacy-bounded `promptSnippet`; the mobile Firestore mapper must preserve it as `TaskSummary.prompt` instead of discarding it. When LAN and cloud copies of the same task merge, the live LAN prompt wins when present, just as live LAN title and stage data do. Legacy records without a prompt fall back to their display title in the screen.
+
+No database migration, relay publication schema change, native project change, or OTA runtime-version bump is required.
 
 ## Interaction Contract
 
-The task-detail title chip remains collapsed to one rendered line by default. Tapping the chip expands it in place so the current title can wrap across as many lines as its content requires. The expanded text is the existing current task title, including a user-renamed title; it does not substitute the original task-creation prompt.
+The header starts collapsed and displays the current `title` on one line. Tapping the title chip expands it and displays `prompt ?? title`, preserving newlines and the end of the available prompt. Tapping the chip again or tapping the transparent outside layer collapses it. Selecting another task starts collapsed.
 
-The expanded title collapses when the user taps the title chip again or taps outside it. Selecting another task starts with the title collapsed. Expansion changes only the floating title chrome and must not alter terminal output, agent state, task metadata, or the reply draft.
+Expansion changes only transient `TaskScreen` state. It does not alter terminal output, task metadata, agent state, or the reply draft.
 
-## Mobile Presentation
+## Bounded Presentation and Accessibility
 
-`TaskScreen` owns the transient expanded-title state because the behavior is local to the visible task workspace. The existing title chip becomes a `Pressable`. Its collapsed state preserves the current styling and `numberOfLines={1}` behavior. Its expanded state removes that line limit, aligns the chip content for multiline text, and keeps the stage label alongside the title.
+The expanded prompt is rendered in a vertical `ScrollView` with a maximum height derived from the current window height and capped at a comfortable tablet height. Arbitrarily long prompts therefore remain reachable without growing the floating header beyond the viewport. The top chrome aligns controls to its top edge, so expansion never moves the Back button.
 
-While the title is expanded, `TaskScreen` renders a transparent full-screen dismissal layer above the terminal and reply controls but below the title chrome. Pressing that layer collapses the title without forwarding the same press to the terminal or composer. The title chip stays above the layer so a second title tap also collapses it. Navigating back still leaves the task screen normally.
+The title chip is one accessible `Pressable` with button role and expanded state. Its accessibility label changes from the collapsed display title to the expanded prompt. Descendant stage/title/prompt text and the outside-dismiss layer are not separate VoiceOver stops. The Back control remains a separate accessible action above the dismissal layer.
 
-The title control exposes a button role, an expanded accessibility state, and a concise expand/collapse hint. The existing title test identifier and task-activity accessibility value remain available for automation.
+The existing display-title test id remains on collapsed title text. Dedicated ids identify the toggle, expanded prompt text, and outside-dismiss layer for Appium without creating extra actionable accessibility elements.
 
-## Data Boundaries
+## Error and Compatibility Behavior
 
-No API, database, Firebase, relay, or native project change is required. `TaskSummary.title` already represents the current display title across LAN and cloud sources and already reaches `TaskScreen` without programmatic truncation. The current visual shortening comes only from the React Native one-line text constraint.
+Older LAN or cloud task objects that omit `prompt` continue to work because `TaskScreen` falls back to `title`. An absent cloud `promptSnippet` likewise produces the title fallback. Empty strings are treated as absent at the presentation boundary.
 
-Because this is a JavaScript-only presentation change with no native dependency or configuration impact, the mobile OTA `runtimeVersion` remains unchanged.
-
-## Error and Edge-Case Behavior
-
-The feature has no asynchronous operation or new failure mode. Empty-title fallback behavior remains owned by the existing server/task model. Multiline, Unicode, and long renamed titles are rendered verbatim by React Native rather than copied or normalized locally.
-
-Expanded state is associated with the visible task id so it cannot leak when task selection changes without unmounting `TaskScreen`. Outside dismissal intentionally consumes the first press; the user can interact with the terminal or composer after the title has collapsed.
+Cloud prompt content remains subject to the existing 500-character publication contract. LAN content is the full database prompt. This feature does not broaden cloud publication of user text; it ensures the available canonical prompt is no longer discarded on mobile.
 
 ## Testing
 
-Focused `TaskScreen` regression tests will verify:
+Tests use a short renamed title and a distinct multiline prompt ending in an explicit sentinel. Coverage verifies:
 
-- the title starts as a one-line, collapsed pressable;
-- pressing the title requests expansion;
-- the expanded title removes the one-line constraint while preserving the renamed title and activity value;
-- pressing the expanded title requests collapse;
-- pressing the outside dismissal layer requests collapse; and
-- expanded state from one task is not presented for another task id.
+- LAN server list/recent/search summaries serialize title and prompt separately through the prompt end;
+- the cloud mapper carries `promptSnippet` through to `TaskSummary.prompt`;
+- cloud/LAN merging prefers the LAN prompt;
+- `TaskScreen` displays the title while collapsed and the distinct prompt through its sentinel while expanded;
+- the expanded container is height-bounded and scrollable;
+- exactly one title/prompt toggle is accessible, Back remains independent, and task switches reset expansion;
+- selector contracts include the toggle, prompt, and dismissal ids; and
+- the simulator Appium smoke opens the known seeded task, expands the prompt, checks the end sentinel, collapses it via the outside layer, and then uses Back.
 
-After the focused test passes, run the mobile TypeScript typecheck and the practical affected mobile test suite. The live development check uses the canonical `kd` mobile workflow rather than starting Expo directly.
+Verification uses the focused mobile tests, mobile typecheck, `cargo test -p kanna-server`, the repository test suite, and the canonical `./kd dev up --mobile` simulator/Appium workflow. Physical-device Appium is outside this task.
 
 ## Out of Scope
 
-- Displaying the original task-creation prompt when it differs from the current renamed title.
-- Editing or copying the title from the expanded view.
+- Editing or copying the prompt from the expanded view.
 - Persisting expansion across navigation or app restarts.
 - Changing task-list card title presentation.
+- Changing cloud prompt publication limits or privacy policy.

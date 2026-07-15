@@ -8,6 +8,9 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.taskDetailScreen).toBe("mobile.task-detail-screen");
     expect(MOBILE_E2E_IDS.taskDetailTitle).toBe("mobile.task-detail-title");
     expect(MOBILE_E2E_IDS.taskTitleButton).toBe("mobile.task-title-button");
+    expect(MOBILE_E2E_IDS.taskExpandedPrompt).toBe(
+      "mobile.task-expanded-prompt"
+    );
     expect(MOBILE_E2E_IDS.taskTitleDismissLayer).toBe(
       "mobile.task-title-dismiss-layer"
     );

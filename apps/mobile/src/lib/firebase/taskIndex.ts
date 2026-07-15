@@ -312,6 +312,7 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     repoId: snapshot.repo.cloudRepoId,
     repoName: snapshot.repo.name,
     title: snapshot.displayName ?? snapshot.title,
+    prompt: snapshot.promptSnippet ?? undefined,
     stage: snapshot.stage,
     waitingPromptSnippet: snapshot.waitingPromptSnippet ?? undefined,
     agentProvider: snapshot.agent?.provider ?? null,

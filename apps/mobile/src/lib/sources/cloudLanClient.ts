@@ -110,6 +110,9 @@ export function mergeCloudAndLanTasks({
       if (mergedTask.ownerLocalRepoId === undefined) {
         mergedTask.ownerLocalRepoId = lanTask.repoId;
       }
+      if (lanTask.prompt !== null && lanTask.prompt !== undefined) {
+        mergedTask.prompt = lanTask.prompt;
+      }
       if (
         lanTask.waitingPromptSnippet !== null &&
         lanTask.waitingPromptSnippet !== undefined
@@ -225,6 +228,9 @@ function mergeCloudWithPreservedLanProjection(
       preservedTask.ownerLocalRepoId !== undefined
     ) {
       mergedTask.ownerLocalRepoId = preservedTask.ownerLocalRepoId;
+    }
+    if (preservedTask.prompt !== null && preservedTask.prompt !== undefined) {
+      mergedTask.prompt = preservedTask.prompt;
     }
     if (
       preservedTask.waitingPromptSnippet !== null &&

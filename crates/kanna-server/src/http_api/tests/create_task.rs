@@ -10,10 +10,12 @@ async fn create_task_route_uses_task_creator() {
                 payload.blocker_task_ids,
                 Some(vec!["blocker-1".to_string()])
             );
+            let prompt = payload.prompt;
             Ok(CreateTaskResponse {
                 task_id: "task-1".to_string(),
                 repo_id: payload.repo_id,
-                title: payload.prompt,
+                title: prompt.clone(),
+                prompt,
                 stage: "in progress".to_string(),
                 agent_type: "agent".to_string(),
                 worktree_path: Some("/tmp/worktree".to_string()),
@@ -46,6 +48,7 @@ async fn create_task_route_uses_task_creator() {
     assert_eq!(created.task_id, "task-1");
     assert_eq!(created.repo_id, "repo-1");
     assert_eq!(created.title, "Ship it");
+    assert_eq!(created.prompt, "Ship it");
     assert_eq!(created.stage, "in progress");
 }
 

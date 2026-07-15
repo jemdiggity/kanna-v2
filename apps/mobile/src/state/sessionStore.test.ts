@@ -410,6 +410,40 @@ describe("createSessionStore", () => {
     expect(store.getState().recentTasks[0]?.activity).toBe("working");
   });
 
+  it("publishes when a task's canonical prompt changes without a title change", () => {
+    const store = createSessionStore();
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Short renamed task",
+        prompt: "Older prompt",
+        stage: "pr"
+      }
+    ]);
+    publishes = 0;
+
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Short renamed task",
+        prompt: "Updated prompt\nPROMPT_END_SENTINEL",
+        stage: "pr"
+      }
+    ]);
+
+    expect(publishes).toBe(1);
+    expect(store.getState().recentTasks[0]?.prompt).toBe(
+      "Updated prompt\nPROMPT_END_SENTINEL"
+    );
+  });
+
   it("does not publish when missing task activity is refreshed as idle", () => {
     const store = createSessionStore();
     let publishes = 0;

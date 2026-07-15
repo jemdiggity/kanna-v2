@@ -56,6 +56,7 @@ pub struct TaskSummary {
     pub id: String,
     pub repo_id: String,
     pub title: String,
+    pub prompt: Option<String>,
     pub stage: Option<String>,
     pub activity: Option<String>,
     pub snippet: Option<String>,
@@ -69,6 +70,7 @@ pub struct TaskDetail {
     pub id: String,
     pub repo_id: String,
     pub title: String,
+    pub prompt: Option<String>,
     pub stage: Option<String>,
     pub pipeline_name: Option<String>,
     pub stage_transition: Option<String>,
@@ -127,6 +129,7 @@ pub struct CreateTaskResponse {
     pub task_id: String,
     pub repo_id: String,
     pub title: String,
+    pub prompt: String,
     pub stage: String,
     pub agent_type: String,
     pub worktree_path: Option<String>,
@@ -367,16 +370,18 @@ impl AddRepoError {
 }
 
 fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
+    let prompt = item.prompt.clone();
     let title = item
         .display_name
         .clone()
-        .or(item.prompt.clone())
+        .or(prompt.clone())
         .unwrap_or_else(|| item.id.clone());
     let waiting_prompt_snippet = item.last_output_preview.clone();
     TaskSummary {
         id: item.id,
         repo_id: item.repo_id,
         title,
+        prompt,
         stage: item.stage,
         activity: item.activity,
         snippet: waiting_prompt_snippet.clone(),
@@ -390,10 +395,11 @@ fn map_task_detail(
     repo: Option<&crate::db::Repo>,
     worktree_path: Option<String>,
 ) -> TaskDetail {
+    let prompt = item.prompt.clone();
     let title = item
         .display_name
         .clone()
-        .or(item.prompt.clone())
+        .or(prompt.clone())
         .unwrap_or_else(|| item.id.clone());
     let git_state = worktree_path
         .as_deref()
@@ -424,6 +430,7 @@ fn map_task_detail(
         id: item.id,
         repo_id: item.repo_id,
         title,
+        prompt,
         stage: item.stage,
         pipeline_name,
         stage_transition,

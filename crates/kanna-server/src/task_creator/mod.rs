@@ -1309,10 +1309,13 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     })
     .map_err(|error| classify_pipeline_item_insert_error(error, has_requested_task_id))?;
 
+    let prompt = request.prompt;
+    let title = request.display_name.unwrap_or_else(|| prompt.clone());
     Ok(crate::mobile_api::CreateTaskResponse {
         task_id,
         repo_id: repo.id,
-        title: request.display_name.unwrap_or(request.prompt),
+        title,
+        prompt,
         stage: stage_name,
         agent_type: agent_type.as_str().to_string(),
         worktree_path: None,
@@ -1520,10 +1523,11 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         Ok(prepared) => prepared,
         Err(error) => return Err(rollback_start(error.into())),
     };
+    let prompt = item.prompt.clone().unwrap_or_default();
     let title = item
         .display_name
         .clone()
-        .or_else(|| item.prompt.clone())
+        .or_else(|| (!prompt.is_empty()).then(|| prompt.clone()))
         .unwrap_or_else(|| task_id.to_string());
 
     Ok(Some(PreparedTaskSpawn {
@@ -1531,6 +1535,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
             task_id: task_id.to_string(),
             repo_id: repo.id.clone(),
             title,
+            prompt,
             stage: stage_name,
             agent_type: agent_type.as_str().to_string(),
             worktree_path: worktree_path.clone(),
@@ -1699,6 +1704,7 @@ fn prepare_task_spawn_with_error(
             task_id: task_id.clone(),
             repo_id: repo.id.clone(),
             title,
+            prompt: resolved.original_prompt,
             stage: resolved.stage_name,
             agent_type: agent_type.as_str().to_string(),
             worktree_path: worktree_path.clone(),

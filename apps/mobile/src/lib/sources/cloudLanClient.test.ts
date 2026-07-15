@@ -97,7 +97,8 @@ function deferred<T>(): {
 
 describe("mergeCloudAndLanTasks", () => {
   it("keeps cloud identity and metadata while applying LAN mutable fields and routing", () => {
-    const cloudTask = task({
+    const cloudTask = {
+      ...task({
       id: "cloud-X",
       repoId: "cloud-repo",
       repoName: "Cloud Repo",
@@ -110,8 +111,11 @@ describe("mergeCloudAndLanTasks", () => {
       ownerLocalRepoId: "local-repo",
       ownerLocalTaskId: "local-task",
       ownerOnline: false
-    });
-    const lanTask = task({
+      }),
+      prompt: "Cloud prompt snippet"
+    };
+    const lanTask = {
+      ...task({
       id: "local-task",
       repoId: "local-repo",
       repoName: "LAN Repo",
@@ -120,7 +124,10 @@ describe("mergeCloudAndLanTasks", () => {
       waitingPromptSnippet: "LAN snippet",
       agentProvider: "codex",
       agentType: "agent"
-    });
+      }),
+      prompt:
+        "First line of the canonical task prompt.\nSecond line.\nPROMPT_END_SENTINEL"
+    };
 
     const result = mergeCloudAndLanTasks({
       cloudTasks: [cloudTask],
@@ -131,6 +138,8 @@ describe("mergeCloudAndLanTasks", () => {
       {
         ...cloudTask,
         title: "LAN title",
+        prompt:
+          "First line of the canonical task prompt.\nSecond line.\nPROMPT_END_SENTINEL",
         stage: "pr",
         waitingPromptSnippet: "LAN snippet",
         agentType: "agent"

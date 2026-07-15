@@ -208,6 +208,7 @@ export function createSessionStore(): SessionStore {
         task.id === other.id &&
         task.repoId === other.repoId &&
         task.title === other.title &&
+        (task.prompt ?? null) === (other.prompt ?? null) &&
         task.stage === other.stage &&
         (task.activity ?? "idle") === (other.activity ?? "idle") &&
         (task.waitingPromptSnippet ?? null) ===

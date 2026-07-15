@@ -1741,6 +1741,7 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
     id: response.taskId,
     repoId: response.repoId,
     title: response.title,
+    prompt: response.prompt,
     stage: response.stage,
     agentType: response.agentType ?? null
   };
