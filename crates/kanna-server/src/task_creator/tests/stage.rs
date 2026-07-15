@@ -573,7 +573,7 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
             let command = args.join(" ");
             assert!(
                 command.contains(
-                    "Snapshot agent: Fix the shell\n\nSnapshot prompt {\"status\":\"success\",\"summary\":\"done\"}"
+                    "## Agent Instructions\n\nSnapshot agent: Fix the shell\n\n## Your Task\n\nSnapshot prompt {\"status\":\"success\",\"summary\":\"done\"}"
                 ),
                 "unexpected command: {command}"
             );
@@ -693,7 +693,7 @@ fn prepare_advance_stage_applies_repo_agent_extension() {
             let command = args.join(" ");
             assert!(
                 command.contains(
-                    "Base reviewer: Fix the shell\n\nRepo extension: run the full unit and integration suites.\n\nReview prompt {\"status\":\"success\",\"summary\":\"done\"}"
+                    "## Agent Instructions\n\nBase reviewer: Fix the shell\n\nRepo extension: run the full unit and integration suites.\n\n## Your Task\n\nReview prompt {\"status\":\"success\",\"summary\":\"done\"}"
                 ),
                 "unexpected command: {command}"
             );
@@ -826,7 +826,9 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
             assert!(
-                command.contains("Review Fix it\n\nUse result {\"source\":\"stage_run\"}"),
+                command.contains(
+                    "## Agent Instructions\n\nReview Fix it\n\n## Your Task\n\nUse result {\"source\":\"stage_run\"}"
+                ),
                 "unexpected command: {command}"
             );
             assert!(!command.contains("{\"source\":\"legacy\"}"));
@@ -1773,7 +1775,7 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
     let fork = run.forked_workspace().expect("auto transition forks");
     assert_eq!(run.cwd, fork.worktree_path);
     let expected_prompt = format!(
-        "PR agent for Fix stage promotion\n\nCreate PR for {} from {} after {{\"status\":\"success\",\"summary\":\"committed\"}}",
+        "## Agent Instructions\n\nPR agent for Fix stage promotion\n\n## Your Task\n\nCreate PR for {} from {} after {{\"status\":\"success\",\"summary\":\"committed\"}}",
         fork.branch,
         source_worktree.to_string_lossy()
     );
@@ -1972,12 +1974,39 @@ fn prepare_advance_stage_dispatches_post_into_running_session() {
         "message: {}",
         post.message
     );
+    let completion_index = post
+        .message
+        .find("When this work is complete")
+        .expect("completion instruction");
+    let task_heading_index = post.message.find("## Your Task").expect("task heading");
+    assert!(
+        completion_index < task_heading_index,
+        "completion instructions must precede the task section: {}",
+        post.message
+    );
+    assert!(
+        post.message.ends_with("## Your Task\n\nCommit Fix it"),
+        "post assignment must remain the final section: {}",
+        post.message
+    );
     // The fallback spawn keeps the owning stage: a post never moves the
     // task's stage.
     assert_eq!(post.fallback.next_stage, "in progress");
     assert_eq!(post.fallback.run_stage, "commit");
     assert_eq!(post.fallback.run_kind, "post");
     assert_eq!(post.fallback.stage_agent.as_deref(), Some("commit"));
+    let fallback_prompt = match &post.fallback.session {
+        PreparedSessionSpawn::Pty { args, .. } => args.join(" "),
+        PreparedSessionSpawn::Agent {
+            prompt,
+            system_prompt,
+            ..
+        } => format!("{system_prompt}\n{prompt}"),
+    };
+    assert!(
+        !fallback_prompt.contains("When this work is complete"),
+        "fresh post fallback should rely on its auto-stage runtime guidance: {fallback_prompt}"
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

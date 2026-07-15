@@ -108,17 +108,55 @@ export function buildKannaRuntimeSystemPrompt(context?: KannaRuntimeContext): st
     .replace("{{COMPLETION}}", buildKannaCompletionLine(context));
 }
 
+function hasOuterPromptSection(prompt: string): boolean {
+  const firstContentLine = prompt.split(/\r?\n/).find((line) => line.trim() !== "")?.trim();
+  return firstContentLine === "## Agent Instructions" || firstContentLine === "## Your Task";
+}
+
 // Joins the Kanna preamble and the task prompt into one message for providers
-// without a native system-prompt channel. A `## Your Task` heading closes the
-// preamble's `## Kanna Task Environment` section so the agent can tell where
-// the environment guidance ends and its assignment begins. Mirrors
-// prompt_with_system_prompt in crates/kanna-agent-protocol/src/adapter.rs —
-// keep the formats in sync.
+// without a native system-prompt channel. Stage composition owns its section
+// labels; raw prompts receive compatibility framing when no outer section is
+// present. Mirrors prompt_with_system_prompt in
+// crates/kanna-agent-protocol/src/adapter.rs — keep the formats in sync.
 export function buildKannaRuntimeUserPrompt(
   prompt: string,
   context?: KannaRuntimeContext
 ): string {
-  return `${buildKannaRuntimeSystemPrompt(context)}\n\n## Your Task\n\n${prompt}`;
+  const systemPrompt = buildKannaRuntimeSystemPrompt(context);
+  if (prompt.trim() === "") return systemPrompt;
+
+  const userPrompt = hasOuterPromptSection(prompt) ? prompt : `## Your Task\n\n${prompt}`;
+  return `${systemPrompt}\n\n${userPrompt}`;
+}
+
+function substitutePromptVars(template: string, context: PromptContext): string {
+  const values: Record<string, string> = {
+    TASK_PROMPT: context.taskPrompt ?? "",
+    PREV_RESULT: context.prevResult ?? "",
+    BRANCH: context.branch ?? "",
+    BASE_REF: context.baseRef ?? "",
+    SOURCE_WORKTREE: context.sourceWorktree ?? "",
+  };
+
+  return template.replace(
+    /\$(?:\{(TASK_PROMPT|PREV_RESULT|BRANCH|BASE_REF|SOURCE_WORKTREE)\}|(TASK_PROMPT|PREV_RESULT|BRANCH|BASE_REF|SOURCE_WORKTREE)(?![A-Za-z0-9_]))/g,
+    (variable, bracedName: string | undefined, bareName: string | undefined) => {
+      const name = bracedName ?? bareName;
+      return name === undefined ? variable : values[name] ?? variable;
+    }
+  );
+}
+
+function buildPromptSection(
+  heading: "## Agent Instructions" | "## Your Task",
+  template: string,
+  context: PromptContext
+): string | undefined {
+  const trimmedTemplate = template.trim();
+  if (trimmedTemplate === "") return undefined;
+
+  const body = substitutePromptVars(trimmedTemplate, context);
+  return body.trim() === "" ? undefined : `${heading}\n\n${body}`;
 }
 
 export function buildStagePrompt(
@@ -126,15 +164,14 @@ export function buildStagePrompt(
   stagePrompt: string | undefined,
   context: PromptContext
 ): string {
-  const parts = [agentPrompt, stagePrompt].filter(
-    (p): p is string => p !== undefined && p.trim() !== ""
-  );
-  const combined = parts.join("\n\n");
+  const parts: string[] = [];
+  const agentSection = buildPromptSection("## Agent Instructions", agentPrompt, context);
+  if (agentSection !== undefined) parts.push(agentSection);
 
-  return combined
-    .replaceAll("$TASK_PROMPT", context.taskPrompt ?? "")
-    .replaceAll("$PREV_RESULT", context.prevResult ?? "")
-    .replaceAll("$BRANCH", context.branch ?? "")
-    .replaceAll("$BASE_REF", context.baseRef ?? "")
-    .replaceAll("$SOURCE_WORKTREE", context.sourceWorktree ?? "");
+  if (stagePrompt !== undefined) {
+    const taskSection = buildPromptSection("## Your Task", stagePrompt, context);
+    if (taskSection !== undefined) parts.push(taskSection);
+  }
+
+  return parts.join("\n\n");
 }
