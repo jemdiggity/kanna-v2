@@ -248,8 +248,30 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain('type: "terminal-ready"');
     expect(html).toContain('type: "terminal-tap"');
     expect(html).toContain('viewport.addEventListener("pointerdown"');
-    expect(html).toContain("terminalViewport.style.bottom = stickyToBottom");
+    expect(html).toContain('terminalViewport.style.bottom = "132px"');
+    expect(html).not.toContain("terminalViewport.style.bottom = stickyToBottom");
     expect(html).not.toContain("<pre id=\"terminal\"></pre>");
+  });
+
+  it("keeps the terminal safe region while scrollback disables sticky following", () => {
+    const { terminal, terminalViewport, window } = createExecutedTerminalDocument();
+    const initialScrollToBottomCalls = terminal.scrollToBottomCalls;
+
+    terminalViewport.scrollTop = 100;
+    terminalViewport.dispatchEvent(new window.Event("scroll"));
+
+    expect(terminalViewport.style.bottom).toBe("24px");
+
+    window.__appendTerminalChunk({ chunksB64: [b64("new output\n")] });
+
+    expect(terminal.scrollToBottomCalls).toBe(initialScrollToBottomCalls);
+
+    terminalViewport.scrollTop = 876;
+    terminalViewport.dispatchEvent(new window.Event("scroll"));
+    window.__appendTerminalChunk({ chunksB64: [b64("latest output\n")] });
+
+    expect(terminalViewport.style.bottom).toBe("24px");
+    expect(terminal.scrollToBottomCalls).toBe(initialScrollToBottomCalls + 1);
   });
 
   it("enables mobile pinch zoom and bidirectional touch scrolling for xterm", () => {

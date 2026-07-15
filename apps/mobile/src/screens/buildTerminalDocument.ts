@@ -171,7 +171,7 @@ export function buildTerminalDocument({
           return;
         }
 
-        terminalViewport.style.bottom = stickyToBottom ? "${bottomInset}px" : "0px";
+        terminalViewport.style.bottom = "${bottomInset}px";
       }
 
       function cellDimensions() {
