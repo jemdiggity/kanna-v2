@@ -235,13 +235,15 @@ const appTaskNavigation = useAppTaskNavigation({
 const {
   navigateItems,
   navigateRepos,
+  navigateBack,
+  navigateForward,
   selectReadTask,
   selectUnreadTaskWithReadFallback,
   handleBlockTask,
   handleEditBlockedTask,
   sidebarBlockerNames,
   handleSelectRepo,
-  handleSelectItem,
+  selectSidebarItemById,
 } = appTaskNavigation;
 const appTaskCreation = useAppTaskCreation({
   store,
@@ -347,6 +349,8 @@ const appKeyboardActions = useAppKeyboardActions({
   advanceSelectedRemoteWorkspaceTask,
   closeSelectedWorkspaceTask,
   navigateItems,
+  navigateBack,
+  navigateForward,
   selectUnreadTaskWithReadFallback,
   selectReadTask,
   navigateRepos,
@@ -399,7 +403,7 @@ const modalLayerController = {
         :selected-slot-id="selectedSidebarSlotId"
         :blocker-names="sidebarBlockerNames"
         @select-repo="handleSelectRepo"
-        @select-item="handleSelectItem"
+        @select-item="selectSidebarItemById"
         @new-task="(repoId: string) => openNewTaskModal(repoId).catch((e) => console.error('[App] openNewTaskModal failed:', e))"
         @pin-item="store.pinItem"
         @unpin-item="store.unpinItem"

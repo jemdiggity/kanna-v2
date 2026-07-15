@@ -75,8 +75,10 @@ interface UseAppKeyboardActionsOptions {
   advanceSelectedRemoteWorkspaceTask: (workspaceTask: WorkspaceTask) => Promise<void>;
   closeSelectedWorkspaceTask: () => Promise<void>;
   navigateItems: (direction: -1 | 1) => Promise<void>;
-  selectUnreadTaskWithReadFallback: (mode: "oldest" | "newest") => Promise<void>;
-  selectReadTask: (mode: "oldest" | "newest") => Promise<void>;
+  navigateBack: () => Promise<void>;
+  navigateForward: () => Promise<void>;
+  selectUnreadTaskWithReadFallback: (scope: "currentRepo" | "allRepos") => Promise<void>;
+  selectReadTask: (scope: "currentRepo" | "allRepos") => Promise<void>;
   navigateRepos: (direction: -1 | 1) => Promise<void>;
   closePeerPicker: () => void;
   closeFilePicker: () => void;
@@ -136,6 +138,8 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     advanceSelectedRemoteWorkspaceTask,
     closeSelectedWorkspaceTask,
     navigateItems,
+    navigateBack,
+    navigateForward,
     selectUnreadTaskWithReadFallback,
     selectReadTask,
     navigateRepos,
@@ -251,10 +255,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     undoClose: () => store.undoClose(),
     navigateUp: () => navigateItems(-1),
     navigateDown: () => navigateItems(1),
-    goToOldestUnread: () => selectUnreadTaskWithReadFallback("oldest"),
-    goToNewestUnread: () => selectUnreadTaskWithReadFallback("newest"),
-    goToOldestRead: () => selectReadTask("oldest"),
-    goToNewestRead: () => selectReadTask("newest"),
+    goToOldestUnread: () => selectUnreadTaskWithReadFallback("currentRepo"),
+    goToOldestUnreadAllRepos: () => selectUnreadTaskWithReadFallback("allRepos"),
+    goToOldestRead: () => selectReadTask("currentRepo"),
+    goToOldestReadAllRepos: () => selectReadTask("allRepos"),
     navigateRepoUp: () => navigateRepos(-1),
     navigateRepoDown: () => navigateRepos(1),
     toggleSidebar: () => { sidebarHidden.value = !sidebarHidden.value; },
@@ -398,8 +402,8 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       }
     },
     showAnalytics: () => { showAnalyticsModal.value = !showAnalyticsModal.value; },
-    goBack: () => store.goBack(),
-    goForward: () => store.goForward(),
+    goBack: () => navigateBack(),
+    goForward: () => navigateForward(),
     createRepo: () => { addRepoInitialTab.value = "create"; showAddRepoModal.value = true; },
     importRepo: () => { addRepoInitialTab.value = "import"; showAddRepoModal.value = true; },
     blockTask: () => { handleBlockTask(); },

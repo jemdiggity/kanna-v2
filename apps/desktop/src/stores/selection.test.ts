@@ -17,17 +17,21 @@ const mockState = vi.hoisted(() => {
   const setSettingMock = vi.fn(async () => {});
   const updatePipelineItemActivityMock = vi.fn(async () => {});
   const markDesktopTaskReadMock = vi.fn(async (taskId: string) => ({ taskId, activity: "idle" }));
+  const putDesktopSettingMock = vi.fn(async (key: string, value: string) => ({ key, value }));
 
   return {
     insertOperatorEventMock,
     setSettingMock,
     updatePipelineItemActivityMock,
     markDesktopTaskReadMock,
+    putDesktopSettingMock,
     reset() {
       insertOperatorEventMock.mockClear();
       setSettingMock.mockClear();
       updatePipelineItemActivityMock.mockClear();
       markDesktopTaskReadMock.mockClear();
+      putDesktopSettingMock.mockReset();
+      putDesktopSettingMock.mockImplementation(async (key: string, value: string) => ({ key, value }));
     },
   };
 });
@@ -41,7 +45,7 @@ vi.mock("@kanna/" + "db", () => ({
 vi.mock("../services/desktopServerClient", () => ({
   markDesktopTaskRead: mockState.markDesktopTaskReadMock,
   postDesktopOperatorEvent: vi.fn(async () => {}),
-  putDesktopSetting: vi.fn(async (key: string, value: string) => ({ key, value })),
+  putDesktopSetting: mockState.putDesktopSettingMock,
   setDesktopServerClientHandlersForTests: vi.fn(),
 }));
 
@@ -166,6 +170,98 @@ describe("createSelectionApi", () => {
       "selected_item_id",
       "task-1",
     );
+  });
+
+  it("can select a repo without persisting an intermediate window selection", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [
+      createRepo(),
+      createRepo({
+        id: "repo-2",
+        path: "/tmp/repo-2",
+        name: "repo-2",
+        sort_order: 1,
+      }),
+    ];
+    state.items.value = [createItem({ id: "task-2", repo_id: "repo-2" })];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = null;
+    state.lastSelectedItemByRepo.value["repo-2"] = "task-2";
+
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      { windowWorkspace: { persistSelection } } as never,
+    );
+
+    await createSelectionApi(context).selectRepo("repo-2", {
+      persistWindowSelection: false,
+    });
+
+    expect(state.selectedRepoId.value).toBe("repo-2");
+    expect(state.selectedItemId.value).toBe("task-2");
+    expect(persistSelection).not.toHaveBeenCalled();
+  });
+
+  it("does not persist a stale repo selection after focus changes while settings are pending", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [
+      createRepo(),
+      createRepo({
+        id: "repo-mixed",
+        path: "/tmp/repo-mixed",
+        name: "repo-mixed",
+        sort_order: 1,
+      }),
+    ];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = null;
+
+    const settingWrite = deferred<void>();
+    mockState.putDesktopSettingMock.mockImplementationOnce(async (key: string, value: string) => {
+      await settingWrite.promise;
+      return { key, value };
+    });
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      { windowWorkspace: { persistSelection } } as never,
+    );
+
+    const repoSelection = createSelectionApi(context).selectRepo("repo-mixed");
+    expect(state.selectedRepoId.value).toBe("repo-mixed");
+    expect(state.selectedItemId.value).toBeNull();
+
+    state.selectedItemId.value = "remote:stable-slot";
+    await persistSelection({
+      selectedRepoId: "repo-mixed",
+      selectedItemId: "remote-task-durable",
+    });
+    settingWrite.resolve();
+    await repoSelection;
+
+    expect(persistSelection).toHaveBeenCalledTimes(1);
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-mixed",
+      selectedItemId: "remote-task-durable",
+    });
   });
 
   it("keeps slot selection stable while persisting only durable task IDs", async () => {
@@ -438,7 +534,12 @@ describe("createSelectionApi", () => {
     await selection.selectItem("create:slot-1");
     await vi.advanceTimersByTimeAsync(1001);
     await selection.selectItem("durable-1");
-    selection.goBack();
+    const backTarget = selection.takeBackTarget(
+      "ready:slot-2",
+      new Set(["create:slot-1", "ready:slot-2"]),
+    );
+    expect(backTarget).toBe("create:slot-1");
+    await selection.selectItem(backTarget!, { recordNavigation: false });
 
     expect(state.selectedItemId.value).toBe("create:slot-1");
     expect(selection.currentTaskSlot.value).toMatchObject({
@@ -492,15 +593,94 @@ describe("createSelectionApi", () => {
     await selection.selectItem("durable-1");
     await vi.advanceTimersByTimeAsync(1001);
     await selection.selectItem("create:slot-1");
-    selection.goBack();
+    const backTarget = selection.takeBackTarget(
+      "create:slot-1",
+      new Set(["create:slot-1", "ready:slot-2"]),
+    );
+    expect(backTarget).toBe("ready:slot-2");
+    await selection.selectItem(backTarget!, { recordNavigation: false });
     expect(state.selectedItemId.value).toBe("ready:slot-2");
 
-    selection.goForward();
+    const forwardTarget = selection.takeForwardTarget(
+      "ready:slot-2",
+      new Set(["create:slot-1", "ready:slot-2"]),
+    );
+    expect(forwardTarget).toBe("create:slot-1");
+    await selection.selectItem(forwardTarget!, { recordNavigation: false });
     expect(state.selectedItemId.value).toBe("create:slot-1");
     expect(selection.currentTaskSlot.value).toMatchObject({
       slot_id: "create:slot-1",
       state: "creating",
     });
+  });
+
+  it("round-trips remote presentation slots through the shared navigation ledger", async () => {
+    vi.useFakeTimers();
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.items.value = [createItem()];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
+    state.selectedRepoId.value = "repo-1";
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {} as never,
+    );
+    const selection = createSelectionApi(context);
+
+    await selection.selectItem("task-1");
+    await vi.advanceTimersByTimeAsync(1001);
+    selection.recordNavigation("remote:stable-slot", "task-1");
+
+    const validIds = new Set(["task-1", "remote:stable-slot"]);
+    expect(selection.takeBackTarget("remote:stable-slot", validIds)).toBe("task-1");
+    expect(selection.takeForwardTarget("task-1", validIds)).toBe("remote:stable-slot");
+  });
+
+  it("can apply a history target without recording a circular selection", async () => {
+    vi.useFakeTimers();
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.items.value = [
+      createItem({ id: "task-1" }),
+      createItem({ id: "task-2", created_at: "2026-04-29T01:00:00.000Z" }),
+    ];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
+    state.selectedRepoId.value = "repo-1";
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {} as never,
+    );
+    const selection = createSelectionApi(context);
+
+    await selection.selectItem("task-1");
+    await vi.advanceTimersByTimeAsync(1001);
+    selection.recordNavigation("remote:stable-slot", "task-1");
+    await vi.advanceTimersByTimeAsync(1001);
+    await selection.selectItem("task-2", {
+      previousItemId: "remote:stable-slot",
+      recordNavigation: false,
+    });
+
+    expect(selection.takeBackTarget(
+      "task-2",
+      new Set(["task-1", "task-2", "remote:stable-slot"]),
+    )).toBe("task-1");
   });
 
   it("marks an unread selected task read and invalidates other windows", async () => {

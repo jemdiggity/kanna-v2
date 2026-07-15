@@ -20,19 +20,25 @@ export interface SelectionApi {
   canGoBack: ComputedRef<boolean>;
   canGoForward: ComputedRef<boolean>;
   getStageOrder: (repoId: string) => readonly string[];
-  selectRepo: (repoId: string) => Promise<void>;
+  selectRepo: (repoId: string, options?: SelectRepoOptions) => Promise<void>;
   selectItem: (itemId: string, options?: SelectItemOptions) => Promise<void>;
+  recordNavigation: (newItemId: string, previousItemId: string | null) => void;
+  takeBackTarget: (currentItemId: string, validItemIds?: Set<string>) => string | null;
+  takeForwardTarget: (currentItemId: string, validItemIds?: Set<string>) => string | null;
   persistSelection: () => Promise<void>;
   selectReplacementAfterItemRemoval: (removedItem: PipelineItem) => Promise<string | null>;
   reconcileSelection: () => void;
   restoreSelection: (itemId: string) => void;
-  goBack: () => void;
-  goForward: () => void;
   isItemHidden: (item: PipelineItem) => boolean;
+}
+
+export interface SelectRepoOptions {
+  persistWindowSelection?: boolean;
 }
 
 export interface SelectItemOptions {
   previousItemId?: string | null;
+  recordNavigation?: boolean;
 }
 
 export function createSelectionApi(context: StoreContext): SelectionApi {
@@ -135,16 +141,44 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     { debounce: 1000 },
   );
 
-  async function selectRepo(repoId: string) {
+  async function selectRepo(repoId: string, options: SelectRepoOptions = {}) {
     const previousItemId = context.state.selectedItemId.value;
     context.state.selectedRepoId.value = repoId;
     context.state.selectedItemId.value = taskUiSlotForSelection(
       context.state.taskUiSlots.value,
       context.state.lastSelectedItemByRepo.value[repoId],
     )?.slot_id ?? null;
+    const selectedItemId = context.state.selectedItemId.value;
     logSelection("selectRepo", previousItemId, context.state.selectedItemId.value, { repoId });
     await putDesktopSetting("selected_repo_id", repoId);
-    await persistSelection();
+    // A newer item or repo selection can land while the setting write is in
+    // flight. Do not let this older repo-only selection overwrite it.
+    const selectionIsCurrent = context.state.selectedRepoId.value === repoId
+      && context.state.selectedItemId.value === selectedItemId;
+    if (options.persistWindowSelection !== false && selectionIsCurrent) {
+      await persistSelection();
+    }
+  }
+
+  function canonicalNavigationId(itemId: string | null | undefined): string | null {
+    if (!itemId) return null;
+    return taskUiSlotForSelection(context.state.taskUiSlots.value, itemId)?.slot_id ?? itemId;
+  }
+
+  function recordNavigation(newItemId: string, previousItemId: string | null) {
+    const newNavigationId = canonicalNavigationId(newItemId);
+    if (!newNavigationId) return;
+    nav.select(newNavigationId, canonicalNavigationId(previousItemId));
+  }
+
+  function takeBackTarget(currentItemId: string, validItemIds?: Set<string>): string | null {
+    const currentNavigationId = canonicalNavigationId(currentItemId);
+    return currentNavigationId ? nav.goBack(currentNavigationId, validItemIds) : null;
+  }
+
+  function takeForwardTarget(currentItemId: string, validItemIds?: Set<string>): string | null {
+    const currentNavigationId = canonicalNavigationId(currentItemId);
+    return currentNavigationId ? nav.goForward(currentNavigationId, validItemIds) : null;
   }
 
   async function selectItem(itemId: string, options: SelectItemOptions = {}) {
@@ -154,11 +188,10 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     const previousSelectionId = options.previousItemId !== undefined
       ? options.previousItemId
       : context.state.selectedItemId.value;
-    const previousSlotId = taskUiSlotForSelection(
-      context.state.taskUiSlots.value,
-      previousSelectionId,
-    )?.slot_id ?? null;
-    nav.select(slot.slot_id, previousSlotId);
+    const previousSlotId = canonicalNavigationId(previousSelectionId);
+    if (options.recordNavigation !== false) {
+      recordNavigation(slot.slot_id, previousSlotId);
+    }
     context.state.selectedItemId.value = slot.slot_id;
     context.state.selectedRepoId.value = slot.draft.repo_id;
     logSelection("selectItem", previousSlotId, slot.slot_id, {
@@ -299,65 +332,6 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     )?.slot_id ?? null;
   }
 
-  function visibleTaskSlotIds(): Set<string> {
-    const availableRepoIds = new Set(
-      context.state.repos.value
-        .filter((repo) => !repo.hidden)
-        .map((repo) => repo.id),
-    );
-    return new Set(
-      context.state.taskUiSlots.value
-        .filter((slot) =>
-          availableRepoIds.has(slot.draft.repo_id)
-          && (slot.state === "creating" || !isItemHidden(slot.task)))
-        .map((slot) => slot.slot_id),
-    );
-  }
-
-  function goBack() {
-    const currentSlotId = taskUiSlotForSelection(
-      context.state.taskUiSlots.value,
-      context.state.selectedItemId.value,
-    )?.slot_id ?? context.state.selectedItemId.value;
-    if (!currentSlotId) return;
-    const slotId = nav.goBack(currentSlotId, visibleTaskSlotIds());
-    const slot = taskUiSlotForSelection(context.state.taskUiSlots.value, slotId);
-    if (!slot) return;
-
-    if (slot.draft.repo_id !== context.state.selectedRepoId.value) {
-      context.state.selectedRepoId.value = slot.draft.repo_id;
-    }
-    context.state.lastSelectedItemByRepo.value[slot.draft.repo_id] = slot.slot_id;
-
-    context.state.selectedItemId.value = slot.slot_id;
-    void persistSelection();
-    if (slot.task_id) {
-      emitTaskSelected(slot.task_id);
-    }
-  }
-
-  function goForward() {
-    const currentSlotId = taskUiSlotForSelection(
-      context.state.taskUiSlots.value,
-      context.state.selectedItemId.value,
-    )?.slot_id ?? context.state.selectedItemId.value;
-    if (!currentSlotId) return;
-    const slotId = nav.goForward(currentSlotId, visibleTaskSlotIds());
-    const slot = taskUiSlotForSelection(context.state.taskUiSlots.value, slotId);
-    if (!slot) return;
-
-    if (slot.draft.repo_id !== context.state.selectedRepoId.value) {
-      context.state.selectedRepoId.value = slot.draft.repo_id;
-    }
-    context.state.lastSelectedItemByRepo.value[slot.draft.repo_id] = slot.slot_id;
-
-    context.state.selectedItemId.value = slot.slot_id;
-    void persistSelection();
-    if (slot.task_id) {
-      emitTaskSelected(slot.task_id);
-    }
-  }
-
   return {
     selectedRepo,
     currentItem,
@@ -370,12 +344,13 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     getStageOrder,
     selectRepo,
     selectItem,
+    recordNavigation,
+    takeBackTarget,
+    takeForwardTarget,
     persistSelection,
     selectReplacementAfterItemRemoval,
     reconcileSelection,
     restoreSelection,
-    goBack,
-    goForward,
     isItemHidden,
   };
 }

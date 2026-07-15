@@ -186,6 +186,9 @@ const store = {
   attachWindowWorkspace: vi.fn(),
   selectRepo: vi.fn(),
   selectItem: vi.fn(),
+  recordNavigation: vi.fn(),
+  takeBackTarget: vi.fn(),
+  takeForwardTarget: vi.fn(),
   advanceStage: vi.fn(async () => {}),
   closeTask: vi.fn(async () => {}),
   bump: vi.fn(async () => {}),
@@ -443,9 +446,15 @@ vi.mock("./composables/useModalZIndex", () => ({
   useModalZIndex: () => ({ zIndex: 1000 }),
 }));
 
+const sidebarSearchQuery = ref("");
+
 const SidebarWithRepoStub = defineComponent({
   name: "Sidebar",
   emits: ["new-task"],
+  setup(_props, { expose }) {
+    expose({ searchQuery: sidebarSearchQuery });
+    return {};
+  },
   template: '<button data-testid="open-new-task" @click="$emit(\'new-task\', \'repo-1\')">open</button>',
 });
 
@@ -680,6 +689,7 @@ describe("App", () => {
   });
 
   beforeEach(() => {
+    sidebarSearchQuery.value = "";
     store.init.mockClear();
     store.createItem.mockClear();
     store.createRepo.mockClear();
@@ -693,6 +703,9 @@ describe("App", () => {
     store.loadAgent.mockClear();
     store.selectRepo.mockClear();
     store.selectItem.mockClear();
+    store.recordNavigation.mockClear();
+    store.takeBackTarget.mockReset();
+    store.takeForwardTarget.mockReset();
     store.advanceStage.mockClear();
     relayAdvanceStageMock.mockClear();
     relayCloseTaskMock.mockClear();
@@ -1220,7 +1233,7 @@ describe("App", () => {
         repos: { type: Array, default: () => [] },
         taskSlots: { type: Array, default: () => [] },
       },
-      emits: ["select-repo", "select-item"],
+      emits: ["select-item"],
       template: `
         <div data-testid="sidebar">
           <button
@@ -1228,7 +1241,7 @@ describe("App", () => {
             :key="item.slot_id"
             data-testid="cloud-task"
             type="button"
-            @click="$emit('select-repo', item.repo_id); $emit('select-item', item.slot_id)"
+            @click="$emit('select-item', item.slot_id)"
           >
             {{ item.display_name }}
           </button>
@@ -1497,7 +1510,9 @@ describe("App", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(store.selectItem).toHaveBeenCalledWith("task-owner");
+    expect(store.selectItem).toHaveBeenCalledWith("task-owner", {
+      recordNavigation: false,
+    });
     expect(store.selectedItemId).toBe("slot:local-owner");
     expect(wrapper.get('[data-testid="ownership-row-count"]').text()).toBe("1");
     expect(wrapper.get('[data-testid="ownership-task"]').attributes("data-slot-id")).toBe(presentationSlotId);
@@ -1659,7 +1674,10 @@ describe("App", () => {
     await wrapper.get('[data-testid="creating-without-workspace"]').trigger("click");
     await flushPromises();
 
-    expect(store.selectItem).toHaveBeenCalledWith("create:without-workspace");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "create:without-workspace",
+      expect.objectContaining({ recordNavigation: false }),
+    );
     expect(mockWindowWorkspace.persistSelection).not.toHaveBeenCalledWith(expect.objectContaining({
       selectedItemId: "create:without-workspace",
     }));
@@ -2429,7 +2447,7 @@ describe("App", () => {
       }),
     );
   });
-  it("skips blocked tasks when navigating to the oldest and newest read task", async () => {
+  it("skips blocked tasks when navigating to the oldest read task", async () => {
     store.sortedItemsForCurrentRepo = [
       { id: "blocked-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: "[]" },
       { id: "read-oldest", activity: "idle", created_at: "2026-03-31T01:00:00.000Z", tags: "[]" },
@@ -2445,14 +2463,13 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestRead();
-    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
-
-    store.selectItem.mockClear();
-    capturedKeyboardActions?.goToNewestRead();
-    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "read-oldest",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
-  it("skips pinned tasks when navigating to the oldest and newest read task", async () => {
+  it("skips pinned tasks when navigating to the oldest read task", async () => {
     store.sortedItemsForCurrentRepo = [
       { id: "pinned-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: "[]", pinned: 1 },
       { id: "read-oldest", activity: "idle", created_at: "2026-03-31T01:00:00.000Z", tags: "[]", pinned: 0 },
@@ -2464,14 +2481,13 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestRead();
-    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
-
-    store.selectItem.mockClear();
-    capturedKeyboardActions?.goToNewestRead();
-    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "read-oldest",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
-  it("navigates to the absolute oldest and newest read task", async () => {
+  it("navigates to the absolute oldest read task", async () => {
     store.currentItem = { id: "current", created_at: "2026-03-31T03:00:00.000Z" };
     store.sortedItemsForCurrentRepo = [
       { id: "read-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: "[]" },
@@ -2485,11 +2501,10 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestRead();
-    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
-
-    store.selectItem.mockClear();
-    capturedKeyboardActions?.goToNewestRead();
-    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "read-oldest",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
   it("opens a new window through the workspace controller using the current selection", async () => {
@@ -2722,7 +2737,10 @@ describe("App", () => {
 
     await handler?.({});
 
-    expect(store.selectItem).toHaveBeenCalledWith("task-old", { previousItemId: "task-new" });
+    expect(store.selectItem).toHaveBeenCalledWith("task-old", {
+      previousItemId: "task-new",
+      recordNavigation: false,
+    });
   });
 
   it("navigates task shortcuts in the same order the sidebar renders stage groups", async () => {
@@ -2770,7 +2788,10 @@ describe("App", () => {
 
     capturedKeyboardActions?.navigateDown();
 
-    expect(store.selectItem).toHaveBeenCalledWith("task-pr", { previousItemId: "slot:progress" });
+    expect(store.selectItem).toHaveBeenCalledWith("task-pr", {
+      previousItemId: "slot:progress",
+      recordNavigation: false,
+    });
     expect(store.selectedItemId).toBe("slot:pr");
   });
 
@@ -2819,8 +2840,84 @@ describe("App", () => {
     await capturedKeyboardActions?.navigateDown();
     await flushPromises();
 
-    expect(store.selectRepo).toHaveBeenCalledWith("repo-2");
-    expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "slot:one" });
+    expect(store.selectRepo).toHaveBeenCalledWith("repo-2", {
+      persistWindowSelection: false,
+    });
+    expect(store.selectItem).toHaveBeenCalledWith("task-two", {
+      previousItemId: "slot:one",
+      recordNavigation: false,
+    });
+  });
+
+  it("routes a cross-repo sidebar row click through the atomic selection path", async () => {
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
+    store.items = [
+      {
+        id: "task-one",
+        repo_id: "repo-1",
+        prompt: "Repo one task",
+        stage: "in progress",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:00:00.000Z",
+        updated_at: "2026-04-17T10:00:00.000Z",
+      },
+      {
+        id: "task-two",
+        repo_id: "repo-2",
+        prompt: "Repo two task",
+        stage: "in progress",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:01:00.000Z",
+        updated_at: "2026-04-17T10:01:00.000Z",
+      },
+    ];
+    store.taskUiSlots = [
+      readyTaskSlot("slot:one", store.items[0]),
+      readyTaskSlot("slot:two", store.items[1]),
+    ];
+    store.selectedItemId = "slot:one";
+    store.selectedTaskId = "task-one";
+    store.currentTaskSlot = store.taskUiSlots[0];
+
+    const SidebarRowStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["select-item"],
+      template: `
+        <button
+          v-for="item in taskSlots"
+          :key="item.slot_id"
+          :data-testid="'sidebar-task-' + item.slot_id"
+          @click="$emit('select-item', item.slot_id)"
+        >{{ item.display_name }}</button>
+      `,
+    });
+
+    const wrapper = await mountApp(SidebarRowStub);
+    await wrapper.get('[data-testid="sidebar-task-slot:two"]').trigger("click");
+    await flushPromises();
+
+    expect(store.selectRepo).toHaveBeenCalledWith("repo-2", {
+      persistWindowSelection: false,
+    });
+    expect(store.recordNavigation).toHaveBeenCalledWith("slot:two", "slot:one");
+    expect(store.selectItem).toHaveBeenCalledWith("task-two", {
+      previousItemId: "slot:one",
+      recordNavigation: false,
+    });
+
+    wrapper.unmount();
   });
 
   it("keeps unread task shortcuts scoped to the selected repo before falling back to read tasks", async () => {
@@ -2885,7 +2982,10 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.selectRepo).not.toHaveBeenCalled();
-    expect(store.selectItem).toHaveBeenCalledWith("task-read-oldest");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "task-read-oldest",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
   it("keeps read task shortcuts scoped to the selected repo", async () => {
@@ -2938,7 +3038,299 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.selectRepo).not.toHaveBeenCalled();
-    expect(store.selectItem).toHaveBeenCalledWith("task-current");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "task-current",
+      expect.objectContaining({ recordNavigation: false }),
+    );
+  });
+
+  it("uses the all-repos unread action to select the oldest eligible unread task across visible repos", async () => {
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "current";
+    store.selectedTaskId = "current";
+    store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
+    sidebarSearchQuery.value = "global shortcut";
+    store.items = [
+      {
+        id: "hidden-unread",
+        repo_id: "repo-hidden",
+        prompt: "Global shortcut hidden unread task",
+        stage: "in progress",
+        activity: "unread",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T00:00:00.000Z",
+        updated_at: "2026-04-17T00:00:00.000Z",
+      },
+      {
+        id: "search-filtered-unread",
+        repo_id: "repo-1",
+        prompt: "Older ordinary unread task",
+        stage: "in progress",
+        activity: "unread",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T01:00:00.000Z",
+        updated_at: "2026-04-17T01:00:00.000Z",
+      },
+      {
+        id: "pinned-unread",
+        repo_id: "repo-2",
+        prompt: "Global shortcut pinned unread task",
+        stage: "in progress",
+        activity: "unread",
+        tags: "[]",
+        pinned: 1,
+        pin_order: 0,
+        created_at: "2026-04-17T02:00:00.000Z",
+        updated_at: "2026-04-17T02:00:00.000Z",
+      },
+      {
+        id: "teardown-unread",
+        repo_id: "repo-1",
+        prompt: "Global shortcut teardown unread task",
+        stage: "pr",
+        teardown_started_at: "2026-04-17T03:30:00.000Z",
+        activity: "unread",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T03:00:00.000Z",
+        updated_at: "2026-04-17T03:30:00.000Z",
+      },
+      {
+        id: "target-unread",
+        repo_id: "repo-2",
+        prompt: "Global shortcut target unread task",
+        stage: "in progress",
+        activity: "unread",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T04:00:00.000Z",
+        updated_at: "2026-04-17T04:00:00.000Z",
+      },
+      {
+        id: "later-unread",
+        repo_id: "repo-1",
+        prompt: "Global shortcut later unread task",
+        stage: "in progress",
+        activity: "unread",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T05:00:00.000Z",
+        updated_at: "2026-04-17T05:00:00.000Z",
+      },
+      {
+        id: "current",
+        repo_id: "repo-1",
+        prompt: "Global shortcut current working task",
+        stage: "in progress",
+        activity: "working",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T06:00:00.000Z",
+        updated_at: "2026-04-17T06:00:00.000Z",
+      },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    await capturedKeyboardActions?.goToOldestUnreadAllRepos();
+    await flushPromises();
+
+    expect(store.selectRepo).toHaveBeenCalledWith("repo-2", {
+      persistWindowSelection: false,
+    });
+    expect(store.selectItem).toHaveBeenCalledWith("target-unread", {
+      previousItemId: "current",
+      recordNavigation: false,
+    });
+  });
+
+  it("the all-repos unread action does nothing when the global search result is empty", async () => {
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "current";
+    store.selectedTaskId = "current";
+    store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
+    sidebarSearchQuery.value = "matching target";
+    store.sortedItemsAllRepos = [
+      {
+        id: "unfiltered-unread",
+        repo_id: "repo-2",
+        prompt: "Ordinary unread task",
+        stage: "in progress",
+        activity: "unread",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T00:00:00.000Z",
+        updated_at: "2026-04-17T00:00:00.000Z",
+      },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    await capturedKeyboardActions?.goToOldestUnreadAllRepos();
+    await flushPromises();
+
+    expect(store.selectRepo).not.toHaveBeenCalled();
+    expect(store.selectItem).not.toHaveBeenCalled();
+  });
+
+  it("uses the all-repos unread action to fall back to the oldest eligible read task across visible repos", async () => {
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "current";
+    store.selectedTaskId = "current";
+    store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
+    store.items = [
+      {
+        id: "blocked-read",
+        repo_id: "repo-1",
+        prompt: "Blocked oldest read task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T00:00:00.000Z",
+        updated_at: "2026-04-17T00:00:00.000Z",
+      },
+      {
+        id: "target-read-fallback",
+        repo_id: "repo-2",
+        prompt: "Target read fallback task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T01:00:00.000Z",
+        updated_at: "2026-04-17T01:00:00.000Z",
+      },
+      {
+        id: "current",
+        repo_id: "repo-1",
+        prompt: "Current read task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T02:00:00.000Z",
+        updated_at: "2026-04-17T02:00:00.000Z",
+      },
+      {
+        id: "blocker",
+        repo_id: "repo-1",
+        prompt: "Unresolved blocker",
+        stage: "in progress",
+        activity: "working",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T03:00:00.000Z",
+        updated_at: "2026-04-17T03:00:00.000Z",
+      },
+    ];
+    store.taskBlockers = [
+      { blocked_item_id: "blocked-read", blocker_item_id: "blocker" },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    await capturedKeyboardActions?.goToOldestUnreadAllRepos();
+    await flushPromises();
+
+    expect(store.selectRepo).toHaveBeenCalledWith("repo-2", {
+      persistWindowSelection: false,
+    });
+    expect(store.selectItem).toHaveBeenCalledWith("target-read-fallback", {
+      previousItemId: "current",
+      recordNavigation: false,
+    });
+  });
+
+  it("uses the all-repos read action to select the oldest read task across visible repos", async () => {
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "current";
+    store.selectedTaskId = "current";
+    store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
+    store.items = [
+      {
+        id: "older-working",
+        repo_id: "repo-2",
+        prompt: "Older working task",
+        stage: "in progress",
+        activity: "working",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T00:00:00.000Z",
+        updated_at: "2026-04-17T00:00:00.000Z",
+      },
+      {
+        id: "target-read",
+        repo_id: "repo-2",
+        prompt: "Target oldest read task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T01:00:00.000Z",
+        updated_at: "2026-04-17T01:00:00.000Z",
+      },
+      {
+        id: "current",
+        repo_id: "repo-1",
+        prompt: "Current read task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T02:00:00.000Z",
+        updated_at: "2026-04-17T02:00:00.000Z",
+      },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    await capturedKeyboardActions?.goToOldestReadAllRepos();
+    await flushPromises();
+
+    expect(store.selectRepo).toHaveBeenCalledWith("repo-2", {
+      persistWindowSelection: false,
+    });
+    expect(store.selectItem).toHaveBeenCalledWith("target-read", {
+      previousItemId: "current",
+      recordNavigation: false,
+    });
   });
 
   it.each([
@@ -2968,8 +3360,13 @@ describe("App", () => {
 
     await handler?.({});
 
-    expect(store.selectRepo).toHaveBeenCalledWith("repo-2");
-    expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "task-one" });
+    expect(store.selectRepo).toHaveBeenCalledWith("repo-2", {
+      persistWindowSelection: false,
+    });
+    expect(store.selectItem).toHaveBeenCalledWith("task-two", {
+      previousItemId: "task-one",
+      recordNavigation: false,
+    });
   });
 
   it("skips teardown tasks when navigating to unread tasks", async () => {
@@ -2982,10 +3379,13 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("normal-unread");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "normal-unread",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
-  it("navigates to the absolute oldest and newest unread task", async () => {
+  it("navigates to the absolute oldest unread task", async () => {
     store.currentItem = { id: "current", created_at: "2026-03-31T03:00:00.000Z" };
     store.sortedItemsForCurrentRepo = [
       { id: "unread-oldest", activity: "unread", created_at: "2026-03-31T00:00:00.000Z", tags: "[]" },
@@ -2999,14 +3399,13 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("unread-oldest");
-
-    store.selectItem.mockClear();
-    capturedKeyboardActions?.goToNewestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("unread-newest");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "unread-oldest",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
-  it("skips pinned tasks when navigating to the oldest and newest unread task", async () => {
+  it("skips pinned tasks when navigating to the oldest unread task", async () => {
     store.sortedItemsForCurrentRepo = [
       { id: "pinned-oldest", activity: "unread", created_at: "2026-03-31T00:00:00.000Z", tags: "[]", pinned: 1 },
       { id: "unread-oldest", activity: "unread", created_at: "2026-03-31T01:00:00.000Z", tags: "[]", pinned: 0 },
@@ -3018,11 +3417,10 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("unread-oldest");
-
-    store.selectItem.mockClear();
-    capturedKeyboardActions?.goToNewestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("unread-newest");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "unread-oldest",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
   it("falls back to absolute read tasks when unread shortcut navigation has no unread task", async () => {
@@ -3045,11 +3443,10 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
-
-    store.selectItem.mockClear();
-    capturedKeyboardActions?.goToNewestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "read-oldest",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
   it("skips pinned read tasks when unread shortcut navigation falls back to read tasks", async () => {
@@ -3064,11 +3461,10 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
-
-    store.selectItem.mockClear();
-    capturedKeyboardActions?.goToNewestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
+    expect(store.selectItem).toHaveBeenCalledWith(
+      "read-oldest",
+      expect.objectContaining({ recordNavigation: false }),
+    );
   });
 
   it("reopens the diff modal with the last saved diff view state", async () => {

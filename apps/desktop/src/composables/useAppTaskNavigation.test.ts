@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { SidebarTaskItem } from "../types/taskUi";
 import type { WorkspaceTask } from "../workspace/types";
+import { createNavigationHistory } from "./useNavigationHistory";
 import { useAppTaskNavigation } from "./useAppTaskNavigation";
 
 function deferred() {
@@ -79,6 +80,9 @@ describe("useAppTaskNavigation", () => {
       editBlockedTask: vi.fn(async () => {}),
       loadAgent: vi.fn(),
       createItem: vi.fn(),
+      recordNavigation: vi.fn(),
+      takeBackTarget: vi.fn(),
+      takeForwardTarget: vi.fn(),
     });
     let repoSelectionCount = 0;
     const selectRepo = vi.fn(async (repoId: string) => {
@@ -118,7 +122,9 @@ describe("useAppTaskNavigation", () => {
 
     try {
       const olderNavigation = navigation.navigateItems(1);
-      await vi.waitFor(() => expect(selectRepo).toHaveBeenCalledWith("repo-2"));
+      await vi.waitFor(() => expect(selectRepo).toHaveBeenCalledWith("repo-2", {
+        persistWindowSelection: false,
+      }));
 
       await navigation.navigateItems(-1);
       expect(store.selectedItemId).toBe("task-one");
@@ -126,8 +132,15 @@ describe("useAppTaskNavigation", () => {
       firstRepoSelection.resolve();
       await olderNavigation;
 
-      expect(selectItem).toHaveBeenCalledTimes(1);
-      expect(selectItem).toHaveBeenCalledWith("task-one", { previousItemId: "task-two" });
+      expect(selectItem).toHaveBeenCalledTimes(2);
+      expect(selectItem).toHaveBeenNthCalledWith(1, "task-two", {
+        previousItemId: "task-one",
+        recordNavigation: false,
+      });
+      expect(selectItem).toHaveBeenNthCalledWith(2, "task-one", {
+        previousItemId: "task-two",
+        recordNavigation: false,
+      });
       expect(store.selectedRepoId).toBe("repo-1");
       expect(store.selectedItemId).toBe("task-one");
     } finally {
@@ -213,6 +226,488 @@ describe("useAppTaskNavigation", () => {
       });
     } finally {
       scope.stop();
+    }
+  });
+
+  it("records a remote all-repos target and routes Back and Forward across owners", async () => {
+    const localItem = sidebarTask("slot:local", "repo-local");
+    const remoteItem = {
+      ...sidebarTask("slot:remote", "cloud:repo-remote"),
+      task_id: "cloud-task-remote",
+      activity: "unread" as const,
+      created_at: "2026-07-13T00:00:00.000Z",
+    };
+    const selectedCloudRepoId = ref<string | null>(null);
+    const selectedCloudItemId = ref<string | null>(null);
+    const recordNavigation = vi.fn();
+    const takeBackTarget = vi.fn(() => localItem.slot_id);
+    const takeForwardTarget = vi.fn(() => remoteItem.slot_id);
+    const items = [localItem, remoteItem];
+    const store = reactive({
+      selectedRepoId: localItem.repo_id,
+      selectedItemId: localItem.slot_id as string | null,
+      lastSelectedItemByRepo: {
+        [localItem.repo_id]: localItem.slot_id,
+      } as Record<string, string>,
+      items: [{ ...localItem, id: localItem.task_id }],
+      sortedItemsForCurrentRepo: [],
+      sortedItemsAllRepos: [],
+      taskBlockers: [],
+      currentItem: null,
+      getStageOrder: () => 0,
+      listBlockedByItem: vi.fn(async () => []),
+      listBlockersForItem: vi.fn(async () => []),
+      blockTask: vi.fn(async () => {}),
+      editBlockedTask: vi.fn(async () => {}),
+      loadAgent: vi.fn(),
+      createItem: vi.fn(),
+      recordNavigation,
+      takeBackTarget,
+      takeForwardTarget,
+      selectRepo: vi.fn(async (repoId: string) => {
+        store.selectedRepoId = repoId;
+        store.selectedItemId = store.lastSelectedItemByRepo[repoId] ?? null;
+      }),
+      selectItem: vi.fn(async (itemId: string) => {
+        store.selectedRepoId = localItem.repo_id;
+        store.selectedItemId = itemId;
+        store.lastSelectedItemByRepo[localItem.repo_id] = itemId;
+      }),
+    });
+    const remoteWorkspaceTask = {
+      repoKey: remoteItem.repo_id,
+      item: { id: remoteItem.task_id },
+      localTaskId: null,
+      owner: { kind: "remote", desktopId: "desktop-remote" },
+    } as unknown as WorkspaceTask;
+
+    const scope = effectScope();
+    const navigation = scope.run(() => useAppTaskNavigation({
+      store: store as never,
+      toast: { error: vi.fn() } as never,
+      t: (key) => key,
+      windowWorkspace: { persistSelection: vi.fn(async () => {}) } as never,
+      sidebarRef: ref(null),
+      sidebarRepos: computed(() => [
+        { id: localItem.repo_id },
+        { id: remoteItem.repo_id },
+      ] as never),
+      sidebarItems: computed(() => items),
+      workspaceTasksByItemId: computed(() => new Map([
+        [remoteItem.slot_id, remoteWorkspaceTask],
+        [remoteItem.task_id, remoteWorkspaceTask],
+      ])),
+      selectedCloudRepoId,
+      selectedCloudItemId,
+      showBlockerSelect: ref(false),
+      blockerSelectMode: ref("block"),
+      customTasks: ref([]),
+      openPeerPicker: vi.fn(),
+      openPairPeerPicker: vi.fn(),
+    }));
+    if (!navigation) throw new Error("navigation composable did not initialize");
+
+    try {
+      await navigation.selectUnreadTaskWithReadFallback("allRepos");
+
+      expect(recordNavigation).toHaveBeenCalledWith(remoteItem.slot_id, localItem.slot_id);
+      expect(selectedCloudItemId.value).toBe(remoteItem.slot_id);
+      expect(store.selectedRepoId).toBe(remoteItem.repo_id);
+
+      await navigation.navigateBack();
+
+      expect(takeBackTarget).toHaveBeenCalledWith(
+        remoteItem.slot_id,
+        new Set([localItem.slot_id, remoteItem.slot_id]),
+      );
+      expect(store.selectedRepoId).toBe(localItem.repo_id);
+      expect(store.selectedItemId).toBe(localItem.slot_id);
+
+      await navigation.navigateForward();
+
+      expect(takeForwardTarget).toHaveBeenCalledWith(
+        localItem.slot_id,
+        new Set([localItem.slot_id, remoteItem.slot_id]),
+      );
+      expect(selectedCloudItemId.value).toBe(remoteItem.slot_id);
+      expect(recordNavigation).toHaveBeenCalledTimes(1);
+    } finally {
+      scope.stop();
+    }
+  });
+
+  it("does not overwrite a remote task selection when its repo has a local key", async () => {
+    const repoPersistence = deferred();
+    const localItem = sidebarTask("slot:local", "repo-local");
+    const remoteItem = {
+      ...sidebarTask("slot:remote", "repo-mixed"),
+      task_id: "remote-task-durable",
+      activity: "unread" as const,
+      created_at: "2026-07-13T00:00:00.000Z",
+    };
+    const persistSelection = vi.fn(async () => {});
+    const store = reactive({
+      selectedRepoId: localItem.repo_id,
+      selectedItemId: localItem.slot_id as string | null,
+      lastSelectedItemByRepo: {
+        [localItem.repo_id]: localItem.slot_id,
+      } as Record<string, string>,
+      items: [{ ...localItem, id: localItem.task_id }],
+      sortedItemsForCurrentRepo: [],
+      sortedItemsAllRepos: [],
+      taskBlockers: [],
+      currentItem: null,
+      getStageOrder: () => 0,
+      listBlockedByItem: vi.fn(async () => []),
+      listBlockersForItem: vi.fn(async () => []),
+      blockTask: vi.fn(async () => {}),
+      editBlockedTask: vi.fn(async () => {}),
+      loadAgent: vi.fn(),
+      createItem: vi.fn(),
+      recordNavigation: vi.fn(),
+      takeBackTarget: vi.fn(),
+      takeForwardTarget: vi.fn(),
+      selectItem: vi.fn(async () => {}),
+    });
+    const selectRepo = vi.fn(async (
+      repoId: string,
+      options?: { persistWindowSelection?: boolean },
+    ) => {
+      store.selectedRepoId = repoId;
+      store.selectedItemId = null;
+      await repoPersistence.promise;
+      if (options?.persistWindowSelection !== false) {
+        await persistSelection({
+          selectedRepoId: repoId,
+          selectedItemId: null,
+        });
+      }
+    });
+    Object.assign(store, { selectRepo });
+    const remoteWorkspaceTask = {
+      repoKey: remoteItem.repo_id,
+      item: { id: remoteItem.task_id },
+      localTaskId: null,
+      owner: { kind: "remote", desktopId: "desktop-remote" },
+    } as unknown as WorkspaceTask;
+
+    const scope = effectScope();
+    const navigation = scope.run(() => useAppTaskNavigation({
+      store: store as never,
+      toast: { error: vi.fn() } as never,
+      t: (key) => key,
+      windowWorkspace: { persistSelection } as never,
+      sidebarRef: ref(null),
+      sidebarRepos: computed(() => [
+        { id: localItem.repo_id },
+        { id: remoteItem.repo_id },
+      ] as never),
+      sidebarItems: computed(() => [localItem, remoteItem]),
+      workspaceTasksByItemId: computed(() => new Map([
+        [remoteItem.slot_id, remoteWorkspaceTask],
+        [remoteItem.task_id, remoteWorkspaceTask],
+      ])),
+      selectedCloudRepoId: ref(null),
+      selectedCloudItemId: ref(null),
+      showBlockerSelect: ref(false),
+      blockerSelectMode: ref("block"),
+      customTasks: ref([]),
+      openPeerPicker: vi.fn(),
+      openPairPeerPicker: vi.fn(),
+    }));
+    if (!navigation) throw new Error("navigation composable did not initialize");
+
+    try {
+      const switching = navigation.selectUnreadTaskWithReadFallback("allRepos");
+      await vi.waitFor(() => expect(persistSelection).toHaveBeenCalledWith({
+        selectedRepoId: remoteItem.repo_id,
+        selectedItemId: remoteItem.task_id,
+      }));
+      repoPersistence.resolve();
+      await switching;
+
+      expect(selectRepo).toHaveBeenCalledWith(remoteItem.repo_id, {
+        persistWindowSelection: false,
+      });
+      expect(persistSelection).toHaveBeenCalledTimes(1);
+    } finally {
+      repoPersistence.resolve();
+      scope.stop();
+    }
+  });
+
+  it("records repo-arrow navigation before persistence so Back can cancel it", async () => {
+    vi.useFakeTimers();
+    const repoPersistence = deferred();
+    const items = [sidebarTask("task-one", "repo-1"), sidebarTask("task-two", "repo-2")];
+    const history = createNavigationHistory();
+    const store = reactive({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-one" as string | null,
+      lastSelectedItemByRepo: {
+        "repo-1": "task-one",
+        "repo-2": "task-two",
+      } as Record<string, string>,
+      items: items.map((item) => ({ ...item, id: item.task_id })),
+      sortedItemsForCurrentRepo: [],
+      sortedItemsAllRepos: [],
+      taskBlockers: [],
+      currentItem: null,
+      getStageOrder: () => 0,
+      listBlockedByItem: vi.fn(async () => []),
+      listBlockersForItem: vi.fn(async () => []),
+      blockTask: vi.fn(async () => {}),
+      editBlockedTask: vi.fn(async () => {}),
+      loadAgent: vi.fn(),
+      createItem: vi.fn(),
+      recordNavigation: (newItemId: string, previousItemId: string | null) =>
+        history.select(newItemId, previousItemId),
+      takeBackTarget: (currentItemId: string, validItemIds?: Set<string>) =>
+        history.goBack(currentItemId, validItemIds),
+      takeForwardTarget: (currentItemId: string, validItemIds?: Set<string>) =>
+        history.goForward(currentItemId, validItemIds),
+    });
+    const selectRepo = vi.fn(async (repoId: string) => {
+      store.selectedRepoId = repoId;
+      store.selectedItemId = store.lastSelectedItemByRepo[repoId] ?? null;
+      if (repoId === "repo-2") await repoPersistence.promise;
+    });
+    const selectItem = vi.fn(async (itemId: string) => {
+      const item = items.find((candidate) => candidate.slot_id === itemId);
+      if (!item) return;
+      store.selectedRepoId = item.repo_id;
+      store.selectedItemId = item.slot_id;
+      store.lastSelectedItemByRepo[item.repo_id] = item.slot_id;
+    });
+    Object.assign(store, { selectRepo, selectItem });
+
+    const scope = effectScope();
+    const navigation = scope.run(() => useAppTaskNavigation({
+      store: store as never,
+      toast: { error: vi.fn() } as never,
+      t: (key) => key,
+      windowWorkspace: { persistSelection: vi.fn(async () => {}) } as never,
+      sidebarRef: ref(null),
+      sidebarRepos: computed(() => [
+        { id: "repo-1" },
+        { id: "repo-2" },
+      ] as never),
+      sidebarItems: computed(() => items),
+      workspaceTasksByItemId: computed(() => new Map()),
+      selectedCloudRepoId: ref(null),
+      selectedCloudItemId: ref(null),
+      showBlockerSelect: ref(false),
+      blockerSelectMode: ref("block"),
+      customTasks: ref([]),
+      openPeerPicker: vi.fn(),
+      openPairPeerPicker: vi.fn(),
+    }));
+    if (!navigation) throw new Error("navigation composable did not initialize");
+
+    try {
+      await vi.advanceTimersByTimeAsync(1001);
+      const repoNavigation = navigation.navigateRepos(1);
+      await Promise.resolve();
+
+      await navigation.navigateBack();
+      expect(store.selectedRepoId).toBe("repo-1");
+      expect(store.selectedItemId).toBe("task-one");
+
+      repoPersistence.resolve();
+      await repoNavigation;
+    } finally {
+      repoPersistence.resolve();
+      scope.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("records a cross-repo transition before persistence so Back can cancel it", async () => {
+    vi.useFakeTimers();
+    const firstRepoSelection = deferred();
+    const items = [sidebarTask("task-one", "repo-1"), sidebarTask("task-two", "repo-2")];
+    const history = createNavigationHistory();
+    const store = reactive({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-one" as string | null,
+      lastSelectedItemByRepo: {
+        "repo-1": "task-one",
+        "repo-2": "task-two",
+      } as Record<string, string>,
+      items: items.map((item) => ({ ...item, id: item.task_id })),
+      sortedItemsForCurrentRepo: [],
+      sortedItemsAllRepos: [],
+      taskBlockers: [],
+      currentItem: null,
+      getStageOrder: () => 0,
+      listBlockedByItem: vi.fn(async () => []),
+      listBlockersForItem: vi.fn(async () => []),
+      blockTask: vi.fn(async () => {}),
+      editBlockedTask: vi.fn(async () => {}),
+      loadAgent: vi.fn(),
+      createItem: vi.fn(),
+      recordNavigation: (newItemId: string, previousItemId: string | null) =>
+        history.select(newItemId, previousItemId),
+      takeBackTarget: (currentItemId: string, validItemIds?: Set<string>) =>
+        history.goBack(currentItemId, validItemIds),
+      takeForwardTarget: (currentItemId: string, validItemIds?: Set<string>) =>
+        history.goForward(currentItemId, validItemIds),
+    });
+    let repoSelectionCount = 0;
+    const selectRepo = vi.fn(async (repoId: string) => {
+      repoSelectionCount += 1;
+      store.selectedRepoId = repoId;
+      store.selectedItemId = store.lastSelectedItemByRepo[repoId] ?? null;
+      if (repoSelectionCount === 1) await firstRepoSelection.promise;
+    });
+    const selectItem = vi.fn(async (itemId: string) => {
+      store.selectedItemId = itemId;
+      store.selectedRepoId = items.find((item) => item.slot_id === itemId)?.repo_id ?? store.selectedRepoId;
+    });
+    Object.assign(store, { selectRepo, selectItem });
+
+    const scope = effectScope();
+    const navigation = scope.run(() => useAppTaskNavigation({
+      store: store as never,
+      toast: { error: vi.fn() } as never,
+      t: (key) => key,
+      windowWorkspace: { persistSelection: vi.fn(async () => {}) } as never,
+      sidebarRef: ref(null),
+      sidebarRepos: computed(() => [
+        { id: "repo-1" },
+        { id: "repo-2" },
+      ] as never),
+      sidebarItems: computed(() => items),
+      workspaceTasksByItemId: computed(() => new Map()),
+      selectedCloudRepoId: ref(null),
+      selectedCloudItemId: ref(null),
+      showBlockerSelect: ref(false),
+      blockerSelectMode: ref("block"),
+      customTasks: ref([]),
+      openPeerPicker: vi.fn(),
+      openPairPeerPicker: vi.fn(),
+    }));
+    if (!navigation) throw new Error("navigation composable did not initialize");
+
+    try {
+      await vi.advanceTimersByTimeAsync(1001);
+      const olderNavigation = navigation.navigateItems(1);
+      expect(selectRepo).toHaveBeenCalledWith("repo-2", {
+        persistWindowSelection: false,
+      });
+
+      await navigation.navigateBack();
+      expect(store.selectedRepoId).toBe("repo-1");
+      expect(store.selectedItemId).toBe("task-one");
+
+      firstRepoSelection.resolve();
+      await olderNavigation;
+
+      expect(selectItem).toHaveBeenCalledTimes(2);
+      expect(selectItem).toHaveBeenNthCalledWith(1, "task-two", expect.objectContaining({
+        previousItemId: "task-one",
+      }));
+      expect(selectItem).toHaveBeenNthCalledWith(2, "task-one", expect.objectContaining({
+        previousItemId: "task-two",
+      }));
+    } finally {
+      firstRepoSelection.resolve();
+      scope.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies a cross-repo Back target before persistence so Forward remains coherent", async () => {
+    vi.useFakeTimers();
+    const backRepoPersistence = deferred();
+    const items = [sidebarTask("task-one", "repo-1"), sidebarTask("task-two", "repo-2")];
+    const history = createNavigationHistory();
+    const store = reactive({
+      selectedRepoId: "repo-2",
+      selectedItemId: "task-two" as string | null,
+      lastSelectedItemByRepo: {
+        "repo-2": "task-two",
+      } as Record<string, string>,
+      items: items.map((item) => ({ ...item, id: item.task_id })),
+      sortedItemsForCurrentRepo: [],
+      sortedItemsAllRepos: [],
+      taskBlockers: [],
+      currentItem: null,
+      getStageOrder: () => 0,
+      listBlockedByItem: vi.fn(async () => []),
+      listBlockersForItem: vi.fn(async () => []),
+      blockTask: vi.fn(async () => {}),
+      editBlockedTask: vi.fn(async () => {}),
+      loadAgent: vi.fn(),
+      createItem: vi.fn(),
+      recordNavigation: (newItemId: string, previousItemId: string | null) =>
+        history.select(newItemId, previousItemId),
+      takeBackTarget: (currentItemId: string, validItemIds?: Set<string>) =>
+        history.goBack(currentItemId, validItemIds),
+      takeForwardTarget: (currentItemId: string, validItemIds?: Set<string>) =>
+        history.goForward(currentItemId, validItemIds),
+    });
+    const selectRepo = vi.fn(async (repoId: string) => {
+      store.selectedRepoId = repoId;
+      store.selectedItemId = store.lastSelectedItemByRepo[repoId] ?? null;
+      if (repoId === "repo-1") await backRepoPersistence.promise;
+    });
+    const selectItem = vi.fn(async (itemId: string) => {
+      const item = items.find((candidate) => candidate.slot_id === itemId);
+      if (!item) return;
+      store.selectedRepoId = item.repo_id;
+      store.selectedItemId = item.slot_id;
+      store.lastSelectedItemByRepo[item.repo_id] = item.slot_id;
+    });
+    Object.assign(store, { selectRepo, selectItem });
+
+    const scope = effectScope();
+    const navigation = scope.run(() => useAppTaskNavigation({
+      store: store as never,
+      toast: { error: vi.fn() } as never,
+      t: (key) => key,
+      windowWorkspace: { persistSelection: vi.fn(async () => {}) } as never,
+      sidebarRef: ref(null),
+      sidebarRepos: computed(() => [
+        { id: "repo-1" },
+        { id: "repo-2" },
+      ] as never),
+      sidebarItems: computed(() => items),
+      workspaceTasksByItemId: computed(() => new Map()),
+      selectedCloudRepoId: ref(null),
+      selectedCloudItemId: ref(null),
+      showBlockerSelect: ref(false),
+      blockerSelectMode: ref("block"),
+      customTasks: ref([]),
+      openPeerPicker: vi.fn(),
+      openPairPeerPicker: vi.fn(),
+    }));
+    if (!navigation) throw new Error("navigation composable did not initialize");
+
+    try {
+      await vi.advanceTimersByTimeAsync(1001);
+      history.select("task-two", "task-one");
+
+      const olderBack = navigation.navigateBack();
+      expect(store.selectedRepoId).toBe("repo-1");
+      expect(store.selectedItemId).toBe("task-one");
+
+      await navigation.navigateForward();
+      expect(store.selectedRepoId).toBe("repo-2");
+      expect(store.selectedItemId).toBe("task-two");
+
+      backRepoPersistence.resolve();
+      await olderBack;
+      expect(store.selectedRepoId).toBe("repo-2");
+      expect(store.selectedItemId).toBe("task-two");
+
+      await navigation.navigateBack();
+      expect(store.selectedRepoId).toBe("repo-1");
+      expect(store.selectedItemId).toBe("task-one");
+    } finally {
+      backRepoPersistence.resolve();
+      scope.stop();
+      vi.useRealTimers();
     }
   });
 });

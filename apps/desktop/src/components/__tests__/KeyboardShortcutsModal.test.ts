@@ -49,7 +49,9 @@ describe("KeyboardShortcutsModal", () => {
     expect(entryAt("1", "12")).toBe("shortcuts.closeWindow⌘W");
     expect(entryAt("1", "13")).toBe("shortcuts.toggleSidebar⌘B");
     expect(entryAt("1", "16")).toBe("shortcuts.preferences⌘,");
+    expect(entryAt("2", "9")).toBe("shortcuts.oldestUnreadAllRepos⇧⌘U");
     expect(entryAt("2", "10")).toBe("shortcuts.oldestRead⌘R");
+    expect(entryAt("2", "11")).toBe("shortcuts.oldestReadAllRepos⇧⌘R");
     expect(entryAt("3", "8")).toBe("shortcuts.openLatestAgentFile⌘L");
     expect(entryAt("3", "11")).toBe("shortcuts.treeExplorer⇧⌘E");
     expect(entryAt("3", "12")).toBe("shortcuts.viewDiff⌘D");

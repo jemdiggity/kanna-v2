@@ -1263,6 +1263,78 @@ describe("createInitApi", () => {
     expect(services.reloadSnapshot).toHaveBeenCalled();
     expect(state.selectedItemId.value).toBe("create:stable-current");
   });
+
+  it("does not restore stale focus when selection changes during a KSP refresh", async () => {
+    mockState.tauri = true;
+    const previousTask = mockState.makeItem({ id: "task-previous" });
+    const newerTask = mockState.makeItem({ id: "task-newer" });
+    const previousSlot = makeReadyTaskSlot(previousTask, "create:stable-previous");
+    const newerSlot = makeReadyTaskSlot(newerTask, "create:stable-newer");
+
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [previousTask, newerTask];
+    state.taskUiSlots.value = [previousSlot, newerSlot];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = previousSlot.slot_id;
+
+    let finishRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const currentTaskSlot = computed(() =>
+      state.taskUiSlots.value.find((slot) => slot.slot_id === state.selectedItemId.value) ?? null,
+    );
+    const restoreSelection = vi.fn((taskId: string) => {
+      const slot = state.taskUiSlots.value.find((candidate) => candidate.task_id === taskId);
+      state.selectedItemId.value = slot?.slot_id ?? null;
+    });
+    const reloadSnapshot = vi.fn(async () => {
+      await refreshGate;
+    });
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      selectedTaskId: computed(() => currentTaskSlot.value?.task_id ?? null),
+      currentTaskSlot,
+      currentItem: computed(() => currentTaskSlot.value?.task ?? null),
+      restoreSelection,
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+      windowWorkspace: {
+        onSharedInvalidation: vi.fn(async () => () => undefined),
+        persistSelection: vi.fn(async () => {}),
+      },
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const initApi = createInitApi(context, {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+    await flushAsync();
+
+    mockState.stateChangedListeners[0]("settings");
+    await vi.waitFor(() => expect(reloadSnapshot).toHaveBeenCalledTimes(1));
+
+    state.selectedItemId.value = newerSlot.slot_id;
+    finishRefresh();
+    await flushAsync();
+
+    expect(restoreSelection).not.toHaveBeenCalled();
+    expect(state.selectedItemId.value).toBe(newerSlot.slot_id);
+  });
 });
 
 describe("Markdown preview mode settings", () => {

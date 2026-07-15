@@ -94,9 +94,9 @@
     "dismiss": "Dismiss",
     "treeExplorer": "Tree Explorer",
     "oldestUnread": "Oldest Unread Task",
-    "newestUnread": "Newest Unread Task",
+    "oldestUnreadAllRepos": "Oldest Unread Task Across Repos",
     "oldestRead": "Oldest Read Task",
-    "newestRead": "Newest Read Task",
+    "oldestReadAllRepos": "Oldest Read Task Across Repos",
     "focusSearch": "Search"
   },
   "shortcutContexts": {

@@ -73,9 +73,9 @@ describe("getShortcutGroups", () => {
       "shortcuts.goBack",
       "shortcuts.goForward",
       "shortcuts.oldestUnread",
-      "shortcuts.newestUnread",
+      "shortcuts.oldestUnreadAllRepos",
       "shortcuts.oldestRead",
-      "shortcuts.newestRead",
+      "shortcuts.oldestReadAllRepos",
     ]);
 
     expect([...groupMap["shortcuts.groupOpenInspect"]].sort()).toEqual([
@@ -227,9 +227,9 @@ describe("useKeyboardShortcuts", () => {
     "nextTab",
     "focusSearch",
     "goToOldestUnread",
-    "goToNewestUnread",
+    "goToOldestUnreadAllRepos",
     "goToOldestRead",
-    "goToNewestRead",
+    "goToOldestReadAllRepos",
   ];
 
   function buildActions(): KeyboardActions {
@@ -246,6 +246,32 @@ describe("useKeyboardShortcuts", () => {
 
     return mount(Harness);
   }
+
+  it.each([
+    { key: "U", action: "goToOldestUnreadAllRepos" as const, labelKey: "shortcuts.oldestUnreadAllRepos" },
+    { key: "R", action: "goToOldestReadAllRepos" as const, labelKey: "shortcuts.oldestReadAllRepos" },
+  ])("maps Shift+Command+$key to $action", ({ key, action, labelKey }) => {
+    expect(shortcuts.find((shortcut) => shortcut.action === action)).toMatchObject({
+      action,
+      labelKey,
+      key: [key, key.toLowerCase()],
+      meta: true,
+      shift: true,
+    });
+
+    const actions = buildActions();
+    const wrapper = mountShortcutHarness(actions, () => "main");
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key,
+      metaKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    }));
+
+    expect(actions[action]).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
 
   it("allows opening the file picker from the diff modal context", () => {
     const actions = buildActions();

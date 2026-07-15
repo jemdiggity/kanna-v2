@@ -117,10 +117,9 @@ All frontend; the engine needs nothing new.
   supplementary shortcuts in the `diff` context (so `⌘/` lists them):
   - **`⌘S` approve** — the existing `advanceStage` action, context
     extended to `diff`. Advancing *is* approving; one meaning, one chord.
-  - **`⇧⌘S` request changes** — the shift-variant of `⌘S`, matching the
-    app's existing shift-pair convention (`⌘U`/`⇧⌘U`, `⌘R`/`⇧⌘R`):
-    same axis, opposite direction — send the task back down. Opens the
-    summary composer with the pending comments listed, `⌘Enter` sends.
+  - **`⇧⌘S` request changes** — the shifted counterpart to `⌘S`: send the
+    task back down. Opens the summary composer with the pending comments
+    listed; `⌘Enter` sends.
   - **`c` toggle comment drawer** — the only free single letter that
     reads as "comments"; drawer entries jump on click/Enter.
   - **Composer keys**: `⌘Enter` submits (the NewTaskModal convention),
