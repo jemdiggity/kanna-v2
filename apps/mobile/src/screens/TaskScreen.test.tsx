@@ -106,6 +106,7 @@ interface ElementNode {
 
 interface RenderTaskScreenOptions {
   agentType: "agent" | "pty";
+  taskId?: string;
   terminalDims?: { cols: number | null; rows: number | null };
   e2eTaskSnapshotMarker?: string;
   activity?: "idle" | "working" | "unread";
@@ -438,6 +439,68 @@ describe("TaskScreen", () => {
       "SGTM. Proceed.\n\nAlso add regression tests."
     );
     expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
+  });
+
+  it("uses the current draft when a pending quick reply is selected", () => {
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "Initial detail."
+    });
+    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    const input = findByTestId(tree, "mobile.task-input");
+    (sendButton?.props?.onLongPress as (() => void))();
+    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
+      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    ) => void;
+
+    (input?.props?.onChangeText as ((value: string) => void))("Latest detail.");
+    onSelect(TASK_QUICK_REPLIES[0]!);
+
+    expect(componentMocks.onSendInput).toHaveBeenCalledWith(
+      "SGTM. Proceed.\n\nLatest detail."
+    );
+    expect(componentMocks.draftSetter).toHaveBeenLastCalledWith("");
+  });
+
+  it("ignores a pending quick reply after the composer becomes unavailable", () => {
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "Keep this draft."
+    });
+    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    (sendButton?.props?.onLongPress as (() => void))();
+    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
+      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    ) => void;
+
+    renderTaskScreen({
+      agentType: "agent",
+      agentStatus: "error",
+      draftInput: "Keep this draft."
+    });
+    onSelect(TASK_QUICK_REPLIES[0]!);
+
+    expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+    expect(componentMocks.draftSetter).not.toHaveBeenCalled();
+  });
+
+  it("ignores a pending quick reply after the selected task changes", () => {
+    const tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "Task one detail.",
+      taskId: "task-1"
+    });
+    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    (sendButton?.props?.onLongPress as (() => void))();
+    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
+      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    ) => void;
+
+    renderTaskScreen({ agentType: "agent", taskId: "task-2" });
+    onSelect(TASK_QUICK_REPLIES[0]!);
+
+    expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+    expect(componentMocks.draftSetter).not.toHaveBeenCalled();
   });
 
   it.each([

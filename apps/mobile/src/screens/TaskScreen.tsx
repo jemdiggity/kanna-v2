@@ -17,10 +17,7 @@ import { TerminalWebView } from "./TerminalWebView";
 import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
 import { showTaskQuickReplyMenu } from "./taskQuickReplyMenu";
-import {
-  buildTaskQuickReply,
-  type TaskQuickReply
-} from "./taskQuickReplies";
+import { buildTaskQuickReply } from "./taskQuickReplies";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
 import { getTerminalBottomInset } from "./terminalSafeArea";
 
@@ -104,23 +101,53 @@ export function TaskScreen({
     ? agentStatus === "connecting" || agentStatus === "error"
     : model.isComposerDisabled;
   const terminalBottomInset = getTerminalBottomInset(screenHeight, composerTop);
+  const composerSnapshotRef = useRef({
+    taskId: task.id,
+    draftInput,
+    isComposerDisabled,
+    onSendInput
+  });
+  composerSnapshotRef.current = {
+    taskId: task.id,
+    draftInput,
+    isComposerDisabled,
+    onSendInput
+  };
+  const updateDraftInput = (nextDraftInput: string) => {
+    composerSnapshotRef.current.draftInput = nextDraftInput;
+    setDraftInput(nextDraftInput);
+  };
+  const clearDraftInput = () => {
+    composerSnapshotRef.current.draftInput = "";
+    setDraftInput("");
+  };
   const submitInput = (input: string) => {
+    const snapshot = composerSnapshotRef.current;
     const nextInput = input.trim();
-    if (!nextInput || isComposerDisabled) {
+    if (!nextInput || snapshot.isComposerDisabled) {
       return;
     }
 
-    onSendInput(nextInput);
-    setDraftInput("");
+    snapshot.onSendInput(nextInput);
+    clearDraftInput();
   };
-  const sendDraftInput = () => submitInput(draftInput);
-  const sendQuickReply = (quickReply: TaskQuickReply) => {
-    submitInput(buildTaskQuickReply(quickReply, draftInput));
-  };
+  const sendDraftInput = () => submitInput(composerSnapshotRef.current.draftInput);
   const openQuickReplyMenu = () => {
-    if (!isComposerDisabled) {
-      showTaskQuickReplyMenu(sendQuickReply);
+    const openedTaskId = composerSnapshotRef.current.taskId;
+    if (composerSnapshotRef.current.isComposerDisabled) {
+      return;
     }
+
+    showTaskQuickReplyMenu((quickReply) => {
+      const currentSnapshot = composerSnapshotRef.current;
+      if (
+        currentSnapshot.taskId !== openedTaskId ||
+        currentSnapshot.isComposerDisabled
+      ) {
+        return;
+      }
+      submitInput(buildTaskQuickReply(quickReply, currentSnapshot.draftInput));
+    });
   };
 
   useEffect(() => {
@@ -132,6 +159,7 @@ export function TaskScreen({
     });
 
     return () => {
+      composerSnapshotRef.current.isComposerDisabled = true;
       showSubscription.remove();
       hideSubscription.remove();
     };
@@ -235,7 +263,7 @@ export function TaskScreen({
           <TextInput
             {...TASK_COMPOSER_TEXT_INPUT_PROPS}
             editable={!isComposerDisabled}
-            onChangeText={setDraftInput}
+            onChangeText={updateDraftInput}
             placeholder="Reply…"
             placeholderTextColor="#6F89AE"
             style={[styles.inputField, isComposerDisabled ? styles.inputFieldDisabled : null]}
