@@ -217,7 +217,16 @@ function parsePendingTaskCreation(value: unknown): PendingTaskCreation | null {
     repoId: candidate.repoId,
     prompt: candidate.prompt,
     desktopId: candidate.desktopId,
-    agentProvider: candidate.agentProvider
+    agentProvider: candidate.agentProvider,
+    ...(Number.isInteger(candidate.terminalCols) &&
+    Number.isInteger(candidate.terminalRows) &&
+    (candidate.terminalCols ?? 0) > 0 &&
+    (candidate.terminalRows ?? 0) > 0
+      ? {
+          terminalCols: candidate.terminalCols,
+          terminalRows: candidate.terminalRows
+        }
+      : {})
   };
 }
 

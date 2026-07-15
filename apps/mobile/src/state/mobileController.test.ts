@@ -2203,7 +2203,9 @@ describe("createMobileController", () => {
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
       agentProvider: "claude",
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 80,
+      terminalRows: 48
     });
 
     pendingCreate.resolve({
@@ -2322,7 +2324,9 @@ describe("createMobileController", () => {
         prompt: "Persist before either request",
         desktopId: "desktop-1",
         agentProvider: "claude",
-        agentType: "pty"
+        agentType: "pty",
+        terminalCols: 80,
+        terminalRows: 48
       });
     }
 
@@ -2396,7 +2400,7 @@ describe("createMobileController", () => {
     store.selectRepo("repo-2");
     controller.openComposer();
     controller.updateComposerPrompt("Recover exactly once");
-    void controller.createTask();
+    void controller.createTask({ cols: 120, rows: 70 });
     await flushMicrotasks();
 
     controller.backgroundTaskCreation();
@@ -2408,7 +2412,9 @@ describe("createMobileController", () => {
         repoId: "repo-2",
         prompt: "Recover exactly once",
         desktopId: "desktop-1",
-        agentProvider: "claude"
+        agentProvider: "claude",
+        terminalCols: 120,
+        terminalRows: 70
       }
     });
 
@@ -2424,7 +2430,9 @@ describe("createMobileController", () => {
       prompt: "Recover exactly once",
       desktopId: "desktop-1",
       agentProvider: "claude",
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 120,
+      terminalRows: 70
     });
     expect(store.getState().taskCreationPhase).toBe("recovering");
 
@@ -2509,7 +2517,9 @@ describe("createMobileController", () => {
       prompt: pendingTaskCreation.prompt,
       desktopId: pendingTaskCreation.desktopId,
       agentProvider: pendingTaskCreation.agentProvider,
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 80,
+      terminalRows: 48
     });
     expect(store.getState()).toMatchObject({
       isComposerOpen: false,
@@ -3004,7 +3014,9 @@ describe("createMobileController", () => {
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
       agentProvider: "copilot",
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 80,
+      terminalRows: 48
     });
   });
 
@@ -3091,7 +3103,9 @@ describe("createMobileController", () => {
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
       agentProvider: "opencode",
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 80,
+      terminalRows: 48
     });
   });
 
@@ -3174,7 +3188,7 @@ describe("createMobileController", () => {
     controller.selectComposerDesktop("desktop-2");
     controller.selectComposerAgentProvider("codex");
 
-    await controller.createTask();
+    await controller.createTask({ cols: 104, rows: 72 });
 
     expect(client.createTask).toHaveBeenCalledWith({
       taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
@@ -3182,7 +3196,9 @@ describe("createMobileController", () => {
       prompt: "Ship mobile shell",
       desktopId: "desktop-2",
       agentProvider: "codex",
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 104,
+      terminalRows: 72
     });
     expect(store.getState().repoCreationProfiles).toEqual([
       expect.objectContaining({
@@ -3260,7 +3276,9 @@ describe("createMobileController", () => {
       prompt: "Ship mobile shell",
       desktopId: "desktop-2",
       agentProvider: "codex",
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 80,
+      terminalRows: 48
     });
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
@@ -3350,7 +3368,9 @@ describe("createMobileController", () => {
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
       agentProvider: "claude",
-      agentType: "pty"
+      agentType: "pty",
+      terminalCols: 80,
+      terminalRows: 48
     });
     expect(store.getState()).toMatchObject({
       connectionState: "connected",

@@ -24,7 +24,9 @@ describe("createSessionPersistence", () => {
       repoId: "repo-1",
       prompt: "Add durable mobile task recovery",
       desktopId: "desktop-e2e",
-      agentProvider: "codex" as const
+      agentProvider: "codex" as const,
+      terminalCols: 120,
+      terminalRows: 70
     };
 
     await persistence.save({

@@ -175,7 +175,9 @@ describe("createLanTransport", () => {
     await expect(transport.createTask({
       repoId: "repo-1",
       prompt: "Ship it",
-      desktopId: "desktop-ignored"
+      desktopId: "desktop-ignored",
+      terminalCols: 80,
+      terminalRows: 48
     })).resolves.toEqual({
       taskId: "task-1",
       repoId: "repo-1",
@@ -214,7 +216,9 @@ describe("createLanTransport", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           repoId: "repo-1",
-          prompt: "Ship it"
+          prompt: "Ship it",
+          terminalCols: 80,
+          terminalRows: 48
         })
       }
     );

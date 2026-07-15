@@ -202,6 +202,8 @@ async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() 
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("agent".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,

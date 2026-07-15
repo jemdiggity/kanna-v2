@@ -106,6 +106,8 @@ pub struct CreateTaskRequest {
     pub agent: Option<String>,
     pub agent_provider: Option<String>,
     pub agent_type: Option<String>,
+    pub terminal_cols: Option<u16>,
+    pub terminal_rows: Option<u16>,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
@@ -622,12 +624,16 @@ mod tests {
             "prompt": "Build the view",
             "displayName": "Short task title",
             "agentProvider": "claude",
-            "agentType": "agent"
+            "agentType": "agent",
+            "terminalCols": 104,
+            "terminalRows": 72
         }))
         .unwrap();
 
         assert_eq!(request.display_name.as_deref(), Some("Short task title"));
         assert_eq!(request.agent_type.as_deref(), Some("agent"));
+        assert_eq!(request.terminal_cols, Some(104));
+        assert_eq!(request.terminal_rows, Some(72));
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             json!({
@@ -640,6 +646,8 @@ mod tests {
                 "agent": null,
                 "agentProvider": "claude",
                 "agentType": "agent",
+                "terminalCols": 104,
+                "terminalRows": 72,
                 "model": null,
                 "permissionMode": null,
                 "allowedTools": null,

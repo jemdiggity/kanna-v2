@@ -8,6 +8,7 @@ import React, {
 import {
   AppState,
   type AppStateStatus,
+  type LayoutChangeEvent,
   SafeAreaView,
   StyleSheet,
   Text,
@@ -24,6 +25,7 @@ import {
   shouldCheckForOtaUpdateOnForeground
 } from "./appLifecycle";
 import { createAppModel, resolveForceCloud, type AppModel } from "./appModel";
+import { resolveMobileTerminalGeometry } from "./mobileTerminalGeometry";
 import { AccountBadge } from "./components/AccountBadge";
 import { AccountSheet } from "./components/AccountSheet";
 import { FloatingToolbar } from "./components/FloatingToolbar";
@@ -70,6 +72,10 @@ export default function App() {
   );
   const lastOtaCheckAtRef = useRef<number | null>(null);
   const hasDownloadedUpdateRef = useRef(false);
+  const taskDetailViewportRef = useRef<{
+    width: number;
+    height: number;
+  } | null>(null);
   const selectedTask =
     state.repoTasks.find((task) => task.id === state.selectedTaskId) ??
     state.recentTasks.find((task) => task.id === state.selectedTaskId) ??
@@ -274,7 +280,13 @@ export default function App() {
     <SafeAreaView style={styles.safeArea} testID={MOBILE_E2E_IDS.appShell}>
       <View style={styles.backgroundGlow} />
       <View style={styles.backgroundOrb} />
-      <View style={[styles.shell, taskDetailVisible ? styles.shellTaskDetail : null]}>
+      <View
+        style={[styles.shell, taskDetailVisible ? styles.shellTaskDetail : null]}
+        onLayout={(event: LayoutChangeEvent) => {
+          const { width, height } = event.nativeEvent.layout;
+          taskDetailViewportRef.current = { width, height };
+        }}
+      >
         {state.errorMessage && state.connectionState === "connected" && !taskDetailVisible ? (
           <View style={styles.errorBanner}>
             <Text style={styles.errorText}>{state.errorMessage}</Text>
@@ -335,7 +347,9 @@ export default function App() {
           }
           onChangePrompt={(prompt) => controller.updateComposerPrompt(prompt)}
           onSubmit={() => {
-            void controller.createTask();
+            void controller.createTask(
+              resolveMobileTerminalGeometry(taskDetailViewportRef.current)
+            );
           }}
         />
         <AccountSheet

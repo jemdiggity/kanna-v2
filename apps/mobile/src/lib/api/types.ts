@@ -52,6 +52,8 @@ export interface CreateTaskRequest {
   model?: string;
   permissionMode?: string;
   allowedTools?: string[];
+  terminalCols?: number;
+  terminalRows?: number;
 }
 
 export interface CreateTaskResponse {

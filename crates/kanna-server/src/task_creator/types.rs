@@ -14,6 +14,7 @@ pub(super) struct TaskCreationRequest {
     pub(super) explicit_provider: Option<String>,
     pub(super) default_provider: Option<String>,
     pub(super) agent_type: Option<String>,
+    pub(super) initial_terminal_geometry: Option<(u16, u16)>,
     pub(super) model: Option<String>,
     pub(super) permission_mode: Option<String>,
     pub(super) allowed_tools: Vec<String>,

@@ -269,6 +269,8 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
+            terminal_cols: None,
+            terminal_rows: None,
         },
     )
     .unwrap();
@@ -1940,6 +1942,8 @@ fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() 
                 agent: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: Some("agent".to_string()),
+                terminal_cols: None,
+                terminal_rows: None,
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
@@ -2311,6 +2315,8 @@ fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
                 agent: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: None,
+                terminal_cols: None,
+                terminal_rows: None,
                 model: Some("model-a".to_string()),
                 permission_mode: Some("dontAsk".to_string()),
                 allowed_tools: Some(vec!["Bash".to_string()]),
@@ -2333,10 +2339,141 @@ fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
             .find(|item| item.id == prepared.created_task.task_id)
             .unwrap();
         assert_eq!(created.agent_type.as_deref(), Some("pty"));
-        assert!(matches!(prepared.session, PreparedSessionSpawn::Pty { .. }));
+        assert!(matches!(
+            prepared.session,
+            PreparedSessionSpawn::Pty {
+                cols: 80,
+                rows: 24,
+                ..
+            }
+        ));
 
         let _ = std::fs::remove_dir_all(&repo_root);
     }
+}
+
+#[test]
+fn resolve_requested_initial_terminal_geometry_requires_complete_positive_pair() {
+    assert_eq!(
+        resolve_initial_terminal_geometry(Some(80), Some(48)),
+        Some((80, 48))
+    );
+    assert_eq!(resolve_initial_terminal_geometry(Some(80), None), None);
+    assert_eq!(resolve_initial_terminal_geometry(None, Some(48)), None);
+    assert_eq!(resolve_initial_terminal_geometry(Some(0), Some(48)), None);
+    assert_eq!(resolve_initial_terminal_geometry(Some(80), Some(0)), None);
+    assert_eq!(
+        resolve_initial_terminal_geometry(Some(320), Some(256)),
+        Some((320, 256))
+    );
+    assert_eq!(
+        resolve_initial_terminal_geometry(Some(321), Some(256)),
+        None
+    );
+    assert_eq!(
+        resolve_initial_terminal_geometry(Some(320), Some(257)),
+        None
+    );
+}
+
+#[test]
+fn prepare_task_uses_requested_initial_terminal_geometry() {
+    let repo_root = init_git_repo("requested-initial-terminal-geometry");
+    let config = test_config("requested-initial-terminal-geometry");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use requested geometry".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: Some(104),
+            terminal_rows: Some(72),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        prepared.session,
+        PreparedSessionSpawn::Pty {
+            cols: 104,
+            rows: 72,
+            ..
+        }
+    ));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_uses_default_initial_terminal_geometry_for_oversized_request() {
+    let repo_root = init_git_repo("oversized-initial-terminal-geometry");
+    let config = test_config("oversized-initial-terminal-geometry");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Reject oversized geometry".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: Some(321),
+            terminal_rows: Some(256),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        prepared.session,
+        PreparedSessionSpawn::Pty {
+            cols: 80,
+            rows: 24,
+            ..
+        }
+    ));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]
@@ -2369,6 +2506,8 @@ fn prepare_task_uses_create_request_agent_selector() {
             agent: Some("setup".to_string()),
             agent_provider: None,
             agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -2425,6 +2564,8 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: Some("opus".to_string()),
             permission_mode: Some("acceptEdits".to_string()),
             allowed_tools: Some(vec!["Bash".to_string()]),
@@ -2503,6 +2644,8 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -2555,6 +2698,8 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
+            terminal_cols: Some(104),
+            terminal_rows: Some(72),
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -2571,6 +2716,10 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
     .unwrap();
 
     assert!(prepared.cwd.contains(".kanna-worktrees/task-"));
+    assert!(matches!(
+        prepared.session,
+        PreparedSessionSpawn::Agent { .. }
+    ));
     // This boundary test exercises the real server-side task worktree creation
     // without booting the full desktop app, which is too heavyweight for this
     // filesystem side-effect regression.
@@ -2616,6 +2765,8 @@ fn prepare_task_for_api_uses_requested_task_id() {
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
+            terminal_cols: None,
+            terminal_rows: None,
         },
         Some("0123456789abcdef".to_string()),
     )
@@ -2658,6 +2809,8 @@ fn create_dormant_task_for_api_uses_requested_task_id() {
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
+            terminal_cols: None,
+            terminal_rows: None,
         },
         Some("fedcba9876543210".to_string()),
     )
@@ -2711,6 +2864,8 @@ fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
+            terminal_cols: None,
+            terminal_rows: None,
         },
         Some(task_id.to_string()),
     ) {
@@ -2767,6 +2922,8 @@ fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collisio
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
+            terminal_cols: None,
+            terminal_rows: None,
         },
         Some(task_id.to_string()),
     ) {
@@ -2805,6 +2962,8 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("agent".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -2874,6 +3033,8 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("agent".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -2931,6 +3092,8 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             agent: None,
             agent_provider: Some("copilot".to_string()),
             agent_type: None,
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -3000,6 +3163,8 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -3073,6 +3238,8 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -3119,6 +3286,8 @@ fn prepare_task_rejects_missing_parent_task() {
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -3253,6 +3422,8 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -3368,6 +3539,8 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             agent: None,
             agent_provider: None,
             agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
@@ -3403,6 +3576,8 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,

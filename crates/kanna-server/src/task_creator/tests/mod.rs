@@ -10,8 +10,8 @@ use super::{
     prepare_merge_agent_for_api, prepare_rerun_stage_for_api, prepare_revision_task_for_api,
     prepare_stage_completion_for_api, prepare_task_for_api, prepare_task_for_api_with_error,
     read_default_agent_provider_setting, rerun_prepared_stage_for_api, resolve_agent_type,
-    spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api_recording_stage_run,
-    PrepareTaskError,
+    resolve_initial_terminal_geometry, spawn_prepared_stage_run_for_api,
+    spawn_prepared_task_for_api_recording_stage_run, PrepareTaskError,
 };
 use crate::config::Config;
 use crate::daemon_client::DaemonClient;
