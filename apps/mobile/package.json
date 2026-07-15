@@ -17,6 +17,7 @@
     "test:e2e:device:preflight": "KANNA_IOS_E2E_TARGET=device pnpm exec tsx ./e2e/preflight.ts",
     "test:e2e:device:smoke": "KANNA_IOS_E2E_TARGET=device pnpm exec tsx ./e2e/run.ts smoke",
     "test:e2e:device:profile-disconnected": "KANNA_IOS_E2E_TARGET=device pnpm exec tsx ./e2e/run.ts profile-disconnected",
+    "test:integration:expo-modules-jsi-worktrees": "KANNA_RUN_EXPO_MODULES_JSI_WORKTREE_CACHE_INTEGRATION=1 pnpm exec vitest run e2e/expoModulesJsiWorktreeCache.integration.test.ts --maxWorkers=1",
     "test:e2e:appium:install-xcuitest": "pnpm exec tsx ./e2e/helpers/appium.ts install-xcuitest",
     "test:e2e:appium:start": "pnpm exec tsx ./e2e/helpers/appium.ts start",
     "test": "sh -c 'if [ \"$1\" = \"--\" ]; then shift; fi; if [ \"$1\" = \"--runInBand\" ]; then shift; fi; exec pnpm exec vitest run --maxWorkers=2 \"$@\"' --",
