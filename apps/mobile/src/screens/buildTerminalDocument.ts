@@ -105,6 +105,7 @@ export function buildTerminalDocument({
       const BASE_FONT_SIZE = 13;
       const MIN_FONT_SCALE = 0.75;
       const MAX_FONT_SCALE = 1.8;
+      const SMOOTH_SCROLL_DURATION_MS = 80;
       const term = new TerminalCtor({
         cols: TERMINAL_COLS,
         fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
@@ -113,6 +114,7 @@ export function buildTerminalDocument({
         letterSpacing: 0,
         cursorBlink: false,
         scrollback: 10000,
+        smoothScrollDuration: SMOOTH_SCROLL_DURATION_MS,
         vtExtensions: { kittyKeyboard: true },
         theme: {
           background: "#09111d",
@@ -148,7 +150,6 @@ export function buildTerminalDocument({
 
       term.loadAddon(fitAddon);
       term.open(root);
-
       term.onScroll(() => {
         stickyToBottom = isNearBottom();
       });
@@ -207,7 +208,7 @@ export function buildTerminalDocument({
         scheduleViewportAlignment();
         stickyToBottom = shouldStick;
         if (shouldStick) {
-          term.scrollToBottom();
+          scrollToBottomImmediately();
         }
       };
 
@@ -222,7 +223,7 @@ export function buildTerminalDocument({
         fitTerminal();
         stickyToBottom = shouldStick;
         if (shouldStick) {
-          term.scrollToBottom();
+          scrollToBottomImmediately();
         }
         scheduleViewportAlignment();
       };
@@ -265,6 +266,16 @@ export function buildTerminalDocument({
         return Math.hypot(dx, dy);
       }
 
+      function scrollToBottomImmediately() {
+        const smoothScrollDuration = term.options.smoothScrollDuration;
+        term.options.smoothScrollDuration = 0;
+        try {
+          term.scrollToBottom();
+        } finally {
+          term.options.smoothScrollDuration = smoothScrollDuration;
+        }
+      }
+
       function applyFontScale(nextScale) {
         const shouldStick = stickyToBottom || isNearBottom();
         fontScale = clamp(nextScale, MIN_FONT_SCALE, MAX_FONT_SCALE);
@@ -273,7 +284,7 @@ export function buildTerminalDocument({
         fitTerminal();
         stickyToBottom = shouldStick;
         if (shouldStick) {
-          term.scrollToBottom();
+          scrollToBottomImmediately();
         }
       }
 
@@ -296,9 +307,11 @@ export function buildTerminalDocument({
 
           const touch = event.touches[0];
           touchScroll = {
+            axis: null,
             x: touch.clientX,
             y: touch.clientY,
-            scrollLeft: viewport.scrollLeft
+            scrollLeft: viewport.scrollLeft,
+            terminalScrollLine: term.buffer.active.viewportY
           };
         }, { passive: true, capture: true });
 
@@ -327,11 +340,23 @@ export function buildTerminalDocument({
           if (absDeltaX < 4 && absDeltaY < 4) {
             return;
           }
-          if (absDeltaY > absDeltaX) {
-            return;
+
+          if (touchScroll.axis === null) {
+            touchScroll.axis = absDeltaY > absDeltaX ? "vertical" : "horizontal";
           }
 
-          viewport.scrollLeft = touchScroll.scrollLeft + deltaX;
+          if (touchScroll.axis === "vertical") {
+            const { height } = cellDimensions();
+            const targetLine = Math.round(clamp(
+              touchScroll.terminalScrollLine + deltaY / height,
+              0,
+              term.buffer.active.baseY
+            ));
+            term.scrollToLine(targetLine);
+          } else {
+            viewport.scrollLeft = touchScroll.scrollLeft + deltaX;
+          }
+
           if (event.cancelable) {
             event.preventDefault();
           }
@@ -368,7 +393,7 @@ export function buildTerminalDocument({
         fitTerminal();
         requestAnimationFrame(() => {
           fitTerminal();
-          term.scrollToBottom();
+          scrollToBottomImmediately();
         });
       });
 
@@ -377,7 +402,7 @@ export function buildTerminalDocument({
         fitTerminal();
         stickyToBottom = shouldStick;
         if (shouldStick) {
-          term.scrollToBottom();
+          scrollToBottomImmediately();
         }
         scheduleViewportAlignment();
       });
@@ -386,7 +411,7 @@ export function buildTerminalDocument({
         stickyToBottom = shouldStick;
 
         if (shouldStick) {
-          term.scrollToBottom();
+          scrollToBottomImmediately();
         }
         scheduleViewportAlignment();
 
