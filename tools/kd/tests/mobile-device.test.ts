@@ -240,6 +240,7 @@ describe("physical-device mobile runtime", () => {
         "device",
         "process",
         "launch",
+        "--terminate-existing",
         "--device",
         "00008130-001015CA1091401C",
         "build.kanna.app.dev"

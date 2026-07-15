@@ -5,7 +5,7 @@ const {
   withDangerousMod,
   withInfoPlist,
   withXcodeProject
-} = require("@expo/config-plugins");
+} = require("expo/config-plugins");
 
 const SERVICE_TYPE = "_kanna-mobile._tcp";
 const LOCAL_NETWORK_USAGE_DESCRIPTION =
@@ -97,7 +97,7 @@ function patchAppDelegate(contents) {
     return contents;
   }
 
-  return contents.replace(
+  const patched = contents.replace(
     `  override func bundleURL() -> URL? {
 #if DEBUG
     return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: ".expo/.virtual-metro-entry")
@@ -132,6 +132,10 @@ function patchAppDelegate(contents) {
       .trimmingCharacters(in: .whitespacesAndNewlines)
   }`
   );
+  if (patched === contents) {
+    throw new Error("Unsupported Expo AppDelegate template; could not install Kanna's Metro endpoint.");
+  }
+  return patched;
 }
 
 function patchMetroPortScript(project) {
@@ -141,14 +145,25 @@ function patchMetroPortScript(project) {
       continue;
     }
     const shellScript = phase.shellScript;
-    if (typeof shellScript !== "string" || shellScript.includes("metro-port.txt")) {
+    if (typeof shellScript !== "string") {
       continue;
     }
-    phase.shellScript = shellScript.replace(
+    if (shellScript.includes("metro-port.txt")) {
+      return;
+    }
+    const patched = shellScript.replace(
       "export PROJECT_ROOT=\\\"$PROJECT_DIR\\\"/..\\n\\n",
       "export PROJECT_ROOT=\\\"$PROJECT_DIR\\\"/..\\n\\nif [[ \\\"$CONFIGURATION\\\" = *Debug* && ! \\\"$PLATFORM_NAME\\\" == *simulator ]]; then\\n  mkdir -p \\\"$CONFIGURATION_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\\\"\\n  echo \\\"${RCT_METRO_PORT:-8081}\\\" > \\\"$CONFIGURATION_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/metro-port.txt\\\"\\nfi\\n\\n"
     );
+    if (patched === shellScript) {
+      break;
+    }
+    phase.shellScript = patched;
+    return;
   }
+  throw new Error(
+    "Unsupported React Native bundle phase template; could not bundle Kanna's Metro port."
+  );
 }
 
 function writeNativeSources(projectRoot) {
@@ -199,7 +214,9 @@ function withKannaBonjour(config) {
 
 module.exports = withKannaBonjour;
 module.exports.__internal = {
-  applyInfoPlist
+  applyInfoPlist,
+  patchAppDelegate,
+  patchMetroPortScript
 };
 
 function applyInfoPlist(plist) {

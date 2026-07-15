@@ -22,7 +22,7 @@ by the relay and stored in the per-environment Firebase/GCS bucket.
 - Origins: `https://relay-staging.kanna.build` for staging and `https://relay.kanna.build` for production.
 - Dev: disabled.
 - Channels: `staging` and `production`, passed by `expo-channel-name`.
-- Runtime version: `1.0.0` currently, sourced from `apps/mobile/src/mobileEnvironments.json` as `runtimeVersion`.
+- Runtime version: `2.0.0` currently, sourced from `apps/mobile/src/mobileEnvironments.json` as `runtimeVersion`.
 - Code signing: RSA SHA-256, Expo alg `rsa-v1_5-sha256`.
 - Code signing key id: `kanna-mobile-ota-v1`.
 - Public cert: `apps/mobile/certs/ota-codesign.pem`.
@@ -44,7 +44,7 @@ ota/ios/<runtimeVersion>/channels/<channel>.json
 The channel pointer is the commit point:
 
 ```json
-{ "currentUpdateId": "<updateId>", "createdAt": "...", "runtimeVersion": "1.0.0" }
+{ "currentUpdateId": "<updateId>", "createdAt": "...", "runtimeVersion": "2.0.0" }
 ```
 
 `updateId` is deterministic: SHA-256 of `metadata.json`, converted to the Expo

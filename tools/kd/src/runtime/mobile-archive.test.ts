@@ -85,8 +85,8 @@ describe("kd mobile archive", () => {
       `pnpm --dir ${repoRoot}/apps/mobile exec expo prebuild --platform ios --clean`,
       [
         "xcodebuild",
-        `-workspace ${repoRoot}/apps/mobile/ios/KannaMobile.xcworkspace`,
-        "-scheme KannaMobile",
+        `-workspace ${repoRoot}/apps/mobile/ios/Kanna.xcworkspace`,
+        "-scheme Kanna",
         "-configuration Release",
         "-sdk iphoneos",
         "-destination generic/platform=iOS",

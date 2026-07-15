@@ -327,6 +327,7 @@ export function buildMobileDeviceRelaunchCommand(
       "device",
       "process",
       "launch",
+      "--terminate-existing",
       "--device",
       input.deviceUdid,
       input.bundleId

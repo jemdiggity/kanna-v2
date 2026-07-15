@@ -49,7 +49,7 @@ interface MobileEnvironmentRecord {
 
 const APP_ENV = "prod";
 const APPLE_TEAM_ID = "GY3LFAA59P";
-const XCODE_SCHEME = "KannaMobile";
+const XCODE_SCHEME = "Kanna";
 const UPLOAD_API_KEY_PLACEHOLDER = "<APP_STORE_CONNECT_API_KEY_ID>";
 const UPLOAD_API_ISSUER_PLACEHOLDER = "<APP_STORE_CONNECT_API_ISSUER_ID>";
 

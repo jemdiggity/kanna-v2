@@ -22,9 +22,9 @@ describe("mobile app config", () => {
         channel: "production",
         manifestUrl: "https://relay.kanna.build/ota/manifest"
       },
-      runtimeVersion: "1.0.0"
+      runtimeVersion: "2.0.0"
     });
-    expect(config.runtimeVersion).toBe("1.0.0");
+    expect(config.runtimeVersion).toBe("2.0.0");
     expect(config.updates).toMatchObject({
       url: "https://relay.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "production" },
@@ -62,6 +62,7 @@ describe("mobile app config", () => {
         iosBundleId: "build.kanna.app.dev"
       }
     ]);
+    expect(config.plugins).toContain("expo-font");
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.dev");
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.production.plist"
@@ -74,9 +75,9 @@ describe("mobile app config", () => {
         channel: null,
         manifestUrl: null
       },
-      runtimeVersion: "1.0.0"
+      runtimeVersion: "2.0.0"
     });
-    expect(config.runtimeVersion).toBe("1.0.0");
+    expect(config.runtimeVersion).toBe("2.0.0");
     expect(config.updates).toBeUndefined();
   });
 
@@ -104,9 +105,9 @@ describe("mobile app config", () => {
         channel: "staging",
         manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
       },
-      runtimeVersion: "1.0.0"
+      runtimeVersion: "2.0.0"
     });
-    expect(config.runtimeVersion).toBe("1.0.0");
+    expect(config.runtimeVersion).toBe("2.0.0");
     expect(config.updates).toMatchObject({
       url: "https://relay-staging.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "staging" }

@@ -12,11 +12,11 @@ describe("withKannaNativeIdentity internals", () => {
           objects: {
             PBXNativeTarget: {
               appTarget: {
-                name: "KannaMobile",
+                name: "KannaDev",
                 buildConfigurationList: "appConfigList"
               },
               testTarget: {
-                name: "KannaMobileTests",
+                name: "KannaDevTests",
                 buildConfigurationList: "testConfigList"
               }
             },
@@ -36,7 +36,7 @@ describe("withKannaNativeIdentity internals", () => {
               appRelease: { buildSettings: {} },
               testDebug: {
                 buildSettings: {
-                  PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.KannaMobileTests"
+                  PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.KannaDevTests"
                 }
               }
             }
@@ -48,12 +48,14 @@ describe("withKannaNativeIdentity internals", () => {
     __internal.setAppTargetBuildSetting(
       project,
       "PRODUCT_BUNDLE_IDENTIFIER",
-      "build.kanna.app.staging"
+      "build.kanna.app.staging",
+      "KannaDev"
     );
     __internal.setAppTargetBuildSetting(
       project,
       "INFOPLIST_KEY_CFBundleDisplayName",
-      "Kanna Staging"
+      "Kanna Staging",
+      "KannaDev"
     );
 
     // The display name has a space, so it must be quoted in the pbxproj or
@@ -67,7 +69,7 @@ describe("withKannaNativeIdentity internals", () => {
       INFOPLIST_KEY_CFBundleDisplayName: '"Kanna Staging"'
     });
     expect(project.hash.project.objects.XCBuildConfiguration.testDebug.buildSettings).toEqual({
-      PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.KannaMobileTests"
+      PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.KannaDevTests"
     });
   });
 
@@ -76,5 +78,28 @@ describe("withKannaNativeIdentity internals", () => {
     expect(__internal.quotePbxprojValue("Kanna Dev")).toBe('"Kanna Dev"');
     expect(__internal.quotePbxprojValue("build.kanna.app.dev")).toBe("build.kanna.app.dev");
     expect(__internal.quotePbxprojValue("build.kanna.app")).toBe("build.kanna.app");
+  });
+
+  it("fails when CNG's generated app target cannot be found", () => {
+    const project = {
+      hash: {
+        project: {
+          objects: {
+            PBXNativeTarget: {},
+            XCConfigurationList: {},
+            XCBuildConfiguration: {}
+          }
+        }
+      }
+    };
+
+    expect(() =>
+      __internal.setAppTargetBuildSetting(
+        project,
+        "PRODUCT_BUNDLE_IDENTIFIER",
+        "build.kanna.app.dev",
+        "KannaDev"
+      )
+    ).toThrow('Could not find generated iOS app target "KannaDev"');
   });
 });
