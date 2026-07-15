@@ -19,6 +19,19 @@ interface BrowserGridSnapshot {
   cells: GridSnapshot["cells"];
 }
 
+interface MobileScrollSample {
+  elapsedMs: number;
+  terminalViewportScrollTop: number;
+  viewportY: number;
+}
+
+interface MobileEasedScrollResult {
+  baseY: number;
+  initialViewportY: number;
+  requestedTarget: number | null;
+  samples: MobileScrollSample[];
+}
+
 interface TerminalHookState {
   text?: string;
   chunksB64?: string[];
@@ -42,6 +55,228 @@ interface SessionStoreModule {
 }
 
 const VIEWPORT = { width: 1900, height: 624 };
+const MOBILE_SCROLL_COLS = 80;
+const MOBILE_SCROLL_ROWS = 20;
+const MOBILE_SCROLL_LINE_COUNT = 140;
+const MOBILE_SCROLL_SAMPLE_DELAYS_MS = [8, 20, 36, 52, 68, 92, 128, 180];
+
+export async function verifyMobileEasedScrolling(browser: Browser): Promise<void> {
+  const context = await browser.newContext({
+    viewport: VIEWPORT,
+    hasTouch: true
+  });
+  let page: Page | null = null;
+  try {
+    page = await context.newPage();
+    const html = await buildInstrumentedMobileDocument();
+    await page.setContent(html, { waitUntil: "load" });
+    await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
+    const maxTouchPoints = await page.evaluate(() => navigator.maxTouchPoints);
+    if (maxTouchPoints < 1) {
+      throw new Error("mobile eased scrolling requires a touch-enabled browser context");
+    }
+
+    await page.evaluate(
+      (dims) => {
+        window.__setTerminalDims(dims);
+      },
+      { cols: MOBILE_SCROLL_COLS, rows: MOBILE_SCROLL_ROWS }
+    );
+    await page.waitForFunction(
+      ({ cols, rows }) => {
+        const term = window.__kannaTerminals[0];
+        return term?.cols === cols && term.rows === rows;
+      },
+      { cols: MOBILE_SCROLL_COLS, rows: MOBILE_SCROLL_ROWS }
+    );
+
+    const numberedLines = Array.from(
+      { length: MOBILE_SCROLL_LINE_COUNT },
+      (_, index) => `mobile-scroll-line-${String(index + 1).padStart(3, "0")}`
+    ).join("\r\n") + "\r\n";
+    await callHook(page, "__replaceTerminalState", { text: numberedLines });
+
+    await page.waitForFunction(() => {
+      const buffer = window.__kannaTerminals[0]?.buffer.active;
+      return Boolean(buffer && buffer.baseY > 0 && buffer.viewportY === buffer.baseY);
+    });
+    // Let xterm's render loop settle before installing the gesture probe.
+    await page.waitForTimeout(120);
+    await page.waitForFunction(() => {
+      const buffer = window.__kannaTerminals[0]?.buffer.active;
+      return Boolean(buffer && buffer.baseY > 0 && buffer.viewportY === buffer.baseY);
+    });
+
+    const result = await page.evaluate(
+      async (sampleDelays): Promise<MobileEasedScrollResult> => {
+        const term = window.__kannaTerminals[0];
+        const screen = document.querySelector<HTMLElement>(".xterm-screen");
+        const terminalViewport = document.querySelector<HTMLElement>(".xterm-viewport");
+        if (!term || !screen || !terminalViewport) {
+          throw new Error("mobile terminal gesture elements were not available");
+        }
+
+        const initialViewportY = term.buffer.active.viewportY;
+        const baseY = term.buffer.active.baseY;
+        const originalScrollToLine = term.scrollToLine.bind(term);
+        window.__kannaScrollToLineTarget = undefined;
+        term.scrollToLine = (line: number) => {
+          window.__kannaScrollToLineTarget = line;
+          originalScrollToLine(line);
+        };
+
+        const startTouch = {
+          identifier: 1,
+          target: screen,
+          clientX: 220,
+          clientY: 160,
+          pageX: 220,
+          pageY: 160,
+          screenX: 220,
+          screenY: 160,
+          radiusX: 1,
+          radiusY: 1,
+          rotationAngle: 0,
+          force: 1
+        };
+        const movedTouch = {
+          identifier: 1,
+          target: screen,
+          clientX: 224,
+          clientY: 340,
+          pageX: 224,
+          pageY: 340,
+          screenX: 224,
+          screenY: 340,
+          radiusX: 1,
+          radiusY: 1,
+          rotationAngle: 0,
+          force: 1
+        };
+
+        const touchStart = new Event("touchstart", { bubbles: true, cancelable: true });
+        Object.defineProperties(touchStart, {
+          touches: {
+            configurable: true,
+            value: Object.assign([startTouch], { item: Array.prototype.at })
+          },
+          targetTouches: {
+            configurable: true,
+            value: Object.assign([startTouch], { item: Array.prototype.at })
+          },
+          changedTouches: {
+            configurable: true,
+            value: Object.assign([startTouch], { item: Array.prototype.at })
+          }
+        });
+        screen.dispatchEvent(touchStart);
+
+        const startedAt = performance.now();
+        const touchMove = new Event("touchmove", { bubbles: true, cancelable: true });
+        Object.defineProperties(touchMove, {
+          touches: {
+            configurable: true,
+            value: Object.assign([movedTouch], { item: Array.prototype.at })
+          },
+          targetTouches: {
+            configurable: true,
+            value: Object.assign([movedTouch], { item: Array.prototype.at })
+          },
+          changedTouches: {
+            configurable: true,
+            value: Object.assign([movedTouch], { item: Array.prototype.at })
+          }
+        });
+        screen.dispatchEvent(touchMove);
+        const samples: MobileScrollSample[] = [{
+          elapsedMs: performance.now() - startedAt,
+          terminalViewportScrollTop: terminalViewport.scrollTop,
+          viewportY: term.buffer.active.viewportY
+        }];
+
+        const touchEnd = new Event("touchend", { bubbles: true, cancelable: true });
+        Object.defineProperties(touchEnd, {
+          touches: {
+            configurable: true,
+            value: Object.assign([], { item: Array.prototype.at })
+          },
+          targetTouches: {
+            configurable: true,
+            value: Object.assign([], { item: Array.prototype.at })
+          },
+          changedTouches: {
+            configurable: true,
+            value: Object.assign([movedTouch], { item: Array.prototype.at })
+          }
+        });
+        screen.dispatchEvent(touchEnd);
+
+        for (const delayMs of sampleDelays) {
+          const remainingMs = Math.max(0, delayMs - (performance.now() - startedAt));
+          await new Promise<void>((resolve) => window.setTimeout(resolve, remainingMs));
+          samples.push({
+            elapsedMs: performance.now() - startedAt,
+            terminalViewportScrollTop: terminalViewport.scrollTop,
+            viewportY: term.buffer.active.viewportY
+          });
+        }
+
+        return {
+          baseY,
+          initialViewportY,
+          requestedTarget: window.__kannaScrollToLineTarget ?? null,
+          samples
+        };
+      },
+      MOBILE_SCROLL_SAMPLE_DELAYS_MS
+    );
+
+    const trace = formatMobileEasedScrollResult(result);
+    const target = result.requestedTarget;
+    if (target === null) {
+      throw new Error(`mobile eased scrolling recorded no public scrollToLine target (${trace})`);
+    }
+    if (!Number.isFinite(target) || !Number.isInteger(target)) {
+      throw new Error(`mobile eased scrolling recorded a non-integer target (${trace})`);
+    }
+    if (target >= result.initialViewportY) {
+      throw new Error(`mobile eased scrolling did not request an earlier buffer line (${trace})`);
+    }
+
+    const immediatePosition = result.samples[0]?.viewportY;
+    if (immediatePosition === undefined) {
+      throw new Error(`mobile eased scrolling produced no immediate position sample (${trace})`);
+    }
+    if (immediatePosition === target) {
+      throw new Error(`mobile eased scrolling jumped directly to its requested target (${trace})`);
+    }
+
+    const finalPosition = result.samples.at(-1)?.viewportY;
+    if (finalPosition === undefined) {
+      throw new Error(`mobile eased scrolling produced no settled position sample (${trace})`);
+    }
+    const lowerBound = Math.min(result.initialViewportY, finalPosition);
+    const upperBound = Math.max(result.initialViewportY, finalPosition);
+    const hasIntermediatePosition = result.samples
+      .slice(1, -1)
+      .some(({ viewportY }) => viewportY > lowerBound && viewportY < upperBound);
+    if (!hasIntermediatePosition) {
+      throw new Error(`mobile eased scrolling produced no intermediate row transition (${trace})`);
+    }
+    if (Math.abs(finalPosition - target) > 1) {
+      throw new Error(`mobile eased scrolling did not settle within one row of its target (${trace})`);
+    }
+    if (result.samples.some(({ terminalViewportScrollTop }) => terminalViewportScrollTop !== 0)) {
+      throw new Error(`mobile eased scrolling mutated inert .xterm-viewport.scrollTop (${trace})`);
+    }
+  } finally {
+    try {
+      await page?.close();
+    } finally {
+      await context.close();
+    }
+  }
+}
 
 export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): Promise<GridSnapshot> {
   const page = await browser.newPage({ viewport: VIEWPORT });
@@ -287,6 +522,21 @@ async function readPackageFile(packagePath: string): Promise<string> {
   return await readFile(path.join(PACKAGE_ROOT, "node_modules", packagePath), "utf8");
 }
 
+function formatMobileEasedScrollResult(result: MobileEasedScrollResult): string {
+  const samples = result.samples
+    .map(
+      ({ elapsedMs, terminalViewportScrollTop, viewportY }) =>
+        `${Math.round(elapsedMs)}ms:${viewportY}/dom=${terminalViewportScrollTop}`
+    )
+    .join(", ");
+  return [
+    `baseY=${result.baseY}`,
+    `start=${result.initialViewportY}`,
+    `target=${String(result.requestedTarget)}`,
+    `samples=[${samples}]`
+  ].join(", ");
+}
+
 function terminalProbeScript(): string {
   return `
     window.__kannaTerminals = [];
@@ -362,6 +612,7 @@ declare global {
     __setTerminalBottomInset: (state: { bottomInset: number }) => void;
     __setTerminalDims: (dims: { cols: number; rows: number }) => void;
     __kannaPendingWrites: number;
+    __kannaScrollToLineTarget: number | undefined;
     __kannaSerializeAddon: { serialize: () => string };
     __kannaColorValue: (
       cell:

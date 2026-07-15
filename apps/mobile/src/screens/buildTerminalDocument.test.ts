@@ -15,9 +15,11 @@ interface TouchPoint {
 class StubTerminal {
   cols: number;
   rows = 0;
-  options: { fontSize: number };
+  options: { fontSize: number; smoothScrollDuration?: number };
   resizeCalls: Array<{ cols: number; rows: number }> = [];
   scrollToBottomCalls = 0;
+  scrollToBottomHook: (() => void) | null = null;
+  scrollToLineCalls: number[] = [];
   writes: unknown[] = [];
   resets = 0;
   buffer = {
@@ -42,22 +44,17 @@ class StubTerminal {
     }
   };
   private scrollListeners: Array<(viewportY: number) => void> = [];
-  _core = {
-    _renderService: {
-      dimensions: {
-        css: {
-          cell: {
-            width: 9,
-            height: 18
-          }
-        }
-      }
-    }
-  };
 
-  constructor(options: { cols: number; fontSize: number }) {
+  constructor(options: {
+    cols: number;
+    fontSize: number;
+    smoothScrollDuration?: number;
+  }) {
     this.cols = options.cols;
-    this.options = { fontSize: options.fontSize };
+    this.options = {
+      fontSize: options.fontSize,
+      smoothScrollDuration: options.smoothScrollDuration
+    };
   }
 
   loadAddon(): void {}
@@ -67,6 +64,21 @@ class StubTerminal {
     xterm.className = "xterm";
     const screen = root.ownerDocument.createElement("div");
     screen.className = "xterm-screen";
+    screen.getBoundingClientRect = () => {
+      const width = this.cols * 9;
+      const height = this.rows * 18;
+      return {
+        x: 0,
+        y: 0,
+        width,
+        height,
+        top: 0,
+        right: width,
+        bottom: height,
+        left: 0,
+        toJSON: () => ({})
+      };
+    };
     const viewport = root.ownerDocument.createElement("div");
     viewport.className = "xterm-viewport";
     const scrollableElement = root.ownerDocument.createElement("div");
@@ -95,11 +107,19 @@ class StubTerminal {
 
   scrollToBottom(): void {
     this.scrollToBottomCalls += 1;
+    if (this.scrollToBottomHook) {
+      this.scrollToBottomHook();
+      return;
+    }
     this.buffer.active.viewportY = this.buffer.active.baseY;
     this.emitScroll();
   }
 
   scrollToLine(line: number): void {
+    if (!Number.isInteger(line)) {
+      throw new Error("This API only accepts integers");
+    }
+    this.scrollToLineCalls.push(line);
     this.buffer.active.viewportY = Math.max(
       0,
       Math.min(this.buffer.active.baseY, line)
@@ -123,7 +143,10 @@ class StubTerminal {
     this.resets += 1;
   }
 
-  private emitScroll(): void {
+  emitScroll(viewportY?: number): void {
+    if (viewportY !== undefined) {
+      this.buffer.active.viewportY = viewportY;
+    }
     for (const listener of this.scrollListeners) {
       listener(this.buffer.active.viewportY);
     }
@@ -196,7 +219,11 @@ function createExecutedTerminalDocument({
 
   let terminal: StubTerminal | null = null;
   window.Terminal = class extends StubTerminal {
-    constructor(options: { cols: number; fontSize: number }) {
+    constructor(options: {
+      cols: number;
+      fontSize: number;
+      smoothScrollDuration?: number;
+    }) {
       super(options);
       terminal = this;
     }
@@ -256,6 +283,7 @@ describe("buildTerminalDocument", () => {
     expect(script).not.toContain("terminal-inspection");
     expect(script).not.toContain("function renderedTerminalText");
     expect(script).not.toContain("translateToString");
+    expect(script).not.toContain("buffer.getLine");
     expect(script).not.toContain("recordTerminalFrame");
     expect(messages.map((message) => JSON.parse(message).type)).not.toContain(
       "terminal-inspection"
@@ -305,7 +333,8 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain("vtExtensions: { kittyKeyboard: true }");
     expect(html).toContain("new FitAddonCtor()");
     expect(html).toContain("term.open(root)");
-    expect(html).toContain("term.scrollToBottom()");
+    expect(html).toContain("function scrollToBottomImmediately()");
+    expect(html).toContain("scrollToBottomImmediately();");
     expect(html).toContain("window.__replaceTerminalState");
     expect(html).toContain("window.__appendTerminalChunk");
     expect(html).toContain("window.ReactNativeWebView.postMessage");
@@ -363,6 +392,7 @@ describe("buildTerminalDocument", () => {
       bottomInset: 24,
       enableE2EInspection: false
     });
+    const script = extractTerminalScript(html);
 
     expect(html).toContain("maximum-scale=3");
     expect(html).toContain("user-scalable=yes");
@@ -375,34 +405,94 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain('viewport.addEventListener("touchstart"');
     expect(html).toContain('viewport.addEventListener("touchmove"');
     expect(html).toContain("term.options.fontSize = Math.round(BASE_FONT_SIZE * fontScale)");
+    expect(script).not.toContain("term._core");
+  });
+
+  it("configures xterm with an 80 ms smooth scroll duration", () => {
+    const { terminal } = createExecutedTerminalDocument();
+
+    expect(terminal.options.smoothScrollDuration).toBe(80);
   });
 
   it("executes one-finger fallback horizontal scrolling across the viewport", () => {
     const { terminal, viewport, window } = createExecutedTerminalDocument();
     viewport.scrollLeft = 12;
-    terminal.scrollToLine(80);
+    terminal.scrollToLine(76);
+    terminal.scrollToLineCalls = [];
 
     viewport.dispatchEvent(createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }]));
     const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 175, clientY: 232 }]);
     viewport.dispatchEvent(touchMove);
 
     expect(viewport.scrollLeft).toBe(57);
-    expect(terminal.buffer.active.viewportY).toBe(80);
+    expect(terminal.scrollToLineCalls).toEqual([]);
+    expect(terminal.buffer.active.viewportY).toBe(76);
     expect(touchMove.defaultPrevented).toBe(true);
   });
 
-  it("leaves primarily vertical one-finger scrolling to the xterm viewport", () => {
+  it("eases a vertical one-finger drag through xterm buffer lines", () => {
     const { terminal, viewport, window } = createExecutedTerminalDocument();
     viewport.scrollLeft = 12;
-    terminal.scrollToLine(80);
+    terminal.scrollToLine(76);
+    terminal.scrollToLineCalls = [];
 
     viewport.dispatchEvent(createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }]));
-    const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 216, clientY: 180 }]);
+    const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 195 }]);
     viewport.dispatchEvent(touchMove);
 
     expect(viewport.scrollLeft).toBe(12);
-    expect(terminal.buffer.active.viewportY).toBe(80);
-    expect(touchMove.defaultPrevented).toBe(false);
+    expect(terminal.scrollToLineCalls).toEqual([79]);
+    expect(touchMove.defaultPrevented).toBe(true);
+  });
+
+  it("keeps a one-finger gesture vertically locked after horizontal displacement dominates", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    viewport.scrollLeft = 12;
+    terminal.scrollToLine(76);
+    terminal.scrollToLineCalls = [];
+
+    viewport.dispatchEvent(createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }]));
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 217, clientY: 225 }])
+    );
+    const laterMove = createTouchEvent(window, "touchmove", [{ clientX: 170, clientY: 242 }]);
+    viewport.dispatchEvent(laterMove);
+
+    expect(terminal.scrollToLineCalls).toEqual([77, 76]);
+    expect(viewport.scrollLeft).toBe(12);
+    expect(laterMove.defaultPrevented).toBe(true);
+  });
+
+  it("keeps the outer safe-region inset while public xterm scroll positions change", () => {
+    const { terminal, viewport } = createExecutedTerminalDocument();
+
+    terminal.emitScroll(97);
+    expect(viewport.style.paddingBottom).toBe("24px");
+
+    terminal.emitScroll(100);
+    expect(viewport.style.paddingBottom).toBe("24px");
+  });
+
+  it("keeps rapid consecutive appends following bottom while gesture scrolling stays smooth", () => {
+    const { terminal, window } = createExecutedTerminalDocument();
+    terminal.emitScroll(99);
+    const initialScrollToBottomCalls = terminal.scrollToBottomCalls;
+    const autoFollowDurations: Array<number | undefined> = [];
+    terminal.scrollToBottomHook = () => {
+      autoFollowDurations.push(terminal.options.smoothScrollDuration);
+      terminal.emitScroll(
+        terminal.options.smoothScrollDuration === 0
+          ? terminal.buffer.active.baseY
+          : 50
+      );
+    };
+
+    window.__appendTerminalChunk({ chunksB64: [b64("first append\n")] });
+    window.__appendTerminalChunk({ chunksB64: [b64("second append\n")] });
+
+    expect(terminal.scrollToBottomCalls - initialScrollToBottomCalls).toBe(2);
+    expect(autoFollowDurations).toEqual([0, 0]);
+    expect(terminal.options.smoothScrollDuration).toBe(80);
   });
 
   it("executes two-finger fallback pinch scaling with clamping and keeps terminal scripts working", () => {
@@ -422,6 +512,7 @@ describe("buildTerminalDocument", () => {
 
     expect(root.dataset.kannaFontScale).toBe("1.80");
     expect(terminal.options.fontSize).toBe(23);
+    expect(terminal.scrollToLineCalls).toEqual([]);
     expect(pinchOut.defaultPrevented).toBe(true);
 
     viewport.dispatchEvent(createTouchEvent(window, "touchend", []));
@@ -446,9 +537,12 @@ describe("buildTerminalDocument", () => {
 
     expect(root.dataset.kannaCols).toBe("132");
     expect(root.dataset.kannaRows).toBe("43");
+    expect(root.style.width).toBe("1188px");
+    expect(root.style.height).toBe("774px");
     expect(terminal.resizeCalls).toContainEqual({ cols: 132, rows: 43 });
     expect(terminal.resets).toBe(1);
     expect(terminal.writes).toHaveLength(1);
+    expect(terminal.scrollToLineCalls).toEqual([]);
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {
