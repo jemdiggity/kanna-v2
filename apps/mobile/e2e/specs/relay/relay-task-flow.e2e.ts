@@ -238,8 +238,13 @@ export async function assertRelayTaskRowPresentation(
 ): Promise<void> {
   const nativeLabel = await row.getAttribute("label").catch(() => null);
   const label = nativeLabel?.trim() || (await row.getText()).trim();
-  const expectedLabel =
-    `${expected.title}. ${expected.stage}. ${expected.waitingPromptSnippet}`;
+  const expectedLabel = [
+    expected.title,
+    expected.stage,
+    expected.waitingPromptSnippet === expected.title
+      ? null
+      : expected.waitingPromptSnippet,
+  ].filter(Boolean).join(". ");
   const forbidden = [
     expected.originalPromptSnippet,
     expected.repoLabel,

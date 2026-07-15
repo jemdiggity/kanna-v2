@@ -5,7 +5,7 @@ import type { TaskActivity } from "../../src/lib/api/types";
 const RELAY_TASK_TITLE = "Relay card current title";
 const RELAY_ORIGINAL_PROMPT = "Original relay request must stay hidden";
 const RELAY_REPO_LABEL = "Relay fixture repository";
-const RELAY_WAITING_PROMPT = "Agent is waiting for relay review.";
+const RELAY_WAITING_PROMPT = RELAY_TASK_TITLE;
 const RELAY_TASK_STAGE = "in progress";
 const HYBRID_DUPLICATE_CLOUD_TITLE = "Hybrid duplicate from cloud";
 const HYBRID_CLOUD_ONLY_TITLE = "Hybrid cloud-only task";

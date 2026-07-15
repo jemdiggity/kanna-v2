@@ -10,14 +10,13 @@ import {
 const taskRowExpectation: RelayTaskRowExpectation = {
   title: "Relay card current title",
   stage: "in progress",
-  waitingPromptSnippet: "Agent is waiting for relay review.",
+  waitingPromptSnippet: "Relay card current title",
   originalPromptSnippet: "Original relay request must stay hidden",
   repoLabel: "Relay fixture repository",
 };
 
 function expectedTaskRowLabel(): string {
-  return `${taskRowExpectation.title}. ${taskRowExpectation.stage}. ` +
-    taskRowExpectation.waitingPromptSnippet;
+  return `${taskRowExpectation.title}. ${taskRowExpectation.stage}`;
 }
 
 function createTaskRow(label: string, calls: string[] = []) {
@@ -155,13 +154,25 @@ describe("relay task row presentation", () => {
     expect(calls).toEqual(["waitForDisplayed", "getAttribute:label", "click"]);
   });
 
-  it("accepts only the title, stage, and waiting output", async () => {
+  it("accepts a duplicated waiting preview rendered only once", async () => {
     await expect(
       assertRelayTaskRowPresentation(
         createTaskRow(expectedTaskRowLabel()),
         taskRowExpectation,
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it("rejects a duplicated waiting preview rendered twice", async () => {
+    const duplicatedLabel =
+      `${expectedTaskRowLabel()}. ${taskRowExpectation.waitingPromptSnippet}`;
+
+    await expect(
+      assertRelayTaskRowPresentation(
+        createTaskRow(duplicatedLabel),
+        taskRowExpectation,
+      ),
+    ).rejects.toThrow("unexpected content");
   });
 
   it.each([

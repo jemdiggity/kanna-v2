@@ -148,25 +148,24 @@ describe("TaskCard", () => {
     );
   });
 
-  it("renders a prompt only once when the waiting preview duplicates the title", () => {
+  it("renders a normalized multiline prompt only once in text and accessibility", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
 
+    const title = "Fix the duplicated\n  mobile task prompt";
     const duplicatePrompt = "Fix the duplicated mobile task prompt";
     const tree = TaskCard({
       task: {
         id: "task-1",
         repoId: "repo-1",
-        title: duplicatePrompt,
+        title,
         stage: "in progress",
-        waitingPromptSnippet: `  ${duplicatePrompt}  `
+        waitingPromptSnippet: duplicatePrompt
       },
       onPress: vi.fn()
     }) as ElementNode;
 
-    expect(textContent(tree).split(duplicatePrompt)).toHaveLength(2);
-    expect(tree.props?.accessibilityLabel).toBe(
-      `${duplicatePrompt}. in progress`
-    );
+    expect(textContent(tree)).toBe(`${title}in progress`);
+    expect(tree.props?.accessibilityLabel).toBe(`${title}. in progress`);
   });
 
   it("styles the pre-capture ellipsis as a muted placeholder", () => {
