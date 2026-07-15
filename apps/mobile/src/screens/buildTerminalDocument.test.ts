@@ -20,6 +20,28 @@ class StubTerminal {
   scrollToBottomCalls = 0;
   writes: unknown[] = [];
   resets = 0;
+  buffer = {
+    active: {
+      baseY: 100,
+      viewportY: 100,
+      length: 101,
+      getLine: (_index: number) => ({
+        translateToString: (_trimRight?: boolean) => ""
+      })
+    }
+  };
+  dimensions = {
+    css: {
+      canvas: { width: 1980, height: 774 },
+      cell: { width: 9, height: 18 }
+    },
+    device: {
+      canvas: { width: 1980, height: 774 },
+      cell: { width: 9, height: 18 },
+      char: { width: 9, height: 18 }
+    }
+  };
+  private scrollListeners: Array<(viewportY: number) => void> = [];
   _core = {
     _renderService: {
       dimensions: {
@@ -47,12 +69,22 @@ class StubTerminal {
     screen.className = "xterm-screen";
     const viewport = root.ownerDocument.createElement("div");
     viewport.className = "xterm-viewport";
-    Object.defineProperties(viewport, {
-      clientHeight: { configurable: true, value: 100 },
-      scrollHeight: { configurable: true, value: 1000 }
-    });
-    xterm.append(screen, viewport);
+    const scrollableElement = root.ownerDocument.createElement("div");
+    scrollableElement.className = "xterm-scrollable-element";
+    scrollableElement.append(screen);
+    xterm.append(viewport, scrollableElement);
     root.append(xterm);
+  }
+
+  onScroll(listener: (viewportY: number) => void): { dispose(): void } {
+    this.scrollListeners.push(listener);
+    return {
+      dispose: () => {
+        this.scrollListeners = this.scrollListeners.filter(
+          (candidate) => candidate !== listener
+        );
+      }
+    };
   }
 
   resize(cols: number, rows: number): void {
@@ -63,15 +95,38 @@ class StubTerminal {
 
   scrollToBottom(): void {
     this.scrollToBottomCalls += 1;
+    this.buffer.active.viewportY = this.buffer.active.baseY;
+    this.emitScroll();
+  }
+
+  scrollToLine(line: number): void {
+    this.buffer.active.viewportY = Math.max(
+      0,
+      Math.min(this.buffer.active.baseY, line)
+    );
+    this.emitScroll();
   }
 
   write(data: unknown, done?: () => void): void {
     this.writes.push(data);
+    const previousBaseY = this.buffer.active.baseY;
+    this.buffer.active.baseY += 1;
+    this.buffer.active.length += 1;
+    if (this.buffer.active.viewportY === previousBaseY) {
+      this.buffer.active.viewportY = this.buffer.active.baseY;
+    }
+    this.emitScroll();
     done?.();
   }
 
   reset(): void {
     this.resets += 1;
+  }
+
+  private emitScroll(): void {
+    for (const listener of this.scrollListeners) {
+      listener(this.buffer.active.viewportY);
+    }
   }
 }
 
@@ -120,6 +175,7 @@ function createExecutedTerminalDocument({
   root: HTMLElement;
   viewport: HTMLElement;
   terminalViewport: HTMLElement;
+  scrollableElement: HTMLElement;
   messages: string[];
 } {
   const html = buildTerminalDocument({ bottomInset: 24, enableE2EInspection });
@@ -157,12 +213,19 @@ function createExecutedTerminalDocument({
     configurable: true,
     value: 390
   });
+  Object.defineProperties(viewport, {
+    clientHeight: { configurable: true, value: 844 },
+    scrollHeight: { configurable: true, value: 1000 }
+  });
 
   window.eval(extractTerminalScript(html));
 
   const root = window.document.getElementById("terminal-root");
   const terminalViewport = root?.querySelector<HTMLElement>(".xterm-viewport");
-  if (!terminal || !root || !terminalViewport) {
+  const scrollableElement = root?.querySelector<HTMLElement>(
+    ".xterm-scrollable-element"
+  );
+  if (!terminal || !root || !terminalViewport || !scrollableElement) {
     throw new Error("generated terminal script did not initialize xterm");
   }
 
@@ -172,6 +235,7 @@ function createExecutedTerminalDocument({
     root,
     viewport,
     terminalViewport,
+    scrollableElement,
     messages
   };
 }
@@ -190,7 +254,8 @@ describe("buildTerminalDocument", () => {
     window.__appendTerminalChunk({ chunksB64: [b64("second frame\n")] });
 
     expect(script).not.toContain("terminal-inspection");
-    expect(script).not.toContain("term.buffer.active");
+    expect(script).not.toContain("function renderedTerminalText");
+    expect(script).not.toContain("translateToString");
     expect(script).not.toContain("recordTerminalFrame");
     expect(messages.map((message) => JSON.parse(message).type)).not.toContain(
       "terminal-inspection"
@@ -234,7 +299,6 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain("overflow-x: auto;");
     expect(html).toContain("-webkit-overflow-scrolling: touch;");
     expect(html).toContain("touch-action: pan-x pan-y pinch-zoom;");
-    expect(html).toContain("terminalViewport.style.overflowX = \"visible\"");
     expect(html).toContain("const TERMINAL_COLS = 220;");
     expect(html).toContain("term.resize(TERMINAL_COLS, proposed.rows)");
     expect(html).toContain("const term = new TerminalCtor(");
@@ -248,30 +312,50 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain('type: "terminal-ready"');
     expect(html).toContain('type: "terminal-tap"');
     expect(html).toContain('viewport.addEventListener("pointerdown"');
-    expect(html).toContain('terminalViewport.style.bottom = "132px"');
-    expect(html).not.toContain("terminalViewport.style.bottom = stickyToBottom");
+    expect(html).toContain("term.onScroll");
+    expect(html).toContain("window.__setTerminalBottomInset");
+    expect(html).toContain("viewport.style.paddingBottom");
+    expect(html).not.toContain('terminalViewport.addEventListener("scroll"');
+    expect(html).not.toContain("terminalViewport.style.bottom");
     expect(html).not.toContain("<pre id=\"terminal\"></pre>");
   });
 
-  it("keeps the terminal safe region while scrollback disables sticky following", () => {
-    const { terminal, terminalViewport, window } = createExecutedTerminalDocument();
+  it("keeps manual xterm scrollback stable and resumes following near the bottom", () => {
+    const {
+      scrollableElement,
+      terminal,
+      terminalViewport,
+      window
+    } = createExecutedTerminalDocument();
     const initialScrollToBottomCalls = terminal.scrollToBottomCalls;
+    const screen = scrollableElement.querySelector(".xterm-screen");
 
-    terminalViewport.scrollTop = 100;
-    terminalViewport.dispatchEvent(new window.Event("scroll"));
-
-    expect(terminalViewport.style.bottom).toBe("24px");
+    expect(screen).not.toBeNull();
+    expect(terminalViewport.children).toHaveLength(0);
+    terminal.scrollToLine(terminal.buffer.active.baseY - 3);
+    const manualViewportY = terminal.buffer.active.viewportY;
 
     window.__appendTerminalChunk({ chunksB64: [b64("new output\n")] });
 
+    expect(terminal.buffer.active.viewportY).toBe(manualViewportY);
     expect(terminal.scrollToBottomCalls).toBe(initialScrollToBottomCalls);
+    expect(terminalViewport.style.bottom).toBe("");
 
-    terminalViewport.scrollTop = 876;
-    terminalViewport.dispatchEvent(new window.Event("scroll"));
+    terminal.scrollToLine(terminal.buffer.active.baseY - 1);
     window.__appendTerminalChunk({ chunksB64: [b64("latest output\n")] });
 
-    expect(terminalViewport.style.bottom).toBe("24px");
     expect(terminal.scrollToBottomCalls).toBe(initialScrollToBottomCalls + 1);
+    expect(terminal.buffer.active.viewportY).toBe(terminal.buffer.active.baseY);
+  });
+
+  it("updates and aligns the Kanna-owned viewport for measured composer insets", () => {
+    const { root, viewport, window } = createExecutedTerminalDocument();
+
+    window.__setTerminalBottomInset({ bottomInset: 212 });
+
+    expect(viewport.style.paddingBottom).toBe("212px");
+    expect(viewport.scrollTop).toBe(156);
+    expect(root.dataset.kannaBottomInset).toBe("212");
   });
 
   it("enables mobile pinch zoom and bidirectional touch scrolling for xterm", () => {
@@ -294,30 +378,30 @@ describe("buildTerminalDocument", () => {
   });
 
   it("executes one-finger fallback horizontal scrolling across the viewport", () => {
-    const { terminalViewport, viewport, window } = createExecutedTerminalDocument();
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
     viewport.scrollLeft = 12;
-    terminalViewport.scrollTop = 80;
+    terminal.scrollToLine(80);
 
     viewport.dispatchEvent(createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }]));
     const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 175, clientY: 232 }]);
     viewport.dispatchEvent(touchMove);
 
     expect(viewport.scrollLeft).toBe(57);
-    expect(terminalViewport.scrollTop).toBe(80);
+    expect(terminal.buffer.active.viewportY).toBe(80);
     expect(touchMove.defaultPrevented).toBe(true);
   });
 
   it("leaves primarily vertical one-finger scrolling to the xterm viewport", () => {
-    const { terminalViewport, viewport, window } = createExecutedTerminalDocument();
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
     viewport.scrollLeft = 12;
-    terminalViewport.scrollTop = 80;
+    terminal.scrollToLine(80);
 
     viewport.dispatchEvent(createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }]));
     const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 216, clientY: 180 }]);
     viewport.dispatchEvent(touchMove);
 
     expect(viewport.scrollLeft).toBe(12);
-    expect(terminalViewport.scrollTop).toBe(80);
+    expect(terminal.buffer.active.viewportY).toBe(80);
     expect(touchMove.defaultPrevented).toBe(false);
   });
 

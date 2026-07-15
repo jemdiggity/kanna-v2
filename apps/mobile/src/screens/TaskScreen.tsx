@@ -16,6 +16,7 @@ import { TerminalWebView } from "./TerminalWebView";
 import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
+import { getTerminalBottomInset } from "./terminalSafeArea";
 
 interface TaskScreenProps {
   task: TaskSummary;
@@ -59,6 +60,8 @@ export function TaskScreen({
   });
   const [draftInput, setDraftInput] = useState("");
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [screenHeight, setScreenHeight] = useState(0);
+  const [composerTop, setComposerTop] = useState<number | null>(null);
   const isAgentTask = task.agentType === "agent";
   const effectiveActivity =
     task.activity === "working" || task.activity === "unread"
@@ -68,6 +71,7 @@ export function TaskScreen({
     ? agentStatus === "connecting" || agentStatus === "error"
     : model.isComposerDisabled;
   const sendDisabled = isComposerDisabled || !draftInput.trim();
+  const terminalBottomInset = getTerminalBottomInset(screenHeight, composerTop);
   const sendDraftInput = () => {
     const nextInput = draftInput.trim();
     if (!nextInput || isComposerDisabled) {
@@ -93,7 +97,11 @@ export function TaskScreen({
   }, []);
 
   return (
-    <View style={styles.screen} testID={MOBILE_E2E_IDS.taskDetailScreen}>
+    <View
+      style={styles.screen}
+      testID={MOBILE_E2E_IDS.taskDetailScreen}
+      onLayout={(event) => setScreenHeight(event.nativeEvent.layout.height)}
+    >
       {e2eTaskSnapshotMarker ? (
         <Text
           accessibilityLabel={e2eTaskSnapshotMarker}
@@ -122,6 +130,7 @@ export function TaskScreen({
             cols={terminalCols}
             rows={terminalRows}
             taskId={task.id}
+            bottomInset={terminalBottomInset}
             onConsolePress={Keyboard.dismiss}
           />
         ) : (
@@ -161,6 +170,8 @@ export function TaskScreen({
 
       <View
         pointerEvents="box-none"
+        testID={MOBILE_E2E_IDS.taskComposerChrome}
+        onLayout={(event) => setComposerTop(event.nativeEvent.layout.y)}
         style={[
           styles.bottomChrome,
           { bottom: getComposerBottomOffset(keyboardHeight) }

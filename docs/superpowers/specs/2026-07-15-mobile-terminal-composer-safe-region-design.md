@@ -2,123 +2,177 @@
 
 ## Goal
 
-Keep PTY terminal content readable when the user browses scrollback behind the
-mobile task screen's floating composer. Content must remain above the composer
-instead of becoming obscured when sticky-bottom mode turns off.
+Keep every readable PTY terminal row above the mobile task screen's floating
+composer in its resting, multiline, and keyboard-shifted states. A user who is
+reading scrollback must stay at the same xterm buffer position while output
+arrives, and live following must resume only after the user returns within the
+existing 24 px near-bottom threshold.
 
-## Context
+## Verified Runtime Contract
 
-The fullscreen mobile terminal already receives a 132 px bottom inset. The
-generated terminal document applies that inset to xterm's internal viewport
-only while `stickyToBottom` is true. As soon as the user scrolls into history,
-the document sets the viewport bottom to zero and allows terminal rows to render
-behind the floating composer.
+The bundled `@xterm/xterm` version is `6.1.0-beta.195`. Its live DOM is:
 
-This behavior was intentional in the original task-detail design, but it makes
-scrollback harder to read. The outer WebView padding does not solve the problem
-because vertical terminal scrolling is owned by xterm's internal viewport.
+```text
+#viewport                         Kanna-owned horizontal/vertical wrapper
+└─ #terminal-root
+   └─ .terminal.xterm
+      ├─ .xterm-viewport          empty legacy sibling
+      └─ .xterm-scrollable-element
+         ├─ .xterm-screen         rendered rows and touch target
+         └─ xterm scrollbars
+```
 
-## Scope
+`.xterm-scrollable-element` uses xterm's internal `Scrollable` model; neither it
+nor `.xterm-viewport` reports live position through native `scrollTop` events.
+The supported follow-state boundary is `term.onScroll` together with
+`term.buffer.active.viewportY` and `baseY`.
 
-This change applies only to raw PTY tasks rendered by `TerminalWebView`.
-
-- Keep the native agent-message feed unchanged; it already uses React Native
-  scroll content padding.
-- Keep the floating composer and task action button unchanged.
-- Keep the existing 132 px fullscreen inset and 24 px embedded inset.
-- Do not change terminal transport, PTY dimensions, input submission, or task
-  state.
-- Do not add custom nested-scroll or touch-handoff behavior.
+The current document also reserves fixed space on Kanna's outer `#viewport`
+with `padding-bottom`. That happens to fit the one-line composer, but a pinned
+PTY grid can overflow the content box. The document must therefore align the
+outer viewport to its maximum vertical offset after changing the inset so the
+rendered xterm host ends at or above the safe-region boundary.
 
 ## Approaches Considered
 
-### Permanent terminal safe region (selected)
+### Measured obstruction and runtime WebView bridge (selected)
 
-Always end xterm's visible viewport above the configured bottom inset. The
-composer continues to float over the terminal background, but it never covers
-readable terminal rows.
+Measure the final native composer top in the same coordinate space as the task
+screen. Propagate the resulting bottom obstruction through `TerminalWebView`
+without rebuilding the WebView document. The generated document applies it to
+the Kanna-owned viewport, refits unpinned terminals, and aligns pinned grids.
 
-This is the smallest and most reliable solution. The area is not useful reading
-space while covered by the composer, so keeping it clear does not reduce the
-amount of content the user can actually read.
+This preserves the floating UI, captures actual font and multiline layout, and
+keeps xterm DOM details out of the layout contract.
 
-### True bottom overscroll
+### Resize the native terminal canvas
 
-Keep xterm full height and coordinate its internal scroller with an outer
-WebView spacer when the user reaches the bottom. This would preserve the current
-behind-composer layout until the user pulls farther, but xterm owns touch
-scrolling and prevents a natural nested-scroll handoff. Custom gesture routing
-would be more fragile and would require more device-specific testing.
+End the React Native WebView above the measured composer. This is a valid
+structural boundary, but resizing WKWebView during every multiline and keyboard
+animation would add native/WebView churn and would remove the terminal
+background beneath the translucent chrome.
 
-### Non-floating composer
+### Put the composer in normal flow
 
-Move the composer into normal layout below the terminal. This eliminates the
-overlap structurally, but changes the approved terminal-first visual design and
-expands the task beyond terminal scroll behavior.
+Place the terminal and composer in one flex column. This removes overlap by
+construction, but materially changes the existing terminal-first presentation
+and keyboard behavior.
 
-## Design
+Directly styling `.xterm-scrollable-element` was rejected. It is an xterm beta
+implementation detail and is not a native scrolling element.
 
-`buildTerminalDocument` remains the owner of terminal scroll presentation. Its
-two concerns will be separated:
+## Native Geometry
 
-1. The configured `bottomInset` always controls xterm's visible bottom edge.
-2. `stickyToBottom` only controls whether new output automatically follows the
-   live terminal bottom.
+`TaskScreen` records:
 
-When xterm's viewport is discovered, the document applies the configured inset.
-Scroll events may update `stickyToBottom`, but they must not remove the inset.
-Resize, replace, and append paths continue to reapply the same inset defensively.
+- the task screen height from its root `onLayout` callback; and
+- the floating chrome's final `layout.y` from its own `onLayout` callback.
 
-The resulting behavior is:
+Both values share the same parent coordinate space. The terminal inset is:
 
-- At the live bottom, the newest terminal rows sit above the composer and new
-  output continues to follow automatically.
-- After the user scrolls upward, the viewport remains above the composer and
-  new output does not move the user's reading position.
-- After the user returns to the existing near-bottom threshold, subsequent
-  output resumes following the live bottom.
-- Horizontal scrolling, pinch zoom, terminal taps, and pinned desktop PTY
-  dimensions retain their current behavior.
+```text
+ceil(screenHeight - composerTop + 8 px reading gap)
+```
 
-`TerminalWebView` keeps its existing inset constants and document-building
-contract. `TaskScreen` and `AgentMessageView` require no changes.
+This includes the plus control, the gap below it, the full multiline input,
+composer padding, the resting bottom margin, and keyboard displacement. It does
+not duplicate the device safe-area inset. Until both measurements exist, the
+current 132 px one-line value is a short-lived fallback.
 
-## Error Handling
+Representative regression geometries for an 800 px task screen are:
 
-The generated document already treats a missing xterm viewport as a temporary
-layout state and retries through later fit/sync calls. The safe-region change
-keeps that behavior. It introduces no new asynchronous work, bridge messages,
-or failure states.
+| State | Composer top | Terminal inset |
+|---|---:|---:|
+| Resting, one line | 676 | 132 |
+| Resting, max multiline | 596 | 212 |
+| Keyboard shifted, one line | 362 | 446 |
+| Keyboard shifted, max multiline | 282 | 526 |
+
+## React Native to WebView Data Flow
+
+1. `TaskScreen` calculates the measured `bottomInset` and passes it to
+   `TerminalWebView`.
+2. `TerminalWebView` keeps its generated HTML stable and injects a
+   `__setTerminalBottomInset` script whenever the measurement changes.
+3. Before `terminal-ready`, resize scripts are coalesced first, inset scripts
+   second, and terminal state scripts last. Repeated inset changes retain only
+   the newest measurement.
+4. WebView reload seeds the same resize, latest inset, and snapshot ordering.
+5. The document clamps the inset, updates `#viewport` padding, refits an
+   unpinned terminal, and aligns the Kanna-owned viewport to its vertical end.
+   A pinned grid keeps its desktop dimensions and is shifted within the outer
+   viewport so its rendered bottom remains above the obstruction.
+
+Changing the inset must never replace `source.html`, reset xterm, or change the
+user's xterm scrollback position.
+
+## Follow State
+
+The document subscribes once to `term.onScroll`. A buffer is near the bottom
+when:
+
+```text
+(baseY - viewportY) * cellHeight <= 24 px
+```
+
+`cellHeight` comes from xterm's public `term.dimensions` API, with the existing
+estimate only before dimensions are ready. Appending output captures follow
+intent before writing:
+
+- while the user is farther than the threshold, xterm's own write behavior
+  preserves `viewportY` and Kanna does not call `scrollToBottom`;
+- within the threshold, completion follows the new live bottom; and
+- layout inset changes remain independent from follow intent.
+
+The legacy `.xterm-viewport` listener and bottom style are removed. The Happy
+DOM terminal stub models the public buffer and `onScroll` contract rather than
+inventing native scroll metrics.
 
 ## Testing
 
-Extend `buildTerminalDocument.test.ts` with executable DOM coverage that proves:
+### Unit and component coverage
 
-- the configured inset is applied after xterm initializes;
-- scrolling away from the bottom does not collapse the inset;
-- appending output while scrolled up does not call `scrollToBottom`;
-- returning to the near-bottom threshold restores sticky following for later
-  output;
-- existing horizontal scrolling and pinch-zoom tests remain green.
+- Geometry tests cover all four representative native layouts.
+- `TaskScreen` tests execute both native `onLayout` callbacks and verify the
+  measured inset reaching `TerminalWebView`.
+- `TerminalWebView` tests prove pre-ready inset coalescing, deterministic script
+  order, immediate ready-state injection, and stable document HTML.
+- Generated-document tests model xterm's real DOM hierarchy and public scroll
+  API as narrow, fast coverage.
 
-Verification commands:
+### Real-browser integration
 
-```bash
-pnpm --dir apps/mobile test -- src/screens/buildTerminalDocument.test.ts
-pnpm --dir apps/mobile run typecheck
-pnpm --dir apps/mobile test
-```
+The existing `tests/tui-fidelity` Playwright harness loads the actual generated
+HTML, bundled xterm script, and fit addon in Chromium. Its safe-region check:
 
-This interaction ideally also has device-level coverage. The current Appium
-harness cannot reliably expose the terminal WebView context, as documented in
-`docs/2026-07-09-remote-e2e-layer-c-d-runbook.md`. The executable generated-DOM
-test is the focused regression coverage for this change; final visual/touch
-confirmation remains a human simulator or device check.
+- applies 132, 212, 446, and 526 px insets to a pinned terminal;
+- asserts the real `.xterm-scrollable-element` ends above each obstruction;
+- uses real wheel input to enter scrollback;
+- appends output and verifies `viewportY` and the top rendered line remain
+  stable; and
+- returns one row from the bottom and verifies following resumes.
+
+Run it with `pnpm test:tui-fidelity` in addition to the normal unit suites.
+
+### Why Appium is not the blocking regression
+
+The current Appium path needs a running kd-managed simulator stack and a known
+live PTY task supplied by environment variables. It cannot create a controlled
+PTY fixture, and its native driver cannot yet inject a reliable gesture while
+simultaneously inspecting the embedded WebView context. Making it deterministic
+requires a test-only server fixture that registers a synthetic terminal session
+plus a cross-context gesture helper. The Chromium test exercises the bundled
+xterm document and real scrolling behavior now; native measurement and bridge
+wiring remain covered at their React component boundaries.
 
 ## Success Criteria
 
-- No PTY terminal row is covered by the floating composer while browsing
-  scrollback.
-- Manual scrollback remains stable while terminal output continues.
-- Returning to the bottom resumes live-output following.
-- Native agent-message tasks and terminal touch navigation are unchanged.
+- Measured normal, multiline, and keyboard-shifted composer geometry reaches
+  the generated terminal document without a reload.
+- The real rendered xterm host has sufficient clearance in Chromium for every
+  representative obstruction.
+- Appending output never moves manual scrollback.
+- Returning within 24 px of the bottom resumes following.
+- No follow or layout logic depends on `.xterm-viewport` native scroll state.
+- Pinned PTY dimensions, horizontal scrolling, pinch zoom, and byte replay keep
+  their existing behavior.

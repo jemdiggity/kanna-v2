@@ -6,6 +6,7 @@ import { emitFixtureFrames } from "./emitter.ts";
 import { writeFixtures } from "./fixtures.ts";
 import { ARTIFACT_DIR, FIXTURE_DIR, GOLDEN_DIR } from "./paths.ts";
 import { renderPathGrid, renderReferenceGrid, renderSessionStorePathGrid } from "./render.ts";
+import { verifyTerminalSafeRegion } from "./terminalSafeRegion.ts";
 import type { FixtureResult } from "./types.ts";
 
 const DEFAULT_COLS = 220;
@@ -19,6 +20,8 @@ async function main(): Promise<void> {
   const browser = await chromium.launch();
   const results: FixtureResult[] = [];
   try {
+    await verifyTerminalSafeRegion(browser);
+    process.stdout.write("PASS terminal-safe-region\n");
     for (const fixture of fixtures) {
       const fixturePath = path.join(FIXTURE_DIR, `${fixture.name}.ansi`);
       const cols = fixture.cols ?? DEFAULT_COLS;

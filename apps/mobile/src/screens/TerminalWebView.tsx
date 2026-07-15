@@ -8,11 +8,13 @@ import {
 import type { TaskTerminalStatus } from "../state/sessionStore";
 import {
   buildTerminalAppendScript,
+  buildTerminalBottomInsetScript,
   buildTerminalDocument,
   buildTerminalReplaceScript,
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
 import { planTerminalMutation } from "./terminalMutation";
+import { DEFAULT_TERMINAL_BOTTOM_INSET } from "./terminalSafeArea";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 
 interface TerminalWebViewProps {
@@ -22,10 +24,10 @@ interface TerminalWebViewProps {
   cols: number | null;
   rows: number | null;
   fullscreen?: boolean;
+  bottomInset?: number;
   onConsolePress?: () => void;
 }
 
-const FULLSCREEN_BOTTOM_INSET = 132;
 const ENABLE_E2E_TERMINAL_INSPECTION =
   process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1";
 
@@ -33,7 +35,7 @@ interface TerminalWebViewHandle {
   injectJavaScript(script: string): void;
 }
 
-type PendingScriptKind = "terminal-state" | "resize";
+type PendingScriptKind = "terminal-state" | "resize" | "bottom-inset";
 
 interface TerminalInspection {
   byteCount: number;
@@ -54,6 +56,7 @@ export function TerminalWebView({
   cols,
   rows,
   fullscreen = false,
+  bottomInset,
   onConsolePress
 }: TerminalWebViewProps) {
   const webViewRef = useRef<TerminalWebViewHandle>(null);
@@ -63,10 +66,12 @@ export function TerminalWebView({
   const previousOutputRef = useRef("");
   const previousStatusRef = useRef<TaskTerminalStatus>("idle");
   const [terminalInspection, setTerminalInspection] = useState<TerminalInspection | null>(null);
+  const resolvedBottomInset =
+    bottomInset ?? (fullscreen ? DEFAULT_TERMINAL_BOTTOM_INSET : 24);
   const document = useMemo(
     () =>
       buildTerminalDocument({
-        bottomInset: fullscreen ? FULLSCREEN_BOTTOM_INSET : 24,
+        bottomInset: fullscreen ? DEFAULT_TERMINAL_BOTTOM_INSET : 24,
         enableE2EInspection: ENABLE_E2E_TERMINAL_INSPECTION
       }),
     [fullscreen]
@@ -78,6 +83,10 @@ export function TerminalWebView({
         status
       }),
     [output, status]
+  );
+  const bottomInsetScript = useMemo(
+    () => buildTerminalBottomInsetScript(resolvedBottomInset),
+    [resolvedBottomInset]
   );
 
   const injectOrQueueScript = (
@@ -91,6 +100,21 @@ export function TerminalWebView({
           ...pendingScriptsRef.current.filter(
             (pendingScript) => !pendingScript.includes("__setTerminalDims")
           )
+        ];
+      } else if (kind === "bottom-inset") {
+        const withoutBottomInset = pendingScriptsRef.current.filter(
+          (pendingScript) => !pendingScript.includes("__setTerminalBottomInset")
+        );
+        const resizeScripts = withoutBottomInset.filter((pendingScript) =>
+          pendingScript.includes("__setTerminalDims")
+        );
+        const remainingScripts = withoutBottomInset.filter(
+          (pendingScript) => !pendingScript.includes("__setTerminalDims")
+        );
+        pendingScriptsRef.current = [
+          ...resizeScripts,
+          script,
+          ...remainingScripts
         ];
       } else {
         pendingScriptsRef.current.push(script);
@@ -146,6 +170,10 @@ export function TerminalWebView({
     }
   }, [cols, rows]);
 
+  useEffect(() => {
+    injectOrQueueScript(bottomInsetScript, "bottom-inset");
+  }, [bottomInsetScript]);
+
   const handleMessage = (event: WebViewMessageEvent) => {
     let payload: { type?: string; inspection?: TerminalInspection } | null = null;
 
@@ -180,7 +208,11 @@ export function TerminalWebView({
     const pending =
       pendingScriptsRef.current.length > 0
         ? pendingScriptsRef.current
-        : [replaceScript];
+        : [
+            ...(cols && rows ? [buildTerminalResizeScript(cols, rows)] : []),
+            bottomInsetScript,
+            replaceScript
+          ];
     pendingScriptsRef.current = [];
     for (const script of pending) {
       webViewRef.current?.injectJavaScript(script);
@@ -204,10 +236,11 @@ export function TerminalWebView({
         originWhitelist={["*"]}
         onLoadStart={() => {
           bridgeReadyRef.current = false;
-          pendingScriptsRef.current =
-            cols && rows
-              ? [buildTerminalResizeScript(cols, rows), replaceScript]
-              : [replaceScript];
+          pendingScriptsRef.current = [
+            ...(cols && rows ? [buildTerminalResizeScript(cols, rows)] : []),
+            bottomInsetScript,
+            replaceScript
+          ];
         }}
         onMessage={handleMessage}
         onLoadEnd={() => {
