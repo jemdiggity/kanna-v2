@@ -180,6 +180,13 @@ function createTransferDb(initial: {
     deleteSetting: async () => {},
     putSetting: async (key, value) => ({ key, value }),
     postOperatorEvents: async () => {},
+    fetchRepoKannaDefinitions: async () => ({
+      revision: "remote-rev",
+      refName: "origin/main",
+      config: {},
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    }),
     applyTaskRuntimeStatus: async (taskId, input) => {
       const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
       if (!item || item.closed_at != null) return { taskId, activity: null };

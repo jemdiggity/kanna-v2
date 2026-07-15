@@ -178,16 +178,20 @@ pub(super) fn write_kanna_mcp_config(
     Ok(Some(path))
 }
 
-pub(super) fn apply_workspace_path_env(
+pub(super) fn apply_workspace_config_env(
     env: &mut HashMap<String, String>,
     worktree_path: &str,
     repo_config: &RepoConfig,
 ) {
-    let Some(path_config) = repo_config
-        .workspace
-        .as_ref()
-        .and_then(|workspace| workspace.path.as_ref())
-    else {
+    let Some(workspace_config) = repo_config.workspace.as_ref() else {
+        return;
+    };
+
+    if let Some(config_env) = workspace_config.env.as_ref() {
+        env.extend(config_env.clone());
+    }
+
+    let Some(path_config) = workspace_config.path.as_ref() else {
         return;
     };
 
@@ -291,7 +295,7 @@ pub(super) fn build_workspace_search_path(
     repo_config: &RepoConfig,
 ) -> Option<String> {
     let mut env = HashMap::new();
-    apply_workspace_path_env(&mut env, workspace_root, repo_config);
+    apply_workspace_config_env(&mut env, workspace_root, repo_config);
     env.remove("PATH")
 }
 

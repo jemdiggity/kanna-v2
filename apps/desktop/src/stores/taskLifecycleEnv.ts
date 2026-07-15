@@ -4,7 +4,7 @@ import { invoke } from "../invoke";
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
 import { buildTaskRuntimeEnv } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
-import { readRepoConfig } from "./state";
+import { fetchRepoConfig } from "./state";
 import { readEnvVarOptional, whichBinaryOptional } from "../utils/invokeHelpers";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
 
@@ -107,8 +107,7 @@ export async function collectTeardownCommands(item: PipelineItem, repo: Repo): P
     }
   }
 
-  const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
-  const repoConfig = await readRepoConfig(worktreePath);
+  const repoConfig = await fetchRepoConfig(repo.id);
   if (repoConfig.teardown?.length) {
     cmds.push(...repoConfig.teardown);
   }

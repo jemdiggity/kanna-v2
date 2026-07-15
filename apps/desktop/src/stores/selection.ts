@@ -81,8 +81,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
   }
 
   function getStageOrder(repoId: string): readonly string[] {
-    const repoPath = context.state.repos.value.find((repo) => repo.id === repoId)?.path ?? "";
-    return context.state.stageOrderCache.get(repoPath) ?? DEFAULT_STAGE_ORDER;
+    return context.state.stageOrderCache.get(repoId)?.stageOrder ?? DEFAULT_STAGE_ORDER;
   }
 
   function isItemHidden(item: PipelineItem): boolean {

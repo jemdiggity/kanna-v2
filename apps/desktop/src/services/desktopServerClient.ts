@@ -1,4 +1,6 @@
 import { isAgentProvider, type AgentProvider } from "@kanna/agent-protocol";
+import type { RepoConfig } from "@kanna/core";
+import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
@@ -47,6 +49,15 @@ export interface DesktopServerClientHandlersForTests {
   blockTask?: (taskId: string, blockerTaskIds: string[]) => MaybePromise<void>;
   unblockTask?: (taskId: string) => MaybePromise<void>;
   addRepo?: (input: AddDesktopRepoInput) => MaybePromise<DesktopRepoResponse>;
+  fetchRepoKannaDefinitions?: (repoId: string) => MaybePromise<DesktopRepoKannaDefinitions>;
+  fetchRepoPipelineDefinition?: (
+    repoId: string,
+    pipelineName: string,
+  ) => MaybePromise<DesktopRepoPipelineDefinition>;
+  fetchRepoAgentDefinition?: (
+    repoId: string,
+    agentSelector: string,
+  ) => MaybePromise<DesktopRepoAgentDefinition>;
   fetchRepoAgentProviders?: (repoId: string) => MaybePromise<AgentProvider[]>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
@@ -203,6 +214,59 @@ export async function createDesktopTask(
 
 interface DesktopRepoAgentProvidersResponse {
   providers: Array<{ id: string; executable: string }>;
+}
+
+export interface DesktopRepoKannaDefinitions {
+  revision: string | null;
+  refName: string;
+  config: RepoConfig;
+  defaultPipeline: string;
+  pipelines: string[];
+}
+
+export interface DesktopRepoPipelineDefinition {
+  revision: string | null;
+  definition: PipelineDefinition;
+}
+
+export interface DesktopRepoAgentDefinition {
+  revision: string | null;
+  definition: AgentDefinition;
+}
+
+export async function fetchDesktopRepoKannaDefinitions(
+  repoId: string,
+): Promise<DesktopRepoKannaDefinitions> {
+  if (clientHandlersForTests?.fetchRepoKannaDefinitions) {
+    return await clientHandlersForTests.fetchRepoKannaDefinitions(repoId);
+  }
+  return await requestJson<DesktopRepoKannaDefinitions>(
+    `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`,
+  );
+}
+
+export async function fetchDesktopRepoPipelineDefinition(
+  repoId: string,
+  pipelineName: string,
+): Promise<DesktopRepoPipelineDefinition> {
+  if (clientHandlersForTests?.fetchRepoPipelineDefinition) {
+    return await clientHandlersForTests.fetchRepoPipelineDefinition(repoId, pipelineName);
+  }
+  return await requestJson<DesktopRepoPipelineDefinition>(
+    `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions/pipelines/${encodeURIComponent(pipelineName)}`,
+  );
+}
+
+export async function fetchDesktopRepoAgentDefinition(
+  repoId: string,
+  agentSelector: string,
+): Promise<DesktopRepoAgentDefinition> {
+  if (clientHandlersForTests?.fetchRepoAgentDefinition) {
+    return await clientHandlersForTests.fetchRepoAgentDefinition(repoId, agentSelector);
+  }
+  return await requestJson<DesktopRepoAgentDefinition>(
+    `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions/agents/${encodeURIComponent(agentSelector)}`,
+  );
 }
 
 export async function fetchDesktopRepoAgentProviders(repoId: string): Promise<AgentProvider[]> {

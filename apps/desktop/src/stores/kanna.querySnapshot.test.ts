@@ -9,8 +9,10 @@ import {
   type StoreServices,
 } from "./state";
 import { createQueriesApi } from "./queries";
+import { createSelectionApi } from "./selection";
 import { useKannaStore } from "./kanna";
 import {
+  setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
   updateDesktopServerClientHandlersForTests,
 } from "../services/desktopServerClient";
@@ -405,6 +407,14 @@ describe("kanna query snapshot regressions", () => {
       settings: {},
     }));
     updateDesktopServerClientHandlersForTests({
+      putSetting: async () => {},
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      }),
       findRepoByPath: async (path) =>
         mockState.allRepos.find((repo) => repo.path === path) as never ?? null,
       addRepo: async ({ path, name }) => {
@@ -441,6 +451,7 @@ describe("kanna query snapshot regressions", () => {
   });
 
   afterEach(() => {
+    setDesktopServerClientHandlersForTests(null);
     setDesktopSnapshotFetcherForTests(async () => ({
       entries: [],
       taskBlockers: [],
@@ -448,6 +459,96 @@ describe("kanna query snapshot regressions", () => {
       settings: {},
     }));
     vi.useRealTimers();
+  });
+
+  it("refreshes stage order by repo ID when the manifest revision changes", async () => {
+    const repo = mockState.makeRepo({ id: "repo-stage-order", path: "/tmp/movable-path" });
+    const firstOrder = ["review", "pr"];
+    const responses = [
+      {
+        revision: "rev-1",
+        refName: "origin/main",
+        config: { stage_order: firstOrder },
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      },
+      {
+        revision: "rev-1",
+        refName: "origin/main",
+        config: { stage_order: ["ignored-same-revision"] },
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      },
+      {
+        revision: "rev-2",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      },
+    ];
+    const fetchRepoKannaDefinitions = vi.fn(async () => {
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected manifest fetch");
+      return response;
+    });
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
+    const state = createStoreState();
+    const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
+      fetchSnapshot: async () => ({
+        entries: [{ repo, items: [] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      }),
+    });
+    const queries = createQueriesApi(context);
+    const selection = createSelectionApi(context);
+
+    await queries.reloadSnapshot();
+    const firstEntry = state.stageOrderCache.get(repo.id);
+    expect(firstEntry).toBeDefined();
+    expect(selection.getStageOrder(repo.id)).toBe(firstOrder);
+    expect(state.stageOrderCache.has(repo.path)).toBe(false);
+
+    await queries.reloadSnapshot();
+    expect(state.stageOrderCache.get(repo.id)).toBe(firstEntry);
+    expect(selection.getStageOrder(repo.id)).toBe(firstOrder);
+
+    await queries.reloadSnapshot();
+    expect(state.stageOrderCache.get(repo.id)).not.toBe(firstEntry);
+    expect(selection.getStageOrder(repo.id)).toEqual(["pr", "review", "in progress"]);
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledTimes(3);
+    expect(fetchRepoKannaDefinitions).toHaveBeenNthCalledWith(1, repo.id);
+  });
+
+  it("propagates manifest failures during snapshot reload without reading local config", async () => {
+    const error = new Error("stage-order manifest unavailable");
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => {
+        throw error;
+      },
+    });
+    const repo = mockState.makeRepo({ id: "repo-stage-error" });
+    const state = createStoreState();
+    const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
+      fetchSnapshot: async () => ({
+        entries: [{ repo, items: [] }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      }),
+    });
+    const queries = createQueriesApi(context);
+    mockState.invokeMock.mockClear();
+
+    await expect(queries.reloadSnapshot()).rejects.toBe(error);
+
+    expect(queries.snapshot.error.value).toBe(error);
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
+      "read_text_file",
+      expect.objectContaining({ path: expect.stringContaining("/.kanna/config.json") }),
+    );
   });
 
   it("keeps the newest snapshot when an older reload resolves last", async () => {
@@ -599,11 +700,17 @@ describe("kanna query snapshot regressions", () => {
     expect(queries.snapshot.pending.value).toBe(false);
   });
 
-  it("keeps the newest snapshot when an older reload resumes after reading repo config", async () => {
+  it("keeps the newest snapshot when an older reload resumes after reading repo definitions", async () => {
     const older = deferred<KannaSnapshot>();
     const newer = deferred<KannaSnapshot>();
-    const repoConfig = deferred<string>();
-    const configReadStarted = deferred<void>();
+    const repoDefinitions = deferred<{
+      revision: string;
+      refName: string;
+      config: Record<string, never>;
+      defaultPipeline: string;
+      pipelines: string[];
+    }>();
+    const definitionsReadStarted = deferred<void>();
     const fetchSnapshot = vi.fn()
       .mockReturnValueOnce(older.promise)
       .mockReturnValueOnce(newer.promise);
@@ -622,18 +729,12 @@ describe("kanna query snapshot regressions", () => {
       path: "/tmp/repo-config-race",
       name: "repo-config-race",
     });
-    const originalInvoke = mockState.invokeMock.getMockImplementation();
-    if (!originalInvoke) throw new Error("invoke mock implementation is unavailable");
-
-    mockState.invokeMock.mockImplementation(async (command, args) => {
-      if (
-        command === "read_text_file"
-        && args?.path === `${olderRepo.path}/.kanna/config.json`
-      ) {
-        configReadStarted.resolve();
-        return repoConfig.promise;
-      }
-      return originalInvoke(command, args);
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async (repoId) => {
+        expect(repoId).toBe(olderRepo.id);
+        definitionsReadStarted.resolve();
+        return repoDefinitions.promise;
+      },
     });
 
     let olderReload: Promise<void> | undefined;
@@ -645,7 +746,7 @@ describe("kanna query snapshot regressions", () => {
         worktreePaths: {},
         settings: { markdownPreviewMode: "rendered" },
       });
-      await configReadStarted.promise;
+      await definitionsReadStarted.promise;
 
       const newerReload = queries.reloadSnapshot();
       newer.resolve({
@@ -659,7 +760,13 @@ describe("kanna query snapshot regressions", () => {
       });
       await newerReload;
 
-      repoConfig.resolve("{}");
+      repoDefinitions.resolve({
+        revision: "older-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      });
       await olderReload;
 
       expect(state.markdownPreviewMode.value).toBe("raw");
@@ -669,10 +776,14 @@ describe("kanna query snapshot regressions", () => {
       expect(queries.snapshot.pending.value).toBe(false);
       expect(queries.snapshot.error.value).toBeNull();
     } finally {
-      repoConfig.resolve("{}");
+      repoDefinitions.resolve({
+        revision: "older-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      });
       await olderReload?.catch(() => undefined);
-      mockState.invokeMock.mockReset();
-      mockState.invokeMock.mockImplementation(originalInvoke);
     }
   });
 

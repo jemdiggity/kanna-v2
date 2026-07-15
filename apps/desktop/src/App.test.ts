@@ -195,7 +195,7 @@ const store = {
   renameItem: vi.fn(async () => {}),
   hideRepo: vi.fn(async () => {}),
   spawnPtySession: vi.fn(async () => {}),
-  loadAgent: vi.fn(async (_repoPath: string, agentName: string) => ({
+  loadAgent: vi.fn(async (_repoId: string, agentName: string) => ({
     prompt: agentName === "setup"
       ? "Configure the GitHub flow by composing stock flavors instead of writing agents from scratch."
       : "Use https://schemas.kanna.build/config.schema.json when writing .kanna/config.json.",
@@ -748,6 +748,13 @@ describe("App", () => {
     dbMock.execute.mockReset();
     dbMock.execute.mockResolvedValue({ rowsAffected: 0 });
     updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      }),
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
       claimPendingIncomingTransfer: async (transferId) => {
         const result = await dbMock.execute(
@@ -3608,7 +3615,7 @@ describe("App", () => {
     await wrapper.get('[data-command-id="setup-repo"]').trigger("click");
     await flushPromises();
 
-    expect(store.loadAgent).toHaveBeenCalledWith("/tmp/repo", "setup");
+    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "setup");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-1",
       "/tmp/repo",
@@ -3630,7 +3637,7 @@ describe("App", () => {
     await createConfigButton.trigger("click");
     await flushPromises();
 
-    expect(store.loadAgent).toHaveBeenCalledWith("/tmp/repo", "config-factory");
+    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "config-factory");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-1",
       "/tmp/repo",
@@ -3676,7 +3683,7 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.importRepo).toHaveBeenCalledWith("/tmp/imported", "imported", "main");
-    expect(store.loadAgent).toHaveBeenCalledWith("/tmp/imported", "setup");
+    expect(store.loadAgent).toHaveBeenCalledWith("repo-imported", "setup");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-imported",
       "/tmp/imported",

@@ -83,7 +83,62 @@ fn test_config(label: &str) -> Config {
 }
 
 fn init_git_repo(label: &str) -> std::path::PathBuf {
-    init_git_repo_with_provider_fixtures(label, true)
+    let repo_root = init_git_repo_with_provider_fixtures(label, true);
+    publish_origin_main(&repo_root, "publish initial fixture definitions");
+    repo_root
+}
+
+fn run_git_fixture(repo_root: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .expect("run git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed in {}\nstdout:\n{}\nstderr:\n{}",
+        repo_root.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8(output.stdout)
+        .expect("git fixture stdout should be UTF-8")
+        .trim()
+        .to_string()
+}
+
+fn publish_origin_main(repo_root: &std::path::Path, message: &str) -> String {
+    publish_origin_branch(repo_root, "main", message)
+}
+
+fn publish_origin_branch(repo_root: &std::path::Path, branch: &str, message: &str) -> String {
+    run_git_fixture(repo_root, &["add", "."]);
+    let staged_status = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(repo_root)
+        .status()
+        .expect("check staged fixture changes");
+    match staged_status.code() {
+        Some(0) => {}
+        Some(1) => {
+            run_git_fixture(repo_root, &["commit", "-m", message]);
+        }
+        status => panic!(
+            "git diff --cached --quiet failed in {} with status {status:?}",
+            repo_root.display()
+        ),
+    }
+
+    let revision = run_git_fixture(repo_root, &["rev-parse", "HEAD"]);
+    run_git_fixture(
+        repo_root,
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{branch}"),
+            revision.as_str(),
+        ],
+    );
+    revision
 }
 
 fn init_git_repo_without_provider_fixtures(label: &str) -> std::path::PathBuf {
@@ -388,5 +443,6 @@ fn init_git_repo_with_pipeline(
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish kanna pipeline fixture");
     repo_root
 }

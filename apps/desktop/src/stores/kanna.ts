@@ -12,7 +12,7 @@ import { createInitApi } from "./init";
 import type { WindowWorkspaceController } from "../windowWorkspace";
 import { fetchDesktopSnapshot } from "../services/desktopServerClient";
 
-export { readRepoConfig } from "./state";
+export { fetchRepoConfig } from "./state";
 export { collectTeardownCommands } from "./tasks";
 
 export const useKannaStore = defineStore("kanna", () => {
@@ -103,7 +103,7 @@ export const useKannaStore = defineStore("kanna", () => {
     if (!repo) return;
 
     try {
-      const agent = await pipeline.loadAgent(repo.path, "merge");
+      const agent = await pipeline.loadAgent(repo.id, "merge");
       const targetBranch = repo.default_branch || "main";
       const prompt = `${agent.prompt.trim()}
 

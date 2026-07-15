@@ -1,7 +1,8 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { type PipelineItem, type Repo } from "../types/kanna";
 import type { TaskUiSlot } from "../types/taskUi";
-import { readRepoConfig, requireService, type KannaSnapshot, type StoreContext } from "./state";
+import { fetchDesktopRepoKannaDefinitions } from "../services/desktopServerClient";
+import { requireService, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 import { reconcileTaskUiSlots } from "./taskUiSlots";
@@ -153,17 +154,14 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         const repoStart = performance.now();
         debugLog(`[perf:items] refresh repo #${runId} ${repo.id}: ${(performance.now() - repoStart).toFixed(1)}ms`);
 
-        if (!context.state.stageOrderCache.has(repo.path)) {
-          try {
-            const config = await readRepoConfig(repo.path);
-            if (runId !== refreshRunId.value) return;
-            if (config.stage_order) {
-              context.state.stageOrderCache.set(repo.path, config.stage_order);
-            }
-          } catch (error) {
-            if (runId !== refreshRunId.value) return;
-            console.debug("[store] no repo config while refreshing stage order cache:", error);
-          }
+        const manifest = await fetchDesktopRepoKannaDefinitions(repo.id);
+        if (runId !== refreshRunId.value) return;
+        const cachedStageOrder = context.state.stageOrderCache.get(repo.id);
+        if (!cachedStageOrder || cachedStageOrder.revision !== manifest.revision) {
+          context.state.stageOrderCache.set(repo.id, {
+            revision: manifest.revision,
+            stageOrder: manifest.config.stage_order ?? null,
+          });
         }
       }
 

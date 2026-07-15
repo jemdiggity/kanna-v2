@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
-use super::definitions::{
-    read_agent_definition, read_repo_config, PipelineStage, PipelineStageTransition,
-};
+use super::definitions::{PipelineStage, PipelineStageTransition, RepoDefinitions};
 
 pub(super) fn build_target_stage_prompt(
+    definitions: &RepoDefinitions,
     repo_path: &str,
     stage: &PipelineStage,
     task_prompt: &str,
@@ -15,17 +14,16 @@ pub(super) fn build_target_stage_prompt(
 ) -> Result<String, String> {
     let source_worktree =
         source_worktree_branch.map(|branch| format!("{repo_path}/.kanna-worktrees/{branch}"));
-    let repo_vars = read_repo_config(repo_path)?.vars;
     let context = PromptContext {
         task_prompt: Some(task_prompt),
         prev_result,
         branch,
         base_ref,
         source_worktree: source_worktree.as_deref(),
-        vars: repo_vars.as_ref(),
+        vars: definitions.config().vars.as_ref(),
     };
     if let Some(agent_name) = stage.agent.as_deref() {
-        let agent = read_agent_definition(repo_path, agent_name)?;
+        let agent = definitions.agent(agent_name)?;
         return Ok(build_stage_prompt(
             &agent.prompt,
             stage.prompt.as_deref(),

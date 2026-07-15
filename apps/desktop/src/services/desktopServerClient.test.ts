@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeDesktopTask,
   createDesktopBackup,
+  fetchDesktopRepoAgentDefinition,
   fetchDesktopRepoAgentProviders,
+  fetchDesktopRepoKannaDefinitions,
+  fetchDesktopRepoPipelineDefinition,
   fetchDesktopSnapshot,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
@@ -106,6 +109,160 @@ describe("desktopServerClient", () => {
         body: undefined,
       },
     );
+  });
+
+  it("fetches the repo Kanna definition manifest from the encoded repo endpoint", async () => {
+    const response = {
+      revision: "abc123",
+      refName: "origin/main",
+      config: {
+        pipeline: "qa",
+        reserved_port_offsets: [0, 2],
+        stage_order: ["review", "pr"],
+      },
+      defaultPipeline: "qa",
+      pipelines: ["default", "qa"],
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchDesktopRepoKannaDefinitions("repo/with space")).resolves.toEqual(response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/repos/repo%2Fwith%20space/kanna-definitions",
+      {
+        method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("fetches a revisioned pipeline definition with each path segment encoded independently", async () => {
+    const response = {
+      revision: "def456",
+      definition: {
+        name: "qa candidate",
+        description: "Quality assurance pipeline",
+        environments: {
+          test: {
+            setup: ["pnpm install"],
+            teardown: ["pnpm clean"],
+          },
+        },
+        stages: [{
+          name: "in progress",
+          agent: "implement",
+          agent_provider: ["codex", "claude"],
+          environment: "test",
+          policy: { transition: "manual" },
+          post: {
+            name: "commit",
+            agent: "commit",
+            agent_provider: ["codex"],
+          },
+        }],
+      },
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchDesktopRepoPipelineDefinition("repo/one", "qa candidate"),
+    ).resolves.toEqual(response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/repos/repo%2Fone/kanna-definitions/pipelines/qa%20candidate",
+      {
+        method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("fetches a revisioned agent definition with each path segment encoded independently", async () => {
+    const response = {
+      revision: null,
+      definition: {
+        name: "Reviewer",
+        description: "Reviews task changes",
+        prompt: "Review the implementation.",
+        agent_provider: ["codex", "claude"],
+        model: "gpt-5",
+        permission_mode: "dontAsk",
+        allowed_tools: ["Read", "Bash"],
+      },
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchDesktopRepoAgentDefinition("repo/one", "review@strict"),
+    ).resolves.toEqual(response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/repos/repo%2Fone/kanna-definitions/agents/review%40strict",
+      {
+        method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("allows tests to override repo definition clients", async () => {
+    const manifest = {
+      revision: "abc123",
+      refName: "origin/main",
+      config: {},
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    };
+    const pipeline = {
+      revision: "abc123",
+      definition: {
+        name: "default",
+        stages: [{ name: "in progress", policy: { transition: "manual" as const } }],
+      },
+    };
+    const agent = {
+      revision: "abc123",
+      definition: {
+        name: "Implementer",
+        description: "Implements tasks",
+        prompt: "Implement the task.",
+      },
+    };
+    const fetchRepoKannaDefinitions = vi.fn(async () => manifest);
+    const fetchRepoPipelineDefinition = vi.fn(async () => pipeline);
+    const fetchRepoAgentDefinition = vi.fn(async () => agent);
+    const fetchMock = vi.fn(() => {
+      throw new Error("unexpected fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions,
+      fetchRepoPipelineDefinition,
+      fetchRepoAgentDefinition,
+    });
+
+    await expect(fetchDesktopRepoKannaDefinitions("repo-1")).resolves.toBe(manifest);
+    await expect(fetchDesktopRepoPipelineDefinition("repo-1", "default")).resolves.toBe(pipeline);
+    await expect(fetchDesktopRepoAgentDefinition("repo-1", "implement")).resolves.toBe(agent);
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
+    expect(fetchRepoPipelineDefinition).toHaveBeenCalledWith("repo-1", "default");
+    expect(fetchRepoAgentDefinition).toHaveBeenCalledWith("repo-1", "implement");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("allows tests to override server readiness checks", async () => {

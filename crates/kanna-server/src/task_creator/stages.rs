@@ -2,8 +2,8 @@ use crate::config::Config;
 use crate::db::{Db, TaskStageSource};
 
 use super::definitions::{
-    post_as_stage, read_pipeline_definition, read_task_pipeline_definition, resolve_stage_position,
-    PipelineDefinition, PipelineStage, PipelineStageTransition, StagePosition,
+    parse_stored_pipeline_definition, post_as_stage, resolve_stage_position, PipelineDefinition,
+    PipelineStage, PipelineStageTransition, RepoDefinitions, StagePosition,
 };
 use super::prepare_stage_run_spawn;
 use super::prompt::{
@@ -23,14 +23,26 @@ struct StageTransitionContext<'a> {
     source_task: &'a TaskStageSource,
     source_task_id: &'a str,
     repo: &'a Repo,
+    definitions: &'a RepoDefinitions,
     pipeline_name: &'a str,
     pipeline: &'a PipelineDefinition,
 }
 
-fn load_stage_transition_source(
-    db: &Db,
-    source_task_id: &str,
-) -> Result<(TaskStageSource, Repo, String, PipelineDefinition, String), String> {
+struct LoadedStageTransitionSource {
+    source_task: TaskStageSource,
+    repo: Repo,
+    definitions: RepoDefinitions,
+    pipeline_name: String,
+    pipeline: PipelineDefinition,
+    current_stage_name: String,
+}
+
+struct LoadedStageIdentity {
+    source_task: TaskStageSource,
+    repo: Repo,
+}
+
+fn load_stage_identity(db: &Db, source_task_id: &str) -> Result<LoadedStageIdentity, String> {
     let source_task = db
         .get_task_stage_source(source_task_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -39,6 +51,15 @@ fn load_stage_transition_source(
         .get_repo(&source_task.repo_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("repo not found for task: {}", source_task_id))?;
+    Ok(LoadedStageIdentity { source_task, repo })
+}
+
+fn load_stage_transition_source(
+    identity: LoadedStageIdentity,
+    source_task_id: &str,
+) -> Result<LoadedStageTransitionSource, String> {
+    let LoadedStageIdentity { source_task, repo } = identity;
+    let definitions = RepoDefinitions::resolve(&repo)?;
     let pipeline_name = source_task
         .pipeline
         .clone()
@@ -47,18 +68,16 @@ fn load_stage_transition_source(
         .stage
         .clone()
         .ok_or_else(|| format!("task has no stage: {}", source_task_id))?;
-    let pipeline = read_task_pipeline_definition(
-        &repo.path,
-        &pipeline_name,
-        source_task.pipeline_def.as_deref(),
-    )?;
-    Ok((
+    let pipeline =
+        definitions.task_pipeline(&pipeline_name, source_task.pipeline_def.as_deref())?;
+    Ok(LoadedStageTransitionSource {
         source_task,
         repo,
+        definitions,
         pipeline_name,
         pipeline,
         current_stage_name,
-    ))
+    })
 }
 
 pub(crate) fn prepare_advance_stage_for_api(
@@ -66,9 +85,8 @@ pub(crate) fn prepare_advance_stage_for_api(
     config: &Config,
     source_task_id: &str,
 ) -> Result<PreparedStageTransition, String> {
-    let (source_task, repo, pipeline_name, pipeline, current_stage_name) =
-        load_stage_transition_source(db, source_task_id)?;
-    if source_task.closed_at.is_some() {
+    let identity = load_stage_identity(db, source_task_id)?;
+    if identity.source_task.closed_at.is_some() {
         return Err(format!("task is closed: {}", source_task_id));
     }
     let open_blockers = db
@@ -77,22 +95,24 @@ pub(crate) fn prepare_advance_stage_for_api(
     if open_blockers > 0 {
         return Err(format!("task is blocked: {}", source_task_id));
     }
+    let loaded = load_stage_transition_source(identity, source_task_id)?;
     let context = StageTransitionContext {
-        source_task: &source_task,
+        source_task: &loaded.source_task,
         source_task_id,
-        repo: &repo,
-        pipeline_name: &pipeline_name,
-        pipeline: &pipeline,
+        repo: &loaded.repo,
+        definitions: &loaded.definitions,
+        pipeline_name: &loaded.pipeline_name,
+        pipeline: &loaded.pipeline,
     };
 
-    let position = resolve_stage_position(&pipeline, &current_stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", current_stage_name))?;
+    let position = resolve_stage_position(&loaded.pipeline, &loaded.current_stage_name)
+        .ok_or_else(|| format!("stage not found in pipeline: {}", loaded.current_stage_name))?;
     match position {
         // Legacy in-flight task parked at a folded post name (e.g. `commit`):
         // the post is the current context, so advancing swaps past its owner.
         StagePosition::Post { owner } => prepare_swap_to_index(db, config, &context, owner + 1),
         StagePosition::Stage(index) => {
-            let stage = &pipeline.stages[index];
+            let stage = &loaded.pipeline.stages[index];
             if let Some(post) = &stage.post {
                 let latest = db
                     .latest_stage_run(source_task_id)
@@ -130,21 +150,22 @@ pub(crate) fn prepare_stage_completion_for_api(
     source_task_id: &str,
     finished_run_kind: Option<&str>,
 ) -> Result<Option<PreparedStageTransition>, String> {
-    let (source_task, repo, pipeline_name, pipeline, current_stage_name) =
-        load_stage_transition_source(db, source_task_id)?;
-    if source_task.closed_at.is_some() {
+    let identity = load_stage_identity(db, source_task_id)?;
+    if identity.source_task.closed_at.is_some() {
         return Ok(None);
     }
+    let loaded = load_stage_transition_source(identity, source_task_id)?;
     let context = StageTransitionContext {
-        source_task: &source_task,
+        source_task: &loaded.source_task,
         source_task_id,
-        repo: &repo,
-        pipeline_name: &pipeline_name,
-        pipeline: &pipeline,
+        repo: &loaded.repo,
+        definitions: &loaded.definitions,
+        pipeline_name: &loaded.pipeline_name,
+        pipeline: &loaded.pipeline,
     };
 
-    let position = resolve_stage_position(&pipeline, &current_stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", current_stage_name))?;
+    let position = resolve_stage_position(&loaded.pipeline, &loaded.current_stage_name)
+        .ok_or_else(|| format!("stage not found in pipeline: {}", loaded.current_stage_name))?;
     match position {
         // Legacy in-flight task parked at a folded post name: success means
         // the post finished, which always advances past its owner.
@@ -152,7 +173,7 @@ pub(crate) fn prepare_stage_completion_for_api(
             prepare_swap_to_index(db, config, &context, owner + 1).map(Some)
         }
         StagePosition::Stage(index) => {
-            let stage = &pipeline.stages[index];
+            let stage = &loaded.pipeline.stages[index];
             if finished_run_kind == Some("post") {
                 return prepare_swap_to_index(db, config, &context, index + 1).map(Some);
             }
@@ -162,7 +183,7 @@ pub(crate) fn prepare_stage_completion_for_api(
             if stage.post.is_some() {
                 return prepare_post_dispatch(db, config, &context, index).map(Some);
             }
-            if pipeline.stages.get(index + 1).is_none() {
+            if loaded.pipeline.stages.get(index + 1).is_none() {
                 // An auto main-run completion never closes the task; only an
                 // explicit advance (or a post completion) moves past the
                 // final stage.
@@ -180,14 +201,27 @@ fn prepare_swap_to_index(
     next_index: usize,
 ) -> Result<PreparedStageTransition, String> {
     let Some(next_stage) = context.pipeline.stages.get(next_index) else {
+        let workspace_teardown = context
+            .source_task
+            .branch
+            .as_deref()
+            .zip(context.source_task.stage.as_deref())
+            .and_then(|(branch, stage_name)| {
+                super::prepare_workspace_teardown_for_transition_close(
+                    db,
+                    config,
+                    context.repo,
+                    context.definitions,
+                    context.source_task_id,
+                    context.pipeline,
+                    stage_name,
+                    branch,
+                )
+            })
+            .map(Box::new);
         return Ok(PreparedStageTransition::Close {
             task_id: context.source_task_id.to_string(),
-            workspace_teardown: super::prepare_workspace_teardown_for_close(
-                db,
-                config,
-                context.source_task_id,
-            )
-            .map(Box::new),
+            workspace_teardown,
         });
     };
     prepare_stage_run_for_target(
@@ -331,6 +365,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         _ => source_branch.clone(),
     };
     let final_prompt = build_target_stage_prompt(
+        context.definitions,
         &context.repo.path,
         target_stage,
         task_prompt,
@@ -352,6 +387,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         db,
         config,
         context.repo,
+        context.definitions,
         context.source_task_id,
         context.pipeline_name,
         context.pipeline,
@@ -375,6 +411,7 @@ fn prepare_stage_run_for_target_returning_prompt(
             db,
             config,
             context.repo,
+            context.definitions,
             context.source_task_id,
             context.pipeline,
             departed_stage,
@@ -400,25 +437,26 @@ pub(crate) fn prepare_revision_task_for_api(
     target_stage_name: &str,
     revision_prompt: &str,
 ) -> Result<PreparedStageRunSpawn, String> {
-    let (source_task, repo, pipeline_name, pipeline, _current_stage_name) =
-        load_stage_transition_source(db, source_task_id)?;
-    if source_task.closed_at.is_some() {
+    let identity = load_stage_identity(db, source_task_id)?;
+    if identity.source_task.closed_at.is_some() {
         return Err(format!("task is closed: {}", source_task_id));
     }
+    let loaded = load_stage_transition_source(identity, source_task_id)?;
     let context = StageTransitionContext {
-        source_task: &source_task,
+        source_task: &loaded.source_task,
         source_task_id,
-        repo: &repo,
-        pipeline_name: &pipeline_name,
-        pipeline: &pipeline,
+        repo: &loaded.repo,
+        definitions: &loaded.definitions,
+        pipeline_name: &loaded.pipeline_name,
+        pipeline: &loaded.pipeline,
     };
 
-    let position = resolve_stage_position(&pipeline, target_stage_name)
+    let position = resolve_stage_position(&loaded.pipeline, target_stage_name)
         .ok_or_else(|| format!("stage not found in pipeline: {}", target_stage_name))?;
     let (target_stage, item_stage, run_kind): (PipelineStage, String, &'static str) = match position
     {
         StagePosition::Stage(index) => {
-            let stage = pipeline.stages[index].clone();
+            let stage = loaded.pipeline.stages[index].clone();
             let item_stage = stage.name.clone();
             (stage, item_stage, "main")
         }
@@ -426,7 +464,7 @@ pub(crate) fn prepare_revision_task_for_api(
         // the post as a fresh session with feedback; the task's stage is
         // the post's owner.
         StagePosition::Post { owner } => {
-            let owner_stage = &pipeline.stages[owner];
+            let owner_stage = &loaded.pipeline.stages[owner];
             let post_stage = post_as_stage(owner_stage)
                 .ok_or_else(|| format!("stage has no post: {}", owner_stage.name))?;
             (post_stage, owner_stage.name.clone(), "post")
@@ -449,8 +487,10 @@ pub(crate) fn prepare_revision_task_for_api(
     // prompt_override would clobber $TASK_PROMPT entirely. The run keeps the
     // task's provider: a revision continues the same stage's work, so the
     // agent def's provider priority list must not switch providers on it.
-    let composed_prompt =
-        build_revision_task_prompt(source_task.prompt.as_deref().unwrap_or(""), revision_prompt);
+    let composed_prompt = build_revision_task_prompt(
+        loaded.source_task.prompt.as_deref().unwrap_or(""),
+        revision_prompt,
+    );
     prepare_stage_run_for_target_with_provider(
         db,
         config,
@@ -460,7 +500,7 @@ pub(crate) fn prepare_revision_task_for_api(
         run_kind,
         Some(&composed_prompt),
         Some(revision_prompt.to_string()),
-        source_task.agent_provider.clone(),
+        loaded.source_task.agent_provider.clone(),
     )
 }
 
@@ -535,6 +575,7 @@ fn prepare_revision_resume(
         db,
         config,
         context.repo,
+        context.definitions,
         task_id,
         context.pipeline_name,
         context.pipeline,
@@ -573,11 +614,15 @@ fn prepare_revision_resume(
 }
 
 pub(crate) fn resolve_stage_transition(
-    repo_path: &str,
+    repo: &Repo,
     pipeline_name: &str,
+    pipeline_def: Option<&str>,
     stage_name: &str,
 ) -> Result<Option<String>, String> {
-    let pipeline = read_pipeline_definition(repo_path, pipeline_name)?;
+    let pipeline = match pipeline_def.filter(|value| !value.trim().is_empty()) {
+        Some(stored) => parse_stored_pipeline_definition(stored)?,
+        None => RepoDefinitions::resolve(repo)?.pipeline(pipeline_name)?,
+    };
     Ok(match resolve_stage_position(&pipeline, stage_name) {
         Some(StagePosition::Stage(index)) => Some(
             pipeline.stages[index]

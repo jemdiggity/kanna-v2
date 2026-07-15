@@ -1,12 +1,9 @@
-import {
-  applyAgentExtension,
-  parseAgentDefinition,
-  parseAgentExtension,
-} from "../../../../packages/core/src/pipeline/agent-loader";
-import { parseRepoConfig } from "../../../../packages/core/src/config/repo-config";
-import { parsePipelineJson } from "../../../../packages/core/src/pipeline/pipeline-loader";
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import { invoke } from "../invoke";
+import {
+  fetchDesktopRepoAgentDefinition,
+  fetchDesktopRepoPipelineDefinition,
+} from "../services/desktopServerClient";
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
 import { requireService, type AdvanceStageOptions, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
@@ -17,8 +14,8 @@ const STAGE_ADVANCE_RECONCILE_TIMEOUT_MS = 15_000;
 const STAGE_ADVANCE_RECONCILE_RETRY_MS = 100;
 
 export interface PipelineApi {
-  loadPipeline: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
-  loadAgent: (repoPath: string, agentName: string) => Promise<AgentDefinition>;
+  loadPipeline: (repoId: string, pipelineName: string) => Promise<PipelineDefinition>;
+  loadAgent: (repoId: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
   requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage: (taskId: string) => Promise<void>;
@@ -148,10 +145,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     pipeline: string;
     stage: string;
   }): Promise<StageAdvanceProjection> {
-    const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
-    if (!repo) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
     try {
-      const pipeline = await loadPipeline(repo.path, item.pipeline || "default");
+      const pipeline = await loadPipeline(item.repo_id, item.pipeline || "default");
       const currentIndex = pipeline.stages.findIndex((stage) => stage.name === item.stage);
       if (currentIndex === -1) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
       const currentStage = pipeline.stages[currentIndex];
@@ -248,131 +243,24 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     }
   }
 
-  async function loadPipeline(repoPath: string, pipelineName: string): Promise<PipelineDefinition> {
-    const cacheKey = `${repoPath}::${pipelineName}`;
+  async function loadPipeline(repoId: string, pipelineName: string): Promise<PipelineDefinition> {
+    const cacheKey = `${repoId}::${pipelineName}`;
+    const response = await fetchDesktopRepoPipelineDefinition(repoId, pipelineName);
     const cached = context.state.pipelineCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached?.revision === response.revision) return cached.definition;
 
-    let pipeline: PipelineDefinition;
-    try {
-      const path = `${repoPath}/.kanna/pipelines/${pipelineName}.json`;
-      const content = await invoke<string>("read_text_file", { path });
-      pipeline = parsePipelineJson(content);
-    } catch (error) {
-      console.debug(`[pipeline] failed to load pipeline "${pipelineName}" from repo; trying bundled resource:`, error);
-      try {
-        const content = await invoke<string>("read_builtin_resource", {
-          relativePath: `.kanna/pipelines/${pipelineName}.json`,
-        });
-        pipeline = parsePipelineJson(content);
-      } catch (error) {
-        throw new Error(
-          `Pipeline "${pipelineName}" not found: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
-        );
-      }
-    }
-
-    context.state.pipelineCache.set(cacheKey, pipeline);
-    return pipeline;
+    context.state.pipelineCache.set(cacheKey, response);
+    return response.definition;
   }
 
-  async function loadRepoConfigForAgent(repoPath: string): Promise<{
-    flavors?: Record<string, string>;
-    vars?: Record<string, string>;
-  }> {
-    try {
-      const content = await invoke<string>("read_text_file", { path: `${repoPath}/.kanna/config.json` });
-      const config = parseRepoConfig(content);
-      return {
-        flavors: config.flavors,
-        vars: config.vars,
-      };
-    } catch {
-      return {};
-    }
-  }
-
-  function resolveAgentSelector(agentName: string, flavors?: Record<string, string>): {
-    role: string;
-    repoAgentDir: string;
-    builtinFlavorPath: string | null;
-  } {
-    const [role, explicitFlavor] = splitAgentSelector(agentName);
-    const selectedFlavor = explicitFlavor ?? flavors?.[role] ?? null;
-    return {
-      role,
-      repoAgentDir: role,
-      builtinFlavorPath: selectedFlavor ? `.kanna/agents/${role}/flavors/${selectedFlavor}/AGENT.md` : null,
-    };
-  }
-
-  function splitAgentSelector(agentName: string): [string, string | null] {
-    const parts = agentName.split("@");
-    if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
-      return [agentName, null];
-    }
-    return [parts[0], parts[1]];
-  }
-
-  async function loadAgent(repoPath: string, agentName: string): Promise<AgentDefinition> {
-    const cacheKey = `${repoPath}::${agentName}`;
+  async function loadAgent(repoId: string, agentName: string): Promise<AgentDefinition> {
+    const cacheKey = `${repoId}::${agentName}`;
+    const response = await fetchDesktopRepoAgentDefinition(repoId, agentName);
     const cached = context.state.agentCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached?.revision === response.revision) return cached.definition;
 
-    const repoConfig = await loadRepoConfigForAgent(repoPath);
-    const selector = resolveAgentSelector(agentName, repoConfig.flavors);
-    let agent: AgentDefinition;
-    try {
-      const path = `${repoPath}/.kanna/agents/${selector.repoAgentDir}/AGENT.md`;
-      const content = await invoke<string>("read_text_file", { path });
-      agent = parseAgentDefinition(content);
-    } catch (error) {
-      console.debug(`[pipeline] failed to load agent "${agentName}" from repo; trying bundled resource:`, error);
-      try {
-        const content = await invoke<string>("read_builtin_resource", {
-          relativePath: selector.builtinFlavorPath ?? `.kanna/agents/${selector.role}/AGENT.md`,
-        });
-        agent = parseAgentDefinition(content);
-      } catch (flavorError) {
-        if (selector.builtinFlavorPath) {
-          try {
-            const content = await invoke<string>("read_builtin_resource", {
-              relativePath: `.kanna/agents/${selector.role}/AGENT.md`,
-            });
-            agent = parseAgentDefinition(content);
-          } catch (defaultError) {
-            throw new Error(
-              `Agent "${agentName}" not found on disk or in bundled resources: ${defaultError instanceof Error ? defaultError.message : JSON.stringify(defaultError)}`,
-            );
-          }
-        } else {
-          throw new Error(
-            `Agent "${agentName}" not found on disk or in bundled resources: ${flavorError instanceof Error ? flavorError.message : JSON.stringify(flavorError)}`,
-          );
-        }
-      }
-    }
-
-    // Repo-local extension: layered onto the resolved agent (repo override or
-    // built-in) so a repo can customize a default agent without rewriting it.
-    const extendPath = `${repoPath}/.kanna/agents/${selector.repoAgentDir}/EXTEND.md`;
-    let extendContent: string | null = null;
-    try {
-      extendContent = await invoke<string>("read_text_file", { path: extendPath });
-    } catch (error) {
-      console.debug(`[pipeline] no extension for agent "${agentName}":`, error);
-    }
-    if (extendContent !== null) {
-      try {
-        agent = applyAgentExtension(agent, parseAgentExtension(extendContent));
-      } catch (error) {
-        throw new Error(
-          `Invalid agent extension at ${extendPath}: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
-        );
-      }
-    }
-    context.state.agentCache.set(cacheKey, agent);
-    return agent;
+    context.state.agentCache.set(cacheKey, response);
+    return response.definition;
   }
 
   async function advanceStage(taskId: string, options: AdvanceStageOptions = {}): Promise<void> {

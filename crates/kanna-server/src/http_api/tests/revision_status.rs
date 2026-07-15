@@ -108,7 +108,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/AGENT.md"),
-        "---\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
+        "---\nname: Implement\ndescription: Test implementation agent\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
     )
     .unwrap();
     assert!(Command::new("git")
@@ -123,6 +123,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         .status()
         .unwrap()
         .success());
+    super::publish_test_origin_main(&repo_root);
     assert!(Command::new("git")
         .args(["branch", "task-710917fb"])
         .current_dir(&repo_root)
@@ -330,6 +331,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         [
             "---",
             "name: Revision",
+            "description: Test revision agent",
             "agent_provider: codex",
             "---",
             "Implement revision:",
@@ -351,6 +353,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         .status()
         .unwrap()
         .success());
+    super::publish_test_origin_main(&repo_root);
     assert!(Command::new("git")
         .args(["branch", "task-reviewed"])
         .current_dir(&repo_root)

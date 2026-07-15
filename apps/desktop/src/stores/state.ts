@@ -1,12 +1,11 @@
 import { ref, type ComputedRef, type Ref } from "vue";
-import { parseRepoConfig, type RepoConfig } from "@kanna/core";
+import type { RepoConfig } from "@kanna/core";
 import type { AgentProvider, DbHandle, PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { PipelineDefinition, AgentDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
-import { invoke } from "../invoke";
 import i18n from "../i18n";
 import { useToast } from "../composables/useToast";
-import { getAppErrorMessage } from "../appError";
+import { fetchDesktopRepoKannaDefinitions } from "../services/desktopServerClient";
 import type { WindowBootstrap, WindowWorkspaceController } from "../windowWorkspace";
 import {
   DEFAULT_APP_THEME,
@@ -133,10 +132,20 @@ export interface StoreState {
   agentMessageAppearance: Ref<AgentMessageAppearance>;
   markdownPreviewMode: Ref<MarkdownPreviewMode>;
   lastHiddenRepoId: Ref<string | null>;
-  pipelineCache: Map<string, PipelineDefinition>;
-  agentCache: Map<string, AgentDefinition>;
-  stageOrderCache: Map<string, string[]>;
+  pipelineCache: Map<string, RevisionedDefinitionCacheEntry<PipelineDefinition>>;
+  agentCache: Map<string, RevisionedDefinitionCacheEntry<AgentDefinition>>;
+  stageOrderCache: Map<string, RevisionedStageOrderCacheEntry>;
   pendingCreateVisibility: Map<string, { bumpAt: number }>;
+}
+
+export interface RevisionedDefinitionCacheEntry<T> {
+  revision: string | null;
+  definition: T;
+}
+
+export interface RevisionedStageOrderCacheEntry {
+  revision: string | null;
+  stageOrder: string[] | null;
 }
 
 export interface StoreServices {
@@ -166,8 +175,8 @@ export interface StoreServices {
   restoreSelection?: (itemId: string) => void;
   goBack?: () => void;
   goForward?: () => void;
-  loadPipeline?: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
-  loadAgent?: (repoPath: string, agentName: string) => Promise<AgentDefinition>;
+  loadPipeline?: (repoId: string, pipelineName: string) => Promise<PipelineDefinition>;
+  loadAgent?: (repoId: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage?: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
   requestRevision?: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage?: (taskId: string) => Promise<void>;
@@ -240,37 +249,8 @@ export function requireService<T>(
   return service;
 }
 
-export async function readRepoConfig(basePath: string): Promise<RepoConfig> {
-  const configPath = `${basePath}/.kanna/config.json`;
-
-  function isMissingRepoConfigError(error: unknown): boolean {
-    const message = getAppErrorMessage(error).toLowerCase();
-    return message.includes("no such file or directory")
-      || message.includes("missing config")
-      || message.includes("not found");
-  }
-
-  try {
-    const content = await invoke<string>("read_text_file", {
-      path: configPath,
-    });
-
-    if (!content) {
-      return {};
-    }
-
-    try {
-      return parseRepoConfig(content);
-    } catch (error) {
-      throw new Error(`invalid repo config '${configPath}': ${getAppErrorMessage(error)}`);
-    }
-  } catch (error) {
-    if (isMissingRepoConfigError(error)) {
-      console.debug("[store] no .kanna/config.json:", error);
-      return {};
-    }
-    throw error;
-  }
+export async function fetchRepoConfig(repoId: string): Promise<RepoConfig> {
+  return (await fetchDesktopRepoKannaDefinitions(repoId)).config;
 }
 
 export function createStoreState(): StoreState {
@@ -296,9 +276,9 @@ export function createStoreState(): StoreState {
   const markdownPreviewMode = ref<MarkdownPreviewMode>(DEFAULT_MARKDOWN_PREVIEW_MODE);
   const lastHiddenRepoId = ref<string | null>(null);
   const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
-  const pipelineCache = new Map<string, PipelineDefinition>();
-  const agentCache = new Map<string, AgentDefinition>();
-  const stageOrderCache = new Map<string, string[]>();
+  const pipelineCache = new Map<string, RevisionedDefinitionCacheEntry<PipelineDefinition>>();
+  const agentCache = new Map<string, RevisionedDefinitionCacheEntry<AgentDefinition>>();
+  const stageOrderCache = new Map<string, RevisionedStageOrderCacheEntry>();
 
   return {
     db,

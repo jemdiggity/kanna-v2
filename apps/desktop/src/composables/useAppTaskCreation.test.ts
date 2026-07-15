@@ -1,8 +1,11 @@
 import { computed, ref } from "vue";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAppTaskCreation } from "./useAppTaskCreation";
-import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
+import {
+  setDesktopServerClientHandlersForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -12,6 +15,8 @@ vi.mock("../invoke", () => ({
 
 function createTaskCreationHarness() {
   const showNewTaskModal = ref(true);
+  const availablePipelines = ref<string[]>([]);
+  const defaultPipelineName = ref<string | undefined>(undefined);
   const onAgentChoiceUsed = vi.fn(async () => {});
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
@@ -46,8 +51,8 @@ function createTaskCreationHarness() {
     selectedCloudRepoId,
     selectedCloudItemId,
     showNewTaskModal,
-    availablePipelines: ref([]),
-    defaultPipelineName: ref(undefined),
+    availablePipelines,
+    defaultPipelineName,
     availableBaseBranches: ref([]),
     defaultBaseBranchName: ref(undefined),
     repoDefaultBranchName: ref(undefined),
@@ -61,6 +66,8 @@ function createTaskCreationHarness() {
     creation,
     store,
     showNewTaskModal,
+    availablePipelines,
+    defaultPipelineName,
     onAgentChoiceUsed,
     selectedCloudRepoId,
     selectedCloudItemId,
@@ -70,6 +77,13 @@ function createTaskCreationHarness() {
 describe("useAppTaskCreation", () => {
   beforeEach(() => {
     updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      }),
       fetchRepoAgentProviders: async () => ["claude", "copilot", "codex", "opencode", "antigravity"],
     });
     invokeMock.mockReset();
@@ -80,6 +94,48 @@ describe("useAppTaskCreation", () => {
       if (command === "git_list_base_branches") return ["origin/main"];
       return "";
     });
+  });
+
+  afterEach(() => {
+    setDesktopServerClientHandlersForTests(null);
+  });
+
+  it("loads pipeline choices and the default from the repo definitions manifest", async () => {
+    const fetchRepoKannaDefinitions = vi.fn(async () => ({
+      revision: "remote-rev",
+      refName: "origin/main",
+      config: { pipeline: "remote-qa" },
+      defaultPipeline: "remote-qa",
+      pipelines: ["default", "remote-qa"],
+    }));
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
+    const { creation, availablePipelines, defaultPipelineName } = createTaskCreationHarness();
+
+    await creation.openNewTaskModal();
+
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
+    expect(availablePipelines.value).toEqual(["default", "remote-qa"]);
+    expect(defaultPipelineName.value).toBe("remote-qa");
+    expect(invokeMock).not.toHaveBeenCalledWith("list_dir", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("read_text_file", expect.anything());
+  });
+
+  it("propagates manifest failures without trying local definition files", async () => {
+    const error = new Error("remote definitions unavailable");
+    const fetchRepoAgentProviders = vi.fn(async (): Promise<["claude"]> => ["claude"]);
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => {
+        throw error;
+      },
+      fetchRepoAgentProviders,
+    });
+    const { creation } = createTaskCreationHarness();
+
+    await expect(creation.openNewTaskModal()).rejects.toBe(error);
+
+    expect(fetchRepoAgentProviders).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith("list_dir", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("read_text_file", expect.anything());
   });
 
   it("loads executable availability through the repo-scoped server resolver", async () => {
@@ -202,7 +258,7 @@ describe("useAppTaskCreation", () => {
     await creation.handleImportRepo("/repo", "repo", "main");
 
     expect(store.importRepo).toHaveBeenCalledWith("/repo", "repo", "main");
-    expect(store.loadAgent).toHaveBeenCalledWith("/repo", "setup");
+    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "setup");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-1",
       "/repo",

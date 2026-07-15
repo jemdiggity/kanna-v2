@@ -7,7 +7,8 @@ use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
 use super::pairing::create_pairing_session;
 use super::repos::{
-    add_repo, dependent_tasks_exist, get_repo_by_path, list_available_agent_providers,
+    add_repo, dependent_tasks_exist, get_repo_agent_definition, get_repo_by_path,
+    get_repo_kanna_definitions, get_repo_pipeline_definition, list_available_agent_providers,
     list_repo_tasks, list_repos, patch_repo, reorder_repos,
 };
 use super::settings::{delete_setting, get_setting, put_setting};
@@ -67,6 +68,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/repos/actions/reorder", post(reorder_repos))
         .route("/v1/repos/{repo_id}", axum::routing::patch(patch_repo))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
+        .route(
+            "/v1/repos/{repo_id}/kanna-definitions",
+            get(get_repo_kanna_definitions),
+        )
+        .route(
+            "/v1/repos/{repo_id}/kanna-definitions/pipelines/{pipeline_name}",
+            get(get_repo_pipeline_definition),
+        )
+        .route(
+            "/v1/repos/{repo_id}/kanna-definitions/agents/{agent_selector}",
+            get(get_repo_agent_definition),
+        )
         .route(
             "/v1/repos/{repo_id}/agent-providers",
             get(list_available_agent_providers),

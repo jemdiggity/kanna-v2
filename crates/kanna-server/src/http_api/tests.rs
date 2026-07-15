@@ -125,6 +125,16 @@ fn init_test_git_repo(repo_root: &Path) {
         .status()
         .unwrap()
         .success());
+    publish_test_origin_main(repo_root);
+}
+
+fn publish_test_origin_main(repo_root: &Path) {
+    assert!(Command::new("git")
+        .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
+        .current_dir(repo_root)
+        .status()
+        .unwrap()
+        .success());
 }
 
 mod actions;
@@ -132,4 +142,5 @@ mod core_routes;
 mod create_task;
 mod e2e_sql_routes;
 mod input;
+mod repo_definitions;
 mod revision_status;

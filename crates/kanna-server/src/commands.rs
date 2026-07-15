@@ -330,6 +330,12 @@ mod tests {
             .status()
             .unwrap()
             .success());
+        assert!(Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
+            .current_dir(repo_root)
+            .status()
+            .unwrap()
+            .success());
     }
 
     fn test_config(unique: &str, db_path: String, daemon_dir: String) -> Config {

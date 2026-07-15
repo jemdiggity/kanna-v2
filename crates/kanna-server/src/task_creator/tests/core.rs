@@ -1,6 +1,7 @@
-use super::super::definitions::AgentDefinition;
+use super::super::definitions::{AgentDefinition, RepoDefinitions};
 use super::super::provider::resolve_agent_provider_with;
 use super::*;
+use crate::db::{NewRepo, Repo};
 
 #[derive(serde::Deserialize)]
 struct ProviderResolutionCase {
@@ -23,6 +24,49 @@ fn joined(values: &[String]) -> Option<String> {
     (!values.is_empty()).then(|| values.join(","))
 }
 
+fn string_values(values: Option<&[String]>) -> Option<Vec<&str>> {
+    values.map(|values| values.iter().map(String::as_str).collect())
+}
+
+fn definition_repo(repo_root: &std::path::Path, default_branch: &str) -> Repo {
+    Repo {
+        id: format!("repo-{}", repo_root.display()),
+        path: repo_root.to_string_lossy().into_owned(),
+        name: "Definition fixture".to_string(),
+        default_branch: Some(default_branch.to_string()),
+        hidden: None,
+        sort_order: None,
+        created_at: None,
+        last_opened_at: None,
+    }
+}
+
+fn resolve_test_agent_definition(
+    repo_root: &std::path::Path,
+    agent_name: &str,
+) -> Result<AgentDefinition, String> {
+    RepoDefinitions::resolve(&definition_repo(repo_root, "main"))?.agent(agent_name)
+}
+
+fn resolve_test_pipeline_definition(
+    repo_root: &std::path::Path,
+    pipeline_name: &str,
+) -> Result<super::super::definitions::PipelineDefinition, String> {
+    RepoDefinitions::resolve(&definition_repo(repo_root, "main"))?.pipeline(pipeline_name)
+}
+
+fn assert_remote_definition_error(error: &str, path: &str, revision: &str) {
+    assert!(error.contains(path), "missing path {path:?} in {error:?}");
+    assert!(
+        error.contains("origin/main"),
+        "missing attempted ref in {error:?}"
+    );
+    assert!(
+        error.contains(revision),
+        "missing pinned revision {revision:?} in {error:?}"
+    );
+}
+
 #[test]
 fn provider_resolution_cases_match_shared_contract() {
     let cases: Vec<ProviderResolutionCase> =
@@ -30,6 +74,8 @@ fn provider_resolution_cases_match_shared_contract() {
 
     for case in cases {
         let agent = (!case.agent.is_empty()).then(|| AgentDefinition {
+            name: "test-agent".to_string(),
+            description: "Test agent".to_string(),
             prompt: String::new(),
             agent_providers: case.agent.clone(),
             model: None,
@@ -61,6 +107,231 @@ fn provider_resolution_rejects_unknown_values() {
         resolve_agent_provider_with(Some("future-agent"), None, None, None, |_| true).unwrap_err(),
         "unsupported agent provider: future-agent",
     );
+}
+
+#[test]
+fn workspace_config_env_merges_values_and_resolves_path_entries_against_worktree() {
+    let worktree = std::path::Path::new("/tmp/kanna-worktrees/task-remote");
+    let config: super::super::definitions::RepoConfig = serde_json::from_value(serde_json::json!({
+        "workspace": {
+            "env": {
+                "REMOTE_ENV": "yes",
+                "OVERRIDE_ME": "remote",
+                "PATH": "remote-existing"
+            },
+            "path": {
+                "prepend": ["remote-bin", "/absolute/prepend"],
+                "append": ["remote-tail", "/absolute/append"]
+            }
+        }
+    }))
+    .unwrap();
+    let mut env = HashMap::from([
+        ("KEEP_ME".to_string(), "runtime".to_string()),
+        ("OVERRIDE_ME".to_string(), "local".to_string()),
+        ("PATH".to_string(), "runtime-existing".to_string()),
+    ]);
+
+    super::super::environment::apply_workspace_config_env(
+        &mut env,
+        &worktree.to_string_lossy(),
+        &config,
+    );
+
+    assert_eq!(env.get("KEEP_ME").map(String::as_str), Some("runtime"));
+    assert_eq!(env.get("REMOTE_ENV").map(String::as_str), Some("yes"));
+    assert_eq!(env.get("OVERRIDE_ME").map(String::as_str), Some("remote"));
+    assert_eq!(
+        env.get("PATH").map(String::as_str),
+        Some(
+            "/tmp/kanna-worktrees/task-remote/remote-bin:/absolute/prepend:remote-existing:/tmp/kanna-worktrees/task-remote/remote-tail:/absolute/append"
+        )
+    );
+}
+
+#[test]
+fn task_creation_uses_one_remote_default_branch_definition_context() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo_root = init_git_repo_without_provider_fixtures("remote-task-creation-context");
+    let config = test_config("remote-task-creation-context");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+
+    let write_definitions = |prefix: &str, provider: &str| {
+        let lower = prefix.to_ascii_lowercase();
+        let agent_name = format!("{lower}-agent");
+        let pipeline_name = format!("{lower}-pipeline");
+        let bin_dir = repo_root.join(format!("{lower}-bin"));
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::create_dir_all(repo_root.join(format!(".kanna/agents/{agent_name}"))).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(repo_root.join(format!("{lower}-tail"))).unwrap();
+        std::fs::write(repo_root.join(format!("{lower}-tail/.keep")), "").unwrap();
+        let provider_binary = bin_dir.join(provider);
+        std::fs::write(&provider_binary, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&provider_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/config.json"),
+            serde_json::json!({
+                "pipeline": pipeline_name,
+                "setup": [format!("printf {prefix}_SETUP > {lower}-setup.marker")],
+                "ports": {format!("{prefix}_PORT"): 49100},
+                "reserved_port_offsets": [1],
+                "vars": {format!("{prefix}_VAR"): format!("{prefix}_VALUE")},
+                "workspace": {
+                    "env": {format!("{prefix}_ENV"): "yes"},
+                    "path": {
+                        "prepend": [format!("{lower}-bin")],
+                        "append": [format!("{lower}-tail")]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            repo_root.join(format!(".kanna/pipelines/{pipeline_name}.json")),
+            serde_json::json!({
+                "name": pipeline_name,
+                "stages": [{
+                    "name": "in progress",
+                    "agent": agent_name,
+                    "prompt": format!("{prefix}_PIPELINE $TASK_PROMPT"),
+                    "transition": "manual"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            repo_root.join(format!(".kanna/agents/{agent_name}/AGENT.md")),
+            format!(
+                "---\nname: {agent_name}\ndescription: {prefix} agent\nagent_provider: {provider}\nmodel: {lower}-model\npermission_mode: dontAsk\nallowed_tools:\n  - Read\n  - Bash\n---\n{prefix}_AGENT ${prefix}_VAR\n"
+            ),
+        )
+        .unwrap();
+    };
+
+    write_definitions("LOCAL_SENTINEL", "claude");
+    publish_origin_main(&repo_root, "publish local sentinel definitions");
+
+    std::fs::remove_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::remove_dir_all(repo_root.join(".kanna/agents")).unwrap();
+    write_definitions("REMOTE", "codex");
+    publish_origin_branch(&repo_root, "dev", "publish remote dev definitions");
+
+    // The live checkout disagrees with both tracked refs. Orchestration must
+    // ignore it and use the exact origin/dev snapshot selected by the DB Repo.
+    write_definitions("LOCAL_SENTINEL", "claude");
+
+    db.insert_repo(NewRepo {
+        id: "repo-1",
+        path: &repo_root.to_string_lossy(),
+        name: "Repo One",
+        default_branch: Some("dev"),
+    })
+    .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Do remote work".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: None,
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    let stored = db
+        .get_pipeline_item(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.pipeline.as_deref(), Some("remote-pipeline"));
+    let pipeline_def = stored.pipeline_def.as_deref().unwrap();
+    assert!(pipeline_def.contains("REMOTE_PIPELINE"), "{pipeline_def}");
+    assert!(!pipeline_def.contains("LOCAL_SENTINEL"), "{pipeline_def}");
+    assert_eq!(prepared.agent_provider, "codex");
+    assert_eq!(prepared.model.as_deref(), Some("remote-model"));
+    assert_eq!(
+        prepared.env.get("REMOTE_ENV").map(String::as_str),
+        Some("yes")
+    );
+    assert!(!prepared.env.contains_key("LOCAL_SENTINEL_ENV"));
+    assert_eq!(
+        prepared.env.get("REMOTE_PORT").map(String::as_str),
+        Some("49102")
+    );
+    let path = prepared.env.get("PATH").unwrap();
+    let expected_prepend = format!("{}/remote-bin", prepared.cwd);
+    let expected_append = format!("{}/remote-tail", prepared.cwd);
+    assert_eq!(path.split(':').next(), Some(expected_prepend.as_str()));
+    assert_eq!(path.split(':').last(), Some(expected_append.as_str()));
+    assert!(std::path::Path::new(&prepared.cwd)
+        .join("remote-setup.marker")
+        .is_file());
+    assert!(!std::path::Path::new(&prepared.cwd)
+        .join("local_sentinel-setup.marker")
+        .exists());
+
+    match &prepared.session {
+        PreparedSessionSpawn::Agent {
+            prompt,
+            model,
+            permission_mode,
+            allowed_tools,
+            executable,
+            ..
+        } => {
+            assert!(prompt.contains("REMOTE_AGENT REMOTE_VALUE"), "{prompt}");
+            assert!(
+                prompt.contains("REMOTE_PIPELINE Do remote work"),
+                "{prompt}"
+            );
+            assert!(!prompt.contains("LOCAL_SENTINEL"), "{prompt}");
+            assert_eq!(model.as_deref(), Some("remote-model"));
+            assert_eq!(permission_mode.as_deref(), Some("dontAsk"));
+            assert_eq!(allowed_tools, &["Read".to_string(), "Bash".to_string()]);
+            assert_eq!(
+                executable.as_deref(),
+                Some(format!("{}/remote-bin/codex", prepared.cwd).as_str())
+            );
+        }
+        _ => panic!("expected remote headless agent spawn"),
+    }
+
+    let spawn_options: serde_json::Value = serde_json::from_str(
+        db.get_test_pipeline_item_spawn_options(&prepared.created_task.task_id)
+            .unwrap()
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(spawn_options["model"], "remote-model");
+    assert_eq!(spawn_options["permissionMode"], "dontAsk");
+    assert_eq!(
+        spawn_options["allowedTools"],
+        serde_json::json!(["Read", "Bash"])
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]
@@ -99,16 +370,657 @@ fn claim_task_ports_skips_reserved_ports_and_offsets() {
     );
 }
 
+#[test]
+fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
+    let temp = tempfile::tempdir().expect("create repo definitions fixture");
+    let origin = temp.path().join("origin.git");
+    let publisher = temp.path().join("publisher");
+    let consumer = temp.path().join("consumer");
+
+    run_git_fixture(
+        temp.path(),
+        &[
+            "init",
+            "--bare",
+            "--initial-branch=dev",
+            origin.to_str().unwrap(),
+        ],
+    );
+    run_git_fixture(
+        temp.path(),
+        &[
+            "clone",
+            origin.to_str().unwrap(),
+            publisher.to_str().unwrap(),
+        ],
+    );
+    run_git_fixture(&publisher, &["config", "user.email", "test@example.com"]);
+    run_git_fixture(&publisher, &["config", "user.name", "Kanna Test"]);
+
+    std::fs::create_dir_all(publisher.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(publisher.join(".kanna/agents/review")).unwrap();
+    std::fs::write(
+        publisher.join(".kanna/config.json"),
+        serde_json::json!({
+            "pipeline": "remote-qa",
+            "setup": ["REMOTE_SETUP"],
+            "teardown": ["REMOTE_TEARDOWN"],
+            "test": ["REMOTE_TEST"],
+            "ports": {"REMOTE_PORT": 45123},
+            "flavors": {"review": "REMOTE_FLAVOR"},
+            "vars": {"REMOTE_VAR": "REMOTE_VARS"},
+            "reserved_ports": [45124],
+            "reserved_port_offsets": [17],
+            "stage_order": ["remote review", "remote post"],
+            "workspace": {
+                "env": {"REMOTE_ENV": "REMOTE_WORKSPACE_ENV"},
+                "path": {
+                    "prepend": ["REMOTE_PREPEND"],
+                    "append": ["REMOTE_APPEND"]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        publisher.join(".kanna/pipelines/remote-qa.json"),
+        serde_json::json!({
+            "name": "remote-qa",
+            "description": "REMOTE_PIPELINE description",
+            "stages": [{
+                "name": "remote review",
+                "description": "REMOTE_PIPELINE stage description",
+                "agent": "review",
+                "prompt": "REMOTE_PIPELINE",
+                "policy": {"transition": "manual"},
+                "post": {
+                    "name": "remote post",
+                    "description": "REMOTE_PIPELINE post description",
+                    "agent": "review",
+                    "prompt": "REMOTE_PIPELINE post"
+                }
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        publisher.join(".kanna/agents/review/AGENT.md"),
+        "---\nname: remote-review\ndescription: REMOTE_AGENT base description\nagent_provider:\n  - codex\n  - claude\nmodel: remote-model\npermission_mode: dontAsk\nallowed_tools:\n  - Read\n---\nREMOTE_AGENT base body\n",
+    )
+    .unwrap();
+    std::fs::write(
+        publisher.join(".kanna/agents/review/EXTEND.md"),
+        "---\nname: forbidden-extension-rename\ndescription: REMOTE_EXTENSION description\nagent_provider: copilot\nmodel: extension-model\npermission_mode: acceptEdits\nallowed_tools:\n  - Bash\n---\nREMOTE_EXTENSION body\n",
+    )
+    .unwrap();
+
+    run_git_fixture(&publisher, &["add", ".kanna"]);
+    run_git_fixture(&publisher, &["commit", "-m", "publish remote definitions"]);
+    let revision = run_git_fixture(&publisher, &["rev-parse", "HEAD"]);
+    run_git_fixture(&publisher, &["push", "-u", "origin", "dev"]);
+    run_git_fixture(
+        temp.path(),
+        &[
+            "clone",
+            origin.to_str().unwrap(),
+            consumer.to_str().unwrap(),
+        ],
+    );
+
+    for relative_path in [
+        ".kanna/config.json",
+        ".kanna/pipelines/remote-qa.json",
+        ".kanna/agents/review/AGENT.md",
+        ".kanna/agents/review/EXTEND.md",
+    ] {
+        std::fs::write(consumer.join(relative_path), "LOCAL_SENTINEL").unwrap();
+    }
+
+    let repo = Repo {
+        id: "repo-remote-definitions".to_string(),
+        path: consumer.to_string_lossy().into_owned(),
+        name: "Remote definitions".to_string(),
+        default_branch: Some("dev".to_string()),
+        hidden: None,
+        sort_order: None,
+        created_at: None,
+        last_opened_at: None,
+    };
+    let definitions = RepoDefinitions::resolve(&repo).expect("resolve remote definitions");
+
+    assert_eq!(definitions.ref_name(), "origin/dev");
+    assert_eq!(definitions.revision(), Some(revision.as_str()));
+
+    std::fs::write(
+        publisher.join(".kanna/config.json"),
+        serde_json::json!({
+            "pipeline": "remote-qa-v2",
+            "setup": ["REMOTE_SETUP_V2"],
+            "test": ["REMOTE_TEST_V2"],
+            "flavors": {"review": "REMOTE_FLAVOR_V2"},
+            "workspace": {
+                "env": {"REMOTE_ENV": "REMOTE_WORKSPACE_ENV_V2"}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        publisher.join(".kanna/pipelines/remote-qa.json"),
+        serde_json::json!({
+            "name": "remote-qa-v2",
+            "description": "REMOTE_PIPELINE_V2 description",
+            "stages": [{
+                "name": "remote review v2",
+                "description": "REMOTE_PIPELINE_V2 stage description",
+                "agent": "review",
+                "prompt": "REMOTE_PIPELINE_V2",
+                "policy": {"transition": "manual"},
+                "post": {
+                    "name": "remote post v2",
+                    "description": "REMOTE_PIPELINE_V2 post description",
+                    "agent": "review",
+                    "prompt": "REMOTE_PIPELINE_V2 post"
+                }
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        publisher.join(".kanna/agents/review/AGENT.md"),
+        "---\nname: remote-review-v2\ndescription: REMOTE_AGENT_V2 base description\nagent_provider: claude\nmodel: remote-model-v2\npermission_mode: default\nallowed_tools:\n  - Read\n---\nREMOTE_AGENT_V2 base body\n",
+    )
+    .unwrap();
+    std::fs::write(
+        publisher.join(".kanna/agents/review/EXTEND.md"),
+        "---\ndescription: REMOTE_EXTENSION_V2 description\nagent_provider: codex\nmodel: extension-model-v2\npermission_mode: dontAsk\nallowed_tools:\n  - Bash\n  - Read\n---\nREMOTE_EXTENSION_V2 body\n",
+    )
+    .unwrap();
+    run_git_fixture(&publisher, &["add", ".kanna"]);
+    run_git_fixture(
+        &publisher,
+        &["commit", "-m", "publish remote definitions v2"],
+    );
+    let revision_v2 = run_git_fixture(&publisher, &["rev-parse", "HEAD"]);
+    run_git_fixture(&publisher, &["push", "origin", "dev"]);
+
+    assert_ne!(revision_v2, revision);
+    assert_eq!(definitions.revision(), Some(revision.as_str()));
+
+    let config = definitions.config();
+    assert_eq!(config.pipeline.as_deref(), Some("remote-qa"));
+    assert_eq!(
+        string_values(config.setup.as_deref()),
+        Some(vec!["REMOTE_SETUP"])
+    );
+    assert_eq!(
+        string_values(config.teardown.as_deref()),
+        Some(vec!["REMOTE_TEARDOWN"])
+    );
+    assert_eq!(
+        string_values(config.test.as_deref()),
+        Some(vec!["REMOTE_TEST"])
+    );
+    assert_eq!(
+        config
+            .ports
+            .as_ref()
+            .and_then(|ports| ports.get("REMOTE_PORT")),
+        Some(&45123)
+    );
+    assert_eq!(
+        config
+            .flavors
+            .as_ref()
+            .and_then(|flavors| flavors.get("review"))
+            .map(String::as_str),
+        Some("REMOTE_FLAVOR")
+    );
+    assert_eq!(
+        config
+            .vars
+            .as_ref()
+            .and_then(|vars| vars.get("REMOTE_VAR"))
+            .map(String::as_str),
+        Some("REMOTE_VARS")
+    );
+    assert_eq!(config.reserved_ports, vec![45124]);
+    assert_eq!(config.reserved_port_offsets, vec![17]);
+    assert_eq!(
+        string_values(config.stage_order.as_deref()),
+        Some(vec!["remote review", "remote post"])
+    );
+    let workspace = config.workspace.as_ref().expect("workspace config");
+    assert_eq!(
+        workspace
+            .env
+            .as_ref()
+            .and_then(|env| env.get("REMOTE_ENV"))
+            .map(String::as_str),
+        Some("REMOTE_WORKSPACE_ENV")
+    );
+    assert_eq!(
+        string_values(workspace.path.as_ref().unwrap().prepend.as_deref()),
+        Some(vec!["REMOTE_PREPEND"])
+    );
+    assert_eq!(
+        string_values(workspace.path.as_ref().unwrap().append.as_deref()),
+        Some(vec!["REMOTE_APPEND"])
+    );
+
+    let pipeline = definitions.pipeline("remote-qa").unwrap();
+    assert_eq!(pipeline.name.as_deref(), Some("remote-qa"));
+    assert_eq!(
+        pipeline.description.as_deref(),
+        Some("REMOTE_PIPELINE description")
+    );
+    assert_eq!(
+        pipeline.stages[0].description.as_deref(),
+        Some("REMOTE_PIPELINE stage description")
+    );
+    assert_eq!(
+        pipeline.stages[0].prompt.as_deref(),
+        Some("REMOTE_PIPELINE")
+    );
+    assert_eq!(
+        pipeline.stages[0]
+            .post
+            .as_ref()
+            .and_then(|post| post.description.as_deref()),
+        Some("REMOTE_PIPELINE post description")
+    );
+
+    let agent = definitions.agent("review").unwrap();
+    assert_eq!(agent.name, "remote-review");
+    assert_eq!(agent.description, "REMOTE_EXTENSION description");
+    assert_eq!(agent.agent_providers, vec!["copilot"]);
+    assert_eq!(agent.model.as_deref(), Some("extension-model"));
+    assert_eq!(agent.permission_mode.as_deref(), Some("acceptEdits"));
+    assert_eq!(agent.allowed_tools, vec!["Bash"]);
+    assert_eq!(
+        agent.prompt,
+        "REMOTE_AGENT base body\n\nREMOTE_EXTENSION body"
+    );
+
+    let all_wire_values = format!(
+        "{}\n{}\n{}",
+        serde_json::to_string(config).unwrap(),
+        serde_json::to_string(&pipeline).unwrap(),
+        serde_json::to_string(&agent).unwrap(),
+    );
+    assert!(!all_wire_values.contains("LOCAL_SENTINEL"));
+
+    let definitions_v2 = RepoDefinitions::resolve(&repo).expect("resolve updated definitions");
+    assert_eq!(definitions_v2.ref_name(), "origin/dev");
+    assert_eq!(definitions_v2.revision(), Some(revision_v2.as_str()));
+    assert_ne!(definitions_v2.revision(), definitions.revision());
+    assert_eq!(
+        definitions_v2.config().pipeline.as_deref(),
+        Some("remote-qa-v2")
+    );
+    assert_eq!(
+        string_values(definitions_v2.config().setup.as_deref()),
+        Some(vec!["REMOTE_SETUP_V2"])
+    );
+    assert_eq!(
+        definitions_v2
+            .config()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.env.as_ref())
+            .and_then(|env| env.get("REMOTE_ENV"))
+            .map(String::as_str),
+        Some("REMOTE_WORKSPACE_ENV_V2")
+    );
+
+    let pipeline_v2 = definitions_v2.pipeline("remote-qa").unwrap();
+    assert_eq!(pipeline_v2.name.as_deref(), Some("remote-qa-v2"));
+    assert_eq!(
+        pipeline_v2.description.as_deref(),
+        Some("REMOTE_PIPELINE_V2 description")
+    );
+    assert_eq!(
+        pipeline_v2.stages[0].prompt.as_deref(),
+        Some("REMOTE_PIPELINE_V2")
+    );
+    assert_eq!(
+        pipeline_v2.stages[0]
+            .post
+            .as_ref()
+            .and_then(|post| post.description.as_deref()),
+        Some("REMOTE_PIPELINE_V2 post description")
+    );
+
+    let agent_v2 = definitions_v2.agent("review").unwrap();
+    assert_eq!(agent_v2.name, "remote-review-v2");
+    assert_eq!(agent_v2.description, "REMOTE_EXTENSION_V2 description");
+    assert_eq!(agent_v2.agent_providers, vec!["codex"]);
+    assert_eq!(agent_v2.model.as_deref(), Some("extension-model-v2"));
+    assert_eq!(agent_v2.permission_mode.as_deref(), Some("dontAsk"));
+    assert_eq!(agent_v2.allowed_tools, vec!["Bash", "Read"]);
+    assert_eq!(
+        agent_v2.prompt,
+        "REMOTE_AGENT_V2 base body\n\nREMOTE_EXTENSION_V2 body"
+    );
+}
+
+#[test]
+fn missing_remote_custom_definitions_fall_back_only_to_compiled_builtins() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-compiled-only");
+    publish_origin_main(&repo_root, "publish empty definition source");
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    assert_eq!(
+        definitions.pipeline("default").unwrap().name.as_deref(),
+        Some("default")
+    );
+    assert_eq!(definitions.agent("review").unwrap().name, "review");
+
+    let pipeline_error = definitions.pipeline("remote-only").unwrap_err();
+    assert!(
+        pipeline_error.contains("compiled resource not found")
+            && pipeline_error.contains(".kanna/pipelines/remote-only.json"),
+        "{pipeline_error}"
+    );
+    let agent_error = definitions.agent("remote-only").unwrap_err();
+    assert!(
+        agent_error.contains("compiled resource not found")
+            && agent_error.contains(".kanna/agents/remote-only/AGENT.md"),
+        "{agent_error}"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn remote_pipeline_tree_read_error_does_not_fall_back_to_compiled_default() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-pipeline-tree");
+    let pipeline_path = repo_root.join(".kanna/pipelines/default.json");
+    std::fs::create_dir_all(&pipeline_path).unwrap();
+    std::fs::write(pipeline_path.join("child.json"), "{}").unwrap();
+    let revision = publish_origin_main(&repo_root, "publish pipeline tree");
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let error = definitions.pipeline("default").unwrap_err();
+
+    assert_remote_definition_error(&error, ".kanna/pipelines/default.json", &revision);
+    assert!(error.contains("not a blob"), "{error}");
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn remote_pipeline_manifest_blob_list_error_does_not_return_compiled_names() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-pipeline-list-blob");
+    std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
+    std::fs::write(repo_root.join(".kanna/pipelines"), "not a tree").unwrap();
+    let revision = publish_origin_main(&repo_root, "publish pipelines blob");
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let error = definitions.pipeline_names().unwrap_err();
+
+    assert_remote_definition_error(&error, ".kanna/pipelines", &revision);
+    assert!(error.contains("not a tree"), "{error}");
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn local_only_committed_definitions_without_remote_tracking_ref_are_ignored() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-local-only");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/local-agent")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"pipeline":"local-pipeline","setup":["LOCAL_SENTINEL"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/local-pipeline.json"),
+        r#"{"name":"local-pipeline","stages":[{"name":"local","transition":"manual"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/local-agent/AGENT.md"),
+        "---\nname: local-agent\ndescription: Local only\nagent_provider: claude\n---\nLOCAL_SENTINEL\n",
+    )
+    .unwrap();
+    run_git_fixture(&repo_root, &["add", ".kanna"]);
+    run_git_fixture(
+        &repo_root,
+        &["commit", "-m", "commit local-only definitions"],
+    );
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    assert_eq!(definitions.ref_name(), "origin/main");
+    assert_eq!(definitions.revision(), None);
+    assert_eq!(
+        serde_json::to_value(definitions.config()).unwrap(),
+        serde_json::json!({})
+    );
+    assert!(definitions.pipeline("local-pipeline").is_err());
+    assert!(definitions.agent("local-agent").is_err());
+    assert_eq!(
+        definitions.pipeline("default").unwrap().name.as_deref(),
+        Some("default")
+    );
+    assert_eq!(definitions.agent("review").unwrap().name, "review");
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn malformed_remote_definitions_report_path_ref_and_revision_without_fallback() {
+    let config_repo = init_git_repo_without_provider_fixtures("definitions-bad-config");
+    std::fs::create_dir_all(config_repo.join(".kanna")).unwrap();
+    std::fs::write(
+        config_repo.join(".kanna/config.json"),
+        r#"{"test":"must-be-an-array"}"#,
+    )
+    .unwrap();
+    let config_revision = publish_origin_main(&config_repo, "publish malformed config field");
+    let config_error = RepoDefinitions::resolve(&definition_repo(&config_repo, "main"))
+        .err()
+        .expect("malformed remote config should fail");
+    assert_remote_definition_error(&config_error, ".kanna/config.json", &config_revision);
+    assert!(
+        config_error.contains("invalid repo config"),
+        "{config_error}"
+    );
+    assert!(
+        config_error.contains("expected a sequence"),
+        "{config_error}"
+    );
+
+    let pipeline_repo = init_git_repo_without_provider_fixtures("definitions-bad-pipeline");
+    std::fs::create_dir_all(pipeline_repo.join(".kanna/pipelines")).unwrap();
+    std::fs::write(pipeline_repo.join(".kanna/pipelines/default.json"), "{").unwrap();
+    let pipeline_revision = publish_origin_main(&pipeline_repo, "publish malformed pipeline");
+    let pipeline_definitions =
+        RepoDefinitions::resolve(&definition_repo(&pipeline_repo, "main")).unwrap();
+    let pipeline_error = pipeline_definitions.pipeline("default").unwrap_err();
+    assert_remote_definition_error(
+        &pipeline_error,
+        ".kanna/pipelines/default.json",
+        &pipeline_revision,
+    );
+
+    let agent_repo = init_git_repo_without_provider_fixtures("definitions-bad-agent");
+    std::fs::create_dir_all(agent_repo.join(".kanna/agents/review")).unwrap();
+    std::fs::write(
+        agent_repo.join(".kanna/agents/review/AGENT.md"),
+        "---\nname: review\ndescription: Broken remote review\npermission_mode: neverAsk\n---\nREMOTE_AGENT\n",
+    )
+    .unwrap();
+    let agent_revision = publish_origin_main(&agent_repo, "publish malformed agent");
+    let agent_definitions =
+        RepoDefinitions::resolve(&definition_repo(&agent_repo, "main")).unwrap();
+    let agent_error = agent_definitions.agent("review").unwrap_err();
+    assert_remote_definition_error(
+        &agent_error,
+        ".kanna/agents/review/AGENT.md",
+        &agent_revision,
+    );
+
+    let extension_repo = init_git_repo_without_provider_fixtures("definitions-bad-extension");
+    std::fs::create_dir_all(extension_repo.join(".kanna/agents/review")).unwrap();
+    std::fs::write(
+        extension_repo.join(".kanna/agents/review/EXTEND.md"),
+        "---\npermission_mode: neverAsk\n---\nREMOTE_EXTENSION\n",
+    )
+    .unwrap();
+    let extension_revision = publish_origin_main(&extension_repo, "publish malformed extension");
+    let extension_definitions =
+        RepoDefinitions::resolve(&definition_repo(&extension_repo, "main")).unwrap();
+    let extension_error = extension_definitions.agent("review").unwrap_err();
+    assert_remote_definition_error(
+        &extension_error,
+        ".kanna/agents/review/EXTEND.md",
+        &extension_revision,
+    );
+
+    for repo_root in [config_repo, pipeline_repo, agent_repo, extension_repo] {
+        let _ = std::fs::remove_dir_all(repo_root);
+    }
+}
+
+#[test]
+fn remote_agent_requires_name_description_and_supported_permission_mode() {
+    let cases = [
+        (
+            "missing-name",
+            "---\ndescription: Has description\n---\nAgent body.\n",
+            "name is required",
+        ),
+        (
+            "missing-description",
+            "---\nname: review\n---\nAgent body.\n",
+            "description is required",
+        ),
+        (
+            "invalid-permission",
+            "---\nname: review\ndescription: Reviews code\npermission_mode: neverAsk\n---\nAgent body.\n",
+            "permission_mode must be one of",
+        ),
+    ];
+
+    for (label, content, expected) in cases {
+        let repo_root = init_git_repo_without_provider_fixtures(&format!("agent-{label}"));
+        std::fs::create_dir_all(repo_root.join(".kanna/agents/review")).unwrap();
+        std::fs::write(repo_root.join(".kanna/agents/review/AGENT.md"), content).unwrap();
+        let revision = publish_origin_main(&repo_root, "publish invalid agent");
+        let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+        let error = definitions.agent("review").unwrap_err();
+        assert!(error.contains(expected), "{label}: {error}");
+        assert_remote_definition_error(&error, ".kanna/agents/review/AGENT.md", &revision);
+        let _ = std::fs::remove_dir_all(repo_root);
+    }
+}
+
+#[test]
+fn pipeline_names_are_sorted_deduped_remote_and_compiled_union() {
+    let repo_root = init_git_repo_without_provider_fixtures("definition-pipeline-names");
+    let pipeline_dir = repo_root.join(".kanna/pipelines");
+    std::fs::create_dir_all(pipeline_dir.join("nested")).unwrap();
+    for name in ["zeta.json", "alpha.json", "qa.json", "schema.json"] {
+        std::fs::write(pipeline_dir.join(name), "{}").unwrap();
+    }
+    std::fs::write(pipeline_dir.join("README.md"), "not a pipeline").unwrap();
+    std::fs::write(pipeline_dir.join("nested/hidden.json"), "{}").unwrap();
+    publish_origin_main(&repo_root, "publish pipeline names");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    assert_eq!(
+        definitions.pipeline_names().unwrap(),
+        vec!["alpha", "default", "qa", "zeta"]
+    );
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn extension_overrides_description_but_cannot_rename_base_agent() {
+    let repo_root = init_git_repo_without_provider_fixtures("definition-extension-identity");
+    let agent_dir = repo_root.join(".kanna/agents/review");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nname: base-review\ndescription: Base description\nagent_provider: claude\n---\nBase body.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("EXTEND.md"),
+        "---\nname: attempted-rename\ndescription: Extension description\n---\nExtension body.\n",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish extended agent");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+    let agent = definitions.agent("review").unwrap();
+
+    assert_eq!(agent.name, "base-review");
+    assert_eq!(agent.description, "Extension description");
+    assert_eq!(agent.prompt, "Base body.\n\nExtension body.");
+    let wire = serde_json::to_value(&agent).unwrap();
+    assert_eq!(wire["agent_provider"], serde_json::json!(["claude"]));
+    assert!(wire.get("agent_providers").is_none());
+    assert!(wire.get("model").is_none());
+    assert!(wire.get("permission_mode").is_none());
+    assert!(wire.get("allowed_tools").is_none());
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn stored_pipeline_is_parsed_without_snapshot_resolution_and_preserves_descriptions() {
+    let stored = serde_json::json!({
+        "name": "stored",
+        "description": "Stored pipeline",
+        "stages": [
+            {
+                "name": "work",
+                "description": "Stored stage",
+                "transition": "manual"
+            },
+            {
+                "name": "commit",
+                "description": "Stored folded post",
+                "transition": "auto",
+                "mode": "continue"
+            }
+        ]
+    })
+    .to_string();
+
+    let pipeline = super::super::definitions::parse_stored_pipeline_definition(&stored).unwrap();
+
+    assert_eq!(pipeline.name.as_deref(), Some("stored"));
+    assert_eq!(pipeline.description.as_deref(), Some("Stored pipeline"));
+    assert_eq!(
+        pipeline.stages[0].description.as_deref(),
+        Some("Stored stage")
+    );
+    assert_eq!(
+        pipeline.stages[0]
+            .post
+            .as_ref()
+            .and_then(|post| post.description.as_deref()),
+        Some("Stored folded post")
+    );
+}
+
 fn write_agent_repo(label: &str, agent_md: &str, extend_md: Option<&str>) -> std::path::PathBuf {
-    let repo_root =
-        std::env::temp_dir().join(format!("kanna-agent-def-{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&repo_root);
+    let repo_root = init_git_repo_without_provider_fixtures(&format!("agent-def-{label}"));
     let agent_dir = repo_root.join(".kanna/agents/reviewer");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("AGENT.md"), agent_md).unwrap();
     if let Some(extend_md) = extend_md {
         std::fs::write(agent_dir.join("EXTEND.md"), extend_md).unwrap();
     }
+    publish_origin_main(&repo_root, "publish agent definition fixture");
     repo_root
 }
 
@@ -148,15 +1060,14 @@ const MALFORMED_AGENT_PROVIDER_CASES: &[(&str, &str, &str)] = &[
 #[test]
 fn read_agent_definition_rejects_malformed_provider_frontmatter() {
     for (label, yaml, expected) in MALFORMED_AGENT_PROVIDER_CASES {
-        let agent_md = format!("---\n{yaml}\n---\nAgent prompt.");
+        let agent_md = format!(
+            "---\nname: reviewer\ndescription: Reviews changes\n{yaml}\n---\nAgent prompt."
+        );
         let repo_root = write_agent_repo(label, &agent_md, None);
 
-        let error = super::super::definitions::read_agent_definition(
-            &repo_root.to_string_lossy(),
-            "reviewer",
-        )
-        .err()
-        .expect("malformed provider frontmatter should fail");
+        let error = resolve_test_agent_definition(&repo_root, "reviewer")
+            .err()
+            .expect("malformed provider frontmatter should fail");
 
         assert!(
             error.contains(expected),
@@ -172,16 +1083,13 @@ fn read_agent_extension_rejects_malformed_provider_frontmatter() {
         let extension = format!("---\n{yaml}\n---\nExtended prompt.");
         let repo_root = write_agent_repo(
             &format!("extension-{label}"),
-            "---\nagent_provider: claude\n---\nAgent prompt.",
+            "---\nname: reviewer\ndescription: Reviews changes\nagent_provider: claude\n---\nAgent prompt.",
             Some(&extension),
         );
 
-        let error = super::super::definitions::read_agent_definition(
-            &repo_root.to_string_lossy(),
-            "reviewer",
-        )
-        .err()
-        .expect("malformed provider extension should fail");
+        let error = resolve_test_agent_definition(&repo_root, "reviewer")
+            .err()
+            .expect("malformed provider extension should fail");
 
         assert!(
             error.contains(expected),
@@ -203,11 +1111,8 @@ fn read_pipeline_definition_rejects_malformed_provider_selections() {
     ];
 
     for (label, provider) in cases {
-        let repo_root = std::env::temp_dir().join(format!(
-            "kanna-pipeline-provider-{label}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&repo_root);
+        let repo_root =
+            init_git_repo_without_provider_fixtures(&format!("pipeline-provider-{label}"));
         let pipeline_dir = repo_root.join(".kanna/pipelines");
         std::fs::create_dir_all(&pipeline_dir).unwrap();
         std::fs::write(
@@ -223,11 +1128,11 @@ fn read_pipeline_definition_rejects_malformed_provider_selections() {
             .to_string(),
         )
         .unwrap();
+        publish_origin_main(&repo_root, "publish malformed pipeline provider");
 
-        let error =
-            super::super::definitions::read_pipeline_definition(&repo_root.to_string_lossy(), "qa")
-                .err()
-                .expect("malformed pipeline provider selection should fail");
+        let error = resolve_test_pipeline_definition(&repo_root, "qa")
+            .err()
+            .expect("malformed pipeline provider selection should fail");
 
         assert!(
             error.contains("agent_provider"),
@@ -253,11 +1158,8 @@ fn read_pipeline_definition_rejects_legacy_csv_provider_selections() {
             });
         }
 
-        let repo_root = std::env::temp_dir().join(format!(
-            "kanna-pipeline-csv-provider-{location}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&repo_root);
+        let repo_root =
+            init_git_repo_without_provider_fixtures(&format!("pipeline-csv-provider-{location}"));
         let pipeline_dir = repo_root.join(".kanna/pipelines");
         std::fs::create_dir_all(&pipeline_dir).unwrap();
         std::fs::write(
@@ -269,11 +1171,11 @@ fn read_pipeline_definition_rejects_legacy_csv_provider_selections() {
             .to_string(),
         )
         .unwrap();
+        publish_origin_main(&repo_root, "publish legacy CSV pipeline provider");
 
-        let error =
-            super::super::definitions::read_pipeline_definition(&repo_root.to_string_lossy(), "qa")
-                .err()
-                .expect("live pipeline definitions must reject legacy CSV providers");
+        let error = resolve_test_pipeline_definition(&repo_root, "qa")
+            .err()
+            .expect("live pipeline definitions must reject legacy CSV providers");
 
         assert!(
             error.contains("agent_provider"),
@@ -300,9 +1202,8 @@ fn stored_pipeline_definition_accepts_legacy_null_provider_and_omits_it_on_reser
     })
     .to_string();
 
-    let pipeline =
-        super::super::definitions::read_task_pipeline_definition("/unused", "qa", Some(&snapshot))
-            .expect("legacy durable pipeline snapshots should remain readable");
+    let pipeline = super::super::definitions::parse_stored_pipeline_definition(&snapshot)
+        .expect("legacy durable pipeline snapshots should remain readable");
     let serialized = serde_json::to_value(pipeline).unwrap();
 
     assert!(serialized["stages"][0].get("agent_provider").is_none());
@@ -332,12 +1233,8 @@ fn stored_pipeline_definition_normalizes_legacy_csv_and_preserves_provider_lists
         })
         .to_string();
 
-        let pipeline = super::super::definitions::read_task_pipeline_definition(
-            "/unused",
-            "qa",
-            Some(&snapshot),
-        )
-        .expect("durable pipeline snapshots should remain readable");
+        let pipeline = super::super::definitions::parse_stored_pipeline_definition(&snapshot)
+            .expect("durable pipeline snapshots should remain readable");
         let serialized = serde_json::to_value(pipeline).unwrap();
 
         assert_eq!(
@@ -357,13 +1254,11 @@ fn stored_pipeline_definition_normalizes_legacy_csv_and_preserves_provider_lists
 fn read_agent_definition_without_extension_keeps_base() {
     let repo_root = write_agent_repo(
         "no-extend",
-        "---\nagent_provider: claude\nmodel: sonnet\n---\nBase prompt.",
+        "---\nname: reviewer\ndescription: Reviews changes\nagent_provider: claude\nmodel: sonnet\n---\nBase prompt.",
         None,
     );
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "reviewer").unwrap();
     assert_eq!(definition.prompt, "Base prompt.");
     assert_eq!(definition.model.as_deref(), Some("sonnet"));
 
@@ -374,13 +1269,11 @@ fn read_agent_definition_without_extension_keeps_base() {
 fn read_agent_definition_appends_extension_body_and_overrides_frontmatter() {
     let repo_root = write_agent_repo(
         "extend-override",
-        "---\nagent_provider: claude\nmodel: sonnet\npermission_mode: default\n---\nBase prompt.",
+        "---\nname: reviewer\ndescription: Reviews changes\nagent_provider: claude\nmodel: sonnet\npermission_mode: default\n---\nBase prompt.",
         Some("---\nmodel: opus\npermission_mode: acceptEdits\nagent_provider: codex\n---\nRun the full suite."),
     );
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "reviewer").unwrap();
     assert_eq!(definition.prompt, "Base prompt.\n\nRun the full suite.");
     assert_eq!(definition.model.as_deref(), Some("opus"));
     assert_eq!(definition.permission_mode.as_deref(), Some("acceptEdits"));
@@ -393,13 +1286,11 @@ fn read_agent_definition_appends_extension_body_and_overrides_frontmatter() {
 fn read_agent_definition_extension_empty_allowed_tools_clears_base_allowed_tools() {
     let repo_root = write_agent_repo(
         "extend-clear-allowed-tools",
-        "---\nagent_provider: claude\nallowed_tools:\n  - Bash\n  - Read\n---\nBase prompt.",
+        "---\nname: reviewer\ndescription: Reviews changes\nagent_provider: claude\nallowed_tools:\n  - Bash\n  - Read\n---\nBase prompt.",
         Some("---\nallowed_tools: []\n---\nRun without tool restrictions."),
     );
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "reviewer").unwrap();
     assert_eq!(
         definition.prompt,
         "Base prompt.\n\nRun without tool restrictions."
@@ -413,13 +1304,11 @@ fn read_agent_definition_extension_empty_allowed_tools_clears_base_allowed_tools
 fn read_agent_definition_extension_without_frontmatter_extends_prompt_only() {
     let repo_root = write_agent_repo(
         "extend-plain",
-        "---\nagent_provider: claude\nmodel: sonnet\n---\nBase prompt.",
+        "---\nname: reviewer\ndescription: Reviews changes\nagent_provider: claude\nmodel: sonnet\n---\nBase prompt.",
         Some("Repo-specific extra instructions."),
     );
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "reviewer").unwrap();
     assert_eq!(
         definition.prompt,
         "Base prompt.\n\nRepo-specific extra instructions."
@@ -434,11 +1323,7 @@ fn read_agent_definition_extension_without_frontmatter_extends_prompt_only() {
 fn read_agent_definition_extension_applies_to_builtin_fallback() {
     // No repo AGENT.md: the base resolves to the compiled builtin and the
     // repo's EXTEND.md still layers on top of it.
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-builtin-extend-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
+    let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-extend");
     let agent_dir = repo_root.join(".kanna/agents/review");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
@@ -446,10 +1331,9 @@ fn read_agent_definition_extension_applies_to_builtin_fallback() {
         "Repo rule: run the full unit and integration suites.",
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish builtin agent extension");
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "review")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "review").unwrap();
     assert!(definition.prompt.contains("QA review agent"));
     assert!(definition
         .prompt
@@ -460,16 +1344,9 @@ fn read_agent_definition_extension_applies_to_builtin_fallback() {
 
 #[test]
 fn builtin_merge_agent_accepts_natural_language_open_pr_requests() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-builtin-merge-natural-language-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(&repo_root).unwrap();
+    let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-merge-natural-language");
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "merge")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "merge").unwrap();
 
     assert!(definition
         .prompt
@@ -482,16 +1359,9 @@ fn builtin_merge_agent_accepts_natural_language_open_pr_requests() {
 
 #[test]
 fn read_agent_definition_loads_builtin_setup_agent() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-builtin-setup-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(&repo_root).unwrap();
+    let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-setup");
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "setup")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "setup").unwrap();
 
     assert!(definition.prompt.contains("GitHub flow"));
     assert!(definition
@@ -504,18 +1374,9 @@ fn read_agent_definition_loads_builtin_setup_agent() {
 
 #[test]
 fn read_agent_definition_uses_explicit_builtin_flavor() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-explicit-flavor-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
-    std::fs::create_dir_all(&repo_root).unwrap();
+    let repo_root = init_git_repo_without_provider_fixtures("agent-explicit-flavor");
 
-    let definition = super::super::definitions::read_agent_definition(
-        &repo_root.to_string_lossy(),
-        "pr@push-only",
-    )
-    .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "pr@push-only").unwrap();
 
     assert!(definition
         .prompt
@@ -527,21 +1388,16 @@ fn read_agent_definition_uses_explicit_builtin_flavor() {
 
 #[test]
 fn read_agent_definition_uses_repo_config_flavor_map() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-config-flavor-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
+    let repo_root = init_git_repo_without_provider_fixtures("agent-config-flavor");
     std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
     std::fs::write(
         repo_root.join(".kanna/config.json"),
         r#"{"flavors":{"merge":"git"}}"#,
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish configured agent flavor");
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "merge")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "merge").unwrap();
 
     assert!(definition.prompt.contains("Git-only merge master"));
     assert!(!definition.prompt.contains("gh pr merge"));
@@ -551,11 +1407,7 @@ fn read_agent_definition_uses_repo_config_flavor_map() {
 
 #[test]
 fn read_agent_definition_prefers_repo_override_over_config_flavor() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-repo-over-config-flavor-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
+    let repo_root = init_git_repo_without_provider_fixtures("agent-repo-over-config-flavor");
     let agent_dir = repo_root.join(".kanna/agents/pr");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
@@ -565,13 +1417,12 @@ fn read_agent_definition_prefers_repo_override_over_config_flavor() {
     .unwrap();
     std::fs::write(
         agent_dir.join("AGENT.md"),
-        "---\nagent_provider: claude\n---\nRepo-owned PR agent.",
+        "---\nname: repo-pr\ndescription: Repo-owned PR agent\nagent_provider: claude\n---\nRepo-owned PR agent.",
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish repo agent over configured flavor");
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "pr")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "pr").unwrap();
 
     assert_eq!(definition.prompt, "Repo-owned PR agent.");
 
@@ -580,24 +1431,17 @@ fn read_agent_definition_prefers_repo_override_over_config_flavor() {
 
 #[test]
 fn read_agent_definition_prefers_repo_override_over_explicit_flavor() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-repo-over-explicit-flavor-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
+    let repo_root = init_git_repo_without_provider_fixtures("agent-repo-over-explicit-flavor");
     let agent_dir = repo_root.join(".kanna/agents/pr");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         agent_dir.join("AGENT.md"),
-        "---\nagent_provider: claude\n---\nRepo-owned PR agent.",
+        "---\nname: repo-pr\ndescription: Repo-owned PR agent\nagent_provider: claude\n---\nRepo-owned PR agent.",
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish repo agent over explicit flavor");
 
-    let definition = super::super::definitions::read_agent_definition(
-        &repo_root.to_string_lossy(),
-        "pr@push-only",
-    )
-    .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "pr@push-only").unwrap();
 
     assert_eq!(definition.prompt, "Repo-owned PR agent.");
 
@@ -606,11 +1450,7 @@ fn read_agent_definition_prefers_repo_override_over_explicit_flavor() {
 
 #[test]
 fn read_agent_definition_layers_role_extension_on_explicit_builtin_flavor() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-explicit-flavor-role-extend-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
+    let repo_root = init_git_repo_without_provider_fixtures("agent-explicit-flavor-role-extend");
     let agent_dir = repo_root.join(".kanna/agents/pr");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
@@ -618,12 +1458,9 @@ fn read_agent_definition_layers_role_extension_on_explicit_builtin_flavor() {
         "Repo rule: publish only after local CI passes.",
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish role extension over explicit flavor");
 
-    let definition = super::super::definitions::read_agent_definition(
-        &repo_root.to_string_lossy(),
-        "pr@push-only",
-    )
-    .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "pr@push-only").unwrap();
 
     assert!(definition
         .prompt
@@ -637,21 +1474,16 @@ fn read_agent_definition_layers_role_extension_on_explicit_builtin_flavor() {
 
 #[test]
 fn read_agent_definition_falls_back_to_builtin_default_for_missing_flavor() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-missing-config-flavor-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
+    let repo_root = init_git_repo_without_provider_fixtures("agent-missing-config-flavor");
     std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
     std::fs::write(
         repo_root.join(".kanna/config.json"),
         r#"{"flavors":{"pr":"missing-flavor"}}"#,
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish missing configured flavor");
 
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "pr")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "pr").unwrap();
 
     assert!(definition.prompt.contains("create a GitHub pull request"));
     assert!(definition.prompt.contains("gh pr create"));
@@ -661,11 +1493,7 @@ fn read_agent_definition_falls_back_to_builtin_default_for_missing_flavor() {
 
 #[test]
 fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-agent-def-config-vars-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&repo_root);
+    let repo_root = init_git_repo_without_provider_fixtures("agent-config-vars");
     let agent_dir = repo_root.join(".kanna/agents/reviewer");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
@@ -675,15 +1503,14 @@ fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
     .unwrap();
     std::fs::write(
         agent_dir.join("AGENT.md"),
-        "---\nagent_provider: claude\n---\nUse $MERGE_STRATEGY for ${REVIEW_TEAM}. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound.",
+        "---\nname: reviewer\ndescription: Reviews with repo variables\nagent_provider: claude\n---\nUse $MERGE_STRATEGY for ${REVIEW_TEAM}. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound.",
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish agent variables fixture");
 
     // The agent body is returned raw: config-var substitution happens in the
     // single build_stage_prompt pass, never at definition-read time.
-    let definition =
-        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
-            .unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "reviewer").unwrap();
 
     assert_eq!(
         definition.prompt,
@@ -1275,9 +2102,10 @@ fn prepare_task_uses_create_request_agent_selector() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         agent_dir.join("AGENT.md"),
-        "---\nagent_provider: codex\nmodel: gpt-5\npermission_mode: dontAsk\nallowed_tools:\n  - Bash\n---\nsetup agent prompt",
+        "---\nname: setup\ndescription: Sets up the repository\nagent_provider: codex\nmodel: gpt-5\npermission_mode: dontAsk\nallowed_tools:\n  - Bash\n---\nsetup agent prompt",
     )
     .unwrap();
+    publish_origin_main(&repo_root, "publish create-request agent selector");
 
     let prepared = prepare_task_for_api(
         &db,
@@ -1782,18 +2610,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
         .to_string(),
     )
     .unwrap();
-    assert!(Command::new("git")
-        .args(["add", ".kanna"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["commit", "-m", "add workspace path"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
+    publish_origin_main(&repo_root, "add workspace path");
 
     let prepared = prepare_task_for_api(
         &db,
@@ -1919,18 +2736,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
         .to_string(),
     )
     .unwrap();
-    assert!(Command::new("git")
-        .args(["add", ".kanna"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["commit", "-m", "add workspace path"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
+    publish_origin_main(&repo_root, "add workspace path");
 
     let prepared = prepare_task_for_api(
         &db,
@@ -2146,6 +2952,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish default pipeline fallback fixture");
 
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
@@ -2265,6 +3072,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         .status()
         .unwrap()
         .success());
+    publish_origin_main(&repo_root, "publish provider precedence fixture");
 
     let config = Config {
         relay_url: "wss://relay.example".to_string(),

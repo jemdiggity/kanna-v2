@@ -1,8 +1,12 @@
 // @vitest-environment happy-dom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PipelineItem, Repo } from "../types/kanna";
-import { collectTeardownCommands, readRepoConfig } from "./kanna";
+import {
+  setDesktopServerClientHandlersForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
+import { collectTeardownCommands, fetchRepoConfig } from "./kanna";
 
 const { invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -14,101 +18,122 @@ vi.mock("../invoke", () => ({
   invoke: invokeMock,
 }));
 
-function mockRepoConfigResponse(basePath: string, config: Record<string, unknown>): void {
-  const configPath = `${basePath}/.kanna/config.json`;
-  invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-    if (command === "read_text_file" && args?.path === configPath) {
-      return JSON.stringify(config);
-    }
-    throw new Error(`unexpected invoke: ${command} ${JSON.stringify(args)}`);
-  });
-}
+const item = {
+  id: "task-123",
+  repo_id: "repo-1",
+  branch: "task-123",
+  display_name: null,
+} as PipelineItem;
+
+const repo = {
+  id: "repo-1",
+  path: "/repo",
+  name: "repo",
+  default_branch: "main",
+  hidden: 0,
+} as Repo;
 
 describe("task lifecycle config resolution", () => {
-  afterEach(() => {
+  beforeEach(() => {
     invokeMock.mockReset();
-  });
-
-  it("reads setup commands from the task worktree config instead of the repo root config", async () => {
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-      if (
-        command === "read_text_file" &&
-        args?.path === "/repo/.kanna-worktrees/task-123/.kanna/config.json"
-      ) {
-        return JSON.stringify({ setup: ["pnpm install"] });
-      }
-      if (command === "read_text_file" && args?.path === "/repo/.kanna/config.json") {
-        throw new Error("repo root config should not be read for task setup");
-      }
       throw new Error(`unexpected invoke: ${command} ${JSON.stringify(args)}`);
     });
-
-    await expect(readRepoConfig("/repo/.kanna-worktrees/task-123")).resolves.toEqual({
-      setup: ["pnpm install"],
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      }),
     });
   });
 
-  it("reads teardown commands from the task worktree config", async () => {
+  afterEach(() => {
+    setDesktopServerClientHandlersForTests(null);
+  });
+
+  it("loads repo config from the repo definitions manifest by repo ID", async () => {
+    const config = {
+      setup: ["remote setup"],
+      workspace: { env: { REMOTE_ENV: "yes" } },
+    };
+    const fetchRepoKannaDefinitions = vi.fn(async () => ({
+      revision: "remote-rev",
+      refName: "origin/main",
+      config,
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    }));
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
+
+    await expect(fetchRepoConfig("repo-1")).resolves.toBe(config);
+
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("propagates manifest errors without reading a local config", async () => {
+    const error = new Error("remote config unavailable");
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => {
+        throw error;
+      },
+    });
+
+    await expect(fetchRepoConfig("repo-1")).rejects.toBe(error);
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps custom task teardown local and appends remote repo teardown", async () => {
+    const fetchRepoKannaDefinitions = vi.fn(async () => ({
+      revision: "remote-rev",
+      refName: "origin/main",
+      config: { teardown: ["remote teardown"] },
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    }));
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-      if (
-        command === "read_text_file" &&
-        args?.path === "/repo/.kanna-worktrees/task-123/.kanna/config.json"
-      ) {
-        return JSON.stringify({ teardown: ["pnpm worktree-clean"] });
-      }
-      if (command === "read_text_file" && args?.path === "/repo/.kanna/config.json") {
-        throw new Error("repo root config should not be read for task teardown");
-      }
       if (command === "list_dir" && args?.path === "/repo/.kanna/tasks") {
-        return [];
+        return ["release"];
+      }
+      if (command === "read_text_file" && args?.path === "/repo/.kanna/tasks/release/agent.md") {
+        return `---
+name: Release
+teardown:
+  - custom teardown
+---
+Release the task.
+`;
       }
       throw new Error(`unexpected invoke: ${command} ${JSON.stringify(args)}`);
     });
 
-    const item = {
-      id: "task-123",
-      repo_id: "repo-1",
-      branch: "task-123",
-      display_name: null,
-    } as PipelineItem;
-    const repo = {
-      id: "repo-1",
-      path: "/repo",
-      name: "repo",
-      default_branch: "main",
-      hidden: 0,
-    } as Repo;
+    await expect(collectTeardownCommands(
+      { ...item, display_name: "Release" } as PipelineItem,
+      repo,
+    )).resolves.toEqual(["custom teardown", "remote teardown"]);
 
-    await expect(collectTeardownCommands(item, repo)).resolves.toEqual(["pnpm worktree-clean"]);
-  });
-
-  it("treats missing worktree config as empty", async () => {
-    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-      if (
-        command === "read_text_file" &&
-        args?.path === "/repo/.kanna-worktrees/task-123/.kanna/config.json"
-      ) {
-        throw new Error("failed to read '/repo/.kanna-worktrees/task-123/.kanna/config.json': No such file or directory");
-      }
-      throw new Error(`unexpected invoke: ${command} ${JSON.stringify(args)}`);
-    });
-
-    await expect(readRepoConfig("/repo/.kanna-worktrees/task-123")).resolves.toEqual({});
-  });
-
-  it("rejects invalid worktree config instead of treating it as empty", async () => {
-    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-      if (
-        command === "read_text_file" &&
-        args?.path === "/repo/.kanna-worktrees/task-123/.kanna/config.json"
-      ) {
-        return '{ "setup": ["pnpm install", ], }';
-      }
-      throw new Error(`unexpected invoke: ${command} ${JSON.stringify(args)}`);
-    });
-
-    await expect(readRepoConfig("/repo/.kanna-worktrees/task-123")).rejects.toThrow(
-      "invalid repo config '/repo/.kanna-worktrees/task-123/.kanna/config.json'",
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "read_text_file",
+      expect.objectContaining({ path: expect.stringContaining("/.kanna/config.json") }),
     );
+  });
+
+  it("propagates teardown manifest errors without a local config fallback", async () => {
+    const error = new Error("remote teardown unavailable");
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => {
+        throw error;
+      },
+    });
+
+    await expect(collectTeardownCommands(item, repo)).rejects.toBe(error);
+
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

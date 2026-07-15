@@ -920,6 +920,26 @@ describe("kanna store task base branch integration", () => {
       putSetting: async (key, value) => ({ key, value }),
       deleteSetting: async () => {},
       postOperatorEvents: async () => {},
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: mockState.repoConfig,
+        defaultPipeline: mockState.repoConfig.pipeline ?? "default",
+        pipelines: ["default"],
+      }),
+      fetchRepoPipelineDefinition: async () => ({
+        revision: "rev-1",
+        definition: mockState.pipelineDefinition,
+      }),
+      fetchRepoAgentDefinition: async (_repoId, agentSelector) => ({
+        revision: "rev-1",
+        definition: {
+          name: agentSelector,
+          description: agentSelector,
+          prompt: `${agentSelector} agent prompt`,
+          agent_provider: agentSelector === "setup" ? "codex" : "claude",
+        },
+      }),
       patchRepo: async (repoId, input) => {
         const repo = mockState.repos.find((candidate) => candidate.id === repoId);
         if (!repo) return;
@@ -1725,23 +1745,23 @@ describe("kanna store task base branch integration", () => {
       .toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
   });
 
-  it("passes workspace env and PATH updates to PTY task sessions", async () => {
-    mockState.repoConfigResolver = (path: string) => {
-      if (path === "/tmp/repo/.kanna-worktrees/task-pty-env/.kanna/config.json") {
-        return {
-          workspace: {
-            env: {
-              FOO: "bar",
-            },
-            path: {
-              prepend: ["./bin"],
-              append: ["vendor/tools"],
-            },
-          },
-        };
-      }
-      return undefined;
+  it("passes remote workspace env and PATH updates to identified PTY task sessions", async () => {
+    mockState.repoConfig = {
+      workspace: {
+        env: {
+          FOO: "bar",
+        },
+        path: {
+          prepend: ["./bin"],
+          append: ["vendor/tools"],
+        },
+      },
     };
+    mockState.pipelineItems = [mockState.makeItem({
+      id: "task-pty-env",
+      branch: "task-pty-env",
+      prompt: "Ship PTY env",
+    })];
     const store = await createStore();
 
     await store.spawnPtySession(
@@ -2448,27 +2468,26 @@ describe("kanna store task base branch integration", () => {
     ]);
   });
 
-  it("passes workspace env and PATH updates to worktree shell sessions", async () => {
-    mockState.repoConfigResolver = (path: string) => {
-      if (path === "/tmp/repo/.kanna-worktrees/task-shell/.kanna/config.json") {
-        return {
-          workspace: {
-            env: {
-              FOO: "bar",
-            },
-            path: {
-              prepend: ["./bin"],
-              append: ["vendor/tools"],
-            },
-          },
-        };
-      }
-      return undefined;
+  it("passes remote workspace env and PATH updates to identified worktree shell sessions", async () => {
+    mockState.repoConfig = {
+      workspace: {
+        env: {
+          FOO: "bar",
+        },
+        path: {
+          prepend: ["./bin"],
+          append: ["vendor/tools"],
+        },
+      },
     };
+    mockState.pipelineItems = [mockState.makeItem({
+      id: "task-shell",
+      branch: "task-shell",
+    })];
     const store = await createStore();
 
     await store.spawnShellSession(
-      "shell-task-shell",
+      "shell-wt-task-shell",
       "/tmp/repo/.kanna-worktrees/task-shell",
       JSON.stringify({
         KANNA_DEV_PORT: "1421",

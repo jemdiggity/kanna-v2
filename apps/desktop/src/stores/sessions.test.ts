@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
-import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
+import {
+  setDesktopServerClientHandlersForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 import { createSessionsApi } from "./sessions";
 import { createStoreState, type StoreContext } from "./state";
 import { acknowledgeTaskUiSlot, buildCreatingTaskUiSlot } from "./taskUiSlots";
@@ -141,7 +144,18 @@ describe("createSessionsApi", () => {
     setDesktopServerClientHandlersForTests({
       putTaskAgentSession: mocks.putTaskAgentSessionMock,
       applyTaskRuntimeStatus: mocks.applyTaskRuntimeStatusMock,
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default"],
+      }),
     });
+  });
+
+  afterEach(() => {
+    setDesktopServerClientHandlersForTests(null);
   });
 
   it("derives pending setup runtime status from an acknowledged creating slot", async () => {
@@ -492,6 +506,160 @@ describe("createSessionsApi", () => {
         TERM_PROGRAM: "kanna",
       }),
     }));
+  });
+
+  it("uses remote repo config for an identified worktree shell and resolves PATH from its actual cwd", async () => {
+    const context = makeContext();
+    context.state.items.value = [makeItem()];
+    const fetchRepoKannaDefinitions = vi.fn(async () => ({
+      revision: "remote-rev",
+      refName: "origin/main",
+      config: {
+        workspace: {
+          env: { REMOTE_ENV: "yes" },
+          path: { prepend: ["remote-bin"] },
+        },
+      },
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    }));
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
+    const sessions = createSessionsApi(context);
+    const worktreePath = "/tmp/actual-worktree";
+
+    await sessions.spawnShellSession(
+      "shell-wt-task-1",
+      worktreePath,
+      null,
+      true,
+      "/tmp/repo",
+    );
+
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
+    const spawnCall = mocks.invokeMock.mock.calls.find(([command]) => command === "spawn_session");
+    expect(spawnCall?.[1]).toEqual(expect.objectContaining({ cwd: worktreePath }));
+    expect(spawnCall?.[1]?.env).toEqual(expect.objectContaining({ REMOTE_ENV: "yes" }));
+    expect(spawnCall?.[1]?.env?.PATH).toContain(`${worktreePath}/remote-bin`);
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith(
+      "read_text_file",
+      { path: `${worktreePath}/.kanna/config.json` },
+    );
+  });
+
+  it("uses empty config for a worktree shell with no task identity", async () => {
+    const fetchRepoKannaDefinitions = vi.fn(async () => {
+      throw new Error("generic shell must not fetch repo definitions");
+    });
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
+    const sessions = createSessionsApi(makeContext());
+    const worktreePath = "/tmp/generic-worktree";
+
+    await sessions.spawnShellSession("shell-generic", worktreePath, null, true);
+
+    expect(fetchRepoKannaDefinitions).not.toHaveBeenCalled();
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith(
+      "read_text_file",
+      { path: `${worktreePath}/.kanna/config.json` },
+    );
+  });
+
+  it("uses remote setup and workspace config when preparing an identified PTY task", async () => {
+    const context = makeContext();
+    context.state.items.value = [makeItem()];
+    const fetchRepoKannaDefinitions = vi.fn(async () => ({
+      revision: "remote-rev",
+      refName: "origin/main",
+      config: {
+        setup: ["remote setup"],
+        workspace: {
+          env: { REMOTE_ENV: "yes" },
+          path: { prepend: ["remote-bin"] },
+        },
+      },
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    }));
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
+    const sessions = createSessionsApi(context);
+    const worktreePath = "/tmp/actual-pty-worktree";
+
+    const prepared = await sessions.preparePtySession("task-1", "Ship it", {
+      agentProvider: "claude",
+      worktreePath,
+    });
+
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
+    expect(prepared.setupCmds).toEqual(["remote setup"]);
+    expect(prepared.env).toEqual(expect.objectContaining({
+      REMOTE_ENV: "yes",
+    }));
+    expect(prepared.env.PATH).toContain(`${worktreePath}/remote-bin`);
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith(
+      "read_text_file",
+      { path: `${worktreePath}/.kanna/config.json` },
+    );
+  });
+
+  it("propagates manifest errors while preparing an identified PTY task", async () => {
+    const context = makeContext();
+    context.state.items.value = [makeItem()];
+    const error = new Error("remote task config unavailable");
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => {
+        throw error;
+      },
+    });
+    const sessions = createSessionsApi(context);
+
+    await expect(sessions.preparePtySession("task-1", "Ship it", {
+      agentProvider: "claude",
+      worktreePath: "/tmp/identified-worktree",
+    })).rejects.toBe(error);
+
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith(
+      "read_text_file",
+      { path: "/tmp/identified-worktree/.kanna/config.json" },
+    );
+  });
+
+  it("uses remote workspace config when recovering an SDK task", async () => {
+    const context = makeContext();
+    context.state.repos.value = [{
+      id: "repo-1",
+      path: "/tmp/repo",
+      name: "repo",
+      default_branch: "main",
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-06-18T00:00:00.000Z",
+      last_opened_at: "2026-06-18T00:00:00.000Z",
+    }];
+    context.state.items.value = [makeItem({ agent_type: "agent" })];
+    const fetchRepoKannaDefinitions = vi.fn(async () => ({
+      revision: "remote-rev",
+      refName: "origin/main",
+      config: {
+        workspace: {
+          env: { REMOTE_ENV: "yes" },
+          path: { prepend: ["remote-bin"] },
+        },
+      },
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    }));
+    updateDesktopServerClientHandlersForTests({ fetchRepoKannaDefinitions });
+    const sessions = createSessionsApi(context);
+
+    await sessions.recoverTaskSession("task-1");
+
+    const spawnCall = mocks.invokeMock.mock.calls.find(([command]) => command === "spawn_agent_session");
+    expect(fetchRepoKannaDefinitions).toHaveBeenCalledWith("repo-1");
+    expect(spawnCall?.[1]?.env).toEqual(expect.objectContaining({
+      REMOTE_ENV: "yes",
+    }));
+    expect(spawnCall?.[1]?.env?.PATH).toContain(
+      "/tmp/repo/.kanna-worktrees/task-task-1/remote-bin",
+    );
   });
 
   it("restores persisted SDK agent spawn options during task session recovery", async () => {
