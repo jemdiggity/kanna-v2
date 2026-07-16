@@ -64,16 +64,19 @@ describe("physical-device mobile runtime", () => {
     expect(resolveMobileNativeIdentity({ KANNA_APP_ENV: "dev" })).toEqual({
       appEnv: "dev",
       bundleId: "build.kanna.app.dev",
+      devClientScheme: "exp+kanna-mobile",
       displayName: "Kanna Dev"
     });
     expect(resolveMobileNativeIdentity({ KANNA_APP_ENV: "staging" })).toEqual({
       appEnv: "staging",
       bundleId: "build.kanna.app.staging",
+      devClientScheme: "exp+kanna-mobile",
       displayName: "Kanna Staging"
     });
     expect(resolveMobileNativeIdentity({ KANNA_APP_ENV: "production" })).toEqual({
       appEnv: "prod",
       bundleId: "build.kanna.app",
+      devClientScheme: "exp+kanna-mobile",
       displayName: "Kanna"
     });
   });
@@ -84,6 +87,7 @@ describe("physical-device mobile runtime", () => {
       nativeIdentity: {
         appEnv: "staging",
         bundleId: "build.kanna.app.staging",
+        devClientScheme: "exp+kanna-mobile",
         displayName: "Kanna Staging"
       }
     });
@@ -107,6 +111,7 @@ describe("physical-device mobile runtime", () => {
       nativeIdentity: {
         appEnv: "dev",
         bundleId: "build.kanna.app.dev",
+        devClientScheme: "exp+kanna-mobile",
         displayName: "Kanna Dev"
       }
     });
@@ -231,7 +236,10 @@ describe("physical-device mobile runtime", () => {
     expect(
       buildMobileDeviceRelaunchCommand({
         bundleId: "build.kanna.app.dev",
-        deviceUdid: "00008130-001015CA1091401C"
+        devClientScheme: "exp+kanna-mobile",
+        deviceUdid: "00008130-001015CA1091401C",
+        lanHost: "172.16.0.193",
+        metroPort: 1430
       })
     ).toEqual({
       command: "xcrun",
@@ -243,6 +251,8 @@ describe("physical-device mobile runtime", () => {
         "--terminate-existing",
         "--device",
         "00008130-001015CA1091401C",
+        "--payload-url",
+        "exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F172.16.0.193%3A1430",
         "build.kanna.app.dev"
       ]
     });

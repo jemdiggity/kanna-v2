@@ -1043,7 +1043,10 @@ export async function executeMobileDeviceRunWithContext(
   ) {
     const relaunchCommand = buildMobileDeviceRelaunchCommand({
       bundleId: nativeIdentity.bundleId,
-      deviceUdid: device.udid
+      deviceUdid: device.udid,
+      devClientScheme: nativeIdentity.devClientScheme,
+      lanHost,
+      metroPort
     });
     const relaunchResult = await executor.runner.run(relaunchCommand.command, relaunchCommand.args, {
       streamOutput: true
