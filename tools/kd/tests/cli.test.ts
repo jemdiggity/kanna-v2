@@ -28,6 +28,11 @@ function copyLauncherFixture(sourceRepoRoot: string, fixtureRepoRoot: string): v
   if (existsSync(resolve(sourceRepoRoot, "pnpm-lock.yaml"))) {
     cpSync(resolve(sourceRepoRoot, "pnpm-lock.yaml"), resolve(fixtureRepoRoot, "pnpm-lock.yaml"));
   }
+  if (existsSync(resolve(sourceRepoRoot, "patches"))) {
+    cpSync(resolve(sourceRepoRoot, "patches"), resolve(fixtureRepoRoot, "patches"), {
+      recursive: true
+    });
+  }
   cpSync(resolve(sourceRepoRoot, "tools/kd"), resolve(fixtureRepoRoot, "tools/kd"), {
     recursive: true,
     filter: (source) => !source.includes("/node_modules") && !source.includes("/dist")

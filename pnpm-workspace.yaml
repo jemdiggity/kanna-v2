@@ -4,7 +4,7 @@ packages:
   - "services/*"
   - "tests/*"
   - "tools/*"
-enableGlobalVirtualStore: true
+enableGlobalVirtualStore: false
 hoist: false
 confirmModulesPurge: false
 allowBuilds:
@@ -21,57 +21,17 @@ packageExtensions:
   "@apphosting/build@0.1.7":
     dependencies:
       yaml: 2.8.3
-  "@expo/cli@0.24.24":
-    dependencies:
-      "@react-native/js-polyfills": 0.79.6
-      expo: 53.0.27
-      expo-constants: 17.1.8
-      metro: 0.82.5
-      metro-config: 0.82.5
-      metro-core: 0.82.5
-      metro-resolver: 0.82.5
-      metro-runtime: 0.82.5
-  "@expo/metro-config@0.20.18":
-    dependencies:
-      "@babel/code-frame": 7.29.0
-      "@babel/template": 7.28.6
-      "@babel/traverse": 7.29.0
-      "@react-native/js-polyfills": 0.79.6
-      babel-preset-expo: 13.2.5
-      expo: 53.0.27
-      hermes-parser: 0.25.1
-      metro: 0.82.5
-      metro-cache: 0.82.5
-      metro-cache-key: 0.82.5
-      metro-config: 0.82.5
-      metro-minify-terser: 0.82.5
-      metro-source-map: 0.82.5
-      metro-transform-plugins: 0.82.5
-      metro-transform-worker: 0.82.5
-  "@react-native/codegen@0.79.0-rc.4":
-    dependencies:
-      "@babel/parser": 7.29.3
-  "@react-native/codegen@0.79.6":
-    dependencies:
-      "@babel/parser": 7.29.3
   "appium@2.19.0":
     dependencies:
       "@colors/colors": 1.6.0
-  "babel-preset-expo@13.0.0":
+  # Expo and @expo/dom-webview form a peer cycle. Pin Expo's optional web peer
+  # to the SDK 57 React patch so pnpm does not auto-install React DOM 19.2.5
+  # beside Expo's required React 19.2.3.
+  "expo@57.0.6":
     dependencies:
-      "@babel/core": 7.29.0
-      "@babel/types": 7.29.0
-      expo: 53.0.27
-  "babel-preset-expo@13.2.5":
-    dependencies:
-      "@babel/core": 7.29.0
-      "@babel/types": 7.29.0
-      expo: 53.0.27
-  "expo@53.0.27":
-    dependencies:
-      "@babel/runtime": 7.29.2
-  "expo-updates@0.28.18":
-    dependencies:
-      "@expo/cli": 0.24.24
-      debug: 4.4.3
-      getenv: 2.0.0
+      react-dom: 19.2.3
+patchedDependencies:
+  # SDK 57.0.6 pulls expo-modules-jsi 57.0.3, whose unqualified Swift `abs`
+  # is ambiguous with React Native's C++ JSI imports under Xcode 26.2/Swift 6.
+  # Remove this after Expo ships the upstream `Swift.abs` qualification.
+  expo-modules-jsi@57.0.3: patches/expo-modules-jsi@57.0.3.patch

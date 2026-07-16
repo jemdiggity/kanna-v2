@@ -1,11 +1,11 @@
-const { withInfoPlist, withXcodeProject } = require("@expo/config-plugins");
+const { withInfoPlist, withXcodeProject } = require("expo/config-plugins");
 
-function findAppTargetConfigurationIds(project) {
+function findAppTargetConfigurationIds(project, appTargetName) {
   const objects = project.hash.project.objects;
   const targets = objects.PBXNativeTarget || {};
   const configurationLists = objects.XCConfigurationList || {};
   const appTarget = Object.values(targets).find(
-    (target) => target && typeof target === "object" && target.name === "KannaMobile"
+    (target) => target && typeof target === "object" && target.name === appTargetName
   );
   if (!appTarget?.buildConfigurationList) {
     return [];
@@ -33,9 +33,13 @@ function quotePbxprojValue(value) {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function setAppTargetBuildSetting(project, key, value) {
+function setAppTargetBuildSetting(project, key, value, appTargetName) {
   const section = project.hash.project.objects.XCBuildConfiguration || {};
-  for (const configId of findAppTargetConfigurationIds(project)) {
+  const configurationIds = findAppTargetConfigurationIds(project, appTargetName);
+  if (configurationIds.length === 0) {
+    throw new Error(`Could not find generated iOS app target "${appTargetName}".`);
+  }
+  for (const configId of configurationIds) {
     const config = section[configId];
     if (!config || typeof config !== "object") {
       continue;
@@ -56,8 +60,19 @@ function withKannaNativeIdentity(config, options = {}) {
   });
 
   return withXcodeProject(config, (config) => {
-    setAppTargetBuildSetting(config.modResults, "PRODUCT_BUNDLE_IDENTIFIER", iosBundleId);
-    setAppTargetBuildSetting(config.modResults, "INFOPLIST_KEY_CFBundleDisplayName", displayName);
+    const appTargetName = config.modRequest.projectName;
+    setAppTargetBuildSetting(
+      config.modResults,
+      "PRODUCT_BUNDLE_IDENTIFIER",
+      iosBundleId,
+      appTargetName
+    );
+    setAppTargetBuildSetting(
+      config.modResults,
+      "INFOPLIST_KEY_CFBundleDisplayName",
+      displayName,
+      appTargetName
+    );
     return config;
   });
 }

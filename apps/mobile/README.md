@@ -15,6 +15,11 @@ Bump `runtimeVersion` whenever a change touches native code, native config, the
 Expo SDK, native dependencies, or `plugins/withKannaNativeIdentity.js`. JS-only
 changes keep the same `runtimeVersion` and are OTA-deliverable.
 
+The Expo SDK 57 native runtime uses `runtimeVersion` `2.0.0`. Staging and
+production OTA updates built for the former SDK 53 `1.0.0` runtime are not
+compatible; install a new native build before publishing or applying `2.0.0`
+updates.
+
 Development builds (`KANNA_APP_ENV=dev`) do not configure OTA updates; they run
 from Metro/dev-client.
 
@@ -30,7 +35,9 @@ The command runs Expo CNG locally with `KANNA_APP_ENV=prod`, keeps the generated
 `apps/mobile/ios/` directory uncommitted, archives the generated Xcode workspace,
 and exports an IPA under `.build/mobile/ios-production/`. It uses the production
 bundle id `build.kanna.app`, display name `Kanna`, and Apple team
-`GY3LFAA59P` from `app.config.ts` and `mobileEnvironments.json`.
+`GY3LFAA59P` from `app.config.ts` and `mobileEnvironments.json`. Expo SDK 57
+generates the production workspace and scheme as `Kanna`; the dev and staging
+workspaces are `KannaDev` and `KannaStaging` respectively.
 
 By default, the App Store marketing version comes from the repo `VERSION` file.
 Pass `--version <version>` only if the mobile App Store version intentionally

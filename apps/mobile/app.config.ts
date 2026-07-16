@@ -125,6 +125,7 @@ export function createExpoConfig(
     scheme: appEnvironment.scheme,
     icon: "./assets/icon.png",
     plugins: [
+      "expo-font",
       [
         "./plugins/withKannaNativeIdentity",
         {

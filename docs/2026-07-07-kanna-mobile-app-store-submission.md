@@ -38,7 +38,7 @@ Sources:
 
 Mobile app dependencies from `apps/mobile/package.json`:
 
-- Runtime: Expo 53, React Native 0.79, React 19.
+- Runtime: Expo 57, React Native 0.86, React 19.2.
 - Storage: `@react-native-async-storage/async-storage`.
 - Cloud/backend: `firebase`.
 - Terminal: `@xterm/xterm`, `@xterm/addon-fit`, `react-native-webview`.
