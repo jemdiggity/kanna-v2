@@ -489,6 +489,52 @@ describe("createSelectionApi", () => {
     expect(selection.currentItem.value?.id).toBe("task-1");
   });
 
+  it("keeps the repository selected when its last task is removed", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [
+      createRepo(),
+      createRepo({
+        id: "repo-2",
+        path: "/tmp/repo-2",
+        name: "repo-2",
+        sort_order: 1,
+      }),
+    ];
+    const removedItem = createItem();
+    state.items.value = [
+      removedItem,
+      createItem({ id: "task-2", repo_id: "repo-2" }),
+    ];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = removedItem.id;
+
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      { windowWorkspace: { persistSelection } } as never,
+    );
+    const selection = createSelectionApi(context);
+
+    const replacementId = await selection.selectReplacementAfterItemRemoval(removedItem);
+
+    expect(replacementId).toBeNull();
+    expect(state.selectedRepoId.value).toBe("repo-1");
+    expect(state.selectedItemId.value).toBeNull();
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+  });
+
   it("keeps a creating slot reachable in Back history before hydration", async () => {
     vi.useFakeTimers();
     const state = createStoreState();

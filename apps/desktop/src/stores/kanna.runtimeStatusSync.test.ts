@@ -918,7 +918,7 @@ describe("kanna runtime status reconciliation", () => {
     expect(cleanupCall).toBeUndefined();
   });
 
-  it("falls back to another repo when the selected teardown task leaves its repo empty", async () => {
+  it("keeps the repo selected when the selected teardown task leaves it empty", async () => {
     mockState.repos = [
       {
         ...mockState.repos[0]!,
@@ -963,8 +963,7 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(store.selectedRepoId).toBe("repo-2");
-    expect(store.selectedItemId).toBe("task-other-repo");
-    expect(store.currentItem?.id).toBe("task-other-repo");
+    expect(store.selectedRepoId).toBe("repo-1");
+    expect(store.selectedItemId).toBeNull();
   });
 });

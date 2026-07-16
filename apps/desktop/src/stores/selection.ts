@@ -218,16 +218,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
         : 0;
       return sameRepoRemaining[nextIndex] ?? null;
     }
-
-    const allSorted = context.state.repos.value.flatMap((repo) => sortItemsForRepo(repo.id));
-    const globalIndex = allSorted.findIndex((item) => item.id === removedItem.id);
-    const globalRemaining = allSorted.filter((item) => item.id !== removedItem.id);
-    if (globalRemaining.length === 0) return null;
-
-    const nextIndex = globalIndex >= 0
-      ? Math.min(globalIndex, globalRemaining.length - 1)
-      : 0;
-    return globalRemaining[nextIndex] ?? null;
+    return null;
   }
 
   async function selectReplacementAfterItemRemoval(removedItem: PipelineItem): Promise<string | null> {
