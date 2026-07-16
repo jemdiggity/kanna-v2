@@ -42,6 +42,10 @@ interface TaskScreenProps {
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
 }
 
+function preserveExpandedTextSelection(): void {
+  // Pressability suppresses onPress after a long press when this handler exists.
+}
+
 export function TaskScreen({
   task,
   e2eTaskSnapshotMarker,
@@ -258,7 +262,9 @@ export function TaskScreen({
             isTitleExpanded ? "Collapse title" : "Expand title"
           }
           accessibilityLabel={`${model.stageLabel}: ${
-            isTitleExpanded ? expandedPrompt : model.title
+            isTitleExpanded
+              ? `${expandedPrompt}. Task ID: ${task.id}`
+              : model.title
           }`}
           accessibilityRole="button"
           accessibilityState={{ expanded: isTitleExpanded }}
@@ -268,6 +274,9 @@ export function TaskScreen({
             isTitleExpanded ? styles.titleChipExpanded : null
           ]}
           testID={MOBILE_E2E_IDS.taskTitleButton}
+          onLongPress={
+            isTitleExpanded ? preserveExpandedTextSelection : undefined
+          }
           onPress={() =>
             setExpandedTitleTaskId((currentTaskId) =>
               currentTaskId === task.id ? null : task.id
@@ -286,11 +295,20 @@ export function TaskScreen({
             >
               <Text
                 accessible={false}
+                selectable
                 style={styles.prompt}
                 testID={MOBILE_E2E_IDS.taskExpandedPrompt}
               >
                 {expandedPrompt}
               </Text>
+              <View accessible={false} style={styles.taskIdentity}>
+                <Text accessible={false} style={styles.taskIdLabel}>
+                  Task ID
+                </Text>
+                <Text accessible={false} selectable style={styles.taskId}>
+                  {task.id}
+                </Text>
+              </View>
             </ScrollView>
           ) : (
             <Text
@@ -504,6 +522,25 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     lineHeight: 20,
     paddingBottom: 2
+  },
+  taskIdentity: {
+    borderTopColor: "#22304D",
+    borderTopWidth: 1,
+    gap: 4,
+    marginTop: 8,
+    paddingTop: 8
+  },
+  taskIdLabel: {
+    color: "#7FA7D9",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    textTransform: "uppercase"
+  },
+  taskId: {
+    color: "#9BB0CC",
+    fontSize: 11,
+    lineHeight: 16
   },
   bottomChrome: {
     left: 14,

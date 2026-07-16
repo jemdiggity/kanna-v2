@@ -675,7 +675,7 @@ describe("TaskScreen", () => {
 
     expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
       accessibilityHint: "Collapse title",
-      accessibilityLabel: `in progress: ${prompt}`,
+      accessibilityLabel: `in progress: ${prompt}. Task ID: task-1`,
       accessibilityState: { expanded: true }
     });
     expect(findByTestId(tree, "mobile.task-detail-title")).toBeNull();
@@ -700,6 +700,64 @@ describe("TaskScreen", () => {
         zIndex: 4
       }
     });
+  });
+
+  it("shows the complete task ID only in the expanded identity panel", () => {
+    const taskId = "019f6c9d6ed40000000120e4307b4591";
+    const prompt = "Canonical full prompt";
+    let tree = renderTaskScreen({ taskId, prompt });
+
+    expect(findByTypeAndText(tree, "Text", "Task ID")).toBeNull();
+    expect(findByTypeAndText(tree, "Text", taskId)).toBeNull();
+
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({ taskId, prompt });
+
+    expect(findByTypeAndText(tree, "Text", "Task ID")).not.toBeNull();
+    expect(findByTypeAndText(tree, "Text", taskId)?.props).toMatchObject({
+      accessible: false,
+      children: taskId
+    });
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityLabel: `in progress: ${prompt}. Task ID: ${taskId}`,
+      accessibilityState: { expanded: true }
+    });
+  });
+
+  it("makes the expanded prompt and task ID selectable", () => {
+    const taskId = "task-selectable";
+    const prompt = "Select all or part of this prompt";
+    let tree = renderTaskScreen({ taskId, prompt });
+
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({ taskId, prompt });
+
+    expect(findByTestId(tree, "mobile.task-expanded-prompt")?.props).toMatchObject({
+      accessible: false,
+      selectable: true
+    });
+    expect(findByTypeAndText(tree, "Text", taskId)?.props).toMatchObject({
+      accessible: false,
+      selectable: true
+    });
+  });
+
+  it("registers a long-press handler while expanded to preserve text selection", () => {
+    let tree = renderTaskScreen();
+
+    expect(
+      findByTestId(tree, "mobile.task-title-button")?.props?.onLongPress
+    ).toBeUndefined();
+
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen();
+
+    const titleButton = findByTestId(tree, "mobile.task-title-button");
+    expect(titleButton?.props?.onLongPress).toBeTypeOf("function");
+
+    (titleButton?.props?.onLongPress as () => void)();
+    tree = renderTaskScreen();
+    expect(findByTestId(tree, "mobile.task-expanded-prompt")).not.toBeNull();
   });
 
   it("uses one accessible title-prompt toggle while keeping Back above the dismissal layer", () => {
@@ -776,7 +834,7 @@ describe("TaskScreen", () => {
 
     expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
       accessibilityLabel:
-        `in progress: ${prompt}`,
+        `in progress: ${prompt}. Task ID: ${taskId}`,
       accessibilityState: { expanded: true }
     });
     expect(findByTestId(tree, "mobile.task-expanded-prompt")?.props).toMatchObject({
