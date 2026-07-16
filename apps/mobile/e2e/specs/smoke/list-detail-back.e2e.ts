@@ -14,6 +14,10 @@ export const PTY_SNAPSHOT_MIN_DECODED_BYTES = 16_384;
 
 interface SmokeElement {
   click(): Promise<unknown>;
+  getAttribute?(name: string): Promise<string | null>;
+  getText?(): Promise<string>;
+  isDisplayed?(): Promise<boolean>;
+  isEnabled?(): Promise<boolean>;
   isExisting(): Promise<boolean>;
   waitForDisplayed?(options: { timeout: number }): Promise<unknown>;
 }
@@ -47,11 +51,36 @@ interface TaskListUi {
   ): Promise<unknown>;
 }
 
+interface TaskPromptExpansionUi {
+  getBackButton(): Promise<SmokeElement>;
+  getCollapsedTitle(): Promise<SmokeElement>;
+  getExpandedPrompt(): Promise<SmokeElement>;
+  getTitleButton(): Promise<SmokeElement>;
+  getTitleDismissLayer(): Promise<SmokeElement>;
+  waitUntil(
+    condition: () => Promise<boolean>,
+    options: {
+      interval: number;
+      timeout: number;
+      timeoutMsg: string;
+    }
+  ): Promise<unknown>;
+}
+
+export interface TaskPromptFixture {
+  expectedTitle: string;
+  promptEndSentinel: string;
+}
+
 interface RenderedPtyTerminalUi extends TaskTerminalLiveUi {
   inspectTerminalWebView(): Promise<TerminalWebViewInspection>;
 }
 
-interface SmokeUi extends TaskListUi, RenderedPtyTerminalUi, PtyFixtureTaskUi {}
+interface SmokeUi
+  extends TaskListUi,
+    RenderedPtyTerminalUi,
+    PtyFixtureTaskUi,
+    TaskPromptExpansionUi {}
 
 export interface PtyTerminalFixture {
   taskId: string;
@@ -122,6 +151,18 @@ function createSmokeUi(driver: Browser): SmokeUi {
     },
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
+    },
+    async getCollapsedTitle() {
+      return driver.$(selectors.taskDetailTitle);
+    },
+    async getExpandedPrompt() {
+      return driver.$(selectors.taskExpandedPrompt);
+    },
+    async getTitleButton() {
+      return driver.$(selectors.taskTitleButton);
+    },
+    async getTitleDismissLayer() {
+      return driver.$(selectors.taskTitleDismissLayer);
     },
     async getTaskRowById(taskId) {
       return driver.$(`~mobile.task-row.${taskId}`);
@@ -234,7 +275,7 @@ export async function assertPtyTerminalFixtureAvailable(
   desktopServerUrl: string,
   fixture: PtyTerminalFixture,
   fetchImpl: FetchLike = fetch
-): Promise<void> {
+): Promise<TaskPromptFixture> {
   const response = await fetchImpl(
     `${desktopServerUrl}/v1/tasks/${encodeURIComponent(fixture.taskId)}`
   );
@@ -250,9 +291,103 @@ export async function assertPtyTerminalFixtureAvailable(
   if (agentType !== "pty" || closedAt) {
     throw new Error(
       `Known PTY fixture task ${fixture.taskId} expected a live PTY task, got ` +
-        `agentType=${agentType ?? "<missing>"} closedAt=${closedAt ?? "<open>"}.`
+      `agentType=${agentType ?? "<missing>"} closedAt=${closedAt ?? "<open>"}.`
     );
   }
+
+  const expectedTitle = getStringProperty(task, "title")?.trim();
+  const prompt = getStringProperty(task, "prompt")?.trim();
+  const promptLines = prompt?.split(/\r?\n/) ?? [];
+  const promptEndSentinel = promptLines[promptLines.length - 1]?.trim();
+  if (
+    !expectedTitle ||
+    !prompt ||
+    promptLines.length < 2 ||
+    expectedTitle === prompt ||
+    !promptEndSentinel?.includes("PROMPT_END_SENTINEL")
+  ) {
+    throw new Error(
+      `Known PTY fixture task ${fixture.taskId} must have a short renamed title and ` +
+        "a distinct multiline prompt whose final line contains PROMPT_END_SENTINEL."
+    );
+  }
+
+  return { expectedTitle, promptEndSentinel };
+}
+
+async function smokeElementText(element: SmokeElement): Promise<string> {
+  const text = await element.getText?.().catch(() => "");
+  if (text?.trim()) return text;
+  for (const attribute of ["label", "value", "name"] as const) {
+    const value = await element.getAttribute?.(attribute).catch(() => null);
+    if (value?.trim()) return value;
+  }
+  return "";
+}
+
+export async function exerciseTaskPromptExpansion(
+  ui: TaskPromptExpansionUi,
+  fixture: TaskPromptFixture
+): Promise<void> {
+  await ui.waitUntil(
+    async () => {
+      const collapsedTitle = await ui.getCollapsedTitle();
+      return (
+        (await collapsedTitle.isExisting()) &&
+        (await smokeElementText(collapsedTitle)).includes(fixture.expectedTitle)
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected collapsed task title ${JSON.stringify(fixture.expectedTitle)}`
+    }
+  );
+
+  const titleButton = await ui.getTitleButton();
+  await titleButton.click();
+
+  await ui.waitUntil(
+    async () => {
+      const expandedPrompt = await ui.getExpandedPrompt();
+      return (
+        (await expandedPrompt.isExisting()) &&
+        (await smokeElementText(expandedPrompt)).includes(
+          fixture.promptEndSentinel
+        )
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected expanded task prompt through end sentinel ` +
+        JSON.stringify(fixture.promptEndSentinel)
+    }
+  );
+
+  const backButton = await ui.getBackButton();
+  const backIsUsable =
+    (await backButton.isExisting()) &&
+    (await backButton.isDisplayed?.()) === true &&
+    (await backButton.isEnabled?.()) === true;
+  if (!backIsUsable) {
+    throw new Error("Expected Back to remain usable while the task prompt is expanded");
+  }
+
+  const dismissLayer = await ui.getTitleDismissLayer();
+  await dismissLayer.click();
+  await ui.waitUntil(
+    async () => {
+      const expandedPrompt = await ui.getExpandedPrompt();
+      return !(await expandedPrompt.isExisting());
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the task prompt to collapse after an outside tap"
+    }
+  );
 }
 
 function contextName(context: unknown): string | null {
@@ -520,7 +655,7 @@ export async function runListDetailBackSmoke(
     );
   }
   const fixture = resolveRequiredPtyTerminalFixture(env);
-  await assertPtyTerminalFixtureAvailable(
+  const promptFixture = await assertPtyTerminalFixtureAvailable(
     desktopServerUrl,
     fixture,
     options.fetchImpl
@@ -547,6 +682,7 @@ export async function runListDetailBackSmoke(
 
   await waitForTaskTerminalLive(ui);
   await waitForRenderedPtyTerminal(ui, fixture);
+  await exerciseTaskPromptExpansion(ui, promptFixture);
 
   const backButton = await driver.$(selectors.taskBackButton);
   await backButton.click();

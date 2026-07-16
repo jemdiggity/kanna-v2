@@ -6,6 +6,8 @@ PTY fixture:
 
 - `KANNA_E2E_PTY_TASK_ID` points at an open task whose `agentType` is `pty`.
 - `KANNA_E2E_PTY_SENTINEL` is visible in that task's terminal snapshot.
+- The same task has a short renamed display title and a distinct multiline prompt
+  whose final line contains `PROMPT_END_SENTINEL`.
 - `KANNA_E2E_PTY_EXPECTED_COLS` and `KANNA_E2E_PTY_EXPECTED_ROWS` optionally
   override the default fixture size of `80x24`.
 - `KANNA_E2E_PTY_MIN_DECODED_BYTES` optionally overrides the default minimum of
@@ -18,6 +20,9 @@ sentinel, and the terminal root received the expected desktop PTY dimensions
 through `data-kanna-cols` and `data-kanna-rows`. The 16 KiB decoded-byte default
 is intentionally above the old 12,000-character base64 cap failure mode, which
 could only decode to about 9 KiB and could leave the rendered terminal blank.
+The native journey also taps the selected task's title, verifies the canonical
+prompt through its end sentinel, verifies Back remains exposed, dismisses the
+prompt through the outside layer, and then uses Back.
 
 This is only testable end to end when the mobile dev stack is running with
 `./kd dev up --mobile` and the shell has the generated E2E environment, including
@@ -34,6 +39,45 @@ without depending on a real CLI's TUI behavior. Making that feasible requires a
 test-only desktop/mobile-server fixture path that can spawn a fake PTY command or
 register a synthetic terminal session with controlled output and dimensions, then
 surface that task through the normal `/v1/tasks` list and KSP terminal stream.
+
+For the prompt-expansion revision, `./kd dev up --mobile` successfully started
+the assigned desktop server and Metro, and the smoke established a simulator
+XCUITest session. The isolated worktree database contained no tasks, so the run
+stopped at the intentional `KANNA_E2E_PTY_TASK_ID` guard. A complete execution
+requires provisioning the real PTY fixture described above and exporting its id
+and terminal sentinel along with `KANNA_E2E_DESKTOP_SERVER_URL`. The narrower
+substitutes are the server route tests for full prompt serialization, cloud/LAN
+mapping tests, focused `TaskScreen` interaction/accessibility tests, and the
+Appium journey contract test using a fake driver.
+
+The cloud-only full-prompt revision cannot use that smoke as proof of relay
+routing. The smoke resolves `KANNA_E2E_PTY_TASK_ID` metadata directly from
+`KANNA_E2E_DESKTOP_SERVER_URL`, so its prompt comes from the LAN desktop API
+rather than a privacy-bounded Firestore publication. The current fixture tools
+cannot create one controlled PTY task that is simultaneously published to the
+cloud index, reachable through an authenticated relay owner route, and seeded
+with deterministic terminal output. That missing cloud publication + relay
+owner fixture prevents a true live Appium E2E without depending on external
+Firebase, relay, and agent CLI state.
+
+The narrower integration coverage for this path is intentionally layered:
+
+- `src/appModel.cloudFallback.test.ts` publishes a 500-character cloud-only
+  prompt snippet, opens its PTY terminal, verifies the terminal is routed to the
+  owner through the relay, verifies authenticated `GET /v1/tasks/{id}` detail
+  routing, and observes the mobile store gain the end sentinel beyond character
+  500.
+- `src/lib/transports/remoteTransport.test.ts` and
+  `src/lib/sources/cloudLanClient.test.ts` verify canonical cloud identity and
+  hybrid source routing for task detail.
+- `src/state/mobileController.test.ts` verifies legacy/error fallback and rejects
+  stale detail responses after task navigation.
+- `src/screens/TaskScreen.test.tsx` expands a prompt longer than 500 characters
+  through its end sentinel.
+- `crates/kanna-server/src/cloud_task_publisher.rs` keeps the published snippet
+  at 500 characters, while the `/v1/tasks/{id}` route test in
+  `crates/kanna-server/src/http_api/tests/core_routes.rs` returns the full prompt
+  through the sentinel.
 
 True native gesture E2E for terminal scrolling and composer clearance has the
 same fixture constraint plus an Appium/WebView gesture gap: the test must drive
@@ -79,4 +123,5 @@ The simulator-free coverage is:
 - `e2e/specs/smoke/list-detail-back.test.ts` for Appium WebView context
   switching, exact fixture-row selection, live PTY fixture validation, large
   decoded-byte enforcement, sentinel text checks, expected dimension checks, and
-  the explicit failure message when WebView inspection is unavailable.
+  the prompt expand/end-sentinel/dismiss/Back journey, plus the explicit failure
+  message when WebView inspection is unavailable.

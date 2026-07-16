@@ -10,10 +10,12 @@ async fn create_task_route_uses_task_creator() {
                 payload.blocker_task_ids,
                 Some(vec!["blocker-1".to_string()])
             );
+            let prompt = payload.prompt;
             Ok(CreateTaskResponse {
                 task_id: "task-1".to_string(),
                 repo_id: payload.repo_id,
-                title: payload.prompt,
+                title: prompt.clone(),
+                prompt,
                 stage: "in progress".to_string(),
                 agent_type: "agent".to_string(),
                 worktree_path: Some("/tmp/worktree".to_string()),
@@ -46,6 +48,7 @@ async fn create_task_route_uses_task_creator() {
     assert_eq!(created.task_id, "task-1");
     assert_eq!(created.repo_id, "repo-1");
     assert_eq!(created.title, "Ship it");
+    assert_eq!(created.prompt, "Ship it");
     assert_eq!(created.stage, "in progress");
 }
 
@@ -58,10 +61,12 @@ async fn create_task_route_rejects_invalid_requested_task_ids_before_creation() 
         "Studio Mac",
         Arc::new(move |payload| {
             create_calls_for_creator.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let prompt = payload.prompt;
             Ok(CreateTaskResponse {
                 task_id: "generated1".to_string(),
                 repo_id: payload.repo_id,
-                title: payload.prompt,
+                title: prompt.clone(),
+                prompt,
                 stage: "in progress".to_string(),
                 agent_type: "agent".to_string(),
                 worktree_path: Some("/tmp/worktree".to_string()),
@@ -123,10 +128,12 @@ async fn concurrent_requested_task_creation_is_rejected_until_owner_failure_rele
                 return Err("owner failed".to_string());
             }
 
+            let prompt = payload.prompt;
             Ok(CreateTaskResponse {
                 task_id: task_id.to_string(),
                 repo_id: payload.repo_id,
-                title: payload.prompt,
+                title: prompt.clone(),
+                prompt,
                 stage: "in progress".to_string(),
                 agent_type: "agent".to_string(),
                 worktree_path: Some("/tmp/worktree".to_string()),
@@ -414,6 +421,7 @@ fn create_task_prepare_error_replays_only_requested_id_collision() {
             task_id: task_id.to_string(),
             repo_id: "repo-1".to_string(),
             title: "Race title".to_string(),
+            prompt: "Race prompt".to_string(),
             stage: "review".to_string(),
             agent_type: "agent".to_string(),
             worktree_path: Some("/tmp/task-create-race".to_string()),

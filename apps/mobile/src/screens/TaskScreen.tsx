@@ -2,9 +2,11 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   Keyboard,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
@@ -72,6 +74,10 @@ export function TaskScreen({
     line?: number;
     previewRevision: number;
   } | null>(null);
+  const [expandedTitleTaskId, setExpandedTitleTaskId] = useState<string | null>(
+    null
+  );
+  const { height: windowHeight } = useWindowDimensions();
   const isAgentTask = task.agentType === "agent";
   const previewScopeRef = useRef({
     isAgentTask,
@@ -93,6 +99,9 @@ export function TaskScreen({
     !isAgentTask && selectedFile?.previewRevision === previewRevision
       ? selectedFile
       : null;
+  const isTitleExpanded = expandedTitleTaskId === task.id;
+  const expandedPrompt = task.prompt?.trim() ? task.prompt : task.title;
+  const expandedPromptMaxHeight = Math.min(320, windowHeight * 0.45);
   const effectiveActivity =
     task.activity === "working" || task.activity === "unread"
       ? task.activity
@@ -149,6 +158,12 @@ export function TaskScreen({
       submitInput(buildTaskQuickReply(quickReply, currentSnapshot.draftInput));
     });
   };
+
+  useEffect(() => {
+    setExpandedTitleTaskId((currentTaskId) =>
+      currentTaskId === task.id ? currentTaskId : null
+    );
+  }, [task.id]);
 
   useEffect(() => {
     const showSubscription = Keyboard.addListener("keyboardWillShow", (event) => {
@@ -219,7 +234,17 @@ export function TaskScreen({
         )}
       </View>
 
-      <View style={styles.topChrome}>
+      {isTitleExpanded ? (
+        <Pressable
+          accessible={false}
+          focusable={false}
+          style={styles.titleDismissLayer}
+          testID={MOBILE_E2E_IDS.taskTitleDismissLayer}
+          onPress={() => setExpandedTitleTaskId(null)}
+        />
+      ) : null}
+
+      <View pointerEvents="box-none" style={styles.topChrome}>
         <Pressable
           style={styles.backButton}
           testID={MOBILE_E2E_IDS.taskBackButton}
@@ -227,17 +252,57 @@ export function TaskScreen({
         >
           <Text style={styles.backLabel}>{"<"}</Text>
         </Pressable>
-        <View style={styles.titleChip}>
-          <Text style={styles.stageLabel}>{model.stageLabel}</Text>
-          <Text
-            accessibilityValue={{ text: effectiveActivity }}
-            numberOfLines={1}
-            style={styles.title}
-            testID={MOBILE_E2E_IDS.taskDetailTitle}
-          >
-            {model.title}
+        <Pressable
+          accessible
+          accessibilityHint={
+            isTitleExpanded ? "Collapse title" : "Expand title"
+          }
+          accessibilityLabel={`${model.stageLabel}: ${
+            isTitleExpanded ? expandedPrompt : model.title
+          }`}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: isTitleExpanded }}
+          accessibilityValue={{ text: effectiveActivity }}
+          style={[
+            styles.titleChip,
+            isTitleExpanded ? styles.titleChipExpanded : null
+          ]}
+          testID={MOBILE_E2E_IDS.taskTitleButton}
+          onPress={() =>
+            setExpandedTitleTaskId((currentTaskId) =>
+              currentTaskId === task.id ? null : task.id
+            )
+          }
+        >
+          <Text accessible={false} style={styles.stageLabel}>
+            {model.stageLabel}
           </Text>
-        </View>
+          {isTitleExpanded ? (
+            <ScrollView
+              accessible={false}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator
+              style={[styles.promptScroll, { maxHeight: expandedPromptMaxHeight }]}
+            >
+              <Text
+                accessible={false}
+                style={styles.prompt}
+                testID={MOBILE_E2E_IDS.taskExpandedPrompt}
+              >
+                {expandedPrompt}
+              </Text>
+            </ScrollView>
+          ) : (
+            <Text
+              accessible={false}
+              numberOfLines={1}
+              style={styles.title}
+              testID={MOBILE_E2E_IDS.taskDetailTitle}
+            >
+              {model.title}
+            </Text>
+          )}
+        </Pressable>
       </View>
 
       <View
@@ -363,14 +428,14 @@ const styles = StyleSheet.create({
     paddingVertical: 8
   },
   topChrome: {
-    alignItems: "center",
+    alignItems: "flex-start",
     flexDirection: "row",
     gap: 10,
     left: 14,
     position: "absolute",
     right: 14,
     top: 16,
-    zIndex: 3
+    zIndex: 5
   },
   backButton: {
     alignItems: "center",
@@ -401,6 +466,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10
   },
+  titleChipExpanded: {
+    alignItems: "stretch",
+    flexDirection: "column"
+  },
+  titleDismissLayer: {
+    backgroundColor: "transparent",
+    bottom: 0,
+    left: 0,
+    position: "absolute",
+    right: 0,
+    top: 0,
+    zIndex: 4
+  },
   stageLabel: {
     color: "#7FA7D9",
     fontSize: 10,
@@ -415,6 +493,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
     lineHeight: 17
+  },
+  promptScroll: {
+    alignSelf: "stretch",
+    flexGrow: 0
+  },
+  prompt: {
+    color: "#F5F7FB",
+    fontSize: 14,
+    fontWeight: "600",
+    lineHeight: 20,
+    paddingBottom: 2
   },
   bottomChrome: {
     left: 14,

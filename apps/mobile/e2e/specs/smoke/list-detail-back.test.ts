@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import * as smokeModule from "./list-detail-back.e2e";
 import {
   assertPtyTerminalFixtureAvailable,
   ensureTaskListVisible,
@@ -111,6 +112,38 @@ describe("PTY fixture selection", () => {
     ).rejects.toThrow("expected a live PTY task");
   });
 
+  it("loads the distinct renamed title and multiline prompt end from the real task API fixture", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: "task-pty",
+        title: "Short renamed task",
+        prompt:
+          "First canonical prompt line\nSecond detailed line\nMOBILE_PROMPT_END_SENTINEL",
+        agentType: "pty",
+        closedAt: null
+      })
+    }));
+
+    await expect(
+      assertPtyTerminalFixtureAvailable(
+        "http://127.0.0.1:48120",
+        {
+          taskId: "task-pty",
+          sentinel: "Kanna PTY sentinel",
+          expectedCols: 80,
+          expectedRows: 24,
+          minDecodedBytes: PTY_SNAPSHOT_MIN_DECODED_BYTES
+        },
+        fetchImpl
+      )
+    ).resolves.toEqual({
+      expectedTitle: "Short renamed task",
+      promptEndSentinel: "MOBILE_PROMPT_END_SENTINEL"
+    });
+  });
+
   it("opens the exact fixture task row by id and never clicks the first arbitrary row", async () => {
     const firstRow = createElement(() => true);
     const fixtureRow = createElement(() => true);
@@ -132,6 +165,76 @@ describe("PTY fixture selection", () => {
     expect(ui.getTaskRowById).toHaveBeenCalledWith("task-fixture");
     expect(fixtureRow.click).toHaveBeenCalledTimes(1);
     expect(firstRow.click).not.toHaveBeenCalled();
+  });
+});
+
+describe("task prompt expansion journey", () => {
+  it("shows the distinct prompt end, collapses outside, and leaves Back usable", async () => {
+    const exerciseTaskPromptExpansion = (
+      smokeModule as typeof smokeModule & {
+        exerciseTaskPromptExpansion?: (
+          ui: Record<string, unknown>,
+          fixture: { expectedTitle: string; promptEndSentinel: string }
+        ) => Promise<void>;
+      }
+    ).exerciseTaskPromptExpansion;
+    expect(exerciseTaskPromptExpansion).toBeTypeOf("function");
+    if (!exerciseTaskPromptExpansion) return;
+
+    let expanded = false;
+    const titleButton = {
+      ...createElement(() => true, () => {
+        expanded = !expanded;
+      }),
+      getText: vi.fn(async () => "Short renamed task")
+    };
+    const expandedPrompt = {
+      ...createElement(() => expanded),
+      getText: vi.fn(async () =>
+        expanded
+          ? "First prompt line\nSecond detailed line\nPROMPT_END_SENTINEL"
+          : ""
+      )
+    };
+    const dismissLayer = createElement(
+      () => expanded,
+      () => {
+        expanded = false;
+      }
+    );
+    const backButton = createElement(() => true);
+    const backDisplayed = vi.fn(async () => true);
+    const backEnabled = vi.fn(async () => true);
+    Object.assign(backButton, {
+      isDisplayed: backDisplayed,
+      isEnabled: backEnabled
+    });
+    const ui = {
+      getBackButton: vi.fn(async () => backButton),
+      getCollapsedTitle: vi.fn(async () => titleButton),
+      getExpandedPrompt: vi.fn(async () => expandedPrompt),
+      getTitleButton: vi.fn(async () => titleButton),
+      getTitleDismissLayer: vi.fn(async () => dismissLayer),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        for (let index = 0; index < 3; index += 1) {
+          if (await condition()) return;
+        }
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await exerciseTaskPromptExpansion(ui, {
+      expectedTitle: "Short renamed task",
+      promptEndSentinel: "PROMPT_END_SENTINEL"
+    });
+
+    expect(titleButton.click).toHaveBeenCalledTimes(1);
+    expect(expandedPrompt.getText).toHaveBeenCalled();
+    expect(dismissLayer.click).toHaveBeenCalledTimes(1);
+    expect(await backButton.isExisting()).toBe(true);
+    expect(backDisplayed).toHaveBeenCalledTimes(1);
+    expect(backEnabled).toHaveBeenCalledTimes(1);
+    expect(expanded).toBe(false);
   });
 });
 

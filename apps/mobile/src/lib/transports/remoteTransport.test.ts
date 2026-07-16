@@ -1576,6 +1576,62 @@ describe("remote transport", () => {
     });
   });
 
+  it("loads full cloud task detail from the routed owner desktop without widening the cloud summary", async () => {
+    const fullPrompt = `${"p".repeat(520)}END-OF-CANONICAL-PROMPT`;
+    const cloudPromptSnippet = fullPrompt.slice(0, 500);
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (
+        request.method === "GET" &&
+        request.path === "/v1/tasks/local-task-1"
+      ) {
+        return {
+          id: "local-task-1",
+          repoId: "local-repo-1",
+          title: "Long cloud task",
+          prompt: fullPrompt,
+          stage: "in progress"
+        };
+      }
+      throw new Error(`Unexpected remote invocation: ${request.path}`);
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [{
+        id: "cloud-task-1",
+        repoId: "cloud-repo-1",
+        title: "Long cloud task",
+        prompt: cloudPromptSnippet,
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "local-repo-1",
+        ownerLocalTaskId: "local-task-1",
+        ownerOnline: true
+      }]
+    });
+
+    const published = await transport.listRecentTasks();
+    expect(published[0]?.prompt).toHaveLength(500);
+    expect(published[0]?.prompt).not.toContain("END-OF-CANONICAL-PROMPT");
+    await expect(transport.getTask?.("cloud-task-1")).resolves.toEqual(
+      expect.objectContaining({
+        id: "cloud-task-1",
+        repoId: "cloud-repo-1",
+        prompt: fullPrompt,
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "local-repo-1",
+        ownerLocalTaskId: "local-task-1"
+      })
+    );
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/tasks/local-task-1",
+      body: null
+    });
+  });
+
   it("canonicalizes a genuinely new action response on the same owner desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
       if (request.method === "GET" && request.path === "/v1/tasks/recent") {

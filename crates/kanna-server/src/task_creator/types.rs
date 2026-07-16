@@ -53,6 +53,7 @@ pub(super) struct CreatedTask {
     pub(super) task_id: String,
     pub(super) repo_id: String,
     pub(super) title: String,
+    pub(super) prompt: String,
     pub(super) stage: String,
     pub(super) agent_type: String,
     pub(super) worktree_path: String,

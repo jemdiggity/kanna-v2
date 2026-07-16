@@ -146,6 +146,11 @@ export function createMobileController(
     | null = null;
   let taskTerminalGeneration = 0;
   let taskAgentGeneration = 0;
+  let taskDetailGeneration = 0;
+  let activeTaskDetailIdentity: string | null = null;
+  let loadedTaskPrompt:
+    | { taskId: string; routeIdentity: string; prompt: string }
+    | null = null;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
   let backgroundRefreshMode: "collections" | "desktops" = "collections";
@@ -230,6 +235,68 @@ export function createMobileController(
       state.recentTasks.find((task) => task.id === taskId) ??
       state.searchResults.find((task) => task.id === taskId) ??
       null
+    );
+  };
+
+  const taskPromptRouteIdentity = (task: TaskSummary): string =>
+    task.ownerDesktopId && task.ownerLocalTaskId
+      ? JSON.stringify([task.ownerDesktopId, task.ownerLocalTaskId])
+      : client.getTaskRouteIdentity?.(task.id) ?? task.id;
+
+  const loadSelectedTaskPrompt = (taskId: string) => {
+    const task = findTask(taskId);
+    if (!client.getTask || !task) {
+      return;
+    }
+    const routeIdentity = taskPromptRouteIdentity(task);
+    const detailIdentity = JSON.stringify([taskId, routeIdentity]);
+    if (
+      loadedTaskPrompt?.taskId === taskId &&
+      loadedTaskPrompt.routeIdentity === routeIdentity
+    ) {
+      store.setTaskPrompt(taskId, loadedTaskPrompt.prompt);
+      return;
+    }
+    if (activeTaskDetailIdentity === detailIdentity) {
+      return;
+    }
+
+    const generation = ++taskDetailGeneration;
+    activeTaskDetailIdentity = detailIdentity;
+
+    void client.getTask(taskId)
+      .then((detail) => {
+        if (generation !== taskDetailGeneration) {
+          return;
+        }
+        activeTaskDetailIdentity = null;
+        if (
+          store.getState().selectedTaskId !== taskId ||
+          typeof detail.prompt !== "string"
+        ) {
+          return;
+        }
+        loadedTaskPrompt = { taskId, routeIdentity, prompt: detail.prompt };
+        store.setTaskPrompt(taskId, detail.prompt);
+      })
+      .catch(() => {
+        if (generation === taskDetailGeneration) {
+          activeTaskDetailIdentity = null;
+        }
+        // Cloud publications intentionally contain only a bounded prompt.
+        // Keep that snippet when an older or offline owner cannot serve detail.
+      });
+  };
+
+  const preserveLoadedTaskPrompt = (tasks: TaskSummary[]): TaskSummary[] => {
+    if (!loadedTaskPrompt) {
+      return tasks;
+    }
+    return tasks.map((task) =>
+      task.id === loadedTaskPrompt?.taskId &&
+      taskPromptRouteIdentity(task) === loadedTaskPrompt.routeIdentity
+        ? { ...task, prompt: loadedTaskPrompt.prompt }
+        : task
     );
   };
 
@@ -706,6 +773,7 @@ export function createMobileController(
     if (!task) {
       return;
     }
+    loadSelectedTaskPrompt(taskId);
     if (task.agentType === "agent") {
       startTaskAgent(taskId);
     } else {
@@ -828,7 +896,7 @@ export function createMobileController(
     subscriptionEpoch: number,
     cloudAuthoritative: boolean
   ) => {
-    tasks = uniqueTasksById(tasks);
+    tasks = preserveLoadedTaskPrompt(uniqueTasksById(tasks));
     taskCollectionsRevision += 1;
     const repositoryRevision = ++liveRepositoryRevision;
     const previousState = store.getState();
@@ -1324,6 +1392,9 @@ export function createMobileController(
 
     closeTask() {
       taskCollectionsRevision += 1;
+      taskDetailGeneration += 1;
+      activeTaskDetailIdentity = null;
+      loadedTaskPrompt = null;
       stopTaskSession();
       store.setSelectedTask(null);
       store.clearTaskTerminal();
@@ -1741,6 +1812,7 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
     id: response.taskId,
     repoId: response.repoId,
     title: response.title,
+    prompt: response.prompt,
     stage: response.stage,
     agentType: response.agentType ?? null
   };

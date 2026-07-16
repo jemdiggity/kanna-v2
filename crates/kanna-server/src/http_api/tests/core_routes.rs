@@ -1264,14 +1264,15 @@ async fn add_repo_route_rejects_duplicate_path() {
 
 #[tokio::test]
 async fn list_repo_tasks_route_returns_repo_scoped_tasks() {
+    const FULL_PROMPT: &str = "First line of the canonical task prompt.\nSecond line keeps the detailed requirements.\nPROMPT_END_SENTINEL";
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_repo("repo-2", "Repo Two").unwrap();
         db.insert_test_pipeline_item(
             "task-repo-1",
             "repo-1",
-            "repo one prompt",
-            Some("Repo One Task"),
+            FULL_PROMPT,
+            Some("Short renamed task"),
             "in progress",
             "2026-04-17 07:00:00",
         )
@@ -1300,6 +1301,9 @@ async fn list_repo_tasks_route_returns_repo_scoped_tasks() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(json[0]["title"], "Short renamed task");
+    assert_eq!(json[0]["prompt"], FULL_PROMPT);
     let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "task-repo-1");
@@ -1369,12 +1373,14 @@ async fn list_recent_tasks_route_returns_open_tasks_in_updated_order() {
 
 #[tokio::test]
 async fn get_task_route_returns_full_task_detail_by_id() {
-    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+    let full_prompt = format!("{}PROMPT_END_SENTINEL", "p".repeat(520));
+    let seed_prompt = full_prompt.clone();
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", move |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_pipeline_item(
             "task-1",
             "repo-1",
-            "Review MCP task detail",
+            &seed_prompt,
             Some("Review MCP"),
             "in progress",
             "2026-04-18 10:00:00",
@@ -1400,6 +1406,12 @@ async fn get_task_route_returns_full_task_detail_by_id() {
     assert_eq!(task.id, "task-1");
     assert_eq!(task.repo_id, "repo-1");
     assert_eq!(task.title, "Review MCP");
+    assert_eq!(task.prompt.as_deref(), Some(full_prompt.as_str()));
+    assert!(task
+        .prompt
+        .as_deref()
+        .unwrap()
+        .contains("PROMPT_END_SENTINEL"));
     assert_eq!(task.stage.as_deref(), Some("in progress"));
     assert_eq!(task.activity.as_deref(), Some("idle"));
     assert_eq!(task.agent_type.as_deref(), Some("pty"));

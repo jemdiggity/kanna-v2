@@ -820,6 +820,13 @@ function createTrustedLanFallbackClient({
     listRepoTasks: async (repoId) =>
       (await resolveClient(desktopId)).listRepoTasks(repoId),
     listRecentTasks: async () => (await resolveClient(desktopId)).listRecentTasks(),
+    getTask: async (taskId) => {
+      const resolvedClient = await resolveClient(desktopId);
+      if (!resolvedClient.getTask) {
+        throw new Error("Task detail is not available from this desktop.");
+      }
+      return resolvedClient.getTask(taskId);
+    },
     searchTasks: async (query) =>
       (await resolveClient(desktopId)).searchTasks(query),
     createTask: async (input) => (await resolveClient(desktopId)).createTask(input),
@@ -968,6 +975,15 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     listRepos: () => getClient().listRepos(),
     listRepoTasks: (repoId) => getClient().listRepoTasks(repoId),
     listRecentTasks: () => getClient().listRecentTasks(),
+    getTask: (taskId) => {
+      const client = getClient();
+      if (!client.getTask) {
+        return Promise.reject(
+          new Error("Task detail is not available from this client.")
+        );
+      }
+      return client.getTask(taskId);
+    },
     searchTasks: (query) => getClient().searchTasks(query),
     createTask: (input) => getClient().createTask(input),
     runMergeAgent: (taskId) => getClient().runMergeAgent(taskId),

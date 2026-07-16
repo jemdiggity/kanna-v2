@@ -13,6 +13,18 @@ describe("mobile E2E selector helpers", () => {
     });
   });
 
+  it("exposes the prompt expansion controls through stable Appium selectors", () => {
+    expect(selectorHelpers.selectors.taskTitleButton).toBe(
+      "~mobile.task-title-button"
+    );
+    expect(selectorHelpers.selectors.taskExpandedPrompt).toBe(
+      "~mobile.task-expanded-prompt"
+    );
+    expect(selectorHelpers.selectors.taskTitleDismissLayer).toBe(
+      "~mobile.task-title-dismiss-layer"
+    );
+  });
+
   it("extracts the exact display-task id from an Appium task-row name", () => {
     const extractTaskRowId = (
       selectorHelpers as typeof selectorHelpers & {

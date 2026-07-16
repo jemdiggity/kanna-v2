@@ -84,6 +84,30 @@ describe("createLanTransport", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("loads full task detail through the encoded LAN task route", async () => {
+    const fullPrompt = `${"p".repeat(520)}END-OF-CANONICAL-PROMPT`;
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: "task/long",
+        repoId: "repo-1",
+        title: "Long task",
+        prompt: fullPrompt,
+        stage: "in progress"
+      })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.getTask?.("task/long")).resolves.toEqual(
+      expect.objectContaining({ prompt: fullPrompt })
+    );
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/task%2Flong",
+      undefined
+    );
+  });
+
   it("posts mark-read through the LAN task action route", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

@@ -433,10 +433,7 @@ mod tests {
             "Implement publication\nwith detail"
         );
         assert_eq!(json["tasks"][0]["activity"], "working");
-        assert_eq!(
-            json["tasks"][0]["waitingPromptSnippet"],
-            "Ready for review"
-        );
+        assert_eq!(json["tasks"][0]["waitingPromptSnippet"], "Ready for review");
         assert_eq!(json["tasks"][0]["status"], "blocked");
         assert_eq!(
             json["tasks"][0]["blockedByTaskIds"],
@@ -454,6 +451,20 @@ mod tests {
             json["tasks"][0]["agent"],
             serde_json::json!({"provider":"codex","type":"pty"})
         );
+    }
+
+    #[test]
+    fn snapshot_mapping_bounds_prompt_before_a_canonical_end_sentinel() {
+        let full_prompt = format!("{}PROMPT_END_SENTINEL", "p".repeat(520));
+        let mut snapshot = ui_snapshot("working");
+        snapshot.entries[0].items[0].prompt = Some(full_prompt);
+
+        let mapped = map_ui_snapshot("desktop-1", "Studio Mac", snapshot);
+        let json = serde_json::to_value(mapped).unwrap();
+        let prompt_snippet = json["tasks"][0]["promptSnippet"].as_str().unwrap();
+
+        assert_eq!(prompt_snippet.chars().count(), 500);
+        assert!(!prompt_snippet.contains("PROMPT_END_SENTINEL"));
     }
 
     #[test]

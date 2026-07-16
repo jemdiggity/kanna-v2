@@ -15,6 +15,7 @@ import type {
   TaskActionResponse,
   TaskActivityResponse,
   TaskFileContent,
+  TaskDetail,
   TaskSummary,
 } from "../api/types";
 import {
@@ -412,6 +413,31 @@ export function createRemoteTransport({
       listCloudTasks
         ? listFreshCloudTasks()
         : request<TaskSummary[]>("GET", "/v1/tasks/recent", null),
+    getTask: async (taskId: string) => {
+      const route = await resolveCloudTaskRoute(taskId);
+      if (!route) {
+        return request<TaskDetail>(
+          "GET",
+          `/v1/tasks/${encodeURIComponent(taskId)}`,
+          null
+        );
+      }
+
+      const detail = await requestDesktop<TaskDetail>(
+        route.desktopId,
+        "GET",
+        `/v1/tasks/${encodeURIComponent(route.taskId)}`,
+        null
+      );
+      return {
+        ...detail,
+        id: taskId,
+        repoId: route.repoId ?? detail.repoId,
+        ownerDesktopId: route.desktopId,
+        ownerLocalRepoId: route.localRepoId ?? detail.repoId,
+        ownerLocalTaskId: route.taskId
+      };
+    },
     searchTasks: async (query) => {
       if (listCloudTasks) {
         const normalizedQuery = query.toLowerCase();

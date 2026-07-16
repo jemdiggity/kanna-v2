@@ -13,6 +13,7 @@ import type {
   TaskActionResponse,
   TaskActivityResponse,
   TaskFileContent,
+  TaskDetail,
   TaskSummary
 } from "./types";
 
@@ -47,6 +48,7 @@ export interface KannaTransport {
   listRepos(): Promise<RepoSummary[]>;
   listRepoTasks(repoId: string): Promise<TaskSummary[]>;
   listRecentTasks(): Promise<TaskSummary[]>;
+  getTask?(taskId: string): Promise<TaskDetail>;
   searchTasks(query: string): Promise<TaskSummary[]>;
   createTask(input: CreateTaskRequest): Promise<CreateTaskResponse>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
@@ -73,6 +75,7 @@ export interface KannaClient {
   listRepos(): Promise<RepoSummary[]>;
   listRepoTasks(repoId: string): Promise<TaskSummary[]>;
   listRecentTasks(): Promise<TaskSummary[]>;
+  getTask?(taskId: string): Promise<TaskDetail>;
   searchTasks(query: string): Promise<TaskSummary[]>;
   createTask(input: CreateTaskRequest): Promise<CreateTaskResponse>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
@@ -123,6 +126,9 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     listRepos: () => transport.listRepos(),
     listRepoTasks: (repoId) => transport.listRepoTasks(repoId),
     listRecentTasks: () => transport.listRecentTasks(),
+    ...(transport.getTask
+      ? { getTask: (taskId: string) => transport.getTask!(taskId) }
+      : {}),
     searchTasks: (query) => transport.searchTasks(query),
     createTask: async (input) => {
       try {

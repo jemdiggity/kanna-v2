@@ -110,6 +110,9 @@ export function mergeCloudAndLanTasks({
       if (mergedTask.ownerLocalRepoId === undefined) {
         mergedTask.ownerLocalRepoId = lanTask.repoId;
       }
+      if (lanTask.prompt !== null && lanTask.prompt !== undefined) {
+        mergedTask.prompt = lanTask.prompt;
+      }
       if (
         lanTask.waitingPromptSnippet !== null &&
         lanTask.waitingPromptSnippet !== undefined
@@ -225,6 +228,9 @@ function mergeCloudWithPreservedLanProjection(
       preservedTask.ownerLocalRepoId !== undefined
     ) {
       mergedTask.ownerLocalRepoId = preservedTask.ownerLocalRepoId;
+    }
+    if (preservedTask.prompt !== null && preservedTask.prompt !== undefined) {
+      mergedTask.prompt = preservedTask.prompt;
     }
     if (
       preservedTask.waitingPromptSnippet !== null &&
@@ -996,6 +1002,31 @@ export function createCloudLanClient(
       (await listRecentTasks()).filter((task) => task.repoId === repoId),
     listRecentTasks,
     listRecentTasksWithSupplement,
+    getTask: async (taskId) => {
+      const route = routeForTask(taskId);
+      if (route.source === "unavailable") {
+        throw new Error(route.message);
+      }
+      if (!route.client.getTask) {
+        throw new Error("Task detail is not available from this client.");
+      }
+
+      const detail = await route.client.getTask(route.taskId);
+      const displayTask = acceptedTaskSnapshot?.tasks.find(
+        (candidate) => candidate.id === taskId
+      );
+      return {
+        ...detail,
+        id: taskId,
+        repoId: displayTask?.repoId ?? detail.repoId,
+        ownerDesktopId:
+          displayTask?.ownerDesktopId ?? detail.ownerDesktopId,
+        ownerLocalRepoId:
+          displayTask?.ownerLocalRepoId ?? detail.ownerLocalRepoId,
+        ownerLocalTaskId:
+          displayTask?.ownerLocalTaskId ?? detail.ownerLocalTaskId
+      };
+    },
     searchTasks: async (query) => {
       const normalizedQuery = query.toLowerCase();
       return (await listRecentTasks()).filter(
