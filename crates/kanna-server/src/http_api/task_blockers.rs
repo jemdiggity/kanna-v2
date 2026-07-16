@@ -134,13 +134,16 @@ fn blocker_branches_for_task(
         let repo = db
             .get_repo(&blocker.repo_id)
             .map_err(|e| db_write_error("db error", e))?;
-        let resolved_branch = repo
-            .as_ref()
-            .and_then(|repo| {
-                crate::task_creator::resolve_current_source_worktree_branch(
-                    &repo.path,
-                    Some(branch),
-                )
+        let resolved_branch = db
+            .get_pipeline_item_pr_branch(&blocker_id)
+            .map_err(|e| db_write_error("db error", e))?
+            .or_else(|| {
+                repo.as_ref().and_then(|repo| {
+                    crate::task_creator::resolve_current_source_worktree_branch(
+                        &repo.path,
+                        Some(branch),
+                    )
+                })
             })
             .unwrap_or_else(|| branch.to_string());
         branches.push(resolved_branch);

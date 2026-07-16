@@ -674,4 +674,31 @@ impl Db {
         }
         Ok(())
     }
+
+    pub fn get_pipeline_item_pr_branch(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT pr_branch FROM pipeline_item WHERE id = ?",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    /// Persist the live PR branch without changing the workspace identity.
+    pub fn update_pipeline_item_pr_branch(
+        &self,
+        id: &str,
+        branch: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item SET pr_branch = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
+            (branch, id),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
 }

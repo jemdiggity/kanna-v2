@@ -272,6 +272,8 @@ fn collect_blocker_resolution_instructions(
         })
         .or(blocker.branch)
         .unwrap_or_else(|| blocker_task_id.to_string());
+    db.update_pipeline_item_pr_branch(&blocker_task_id, &blocker_branch)
+        .map_err(|error| db_write_error("db error", error))?;
     let blocker_title = blocker
         .display_name
         .unwrap_or_else(|| blocker_task_id.to_string());

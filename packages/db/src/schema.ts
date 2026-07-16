@@ -26,6 +26,7 @@ export interface PipelineItem {
   stage: string;                // current stage name (e.g., "in progress")
   pr_number: number | null;
   pr_url: string | null;
+  pr_branch?: string | null;
   branch: string | null;
   closed_at: string | null;
   agent_type: string | null;

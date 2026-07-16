@@ -64,6 +64,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "024_pipeline_item_stage_graph_cleanup",
     "025_stage_run_kind",
     "026_stage_run_resume",
+    "027_pipeline_item_pr_branch",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1124,6 +1125,11 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "stage_run", "provider_session_id", "TEXT");
         add_column(conn, "stage_run", "cwd", "TEXT");
         add_column(conn, "stage_run", "resumed_from_run_id", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "027_pipeline_item_pr_branch", |conn| {
+        add_column(conn, "pipeline_item", "pr_branch", "TEXT");
         Ok(())
     })?;
 

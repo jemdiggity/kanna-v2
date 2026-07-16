@@ -73,6 +73,7 @@ impl Db {
                 stage TEXT,
                 pr_number INTEGER,
                 pr_url TEXT,
+                pr_branch TEXT,
                 branch TEXT,
                 agent_type TEXT,
                 activity TEXT,
