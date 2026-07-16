@@ -402,32 +402,8 @@ describe("buildTerminalDocument", () => {
     expect(
       messages.map((message) => JSON.parse(message).type)
     ).not.toContain("terminal-file-link");
-  });
 
-  it("renders persistent accessible file buttons and opens one through a real click", () => {
-    const { messages, window } = createExecutedTerminalDocument();
-
-    window.__replaceTerminalState({
-      text: "See README.md and docs/spec.md:42\n"
-    });
-
-    const region = window.document.getElementById("terminal-file-links");
-    const button = region?.querySelector<HTMLButtonElement>(
-      'button[data-terminal-file-raw="docs/spec.md:42"]'
-    );
-    expect(region?.getAttribute("role")).toBe("region");
-    expect(region?.getAttribute("aria-label")).toBe(
-      "Files mentioned in terminal"
-    );
-    expect(region?.hidden).toBe(false);
-    expect(button?.textContent).toBe("docs/spec.md:42");
-    expect(button?.getAttribute("aria-label")).toBe(
-      "Open file docs/spec.md at line 42"
-    );
-    expect(button?.classList.contains("terminal-file-link")).toBe(true);
-
-    button?.click();
-
+    links?.[1]?.activate();
     expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
       type: "terminal-file-link",
       path: "docs/spec.md",
@@ -435,34 +411,17 @@ describe("buildTerminalDocument", () => {
     });
   });
 
-  it("keeps the newest six unique file buttons visible", () => {
-    const { window } = createExecutedTerminalDocument();
+  it("keeps file links inside xterm without rendering a floating link list", () => {
+    const { messages, window } = createExecutedTerminalDocument();
+
     window.__replaceTerminalState({
-      text: [
-        "docs/one.md",
-        "docs/two.md",
-        "docs/three.md",
-        "docs/four.md",
-        "docs/five.md",
-        "docs/six.md",
-        "docs/seven.md",
-        "docs/two.md"
-      ].join("\n")
+      text: "See README.md and docs/spec.md:42\n"
     });
 
-    const buttons = Array.from(
-      window.document.querySelectorAll<HTMLButtonElement>(
-        "#terminal-file-links button"
-      )
-    );
-    expect(buttons.map((button) => button.textContent)).toEqual([
-      "docs/three.md",
-      "docs/four.md",
-      "docs/five.md",
-      "docs/six.md",
-      "docs/seven.md",
-      "docs/two.md"
-    ]);
+    expect(window.document.getElementById("terminal-file-links")).toBeNull();
+    expect(
+      messages.map((message) => JSON.parse(message).type)
+    ).not.toContain("terminal-file-links");
   });
 
   it("rejects literal parent segments and non-file-like rows", () => {
@@ -514,11 +473,6 @@ describe("buildTerminalDocument", () => {
 
     expect(script).not.toContain("terminal-inspection");
     expect(script).not.toContain("function renderedTerminalText");
-    expect(script).toContain("const MAX_FILE_LINK_SCAN_ROWS = 200;");
-    expect(script).toContain(
-      "Math.max(0, buffer.length - MAX_FILE_LINK_SCAN_ROWS)"
-    );
-    expect(script).not.toContain("const firstLine = 0");
     expect(script).not.toContain("recordTerminalFrame");
     expect(messages.map((message) => JSON.parse(message).type)).not.toContain(
       "terminal-inspection"
@@ -778,41 +732,6 @@ describe("buildTerminalDocument", () => {
     expect(terminal.resets).toBe(1);
     expect(terminal.writes).toHaveLength(1);
     expect(terminal.scrollToLineCalls).toEqual([]);
-  });
-
-  it.each([
-    [
-      "scroll",
-      [{ clientX: 220, clientY: 240 }],
-      [{ clientX: 150, clientY: 230 }]
-    ],
-    [
-      "pinch",
-      [
-        { clientX: 100, clientY: 200 },
-        { clientX: 200, clientY: 200 }
-      ],
-      [
-        { clientX: 60, clientY: 200 },
-        { clientX: 240, clientY: 200 }
-      ]
-    ]
-  ])("does not open a file after a %s gesture over its button", (_label, start, move) => {
-    const { messages, window } = createExecutedTerminalDocument();
-    window.__replaceTerminalState({ text: "docs/spec.md\n" });
-    const button = window.document.querySelector<HTMLButtonElement>(
-      "#terminal-file-links button"
-    );
-    expect(button).not.toBeNull();
-
-    button?.dispatchEvent(createTouchEvent(window, "touchstart", start));
-    button?.dispatchEvent(createTouchEvent(window, "touchmove", move));
-    button?.dispatchEvent(createTouchEvent(window, "touchend", []));
-    button?.click();
-
-    expect(
-      messages.map((message) => JSON.parse(message).type)
-    ).not.toContain("terminal-file-link");
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {

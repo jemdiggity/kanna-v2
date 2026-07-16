@@ -167,7 +167,7 @@ describe("TerminalWebView", () => {
     expect(webView.props.webviewDebuggingEnabled).toBe(true);
   });
 
-  it("opens a discovered file through an actual native button press", async () => {
+  it("does not render a native strip for discovered file-list messages", async () => {
     const onOpenFile = vi.fn();
     const webView = await renderTerminalWebView({ onOpenFile });
 
@@ -181,50 +181,6 @@ describe("TerminalWebView", () => {
     } as WebViewMessageEvent);
     await renderTerminalWebView({ onOpenFile });
 
-    const strip = React.Children.toArray(lastTree?.props.children).find(
-      (child): child is ElementNode =>
-        typeof child === "object" && child !== null &&
-        "type" in child && (child as ElementNode).type === "ScrollView"
-    );
-    const button = React.Children.toArray(strip?.props.children).find(
-      (child): child is ElementNode =>
-        typeof child === "object" && child !== null &&
-        "type" in child && (child as ElementNode).type === "Pressable"
-    );
-    expect(button?.props.accessibilityLabel).toBe(
-      "Open file docs/spec.md at line 42"
-    );
-    (button?.props.onPress as () => void)();
-
-    expect(onOpenFile).toHaveBeenCalledOnce();
-    expect(onOpenFile).toHaveBeenCalledWith("docs/spec.md", 42);
-  });
-
-  it("clears discovered links when switching tasks", async () => {
-    const webView = await renderTerminalWebView({ taskId: "task-1" });
-    runEffects();
-    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
-      nativeEvent: {
-        data: JSON.stringify({
-          type: "terminal-file-links",
-          links: [{ raw: "docs/old.md", path: "docs/old.md" }]
-        })
-      }
-    } as WebViewMessageEvent);
-
-    await renderTerminalWebView({ taskId: "task-1" });
-    expect(
-      React.Children.toArray(lastTree?.props.children).some(
-        (child) =>
-          typeof child === "object" && child !== null &&
-          "type" in child && (child as ElementNode).type === "ScrollView"
-      )
-    ).toBe(true);
-    runEffects();
-
-    await renderTerminalWebView({ taskId: "task-2" });
-    runEffects();
-    await renderTerminalWebView({ taskId: "task-2" });
     expect(
       React.Children.toArray(lastTree?.props.children).some(
         (child) =>
@@ -232,6 +188,7 @@ describe("TerminalWebView", () => {
           "type" in child && (child as ElementNode).type === "ScrollView"
       )
     ).toBe(false);
+    expect(onOpenFile).not.toHaveBeenCalled();
   });
 
   it("ignores terminal file links without a nonblank string path", async () => {

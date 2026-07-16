@@ -6,8 +6,66 @@ import {
   verifyRelayQuickReplyJourney,
   verifyRelayTaskActivityTransitions,
   verifyRelayTaskMarkedRead,
+  verifyTerminalFileLinksStayInline,
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
+
+describe("terminal file links", () => {
+  const fixture = {
+    path: "docs/mobile-file-preview.md",
+    line: 4,
+    missingLink: "docs/mobile-preview-missing.md",
+    rawLink: "docs/mobile-file-preview.md:4",
+    renderedLink: "docs/mobile-file-preview.md",
+  };
+
+  it("waits for terminal paths and rejects a separate native file-link UI", async () => {
+    const isExisting = vi.fn(async () => false);
+    const driver = {
+      $: vi.fn(async () => ({ isExisting })),
+    };
+    const ui = {
+      inspectTerminalWebView: vi.fn(async () => ({
+        kind: "rendered" as const,
+        byteCount: 128,
+        cols: 220,
+        frameCount: 2,
+        rows: 40,
+        text: `SCRIPT_INPUT: ${fixture.renderedLink}\nSCRIPT_INPUT: ${fixture.rawLink}\nSCRIPT_INPUT: ${fixture.missingLink}`,
+      })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+
+    await verifyTerminalFileLinksStayInline(driver as never, ui as never, fixture as never);
+
+    expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.path}`);
+    expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.path} at line 4`);
+    expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.missingLink}`);
+  });
+
+  it("fails when a floating native file-link button remains", async () => {
+    const driver = {
+      $: vi.fn(async () => ({ isExisting: vi.fn(async () => true) })),
+    };
+    const ui = {
+      inspectTerminalWebView: vi.fn(async () => ({
+        kind: "rendered" as const,
+        text: `${fixture.renderedLink} ${fixture.rawLink} ${fixture.missingLink}`,
+      })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+
+    await expect(
+      verifyTerminalFileLinksStayInline(driver as never, ui as never, fixture as never),
+    ).rejects.toThrow(/separate native file-link control/i);
+  });
+});
 
 describe("relay quick reply journey", () => {
   it("long-presses Send, selects SGTM, and waits for the composer to clear", async () => {
