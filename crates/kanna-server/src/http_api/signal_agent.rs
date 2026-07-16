@@ -40,7 +40,7 @@ pub(super) async fn signal_agent(
                 format!("db error: {}", e),
             )
         })?;
-        db.find_open_running_agent_task(&repo_id, &agent)
+        db.find_open_agent_task(&repo_id, &agent)
             .map_err(|e| db_write_error("db error", e))?
     };
 

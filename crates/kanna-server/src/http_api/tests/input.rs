@@ -15,8 +15,7 @@ async fn expect_task_state_changed(
     );
 }
 
-#[tokio::test]
-async fn signal_agent_route_sends_message_to_open_running_agent_task() {
+async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str) {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -97,7 +96,7 @@ async fn signal_agent_route_sends_message_to_open_running_agent_task() {
         agent: Some("merge"),
         agent_provider: Some("claude"),
         model: None,
-        status: "running",
+        status: run_status,
         result: None,
         feedback: None,
         session_id: Some("merge-session"),
@@ -138,6 +137,21 @@ async fn signal_agent_route_sends_message_to_open_running_agent_task() {
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
+}
+
+#[tokio::test]
+async fn signal_agent_route_sends_message_to_open_running_agent_task() {
+    assert_signal_agent_reuses_open_task_with_run_status("running").await;
+}
+
+#[tokio::test]
+async fn signal_agent_route_reuses_open_agent_task_after_successful_turn() {
+    assert_signal_agent_reuses_open_task_with_run_status("succeeded").await;
+}
+
+#[tokio::test]
+async fn signal_agent_route_reuses_open_agent_task_after_failed_turn() {
+    assert_signal_agent_reuses_open_task_with_run_status("failed").await;
 }
 
 #[tokio::test]

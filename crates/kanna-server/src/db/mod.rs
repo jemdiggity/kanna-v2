@@ -288,7 +288,7 @@ pub struct ClaimedTaskNotification {
     pub title: String,
 }
 
-pub struct RunningAgentTask {
+pub struct OpenAgentTask {
     pub task_id: String,
     pub session_id: String,
 }
