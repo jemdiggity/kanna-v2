@@ -372,20 +372,21 @@ function createExecutedTerminalDocument({
 }
 
 describe("buildTerminalDocument", () => {
-  it("provides bare, nested, and absolute file links with one-based ranges", () => {
+  it("provides only Markdown file links with case-insensitive extensions and line suffixes", () => {
     const { messages, terminal } = createExecutedTerminalDocument();
     const row = 7;
-    const line = "See README.md and docs/spec.md:42:7 then /tmp/task/notes.md:9";
+    const line =
+      "See README.md. app.tsx config.json docs/SPEC.MD:42:7 src/lib.rs draft.mdx archive.md.bak /tmp/task/notes.md:9";
 
     const links = provideLinks(terminal, row, line);
 
     expect(links?.map((link) => link.text)).toEqual([
       "README.md",
-      "docs/spec.md:42:7",
+      "docs/SPEC.MD:42:7",
       "/tmp/task/notes.md:9"
     ]);
     expect(links?.map((link) => link.range)).toEqual(
-      ["README.md", "docs/spec.md:42:7", "/tmp/task/notes.md:9"].map((text) => {
+      ["README.md", "docs/SPEC.MD:42:7", "/tmp/task/notes.md:9"].map((text) => {
         const start = line.indexOf(text);
         return {
           start: { x: start + 1, y: row },
@@ -406,22 +407,81 @@ describe("buildTerminalDocument", () => {
     links?.[1]?.activate();
     expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
       type: "terminal-file-link",
-      path: "docs/spec.md",
+      path: "docs/SPEC.MD",
       line: 42
     });
   });
 
-  it("keeps file links inside xterm without rendering a floating link list", () => {
+  it("renders persistent Markdown buttons while leaving other extensions as plain text", () => {
     const { messages, window } = createExecutedTerminalDocument();
 
     window.__replaceTerminalState({
-      text: "See README.md and docs/spec.md:42\n"
+      text: "See README.md app.tsx config.json docs/SPEC.MD:42 src/lib.rs\n"
     });
 
-    expect(window.document.getElementById("terminal-file-links")).toBeNull();
-    expect(
-      messages.map((message) => JSON.parse(message).type)
-    ).not.toContain("terminal-file-links");
+    const region = window.document.getElementById("terminal-file-links");
+    const buttons = Array.from(
+      region?.querySelectorAll<HTMLButtonElement>("button") ?? []
+    );
+    expect(region?.hidden).toBe(false);
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "README.md",
+      "docs/SPEC.MD:42"
+    ]);
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Open file README.md",
+      "Open file docs/SPEC.MD at line 42"
+    ]);
+    expect(region?.textContent).not.toContain("app.tsx");
+    expect(region?.textContent).not.toContain("config.json");
+    expect(region?.textContent).not.toContain("src/lib.rs");
+
+    const discovery = messages
+      .map((message) => JSON.parse(message))
+      .findLast((message) => message.type === "terminal-file-links");
+    expect(discovery?.links).toEqual([
+      { raw: "README.md", path: "README.md" },
+      { raw: "docs/SPEC.MD:42", path: "docs/SPEC.MD", line: 42 }
+    ]);
+
+    buttons[1]?.click();
+    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
+      type: "terminal-file-link",
+      path: "docs/SPEC.MD",
+      line: 42
+    });
+  });
+
+  it("keeps the newest six unique Markdown buttons visible", () => {
+    const { window } = createExecutedTerminalDocument();
+    window.__replaceTerminalState({
+      text: [
+        "docs/one.md",
+        "src/ignored.tsx",
+        "docs/two.md",
+        "package.json",
+        "docs/three.md",
+        "docs/four.md",
+        "docs/five.md",
+        "docs/six.md",
+        "docs/seven.md",
+        "docs/two.md"
+      ].join("\n")
+    });
+
+    const buttons = Array.from(
+      window.document.querySelectorAll<HTMLButtonElement>(
+        "#terminal-file-links button"
+      )
+    );
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "docs/three.md",
+      "docs/four.md",
+      "docs/five.md",
+      "docs/six.md",
+      "docs/seven.md",
+      "docs/two.md"
+    ]);
   });
 
   it("rejects literal parent segments and non-file-like rows", () => {
@@ -473,6 +533,11 @@ describe("buildTerminalDocument", () => {
 
     expect(script).not.toContain("terminal-inspection");
     expect(script).not.toContain("function renderedTerminalText");
+    expect(script).toContain("const MAX_FILE_LINK_SCAN_ROWS = 200;");
+    expect(script).toContain(
+      "Math.max(0, buffer.length - MAX_FILE_LINK_SCAN_ROWS)"
+    );
+    expect(script).not.toContain("const firstLine = 0");
     expect(script).not.toContain("recordTerminalFrame");
     expect(messages.map((message) => JSON.parse(message).type)).not.toContain(
       "terminal-inspection"
@@ -732,6 +797,41 @@ describe("buildTerminalDocument", () => {
     expect(terminal.resets).toBe(1);
     expect(terminal.writes).toHaveLength(1);
     expect(terminal.scrollToLineCalls).toEqual([]);
+  });
+
+  it.each([
+    [
+      "scroll",
+      [{ clientX: 220, clientY: 240 }],
+      [{ clientX: 150, clientY: 230 }]
+    ],
+    [
+      "pinch",
+      [
+        { clientX: 100, clientY: 200 },
+        { clientX: 200, clientY: 200 }
+      ],
+      [
+        { clientX: 60, clientY: 200 },
+        { clientX: 240, clientY: 200 }
+      ]
+    ]
+  ])("does not open a Markdown file after a %s gesture over its button", (_label, start, move) => {
+    const { messages, window } = createExecutedTerminalDocument();
+    window.__replaceTerminalState({ text: "docs/spec.md\n" });
+    const button = window.document.querySelector<HTMLButtonElement>(
+      "#terminal-file-links button"
+    );
+    expect(button).not.toBeNull();
+
+    button?.dispatchEvent(createTouchEvent(window, "touchstart", start));
+    button?.dispatchEvent(createTouchEvent(window, "touchmove", move));
+    button?.dispatchEvent(createTouchEvent(window, "touchend", []));
+    button?.click();
+
+    expect(
+      messages.map((message) => JSON.parse(message).type)
+    ).not.toContain("terminal-file-link");
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {

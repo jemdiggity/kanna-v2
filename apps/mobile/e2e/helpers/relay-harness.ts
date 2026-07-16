@@ -38,6 +38,11 @@ export const MOBILE_RELAY_FILE_PREVIEW_FIXTURE = {
   expectedRawLine: "TARGET RAW LINE",
   line: 4,
   missingLink: "docs/mobile-preview-missing.md",
+  nonMarkdownLinks: [
+    "apps/mobile/src/screens/TerminalWebView.tsx:42",
+    "apps/mobile/package.json",
+    "crates/daemon/src/lib.rs:9"
+  ],
   path: "docs/mobile-file-preview.md",
   rawLink: "docs/mobile-file-preview.md:4",
   renderedLink: "docs/mobile-file-preview.md"
@@ -336,7 +341,8 @@ export async function startMobileRelayHarness(
         for (const link of [
           MOBILE_RELAY_FILE_PREVIEW_FIXTURE.renderedLink,
           MOBILE_RELAY_FILE_PREVIEW_FIXTURE.rawLink,
-          MOBILE_RELAY_FILE_PREVIEW_FIXTURE.missingLink
+          MOBILE_RELAY_FILE_PREVIEW_FIXTURE.missingLink,
+          ...MOBILE_RELAY_FILE_PREVIEW_FIXTURE.nonMarkdownLinks
         ]) {
           // Emit after the simulator has attached so the paths cannot age out
           // of the bounded xterm scan while Metro and WebDriverAgent start.

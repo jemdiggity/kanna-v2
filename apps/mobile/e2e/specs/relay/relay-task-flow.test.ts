@@ -6,7 +6,7 @@ import {
   verifyRelayQuickReplyJourney,
   verifyRelayTaskActivityTransitions,
   verifyRelayTaskMarkedRead,
-  verifyTerminalFileLinksStayInline,
+  verifyTerminalMarkdownFileControls,
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
 
@@ -15,14 +15,28 @@ describe("terminal file links", () => {
     path: "docs/mobile-file-preview.md",
     line: 4,
     missingLink: "docs/mobile-preview-missing.md",
+    nonMarkdownLinks: [
+      "apps/mobile/src/screens/TerminalWebView.tsx:42",
+      "apps/mobile/package.json",
+      "crates/daemon/src/lib.rs:9",
+    ],
     rawLink: "docs/mobile-file-preview.md:4",
     renderedLink: "docs/mobile-file-preview.md",
   };
 
-  it("waits for terminal paths and rejects a separate native file-link UI", async () => {
-    const isExisting = vi.fn(async () => false);
+  it("waits for mixed terminal paths but exposes native controls only for Markdown", async () => {
+    const controls = new Map([
+      [`~Open file ${fixture.path}`, true],
+      [`~Open file ${fixture.path} at line 4`, true],
+      [`~Open file ${fixture.missingLink}`, true],
+    ]);
     const driver = {
-      $: vi.fn(async () => ({ isExisting })),
+      $: vi.fn(async (selector: string) => ({
+        isExisting: vi.fn(async () => controls.get(selector) ?? false),
+        waitForDisplayed: vi.fn(async () => {
+          if (!controls.get(selector)) throw new Error(`Missing control ${selector}`);
+        }),
+      })),
     };
     const ui = {
       inspectTerminalWebView: vi.fn(async () => ({
@@ -31,7 +45,12 @@ describe("terminal file links", () => {
         cols: 220,
         frameCount: 2,
         rows: 40,
-        text: `SCRIPT_INPUT: ${fixture.renderedLink}\nSCRIPT_INPUT: ${fixture.rawLink}\nSCRIPT_INPUT: ${fixture.missingLink}`,
+        text: [
+          fixture.renderedLink,
+          fixture.rawLink,
+          fixture.missingLink,
+          ...fixture.nonMarkdownLinks,
+        ].map((path) => `SCRIPT_INPUT: ${path}`).join("\n"),
       })),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (await condition()) return;
@@ -39,21 +58,37 @@ describe("terminal file links", () => {
       }),
     };
 
-    await verifyTerminalFileLinksStayInline(driver as never, ui as never, fixture as never);
+    await verifyTerminalMarkdownFileControls(driver as never, ui as never, fixture);
 
     expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.path}`);
     expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.path} at line 4`);
     expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.missingLink}`);
+    for (const path of fixture.nonMarkdownLinks) {
+      const [filePath, line] = path.match(/^(.*?):(\d+)$/)?.slice(1) ?? [path];
+      expect(driver.$).toHaveBeenCalledWith(
+        `~Open file ${filePath}${line ? ` at line ${line}` : ""}`,
+      );
+    }
   });
 
-  it("fails when a floating native file-link button remains", async () => {
+  it("fails when a Markdown native file-link control is missing", async () => {
     const driver = {
-      $: vi.fn(async () => ({ isExisting: vi.fn(async () => true) })),
+      $: vi.fn(async (selector: string) => ({
+        isExisting: vi.fn(async () => false),
+        waitForDisplayed: vi.fn(async () => {
+          throw new Error(`Missing control ${selector}`);
+        }),
+      })),
     };
     const ui = {
       inspectTerminalWebView: vi.fn(async () => ({
         kind: "rendered" as const,
-        text: `${fixture.renderedLink} ${fixture.rawLink} ${fixture.missingLink}`,
+        text: [
+          fixture.renderedLink,
+          fixture.rawLink,
+          fixture.missingLink,
+          ...fixture.nonMarkdownLinks,
+        ].join(" "),
       })),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (await condition()) return;
@@ -62,8 +97,36 @@ describe("terminal file links", () => {
     };
 
     await expect(
-      verifyTerminalFileLinksStayInline(driver as never, ui as never, fixture as never),
-    ).rejects.toThrow(/separate native file-link control/i);
+      verifyTerminalMarkdownFileControls(driver as never, ui as never, fixture),
+    ).rejects.toThrow(`Missing control ~Open file ${fixture.path}`);
+  });
+
+  it("fails when a non-Markdown native file-link control is exposed", async () => {
+    const driver = {
+      $: vi.fn(async (selector: string) => ({
+        isExisting: vi.fn(async () => selector.includes("TerminalWebView.tsx")),
+        waitForDisplayed: vi.fn(async () => undefined),
+      })),
+    };
+    const ui = {
+      inspectTerminalWebView: vi.fn(async () => ({
+        kind: "rendered" as const,
+        text: [
+          fixture.renderedLink,
+          fixture.rawLink,
+          fixture.missingLink,
+          ...fixture.nonMarkdownLinks,
+        ].join(" "),
+      })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+
+    await expect(
+      verifyTerminalMarkdownFileControls(driver as never, ui as never, fixture),
+    ).rejects.toThrow(/non-Markdown.*TerminalWebView\.tsx/i);
   });
 });
 

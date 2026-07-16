@@ -15,6 +15,11 @@ describe("mobile relay harness helpers", () => {
       expectedRawLine: "TARGET RAW LINE",
       line: 4,
       missingLink: "docs/mobile-preview-missing.md",
+      nonMarkdownLinks: [
+        "apps/mobile/src/screens/TerminalWebView.tsx:42",
+        "apps/mobile/package.json",
+        "crates/daemon/src/lib.rs:9"
+      ],
       path: "docs/mobile-file-preview.md",
       rawLink: "docs/mobile-file-preview.md:4",
       renderedLink: "docs/mobile-file-preview.md"
