@@ -97,8 +97,17 @@ async function expoModulesJsiRoot(worktreeRoot: string): Promise<string> {
   return realpath(join(dirname(expoModulesCoreRoot), "expo-modules-jsi"));
 }
 
-async function installAndPrebuild(worktreeRoot: string, logPath: string): Promise<void> {
-  await run("pnpm", ["install", "--frozen-lockfile"], worktreeRoot, logPath);
+async function installAndPrebuild(
+  worktreeRoot: string,
+  storeRoot: string,
+  logPath: string
+): Promise<void> {
+  await run(
+    "pnpm",
+    ["install", "--frozen-lockfile", "--store-dir", storeRoot],
+    worktreeRoot,
+    logPath
+  );
   await run(
     "pnpm",
     [
@@ -150,14 +159,17 @@ async function buildSimulator(worktreeRoot: string, logPath: string): Promise<vo
 
 describeIntegration("ExpoModulesJSI shared pnpm store isolation", () => {
   it(
-    "rebuilds nested Xcode intermediates when sequential worktrees use different Pods roots",
+    "isolates ExpoModulesJSI state while two worktrees build concurrently",
     async () => {
       const fixtureRoot = await mkdtemp(join(tmpdir(), "kanna-expo-jsi-worktrees-"));
       const archivePath = join(fixtureRoot, "source.tar");
+      const storeRoot = join(fixtureRoot, "pnpm-store");
       const firstRootPath = join(fixtureRoot, "worktree-a");
       const secondRootPath = join(fixtureRoot, "worktree-b");
-      const logPath = join(fixtureRoot, "build.log");
-      let sharedPackageRoot: string | undefined;
+      const setupLogPath = join(fixtureRoot, "setup.log");
+      const firstBuildLogPath = join(fixtureRoot, "build-a.log");
+      const secondBuildLogPath = join(fixtureRoot, "build-b.log");
+      const packageRoots = new Set<string>();
       let succeeded = false;
 
       try {
@@ -165,63 +177,75 @@ describeIntegration("ExpoModulesJSI shared pnpm store isolation", () => {
         await Promise.all([mkdir(firstRootPath), mkdir(secondRootPath)]);
         const firstRoot = await realpath(firstRootPath);
         const secondRoot = await realpath(secondRootPath);
-        await run("tar", ["-xf", archivePath, "-C", firstRoot], repoRoot, logPath);
-        await run("tar", ["-xf", archivePath, "-C", secondRoot], repoRoot, logPath);
+        await Promise.all([
+          run("tar", ["-xf", archivePath, "-C", firstRoot], repoRoot, setupLogPath),
+          run("tar", ["-xf", archivePath, "-C", secondRoot], repoRoot, setupLogPath)
+        ]);
 
-        await installAndPrebuild(firstRoot, logPath);
-        sharedPackageRoot = await expoModulesJsiRoot(firstRoot);
-        await Promise.all(
-          [".DerivedData", ".build", ".swiftpm", ".build-context"].map((directory) =>
-            rm(join(sharedPackageRoot!, "apple", directory), {
-              recursive: true,
-              force: true
-            })
-          )
-        );
-        await buildSimulator(firstRoot, logPath);
-        await rm(firstRoot, { recursive: true, force: true });
+        await Promise.all([
+          installAndPrebuild(firstRoot, storeRoot, setupLogPath),
+          installAndPrebuild(secondRoot, storeRoot, setupLogPath)
+        ]);
 
-        await installAndPrebuild(secondRoot, logPath);
-        expect(await expoModulesJsiRoot(secondRoot)).toBe(sharedPackageRoot);
-        expect(
-          existsSync(
-            join(
-              secondRoot,
-              "apps/mobile/ios/Pods/Headers/Public/hermes-engine/hermes/hermes.h"
+        const firstPackageRoot = await expoModulesJsiRoot(firstRoot);
+        const secondPackageRoot = await expoModulesJsiRoot(secondRoot);
+        packageRoots.add(firstPackageRoot);
+        packageRoots.add(secondPackageRoot);
+        expect(firstPackageRoot).not.toBe(secondPackageRoot);
+
+        for (const worktreeRoot of [firstRoot, secondRoot]) {
+          expect(
+            existsSync(
+              join(
+                worktreeRoot,
+                "apps/mobile/ios/Pods/Headers/Public/hermes-engine/hermes/hermes.h"
+              )
             )
-          )
-        ).toBe(true);
-        await buildSimulator(secondRoot, logPath);
+          ).toBe(true);
+        }
 
-        const responseFiles = await findFiles(
-          join(sharedPackageRoot, "apple/.DerivedData"),
-          "common-args.resp"
-        );
-        expect(responseFiles.length).toBeGreaterThan(0);
-        const responseContents = await Promise.all(
-          responseFiles.map((path) => readFile(path, "utf8"))
-        );
-        const secondRootAliases = [secondRoot, secondRootPath];
-        const firstRootAliases = [firstRoot, firstRootPath];
-        expect(
-          responseContents.some((contents) =>
-            secondRootAliases.some((root) => contents.includes(root))
-          )
-        ).toBe(true);
-        expect(
-          responseContents.every((contents) =>
-            firstRootAliases.every((root) => !contents.includes(root))
-          )
-        ).toBe(true);
-        const buildLog = await readFile(logPath, "utf8");
-        expect(buildLog.match(/Build roots changed; cleaned DerivedData and SwiftPM state/g))
-          .toHaveLength(2);
+        const firstBuild = buildSimulator(firstRoot, firstBuildLogPath);
+        const secondBuild = buildSimulator(secondRoot, secondBuildLogPath);
+        await Promise.all([firstBuild, secondBuild]);
+
+        const contexts = [
+          {
+            packageRoot: firstPackageRoot,
+            ownRoots: [firstRoot, firstRootPath],
+            otherRoots: [secondRoot, secondRootPath]
+          },
+          {
+            packageRoot: secondPackageRoot,
+            ownRoots: [secondRoot, secondRootPath],
+            otherRoots: [firstRoot, firstRootPath]
+          }
+        ];
+        for (const { packageRoot, ownRoots, otherRoots } of contexts) {
+          const responseFiles = await findFiles(
+            join(packageRoot, "apple/.DerivedData"),
+            "common-args.resp"
+          );
+          expect(responseFiles.length).toBeGreaterThan(0);
+          const responseContents = await Promise.all(
+            responseFiles.map((path) => readFile(path, "utf8"))
+          );
+          expect(
+            responseContents.some((contents) =>
+              ownRoots.some((root) => contents.includes(root))
+            )
+          ).toBe(true);
+          expect(
+            responseContents.every((contents) =>
+              otherRoots.every((root) => !contents.includes(root))
+            )
+          ).toBe(true);
+        }
         succeeded = true;
       } finally {
-        if (sharedPackageRoot) {
+        for (const packageRoot of packageRoots) {
           await Promise.all(
             [".DerivedData", ".build", ".swiftpm", ".build-context"].map((directory) =>
-              rm(join(sharedPackageRoot!, "apple", directory), {
+              rm(join(packageRoot, "apple", directory), {
                 recursive: true,
                 force: true
               })
@@ -235,6 +259,6 @@ describeIntegration("ExpoModulesJSI shared pnpm store isolation", () => {
         }
       }
     },
-    30 * 60 * 1000
+    45 * 60 * 1000
   );
 });

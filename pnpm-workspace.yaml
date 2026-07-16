@@ -4,7 +4,7 @@ packages:
   - "services/*"
   - "tests/*"
   - "tools/*"
-enableGlobalVirtualStore: true
+enableGlobalVirtualStore: false
 hoist: false
 confirmModulesPurge: false
 allowBuilds:

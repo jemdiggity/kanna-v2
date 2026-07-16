@@ -27,6 +27,25 @@ imports under Xcode 26.2/Swift 6. Carry a pnpm patch that qualifies it as
 Turbo is kept at 2.10.5 or newer so repository orchestration understands pnpm
 11's scalar patched-dependency lockfile representation.
 
+### Parallel worktree build isolation
+
+`expo-modules-jsi` writes its generated module map, SwiftPM state, nested Xcode
+DerivedData, build context, and xcframework Products beside the installed
+package. pnpm's experimental global virtual store resolves that package to one
+physical directory for every Kanna worktree, so two overlapping native builds
+can delete or replace state while the other build or CocoaPods copy phase is
+using it.
+
+Disable `enableGlobalVirtualStore` for the repository and use pnpm's default
+project-local virtual store. The content-addressable store continues to
+deduplicate dependency content, while every checkout gets a private physical
+`expo-modules-jsi` package directory for all mutable Apple build state. Remove
+the sequential root-switch cleanup from Kanna's package patch; the patch should
+only retain the SDK 57 Swift compiler compatibility fix. Integration coverage
+must install and prebuild two archived checkouts, overlap both simulator builds,
+assert that their resolved package roots differ, and verify that each nested
+Xcode response file contains only its own Pods root.
+
 ## Configuration Boundaries
 
 - `apps/mobile/src/mobileEnvironments.json` remains the single source for dev,
