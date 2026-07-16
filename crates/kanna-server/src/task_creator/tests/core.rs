@@ -2598,17 +2598,17 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
     );
     assert_eq!(spawn_options["maxTurns"], 7);
     assert_eq!(spawn_options["maxBudgetUsd"], 1.5);
-    assert_eq!(
-        std::fs::read_to_string(
-            std::path::Path::new(&prepared.cwd).join(".kanna/custom-setup-ran"),
-        )
-        .unwrap(),
-        "custom setup"
+    assert!(
+        !std::path::Path::new(&prepared.cwd)
+            .join(".kanna/custom-setup-ran")
+            .exists(),
+        "PTY setup must be deferred until the terminal starts"
     );
     match prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
-            assert!(!command.contains("custom-setup-ran"));
+            assert!(command.contains("custom-setup-ran"));
+            assert!(command.contains("Running startup..."));
             assert!(command.contains("--model opus"));
             assert!(command.contains("--permission-mode acceptEdits"));
             assert!(command.contains("--allowedTools Bash"));

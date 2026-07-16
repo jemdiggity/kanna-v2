@@ -2,6 +2,7 @@ use super::*;
 use std::io::Read;
 
 const INSTALL_CODEX: &str = "mkdir -p .kanna/setup-bin && printf '#!/bin/sh\\ntouch .kanna/setup-bin/codex-ran\\nexit 0\\n' > .kanna/setup-bin/codex && chmod +x .kanna/setup-bin/codex";
+const INSTALL_STREAMING_CODEX: &str = "printf 'SETUP_OUTPUT_SENTINEL\\n' && mkdir -p .kanna/setup-bin && printf '#!/bin/sh\\nprintf \\\"PROVIDER_OUTPUT_SENTINEL\\\\n\\\"\\ntouch .kanna/setup-bin/codex-ran\\nexit 0\\n' > .kanna/setup-bin/codex && chmod +x .kanna/setup-bin/codex";
 
 struct ProviderLookupPathGuard;
 
@@ -174,6 +175,233 @@ fn seed_source_task(
     )
     .unwrap();
     source_worktree
+}
+
+#[tokio::test]
+async fn initial_pty_task_streams_setup_before_starting_setup_created_provider() {
+    let _sidecar_guard = crate::test_sidecar_guard();
+    let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
+    let kanna_cli = ensure_test_sidecar("kanna-cli");
+    let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
+    let repo_root = write_setup_repo("setup-provider-initial-pty", INSTALL_STREAMING_CODEX, false);
+    let mut config = test_config("setup-provider-initial-pty");
+    config.kanna_cli_path = Some(kanna_cli.path().to_string_lossy().to_string());
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use the setup-provisioned Codex".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("codex".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    let expected = std::path::Path::new(&prepared.cwd).join(".kanna/setup-bin/codex");
+    assert!(
+        !expected.exists(),
+        "PTY setup must wait for the daemon terminal bootstrap"
+    );
+    let (pty_executable, pty_args) = match &prepared.session {
+        PreparedSessionSpawn::Pty {
+            executable,
+            args,
+            agent_provider,
+            ..
+        } => {
+            assert_eq!(*agent_provider, DaemonAgentProvider::Codex);
+            let command = args.last().expect("PTY command");
+            assert!(command.contains("Running startup..."), "command: {command}");
+            assert!(
+                command.contains(INSTALL_STREAMING_CODEX),
+                "setup must run in the PTY command: {command}"
+            );
+            (executable.clone(), args.clone())
+        }
+        _ => panic!("expected PTY session"),
+    };
+
+    let zdotdir = std::path::Path::new(&prepared.cwd).join(".kanna/test-zdotdir");
+    std::fs::create_dir_all(&zdotdir).unwrap();
+    let mut pty_env = prepared.env.clone();
+    pty_env.insert("ZDOTDIR".to_string(), zdotdir.to_string_lossy().to_string());
+    let mut process = kanna_daemon::pty::PtySession::spawn(
+        &pty_executable,
+        &pty_args,
+        &prepared.cwd,
+        &pty_env,
+        80,
+        24,
+    )
+    .unwrap();
+    let mut output_reader = std::fs::File::from(process.try_clone_io_fd().unwrap());
+    let mut output = Vec::new();
+    let provider_ran = expected.parent().unwrap().join("codex-ran");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match output_reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("failed to read PTY output: {error}"),
+            }
+        }
+        let text = String::from_utf8_lossy(&output);
+        let provider_output_seen = text
+            .match_indices("PROVIDER_OUTPUT_SENTINEL")
+            .nth(1)
+            .is_some();
+        if provider_ran.is_file() && provider_output_seen {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = process.kill();
+            panic!("PTY bootstrap did not finish: {text}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let _ = process.kill();
+    let _ = process.try_wait();
+
+    let output = String::from_utf8_lossy(&output);
+    let startup_index = output.find("Running startup...").expect("startup banner");
+    let setup_output_index = output
+        .match_indices("SETUP_OUTPUT_SENTINEL")
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("setup output after the echoed setup command");
+    let provider_index = output
+        .match_indices("PROVIDER_OUTPUT_SENTINEL")
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("provider output after the echoed setup command");
+    assert!(startup_index < setup_output_index, "output: {output}");
+    assert!(setup_output_index < provider_index, "output: {output}");
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn pty_setup_failure_keeps_output_and_prevents_provider_launch() {
+    let workspace = std::env::temp_dir().join(format!(
+        "kanna-pty-visible-setup-failure-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&workspace);
+    std::fs::create_dir_all(&workspace).unwrap();
+    let command = super::super::build_task_shell_command(
+        "touch provider-ran",
+        &["printf 'SETUP_FAILURE_OUTPUT\\n' && exit 23".to_string()],
+        None,
+        Some("/usr/bin:/bin"),
+    );
+
+    let output = Command::new("/bin/zsh")
+        .args(["--login", "-c", &command])
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(23));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Running startup..."), "stdout: {stdout}");
+    assert!(stdout.contains("SETUP_FAILURE_OUTPUT"), "stdout: {stdout}");
+    assert!(
+        !workspace.join("provider-ran").exists(),
+        "provider must not launch after setup fails"
+    );
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[test]
+fn initial_pty_task_binds_first_provider_before_setup() {
+    let _sidecar_guard = crate::test_sidecar_guard();
+    let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
+    let kanna_cli = ensure_test_sidecar("kanna-cli");
+    let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
+    let repo_root = write_setup_repo("setup-provider-precedence", INSTALL_CODEX, false);
+    let mut config = test_config("setup-provider-precedence");
+    config.kanna_cli_path = Some(kanna_cli.path().to_string_lossy().to_string());
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use the first configured provider".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude,codex".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(prepared.agent_provider, "claude");
+    let installed = std::path::Path::new(&prepared.cwd).join(".kanna/setup-bin/codex");
+    assert!(
+        !installed.exists(),
+        "provider selection must not run setup before the PTY starts"
+    );
+    match prepared.session {
+        PreparedSessionSpawn::Pty {
+            args,
+            agent_provider,
+            ..
+        } => {
+            assert_eq!(agent_provider, DaemonAgentProvider::Claude);
+            let command = args.last().expect("PTY command");
+            assert!(command.contains(INSTALL_CODEX), "command: {command}");
+        }
+        _ => panic!("expected PTY session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[tokio::test]
