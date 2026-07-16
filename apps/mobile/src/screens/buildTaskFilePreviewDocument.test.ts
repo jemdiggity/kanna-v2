@@ -4,6 +4,19 @@ import {
   prepareTaskFileMarkdown
 } from "./buildTaskFilePreviewDocument";
 
+function contentBetween(html: string, start: string, end: string): string {
+  const startIndex = html.indexOf(start);
+  const endIndex = html.indexOf(end, startIndex + start.length);
+  if (startIndex < 0 || endIndex < 0) {
+    throw new Error(`Expected document to contain ${start}...${end}`);
+  }
+  return html.slice(startIndex + start.length, endIndex);
+}
+
+function rawContent(html: string): string {
+  return contentBetween(html, '<pre class="raw">', "</pre>");
+}
+
 describe("buildTaskFilePreviewDocument", () => {
   it("renders Markdown headings, fenced code, and tables", () => {
     const html = buildTaskFilePreviewDocument({
@@ -23,7 +36,8 @@ describe("buildTaskFilePreviewDocument", () => {
     });
 
     expect(html).toContain("<h1>Heading</h1>");
-    expect(html).toContain('<code class="language-ts">const answer = 42;');
+    expect(html).toContain('<code class="language-ts">');
+    expect(html).toContain('<span class="hljs-keyword">const</span>');
     expect(html).toContain("<table>");
     expect(html).toContain("<td>answer</td>");
   });
@@ -46,7 +60,8 @@ describe("buildTaskFilePreviewDocument", () => {
       mode: "rendered",
       preparedMarkdown
     });
-    expect(mismatchedHtml).toContain('<pre class="raw"># Different</pre>');
+    expect(rawContent(mismatchedHtml)).toContain("# Different");
+    expect(rawContent(mismatchedHtml)).toContain("hljs-section");
     expect(mismatchedHtml).not.toContain("<h1>Prepared</h1>");
   });
 
@@ -134,14 +149,17 @@ describe("buildTaskFilePreviewDocument", () => {
   });
 
   it("falls back before rendering token-heavy single-line Markdown", () => {
+    const content = "*x* ".repeat(4_000);
     const html = buildTaskFilePreviewDocument({
       path: "docs/inline-heavy.md",
-      content: "*x* ".repeat(4_000),
+      content,
       mode: "rendered"
     });
 
     expect(html).toContain('<pre class="raw">');
     expect(html).not.toContain('<main class="markdown">');
+    expect(rawContent(html)).not.toContain("<span");
+    expect(rawContent(html).length).toBeLessThan(content.length + 10_000);
   });
 
   it("preflights table delimiters before parsing a wide Markdown table", () => {
@@ -184,7 +202,8 @@ describe("buildTaskFilePreviewDocument", () => {
       mode: "raw"
     });
 
-    expect(html).toContain("first\n&lt;script&gt;alert(1)&lt;/script&gt;\nthird");
+    expect(rawContent(html)).toContain("first\n&lt;script&gt;");
+    expect(rawContent(html)).toContain("&lt;/script&gt;\nthird");
     expect(html).not.toContain("data-line=");
     expect(html).not.toContain("<script>alert(1)</script>");
   });
@@ -208,24 +227,21 @@ describe("buildTaskFilePreviewDocument", () => {
       initialLine: 2
     });
 
-    expect(html).toContain('querySelector(\'[data-line="2"]\')');
+    expect(html).toContain("document.createTreeWalker");
+    expect(html).toContain("document.createRange");
     expect(html).toContain('scrollIntoView({ block: "center" })');
     expect(html).toContain('classList.add("line-flash")');
-    expect(html).toContain(
-      'first\n<span class="raw-line" data-line="2">second</span>\nthird'
-    );
-    expect(html.match(/<span class="raw-line" data-line="\d+"/g)).toEqual([
-      '<span class="raw-line" data-line="2"'
-    ]);
+    expect(rawContent(html)).toBe("first\nsecond\nthird");
+    expect(html).not.toContain('<span class="raw-line" data-line="2">');
   });
 
   it.each([
-    ["LF", "first\nsecond\nthird", "first\n", "\nthird"],
-    ["CRLF", "first\r\nsecond\r\nthird", "first\r\n", "\r\nthird"],
-    ["bare CR", "first\rsecond\rthird", "first\r", "\rthird"]
+    ["LF", "first\nsecond\nthird"],
+    ["CRLF", "first\r\nsecond\r\nthird"],
+    ["bare CR", "first\rsecond\rthird"]
   ])(
-    "targets a raw line separated by %s without wrapping its line ending",
-    (_label, content, before, after) => {
+    "preserves raw source separated by %s while targeting its line",
+    (_label, content) => {
       const html = buildTaskFilePreviewDocument({
         path: "src/file.ts",
         content,
@@ -233,10 +249,9 @@ describe("buildTaskFilePreviewDocument", () => {
         initialLine: 2
       });
 
-      expect(html).toContain(
-        `${before}<span class="raw-line" data-line="2">second</span>${after}`
-      );
-      expect(html.match(/<span class="raw-line" data-line="2"/g)).toHaveLength(1);
+      expect(rawContent(html)).toBe(content);
+      expect(html).toContain("const targetLine = 2");
+      expect(html).toContain("document.createRange");
     }
   );
 
@@ -249,8 +264,9 @@ describe("buildTaskFilePreviewDocument", () => {
       initialLine: 524_288
     });
 
-    expect(html.match(/<span\b/g)).toHaveLength(1);
-    expect(html.match(/<span class="raw-line" data-line=/g)).toHaveLength(1);
+    expect(rawContent(html)).toBe(content);
+    expect(rawContent(html)).not.toContain("<span");
+    expect(html).toContain('document.createElement("span")');
     expect(html.length).toBeLessThan(content.length + 10_000);
   });
 
@@ -280,5 +296,99 @@ describe("buildTaskFilePreviewDocument", () => {
     expect(html).toContain("img-src 'none'");
     expect(html).toContain("connect-src 'none'");
     expect(html).toContain("navigate-to 'none'");
+  });
+});
+
+describe("mobile file syntax highlighting", () => {
+  it("highlights a raw TypeScript file from its path", () => {
+    const html = buildTaskFilePreviewDocument({
+      path: "src/example.ts",
+      content: "const answer: number = 42;",
+      mode: "raw"
+    });
+
+    expect(html).toContain('<span class="hljs-keyword">const</span>');
+    expect(html).toMatch(/<span class="hljs-(?:built_in|type)">number<\/span>/);
+  });
+
+  it("uses Python-compatible highlighting for Bazel files", () => {
+    const html = buildTaskFilePreviewDocument({
+      path: "BUILD.bazel",
+      content: "def build_rule(ctx):\n    return ctx.files.srcs",
+      mode: "raw"
+    });
+
+    expect(html).toContain('<span class="hljs-keyword">def</span>');
+  });
+
+  it("highlights supported fenced code in rendered Markdown", () => {
+    const html = buildTaskFilePreviewDocument({
+      path: "docs/example.md",
+      content: "```ts\nconst answer = 42;\n```",
+      mode: "rendered"
+    });
+
+    expect(html).toContain('<code class="language-ts">');
+    expect(html).toContain('<span class="hljs-keyword">const</span>');
+  });
+
+  it("keeps unknown raw files escaped and unhighlighted", () => {
+    const html = buildTaskFilePreviewDocument({
+      path: "notes.unknown",
+      content: '<script data-value="unsafe">alert(1)</script>',
+      mode: "raw"
+    });
+
+    expect(html).toContain(
+      '&lt;script data-value=&quot;unsafe&quot;&gt;alert(1)&lt;/script&gt;'
+    );
+    expect(rawContent(html)).not.toContain("hljs-");
+    expect(html).not.toContain('<script data-value="unsafe">');
+  });
+
+  it("keeps unknown Markdown fences escaped and unhighlighted", () => {
+    const html = buildTaskFilePreviewDocument({
+      path: "docs/example.md",
+      content: "```unknown-language\n<tag>\n```",
+      mode: "rendered"
+    });
+
+    expect(html).toContain("&lt;tag&gt;");
+    const fence = contentBetween(
+      html,
+      '<code class="language-unknown-language">',
+      "</code>"
+    );
+    expect(fence).not.toContain("hljs-");
+  });
+
+  it("keeps oversized supported files escaped and unhighlighted", () => {
+    const content = `const value = 1;\n${"x".repeat(256 * 1024)}`;
+    const html = buildTaskFilePreviewDocument({
+      path: "src/large.ts",
+      content,
+      mode: "raw"
+    });
+
+    expect(html).toContain("const value = 1;");
+    expect(rawContent(html)).not.toContain("hljs-");
+    expect(html.length).toBeLessThan(content.length + 10_000);
+  });
+
+  it("targets an exact highlighted line through a DOM Range", () => {
+    const html = buildTaskFilePreviewDocument({
+      path: "src/example.ts",
+      content: "const first = 1;\nconst second = 2;",
+      mode: "raw",
+      initialLine: 2
+    });
+
+    expect(html).toContain("document.createTreeWalker");
+    expect(html).toContain("document.createRange");
+    expect(html).toContain("range.getBoundingClientRect()");
+    expect(html).toContain("Number.isFinite(computedLineHeight)");
+    expect(html).not.toContain("range.extractContents()");
+    expect(html).toContain('line.classList.add("line-flash")');
+    expect(html).not.toContain('<span class="raw-line" data-line="2">');
   });
 });
