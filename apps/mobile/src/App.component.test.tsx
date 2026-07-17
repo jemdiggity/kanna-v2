@@ -251,6 +251,14 @@ function runEffects(): void {
 }
 
 describe("App component wiring", () => {
+  it("renders the root shell without ambient decoration layers", async () => {
+    const { model } = createModel("connected");
+    const renderer = await mountModel(model);
+    const safeArea = findTestId(renderer.root, MOBILE_E2E_IDS.appShell);
+
+    expect(safeArea.findAllByType("View", { deep: false })).toHaveLength(1);
+  });
+
   it("creates tasks with geometry derived from the measured task-detail surface", async () => {
     const { controller, model } = createModel("connected");
     controller.openComposer();
