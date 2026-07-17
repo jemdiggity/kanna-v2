@@ -3,6 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { RepoSummary, TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
+import { orderActivityTasks } from "./activityTaskOrder";
 
 interface TasksScreenProps {
   heading?: string | null;
@@ -22,9 +23,11 @@ export function TasksScreen({
   onOpenTask
 }: TasksScreenProps) {
   const isRecentView = heading === "Recent";
-  const filteredTasks = !isRecentView && selectedRepoId
-    ? tasks.filter((task) => task.repoId === selectedRepoId)
-    : tasks;
+  const displayedTasks = isRecentView
+    ? orderActivityTasks(tasks)
+    : selectedRepoId
+      ? tasks.filter((task) => task.repoId === selectedRepoId)
+      : tasks;
 
   return (
     <ScrollView
@@ -65,7 +68,7 @@ export function TasksScreen({
 
         <TaskList
           emptyLabel="No tasks yet."
-          tasks={filteredTasks}
+          tasks={displayedTasks}
           testID={MOBILE_E2E_IDS.tasksScreen}
           onOpenTask={onOpenTask}
         />
