@@ -103,7 +103,6 @@ pub(super) struct PipelineStagePolicy {
 }
 
 impl PipelineStagePolicy {
-    #[allow(dead_code)]
     pub(super) fn revision_transition(&self) -> PipelineStageTransition {
         self.revision_transition.unwrap_or(self.transition)
     }

@@ -256,22 +256,25 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     db.update_pipeline_item_agent_session_id(&task_id, prepared.provider_session_id.as_deref())
         .map_err(|e| format!("db error: {}", e))?;
     let run_id = generate_stage_run_id(&task_id);
-    db.insert_stage_run(NewStageRun {
-        id: &run_id,
-        task_id: &task_id,
-        stage: &prepared.run_stage,
-        kind: prepared.run_kind,
-        agent: prepared.stage_agent.as_deref(),
-        agent_provider: Some(prepared.agent_provider.as_str()),
-        model: prepared.model.as_deref(),
-        status: "running",
-        result: None,
-        feedback: prepared.feedback.as_deref(),
-        session_id: Some(&session_id),
-        provider_session_id: prepared.provider_session_id.as_deref(),
-        cwd: Some(&prepared.cwd),
-        resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
-    })
+    db.insert_stage_run_with_completion_transition(
+        NewStageRun {
+            id: &run_id,
+            task_id: &task_id,
+            stage: &prepared.run_stage,
+            kind: prepared.run_kind,
+            agent: prepared.stage_agent.as_deref(),
+            agent_provider: Some(prepared.agent_provider.as_str()),
+            model: prepared.model.as_deref(),
+            status: "running",
+            result: None,
+            feedback: prepared.feedback.as_deref(),
+            session_id: Some(&session_id),
+            provider_session_id: prepared.provider_session_id.as_deref(),
+            cwd: Some(&prepared.cwd),
+            resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
+        },
+        Some(prepared.completion_transition.as_str()),
+    )
     .map_err(|e| format!("db error: {}", e))?;
 
     spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
@@ -362,22 +365,25 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                 ),
             };
             let run_id = generate_stage_run_id(&task_id);
-            db.insert_stage_run(NewStageRun {
-                id: &run_id,
-                task_id: &task_id,
-                stage: &prepared.run_stage,
-                kind: "post",
-                agent: agent.as_deref(),
-                agent_provider: agent_provider.as_deref(),
-                model: model.as_deref(),
-                status: "running",
-                result: None,
-                feedback: None,
-                session_id: Some(&prepared.session_id),
-                provider_session_id: provider_session_id.as_deref(),
-                cwd: cwd.as_deref(),
-                resumed_from_run_id: None,
-            })
+            db.insert_stage_run_with_completion_transition(
+                NewStageRun {
+                    id: &run_id,
+                    task_id: &task_id,
+                    stage: &prepared.run_stage,
+                    kind: "post",
+                    agent: agent.as_deref(),
+                    agent_provider: agent_provider.as_deref(),
+                    model: model.as_deref(),
+                    status: "running",
+                    result: None,
+                    feedback: None,
+                    session_id: Some(&prepared.session_id),
+                    provider_session_id: provider_session_id.as_deref(),
+                    cwd: cwd.as_deref(),
+                    resumed_from_run_id: None,
+                },
+                Some(prepared.fallback.completion_transition.as_str()),
+            )
             .map_err(|e| format!("db error: {}", e))?;
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
@@ -404,6 +410,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     let stage_agent = prepared.stage_agent.clone();
     let agent_provider = prepared.agent_provider.clone();
     let model = prepared.model.clone();
+    let completion_transition = prepared.completion_transition;
     let provider_session_id = prepared.provider_session_id.clone();
     let cwd = prepared.cwd.clone();
     let record_failure = |error: String| match record_rerun_stage_failure(
@@ -458,6 +465,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 stage_agent.as_deref(),
                 &agent_provider,
                 model.as_deref(),
+                completion_transition.as_str(),
                 &session_id,
                 provider_session_id.as_deref(),
                 &cwd,
@@ -607,22 +615,25 @@ fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Resu
     )
     .map_err(|e| format!("db error: {}", e))?;
     let run_id = generate_stage_run_id(&prepared.created_task.task_id);
-    db.insert_stage_run(NewStageRun {
-        id: &run_id,
-        task_id: &prepared.created_task.task_id,
-        stage: &prepared.created_task.stage,
-        kind: "main",
-        agent: prepared.stage_agent.as_deref(),
-        agent_provider: Some(prepared.agent_provider.as_str()),
-        model: prepared.model.as_deref(),
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some(&prepared.session_id),
-        provider_session_id: prepared.provider_session_id.as_deref(),
-        cwd: Some(&prepared.cwd),
-        resumed_from_run_id: None,
-    })
+    db.insert_stage_run_with_completion_transition(
+        NewStageRun {
+            id: &run_id,
+            task_id: &prepared.created_task.task_id,
+            stage: &prepared.created_task.stage,
+            kind: "main",
+            agent: prepared.stage_agent.as_deref(),
+            agent_provider: Some(prepared.agent_provider.as_str()),
+            model: prepared.model.as_deref(),
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some(&prepared.session_id),
+            provider_session_id: prepared.provider_session_id.as_deref(),
+            cwd: Some(&prepared.cwd),
+            resumed_from_run_id: None,
+        },
+        Some(prepared.completion_transition.as_str()),
+    )
     .map_err(|e| format!("db error: {}", e))
 }
 
@@ -668,6 +679,7 @@ fn record_rerun_stage_run(
     stage_agent: Option<&str>,
     agent_provider: &str,
     model: Option<&str>,
+    completion_transition: &str,
     session_id: &str,
     provider_session_id: Option<&str>,
     cwd: &str,
@@ -680,22 +692,25 @@ fn record_rerun_stage_run(
     db.update_pipeline_item_agent_session_id(task_id, provider_session_id)
         .map_err(|e| format!("db error: {}", e))?;
     let run_id = generate_stage_run_id(task_id);
-    db.insert_stage_run(NewStageRun {
-        id: &run_id,
-        task_id,
-        stage,
-        kind: run_kind,
-        agent: stage_agent,
-        agent_provider: Some(agent_provider),
-        model,
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some(session_id),
-        provider_session_id,
-        cwd: Some(cwd),
-        resumed_from_run_id: None,
-    })
+    db.insert_stage_run_with_completion_transition(
+        NewStageRun {
+            id: &run_id,
+            task_id,
+            stage,
+            kind: run_kind,
+            agent: stage_agent,
+            agent_provider: Some(agent_provider),
+            model,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some(session_id),
+            provider_session_id,
+            cwd: Some(cwd),
+            resumed_from_run_id: None,
+        },
+        Some(completion_transition),
+    )
     .map_err(|e| format!("db error: {}", e))
 }
 

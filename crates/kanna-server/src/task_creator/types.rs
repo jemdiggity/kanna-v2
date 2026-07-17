@@ -1,3 +1,4 @@
+use super::definitions::PipelineStageTransition;
 use kanna_daemon::protocol::AgentProvider as DaemonAgentProvider;
 use std::collections::HashMap;
 
@@ -69,6 +70,7 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
+    pub(super) completion_transition: PipelineStageTransition,
     /// The agent CLI's own session id assigned at spawn (Claude PTY only);
     /// recorded on the stage run so a later revision can resume it.
     pub(super) provider_session_id: Option<String>,
@@ -144,6 +146,7 @@ pub(crate) struct PreparedStageRerun {
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
+    pub(super) completion_transition: PipelineStageTransition,
     pub(super) provider_session_id: Option<String>,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
@@ -220,6 +223,7 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
+    pub(super) completion_transition: PipelineStageTransition,
     pub(super) feedback: Option<String>,
     /// The agent CLI's own session id this run starts (fresh assign) or
     /// continues (resume); recorded on the stage run.
