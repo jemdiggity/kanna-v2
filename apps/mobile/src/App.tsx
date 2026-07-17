@@ -274,8 +274,6 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.safeArea} testID={MOBILE_E2E_IDS.appShell}>
-      <View style={styles.backgroundGlow} />
-      <View style={styles.backgroundOrb} />
       <View
         style={[styles.shell, taskDetailVisible ? styles.shellTaskDetail : null]}
         onLayout={(event: LayoutChangeEvent) => {
@@ -391,26 +389,6 @@ const styles = StyleSheet.create({
   safeArea: {
     backgroundColor: "#08111E",
     flex: 1
-  },
-  backgroundGlow: {
-    backgroundColor: "#122B51",
-    borderRadius: 280,
-    height: 280,
-    opacity: 0.22,
-    position: "absolute",
-    right: -70,
-    top: -40,
-    width: 280
-  },
-  backgroundOrb: {
-    backgroundColor: "#163057",
-    borderRadius: 220,
-    bottom: 120,
-    height: 220,
-    left: -90,
-    opacity: 0.16,
-    position: "absolute",
-    width: 220
   },
   shell: {
     flex: 1,

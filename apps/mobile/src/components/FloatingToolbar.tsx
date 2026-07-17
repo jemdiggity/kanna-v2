@@ -32,6 +32,7 @@ export function FloatingToolbar({
         <Pressable
           style={styles.utilityButton}
           accessibilityLabel={searchAction.label}
+          testID={MOBILE_E2E_IDS.toolbarSearch}
           onPress={() => onSelectUtilityAction(searchAction.name)}
         >
           <Ionicons
@@ -42,7 +43,7 @@ export function FloatingToolbar({
         </Pressable>
       ) : null}
 
-      <View style={styles.bar}>
+      <View style={styles.bar} testID={MOBILE_E2E_IDS.toolbarNavigation}>
         {tabs.map((tab) => {
           const active = tab.name === activeTab;
           return (
@@ -93,7 +94,7 @@ const styles = StyleSheet.create({
     right: 16
   },
   bar: {
-    backgroundColor: "rgba(8, 15, 27, 0.97)",
+    backgroundColor: "#080F1B",
     borderColor: "#1E304C",
     borderRadius: 28,
     borderWidth: 1,
@@ -122,7 +123,7 @@ const styles = StyleSheet.create({
   },
   utilityButton: {
     alignItems: "center",
-    backgroundColor: "rgba(8, 15, 27, 0.97)",
+    backgroundColor: "#080F1B",
     borderColor: "#1E304C",
     borderRadius: 24,
     borderWidth: 1,

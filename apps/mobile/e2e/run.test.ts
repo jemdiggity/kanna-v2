@@ -24,6 +24,11 @@ describe("mobile smoke runner", () => {
     expect(supportedSmokeModes).toContain("profile-disconnected");
   });
 
+  it("supports a simulator shell visual mode without the PTY fixture", () => {
+    expect(supportedSmokeModes).toContain("shell-visual");
+    expect(smokeSpecPaths).toContain("specs/smoke/shell-visual.e2e.ts");
+  });
+
   it("supports a force-cloud smoke mode", () => {
     expect(supportedSmokeModes).toContain("cloud");
     expect(smokeSpecPaths).toContain("specs/cloud/cloud-task-flow.e2e.ts");
