@@ -802,6 +802,7 @@ describe("task lifecycle", () => {
     let repoATaskId = "";
     let repoBTaskId = "";
     let delayedRepoATaskId = "";
+    let createdDuringCloseTaskId = "";
 
     const createAgentTask = async (
       targetRepoId: string,
@@ -975,16 +976,16 @@ describe("task lifecycle", () => {
           15_000,
         );
 
-        const repoBTask = await client.waitForElement(
-          `.repo-section[data-repo-id="${repoBId}"] .pipeline-item[data-task-id="${repoBTaskId}"]`,
-          5_000,
+        createdDuringCloseTaskId = await createAgentTask(
+          repoBId,
+          secondaryFixtureRepoRoot,
+          "Created while repository A close response is pending",
         );
-        await client.click(repoBTask);
         await waitForCondition(async () => {
           const selectedRepoId = await getVueState(client, "selectedRepoId");
           const selectedTaskId = await getVueState(client, "selectedTaskId");
-          return selectedRepoId === repoBId && selectedTaskId === repoBTaskId;
-        }, "repository B task navigation while close response is pending", 5_000);
+          return selectedRepoId === repoBId && selectedTaskId === createdDuringCloseTaskId;
+        }, "new repository B task auto-selection while close response is pending", 10_000);
 
         await client.executeSync(
           `window.__KANNA_TASK_CLOSE_GATE__.release(); return true;`,
@@ -1017,7 +1018,7 @@ describe("task lifecycle", () => {
           closeStatus: "fulfilled",
           closeError: null,
           selectedRepoId: repoBId,
-          selectedTaskId: repoBTaskId,
+          selectedTaskId: createdDuringCloseTaskId,
         });
 
         await client.executeSync("window.__KANNA_E2E__.ready = false; location.reload();");
@@ -1025,8 +1026,8 @@ describe("task lifecycle", () => {
         await waitForCondition(async () => {
           const selectedRepoId = await getVueState(client, "selectedRepoId");
           const selectedTaskId = await getVueState(client, "selectedTaskId");
-          return selectedRepoId === repoBId && selectedTaskId === repoBTaskId;
-        }, "persisted repository B task selection after delayed close and reload", 10_000);
+          return selectedRepoId === repoBId && selectedTaskId === createdDuringCloseTaskId;
+        }, "persisted newly created repository B task selection after delayed close and reload", 10_000);
       } finally {
         await client.executeSync(
           `const gate = window.__KANNA_TASK_CLOSE_GATE__;
@@ -1047,7 +1048,12 @@ describe("task lifecycle", () => {
         ).catch(() => undefined);
       }
     } finally {
-      for (const taskId of [repoATaskId, repoBTaskId, delayedRepoATaskId]) {
+      for (const taskId of [
+        repoATaskId,
+        repoBTaskId,
+        delayedRepoATaskId,
+        createdDuringCloseTaskId,
+      ]) {
         if (!taskId) continue;
         await callVueMethod(client, "store.closeTask", taskId, { selectNext: false })
           .catch(() => undefined);

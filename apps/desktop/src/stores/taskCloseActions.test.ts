@@ -6,6 +6,17 @@ import {
 } from "../services/desktopServerClient";
 import { createStoreContext, createStoreState } from "./state";
 import { createTaskCloseActions } from "./taskCloseActions";
+import { createTaskItemActions } from "./taskItemActions";
+
+const { invokeMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(async (command: string) => {
+    if (command === "git_default_branch") return "main";
+    if (command === "git_list_base_branches") return ["main"];
+    throw new Error(`unexpected invoke: ${command}`);
+  }),
+}));
+
+vi.mock("../invoke", () => ({ invoke: invokeMock }));
 
 function repo(id = "repo-1"): Repo {
   return {
@@ -77,6 +88,8 @@ function createHarness(durableItem = item()) {
     ),
     selectReplacementAfterItemRemoval,
     selectItem,
+    persistSelection: vi.fn(async () => {}),
+    reconcileSelection: vi.fn(),
     reloadSnapshot: vi.fn(async () => {}),
     getAgentProviderAvailability: vi.fn(async () => ({ claude: true })),
     windowWorkspace: { invalidateSharedData: vi.fn(async () => {}) },
@@ -143,25 +156,59 @@ describe("task close durable selection", () => {
     expect(services.selectReplacementAfterItemRemoval).toHaveBeenCalledWith(durableItem);
   });
 
-  it("preserves a newer task selection while close completion is pending", async () => {
+  it("preserves a newly created task selection while close completion is pending", async () => {
     const closeResponse = deferred<void>();
     const closeTask = vi.fn(async () => closeResponse.promise);
-    setDesktopServerClientHandlersForTests({ closeTask });
+    setDesktopServerClientHandlersForTests({
+      closeTask,
+      createTask: async (request) => ({
+        taskId: "task-newer",
+        repoId: request.repoId,
+        title: request.prompt,
+        stage: "in progress",
+        agentType: request.agentType ?? "agent",
+      }),
+    });
     const durableItem = item();
-    const { actions, services, state, selectedTaskId } = createHarness(durableItem);
+    const { actions, services, state } = createHarness(durableItem);
+    const itemActions = createTaskItemActions({
+      state,
+      services,
+      toast: {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      requireDb: () => {
+        throw new Error("database should not be required");
+      },
+      tt: (key: string) => key,
+    });
 
     const closePromise = actions.closeTask(durableItem.id);
     await vi.waitFor(() => expect(closeTask).toHaveBeenCalledWith(durableItem.id));
 
-    state.selectedItemId.value = "create:newer";
-    selectedTaskId.value = "task-newer";
-    state.selectionIntentVersion.value += 1;
+    const createdTaskId = await itemActions.createItem(
+      "repo-2",
+      "/tmp/repo-2",
+      "Create while close is pending",
+      "agent",
+    );
+    const createdSlotId = state.selectedItemId.value;
+
+    expect(createdTaskId).toBe("task-newer");
+    expect(state.selectedRepoId.value).toBe("repo-2");
+    expect(createdSlotId).toMatch(/^create:/);
+    expect(state.selectionIntentVersion.value).toBe(1);
+
     closeResponse.resolve();
     await closePromise;
 
     expect(services.selectReplacementAfterItemRemoval).not.toHaveBeenCalled();
-    expect(state.selectedRepoId.value).toBe("repo-1");
-    expect(state.selectedItemId.value).toBe("create:newer");
+    expect(state.selectedRepoId.value).toBe("repo-2");
+    expect(state.selectedItemId.value).toBe(createdSlotId);
   });
 
   it("keeps the stable slot selected after undo delegates restoration to selectItem", async () => {

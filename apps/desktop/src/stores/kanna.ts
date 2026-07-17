@@ -4,6 +4,7 @@ import { createStoreContext, createStoreState, type StoreServices } from "./stat
 import { createPortsStore } from "./ports";
 import { createQueriesApi } from "./queries";
 import { createSelectionApi } from "./selection";
+import { recordSelectionIntent as recordStoreSelectionIntent } from "./selectionIntent";
 import { createSessionsApi } from "./sessions";
 import { createPipelineApi } from "./pipeline";
 import { createTasksApi } from "./tasks";
@@ -124,7 +125,7 @@ Use this branch as the default when the user does not specify a target branch. B
   }
 
   function recordSelectionIntent(): void {
-    state.selectionIntentVersion.value += 1;
+    recordStoreSelectionIntent(state);
   }
 
   return {
