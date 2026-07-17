@@ -1,7 +1,7 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import type { RepoSummary } from "../lib/api/types";
+import type { RepoSummary, TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
 import { orderActivityTasks } from "./activityTaskOrder";
 import type { TaskUiSlot } from "../state/taskUiSlots";
@@ -16,6 +16,29 @@ interface TasksScreenProps {
   onOpenTask(taskId: string): void;
 }
 
+const sqliteTimestampPattern =
+  /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+
+function taskCreationTimestamp(task: TaskSummary): number | null {
+  const value = task.createdAt?.trim();
+  if (!value) return null;
+  const normalized = sqliteTimestampPattern.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  const timestamp = Date.parse(normalized);
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function sortTaskSlotsNewestFirst(taskSlots: readonly TaskUiSlot[]): TaskUiSlot[] {
+  return [...taskSlots].sort((left, right) => {
+    const leftTimestamp = taskCreationTimestamp(taskUiSlotToTaskSummary(left));
+    const rightTimestamp = taskCreationTimestamp(taskUiSlotToTaskSummary(right));
+    if (leftTimestamp === null) return rightTimestamp === null ? 0 : 1;
+    if (rightTimestamp === null) return -1;
+    return rightTimestamp - leftTimestamp;
+  });
+}
+
 export function TasksScreen({
   heading,
   repos,
@@ -25,17 +48,18 @@ export function TasksScreen({
   onOpenTask
 }: TasksScreenProps) {
   const isRecentView = heading === "Recent";
+  const scopedTaskSlots = !isRecentView && selectedRepoId
+    ? taskSlots.filter(
+        (slot) => taskUiSlotToTaskSummary(slot).repoId === selectedRepoId
+      )
+    : taskSlots;
   const displayedTaskSlots = isRecentView
     ? orderActivityTasks(taskSlots.map(taskUiSlotToTaskSummary)).map(
         (task) => taskSlots.find(
           (slot) => taskUiSlotToTaskSummary(slot).id === task.id
         )!
       )
-    : selectedRepoId
-      ? taskSlots.filter(
-          (slot) => taskUiSlotToTaskSummary(slot).repoId === selectedRepoId
-        )
-      : taskSlots;
+    : sortTaskSlotsNewestFirst(scopedTaskSlots);
 
   return (
     <ScrollView
