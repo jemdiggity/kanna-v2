@@ -91,6 +91,55 @@ describe("TasksScreen", () => {
     expect(textContent(tree)).not.toContain("Repo A");
   });
 
+  it("orders Recent tasks by attention state while preserving group order", () => {
+    if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
+    const tasks = [
+      {
+        id: "working-1",
+        repoId: "repo-a",
+        title: "Working 1",
+        stage: "in progress",
+        activity: "working" as const
+      },
+      {
+        id: "unread-1",
+        repoId: "repo-a",
+        title: "Unread 1",
+        stage: "review",
+        activity: "unread" as const
+      },
+      {
+        id: "idle-1",
+        repoId: "repo-b",
+        title: "Idle 1",
+        stage: "in progress",
+        activity: "idle" as const
+      },
+      {
+        id: "unread-2",
+        repoId: "repo-b",
+        title: "Unread 2",
+        stage: "review",
+        activity: "unread" as const
+      }
+    ];
+
+    const tree = TasksScreen({
+      heading: "Recent",
+      repos: [],
+      selectedRepoId: "repo-a",
+      tasks,
+      onOpenTask: vi.fn(),
+      onSelectRepo: vi.fn()
+    }) as ElementNode;
+
+    expect(
+      (findElement(tree, TaskList)?.props?.tasks as typeof tasks).map(
+        ({ id }) => id
+      )
+    ).toEqual(["unread-1", "unread-2", "idle-1", "working-1"]);
+  });
+
   it("continues to scope the structural Tasks view to the selected repo", () => {
     if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
     const taskA = {
