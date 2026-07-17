@@ -41,6 +41,25 @@ fn bounded_server_work_duration_ms(duration_ms: u64) -> u64 {
     duration_ms.clamp(1, 2_000)
 }
 
+fn server_work_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().min(32))
+        .unwrap_or(1)
+}
+
+fn burn_cpu_until(deadline: std::time::Instant, seed: u64) {
+    let mut state = seed;
+    while std::time::Instant::now() < deadline {
+        for _ in 0..4_096 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1)
+                .rotate_left(17);
+        }
+        std::hint::black_box(state);
+    }
+}
+
 pub(super) async fn execute_e2e_server_work(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(request): Json<E2eServerWorkRequest>,
@@ -56,11 +75,22 @@ pub(super) async fn execute_e2e_server_work(
     }
 
     let duration_ms = bounded_server_work_duration_ms(request.duration_ms);
-    tokio::task::spawn_blocking(move || {
-        std::thread::sleep(std::time::Duration::from_millis(duration_ms));
-    })
-    .await
-    .map_err(internal_error)?;
+    // Exercise scheduler contention rather than only occupying sleeping
+    // blocking threads. Real development machines commonly have rustc, Node,
+    // and fseventd consuming every logical CPU.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(duration_ms);
+    let mut workers = tokio::task::JoinSet::new();
+    for worker in 0..server_work_concurrency() {
+        workers.spawn_blocking(move || {
+            burn_cpu_until(
+                deadline,
+                0x9e37_79b9_7f4a_7c15u64.wrapping_add(worker as u64),
+            );
+        });
+    }
+    while let Some(result) = workers.join_next().await {
+        result.map_err(internal_error)?;
+    }
     Ok(Json(E2eServerWorkResponse { duration_ms }))
 }
 

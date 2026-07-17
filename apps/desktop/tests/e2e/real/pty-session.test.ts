@@ -231,10 +231,6 @@ function trackSessionId(sessionIds: string[], sessionId: string): string {
   return sessionId;
 }
 
-function utf8Bytes(text: string): number[] {
-  return Array.from(new TextEncoder().encode(text));
-}
-
 async function waitForDaemonPid(
   daemonDir: string,
   expectedPid: number,
@@ -366,23 +362,6 @@ async function waitForTerminalBufferText(
   );
 }
 
-async function startConcurrentServerWork(
-  client: WebDriverClient,
-  durationMs: number,
-): Promise<void> {
-  const result = await client.executeAsync(
-    `const cb = arguments[arguments.length - 1];
-     const work = window.__KANNA_E2E__?.serverWork;
-     if (!work) return cb({ __error: "server work hook unavailable" });
-     work.start(${durationMs})
-       .then(() => cb("started"))
-       .catch((error) => cb({ __error: error?.message ?? String(error) }));`,
-  );
-  if (typeof result === "object" && result !== null && "__error" in result) {
-    throw new Error(String((result as { __error: unknown }).__error));
-  }
-}
-
 async function waitForConcurrentServerWork(client: WebDriverClient): Promise<void> {
   const result = await client.executeAsync(
     `const cb = arguments[arguments.length - 1];
@@ -395,6 +374,63 @@ async function waitForConcurrentServerWork(client: WebDriverClient): Promise<voi
   if (typeof result === "object" && result !== null && "__error" in result) {
     throw new Error(String((result as { __error: unknown }).__error));
   }
+}
+
+async function measureTerminalEchoLatency(
+  client: WebDriverClient,
+  sessionId: string,
+  input: string,
+  expectedEcho: string,
+  serverWorkMs: number,
+  timeoutMs: number,
+): Promise<{ latencyMs: number; serverWorkActive: boolean }> {
+  const result = await client.executeAsync(
+    `const cb = arguments[arguments.length - 1];
+     const hook = window.__KANNA_E2E__?.terminalBuffers;
+     const work = window.__KANNA_E2E__?.serverWork;
+     if (!hook) return cb({ __error: "terminal buffer hook unavailable" });
+     if (!work) return cb({ __error: "server work hook unavailable" });
+     let finished = false;
+     const finish = (value) => {
+       if (finished) return;
+       finished = true;
+       cb(value);
+     };
+     work.start(${serverWorkMs}).then(() => {
+       setTimeout(() => {
+         if (!work.isActive()) {
+           return finish({ __error: "CPU work ended before terminal input started" });
+         }
+         const startedAt = performance.now();
+         hook.input(${JSON.stringify(sessionId)}, ${JSON.stringify(`${input}\r`)});
+         const checkEcho = () => {
+           try {
+             const stats = hook.stats(
+               ${JSON.stringify(sessionId)},
+               new RegExp(${JSON.stringify(escapeRegExp(expectedEcho))}),
+             );
+             if (stats.matchingLineCount > 0) {
+               return finish({
+                 latencyMs: performance.now() - startedAt,
+                 serverWorkActive: work.isActive(),
+               });
+             }
+           } catch (error) {
+             return finish({ __error: error?.message ?? String(error) });
+           }
+           if (performance.now() - startedAt >= ${timeoutMs}) {
+             return finish({ __error: "timed out waiting for echoed terminal input" });
+           }
+           setTimeout(checkEcho, 5);
+         };
+         checkEcho();
+       }, 50);
+     }).catch((error) => finish({ __error: error?.message ?? String(error) }));`,
+  );
+  if (typeof result === "object" && result !== null && "__error" in result) {
+    throw new Error(String((result as { __error: unknown }).__error));
+  }
+  return result as { latencyMs: number; serverWorkActive: boolean };
 }
 
 async function detachTerminalStream(
@@ -612,7 +648,7 @@ describe("pty session (real CLI)", () => {
     expect(container).toBeTruthy();
   });
 
-  it("renders PTY echo within 500ms while same-WebSocket server work is active", async () => {
+  it("renders PTY echo within 500ms while same-WebSocket CPU work is active", async () => {
     const sessionId = `pty-latency-${randomUUID()}`;
     deterministicSessionIds.push(sessionId);
     const readyMarker = `KREADY_${randomUUID().replaceAll("-", "")}`;
@@ -642,28 +678,20 @@ describe("pty session (real CLI)", () => {
     await waitForTerminalBufferText(client, sessionId, readyMarker, 15_000);
     await waitForSessionRecoveryText(client, sessionId, readyMarker, 10_000);
 
-    await startConcurrentServerWork(client, 750);
-
-    const startedAt = Date.now();
-    await sendKeysToActiveTerminal(client, inputMarker);
-    await client.pressKey("\uE007");
-
-    const echoStats = await waitForTerminalBufferText(
-      client,
-      sessionId,
-      `ECHO:${inputMarker}`,
-      500,
-      20,
-    );
-    const renderMs = Date.now() - startedAt;
-
-    expect(echoStats.lastMatchingLine).toContain(inputMarker);
-    expect(renderMs).toBeLessThan(500);
-    const serverWorkActive = await client.executeSync<boolean>(
-      "return window.__KANNA_E2E__?.serverWork?.isActive() ?? false;",
-    );
-    expect(serverWorkActive).toBe(true);
-    await waitForConcurrentServerWork(client);
+    try {
+      const measurement = await measureTerminalEchoLatency(
+        client,
+        sessionId,
+        inputMarker,
+        `ECHO:${inputMarker}`,
+        1_500,
+        2_000,
+      );
+      expect(measurement.latencyMs).toBeLessThan(500);
+      expect(measurement.serverWorkActive).toBe(true);
+    } finally {
+      await waitForConcurrentServerWork(client);
+    }
     await waitForSessionRecoveryText(client, sessionId, `ECHO:${inputMarker}`, 10_000);
   });
 
@@ -905,7 +933,114 @@ describe("pty session (real CLI)", () => {
     expect(afterDetachStats.lastMatchingLine).toContain(afterDetachMarker);
   });
 
-  it("sends input to an existing PTY after daemon handoff replaces the command socket", async () => {
+  it("routes xterm input to a durable task's replacement daemon session", async () => {
+    const taskId = `pty-route-task-${randomUUID()}`;
+    const oldSessionId = trackSessionId(
+      deterministicSessionIds,
+      `pty-route-old-${randomUUID()}`,
+    );
+    const newSessionId = trackSessionId(
+      deterministicSessionIds,
+      `pty-route-new-${randomUUID()}`,
+    );
+    const navigationId = trackSessionId(
+      deterministicSessionIds,
+      `pty-route-nav-${randomUUID()}`,
+    );
+    const oldReady = `KROUTE_OLD_READY_${randomUUID().replaceAll("-", "")}`;
+    const newReady = `KROUTE_NEW_READY_${randomUUID().replaceAll("-", "")}`;
+    const navReady = `KROUTE_NAV_READY_${randomUUID().replaceAll("-", "")}`;
+    const beforeMarker = `KROUTE_BEFORE_${randomUUID().replaceAll("-", "")}`;
+    const afterMarker = `KROUTE_AFTER_${randomUUID().replaceAll("-", "")}`;
+
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [taskId, repoId, "Durable task session replacement fixture", "in progress", "pty"],
+    );
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [navigationId, repoId, "Route replacement navigation fixture", "in progress", "pty"],
+    );
+    await execDb(
+      client,
+      `INSERT INTO terminal_session
+         (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+       VALUES (?, ?, ?, 'agent', ?, ?)`,
+      [`terminal-${taskId}`, repoId, taskId, testRepoPath, oldSessionId],
+    );
+
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId: oldSessionId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: [
+        "-f",
+        "-c",
+        `printf '${oldReady}\\n'; while IFS= read -r line; do printf 'OLD_ECHO:%s\\n' "$line"; done`,
+      ],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    });
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId: newSessionId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: [
+        "-f",
+        "-c",
+        `printf '${newReady}\\n'; while IFS= read -r line; do printf 'NEW_ECHO:%s\\n' "$line"; done`,
+      ],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    });
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId: navigationId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: ["-f", "-c", `printf '${navReady}\\n'; while IFS= read -r line; do :; done`],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    });
+
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, taskId);
+    await waitForCurrentItemId(client, taskId);
+    await waitForTerminalBufferText(client, taskId, oldReady, 15_000);
+    await waitForFocusedTerminalReady(client, taskId);
+    await sendKeysToActiveTerminal(client, beforeMarker);
+    await client.pressKey("\uE007");
+    await waitForTerminalBufferText(client, taskId, `OLD_ECHO:${beforeMarker}`, 10_000);
+
+    await execDb(
+      client,
+      "UPDATE terminal_session SET daemon_session_id = ? WHERE pipeline_item_id = ?",
+      [newSessionId, taskId],
+    );
+    await setSelectedItem(client, navigationId);
+    await waitForCurrentItemId(client, navigationId);
+    await waitForTerminalBufferText(client, navigationId, navReady, 15_000);
+    await setSelectedItem(client, taskId);
+    await waitForCurrentItemId(client, taskId);
+    await waitForTerminalBufferText(client, taskId, newReady, 15_000);
+    await waitForFocusedTerminalReady(client, taskId);
+    await sendKeysToActiveTerminal(client, afterMarker);
+    await client.pressKey("\uE007");
+
+    const replacementEcho = await waitForTerminalBufferText(
+      client,
+      taskId,
+      `NEW_ECHO:${afterMarker}`,
+      10_000,
+    );
+    expect(replacementEcho.lastMatchingLine).toContain(afterMarker);
+  });
+
+  it("sends xterm/KSP input after daemon handoff replaces the command socket", async () => {
     const deterministicSessionId = trackSessionId(
       deterministicSessionIds,
       `pty-handoff-input-${randomUUID()}`,
@@ -937,10 +1072,9 @@ describe("pty session (real CLI)", () => {
     await waitForCurrentItemId(client, deterministicSessionId);
     await waitForTerminalBufferText(client, deterministicSessionId, readyMarker, 15_000);
 
-    await invokeOrThrow(client, "send_input", {
-      sessionId: deterministicSessionId,
-      data: utf8Bytes(`${beforeMarker}\n`),
-    });
+    await waitForFocusedTerminalReady(client, deterministicSessionId);
+    await sendKeysToActiveTerminal(client, beforeMarker);
+    await client.pressKey("\uE007");
     await waitForTerminalBufferText(client, deterministicSessionId, `ECHO:${beforeMarker}`, 10_000);
 
     await invokeOrThrow(client, "detach_session", { sessionId: deterministicSessionId });
@@ -948,10 +1082,9 @@ describe("pty session (real CLI)", () => {
     await sleep(1_000);
     await attachSessionWithRetry(client, deterministicSessionId);
 
-    await invokeOrThrow(client, "send_input", {
-      sessionId: deterministicSessionId,
-      data: utf8Bytes(`${afterMarker}\n`),
-    });
+    await waitForFocusedTerminalReady(client, deterministicSessionId);
+    await sendKeysToActiveTerminal(client, afterMarker);
+    await client.pressKey("\uE007");
 
     const echoedText = `ECHO:${afterMarker}`;
     const afterHandoffStats = await waitForTerminalBufferText(

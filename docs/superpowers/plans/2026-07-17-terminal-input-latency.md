@@ -202,3 +202,65 @@ git commit -m "fix: isolate terminal input from server latency"
 
 Expected: a task-specific commit containing the implementation and regression
 coverage required to cross the next stage boundary.
+
+### Revision Task 6: One-way, at-most-once terminal control
+
+**Files:**
+- Modify: `crates/daemon/src/protocol.rs`
+- Modify: `crates/daemon/src/connection.rs`
+- Modify: `crates/daemon/tests/reconnect.rs`
+- Modify: `crates/kanna-server/src/daemon_client.rs`
+- Modify and test: `crates/kanna-server/src/ksp.rs`
+
+- [ ] Add fake-daemon regressions for close-after-consume/no replay and for
+  withheld ACKs not stalling later input or resize; run them and verify RED.
+- [ ] Add `InputNoReply` and `ResizeNoReply` daemon commands. Reuse normal
+  operations, suppress only `Event::Ok`, and retain asynchronous errors.
+- [ ] Split the server daemon client into independent owned reader/writer
+  halves so writes never wait for success replies while errors/EOF are read.
+- [ ] On ambiguous write error, report and discard that command, reconnect
+  before dequeuing the next command, and never replay the ambiguous bytes.
+- [ ] Run focused KSP and daemon tests and verify GREEN.
+
+### Revision Task 7: Cancellation-safe worker retirement
+
+**Files:**
+- Modify and test: `crates/kanna-server/src/ksp.rs`
+
+- [ ] Add RED tests that cancel during connect/backoff and replace a route
+  with old input queued, proving no stale bytes reach the old session.
+- [ ] Add a cancellation channel per handle. Select on it during lookup,
+  connect, read/write, error forwarding, and retry delay.
+- [ ] Make replacement, detach, and shutdown signal and join workers before
+  proceeding. Rely on socket drop for daemon resize-owner cleanup.
+- [ ] Run the focused cancellation/route tests and verify GREEN.
+
+### Revision Task 8: CPU-aware bounded KSP request work
+
+**Files:**
+- Modify and test: `crates/kanna-server/src/ksp.rs`
+- Modify and test: `crates/kanna-server/src/http_api/e2e_sql.rs`
+
+- [ ] Add a RED saturation test: block active request jobs, fill the bounded
+  queue, assert an ID-addressed 503 on overflow, and assert terminal input
+  still reaches the daemon within 300 ms.
+- [ ] Add a bounded request queue and dispatcher-owned `JoinSet`. Cap active
+  outer blocking jobs to `min(4, max(1, available_parallelism - 1))` so KSP
+  does not assume idle CPU and nested blocking work retains capacity where
+  more than one logical CPU is available.
+- [ ] Change the E2E server-work fixture from sleep-only to bounded CPU work.
+- [ ] Run all KSP tests and verify GREEN.
+
+### Revision Task 9: Real xterm/KSP lifecycle coverage
+
+**Files:**
+- Modify: `apps/desktop/tests/e2e/real/pty-session.test.ts`
+
+- [ ] Replace direct Tauri `send_input` in the handoff case with xterm typing
+  before and after daemon replacement.
+- [ ] Add a durable-task fixture whose `terminal_session.daemon_session_id`
+  moves from an old to a new echo PTY; navigate away/back to reattach and
+  assert xterm/KSP input reaches the correct session before and after.
+- [ ] Run every focused and canonical command requested by review, including
+  `./kd dev up` and the real-PTY E2E. Finish with `git diff --check`; do not
+  commit, push, create a PR, or advance the Kanna stage.

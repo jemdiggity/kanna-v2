@@ -22,6 +22,7 @@ interface KannaTerminalBuffersE2EApi {
   lines: (sessionId: string) => string[];
   sessionIds: () => string[];
   write: (sessionId: string, data: string, callback?: () => void) => void;
+  input: (sessionId: string, data: string) => void;
 }
 
 interface KannaAppMetricsSnapshot {

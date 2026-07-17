@@ -8,6 +8,14 @@ pub struct DaemonClient {
     writer: tokio::net::unix::OwnedWriteHalf,
 }
 
+pub struct DaemonClientReader {
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+}
+
+pub struct DaemonClientWriter {
+    writer: tokio::net::unix::OwnedWriteHalf,
+}
+
 impl DaemonClient {
     pub async fn connect(daemon_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let socket_path = kanna_runtime_defaults::socket_path(Path::new(daemon_dir));
@@ -44,5 +52,38 @@ impl DaemonClient {
         self.reader.read_line(&mut line).await?;
         let event: Event = serde_json::from_str(line.trim())?;
         Ok(event)
+    }
+
+    pub fn into_split(self) -> (DaemonClientReader, DaemonClientWriter) {
+        (
+            DaemonClientReader {
+                reader: self.reader,
+            },
+            DaemonClientWriter {
+                writer: self.writer,
+            },
+        )
+    }
+}
+
+impl DaemonClientReader {
+    pub async fn read_event(&mut self) -> Result<Event, Box<dyn std::error::Error>> {
+        let mut line = String::new();
+        let read = self.reader.read_line(&mut line).await?;
+        if read == 0 {
+            return Err("daemon connection closed".into());
+        }
+        let event: Event = serde_json::from_str(line.trim())?;
+        Ok(event)
+    }
+}
+
+impl DaemonClientWriter {
+    pub async fn send_one_way(&mut self, cmd: &Command) -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string(cmd)?;
+        self.writer.write_all(json.as_bytes()).await?;
+        self.writer.write_all(b"\n").await?;
+        self.writer.flush().await?;
+        Ok(())
     }
 }

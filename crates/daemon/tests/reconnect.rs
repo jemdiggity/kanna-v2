@@ -52,6 +52,15 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    InputNoReply {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    ResizeNoReply {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
     Snapshot {
         session_id: String,
     },
@@ -1289,6 +1298,45 @@ fn test_input_works_after_reattach() {
         output_str.contains("post-reattach"),
         "input after reattach should produce output, got: {:?}",
         output_str
+    );
+}
+
+/// One-way terminal control preserves FIFO order and emits no success events.
+#[test]
+fn test_one_way_terminal_control_pipelines_without_success_replies() {
+    let daemon = DaemonHandle::start();
+
+    let mut setup = daemon.connect();
+    spawn_echo_session(&mut setup, "sess-one-way");
+
+    let mut output = daemon.connect();
+    attach(&mut output, "sess-one-way");
+    output.drain_output(Duration::from_millis(200));
+
+    let mut input = daemon.connect();
+    input.send(&Cmd::InputNoReply {
+        session_id: "sess-one-way".to_string(),
+        data: b"ordered-".to_vec(),
+    });
+    input.send(&Cmd::ResizeNoReply {
+        session_id: "sess-one-way".to_string(),
+        cols: 111,
+        rows: 39,
+    });
+    input.send(&Cmd::InputNoReply {
+        session_id: "sess-one-way".to_string(),
+        data: b"bytes\n".to_vec(),
+    });
+
+    assert!(
+        input.recv_with_timeout(Duration::from_millis(150)).is_err(),
+        "successful one-way terminal commands must not emit acknowledgements"
+    );
+    let echoed =
+        output.collect_output_until_contains_with_timeout("ordered-bytes", Duration::from_secs(2));
+    assert!(
+        String::from_utf8_lossy(&echoed).contains("ordered-bytes"),
+        "later input should not wait for an earlier success reply"
     );
 }
 
