@@ -1598,27 +1598,7 @@ export function createMobileController(
         if (responseRoute) {
           pendingTaskIdentities.set(response.taskId, responseRoute);
         }
-        const current = store.getState();
-        const existingTask = [
-          ...current.repoTasks,
-          ...current.recentTasks,
-          ...current.searchResults
-        ].find((task) => task.id === response.taskId);
-        if (!existingTask) {
-          const commandTask: TaskSummary = {
-            id: response.taskId,
-            repoId,
-            title: command.label,
-            prompt: command.description,
-            stage: "in progress",
-            agentType: "pty",
-            ownerDesktopId: response.ownerDesktopId,
-            ownerLocalRepoId: response.ownerLocalRepoId,
-            ownerLocalTaskId: response.ownerLocalTaskId
-          };
-          store.setRepoTasks([commandTask, ...current.repoTasks]);
-          store.setRecentTasks([commandTask, ...current.recentTasks]);
-        }
+        await refreshTaskCollections();
         setUnownedErrorMessage(null);
         this.openTask(response.taskId);
       } catch (error) {

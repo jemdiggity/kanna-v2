@@ -295,6 +295,68 @@ describe("mergeCloudAndLanTasks", () => {
 });
 
 describe("createCloudLanClient", () => {
+  it("routes commands for a taskless LAN repository through its owning desktop", async () => {
+    const cloud = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([])
+    });
+    const lan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-owner")),
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-empty", name: "Empty repository" }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([])
+    });
+    const ownerLan = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-empty", name: "Empty repository" }
+      ]),
+      listRepoCommands: vi.fn().mockResolvedValue({
+        repoId: "repo-empty",
+        revision: "catalog-empty-v1",
+        commands: []
+      }),
+      runRepoCommand: vi.fn().mockResolvedValue({
+        taskId: "local-command-task",
+        reused: false
+      })
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      lanClientForDesktop: (desktopId) =>
+        desktopId === "desktop-owner" ? ownerLan : null
+    });
+
+    await expect(client.listRepos()).resolves.toEqual([
+      { id: "repo-empty", name: "Empty repository" }
+    ]);
+    await expect(client.listRepoCommands("repo-empty")).resolves.toEqual({
+      repoId: "repo-empty",
+      revision: "catalog-empty-v1",
+      commands: []
+    });
+    await expect(
+      client.runRepoCommand(
+        "repo-empty",
+        "factory:create-agent",
+        "catalog-empty-v1"
+      )
+    ).resolves.toMatchObject({
+      taskId: "cloud:desktop-owner:repo-empty:local-command-task",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-empty",
+      ownerLocalTaskId: "local-command-task"
+    });
+    expect(ownerLan.listRepoCommands).toHaveBeenCalledWith("repo-empty");
+    expect(ownerLan.runRepoCommand).toHaveBeenCalledWith(
+      "repo-empty",
+      "factory:create-agent",
+      "catalog-empty-v1"
+    );
+    expect(cloud.listRepoCommands).not.toHaveBeenCalled();
+    expect(cloud.runRepoCommand).not.toHaveBeenCalled();
+  });
+
   it("uses the accepted LAN owner route for repository commands", async () => {
     const cloudTask = task({
       id: "cloud-task",

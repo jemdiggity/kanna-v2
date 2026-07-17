@@ -59,7 +59,13 @@ export const selectors = {
   addTaskButton: `~${MOBILE_E2E_IDS.toolbarUtilityAction("create")}`,
   createTaskCancelButton: `~${MOBILE_E2E_IDS.createTaskCancelButton}`,
   createTaskPromptInput: `~${MOBILE_E2E_IDS.createTaskPromptInput}`,
-  createTaskCommand: `~${MOBILE_E2E_IDS.moreCommand("compose")}`,
+  moreRepoOptionsXPath: '//*[starts-with(@name, "mobile.more.repo.")]',
+  moreCommand(commandId: string): string {
+    return `~${MOBILE_E2E_IDS.moreCommand(commandId)}`;
+  },
+  moreCommandGroup(group: string): string {
+    return `~${MOBILE_E2E_IDS.moreCommandGroup(group)}`;
+  },
   tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,

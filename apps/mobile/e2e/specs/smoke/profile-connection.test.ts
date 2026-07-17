@@ -8,6 +8,7 @@ import {
   assertPairingSheetFresh,
   assertProfilePasswordCanRevealAndHide,
   assertProfileSignInControlsReachable,
+  assertRepositoryCommandJourney,
   assertSignedOutMachineEntryPoints,
   assertToolbarActionPathsReachable,
   openMachinesFromProfile,
@@ -288,7 +289,7 @@ describe("Profile to Machines smoke helpers", () => {
 });
 
 describe("Toolbar action paths", () => {
-  it("opens the task composer from both Add task and the More command", async () => {
+  it("opens the task composer from Add task", async () => {
     const events: string[] = [];
     let composerOpen = false;
     const addTaskButton = {
@@ -296,22 +297,6 @@ describe("Toolbar action paths", () => {
       click: vi.fn(async () => {
         composerOpen = true;
         events.push("click Add task");
-      })
-    };
-    const moreTab = {
-      ...createElement(),
-      click: vi.fn(async () => events.push("click More"))
-    };
-    const moreScreen = {
-      ...createElement(),
-      waitForDisplayed: vi.fn(async () => events.push("More displayed"))
-    };
-    const createTaskCommand = {
-      ...createElement(),
-      scrollIntoView: vi.fn(async () => events.push("scroll Create Task")),
-      click: vi.fn(async () => {
-        composerOpen = true;
-        events.push("click Create Task");
       })
     };
     const promptInput = {
@@ -329,10 +314,7 @@ describe("Toolbar action paths", () => {
     const ui = {
       getAddTaskButton: vi.fn(async () => addTaskButton),
       getCreateTaskCancelButton: vi.fn(async () => cancelButton),
-      getCreateTaskCommand: vi.fn(async () => createTaskCommand),
       getCreateTaskPromptInput: vi.fn(async () => promptInput),
-      getMoreScreen: vi.fn(async () => moreScreen),
-      getMoreTab: vi.fn(async () => moreTab),
       waitUntil: createWaitUntil()
     };
 
@@ -341,18 +323,75 @@ describe("Toolbar action paths", () => {
     expect(events).toEqual([
       "click Add task",
       "composer displayed",
-      "cancel composer",
-      "click More",
-      "More displayed",
-      "scroll Create Task",
-      "click Create Task",
-      "composer displayed",
       "cancel composer"
     ]);
-    expect(createTaskCommand.scrollIntoView).toHaveBeenCalledWith({
-      direction: "down",
-      maxScrolls: 5
+  });
+});
+
+describe("Repository command journey", () => {
+  it("selects a repository, launches a grouped command, and opens its canonical task", async () => {
+    const events: string[] = [];
+    const element = (event?: string) => ({
+      ...createElement(),
+      click: vi.fn(async () => {
+        if (event) events.push(event);
+      })
     });
+    const command = {
+      ...element("click command"),
+      scrollIntoView: vi.fn(async () => events.push("scroll command"))
+    };
+    const ui = {
+      getMoreTab: vi.fn(async () => element("click More")),
+      getMoreScreen: vi.fn(async () => ({
+        ...element(),
+        waitForDisplayed: vi.fn(async () => events.push("More displayed"))
+      })),
+      getRepoOption: vi.fn(async () => element("click repository")),
+      getConfigureCommandGroup: vi.fn(async () => ({
+        ...element(),
+        waitForDisplayed: vi.fn(async () => events.push("Configure displayed"))
+      })),
+      getCreateAgentCommand: vi.fn(async () => command),
+      getTaskDetailScreen: vi.fn(async () => ({
+        ...element(),
+        waitForDisplayed: vi.fn(async () => events.push("task detail displayed"))
+      })),
+      getTaskTitleButton: vi.fn(async () => element("expand task identity")),
+      getExpandedTaskId: vi.fn(async () => ({
+        ...element(),
+        waitForDisplayed: vi.fn(async () => events.push("task id displayed")),
+        getText: vi.fn(async () => {
+          events.push("read task id");
+          return "task-command";
+        })
+      })),
+      getTaskSnapshotMarker: vi.fn(async () => ({
+        ...element(),
+        getAttribute: vi.fn(async () => {
+          events.push("read snapshot marker");
+          return "task-command:Canonical server title";
+        })
+      })),
+      getTaskBackButton: vi.fn(async () => element("back to tasks"))
+    };
+
+    await assertRepositoryCommandJourney(ui);
+
+    expect(events).toEqual([
+      "click More",
+      "More displayed",
+      "click repository",
+      "Configure displayed",
+      "scroll command",
+      "click command",
+      "task detail displayed",
+      "expand task identity",
+      "task id displayed",
+      "read task id",
+      "read snapshot marker",
+      "back to tasks"
+    ]);
   });
 });
 

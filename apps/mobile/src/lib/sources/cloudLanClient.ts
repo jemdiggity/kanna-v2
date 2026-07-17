@@ -57,6 +57,11 @@ export interface LanTaskSnapshot {
   tasks: TaskSummary[];
 }
 
+interface LanRepoSnapshot {
+  desktopId: string;
+  repos: RepoSummary[];
+}
+
 export interface MergedTaskSnapshot {
   tasks: TaskSummary[];
   routes: Map<string, DisplayTaskRoute>;
@@ -399,7 +404,7 @@ export function createCloudLanClient(
   let lastCloudTasks: TaskSummary[] | undefined;
   let lastLanTaskSnapshot: LanTaskSnapshot | undefined;
   let lastCloudRepos: RepoSummary[] | undefined;
-  let lastLanRepos: RepoSummary[] | undefined;
+  let lastLanRepoSnapshot: LanRepoSnapshot | undefined;
   let lastCloudDesktops: DesktopSummary[] | undefined =
     options.initialDesktopSources?.account;
   let lastLanDesktops: DesktopSummary[] | undefined =
@@ -408,6 +413,10 @@ export function createCloudLanClient(
     account: null,
     local: null
   };
+  const lanRepoOwners = new Map<
+    string,
+    { desktopId: string; localRepoId: string }
+  >();
 
   const reportDesktopSourceWarnings = (
     updates: Partial<DesktopSourceWarnings>
@@ -530,7 +539,23 @@ export function createCloudLanClient(
     };
   };
   const readLanTaskSnapshot = shareWhilePending(loadLanTaskSnapshot);
-  const readLanRepos = shareWhilePending(() => lan.listRepos());
+  const loadLanRepoSnapshot = async (): Promise<LanRepoSnapshot> => {
+    const status = await lan.getStatus();
+    if (status.state !== "running") {
+      throw new Error(`LAN desktop is not running (${status.state}).`);
+    }
+    const desktopLan = lanClientForDesktop(status.desktopId);
+    if (!desktopLan) {
+      throw new Error(
+        `No LAN client is available for desktop ${status.desktopId}.`
+      );
+    }
+    return {
+      desktopId: status.desktopId,
+      repos: await desktopLan.listRepos()
+    };
+  };
+  const readLanRepoSnapshot = shareWhilePending(loadLanRepoSnapshot);
   const readLanDesktops = shareWhilePending(() => lan.listDesktops());
 
   const performRecentTaskRead = async (
@@ -738,6 +763,24 @@ export function createCloudLanClient(
       (candidate) => candidate.repoId === repoId
     );
     if (!sourceTask) {
+      const owner = lanRepoOwners.get(repoId);
+      if (owner && options.isLanEnabled()) {
+        const ownerClient = lanClientForDesktop(owner.desktopId);
+        if (ownerClient) {
+          return {
+            source: "lan" as const,
+            client: ownerClient,
+            repoId: owner.localRepoId,
+            desktopId: owner.desktopId
+          };
+        }
+        return {
+          source: "unavailable" as const,
+          taskId: repoId,
+          desktopId: owner.desktopId,
+          message: `LAN route for repository "${repoId}" is unavailable.`
+        };
+      }
       return { source: "cloud" as const, client: cloud, repoId };
     }
     const taskRoute = routeForTask(sourceTask.id);
@@ -869,14 +912,20 @@ export function createCloudLanClient(
     const cloudRead = settleRead(() => cloud.listRepos());
     const lanRead = lanEnabled
       ? settleOptionalLanRead(
-          readLanRepos,
+          readLanRepoSnapshot,
           optionalLanWaitMs,
-          (lateRepos) => {
+          (lateSnapshot) => {
             if (
               readEpoch === latestRepoReadEpoch &&
               options.isLanEnabled()
             ) {
-              lastLanRepos = lateRepos;
+              lastLanRepoSnapshot = lateSnapshot;
+              for (const repo of lateSnapshot.repos) {
+                lanRepoOwners.set(repo.id, {
+                  desktopId: lateSnapshot.desktopId,
+                  localRepoId: repo.id
+                });
+              }
             }
           }
         )
@@ -906,15 +955,21 @@ export function createCloudLanClient(
       lanStillEnabled &&
       lanResult?.status === "fulfilled"
     ) {
-      lastLanRepos = lanResult.value;
+      lastLanRepoSnapshot = lanResult.value;
+      for (const repo of lanResult.value.repos) {
+        lanRepoOwners.set(repo.id, {
+          desktopId: lanResult.value.desktopId,
+          localRepoId: repo.id
+        });
+      }
     }
 
     const cloudRepos =
       cloudResult.status === "fulfilled" ? cloudResult.value : lastCloudRepos;
     const lanRepos = lanStillEnabled
       ? lanResult?.status === "fulfilled"
-        ? lanResult.value
-        : lastLanRepos
+        ? lanResult.value.repos
+        : lastLanRepoSnapshot?.repos
       : undefined;
     const derivedRepos =
       tasksResult.status === "fulfilled"

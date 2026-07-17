@@ -497,9 +497,7 @@ export function useAppTaskNavigation({
     });
     for (const command of repoCommandCatalog.value?.commands ?? []) {
       cmds.push({
-        id: command.id.startsWith("factory:")
-          ? command.id.slice("factory:".length)
-          : `custom-task-${command.label}`,
+        id: command.id,
         label: command.label,
         description: command.description,
         execute: () => {

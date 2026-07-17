@@ -4061,15 +4061,15 @@ describe("App", () => {
     capturedKeyboardActions?.commandPalette();
     await flushPromises();
 
-    const createConfigButton = wrapper.get('[data-command-id="create-config"]');
-    expect(wrapper.get('[data-command-id="create-agent"]').text()).toBe("Create Agent");
-    expect(wrapper.get('[data-command-id="create-pipeline"]').text()).toBe("Create Pipeline");
-    expect(wrapper.get('[data-command-id="setup-repo"]').text()).toBe("Set Up Repository");
-    expect(wrapper.get('[data-command-id="setup-repo"]').attributes("data-command-description")).toBe("Configure .kanna pipeline and agent flavors");
+    const createConfigButton = wrapper.get('[data-command-id="factory:create-config"]');
+    expect(wrapper.get('[data-command-id="factory:create-agent"]').text()).toBe("Create Agent");
+    expect(wrapper.get('[data-command-id="factory:create-pipeline"]').text()).toBe("Create Pipeline");
+    expect(wrapper.get('[data-command-id="factory:setup-repo"]').text()).toBe("Set Up Repository");
+    expect(wrapper.get('[data-command-id="factory:setup-repo"]').attributes("data-command-description")).toBe("Configure .kanna pipeline and agent flavors");
     expect(createConfigButton.text()).toBe("Create Config");
     expect(createConfigButton.attributes("data-command-description")).toBe("Create or update .kanna/config.json");
 
-    await wrapper.get('[data-command-id="setup-repo"]').trigger("click");
+    await wrapper.get('[data-command-id="factory:setup-repo"]').trigger("click");
     await flushPromises();
 
     expect(store.selectItem).toHaveBeenCalledWith("repo-command-task");

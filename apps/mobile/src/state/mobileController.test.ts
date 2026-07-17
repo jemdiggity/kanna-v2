@@ -327,7 +327,7 @@ describe("createMobileController", () => {
     vi.unstubAllGlobals();
   });
 
-  it("loads the selected repository palette and opens a command task single-flight", async () => {
+  it("refreshes canonical task collections before opening a command task single-flight", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const run = createDeferred<{ taskId: string; reused: boolean }>();
@@ -343,6 +343,30 @@ describe("createMobileController", () => {
       repoCommandCatalog: { revision: "catalog-v1" }
     });
 
+    const canonicalTask = {
+      id: "task-command",
+      repoId: "repo-1",
+      title: "Canonical server title",
+      prompt: "Canonical server prompt",
+      stage: "review",
+      agentProvider: "codex",
+      agentType: "agent" as const
+    };
+    const events: string[] = [];
+    client.listRecentTasks.mockImplementation(async () => {
+      events.push("refresh recent");
+      return [canonicalTask];
+    });
+    client.listRepoTasks.mockImplementation(async () => {
+      events.push("refresh repo");
+      return [canonicalTask];
+    });
+    client.observeTaskAgent.mockImplementation((taskId, listener) => {
+      events.push(`open ${taskId}`);
+      client.__agentStream.subscription.setListener(listener);
+      return client.__agentStream.subscription;
+    });
+
     const first = controller.runRepoCommand("factory:create-agent");
     const duplicate = controller.runRepoCommand("factory:create-agent");
     expect(client.runRepoCommand).toHaveBeenCalledTimes(1);
@@ -355,10 +379,34 @@ describe("createMobileController", () => {
       activeView: "tasks",
       runningRepoCommandId: null
     });
-    expect(store.getState().recentTasks).toEqual([
-      expect.objectContaining({ id: "task-command", title: "Create Agent" }),
-      expect.objectContaining({ id: "task-1" })
+    expect(events).toEqual([
+      "refresh recent",
+      "refresh repo",
+      "open task-command"
     ]);
+    expect(store.getState().recentTasks).toEqual([canonicalTask]);
+    expect(store.getState().repoTasks).toEqual([canonicalTask]);
+  });
+
+  it("does not open a command task when the canonical collection refresh fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.showView("more");
+    await flushMicrotasks();
+    client.listRecentTasks.mockRejectedValue(new Error("canonical refresh failed"));
+
+    await controller.runRepoCommand("factory:create-agent");
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      connectionState: "error",
+      errorMessage: "canonical refresh failed",
+      runningRepoCommandId: null
+    });
+    expect(client.observeTaskTerminal).not.toHaveBeenCalled();
+    expect(client.observeTaskAgent).not.toHaveBeenCalled();
   });
 
   it("bootstraps connection, desktops, repos, and recent tasks", async () => {
