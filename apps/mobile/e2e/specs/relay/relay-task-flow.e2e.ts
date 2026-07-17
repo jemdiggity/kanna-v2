@@ -9,6 +9,7 @@ import {
 } from "../smoke/list-detail-back.e2e";
 import { openProfileConnectionSheet } from "../smoke/profile-connection.e2e";
 import type { TaskActivity } from "../../../src/lib/api/types";
+import type { RelayTaskOrderingFixture } from "../../helpers/relay-harness";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
@@ -33,6 +34,7 @@ interface RelayTaskFlowOptions {
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
+  taskOrdering: RelayTaskOrderingFixture;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
 }
 
@@ -92,6 +94,7 @@ interface RelayUi {
   getTaskMoreButton(): Promise<RelayElement>;
   getTaskRowById(taskId: string): Promise<RelayElement>;
   getTaskRows(): Promise<RelayElement[]>;
+  getTasksTab(): Promise<RelayElement>;
   getTaskSendButton(): Promise<RelayElement>;
   getTerminalOverlay(): Promise<RelayElement>;
   inspectTerminalWebView(): ReturnType<typeof inspectTerminalWebView>;
@@ -239,6 +242,9 @@ function createRelayUi(driver: Browser): RelayUi {
     },
     async getTaskRows() {
       return Array.from(await driver.$$(selectors.taskRowsXPath));
+    },
+    async getTasksTab() {
+      return driver.$(selectors.tasksTab);
     },
     async getTaskSendButton() {
       return driver.$(selectors.taskSendButton);
@@ -818,6 +824,60 @@ export async function openRelayFixtureTask(
   await task.click();
 }
 
+async function renderedTaskRowIds(
+  ui: Pick<RelayUi, "getTaskRows">,
+): Promise<string[]> {
+  const taskIds: string[] = [];
+  for (const row of await ui.getTaskRows()) {
+    const taskId = extractTaskRowId(
+      await row.getAttribute("name").catch(() => null),
+    );
+    if (taskId) taskIds.push(taskId);
+  }
+  return taskIds;
+}
+
+export async function verifyTasksTabNewestFirst(
+  ui: Pick<RelayUi, "getTasksTab" | "getTaskRows" | "waitUntil">,
+  fixture: RelayTaskOrderingFixture,
+): Promise<void> {
+  const tasksTab = await ui.getTasksTab();
+  await tasksTab.click();
+
+  const fixtureIds = new Set(fixture.expectedVisualOrderTaskIds);
+  let lastRenderedTaskIds: string[] = [];
+  await ui.waitUntil(
+    async () => {
+      lastRenderedTaskIds = await renderedTaskRowIds(ui);
+      return fixture.expectedVisualOrderTaskIds.every((taskId) =>
+        lastRenderedTaskIds.includes(taskId)
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected both deterministic creation-order tasks on the Tasks tab",
+    },
+  );
+
+  const actualVisualOrder = lastRenderedTaskIds.filter((taskId) =>
+    fixtureIds.has(taskId)
+  );
+  if (
+    actualVisualOrder.length !== fixture.expectedVisualOrderTaskIds.length ||
+    actualVisualOrder.some(
+      (taskId, index) => taskId !== fixture.expectedVisualOrderTaskIds[index],
+    )
+  ) {
+    throw new Error(
+      `Expected Tasks-tab creation order ${JSON.stringify(fixture.expectedVisualOrderTaskIds)}; ` +
+        `source order was ${JSON.stringify(fixture.sourceOrderTaskIds)}; ` +
+        `native visual order was ${JSON.stringify(actualVisualOrder)}`,
+    );
+  }
+}
+
 async function returnToTaskListShell(ui: RelayUi): Promise<void> {
   const backButton = await ui.getBackButton();
   if (await backButton.isExisting().catch(() => false)) {
@@ -968,6 +1028,7 @@ export async function runRelayTaskFlow(
     await signInToRelay(driver, ui, options.credentials);
   }
   await ensureTaskListVisible(ui);
+  await verifyTasksTabNewestFirst(ui, options.taskOrdering);
   const exactTaskRow = await ui.getTaskRowById(options.fixture.taskId);
   await exactTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await assertRelayTaskRowPresentation(exactTaskRow, options.taskRow);

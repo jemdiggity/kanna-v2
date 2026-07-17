@@ -75,8 +75,20 @@ describe("TasksScreen", () => {
   it("keeps Recent pan-repo even when the Tasks view has a selected repo", () => {
     if (!TasksScreen || !TaskList || !TaskCard) throw new Error("TasksScreen was not loaded");
     const tasks = [
-      { id: "task-a", repoId: "repo-a", title: "Task A", stage: "review" },
-      { id: "task-b", repoId: "repo-b", title: "Task B", stage: "in progress" }
+      {
+        id: "task-a",
+        repoId: "repo-a",
+        title: "Task A",
+        stage: "review",
+        createdAt: "2026-07-15T08:00:00.000Z"
+      },
+      {
+        id: "task-b",
+        repoId: "repo-b",
+        title: "Task B",
+        stage: "in progress",
+        createdAt: "2026-07-17T08:00:00.000Z"
+      }
     ];
 
     const tree = TasksScreen({
@@ -147,6 +159,53 @@ describe("TasksScreen", () => {
         ({ taskId }) => taskId
       )
     ).toEqual(["unread-1", "unread-2", "idle-1", "working-1"]);
+  });
+
+  it("orders repo tasks by creation time newest first without mutating input", () => {
+    if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
+    const tasks = [
+      {
+        id: "task-old",
+        repoId: "repo-a",
+        title: "Old task",
+        stage: "in progress",
+        createdAt: "2026-07-15 08:00:00"
+      },
+      {
+        id: "task-new",
+        repoId: "repo-a",
+        title: "New task",
+        stage: "in progress",
+        createdAt: "2026-07-17T08:00:00.000Z"
+      },
+      {
+        id: "task-undated",
+        repoId: "repo-a",
+        title: "Undated task",
+        stage: "in progress"
+      }
+    ];
+    const taskSlots = projectTaskUiSlots(tasks, []);
+
+    const tree = TasksScreen({
+      heading: "Tasks",
+      repos: [{ id: "repo-a", name: "Repo A" }],
+      selectedRepoId: "repo-a",
+      taskSlots,
+      onOpenTask: vi.fn(),
+      onSelectRepo: vi.fn()
+    }) as ElementNode;
+
+    expect(
+      (findElement(tree, TaskList)?.props?.taskSlots as typeof taskSlots).map(
+        ({ taskId }) => taskId
+      )
+    ).toEqual(["task-new", "task-old", "task-undated"]);
+    expect(taskSlots.map(({ taskId }) => taskId)).toEqual([
+      "task-old",
+      "task-new",
+      "task-undated"
+    ]);
   });
 
   it("continues to scope the structural Tasks view to the selected repo", () => {

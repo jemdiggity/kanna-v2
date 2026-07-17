@@ -78,6 +78,7 @@ function validTask(
     stage: "in progress",
     status: "active",
     repo: { cloudRepoId: "cloud-repo-1", name: "kanna" },
+    createdAt: "2026-05-14T00:00:00.000Z",
     updatedAt: "2026-05-14T00:01:00.000Z",
     closedAt: null,
     ...overrides,
@@ -239,6 +240,7 @@ describe("cloud task index", () => {
       prompt:
         "Canonical prompt first line\nDetailed cloud requirements stay distinct from the rename.\nCLOUD_PROMPT_END_SENTINEL",
       stage: "in progress",
+      createdAt: "2026-05-14T00:00:00.000Z",
       waitingPromptSnippet: "Ready for review",
       agentProvider: "claude",
       agentType: "agent",
@@ -260,6 +262,7 @@ describe("cloud task index", () => {
     stage: "in progress",
     status: "active",
     repo: { cloudRepoId: "repo-1", name: "kanna" },
+    createdAt: "2026-05-14T00:00:00.000Z",
     updatedAt: "2026-05-14T00:01:00.000Z",
     closedAt: null,
   };
@@ -370,6 +373,7 @@ describe("cloud task index", () => {
             stage: "in progress",
             status: "active",
             repo: { cloudRepoId: "repo-1", name: "kanna" },
+            createdAt: "2026-05-14 00:00:00",
             updatedAt: "2026-05-14T00:01:00.000Z",
             closedAt: null,
           }),
@@ -392,6 +396,7 @@ describe("cloud task index", () => {
       ownerDesktopId: "desktop-1",
       ownerLocalRepoId: "local-repo-1",
       ownerLocalTaskId: "task-1",
+      createdAt: "2026-05-14T00:00:00.000Z",
     }]);
     expect(firestoreMocks.getDocs).toHaveBeenCalledTimes(2);
   });

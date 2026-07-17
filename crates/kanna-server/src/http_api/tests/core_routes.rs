@@ -1304,6 +1304,7 @@ async fn list_repo_tasks_route_returns_repo_scoped_tasks() {
     let json: serde_json::Value = from_slice(&body).unwrap();
     assert_eq!(json[0]["title"], "Short renamed task");
     assert_eq!(json[0]["prompt"], FULL_PROMPT);
+    assert_eq!(json[0]["createdAt"], "2026-04-17 07:00:00");
     let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "task-repo-1");

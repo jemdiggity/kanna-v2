@@ -12,6 +12,78 @@ import {
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
 
+describe("Tasks-tab creation ordering journey", () => {
+  it("selects Tasks and accepts native task rows only in newest-first order", async () => {
+    const verifyTasksTabNewestFirst = (
+      await import("./relay-task-flow.e2e")
+    ) as typeof import("./relay-task-flow.e2e") & {
+      verifyTasksTabNewestFirst?: (
+        ui: Record<string, unknown>,
+        fixture: {
+          sourceOrderTaskIds: string[];
+          expectedVisualOrderTaskIds: string[];
+        },
+      ) => Promise<void>;
+    };
+    expect(verifyTasksTabNewestFirst.verifyTasksTabNewestFirst).toBeTypeOf(
+      "function",
+    );
+    if (!verifyTasksTabNewestFirst.verifyTasksTabNewestFirst) return;
+
+    const tasksTab = { click: vi.fn(async () => undefined) };
+    const taskRows = ["task-newer", "task-older"].map((taskId) => ({
+      getAttribute: vi.fn(async (name: string) =>
+        name === "name" ? `mobile.task-row.${taskId}` : null
+      ),
+    }));
+    const ui = {
+      getTasksTab: vi.fn(async () => tasksTab),
+      getTaskRows: vi.fn(async () => taskRows),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+
+    await verifyTasksTabNewestFirst.verifyTasksTabNewestFirst(ui, {
+      sourceOrderTaskIds: ["task-older", "task-newer"],
+      expectedVisualOrderTaskIds: ["task-newer", "task-older"],
+    });
+
+    expect(tasksTab.click).toHaveBeenCalledTimes(1);
+    expect(ui.getTaskRows).toHaveBeenCalled();
+  });
+
+  it("reports the reversed source order when native rows are not newest first", async () => {
+    const tasksTab = { click: vi.fn(async () => undefined) };
+    const taskRows = ["task-older", "task-newer"].map((taskId) => ({
+      getAttribute: vi.fn(async (name: string) =>
+        name === "name" ? `mobile.task-row.${taskId}` : null
+      ),
+    }));
+    const ui = {
+      getTasksTab: vi.fn(async () => tasksTab),
+      getTaskRows: vi.fn(async () => taskRows),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+
+    const { verifyTasksTabNewestFirst } = await import(
+      "./relay-task-flow.e2e"
+    );
+    await expect(
+      verifyTasksTabNewestFirst(ui as never, {
+        sourceOrderTaskIds: ["task-older", "task-newer"],
+        expectedVisualOrderTaskIds: ["task-newer", "task-older"],
+      }),
+    ).rejects.toThrow(
+      'source order was ["task-older","task-newer"]; native visual order was ["task-older","task-newer"]',
+    );
+  });
+});
+
 describe("terminal file links", () => {
   const fixture = {
     path: "docs/mobile-file-preview.md",

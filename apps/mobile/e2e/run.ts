@@ -307,6 +307,7 @@ async function main(): Promise<void> {
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
         setTaskActivity: relayHarness.setTaskActivity,
         taskRow: relayHarness.taskRow,
+        taskOrdering: relayHarness.taskOrdering,
         waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity
       });
       await relayHarness.waitForQuickReplyInput(
