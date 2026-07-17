@@ -157,10 +157,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
     }
 
     let revision_run = db.latest_stage_run(&task_id).unwrap().unwrap();
-    assert_eq!(
-        revision_run.completion_transition.as_deref(),
-        Some("auto")
-    );
+    assert_eq!(revision_run.completion_transition.as_deref(), Some("auto"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -567,10 +564,7 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     assert_eq!(revision_run.stage, "in progress");
     assert_eq!(revision_run.kind, "main");
     assert_eq!(revision_run.status, "running");
-    assert_eq!(
-        revision_run.completion_transition.as_deref(),
-        Some("auto")
-    );
+    assert_eq!(revision_run.completion_transition.as_deref(), Some("auto"));
     assert_eq!(
         revision_run.provider_session_id.as_deref(),
         Some(RESUME_SESSION_UUID)

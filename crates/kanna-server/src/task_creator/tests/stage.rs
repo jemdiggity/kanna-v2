@@ -934,7 +934,8 @@ fn prepare_stage_completion_for_closed_task_is_idempotent_without_definitions() 
     db.close_pipeline_item("task-1").unwrap();
 
     let prepared =
-        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main")).unwrap();
+        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main"), None)
+            .unwrap();
 
     assert!(prepared.is_none());
 }
@@ -1760,7 +1761,8 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
     );
 
     let prepared =
-        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main")).unwrap();
+        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main"), None)
+            .unwrap();
     let run = match prepared {
         Some(PreparedStageTransition::Run(run)) => run,
         Some(PreparedStageTransition::Post(_)) => panic!("expected stage swap, got post dispatch"),
@@ -1827,7 +1829,8 @@ fn prepare_auto_stage_completion_parks_manual_stage() {
     .unwrap();
 
     let prepared =
-        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main")).unwrap();
+        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main"), None)
+            .unwrap();
     assert!(
         prepared.is_none(),
         "manual stages must park instead of auto-advancing"
@@ -2141,20 +2144,21 @@ fn stage_completion_of_post_run_swaps_past_manual_gate() {
 
     // A finished post always advances: the manual gate was already passed by
     // the advance that dispatched the post.
-    let run = match super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("post"))
-        .unwrap()
-    {
-        Some(PreparedStageTransition::Run(run)) => run,
-        other => panic!(
-            "expected swap after post completion, got {}",
-            match other {
-                Some(PreparedStageTransition::Post(_)) => "post dispatch",
-                Some(PreparedStageTransition::Close { .. }) => "close",
-                None => "park",
-                Some(PreparedStageTransition::Run(_)) => unreachable!(),
-            }
-        ),
-    };
+    let run =
+        match super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("post"), None)
+            .unwrap()
+        {
+            Some(PreparedStageTransition::Run(run)) => run,
+            other => panic!(
+                "expected swap after post completion, got {}",
+                match other {
+                    Some(PreparedStageTransition::Post(_)) => "post dispatch",
+                    Some(PreparedStageTransition::Close { .. }) => "close",
+                    None => "park",
+                    Some(PreparedStageTransition::Run(_)) => unreachable!(),
+                }
+            ),
+        };
     assert_eq!(run.next_stage, "pr");
 
     let _ = std::fs::remove_dir_all(&repo_root);
@@ -2172,8 +2176,36 @@ fn stage_completion_of_main_run_on_manual_stage_with_post_parks() {
     // The implement agent's own success verdict parks the manual stage; the
     // post is dispatched only when the human (or an auto policy) advances.
     let prepared =
-        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main")).unwrap();
+        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main"), None)
+            .unwrap();
     assert!(prepared.is_none());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_revision_completion_uses_run_transition() {
+    let repo_root = init_git_repo("revision-completion-run-transition");
+    write_post_pipeline_fixtures(&repo_root);
+
+    let config = test_config("revision-completion-run-transition");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+
+    let automatic =
+        super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main"), Some("auto"))
+            .unwrap();
+    assert!(matches!(automatic, Some(PreparedStageTransition::Post(_))));
+
+    let manual = super::prepare_stage_completion_for_api(
+        &db,
+        &config,
+        "task-1",
+        Some("main"),
+        Some("manual"),
+    )
+    .unwrap();
+    assert!(manual.is_none());
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

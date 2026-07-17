@@ -4,7 +4,6 @@ use rusqlite::OptionalExtension;
 /// Identity of a run closed by `finish_latest_running_stage_run`.
 pub struct FinishedStageRun {
     pub kind: String,
-    #[allow(dead_code)]
     pub completion_transition: Option<String>,
 }
 

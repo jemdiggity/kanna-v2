@@ -846,6 +846,9 @@ pub(super) async fn complete_stage(
             &state.config,
             &task_id,
             finished_run.as_ref().map(|run| run.kind.as_str()),
+            finished_run
+                .as_ref()
+                .and_then(|run| run.completion_transition.as_deref()),
         )
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };

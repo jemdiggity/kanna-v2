@@ -150,6 +150,7 @@ pub(crate) fn prepare_stage_completion_for_api(
     config: &Config,
     source_task_id: &str,
     finished_run_kind: Option<&str>,
+    completion_transition: Option<&str>,
 ) -> Result<Option<PreparedStageTransition>, String> {
     let identity = load_stage_identity(db, source_task_id)?;
     if identity.source_task.closed_at.is_some() {
@@ -178,7 +179,15 @@ pub(crate) fn prepare_stage_completion_for_api(
             if finished_run_kind == Some("post") {
                 return prepare_swap_to_index(db, config, &context, index + 1).map(Some);
             }
-            if stage.policy.transition != PipelineStageTransition::Auto {
+            let transition = match completion_transition {
+                Some("manual") => PipelineStageTransition::Manual,
+                Some("auto") => PipelineStageTransition::Auto,
+                Some(value) => {
+                    return Err(format!("invalid stage run completion transition: {value}"))
+                }
+                None => stage.policy.transition,
+            };
+            if transition != PipelineStageTransition::Auto {
                 return Ok(None);
             }
             if stage.post.is_some() {
