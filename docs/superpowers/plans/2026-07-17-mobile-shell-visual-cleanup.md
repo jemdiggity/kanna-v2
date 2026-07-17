@@ -114,7 +114,11 @@ Create `apps/mobile/src/components/FloatingToolbar.test.tsx` with:
 
 ```tsx
 import React from "react";
-import { create } from "react-test-renderer";
+import {
+  act,
+  create,
+  type ReactTestRenderer
+} from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import { FloatingToolbar } from "./FloatingToolbar";
 
@@ -127,6 +131,8 @@ vi.mock("react-native", () => ({
   Text: "Text",
   View: "View"
 }));
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function flattenStyle(style: unknown): Record<string, unknown> {
   if (Array.isArray(style)) {
@@ -143,28 +149,31 @@ function flattenStyle(style: unknown): Record<string, unknown> {
 
 describe("FloatingToolbar", () => {
   it("uses opaque dark surfaces for secondary floating chrome", () => {
-    const renderer = create(
-      <FloatingToolbar
-        activeTab="tasks"
-        tabs={[
-          { name: "tasks", label: "Tasks", icon: "home-outline" },
-          { name: "recent", label: "Activity", icon: "notifications-outline" },
-          { name: "more", label: "More", icon: "ellipsis-horizontal" }
-        ]}
-        utilityActions={[
-          { name: "search", label: "Search", icon: "search-outline" },
-          { name: "create", label: "Add task", icon: "add" }
-        ]}
-        onSelectTab={vi.fn()}
-        onSelectUtilityAction={vi.fn()}
-      />
-    );
+    let renderer: ReactTestRenderer | undefined;
+    act(() => {
+      renderer = create(
+        <FloatingToolbar
+          activeTab="tasks"
+          tabs={[
+            { name: "tasks", label: "Tasks", icon: "home-outline" },
+            { name: "recent", label: "Activity", icon: "notifications-outline" },
+            { name: "more", label: "More", icon: "ellipsis-horizontal" }
+          ]}
+          utilityActions={[
+            { name: "search", label: "Search", icon: "search-outline" },
+            { name: "create", label: "Add task", icon: "add" }
+          ]}
+          onSelectTab={vi.fn()}
+          onSelectUtilityAction={vi.fn()}
+        />
+      );
+    });
 
-    const searchButton = renderer.root.find(
+    const searchButton = renderer!.root.find(
       (node) =>
         node.type === "Pressable" && node.props.accessibilityLabel === "Search"
     );
-    const navigationBar = renderer.root.findAllByType("View").find(
+    const navigationBar = renderer!.root.findAllByType("View").find(
       (node) => node.findAllByType("Pressable", { deep: false }).length === 3
     );
 
@@ -174,6 +183,8 @@ describe("FloatingToolbar", () => {
     expect(flattenStyle(navigationBar?.props.style).backgroundColor).toBe(
       "#080F1B"
     );
+
+    act(() => renderer!.unmount());
   });
 });
 ```
