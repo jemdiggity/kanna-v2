@@ -4,7 +4,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Browser } from "webdriverio";
 import {
   createPhysicalDeviceCapabilities,
-  createSimulatorCapabilities
+  createSimulatorCapabilities,
+  type SimulatorAlertHandling
 } from "./appium.config";
 import {
   assertXcuitestDriverInstalled,
@@ -74,6 +75,18 @@ export function resolveSmokeModeAppEnv(
 
 export function requiresExactExpoEnvironment(mode: string): boolean {
   return mode === "relay" || mode === "hybrid";
+}
+
+export function resolveSimulatorAlertHandling(
+  mode: string
+): SimulatorAlertHandling {
+  if (mode === "hybrid") {
+    return "accept";
+  }
+  if (mode === "relay") {
+    return "manual";
+  }
+  return "dismiss";
 }
 
 interface StoppedDesktopServerHandle {
@@ -212,7 +225,7 @@ async function main(): Promise<void> {
       await assertSimulatorAppInstalled(device, env.bundleId);
       capabilities = createSimulatorCapabilities({
         appiumPort: env.appiumPort,
-        autoAcceptAlerts: mode === "hybrid",
+        alertHandling: resolveSimulatorAlertHandling(mode),
         bundleId: env.bundleId,
         deviceName: device.name,
         reservedPorts: env.reservedPorts

@@ -311,7 +311,15 @@ export async function verifyRelayQuickReplyJourney(
   await ui.waitUntil(
     async () => {
       const value = await input.getAttribute("value").catch(() => null);
-      return value === "" || value === TASK_COMPOSER_PLACEHOLDER;
+      if (value === "" || value === TASK_COMPOSER_PLACEHOLDER) {
+        return true;
+      }
+      if (value !== null) {
+        return false;
+      }
+
+      const label = await input.getAttribute("label").catch(() => null);
+      return label === TASK_COMPOSER_PLACEHOLDER;
     },
     {
       interval: POLL_INTERVAL_MS,

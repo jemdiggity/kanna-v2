@@ -306,7 +306,7 @@ pnpm --dir apps/mobile typecheck
 
 Expected: all selected tests pass and TypeScript reports no errors.
 
-- [ ] **Step 5: Run the canonical Appium relay lane**
+- [x] **Step 5: Run the canonical Appium relay lane**
 
 Run:
 
@@ -330,3 +330,112 @@ Expected: both requested repository-level suites pass.
 - [x] **Step 7: Review scope and hygiene**
 
 Run `git diff --check`, inspect `git status --short`, and review the diff. Confirm the revision changes only the existing design/plan and relay Appium coverage, preserves focused unit/component tests, does not invoke Advance Stage or Close Task during E2E, and does not commit, push, or transition the task.
+
+### Task 5: Preserve Native Alerts in the Relay Appium Lane
+
+**Files:**
+- Modify: `apps/mobile/e2e/appium.config.ts`
+- Modify: `apps/mobile/e2e/appium.config.test.ts`
+- Modify: `apps/mobile/e2e/run.ts`
+- Modify: `apps/mobile/e2e/run.test.ts`
+- Modify: `apps/mobile/e2e/helpers/relay-harness.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.test.ts`
+- Modify: `docs/superpowers/specs/2026-07-17-mobile-task-action-menu-design.md`
+- Modify: `docs/superpowers/plans/2026-07-17-mobile-task-action-menu.md`
+
+- [x] **Step 1: Remove temporary page-source instrumentation**
+
+Restore `RelayUi`, `createRelayUi`, and `verifyRelayTaskActionMenuJourney` to
+their committed shapes after retaining the captured evidence in the design.
+
+- [x] **Step 2: Write failing alert-policy tests**
+
+Add an `alertHandling` input to the desired simulator capability API and assert
+that manual handling emits neither automatic Appium capability:
+
+```ts
+expect(
+  createSimulatorCapabilities({
+    alertHandling: "manual",
+    appiumPort: 4723,
+    deviceName: "iPhone 17 Pro",
+    bundleId: "build.kanna.app.dev"
+  })
+).not.toHaveProperty("appium:autoDismissAlerts");
+```
+
+Also assert that a runner helper resolves `relay` to `manual`, `hybrid` to
+`accept`, and normal smoke modes to `dismiss`.
+
+- [x] **Step 3: Verify RED**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test e2e/appium.config.test.ts e2e/run.test.ts
+```
+
+Expected: FAIL because `alertHandling` and `resolveSimulatorAlertHandling` do
+not exist and relay still inherits automatic dismissal.
+
+- [x] **Step 4: Implement explicit simulator alert handling**
+
+Define:
+
+```ts
+export type SimulatorAlertHandling = "accept" | "dismiss" | "manual";
+```
+
+Default `createSimulatorCapabilities` to `dismiss`, emit
+`appium:autoAcceptAlerts` only for `accept`, emit `appium:autoDismissAlerts`
+only for `dismiss`, and emit neither for `manual`. Export this runner policy:
+
+```ts
+export function resolveSimulatorAlertHandling(
+  mode: string
+): SimulatorAlertHandling {
+  if (mode === "hybrid") return "accept";
+  if (mode === "relay") return "manual";
+  return "dismiss";
+}
+```
+
+Pass the resolved value into simulator capability creation.
+
+- [x] **Step 5: Verify GREEN**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test e2e/appium.config.test.ts e2e/run.test.ts
+```
+
+Expected: both focused test files pass.
+
+- [x] **Step 6: Run all reviewer-requested verification**
+
+Before the full commands, preserve the quick-reply regression exposed after
+manual alert handling: when XCUITest returns a null input `value`, read its
+`label` and accept only the exact `Reply…` placeholder as the cleared state.
+Cover that accessibility shape in `relay-task-flow.test.ts`.
+
+Run the focused mobile command, typecheck, canonical relay E2E, repository JS
+suite, and serialized daemon tests exactly as requested in review feedback.
+
+- [x] **Step 7: Commit the revision**
+
+After `git diff --check` and a final diff review, commit all revision changes:
+
+```bash
+git add apps/mobile/e2e/appium.config.ts \
+  apps/mobile/e2e/appium.config.test.ts \
+  apps/mobile/e2e/run.ts \
+  apps/mobile/e2e/run.test.ts \
+  apps/mobile/e2e/helpers/relay-harness.ts \
+  apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts \
+  apps/mobile/e2e/specs/relay/relay-task-flow.test.ts \
+  docs/superpowers/specs/2026-07-17-mobile-task-action-menu-design.md \
+  docs/superpowers/plans/2026-07-17-mobile-task-action-menu.md
+git commit -m "fix(mobile): preserve task action sheet in relay e2e"
+```

@@ -59,7 +59,7 @@ describe("mobile Appium config", () => {
         appiumPort: 4723,
         deviceName: "iPhone 17 Pro",
         bundleId: "build.kanna.app.dev",
-        autoAcceptAlerts: true
+        alertHandling: "accept"
       })
     ).toMatchObject({
       "appium:autoAcceptAlerts": true
@@ -69,9 +69,21 @@ describe("mobile Appium config", () => {
         appiumPort: 4723,
         deviceName: "iPhone 17 Pro",
         bundleId: "build.kanna.app.dev",
-        autoAcceptAlerts: true
+        alertHandling: "accept"
       })
     ).not.toHaveProperty("appium:autoDismissAlerts");
+  });
+
+  it("leaves native alerts under test control for native-modal journeys", () => {
+    const capabilities = createSimulatorCapabilities({
+      alertHandling: "manual",
+      appiumPort: 4723,
+      deviceName: "iPhone 17 Pro",
+      bundleId: "build.kanna.app.dev"
+    });
+
+    expect(capabilities).not.toHaveProperty("appium:autoAcceptAlerts");
+    expect(capabilities).not.toHaveProperty("appium:autoDismissAlerts");
   });
 
   it("builds real-device capabilities with the selected UDID", () => {

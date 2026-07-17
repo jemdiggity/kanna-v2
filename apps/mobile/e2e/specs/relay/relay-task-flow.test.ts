@@ -231,11 +231,14 @@ describe("relay task action menu journey", () => {
 describe("relay quick reply journey", () => {
   it("long-presses Send, selects SGTM, and waits for the composer to clear", async () => {
     const calls: string[] = [];
-    let composerValue = "";
+    let composerValue: string | null = "";
     const input = {
       getAttribute: vi.fn(async (name: string) => {
         calls.push(`input.getAttribute:${name}`);
-        return composerValue;
+        if (name === "value") {
+          return composerValue;
+        }
+        return name === "label" && composerValue === null ? "Reply…" : null;
       }),
       setValue: vi.fn(async (value: string) => {
         calls.push(`input.setValue:${JSON.stringify(value)}`);
@@ -264,7 +267,7 @@ describe("relay quick reply journey", () => {
     const quickReply = {
       click: vi.fn(async () => {
         calls.push("quickReply.click");
-        composerValue = "Reply…";
+        composerValue = null;
       }),
       waitForDisplayed: vi.fn(async () => {
         calls.push("quickReply.waitForDisplayed");
@@ -299,6 +302,7 @@ describe("relay quick reply journey", () => {
       "quickReply.waitForDisplayed",
       "quickReply.click",
       "input.getAttribute:value",
+      "input.getAttribute:label",
     ]);
   });
 });
@@ -319,13 +323,25 @@ describe("relay quick reply transport observation", () => {
     ).not.toThrow();
   });
 
-  it("rejects a duplicate normal send before the quick reply", () => {
+  it("ignores unrelated scripted inputs when counting the exact quick reply", () => {
     expect(() =>
       assertSingleTaskInput(
-        "SCRIPT_INPUT:Preserve the relay fixture.\r\n" +
+        "SCRIPT_INPUT: docs/mobile-file-preview.md\r\n" +
+          "SCRIPT_INPUT: docs/mobile-file-preview.md:4\r\n" +
+          "SCRIPT_INPUT: docs/mobile-preview-missing.md\r\n" +
+          "SCRIPT_INPUT:SGTM. Proceed.\r\r\n\r\r\n" +
+          "Preserve the relay fixture.\r\r\n",
+      )
+    ).not.toThrow();
+  });
+
+  it("rejects the exact quick reply when it is submitted twice", () => {
+    expect(() =>
+      assertSingleTaskInput(
+        "SCRIPT_INPUT:SGTM. Proceed.\r\n\r\nPreserve the relay fixture.\r\n" +
           "SCRIPT_INPUT:SGTM. Proceed.\r\n\r\nPreserve the relay fixture.\r\n",
       )
-    ).toThrow(/exactly one task input.*observed 2/i);
+    ).toThrow(/exactly one matching task input.*observed 2/i);
   });
 });
 

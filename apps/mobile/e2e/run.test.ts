@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   requiresExactExpoEnvironment,
+  resolveSimulatorAlertHandling,
   resolveSmokeModeAppEnv,
   smokeSpecPaths,
   supportedSmokeModes,
@@ -8,6 +9,12 @@ import {
 } from "./run";
 
 describe("mobile smoke runner", () => {
+  it("leaves relay alerts manual while preserving other lane policies", () => {
+    expect(resolveSimulatorAlertHandling("relay")).toBe("manual");
+    expect(resolveSimulatorAlertHandling("hybrid")).toBe("accept");
+    expect(resolveSimulatorAlertHandling("smoke")).toBe("dismiss");
+  });
+
   it("registers the list-detail-back smoke spec", () => {
     expect(smokeSpecPaths).toContain("specs/smoke/list-detail-back.e2e.ts");
   });

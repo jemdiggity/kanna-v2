@@ -38,3 +38,27 @@ The new menu does not introduce another action state or transport path. Existing
 - Extend the app component test to prove the callbacks use the selected task id and no longer call `showView("more")`.
 - Extend the relay-backed Appium task journey to open a specific task, tap `mobile.task-more-button`, observe the native `Task Actions` sheet with Advance Stage, Close Task, and Cancel, dismiss it with Cancel, and verify the same task detail remains displayed. The journey observes but does not invoke the mutating task actions so the existing relay fixture can continue through its terminal, file-preview, and quick-reply assertions.
 - Run the focused mobile test files, then the mobile test suite or repository-level checks practical for the change.
+
+## Revision: Appium Alert Ownership
+
+The relay Appium lane must leave native alerts under test control. Its captured
+iOS accessibility lifecycle proves that `Task Actions` reaches
+`UIAlertController.ViewDidAppear`, after which Appium's session-wide
+`autoDismissAlerts` policy taps outside the sheet and produces
+`UIAlertController.ViewDidDisappear` before the title lookup. The product
+handler and action-sheet presentation are therefore working; the E2E session
+is dismissing the UI it intends to inspect.
+
+Simulator alert handling is explicit per lane: hybrid automatically accepts
+the Local Network permission prompt, relay handles alerts manually so it can
+inspect and cancel the task action sheet, and other lanes preserve automatic
+dismissal of incidental system prompts. The product menu and its selectors do
+not change. Relay setup already dismisses known first-launch and password
+prompts explicitly.
+
+With native alerts preserved, the lane proceeds through the task action menu
+and exposes the existing quick-reply assertion to current XCUITest semantics:
+after submission the cleared `TextInput` has no `value` attribute and exposes
+its `Reply…` placeholder as `label`. The E2E considers either an empty/value
+placeholder or the evidenced label placeholder to be cleared, while the relay
+harness continues to verify the exact submitted input separately.
