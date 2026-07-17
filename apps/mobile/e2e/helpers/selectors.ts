@@ -41,8 +41,6 @@ export const selectors = {
     `~${MOBILE_E2E_IDS.createTaskProvisioningRecover}`,
   tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
-  moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
-  updateInfoOtaValue: `~${MOBILE_E2E_IDS.updateInfoOtaValue}`,
   taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]'
 } as const;
 

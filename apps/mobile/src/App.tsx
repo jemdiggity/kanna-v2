@@ -34,9 +34,7 @@ import { UpdateReadyBanner } from "./components/UpdateReadyBanner";
 import { MOBILE_E2E_IDS } from "./e2eTestIds";
 import {
   checkAndFetchUpdate,
-  getCurrentUpdateInfo,
-  reloadToApplyUpdate,
-  type CurrentUpdateInfo
+  reloadToApplyUpdate
 } from "./lib/updates/otaUpdates";
 import { DesktopsScreen } from "./screens/DesktopsScreen";
 import { MoreScreen } from "./screens/MoreScreen";
@@ -67,9 +65,6 @@ export default function App() {
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
   const [forceCloudEnabled, setForceCloudEnabled] = useState(resolveForceCloud());
   const [updatePromptVisible, setUpdatePromptVisible] = useState(false);
-  const [currentUpdateInfo, setCurrentUpdateInfo] = useState<CurrentUpdateInfo>(() =>
-    getCurrentUpdateInfo()
-  );
   const lastOtaCheckAtRef = useRef<number | null>(null);
   const hasDownloadedUpdateRef = useRef(false);
   const taskDetailViewportRef = useRef<{
@@ -96,7 +91,6 @@ export default function App() {
   const runOtaUpdateCheck = useCallback(async (nowMs = Date.now()) => {
     lastOtaCheckAtRef.current = nowMs;
     const result = await checkAndFetchUpdate();
-    setCurrentUpdateInfo(getCurrentUpdateInfo());
 
     if (result.state === "downloaded") {
       hasDownloadedUpdateRef.current = true;
@@ -227,7 +221,6 @@ export default function App() {
             pairingCode={state.pairingCode}
             refreshStatus={state.refreshStatus}
             selectedTask={selectedTask}
-            updateInfo={currentUpdateInfo}
             onRefresh={() => {
               void controller.refresh();
             }}

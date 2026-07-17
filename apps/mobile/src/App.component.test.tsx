@@ -75,12 +75,6 @@ vi.mock("./appModel", () => ({
 
 vi.mock("./lib/updates/otaUpdates", () => ({
   checkAndFetchUpdate: (...args: unknown[]) => harness.checkAndFetchUpdate(...args),
-  getCurrentUpdateInfo: vi.fn(() => ({
-    enabled: false,
-    updateId: null,
-    runtimeVersion: null,
-    channel: null
-  })),
   reloadToApplyUpdate: (...args: unknown[]) => harness.reloadToApplyUpdate(...args)
 }));
 

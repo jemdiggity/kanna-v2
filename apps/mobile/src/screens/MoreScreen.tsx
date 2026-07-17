@@ -1,20 +1,16 @@
 import React, { useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
-import type { CurrentUpdateInfo } from "../lib/updates/otaUpdates";
 import type { RefreshStatus } from "../state/sessionStore";
 import {
   buildMoreCommandPalette,
   type MoreCommandAction
 } from "./moreCommands";
-import { buildUpdateInfoRows } from "./moreUpdateInfo";
 
 interface MoreScreenProps {
   pairingCode: string | null;
   refreshStatus: RefreshStatus;
   selectedTask: TaskSummary | null;
-  updateInfo: CurrentUpdateInfo;
   onRefresh(): void;
   onShowDesktops(): void;
   onStartPairing(): void;
@@ -28,7 +24,6 @@ export function MoreScreen({
   pairingCode,
   refreshStatus,
   selectedTask,
-  updateInfo,
   onRefresh,
   onShowDesktops,
   onStartPairing,
@@ -42,7 +37,6 @@ export function MoreScreen({
     () => buildMoreCommandPalette({ pairingCode, refreshStatus, selectedTask }, query),
     [pairingCode, query, refreshStatus, selectedTask]
   );
-  const updateRows = useMemo(() => buildUpdateInfoRows(updateInfo), [updateInfo]);
 
   const handleAction = (action: MoreCommandAction) => {
     switch (action.id) {
@@ -135,24 +129,6 @@ export function MoreScreen({
             )}
           </View>
         </View>
-
-        <View style={styles.updateCard}>
-          <Text style={styles.commandLabel}>App update</Text>
-          {updateRows.map((row) => (
-            <View key={row.label} style={styles.updateRow}>
-              <Text style={styles.updateLabel}>{row.label}</Text>
-              <Text
-                numberOfLines={1}
-                style={styles.updateValue}
-                testID={
-                  row.label === "OTA" ? MOBILE_E2E_IDS.updateInfoOtaValue : undefined
-                }
-              >
-                {row.value}
-              </Text>
-            </View>
-          ))}
-        </View>
       </View>
     </ScrollView>
   );
@@ -177,31 +153,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 12,
     padding: 16
-  },
-  updateCard: {
-    backgroundColor: "#0D1727",
-    borderColor: "#22304D",
-    borderRadius: 20,
-    borderWidth: 1,
-    gap: 10,
-    padding: 16
-  },
-  updateRow: {
-    alignItems: "center",
-    flexDirection: "row",
-    justifyContent: "space-between"
-  },
-  updateLabel: {
-    color: "#93A7C8",
-    fontSize: 13,
-    fontWeight: "700"
-  },
-  updateValue: {
-    color: "#F5F7FB",
-    flex: 1,
-    fontSize: 13,
-    fontWeight: "800",
-    textAlign: "right"
   },
   searchInput: {
     backgroundColor: "#10192A",
