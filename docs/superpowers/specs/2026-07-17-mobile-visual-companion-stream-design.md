@@ -174,11 +174,19 @@ client -> server
 server -> client
   companion_snapshot(task_id, session_id, revision, document_kind, html)
   companion_unavailable(task_id)
+  companion_event_result(task_id, event_id, accepted, code?, message?)
+  companion_error(task_id, code, message)
 ```
 
-Task-scoped failures use the existing KSP error frame with stable codes such as
+Companion failures remain on companion-specific frames so they cannot put a
+terminal or themed-agent attachment into an error state. They use stable codes such as
 `companion_too_large`, `companion_invalid_document`,
 `companion_stale_revision`, and `companion_event_failed`.
+
+Every event receives exactly one `companion_event_result`. A successful result
+is sent only after the JSONL append completes. A rejected result echoes the
+client's `event_id` with a stable code and sanitized message, allowing mobile to
+show accurate delivered/failed state without guessing from WebSocket delivery.
 
 On attachment, Kanna Server immediately sends the current snapshot or an
 unavailable frame. On reconnect, `StreamClient` reattaches exactly as it does
