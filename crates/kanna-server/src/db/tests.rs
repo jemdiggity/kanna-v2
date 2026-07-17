@@ -161,7 +161,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "027_pipeline_item_pr_branch");
+    assert_eq!(latest_migration, "028_stage_run_completion_transition");
 
     let stage_run_sql: String = db
         .conn
@@ -173,6 +173,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
         .expect("stage_run schema");
     assert!(stage_run_sql.contains("provider_session_id"));
     assert!(stage_run_sql.contains("resumed_from_run_id"));
+    assert!(stage_run_sql.contains("completion_transition"));
 
     let _ = std::fs::remove_file(path);
 }
@@ -365,22 +366,25 @@ fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
     )
     .unwrap();
 
-    db.insert_stage_run(NewStageRun {
-        id: "run-1",
-        task_id: "task-1",
-        stage: "in progress",
-        kind: "main",
-        agent: Some("implement"),
-        agent_provider: Some("codex"),
-        model: Some("gpt-5"),
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some("session-1"),
-        provider_session_id: None,
-        cwd: None,
-        resumed_from_run_id: None,
-    })
+    db.insert_stage_run_with_completion_transition(
+        NewStageRun {
+            id: "run-1",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("codex"),
+            model: Some("gpt-5"),
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("session-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+    )
     .unwrap();
 
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
@@ -393,6 +397,7 @@ fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
     assert_eq!(runs[0].model.as_deref(), Some("gpt-5"));
     assert_eq!(runs[0].status, "running");
     assert_eq!(runs[0].session_id.as_deref(), Some("session-1"));
+    assert_eq!(runs[0].completion_transition.as_deref(), Some("auto"));
     assert!(!runs[0].started_at.is_empty());
 
     let result = r#"{"status":"success","summary":"implemented"}"#;

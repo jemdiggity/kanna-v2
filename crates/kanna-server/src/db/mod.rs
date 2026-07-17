@@ -65,6 +65,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "025_stage_run_kind",
     "026_stage_run_resume",
     "027_pipeline_item_pr_branch",
+    "028_stage_run_completion_transition",
 ];
 
 #[derive(Debug, Serialize)]
@@ -262,6 +263,9 @@ pub struct StageRun {
     /// Set when this run resumed a previous run's provider session instead
     /// of starting a fresh agent; records which run's session it continued.
     pub resumed_from_run_id: Option<String>,
+    /// Effective completion policy chosen when this run was prepared.
+    /// Legacy rows leave this null and fall back to the pinned stage policy.
+    pub completion_transition: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -617,6 +621,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           provider_session_id TEXT,
           cwd TEXT,
           resumed_from_run_id TEXT,
+          completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
           started_at TEXT NOT NULL DEFAULT (datetime('now')),
           finished_at TEXT
         );
@@ -1130,6 +1135,16 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     run_migration(conn, "027_pipeline_item_pr_branch", |conn| {
         add_column(conn, "pipeline_item", "pr_branch", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "028_stage_run_completion_transition", |conn| {
+        add_column(
+            conn,
+            "stage_run",
+            "completion_transition",
+            "TEXT CHECK (completion_transition IN ('manual', 'auto'))",
+        );
         Ok(())
     })?;
 
