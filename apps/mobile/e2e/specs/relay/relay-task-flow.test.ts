@@ -4,6 +4,7 @@ import {
   assertRelayTaskRowPresentation,
   inspectTaskFilePreviewWebView,
   openRelayFixtureTask,
+  verifyRelayTaskActionMenuJourney,
   verifyRelayQuickReplyJourney,
   verifyRelayTaskActivityTransitions,
   verifyRelayTaskMarkedRead,
@@ -168,6 +169,61 @@ describe("task file preview WebView inspection", () => {
       "WEBVIEW_terminal",
       "WEBVIEW_preview",
       "NATIVE_APP"
+    ]);
+  });
+});
+
+describe("relay task action menu journey", () => {
+  it("observes every task action, cancels, and leaves task detail visible", async () => {
+    const calls: string[] = [];
+    const displayedElement = (name: string) => ({
+      waitForDisplayed: vi.fn(async () => {
+        calls.push(`${name}.waitForDisplayed`);
+      }),
+    });
+    const more = {
+      ...displayedElement("more"),
+      click: vi.fn(async () => {
+        calls.push("more.click");
+      }),
+    };
+    const title = displayedElement("title");
+    const options = new Map([
+      ["Advance Stage", displayedElement("Advance Stage")],
+      ["Close Task", displayedElement("Close Task")],
+      [
+        "Cancel",
+        {
+          ...displayedElement("Cancel"),
+          click: vi.fn(async () => {
+            calls.push("Cancel.click");
+          }),
+        },
+      ],
+    ]);
+    const ui = {
+      getTaskActionMenuTitle: vi.fn(async () => title),
+      getTaskActionOption: vi.fn(async (label: string) => {
+        calls.push(`ui.getTaskActionOption:${label}`);
+        return options.get(label);
+      }),
+      getTaskMoreButton: vi.fn(async () => more),
+    };
+
+    await verifyRelayTaskActionMenuJourney(ui as never);
+
+    expect(calls).toEqual([
+      "more.waitForDisplayed",
+      "more.click",
+      "title.waitForDisplayed",
+      "ui.getTaskActionOption:Advance Stage",
+      "Advance Stage.waitForDisplayed",
+      "ui.getTaskActionOption:Close Task",
+      "Close Task.waitForDisplayed",
+      "ui.getTaskActionOption:Cancel",
+      "Cancel.waitForDisplayed",
+      "Cancel.click",
+      "more.waitForDisplayed",
     ]);
   });
 });

@@ -16,6 +16,8 @@ const QUICK_REPLY_LABEL = "SGTM. Proceed.";
 const QUICK_REPLY_MENU_TITLE = "Quick Replies";
 const QUICK_REPLY_LONG_PRESS_MS = 800;
 const TASK_COMPOSER_PLACEHOLDER = "Reply…";
+const TASK_ACTION_MENU_TITLE = "Task Actions";
+const TASK_ACTION_LABELS = ["Advance Stage", "Close Task", "Cancel"] as const;
 
 interface RelayCredentials {
   email: string;
@@ -82,9 +84,12 @@ interface RelayUi {
   getBackButton(): Promise<RelayElement>;
   getQuickRepliesMenuTitle(): Promise<RelayElement>;
   getQuickReplyOption(label: string): Promise<RelayElement>;
+  getTaskActionMenuTitle(): Promise<RelayElement>;
+  getTaskActionOption(label: string): Promise<RelayElement>;
   getTaskInput(): Promise<RelayElement>;
   getTaskDetailScreen(): Promise<RelayElement>;
   getTaskDetailActivity(): Promise<RelayElement>;
+  getTaskMoreButton(): Promise<RelayElement>;
   getTaskRowById(taskId: string): Promise<RelayElement>;
   getTaskRows(): Promise<RelayElement[]>;
   getTaskSendButton(): Promise<RelayElement>;
@@ -211,6 +216,12 @@ function createRelayUi(driver: Browser): RelayUi {
     async getQuickReplyOption(label) {
       return driver.$(`~${label}`);
     },
+    async getTaskActionMenuTitle() {
+      return driver.$(`~${TASK_ACTION_MENU_TITLE}`);
+    },
+    async getTaskActionOption(label) {
+      return driver.$(`~${label}`);
+    },
     async getTaskInput() {
       return driver.$(selectors.taskInput);
     },
@@ -218,7 +229,10 @@ function createRelayUi(driver: Browser): RelayUi {
       return driver.$(selectors.taskDetailScreen);
     },
     async getTaskDetailActivity() {
-      return driver.$(selectors.taskDetailTitle);
+      return driver.$(selectors.taskTitleButton);
+    },
+    async getTaskMoreButton() {
+      return driver.$(selectors.taskMoreButton);
     },
     async getTaskRowById(taskId) {
       return driver.$(`~mobile.task-row.${taskId}`);
@@ -242,6 +256,31 @@ function createRelayUi(driver: Browser): RelayUi {
       return driver.waitUntil(condition, options);
     }
   };
+}
+
+export async function verifyRelayTaskActionMenuJourney(
+  ui: Pick<
+    RelayUi,
+    | "getTaskActionMenuTitle"
+    | "getTaskActionOption"
+    | "getTaskMoreButton"
+  >,
+): Promise<void> {
+  const taskMore = await ui.getTaskMoreButton();
+  await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await taskMore.click();
+
+  const menuTitle = await ui.getTaskActionMenuTitle();
+  await menuTitle.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  for (const label of TASK_ACTION_LABELS) {
+    const option = await ui.getTaskActionOption(label);
+    await option.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    if (label === "Cancel") {
+      await option.click();
+    }
+  }
+
+  await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 }
 
 export async function verifyRelayQuickReplyJourney(
@@ -941,6 +980,7 @@ export async function runRelayTaskFlow(
     closeTask: () => returnToTaskListShell(ui),
   });
   await openRelayFixtureTask(ui, options.fixture.taskId);
+  await verifyRelayTaskActionMenuJourney(ui);
   await waitForTaskTerminalLive(ui);
   await waitForRenderedPtyTerminal(ui, options.fixture);
   await options.emitFilePreviewLinks();

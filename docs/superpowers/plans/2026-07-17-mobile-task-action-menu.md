@@ -253,3 +253,80 @@ Expected: the mobile Vitest suite passes. Preserve the focused green evidence an
 - [x] **Step 6: Final hygiene and scope review**
 
 Run `git diff --check`, `git status --short`, and review the diff for the two new helper files, four modified mobile files, the design spec, and this plan. Confirm there is no request-revision UI, merge-agent action, global More change, physical-device action, commit, push, or pipeline transition.
+
+### Task 4: Relay Appium Task-Action Journey
+
+**Files:**
+- Modify: `apps/mobile/e2e/helpers/selectors.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.test.ts`
+
+- [x] **Step 1: Write the failing relay-journey helper test**
+
+Import `verifyRelayTaskActionMenuJourney` into `relay-task-flow.test.ts`. Add a test with a fake plus button, native title, and three native menu options. Track calls and assert this exact journey:
+
+```ts
+expect(calls).toEqual([
+  "more.waitForDisplayed",
+  "more.click",
+  "title.waitForDisplayed",
+  "ui.getTaskActionOption:Advance Stage",
+  "Advance Stage.waitForDisplayed",
+  "ui.getTaskActionOption:Close Task",
+  "Close Task.waitForDisplayed",
+  "ui.getTaskActionOption:Cancel",
+  "Cancel.waitForDisplayed",
+  "Cancel.click",
+  "more.waitForDisplayed",
+]);
+```
+
+- [x] **Step 2: Verify RED**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test e2e/specs/relay/relay-task-flow.test.ts
+```
+
+Expected: FAIL because `verifyRelayTaskActionMenuJourney` has not been exported.
+
+- [x] **Step 3: Implement the minimal Appium journey helper**
+
+Add `taskMoreButton` to the shared selector table. Extend `RelayUi` and `createRelayUi` with accessors for the task actions button, the native `Task Actions` title, and native options by label. Export a helper that waits for the detail-only plus button, taps it, waits for all three entries, clicks Cancel, and waits for the same plus button again to prove the task detail remains active. Invoke it in `runRelayTaskFlow` after the exact relay task has been reopened and before terminal assertions. Keep the activity accessor aligned with the accessible title button that owns `accessibilityValue`.
+
+- [x] **Step 4: Verify GREEN and focused coverage**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test src/screens/taskActionMenu.test.ts src/screens/TaskScreen.test.tsx src/App.component.test.tsx e2e/specs/relay/relay-task-flow.test.ts
+pnpm --dir apps/mobile typecheck
+```
+
+Expected: all selected tests pass and TypeScript reports no errors.
+
+- [ ] **Step 5: Run the canonical Appium relay lane**
+
+Run:
+
+```bash
+./kd test remote-e2e --dev --mobile-relay
+```
+
+Expected: the kd-managed mobile relay lane boots its isolated Appium, simulator, Metro, Firebase, relay, and desktop-owner fixtures and completes the relay task journey.
+
+- [x] **Step 6: Run repository regressions**
+
+Run:
+
+```bash
+pnpm test
+cd crates/daemon && cargo test -- --test-threads=1
+```
+
+Expected: both requested repository-level suites pass.
+
+- [x] **Step 7: Review scope and hygiene**
+
+Run `git diff --check`, inspect `git status --short`, and review the diff. Confirm the revision changes only the existing design/plan and relay Appium coverage, preserves focused unit/component tests, does not invoke Advance Stage or Close Task during E2E, and does not commit, push, or transition the task.

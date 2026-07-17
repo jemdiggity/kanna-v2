@@ -36,4 +36,5 @@ The new menu does not introduce another action state or transport path. Existing
 - Unit-test the task-action helper on iOS and non-iOS, including labels, destructive/cancel indices, and dispatch.
 - Extend `TaskScreen` tests to prove `+` opens the task action menu and routes each selection to the corresponding callback.
 - Extend the app component test to prove the callbacks use the selected task id and no longer call `showView("more")`.
+- Extend the relay-backed Appium task journey to open a specific task, tap `mobile.task-more-button`, observe the native `Task Actions` sheet with Advance Stage, Close Task, and Cancel, dismiss it with Cancel, and verify the same task detail remains displayed. The journey observes but does not invoke the mutating task actions so the existing relay fixture can continue through its terminal, file-preview, and quick-reply assertions.
 - Run the focused mobile test files, then the mobile test suite or repository-level checks practical for the change.
