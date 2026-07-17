@@ -1419,6 +1419,15 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
     let blocker_head = String::from_utf8_lossy(&blocker_head.stdout)
         .trim()
         .to_string();
+    let db = Db::open(&config.db_path).unwrap();
+    db.upsert_worktree(
+        "wt-task-a",
+        "task-a",
+        &blocker_worktree_path.to_string_lossy(),
+        "task-a-stage",
+    )
+    .unwrap();
+    drop(db);
 
     let state = Arc::new(super::AppState::new(config.clone()));
     let app = super::router(Arc::clone(&state));
@@ -1562,6 +1571,11 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
     let blocker = db.get_pipeline_item("task-a").unwrap().unwrap();
     assert!(blocker.closed_at.is_none());
     assert_eq!(blocker.stage.as_deref(), Some("pr"));
+    assert_eq!(blocker.branch.as_deref(), Some("task-a-stage"));
+    assert_eq!(
+        db.get_pipeline_item_pr_branch("task-a").unwrap().as_deref(),
+        Some("task-a-pr")
+    );
     assert_eq!(
         blocker.pr_url.as_deref(),
         Some("https://github.com/acme/repo/pull/7")
@@ -2521,7 +2535,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
 }
 
 #[tokio::test]
-async fn non_conflicting_multi_blocker_merge_starts_dependent_directly() {
+async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -2538,8 +2552,21 @@ async fn non_conflicting_multi_blocker_merge_starts_dependent_directly() {
     );
     let repo_root = std::env::temp_dir().join(format!("kanna-http-clean-multi-{unique}"));
     init_test_git_repo(&repo_root);
-    commit_branch_change(&repo_root, "blocker-a-branch", "a.txt", "from a\n");
-    commit_branch_change(&repo_root, "blocker-b-branch", "b.txt", "from b\n");
+    let blocker_a_worktree =
+        commit_branch_change(&repo_root, "blocker-a-workspace", "a.txt", "from a\n");
+    let blocker_b_worktree =
+        commit_branch_change(&repo_root, "blocker-b-workspace", "b.txt", "from b\n");
+    for (worktree, pr_branch) in [
+        (&blocker_a_worktree, "feat/blocker-a"),
+        (&blocker_b_worktree, "feat/blocker-b"),
+    ] {
+        assert!(Command::new("git")
+            .args(["branch", "-m", pr_branch])
+            .current_dir(worktree)
+            .status()
+            .unwrap()
+            .success());
+    }
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
     let daemon_dir = std::env::temp_dir().join(format!("kanna-http-clean-multi-daemon-{unique}"));
@@ -2567,22 +2594,36 @@ async fn non_conflicting_multi_blocker_merge_starts_dependent_directly() {
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
         .unwrap();
-    for (id, branch) in [
-        ("blocker-a", "blocker-a-branch"),
-        ("blocker-b", "blocker-b-branch"),
+    for (id, stored_branch) in [
+        ("blocker-a", "blocker-a-workspace"),
+        ("blocker-b", "blocker-b-workspace"),
     ] {
         db.insert_test_pipeline_item(
             id,
             "repo-1",
             "blocker prompt",
             Some(id),
-            "in progress",
+            "pr",
             "2026-07-01T00:00:00Z",
         )
         .unwrap();
-        db.update_test_pipeline_item_stage_context(id, branch, "default", None, "claude")
+        db.update_test_pipeline_item_stage_context(id, stored_branch, "default", None, "claude")
             .unwrap();
     }
+    db.upsert_worktree(
+        "wt-blocker-a",
+        "blocker-a",
+        &blocker_a_worktree.to_string_lossy(),
+        "blocker-a-workspace",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-blocker-b",
+        "blocker-b",
+        &blocker_b_worktree.to_string_lossy(),
+        "blocker-b-workspace",
+    )
+    .unwrap();
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
@@ -2610,6 +2651,12 @@ async fn non_conflicting_multi_blocker_merge_starts_dependent_directly() {
         .await
         .unwrap();
     let dependent: CreateTaskResponse = from_slice(&body).unwrap();
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db
+        .get_task_worktree_path(&dependent.task_id)
+        .unwrap()
+        .is_none());
+    drop(db);
 
     let daemon_listener = UnixListener::bind(&socket_path).unwrap();
     let expected_task_id = dependent.task_id.clone();
@@ -2670,6 +2717,28 @@ async fn non_conflicting_multi_blocker_merge_starts_dependent_directly() {
             .status(),
         StatusCode::NO_CONTENT
     );
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(
+        db.get_pipeline_item("blocker-a")
+            .unwrap()
+            .unwrap()
+            .branch
+            .as_deref(),
+        Some("blocker-a-workspace")
+    );
+    assert_eq!(
+        db.get_pipeline_item_pr_branch("blocker-a")
+            .unwrap()
+            .as_deref(),
+        Some("feat/blocker-a")
+    );
+    assert!(!blocker_a_worktree.exists());
+    assert!(db
+        .get_task_worktree_path(&dependent.task_id)
+        .unwrap()
+        .is_none());
+    drop(db);
+
     assert_eq!(
         app.oneshot(
             Request::post("/v1/tasks/blocker-b/actions/close")
@@ -2689,7 +2758,7 @@ async fn non_conflicting_multi_blocker_merge_starts_dependent_directly() {
         .unwrap()
         .is_empty());
     let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
-    assert_eq!(dependent_item.base_ref.as_deref(), Some("blocker-a-branch"));
+    assert_eq!(dependent_item.base_ref.as_deref(), Some("feat/blocker-a"));
     let dependent_worktree = db
         .get_task_worktree_path(&dependent.task_id)
         .unwrap()

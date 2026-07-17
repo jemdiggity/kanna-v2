@@ -161,7 +161,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "026_stage_run_resume");
+    assert_eq!(latest_migration, "027_pipeline_item_pr_branch");
 
     let stage_run_sql: String = db
         .conn
