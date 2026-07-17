@@ -296,6 +296,7 @@ done
 /// stdin protocol, so the daemon interrupts it with SIGINT (the path that used
 /// to be misreported as a crash).
 const CODEX_SLEEPER_AGENT: &str = r#"#!/bin/sh
+trap 'exit 130' INT TERM
 echo '{"type":"thread.started","thread_id":"fake-thread"}'
 echo '{"type":"turn.started"}'
 echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"interim answer"}}'
