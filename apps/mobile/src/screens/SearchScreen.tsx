@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import { ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
@@ -6,6 +6,7 @@ import { TaskList } from "../components/TaskList";
 import { projectTaskUiSlots } from "../state/taskUiSlots";
 
 interface SearchScreenProps {
+  focusRequestKey: number;
   query: string;
   results: TaskSummary[];
   onChangeQuery(query: string): void;
@@ -13,11 +14,20 @@ interface SearchScreenProps {
 }
 
 export function SearchScreen({
+  focusRequestKey,
   query,
   results,
   onChangeQuery,
   onOpenTask
 }: SearchScreenProps) {
+  const inputRef = useRef<TextInput>(null);
+
+  useEffect(() => {
+    if (focusRequestKey > 0) {
+      inputRef.current?.focus();
+    }
+  }, [focusRequestKey]);
+
   return (
     <ScrollView
       contentContainerStyle={styles.content}
@@ -31,6 +41,7 @@ export function SearchScreen({
           Search tasks by title or prompt content across the paired desktop.
         </Text>
         <TextInput
+          ref={inputRef}
           autoCapitalize="none"
           onChangeText={onChangeQuery}
           placeholder="Search tasks"

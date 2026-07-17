@@ -259,6 +259,26 @@ describe("App component wiring", () => {
     expect(safeArea.findAllByType("View", { deep: false })).toHaveLength(1);
   });
 
+  it("requests search input focus for every magnifier tap", async () => {
+    const { model } = createModel("connected");
+    const renderer = await mountModel(model);
+    const toolbar = renderer.root.findByType("FloatingToolbar");
+
+    await act(async () => {
+      toolbar.props.onSelectUtilityAction("search");
+    });
+
+    expect(renderer.root.findByType("SearchScreen").props.focusRequestKey).toBe(1);
+
+    await act(async () => {
+      renderer.root
+        .findByType("FloatingToolbar")
+        .props.onSelectUtilityAction("search");
+    });
+
+    expect(renderer.root.findByType("SearchScreen").props.focusRequestKey).toBe(2);
+  });
+
   it("creates tasks with geometry derived from the measured task-detail surface", async () => {
     const { controller, model } = createModel("connected");
     controller.openComposer();

@@ -69,6 +69,7 @@ export default function App() {
   const { controller, navigator } = model;
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
   const [forceCloudEnabled, setForceCloudEnabled] = useState(resolveForceCloud());
+  const [searchFocusRequestKey, setSearchFocusRequestKey] = useState(0);
   const [updatePromptVisible, setUpdatePromptVisible] = useState(false);
   const lastOtaCheckAtRef = useRef<number | null>(null);
   const hasDownloadedUpdateRef = useRef(false);
@@ -260,6 +261,7 @@ export default function App() {
       case "search":
         return (
           <SearchScreen
+            focusRequestKey={searchFocusRequestKey}
             query={state.searchQuery}
             results={state.searchResults}
             onChangeQuery={(query) => {
@@ -364,6 +366,7 @@ export default function App() {
             onSelectTab={(tab) => controller.showView(tab)}
             onSelectUtilityAction={(action) => {
               if (action === "search") {
+                setSearchFocusRequestKey((requestKey) => requestKey + 1);
                 controller.showView("search");
                 return;
               }
