@@ -814,7 +814,6 @@ export function createRemoteTransport({
       if (listCloudTasks) {
         let closed = false;
         let activeSubscription: TaskCompanionSubscription | null = null;
-        const pendingEvents: Parameters<TaskCompanionSubscription["sendEvent"]>[] = [];
 
         void resolveCloudTaskRoute(taskId)
           .then((resolvedRoute) => {
@@ -828,9 +827,6 @@ export function createRemoteTransport({
               { desktopId: targetRoute.desktopId, taskId: targetRoute.taskId },
               translate
             );
-            for (const args of pendingEvents.splice(0)) {
-              activeSubscription.sendEvent(...args);
-            }
             if (closed) activeSubscription.close();
           })
           .catch((error) => {
@@ -846,16 +842,14 @@ export function createRemoteTransport({
         return {
           close() {
             closed = true;
-            pendingEvents.length = 0;
             activeSubscription?.close();
           },
           sendEvent(sessionId, revision, event) {
-            if (closed) return;
+            if (closed) return false;
             if (activeSubscription) {
-              activeSubscription.sendEvent(sessionId, revision, event);
-            } else {
-              pendingEvents.push([sessionId, revision, event]);
+              return activeSubscription.sendEvent(sessionId, revision, event);
             }
+            return false;
           }
         };
       }

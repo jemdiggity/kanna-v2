@@ -51,14 +51,14 @@ describe("createRelayDesktopClient", () => {
         html: "<button data-choice='a'>A</button>"
       })
     });
-    subscription.sendEvent("123-456", "rev-1", {
+    expect(subscription.sendEvent("123-456", "rev-1", {
       event_id: "event-1",
       type: "click",
       choice: "a",
       text: "A",
       id: null,
       timestamp: 1
-    });
+    })).toBe(true);
     subscription.close();
 
     const frames = vi.mocked(socket.send).mock.calls.map(([payload]) =>
@@ -79,6 +79,7 @@ describe("createRelayDesktopClient", () => {
       kind: "companion"
     });
     expect(events).toEqual([
+      { type: "connection", taskId: "task-1", connected: true },
       expect.objectContaining({
         type: "snapshot",
         taskId: "task-1",

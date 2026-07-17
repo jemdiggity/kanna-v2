@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { Window } from "happy-dom";
 import {
   createRelayDesktopClient,
   type RelaySocketLike
@@ -95,7 +96,7 @@ const snapshot = {
 };
 
 function renderModal(overrides: Partial<{
-  status: "available" | "unavailable" | "error";
+  status: "available" | "unavailable" | "reconnecting" | "error";
   snapshot: typeof snapshot | null;
   errorMessage: string | null;
   eventStatus: "idle" | "sending" | "sent" | "error";
@@ -347,6 +348,65 @@ describe("VisualCompanionModal", () => {
     client.close();
   });
 
+  it("carries byte-bounded Unicode from the WebView bridge through the relay stream", async () => {
+    const socket = createRelaySocket();
+    const client = createRelayDesktopClient({
+      createSocket: () => socket,
+      getIdToken: async () => "id-token-1",
+      relayUrl: "wss://relay.example"
+    });
+    const companion = client.observeTaskCompanion(
+      { desktopId: "desktop-1", taskId: "task-1" },
+      () => {}
+    );
+    socket.onopen?.();
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await flushPromises();
+
+    const choice = "界".repeat(86);
+    const id = "é".repeat(129);
+    const text = "🙂".repeat(1025);
+    const webView = findByType(
+      renderModal({
+        snapshot: {
+          ...snapshot,
+          html: `<button id="${id}" data-choice="${choice}">${text}</button>`
+        },
+        onSendEvent: (sessionId, revision, event) =>
+          companion.sendEvent(sessionId, revision, event)
+      }),
+      "WebView"
+    );
+    const onMessage = webView?.props?.onMessage as (message: unknown) => void;
+    const window = new Window();
+    (window as unknown as {
+      ReactNativeWebView: { postMessage(message: string): void };
+    }).ReactNativeWebView = {
+      postMessage(data) {
+        onMessage(bridgeMessage(data));
+      }
+    };
+    window.document.write((webView?.props?.source as { html: string }).html);
+    window.eval(
+      window.document.querySelector("#kanna-companion-bridge")?.textContent ?? ""
+    );
+    window.document.querySelector<HTMLButtonElement>("button")?.click();
+
+    const frames = vi.mocked(socket.send).mock.calls.map(([payload]) =>
+      JSON.parse(payload) as Record<string, any>
+    );
+    const sent = frames.find((frame) => frame.type === "companion_event");
+    expect(sent).toBeDefined();
+    expect(new TextEncoder().encode(sent!.event.choice)).toHaveLength(255);
+    expect(new TextEncoder().encode(sent!.event.text)).toHaveLength(4096);
+    expect(new TextEncoder().encode(sent!.event.id)).toHaveLength(256);
+    client.close();
+  });
+
   it("shows a local send failure without replacing the companion", () => {
     const onSendEvent = vi.fn(() => {
       throw new Error("relay unavailable");
@@ -385,5 +445,13 @@ describe("VisualCompanionModal", () => {
     (findByTestId(tree, "mobile.visual-companion.close")?.props?.onPress as () => void)();
     (findByType(tree, "Modal")?.props?.onRequestClose as () => void)();
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows reconnecting without leaving stale companion controls active", () => {
+    const tree = renderModal({ status: "reconnecting", snapshot: null });
+
+    expect(findByType(tree, "WebView")).toBeNull();
+    expect(findByTestId(tree, "mobile.visual-companion.status")?.props?.children)
+      .toBe("Reconnecting to visual companion…");
   });
 });

@@ -84,6 +84,7 @@ export interface CompanionStreamHandlers {
   onSnapshot(snapshot: CompanionSnapshot): void;
   onUnavailable(): void;
   onEventResult(result: CompanionEventResult): void;
+  onConnectionChange?(connected: boolean): void;
   onError?(code: string, message: string): void;
 }
 
@@ -239,8 +240,9 @@ export class StreamClient {
     sessionId: string,
     revision: string,
     event: CompanionEvent,
-  ): void {
-    this.sendFrame({
+  ): boolean {
+    if (!this.authed || !this.socket) return false;
+    return this.rawSend({
       type: "companion_event",
       task_id: taskId,
       session_id: sessionId,
@@ -308,6 +310,11 @@ export class StreamClient {
     const wasAuthed = this.authed;
     this.authed = false;
     this.options.onConnectionChange?.(false);
+    for (const attachment of this.attachments.values()) {
+      if (attachment.kind === "companion") {
+        attachment.handlers.onConnectionChange?.(false);
+      }
+    }
     this.failPendingRequests(new Error("stream disconnected"));
 
     // An auth-failure close (or a local credential fetch failure) before we
@@ -386,6 +393,11 @@ export class StreamClient {
         this.forceRefreshNextAuth = false;
         this.authRetryConsumed = false;
         this.options.onConnectionChange?.(true);
+        for (const attachment of this.attachments.values()) {
+          if (attachment.kind === "companion") {
+            attachment.handlers.onConnectionChange?.(true);
+          }
+        }
         // Re-attach everything we track, resuming agent streams from the
         // last seen seq, then flush queued frames.
         for (const [key, attachment] of this.attachments) {
@@ -521,12 +533,14 @@ export class StreamClient {
     this.rawSend(frame);
   }
 
-  private rawSend(frame: ClientFrame, socket = this.socket): void {
+  private rawSend(frame: ClientFrame, socket = this.socket): boolean {
     try {
-      if (socket !== this.socket) return;
-      socket?.send(JSON.stringify(frame));
+      if (socket !== this.socket || !socket) return false;
+      socket.send(JSON.stringify(frame));
+      return true;
     } catch {
       // Socket died between checks; the close handler reconnects.
+      return false;
     }
   }
 }

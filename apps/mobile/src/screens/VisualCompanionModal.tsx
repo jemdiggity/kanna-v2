@@ -175,13 +175,15 @@ export function VisualCompanionModal({
         ? "Sending selection…"
         : eventStatus === "sent"
           ? "Selection sent."
-          : status === "unavailable"
-            ? "This visual companion has ended."
-            : status === "error" && !snapshot
-              ? "The visual companion is unavailable."
-              : !snapshot
-                ? "Waiting for visual companion…"
-                : null;
+          : status === "reconnecting"
+            ? "Reconnecting to visual companion…"
+            : status === "unavailable"
+              ? "This visual companion has ended."
+              : status === "error" && !snapshot
+                ? "The visual companion is unavailable."
+                : !snapshot
+                  ? "Waiting for visual companion…"
+                  : null;
 
   const handleMessage = (message: WebViewMessageEvent) => {
     if (!snapshot) return;
@@ -265,6 +267,8 @@ export function VisualCompanionModal({
             <Text style={styles.emptyStateText}>
               {status === "unavailable"
                 ? "Return to the task to continue."
+                : status === "reconnecting"
+                  ? "Interaction will resume after the latest screen loads."
                 : "The view will appear here when it is ready."}
             </Text>
           </View>

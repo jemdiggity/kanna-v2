@@ -182,8 +182,11 @@ export interface MobileRelayHarness {
   filePreview: MobileRelayFilePreviewFixture;
   companion: {
     fixture: MobileRelayCompanionFixture;
+    disconnect(): Promise<void>;
+    expectNoEvent(choice: string): Promise<void>;
     reconnect(): Promise<void>;
     replaceHtml(): Promise<void>;
+    resume(): Promise<void>;
     stop(): Promise<void>;
     waitForEvent(choice: string, timeoutMs?: number): Promise<Record<string, unknown>>;
   };
@@ -470,13 +473,24 @@ export async function startMobileRelayHarness(
       filePreview: MOBILE_RELAY_FILE_PREVIEW_FIXTURE,
       companion: {
         fixture: MOBILE_RELAY_COMPANION_FIXTURE,
-        async reconnect() {
-          await resumeMobileRelayCompanion(localTask);
+        async disconnect() {
           await harness.stopServer();
+        },
+        async expectNoEvent(choice) {
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          const events = await readMobileRelayCompanionEvents(localTask);
+          if (events.some((candidate) => candidate.choice === choice)) {
+            throw new Error(
+              `Visual companion event ${JSON.stringify(choice)} was delivered before an explicit retry`
+            );
+          }
+        },
+        async reconnect() {
           await harness.startServer();
           await harness.waitForDesktop();
         },
         replaceHtml: () => replaceMobileRelayCompanion(localTask),
+        resume: () => resumeMobileRelayCompanion(localTask),
         stop: () => stopMobileRelayCompanion(localTask),
         async waitForEvent(choice, timeoutMs = 10_000) {
           const deadline = Date.now() + timeoutMs;

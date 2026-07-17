@@ -433,6 +433,9 @@ export function createRelayDesktopClient({
         onEventResult(result) {
           listener({ type: "event_result", taskId, ...result });
         },
+        onConnectionChange(connected) {
+          listener({ type: "connection", taskId, connected });
+        },
         onError(code, message) {
           listener({ type: "error", taskId, code, message });
         }
@@ -443,7 +446,7 @@ export function createRelayDesktopClient({
           client.detach(taskId, "companion");
         },
         sendEvent(sessionId, revision, event) {
-          client.sendCompanionEvent(taskId, sessionId, revision, event);
+          return client.sendCompanionEvent(taskId, sessionId, revision, event);
         }
       } satisfies TaskCompanionSubscription;
     }

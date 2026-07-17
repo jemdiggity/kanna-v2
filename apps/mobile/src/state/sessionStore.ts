@@ -78,6 +78,7 @@ export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "er
 export type TaskCompanionStatus =
   | "idle"
   | "connecting"
+  | "reconnecting"
   | "available"
   | "unavailable"
   | "error";
@@ -1103,6 +1104,25 @@ export function createSessionStore(): SessionStore {
     },
     applyTaskCompanionStreamEvent(taskId, event, isOpen) {
       if (state.taskCompanionTaskId !== taskId) return;
+
+      if (event.type === "connection") {
+        if (event.connected) return;
+        const selectionWasSending =
+          state.taskCompanionEventStatus === "sending";
+        state = {
+          ...state,
+          taskCompanionStatus: "reconnecting",
+          taskCompanionSnapshot: null,
+          taskCompanionUnread: false,
+          taskCompanionErrorMessage: selectionWasSending
+            ? "Connection lost before the selection was confirmed. Retry after reconnecting."
+            : null,
+          taskCompanionEventId: null,
+          taskCompanionEventStatus: selectionWasSending ? "error" : "idle"
+        };
+        publish();
+        return;
+      }
 
       if (event.type === "snapshot") {
         const revisionChanged =

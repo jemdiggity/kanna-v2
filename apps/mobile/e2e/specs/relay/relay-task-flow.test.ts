@@ -200,7 +200,7 @@ describe("Tasks-tab creation ordering journey", () => {
 });
 
 describe("relay visual companion journey", () => {
-  it("opens, selects, updates, ends, and restores through one UI flow", async () => {
+  it("blocks offline selection until a fresh snapshot and explicit retry", async () => {
     const calls: string[] = [];
     let text = "Initial relay visual companion";
     const ui = {
@@ -213,9 +213,16 @@ describe("relay visual companion journey", () => {
       clickChoice: vi.fn(async (choice: string) => {
         calls.push(`click:${choice}`);
       }),
+      tryClickChoice: vi.fn(async () => {
+        calls.push("offline-click-blocked");
+        return false;
+      }),
       readDocumentText: vi.fn(async () => text),
       waitForEnded: vi.fn(async () => {
         calls.push("ended");
+      }),
+      waitForReconnecting: vi.fn(async () => {
+        calls.push("reconnecting");
       }),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (await condition()) return;
@@ -223,8 +230,17 @@ describe("relay visual companion journey", () => {
       })
     };
     const actions = {
+      disconnect: vi.fn(async () => {
+        calls.push("disconnect");
+      }),
+      expectNoEvent: vi.fn(async (choice: string) => {
+        calls.push(`no-event:${choice}`);
+      }),
       reconnect: vi.fn(async () => {
         calls.push("reconnect");
+      }),
+      resume: vi.fn(async () => {
+        calls.push("resume");
       }),
       replaceHtml: vi.fn(async () => {
         calls.push("replace");
@@ -251,12 +267,18 @@ describe("relay visual companion journey", () => {
 
     expect(calls).toEqual([
       "open",
+      "disconnect",
+      "reconnecting",
+      "offline-click-blocked",
+      "no-event:relay-layout-a",
+      "reconnect",
+      "no-event:relay-layout-a",
       "click:relay-layout-a",
       "event:relay-layout-a",
       "replace",
       "stop",
       "ended",
-      "reconnect",
+      "resume",
       "close"
     ]);
   });

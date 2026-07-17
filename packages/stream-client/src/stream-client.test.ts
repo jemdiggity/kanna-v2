@@ -372,6 +372,54 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("drops companion selections across disconnect and requires a fresh explicit send", () => {
+    const { client, socket } = connectedClient();
+    const connectionChanges: boolean[] = [];
+    client.attachCompanion("task-1", {
+      onSnapshot: () => {},
+      onUnavailable: () => {},
+      onEventResult: () => {},
+      onConnectionChange: (connected) => connectionChanges.push(connected),
+    });
+    const event: CompanionEvent = {
+      event_id: "event-offline",
+      type: "click",
+      choice: "a",
+      text: "Option A",
+      id: null,
+      timestamp: 1_784_268_000_000,
+    };
+
+    socket.drop();
+    expect(connectionChanges).toEqual([false]);
+    expect(
+      client.sendCompanionEvent("task-1", "session-1", "rev-1", event),
+    ).toBe(false);
+
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    socket2.open();
+    socket2.receive({ type: "auth_ok" });
+
+    expect(connectionChanges).toEqual([false, true]);
+    expect(socket2.sent).toEqual([
+      { type: "auth" },
+      { type: "attach", task_id: "task-1", kind: "companion", from_seq: 0 },
+    ]);
+    expect(
+      client.sendCompanionEvent("task-1", "session-1", "rev-2", {
+        ...event,
+        event_id: "event-retry",
+      }),
+    ).toBe(true);
+    expect(socket2.sent.at(-1)).toMatchObject({
+      type: "companion_event",
+      revision: "rev-2",
+      event: { event_id: "event-retry" },
+    });
+    client.close();
+  });
+
   it("sends terminal input and resize frames over the stream", () => {
     const { client, socket } = connectedClient();
 

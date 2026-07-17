@@ -90,7 +90,7 @@ function createCompanionSubscriptionMock(): {
   return {
     subscription: {
       close: vi.fn(),
-      sendEvent: vi.fn(),
+      sendEvent: vi.fn(() => true),
       setListener(nextListener: (event: TaskCompanionStreamEvent) => void) {
         listener = nextListener;
       }
@@ -4475,6 +4475,120 @@ describe("createMobileController", () => {
     controller.sendTaskCompanionEvent("task-1", "123-456", "rev-1", event);
     expect(client.__companionStream.subscription.sendEvent).toHaveBeenCalledOnce();
     expect(store.getState().taskCompanionStatus).toBe("idle");
+  });
+
+  it("requires a fresh companion snapshot and explicit retry after reconnect", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const event = {
+      event_id: "event-offline",
+      type: "click" as const,
+      choice: "a",
+      text: "A",
+      id: null,
+      timestamp: 1
+    };
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__companionStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "session-1",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: '<button data-choice="a">A</button>'
+    });
+    client.__companionStream.emit({
+      type: "connection",
+      taskId: "task-1",
+      connected: false
+    });
+
+    controller.sendTaskCompanionEvent(
+      "task-1",
+      "session-1",
+      "rev-1",
+      event
+    );
+    expect(client.__companionStream.subscription.sendEvent).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "reconnecting",
+      taskCompanionSnapshot: null
+    });
+
+    client.__companionStream.emit({
+      type: "connection",
+      taskId: "task-1",
+      connected: true
+    });
+    controller.sendTaskCompanionEvent(
+      "task-1",
+      "session-1",
+      "rev-1",
+      event
+    );
+    expect(client.__companionStream.subscription.sendEvent).not.toHaveBeenCalled();
+
+    client.__companionStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "session-1",
+      revision: "rev-2",
+      documentKind: "fragment",
+      html: '<button data-choice="a">A again</button>'
+    });
+    controller.sendTaskCompanionEvent(
+      "task-1",
+      "session-1",
+      "rev-2",
+      { ...event, event_id: "event-retry" }
+    );
+    expect(client.__companionStream.subscription.sendEvent).toHaveBeenCalledOnce();
+    expect(client.__companionStream.subscription.sendEvent).toHaveBeenCalledWith(
+      "session-1",
+      "rev-2",
+      expect.objectContaining({ event_id: "event-retry" })
+    );
+    expect(store.getState()).toMatchObject({
+      taskCompanionEventId: "event-retry",
+      taskCompanionEventStatus: "sending"
+    });
+  });
+
+  it("fails a companion selection immediately when the transport is offline", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    vi.mocked(client.__companionStream.subscription.sendEvent).mockReturnValue(false);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__companionStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "session-1",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: '<button data-choice="a">A</button>'
+    });
+    controller.sendTaskCompanionEvent("task-1", "session-1", "rev-1", {
+      event_id: "event-1",
+      type: "click",
+      choice: "a",
+      text: "A",
+      id: null,
+      timestamp: 1
+    });
+
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "reconnecting",
+      taskCompanionSnapshot: null,
+      taskCompanionEventStatus: "error",
+      taskCompanionErrorMessage:
+        "Connection lost before the selection was confirmed. Retry after reconnecting."
+    });
   });
 
   it("stores desktop PTY dimensions from an authoritative snapshot", async () => {

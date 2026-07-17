@@ -47,8 +47,11 @@ interface RelayTaskFlowOptions {
 }
 
 interface RelayVisualCompanionActions {
+  disconnect(): Promise<void>;
+  expectNoEvent(choice: string): Promise<void>;
   reconnect(): Promise<void>;
   replaceHtml(): Promise<void>;
+  resume(): Promise<void>;
   stop(): Promise<void>;
   waitForEvent(choice: string): Promise<unknown>;
 }
@@ -58,7 +61,9 @@ interface RelayVisualCompanionUi {
   close(): Promise<void>;
   open(): Promise<void>;
   readDocumentText(): Promise<string>;
+  tryClickChoice(choice: string): Promise<boolean>;
   waitForEnded(): Promise<void>;
+  waitForReconnecting(): Promise<void>;
   waitUntil(
     condition: () => Promise<boolean>,
     options: { interval: number; timeout: number; timeoutMsg: string }
@@ -549,11 +554,25 @@ function createVisualCompanionUi(driver: Browser): RelayVisualCompanionUi {
         await element.click();
       });
     },
+    async tryClickChoice(choice) {
+      try {
+        await this.clickChoice(choice);
+        return true;
+      } catch {
+        return false;
+      }
+    },
     waitForEnded: () =>
       expectNativeText(
         driver,
         selectors.visualCompanionStatus,
         "This visual companion has ended."
+      ),
+    waitForReconnecting: () =>
+      expectNativeText(
+        driver,
+        selectors.visualCompanionStatus,
+        "Reconnecting to visual companion…"
       ),
     waitUntil: (condition, options) => driver.waitUntil(condition, options)
   };
@@ -586,6 +605,16 @@ export async function verifyRelayVisualCompanionJourney(
 ): Promise<void> {
   await ui.open();
   await waitForCompanionMarker(ui, fixture.initialMarker);
+  await actions.disconnect();
+  await ui.waitForReconnecting();
+  if (await ui.tryClickChoice(fixture.choice)) {
+    throw new Error("A stale visual companion choice remained interactive offline");
+  }
+  await actions.expectNoEvent(fixture.choice);
+
+  await actions.reconnect();
+  await waitForCompanionMarker(ui, fixture.initialMarker);
+  await actions.expectNoEvent(fixture.choice);
   await ui.clickChoice(fixture.choice);
   await actions.waitForEvent(fixture.choice);
 
@@ -595,7 +624,7 @@ export async function verifyRelayVisualCompanionJourney(
   await actions.stop();
   await ui.waitForEnded();
 
-  await actions.reconnect();
+  await actions.resume();
   await waitForCompanionMarker(ui, fixture.updatedMarker);
   await ui.close();
 }

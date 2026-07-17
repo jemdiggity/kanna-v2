@@ -51,6 +51,7 @@ export interface TaskAgentSubscription {
 }
 
 export type TaskCompanionStreamEvent =
+  | { type: "connection"; taskId: string; connected: boolean }
   | {
       type: "snapshot";
       taskId: string;
@@ -72,7 +73,7 @@ export type TaskCompanionStreamEvent =
 
 export interface TaskCompanionSubscription {
   close(): void;
-  sendEvent(sessionId: string, revision: string, event: CompanionEvent): void;
+  sendEvent(sessionId: string, revision: string, event: CompanionEvent): boolean;
 }
 
 export interface KannaTransport {

@@ -2199,8 +2199,24 @@ export function createMobileController(
 
     sendTaskCompanionEvent(taskId, sessionId, revision, event) {
       if (activeTaskCompanion?.taskId !== taskId) return;
+      const companionState = store.getState();
+      if (
+        companionState.taskCompanionStatus !== "available" ||
+        companionState.taskCompanionSnapshot?.sessionId !== sessionId ||
+        companionState.taskCompanionSnapshot.revision !== revision
+      ) {
+        return;
+      }
       store.beginTaskCompanionEvent(taskId, event.event_id);
-      activeTaskCompanion.subscription.sendEvent(sessionId, revision, event);
+      if (
+        !activeTaskCompanion.subscription.sendEvent(sessionId, revision, event)
+      ) {
+        store.applyTaskCompanionStreamEvent(
+          taskId,
+          { type: "connection", taskId, connected: false },
+          false
+        );
+      }
     },
 
     async closeDesktopTask(taskId) {

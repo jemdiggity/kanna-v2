@@ -553,17 +553,21 @@ describe("createLanTransport", () => {
         accepted: true
       } satisfies ServerFrame)
     });
-    subscription.sendEvent("123-456", "rev-1", {
+    const event = {
       event_id: "event-1",
       type: "click",
       choice: "a",
       text: "A",
       id: null,
       timestamp: 1
-    });
+    } as const;
+    expect(subscription.sendEvent("123-456", "rev-1", event)).toBe(true);
+    socket.onclose?.({});
+    expect(subscription.sendEvent("123-456", "rev-1", event)).toBe(false);
     subscription.close();
 
     expect(events).toEqual([
+      { type: "connection", taskId: "task-1", connected: true },
       {
         type: "snapshot",
         taskId: "task-1",
@@ -572,7 +576,8 @@ describe("createLanTransport", () => {
         documentKind: "fragment",
         html: "<button data-choice='a'>A</button>"
       },
-      { type: "event_result", taskId: "task-1", eventId: "event-1", accepted: true }
+      { type: "event_result", taskId: "task-1", eventId: "event-1", accepted: true },
+      { type: "connection", taskId: "task-1", connected: false }
     ]);
     expect(sent).toContainEqual({
       type: "attach",
@@ -583,10 +588,6 @@ describe("createLanTransport", () => {
     expect(sent).toContainEqual(
       expect.objectContaining({ type: "companion_event", task_id: "task-1" })
     );
-    expect(sent).toContainEqual({
-      type: "detach",
-      task_id: "task-1",
-      kind: "companion"
-    });
+    expect(sent.filter((frame) => frame.type === "companion_event")).toHaveLength(1);
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Window } from "happy-dom";
 import { buildVisualCompanionDocument } from "./buildVisualCompanionDocument";
 
@@ -96,13 +96,50 @@ describe("buildVisualCompanionDocument", () => {
     );
     expect(document).toContain("type: 'companion-event'");
     expect(document).toContain("type: 'click'");
-    expect(document).toContain("choice: target.dataset.choice");
-    expect(document).toContain("text: (target.textContent || '').trim().slice(0, 4096)");
-    expect(document).toContain("id: target.id ? target.id.slice(0, 256) : null");
+    expect(document).toContain("choice: truncateUtf8(target.dataset.choice, 256)");
+    expect(document).toContain(
+      "text: truncateUtf8((target.textContent || '').trim(), 4096)"
+    );
+    expect(document).toContain(
+      "id: target.id ? truncateUtf8(target.id, 256) : null"
+    );
     expect(document).toContain("timestamp: Date.now()");
     expect(document).toContain("window.ReactNativeWebView.postMessage(JSON.stringify(message))");
     expect(document).not.toContain("new WebSocket");
     expect(document).not.toContain("window.brainstorm");
+  });
+
+  it("truncates bridge strings at UTF-8 byte boundaries without splitting code points", () => {
+    const choice = "界".repeat(86);
+    const text = "🙂".repeat(1025);
+    const id = "é".repeat(129);
+    const document = buildVisualCompanionDocument({
+      documentKind: "fragment",
+      html: `<button id="${id}" data-choice="${choice}">${text}</button>`
+    });
+    const window = new Window();
+    const postMessage = vi.fn();
+    (window as unknown as {
+      ReactNativeWebView: { postMessage(message: string): void };
+    }).ReactNativeWebView = { postMessage };
+    window.document.write(document);
+    const bridge = window.document.querySelector<HTMLScriptElement>(
+      "#kanna-companion-bridge"
+    );
+    window.eval(bridge?.textContent ?? "");
+
+    window.document.querySelector<HTMLButtonElement>("button")?.click();
+
+    expect(postMessage).toHaveBeenCalledOnce();
+    const posted = JSON.parse(postMessage.mock.calls[0]![0]) as {
+      event: { choice: string; text: string; id: string };
+    };
+    expect(new TextEncoder().encode(posted.event.choice)).toHaveLength(255);
+    expect(posted.event.choice).toBe("界".repeat(85));
+    expect(new TextEncoder().encode(posted.event.text)).toHaveLength(4096);
+    expect(posted.event.text).toBe("🙂".repeat(1024));
+    expect(new TextEncoder().encode(posted.event.id)).toHaveLength(256);
+    expect(posted.event.id).toBe("é".repeat(128));
   });
 
   it("keeps hostile script-like HTML out of the constant bridge source", () => {

@@ -911,7 +911,7 @@ function createDisconnectedClient(): KannaClient {
         code: "desktop_unavailable",
         message: "No trusted desktop is available."
       });
-      return { close() {}, sendEvent() {} };
+      return { close() {}, sendEvent: () => false };
     }
   };
 }

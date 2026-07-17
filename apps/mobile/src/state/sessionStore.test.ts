@@ -504,6 +504,67 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("invalidates companion content across reconnect until a fresh snapshot arrives", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-1");
+    store.applyTaskCompanionStreamEvent(
+      "task-1",
+      {
+        type: "snapshot",
+        taskId: "task-1",
+        sessionId: "session-1",
+        revision: "rev-1",
+        documentKind: "fragment",
+        html: '<button data-choice="a">A</button>'
+      },
+      true
+    );
+    store.beginTaskCompanionEvent("task-1", "event-1");
+
+    store.applyTaskCompanionStreamEvent(
+      "task-1",
+      { type: "connection", taskId: "task-1", connected: false },
+      true
+    );
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "reconnecting",
+      taskCompanionSnapshot: null,
+      taskCompanionEventId: null,
+      taskCompanionEventStatus: "error",
+      taskCompanionErrorMessage:
+        "Connection lost before the selection was confirmed. Retry after reconnecting."
+    });
+
+    store.applyTaskCompanionStreamEvent(
+      "task-1",
+      { type: "connection", taskId: "task-1", connected: true },
+      true
+    );
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "reconnecting",
+      taskCompanionSnapshot: null
+    });
+
+    store.applyTaskCompanionStreamEvent(
+      "task-1",
+      {
+        type: "snapshot",
+        taskId: "task-1",
+        sessionId: "session-1",
+        revision: "rev-2",
+        documentKind: "fragment",
+        html: '<button data-choice="a">A again</button>'
+      },
+      true
+    );
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionSnapshot: { revision: "rev-2" },
+      taskCompanionEventStatus: "idle",
+      taskCompanionErrorMessage: null
+    });
+  });
+
   it("clears the selected task when reconciliation finds no remaining collection match", () => {
     const store = createSessionStore();
 

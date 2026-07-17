@@ -74,8 +74,8 @@ describe("remote transport", () => {
     });
   });
 
-  it("resolves, translates, and queues events for an uncached cloud companion route", async () => {
-    const subscription = { close: vi.fn(), sendEvent: vi.fn() };
+  it("resolves an uncached cloud companion route without queueing selections", async () => {
+    const subscription = { close: vi.fn(), sendEvent: vi.fn(() => true) };
     let remoteListener: ((event: any) => void) | undefined;
     const observeTaskCompanion = vi.fn<RemoteTaskCompanionObserver>((_route, listener) => {
       remoteListener = listener;
@@ -105,7 +105,7 @@ describe("remote transport", () => {
       id: null,
       timestamp: 1
     };
-    returned.sendEvent("123-456", "rev-1", event);
+    expect(returned.sendEvent("123-456", "rev-1", event)).toBe(false);
 
     await vi.waitFor(() =>
       expect(observeTaskCompanion).toHaveBeenCalledWith(
@@ -113,6 +113,8 @@ describe("remote transport", () => {
         expect.any(Function)
       )
     );
+    expect(subscription.sendEvent).not.toHaveBeenCalled();
+    expect(returned.sendEvent("123-456", "rev-1", event)).toBe(true);
     expect(subscription.sendEvent).toHaveBeenCalledWith("123-456", "rev-1", event);
     remoteListener?.({ type: "unavailable", taskId: "local-task-1" });
     expect(listener).toHaveBeenCalledWith({

@@ -1286,7 +1286,7 @@ export function createCloudLanClient(
           code: "desktop_unavailable",
           message: route.message
         });
-        return { close() {}, sendEvent() {} };
+        return { close() {}, sendEvent: () => false };
       }
       return route.client.observeTaskCompanion(route.taskId, (event) =>
         listener({ ...event, taskId })

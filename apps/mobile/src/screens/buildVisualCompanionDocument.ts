@@ -171,6 +171,25 @@ const COMPANION_BRIDGE = `<script id="kanna-companion-bridge">
     event.preventDefault();
   });
 
+  function truncateUtf8(value, maxBytes) {
+    var result = '';
+    var bytes = 0;
+    for (var character of value) {
+      var codePoint = character.codePointAt(0) || 0;
+      var characterBytes = codePoint <= 0x7f
+        ? 1
+        : codePoint <= 0x7ff
+          ? 2
+          : codePoint <= 0xffff
+            ? 3
+            : 4;
+      if (bytes + characterBytes > maxBytes) break;
+      result += character;
+      bytes += characterBytes;
+    }
+    return result;
+  }
+
   document.addEventListener('click', function(event) {
     var origin = event.target;
     var target = origin && origin.closest ? origin.closest('[data-choice]') : null;
@@ -183,9 +202,9 @@ const COMPANION_BRIDGE = `<script id="kanna-companion-bridge">
       event: {
         event_id: 'mobile-' + Date.now() + '-' + eventCounter,
         type: 'click',
-        choice: target.dataset.choice.slice(0, 256),
-        text: (target.textContent || '').trim().slice(0, 4096),
-        id: target.id ? target.id.slice(0, 256) : null,
+        choice: truncateUtf8(target.dataset.choice, 256),
+        text: truncateUtf8((target.textContent || '').trim(), 4096),
+        id: target.id ? truncateUtf8(target.id, 256) : null,
         timestamp: Date.now()
       }
     };
