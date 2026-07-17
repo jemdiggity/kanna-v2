@@ -335,7 +335,7 @@ describe("createMobileController", () => {
     const controller = createMobileController(client, store);
     await controller.bootstrap();
 
-    controller.showView("more");
+    controller.setNavigationView("more");
     await flushMicrotasks();
     expect(client.listRepoCommands).toHaveBeenCalledWith("repo-1");
     expect(store.getState()).toMatchObject({
@@ -368,17 +368,23 @@ describe("createMobileController", () => {
     });
 
     const first = controller.runRepoCommand("factory:create-agent");
+    const selection = controller.selectRepo("repo-2");
     const duplicate = controller.runRepoCommand("factory:create-agent");
     expect(client.runRepoCommand).toHaveBeenCalledTimes(1);
     expect(store.getState().runningRepoCommandId).toBe("factory:create-agent");
+    await selection;
+    expect(store.getState().selectedRepoId).toBe("repo-1");
+    expect(client.listRepoTasks).not.toHaveBeenCalledWith("repo-2");
     run.resolve({ taskId: "task-command", reused: false });
-    await Promise.all([first, duplicate]);
+    const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: "task-command",
-      activeView: "tasks",
+      activeView: "more",
       runningRepoCommandId: null
     });
+    expect(firstResult).toBe("task-command");
+    expect(duplicateResult).toBeNull();
     expect(events).toEqual([
       "refresh recent",
       "refresh repo",
@@ -388,25 +394,137 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks).toEqual([canonicalTask]);
   });
 
-  it("does not open a command task when the canonical collection refresh fails", async () => {
+  it("retains and retries a created command task when canonical loading fails", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
     await controller.bootstrap();
-    controller.showView("more");
+    controller.setNavigationView("more");
     await flushMicrotasks();
-    client.listRecentTasks.mockRejectedValue(new Error("canonical refresh failed"));
+    const canonicalTask = {
+      id: "task-command",
+      repoId: "repo-1",
+      title: "Canonical command task",
+      stage: "in progress",
+      agentType: "agent" as const
+    };
+    client.listRecentTasks
+      .mockRejectedValueOnce(new Error("canonical refresh failed"))
+      .mockResolvedValueOnce([canonicalTask]);
+    client.listRepoTasks.mockResolvedValue([canonicalTask]);
 
     await controller.runRepoCommand("factory:create-agent");
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: null,
-      connectionState: "error",
-      errorMessage: "canonical refresh failed",
+      connectionState: "connected",
+      errorMessage: null,
+      repoCommandStatus: "error",
+      repoCommandErrorMessage:
+        "The command launched successfully, but its task could not be loaded. Check your connection and try again.",
+      pendingRepoCommandTask: {
+        commandId: "factory:create-agent",
+        taskId: "task-command"
+      },
       runningRepoCommandId: null
     });
     expect(client.observeTaskTerminal).not.toHaveBeenCalled();
     expect(client.observeTaskAgent).not.toHaveBeenCalled();
+
+    const commandCatalogReads = client.listRepoCommands.mock.calls.length;
+    const retriedTaskId = await controller.retryRepoCommand();
+
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(commandCatalogReads);
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-command",
+      activeView: "more",
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      pendingRepoCommandTask: null,
+      runningRepoCommandId: null
+    });
+    expect(retriedTaskId).toBe("task-command");
+    expect(client.observeTaskAgent).toHaveBeenCalledWith(
+      "task-command",
+      expect.any(Function)
+    );
+  });
+
+  it("does not let a catalog reload erase a command task loading failure", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const commandRun = createDeferred<{ taskId: string; reused: boolean }>();
+    const catalogReload = createDeferred<Awaited<
+      ReturnType<KannaClient["listRepoCommands"]>
+    >>();
+    client.runRepoCommand.mockReturnValueOnce(commandRun.promise);
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    client.listRecentTasks.mockRejectedValueOnce(
+      new Error("canonical refresh failed")
+    );
+    client.listRepoCommands.mockReturnValueOnce(catalogReload.promise);
+
+    const launch = controller.runRepoCommand("factory:create-agent");
+    const reload = controller.loadRepoCommands();
+    commandRun.resolve({ taskId: "task-command", reused: false });
+    await launch;
+    catalogReload.resolve({
+      repoId: "repo-1",
+      revision: "catalog-v2",
+      commands: []
+    });
+    await reload;
+
+    expect(store.getState()).toMatchObject({
+      repoCommandStatus: "error",
+      repoCommandErrorMessage:
+        "The command launched successfully, but its task could not be loaded. Check your connection and try again.",
+      pendingRepoCommandTask: { taskId: "task-command" },
+      runningRepoCommandId: null
+    });
+  });
+
+  it("does not open a command task from a stale collection refresh", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+
+    const recent = createDeferred<TaskSummary[]>();
+    const repo = createDeferred<TaskSummary[]>();
+    client.listRecentTasks.mockReturnValueOnce(recent.promise);
+    client.listRepoTasks.mockReturnValueOnce(repo.promise);
+
+    const launch = controller.runRepoCommand("factory:create-agent");
+    await flushMicrotasks();
+    controller.openTask("task-1");
+    const canonicalTask = {
+      id: "task-command",
+      repoId: "repo-1",
+      title: "Canonical command task",
+      stage: "in progress"
+    };
+    recent.resolve([canonicalTask]);
+    repo.resolve([canonicalTask]);
+    const launchedTaskId = await launch;
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-1",
+      activeView: "more",
+      repoCommandStatus: "error",
+      pendingRepoCommandTask: { taskId: "task-command" },
+      runningRepoCommandId: null
+    });
+    expect(launchedTaskId).toBeNull();
+    expect(client.observeTaskTerminal).not.toHaveBeenCalledWith(
+      "task-command",
+      expect.any(Function)
+    );
   });
 
   it("bootstraps connection, desktops, repos, and recent tasks", async () => {

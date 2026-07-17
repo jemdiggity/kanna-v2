@@ -432,42 +432,29 @@ function TaskMoreRoute({
 }
 
 function MoreRouteContent() {
-  const {
-    controller,
-    forceCloudEnabled,
-    onForceCloudChange,
-    openComposer,
-    pushPreparedTask,
-    state
-  } = useNavigationContent();
-  const selectedTask = resolveSelectedTask(state);
-  const routeTaskResult = (taskId: string | null) => {
-    if (!taskId) return;
-    pushPreparedTask(taskId);
-  };
+  const { controller, pushPreparedTask, state } = useNavigationContent();
 
   return (
     <MoreScreen
-      forceCloudEnabled={forceCloudEnabled}
-      showDeveloperDiagnostics={__DEV__ === true}
-      refreshStatus={state.refreshStatus}
-      selectedTask={selectedTask}
-      onRefresh={() => {
-        void controller.refresh();
+      catalog={state.repoCommandCatalog}
+      errorMessage={state.repoCommandErrorMessage}
+      onRetry={() => {
+        void controller.retryRepoCommand().then((taskId) => {
+          if (taskId) pushPreparedTask(taskId);
+        });
       }}
-      onForceCloudChange={(enabled) => {
-        onForceCloudChange(enabled);
+      onRunCommand={(commandId) => {
+        void controller.runRepoCommand(commandId).then((taskId) => {
+          if (taskId) pushPreparedTask(taskId);
+        });
       }}
-      onOpenComposer={openComposer}
-      onAdvanceTaskStage={(taskId) => {
-        void controller.advanceDesktopTaskStage(taskId).then(routeTaskResult);
+      onSelectRepo={(repoId) => {
+        void controller.selectRepo(repoId);
       }}
-      onRunMergeAgent={(taskId) => {
-        void controller.runMergeAgent(taskId).then(routeTaskResult);
-      }}
-      onCloseTask={(taskId) => {
-        void controller.closeDesktopTask(taskId);
-      }}
+      repos={state.repos}
+      runningCommandId={state.runningRepoCommandId}
+      selectedRepoId={state.selectedRepoId}
+      status={state.repoCommandStatus}
     />
   );
 }

@@ -20,6 +20,7 @@ import {
 import type {
   ComposerAgentProvider,
   MobileView,
+  PendingRepoCommandTask,
   PendingTaskCreation,
   SessionStore
 } from "./sessionStore";
@@ -44,7 +45,8 @@ export interface MobileController {
   selectDesktop(desktopId: string): Promise<void>;
   selectRepo(repoId: string): Promise<void>;
   loadRepoCommands(): Promise<void>;
-  runRepoCommand(commandId: string): Promise<void>;
+  runRepoCommand(commandId: string): Promise<string | null>;
+  retryRepoCommand(): Promise<string | null>;
   openTask(taskId: string): void;
   closeTask(taskId?: string): void;
   openComposer(): void;
@@ -69,6 +71,8 @@ const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
 const MARK_READ_DEBOUNCE_MS = 1_000;
 const MARK_READ_MAX_ATTEMPTS = 3;
 const MARK_READ_RETRY_BASE_MS = 1_000;
+const REPO_COMMAND_TASK_LOAD_ERROR =
+  "The command launched successfully, but its task could not be loaded. Check your connection and try again.";
 
 export interface CloudTaskPublication {
   cloudAuthoritative: boolean;
@@ -728,11 +732,16 @@ export function createMobileController(
   };
 
   const loadRepoCommands = async (): Promise<void> => {
-    const repoId = store.getState().selectedRepoId;
-    const generation = ++repoCommandLoadGeneration;
-    if (!repoId) {
+    const commandState = store.getState();
+    const repoId = commandState.selectedRepoId;
+    if (
+      !repoId ||
+      commandState.runningRepoCommandId !== null ||
+      commandState.pendingRepoCommandTask !== null
+    ) {
       return;
     }
+    const generation = ++repoCommandLoadGeneration;
     store.setRepoCommandLoading(repoId);
     try {
       const catalog = await client.listRepoCommands(repoId);
@@ -961,7 +970,7 @@ export function createMobileController(
     }
   };
 
-  const refreshTaskCollections = async () => {
+  const refreshTaskCollections = async (): Promise<boolean> => {
     const readRevision = taskCollectionsRevision;
     const selectedRepoId = store.getState().selectedRepoId;
     let recentTasks: TaskSummary[];
@@ -976,7 +985,7 @@ export function createMobileController(
         taskCollectionsRevision !== readRevision ||
         store.getState().selectedRepoId !== selectedRepoId
       ) {
-        return;
+        return false;
       }
       throw error;
     }
@@ -984,7 +993,7 @@ export function createMobileController(
       taskCollectionsRevision !== readRevision ||
       store.getState().selectedRepoId !== selectedRepoId
     ) {
-      return;
+      return false;
     }
 
     taskCollectionsRevision += 1;
@@ -992,7 +1001,7 @@ export function createMobileController(
     store.setRecentTasks(recentTasks);
     store.setRepoTasks(repoTasks);
     if (!(await refreshSearchResults())) {
-      return;
+      return false;
     }
     store.reconcileTaskUiSlots(
       uniqueTasksById([
@@ -1003,6 +1012,32 @@ export function createMobileController(
       { authoritative: true }
     );
     reconcileSelectedTask(true);
+    return true;
+  };
+
+  const loadCreatedRepoCommandTask = async (
+    pendingTask: PendingRepoCommandTask
+  ): Promise<boolean> => {
+    try {
+      const committed = await refreshTaskCollections();
+      if (!committed || !findCollectionTask(pendingTask.taskId)) {
+        store.setRepoCommandTaskLoadError(
+          pendingTask,
+          REPO_COMMAND_TASK_LOAD_ERROR
+        );
+        return false;
+      }
+    } catch {
+      store.setRepoCommandTaskLoadError(
+        pendingTask,
+        REPO_COMMAND_TASK_LOAD_ERROR
+      );
+      return false;
+    }
+
+    store.resolveRepoCommandTask(pendingTask.taskId);
+    setUnownedErrorMessage(null);
+    return true;
   };
 
   const applyLiveCloudTasks = (
@@ -1535,15 +1570,20 @@ export function createMobileController(
 
     setNavigationView(view) {
       store.setActiveView(view);
+      const state = store.getState();
+      if (
+        view === "more" &&
+        state.runningRepoCommandId === null &&
+        state.pendingRepoCommandTask === null
+      ) {
+        void loadRepoCommands();
+      }
     },
 
     setTaskDetailVisible(visible) {
       if (taskDetailVisible === visible) return;
       taskDetailVisible = visible;
       reconcileSelectedTaskRead();
-      if (view === "more") {
-        void loadRepoCommands();
-      }
     },
 
     async selectDesktop(desktopId) {
@@ -1557,6 +1597,13 @@ export function createMobileController(
     },
 
     async selectRepo(repoId) {
+      const state = store.getState();
+      if (
+        state.runningRepoCommandId !== null ||
+        state.pendingRepoCommandTask !== null
+      ) {
+        return;
+      }
       taskCollectionsRevision += 1;
       store.selectRepo(repoId);
       try {
@@ -1582,12 +1629,14 @@ export function createMobileController(
         (candidate) => candidate.id === commandId
       );
       if (!repoId || !catalog || catalog.repoId !== repoId || !command) {
-        return;
+        return null;
       }
       if (!store.beginRepoCommandRun(commandId)) {
-        return;
+        return null;
       }
 
+      let reloadCatalog = false;
+      let openedTaskId: string | null = null;
       try {
         const response = await client.runRepoCommand(
           repoId,
@@ -1598,17 +1647,41 @@ export function createMobileController(
         if (responseRoute) {
           pendingTaskIdentities.set(response.taskId, responseRoute);
         }
-        await refreshTaskCollections();
-        setUnownedErrorMessage(null);
-        this.openTask(response.taskId);
+        if (await loadCreatedRepoCommandTask({ commandId, taskId: response.taskId })) {
+          this.openTask(response.taskId);
+          openedTaskId = response.taskId;
+        }
       } catch (error) {
         fail(error);
-        if (isStaleRepoCommandError(error)) {
-          await loadRepoCommands();
-        }
+        reloadCatalog = isStaleRepoCommandError(error);
       } finally {
         store.finishRepoCommandRun(commandId);
       }
+      if (reloadCatalog) {
+        await loadRepoCommands();
+      }
+      return openedTaskId;
+    },
+
+    async retryRepoCommand() {
+      const pendingTask = store.beginRepoCommandTaskRefresh();
+      if (!pendingTask) {
+        if (!store.getState().pendingRepoCommandTask) {
+          await loadRepoCommands();
+        }
+        return null;
+      }
+
+      let openedTaskId: string | null = null;
+      try {
+        if (await loadCreatedRepoCommandTask(pendingTask)) {
+          this.openTask(pendingTask.taskId);
+          openedTaskId = pendingTask.taskId;
+        }
+      } finally {
+        store.finishRepoCommandRun(pendingTask.commandId);
+      }
+      return openedTaskId;
     },
 
     openTask(taskId) {

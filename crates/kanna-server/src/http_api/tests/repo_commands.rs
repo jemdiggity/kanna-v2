@@ -181,3 +181,82 @@ async fn runs_factory_commands_through_the_shared_task_creator() {
     );
     assert_eq!(request.display_name.as_deref(), Some("Create Agent"));
 }
+
+#[tokio::test]
+async fn custom_command_passes_stable_template_identity_and_teardown_to_task_creation() {
+    let temp = tempfile::tempdir().expect("temporary repo");
+    let task_dir = temp.path().join(".kanna/tasks/selected");
+    std::fs::create_dir_all(&task_dir).expect("custom task directory");
+    std::fs::write(
+        task_dir.join("agent.md"),
+        "---\nname: Duplicate label\nteardown: [printf selected-cleanup]\n---\nRun selected.\n",
+    )
+    .expect("custom task definition");
+    let repo_path = temp.path().to_string_lossy().into_owned();
+    let captured = Arc::new(Mutex::new(None));
+    let captured_request = Arc::clone(&captured);
+    let app = test_router_with_seed_and_task_creator(
+        "repo-command-custom-run",
+        "Studio Mac",
+        move |db| {
+            db.insert_repo(NewRepo {
+                id: "repo-1",
+                path: &repo_path,
+                name: "Kanna",
+                default_branch: Some("main"),
+            })
+            .expect("insert repo");
+        },
+        Arc::new(move |request| {
+            *captured_request.lock().expect("capture request") = Some(request);
+            Ok(CreateTaskResponse {
+                task_id: "created-custom-task".to_string(),
+                repo_id: "repo-1".to_string(),
+                title: "Duplicate label".to_string(),
+                prompt: "Run selected.".to_string(),
+                stage: "in progress".to_string(),
+                agent_type: "pty".to_string(),
+                worktree_path: Some("/tmp/worktree".to_string()),
+            })
+        }),
+    );
+    let catalog = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/repos/repo-1/commands")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let revision = response_json(catalog).await["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-1/commands/custom%3Aselected/run")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "catalogRevision": revision }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request = captured
+        .lock()
+        .expect("captured request")
+        .take()
+        .expect("task request");
+    assert_eq!(
+        request.task_template,
+        Some(crate::mobile_api::TaskTemplateLaunch {
+            id: "custom:selected".to_string(),
+            teardown: vec!["printf selected-cleanup".to_string()],
+        })
+    );
+}

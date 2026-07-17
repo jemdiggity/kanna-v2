@@ -711,7 +711,8 @@ pub(in crate::task_creator) fn prepare_workspace_teardown_for_transition_close(
     stage_name: &str,
     branch: &str,
 ) -> Option<PreparedWorkspaceTeardown> {
-    let mut teardown = prepare_workspace_teardown(
+    let task_template_teardown = load_task_template_teardown(db, task_id);
+    let mut teardown = prepare_workspace_teardown_with_extra(
         db,
         config,
         repo,
@@ -720,6 +721,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown_for_transition_close(
         pipeline,
         stage_name,
         branch,
+        &task_template_teardown,
     )?;
     append_close_cleanup_to_teardown(&mut teardown, &config.db_path, &repo.path, task_id);
     Some(teardown)
@@ -735,6 +737,31 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
     stage_name: &str,
     branch: &str,
 ) -> Option<PreparedWorkspaceTeardown> {
+    prepare_workspace_teardown_with_extra(
+        db,
+        config,
+        repo,
+        definitions,
+        task_id,
+        pipeline,
+        stage_name,
+        branch,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_workspace_teardown_with_extra(
+    db: &Db,
+    config: &Config,
+    repo: &Repo,
+    definitions: &RepoDefinitions,
+    task_id: &str,
+    pipeline: &definitions::PipelineDefinition,
+    stage_name: &str,
+    branch: &str,
+    extra_teardown: &[String],
+) -> Option<PreparedWorkspaceTeardown> {
     let worktree_path = db
         .get_task_worktree_path(task_id)
         .ok()
@@ -745,6 +772,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
     }
     let repo_config = definitions.config();
     let mut teardown = stage_environment_teardown(pipeline, stage_name);
+    teardown.extend(extra_teardown.iter().cloned());
     teardown.extend(repo_config.teardown.clone().unwrap_or_default());
     if teardown.is_empty() {
         return None;
@@ -772,6 +800,34 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
             agent_provider: AgentProvider::Claude,
         },
     })
+}
+
+fn load_task_template_teardown(db: &Db, task_id: &str) -> Vec<String> {
+    let stored = match db.get_pipeline_item_agent_spawn_options(task_id) {
+        Ok(stored) => stored,
+        Err(error) => {
+            log::warn!("failed to read task template lifecycle for {task_id}: {error}");
+            return Vec::new();
+        }
+    };
+    let Some(stored) = stored else {
+        return Vec::new();
+    };
+    let options: serde_json::Value = match serde_json::from_str(&stored) {
+        Ok(options) => options,
+        Err(error) => {
+            log::warn!("failed to parse task template lifecycle for {task_id}: {error}");
+            return Vec::new();
+        }
+    };
+    serde_json::from_value::<crate::mobile_api::TaskTemplateLaunch>(
+        options
+            .get("taskTemplate")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )
+    .map(|template| template.teardown)
+    .unwrap_or_default()
 }
 
 fn append_close_cleanup_to_teardown(
@@ -1039,6 +1095,7 @@ pub(crate) fn prepare_task_for_api_with_error(
             max_turns: request.max_turns,
             max_budget_usd: request.max_budget_usd,
             setup_cmds: request.setup_cmds.unwrap_or_default(),
+            task_template: request.task_template,
             resume_session_id: request.resume_session_id,
             notify_task_id: request.notify_task_id,
             parent_task_id,
@@ -1110,6 +1167,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: Vec::new(),
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -1205,6 +1263,7 @@ completion with status success so Kanna can run the commit post and close this i
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: Vec::new(),
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: Some(dependent_task_id.to_string()),
@@ -1608,6 +1667,7 @@ struct ResolvedTaskSpawn {
     max_turns: Option<u32>,
     max_budget_usd: Option<f64>,
     setup_cmds: Vec<String>,
+    task_template: Option<crate::mobile_api::TaskTemplateLaunch>,
     resume_session_id: Option<String>,
     base_ref: Option<String>,
     stored_base_ref: Option<String>,
@@ -1902,6 +1962,7 @@ fn resolve_task_spawn(
         max_turns: request.max_turns,
         max_budget_usd: request.max_budget_usd,
         setup_cmds: request.setup_cmds,
+        task_template: request.task_template,
         resume_session_id: request.resume_session_id,
         base_ref: request.base_ref,
         stored_base_ref,
@@ -1977,6 +2038,7 @@ fn agent_spawn_options_json(resolved: &ResolvedTaskSpawn) -> Result<String, Stri
         "disallowedTools": resolved.disallowed_tools,
         "maxTurns": resolved.max_turns,
         "maxBudgetUsd": resolved.max_budget_usd,
+        "taskTemplate": resolved.task_template,
     }))
     .map_err(|e| format!("serialize error: {}", e))
 }

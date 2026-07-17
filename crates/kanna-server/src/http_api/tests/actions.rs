@@ -4173,7 +4173,8 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-builtin-approve-daemon-{unique}"));
+    let daemon_dir =
+        std::env::temp_dir().join(format!("kanna-http-builtin-approve-daemon-{unique}"));
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -4206,14 +4207,18 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
                         DaemonCommand::Spawn { session_id, .. } => DaemonEvent::SessionCreated {
                             session_id: session_id.clone(),
                         },
-                        DaemonCommand::SpawnAgent { session_id, .. } => DaemonEvent::SessionCreated {
-                            session_id: session_id.clone(),
-                        },
+                        DaemonCommand::SpawnAgent { session_id, .. } => {
+                            DaemonEvent::SessionCreated {
+                                session_id: session_id.clone(),
+                            }
+                        }
                         _ => DaemonEvent::Ok,
                     };
                     log.lock().await.push(command);
                     if write_half
-                        .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
                         .await
                         .is_err()
                     {

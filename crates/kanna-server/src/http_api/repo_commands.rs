@@ -94,6 +94,7 @@ pub(super) async fn run_repo_command(
             max_turns: launch.max_turns,
             max_budget_usd: launch.max_budget_usd,
             setup_cmds: launch.setup_cmds,
+            task_template: launch.task_template,
             resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,

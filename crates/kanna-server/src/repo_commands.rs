@@ -72,6 +72,7 @@ pub(crate) struct RepoCommandLaunch {
     pub(crate) max_turns: Option<u32>,
     pub(crate) max_budget_usd: Option<f64>,
     pub(crate) setup_cmds: Option<Vec<String>>,
+    pub(crate) task_template: Option<crate::mobile_api::TaskTemplateLaunch>,
     pub(crate) stage: Option<String>,
     pub(crate) singleton_agent: Option<String>,
 }
@@ -101,7 +102,7 @@ fn build_repo_command_catalog_from_definitions(
     repo: &Repo,
     definitions: &BTreeMap<String, CustomTaskDefinition>,
 ) -> Result<RepoCommandCatalog, String> {
-    let mut commands = ordered_custom_task_slugs(&definitions)
+    let mut commands = ordered_custom_task_slugs(definitions)
         .into_iter()
         .filter_map(|slug| {
             let definition = definitions.get(&slug)?;
@@ -417,6 +418,10 @@ fn custom_task_launch(slug: &str, definition: &CustomTaskDefinition) -> RepoComm
             .map(|value| value as u32),
         max_budget_usd: definition.max_budget_usd.filter(|value| value.is_finite()),
         setup_cmds: definition.setup.clone(),
+        task_template: Some(crate::mobile_api::TaskTemplateLaunch {
+            id: format!("custom:{slug}"),
+            teardown: definition.teardown.clone().unwrap_or_default(),
+        }),
         stage: definition.stage.clone(),
         singleton_agent: (slug == "merge-master").then(|| "merge".to_string()),
     }
@@ -460,6 +465,7 @@ fn factory_launch(command_id: &str) -> Option<RepoCommandLaunch> {
         max_turns: None,
         max_budget_usd: None,
         setup_cmds: None,
+        task_template: None,
         stage: None,
         singleton_agent: None,
     })
@@ -658,6 +664,7 @@ disallowed_tools: [WebFetch]
 max_turns: 12
 max_budget_usd: 4.5
 setup: [pnpm install]
+teardown: [pnpm cleanup]
 stage: pr
 ---
 Deploy safely.
@@ -690,6 +697,13 @@ Deploy safely.
         assert_eq!(launch.max_turns, Some(12));
         assert_eq!(launch.max_budget_usd, Some(4.5));
         assert_eq!(launch.setup_cmds, Some(vec!["pnpm install".to_string()]));
+        assert_eq!(
+            launch.task_template,
+            Some(crate::mobile_api::TaskTemplateLaunch {
+                id: "custom:deploy".to_string(),
+                teardown: vec!["pnpm cleanup".to_string()],
+            })
+        );
         assert_eq!(launch.stage.as_deref(), Some("pr"));
     }
 
