@@ -1,6 +1,7 @@
 import type {
   KannaTransport,
   TaskAgentSubscription,
+  TaskCompanionSubscription,
   TaskTerminalSubscription
 } from "../api/client";
 import { StreamClient, type WebSocketLike as StreamWebSocketLike } from "@kanna/stream-client";
@@ -216,6 +217,38 @@ export function createLanTransport(
           client.sendAgentInterrupt(taskId);
         }
       } satisfies TaskAgentSubscription;
+    },
+    observeTaskCompanion(taskId, listener) {
+      const client = new StreamClient({
+        url: buildKspWebSocketUrl(baseUrl),
+        webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
+        reconnectDelaysMs: [250, 500, 1000, 2000]
+      });
+
+      client.attachCompanion(taskId, {
+        onSnapshot(snapshot) {
+          listener({ type: "snapshot", taskId, ...snapshot });
+        },
+        onUnavailable() {
+          listener({ type: "unavailable", taskId });
+        },
+        onEventResult(result) {
+          listener({ type: "event_result", taskId, ...result });
+        },
+        onError(code, message) {
+          listener({ type: "error", taskId, code, message });
+        }
+      });
+
+      return {
+        close() {
+          client.detach(taskId, "companion");
+          client.close();
+        },
+        sendEvent(sessionId, revision, event) {
+          client.sendCompanionEvent(taskId, sessionId, revision, event);
+        }
+      } satisfies TaskCompanionSubscription;
     }
   };
 }

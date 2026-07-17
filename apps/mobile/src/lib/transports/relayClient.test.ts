@@ -22,6 +22,73 @@ async function flushPromises(): Promise<void> {
 }
 
 describe("createRelayDesktopClient", () => {
+  it("carries visual companion frames transparently through the shared relay tunnel", async () => {
+    const socket = createSocket();
+    const client = createRelayDesktopClient({
+      createSocket: () => socket,
+      getIdToken: async () => "id-token-1",
+      relayUrl: "wss://relay.example"
+    });
+    const events: unknown[] = [];
+    const subscription = client.observeTaskCompanion(
+      { desktopId: "desktop-1", taskId: "task-1" },
+      (event) => events.push(event)
+    );
+
+    socket.onopen?.();
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "companion_snapshot",
+        task_id: "task-1",
+        session_id: "123-456",
+        revision: "rev-1",
+        document_kind: "fragment",
+        html: "<button data-choice='a'>A</button>"
+      })
+    });
+    subscription.sendEvent("123-456", "rev-1", {
+      event_id: "event-1",
+      type: "click",
+      choice: "a",
+      text: "A",
+      id: null,
+      timestamp: 1
+    });
+    subscription.close();
+
+    const frames = vi.mocked(socket.send).mock.calls.map(([payload]) =>
+      JSON.parse(payload) as Record<string, unknown>
+    );
+    expect(frames).toContainEqual({
+      type: "attach",
+      task_id: "task-1",
+      kind: "companion",
+      from_seq: 0
+    });
+    expect(frames).toContainEqual(
+      expect.objectContaining({ type: "companion_event", task_id: "task-1" })
+    );
+    expect(frames).toContainEqual({
+      type: "detach",
+      task_id: "task-1",
+      kind: "companion"
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "snapshot",
+        taskId: "task-1",
+        sessionId: "123-456",
+        revision: "rev-1"
+      })
+    ]);
+    client.close();
+  });
+
   it("authenticates with a Firebase ID token and invokes a targeted desktop", async () => {
     const socket = createSocket();
     const client = createRelayDesktopClient({

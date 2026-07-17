@@ -2,6 +2,8 @@ import type {
   KannaClient,
   TaskAgentStreamEvent,
   TaskAgentSubscription,
+  TaskCompanionStreamEvent,
+  TaskCompanionSubscription,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../api/client";
@@ -1271,6 +1273,24 @@ export function createCloudLanClient(
         };
       }
       return route.client.observeTaskAgent(route.taskId, listener);
+    },
+    observeTaskCompanion(
+      taskId: string,
+      listener: (event: TaskCompanionStreamEvent) => void
+    ): TaskCompanionSubscription {
+      const route = routeForTask(taskId);
+      if (route.source === "unavailable") {
+        listener({
+          type: "error",
+          taskId,
+          code: "desktop_unavailable",
+          message: route.message
+        });
+        return { close() {}, sendEvent() {} };
+      }
+      return route.client.observeTaskCompanion(route.taskId, (event) =>
+        listener({ ...event, taskId })
+      );
     }
   };
 }

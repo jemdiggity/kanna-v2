@@ -114,6 +114,10 @@ describe("createKannaClient", () => {
       }),
       observeTaskTerminal: vi.fn().mockReturnValue({
         close: vi.fn()
+      }),
+      observeTaskCompanion: vi.fn().mockReturnValue({
+        close: vi.fn(),
+        sendEvent: vi.fn()
       })
     };
 
@@ -171,5 +175,8 @@ describe("createKannaClient", () => {
       "docs/spec one.md"
     );
     expect(typeof client.observeTaskTerminal("task-1", vi.fn()).close).toBe("function");
+    expect(typeof client.observeTaskCompanion("task-1", vi.fn()).sendEvent).toBe(
+      "function"
+    );
   });
 });
