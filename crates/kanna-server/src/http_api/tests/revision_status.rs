@@ -292,6 +292,356 @@ async fn request_revision_route_resolves_branch_style_task_id() {
 }
 
 #[tokio::test]
+async fn automatic_revision_completion_dispatches_commit_post_through_http_routes() {
+    use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use tokio::sync::mpsc;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-loop-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
+    let pipeline_def = serde_json::json!({
+        "name": "qa",
+        "stages": [
+            {
+                "name": "in progress",
+                "policy": {
+                    "transition": "manual",
+                    "revision_transition": "auto"
+                },
+                "agent": "implement",
+                "prompt": "$TASK_PROMPT",
+                "post": {
+                    "name": "commit",
+                    "prompt": "Commit changes for $TASK_PROMPT"
+                }
+            },
+            {
+                "name": "review",
+                "policy": { "transition": "auto" }
+            }
+        ]
+    })
+    .to_string();
+    std::fs::write(repo_root.join(".kanna/pipelines/qa.json"), &pipeline_def).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/implement/AGENT.md"),
+        "---\nname: Implement\ndescription: Test implementation agent\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add automatic revision pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+    assert!(Command::new("git")
+        .args(["branch", "task-reviewed"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    // The durable task remains pinned to the automatic revision policy even
+    // if the repo's current pipeline is later customized back to manual.
+    // This makes the test distinguish snapshot policy from live definitions.
+    let mut current_pipeline_def: serde_json::Value = serde_json::from_str(&pipeline_def).unwrap();
+    current_pipeline_def["stages"][0]["policy"]["revision_transition"] =
+        serde_json::json!("manual");
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/qa.json"),
+        current_pipeline_def.to_string(),
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna/pipelines/qa.json"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "customize future revisions as manual"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-loop-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let (sync_tx, mut sync_rx) = mpsc::unbounded_channel();
+    let daemon_server = tokio::spawn(async move {
+        // The revision request replaces the review session with a fresh
+        // implementer session on the first detached daemon connection.
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let revision_session_id = loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let (response, spawned_session_id) = match command {
+                DaemonCommand::Kill { .. } => (
+                    DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    },
+                    None,
+                ),
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(params.agent_provider, AgentProvider::Claude);
+                    assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                    assert!(params.prompt.contains("Add the missing server coverage."));
+                    (
+                        DaemonEvent::SessionCreated {
+                            session_id: session_id.clone(),
+                        },
+                        Some(session_id),
+                    )
+                }
+                DaemonCommand::Spawn {
+                    session_id,
+                    args,
+                    cwd,
+                    agent_provider,
+                    ..
+                } => {
+                    assert_eq!(agent_provider, Some(AgentProvider::Claude));
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                    assert!(args.join(" ").contains("Add the missing server coverage."));
+                    (
+                        DaemonEvent::SessionCreated {
+                            session_id: session_id.clone(),
+                        },
+                        Some(session_id),
+                    )
+                }
+                other => panic!("unexpected revision daemon command: {other:?}"),
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if let Some(session_id) = spawned_session_id {
+                sync_tx.send("revision spawned").unwrap();
+                break session_id;
+            }
+        };
+        drop(write_half);
+
+        // Successful completion must dispatch the commit post without an
+        // advance-stage request. A live session receives the post as typed
+        // input on the completion route's detached daemon connection.
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        for input_index in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            match command {
+                DaemonCommand::Input { session_id, data } => {
+                    assert_eq!(session_id, revision_session_id);
+                    if input_index == 0 {
+                        let message = String::from_utf8(data).unwrap();
+                        assert!(message.contains("Commit changes for"));
+                        assert!(message.contains("record stage completion"));
+                    } else {
+                        assert_eq!(data, vec![b'\r']);
+                    }
+                }
+                other => panic!("expected commit post input, got {other:?}"),
+            }
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        sync_tx.send("commit dispatched").unwrap();
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-revision-loop-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-revision-loop-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "review-task",
+        "repo-1",
+        "Original implementation prompt.",
+        Some("Automatic revision loop"),
+        "review",
+        "2026-07-17 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "review-task",
+        "task-reviewed",
+        "qa",
+        None,
+        "claude",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_pipeline_def("review-task", &pipeline_def)
+        .unwrap();
+    db.insert_stage_run_with_completion_transition(
+        crate::db::NewStageRun {
+            id: "review-run",
+            task_id: "review-task",
+            stage: "review",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("review-task"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let revision_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/review-task/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "missing server coverage",
+                        "prompt": "Add the missing server coverage."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revision_response.status(), StatusCode::OK);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), sync_rx.recv())
+            .await
+            .expect("revision daemon synchronization timed out")
+            .as_deref(),
+        Some("revision spawned")
+    );
+
+    let db = Db::open(&config.db_path).unwrap();
+    let mut revision_run = None;
+    for _ in 0..100 {
+        if let Some(run) = db.latest_stage_run("review-task").unwrap() {
+            if run.stage == "in progress" && run.status == "running" {
+                revision_run = Some(run);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let revision_run = revision_run.expect("revision stage run was not persisted");
+    assert_eq!(revision_run.kind, "main");
+    assert_eq!(revision_run.completion_transition.as_deref(), Some("auto"));
+
+    let completion_response = app
+        .oneshot(
+            Request::post("/v1/tasks/review-task/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "revision complete"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(completion_response.status(), StatusCode::OK);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), sync_rx.recv())
+            .await
+            .expect("commit post synchronization timed out")
+            .as_deref(),
+        Some("commit dispatched")
+    );
+    daemon_server.await.unwrap();
+
+    let mut post_run = None;
+    for _ in 0..100 {
+        let runs = db.list_stage_runs_for_task("review-task").unwrap();
+        if let Some(run) = runs
+            .into_iter()
+            .find(|run| run.kind == "post" && run.stage == "commit" && run.status == "running")
+        {
+            post_run = Some(run);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        post_run.is_some(),
+        "automatic completion did not start the commit post"
+    );
+    let revision_run = db
+        .list_stage_runs_for_task("review-task")
+        .unwrap()
+        .into_iter()
+        .find(|run| run.id == revision_run.id)
+        .unwrap();
+    assert_eq!(revision_run.status, "succeeded");
+    let item = db.get_pipeline_item("review-task").unwrap().unwrap();
+    assert_eq!(item.stage.as_deref(), Some("in progress"));
+    assert_eq!(item.activity.as_deref(), Some("working"));
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
