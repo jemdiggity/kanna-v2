@@ -48,3 +48,30 @@ Add coverage that deleting the draft manually resets the height without
 submitting or dismissing the keyboard.
 
 Run the task-screen tests, mobile typecheck, and the broader mobile unit suite.
+
+### Native relay boundary
+
+The relay Appium task flow will include a focused normal-Send journey before
+the existing quick-reply journey. It will use the shared task input and Send
+selectors rather than introduce new accessibility IDs.
+
+The journey will:
+
+1. Record the real native input's initial one-line height.
+2. Focus the input, enter a multiline draft, and wait for both the software
+   keyboard and a native height larger than the initial height.
+3. Capture that expanded height and submit through the real Send button.
+4. Wait for the controlled draft to clear, the native input to return to the
+   initial one-line height (and therefore become smaller than the captured
+   expanded height), and the software keyboard to disappear.
+
+The helper-level relay test will model those native state transitions and fail
+when submission leaves either the expanded height or keyboard behind. The
+existing quick-reply and transport assertions remain separate, so failures
+identify whether normal Send reset behavior or quick-reply behavior regressed.
+
+Verification will run the focused relay helper, composer clamp, and task-screen
+tests; mobile typecheck; and the canonical relay simulator lane. If simulator
+execution is blocked by an external prerequisite, the result will identify the
+specific prerequisite and retain the helper test as the narrower boundary
+substitute rather than representing it as equivalent native coverage.
