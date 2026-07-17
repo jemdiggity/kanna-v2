@@ -123,6 +123,10 @@ Use this branch as the default when the user does not specify a target branch. B
     state.initialWindowBootstrap.value = windowWorkspace.bootstrap;
   }
 
+  function recordSelectionIntent(): void {
+    state.selectionIntentVersion.value += 1;
+  }
+
   return {
     repos: state.repos,
     items: state.items,
@@ -153,6 +157,7 @@ Use this branch as the default when the user does not specify a target branch. B
 
     init: initApi.init,
     attachWindowWorkspace,
+    recordSelectionIntent,
     selectRepo: selection.selectRepo,
     selectItem: selection.selectItem,
     recordNavigation: selection.recordNavigation,

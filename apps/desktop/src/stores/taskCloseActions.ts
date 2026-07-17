@@ -43,10 +43,13 @@ export function createTaskCloseActions(
       context.services.selectedTaskId,
       "selectedTaskId",
     ).value === item.id;
+    const selectionIntentAtStart = context.state.selectionIntentVersion.value;
 
     try {
       await closeDesktopTask(item.id);
-      if (opts?.selectNext !== false && itemWasSelected) {
+      const selectionIntentIsCurrent = context.state.selectionIntentVersion.value
+        === selectionIntentAtStart;
+      if (opts?.selectNext !== false && itemWasSelected && selectionIntentIsCurrent) {
         await selectReplacementAfterTaskRemoval(item);
       }
       await reloadSnapshot();

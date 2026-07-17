@@ -186,6 +186,7 @@ const store = {
   attachWindowWorkspace: vi.fn(),
   selectRepo: vi.fn(),
   selectItem: vi.fn(),
+  recordSelectionIntent: vi.fn(),
   recordNavigation: vi.fn(),
   takeBackTarget: vi.fn(),
   takeForwardTarget: vi.fn(),
@@ -704,6 +705,7 @@ describe("App", () => {
     store.selectRepo.mockClear();
     store.selectItem.mockClear();
     store.recordNavigation.mockClear();
+    store.recordSelectionIntent.mockClear();
     store.takeBackTarget.mockReset();
     store.takeForwardTarget.mockReset();
     store.advanceStage.mockClear();

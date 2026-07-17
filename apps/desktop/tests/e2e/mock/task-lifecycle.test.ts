@@ -801,6 +801,7 @@ describe("task lifecycle", () => {
     const repoBId = await importRepo(secondaryFixtureRepoRoot, "close-empty-repo-b");
     let repoATaskId = "";
     let repoBTaskId = "";
+    let delayedRepoATaskId = "";
 
     const createAgentTask = async (
       targetRepoId: string,
@@ -902,8 +903,151 @@ describe("task lifecycle", () => {
       }, "persisted empty repository A selection after reload", 10_000);
 
       await assertEmptyRepoASelection(repoBTaskId);
+
+      delayedRepoATaskId = await createAgentTask(
+        repoAId,
+        testRepoPath,
+        "Close response delayed in repository A",
+      );
+      await callVueMethod(client, "handleSelectItem", delayedRepoATaskId);
+      await persistWindowSelection(client, { repoId: repoAId, itemId: delayedRepoATaskId });
+
+      try {
+        await client.executeSync(
+          `const originalFetch = globalThis.fetch;
+           const callOriginalFetch = originalFetch.bind(globalThis);
+           let releaseCloseResponse;
+           const closeResponseGate = new Promise((resolve) => { releaseCloseResponse = resolve; });
+           const gate = {
+             originalFetch,
+             responseHeld: false,
+             responseReleased: false,
+             closeStatus: "pending",
+             closeError: null,
+             closePromise: null,
+             release() {
+               if (this.responseReleased) return;
+               this.responseReleased = true;
+               releaseCloseResponse();
+             },
+           };
+           window.__KANNA_TASK_CLOSE_GATE__ = gate;
+           globalThis.fetch = async (input, init) => {
+             const url = typeof input === "string"
+               ? input
+               : input instanceof URL
+                 ? input.href
+                 : input.url;
+             const method = String(
+               init?.method ?? (input instanceof Request ? input.method : "GET")
+             ).toUpperCase();
+             const path = new URL(url, window.location.href).pathname;
+             const response = await callOriginalFetch(input, init);
+             if (
+               method === "POST"
+               && path === ${JSON.stringify(`/v1/tasks/${encodeURIComponent(delayedRepoATaskId)}/actions/close`)}
+             ) {
+               gate.responseHeld = true;
+               await closeResponseGate;
+             }
+             return response;
+           };
+           return true;`,
+        );
+
+        await client.executeSync(
+          `const gate = window.__KANNA_TASK_CLOSE_GATE__;
+           const ctx = window.__KANNA_E2E__.setupState;
+           gate.closePromise = Promise.resolve(ctx.closeSelectedWorkspaceTask())
+             .then(() => { gate.closeStatus = "fulfilled"; })
+             .catch((error) => {
+               gate.closeStatus = "rejected";
+               gate.closeError = error?.message || String(error);
+             });
+           return true;`,
+        );
+
+        await waitForCondition(
+          async () => client.executeSync<boolean>(
+            `return window.__KANNA_TASK_CLOSE_GATE__?.responseHeld === true;`,
+          ),
+          "server close response to be held after task close",
+          15_000,
+        );
+
+        const repoBTask = await client.waitForElement(
+          `.repo-section[data-repo-id="${repoBId}"] .pipeline-item[data-task-id="${repoBTaskId}"]`,
+          5_000,
+        );
+        await client.click(repoBTask);
+        await waitForCondition(async () => {
+          const selectedRepoId = await getVueState(client, "selectedRepoId");
+          const selectedTaskId = await getVueState(client, "selectedTaskId");
+          return selectedRepoId === repoBId && selectedTaskId === repoBTaskId;
+        }, "repository B task navigation while close response is pending", 5_000);
+
+        await client.executeSync(
+          `window.__KANNA_TASK_CLOSE_GATE__.release(); return true;`,
+        );
+        await waitForCondition(
+          async () => client.executeSync<boolean>(
+            `return window.__KANNA_TASK_CLOSE_GATE__?.closeStatus !== "pending";`,
+          ),
+          "delayed close completion",
+          15_000,
+        );
+
+        const selectionAfterClose = await client.executeSync<{
+          closeStatus: string;
+          closeError: string | null;
+          selectedRepoId: string | null;
+          selectedTaskId: string | null;
+        }>(
+          `const ctx = window.__KANNA_E2E__.setupState;
+           const read = (value) => value && value.__v_isRef ? value.value : value;
+           const gate = window.__KANNA_TASK_CLOSE_GATE__;
+           return {
+             closeStatus: gate.closeStatus,
+             closeError: gate.closeError,
+             selectedRepoId: read(ctx.store.selectedRepoId) ?? null,
+             selectedTaskId: read(ctx.store.selectedTaskId) ?? null,
+           };`,
+        );
+        expect(selectionAfterClose).toEqual({
+          closeStatus: "fulfilled",
+          closeError: null,
+          selectedRepoId: repoBId,
+          selectedTaskId: repoBTaskId,
+        });
+
+        await client.executeSync("window.__KANNA_E2E__.ready = false; location.reload();");
+        await client.waitForAppReady();
+        await waitForCondition(async () => {
+          const selectedRepoId = await getVueState(client, "selectedRepoId");
+          const selectedTaskId = await getVueState(client, "selectedTaskId");
+          return selectedRepoId === repoBId && selectedTaskId === repoBTaskId;
+        }, "persisted repository B task selection after delayed close and reload", 10_000);
+      } finally {
+        await client.executeSync(
+          `const gate = window.__KANNA_TASK_CLOSE_GATE__;
+           if (gate) {
+             gate.release?.();
+             globalThis.fetch = gate.originalFetch;
+           }
+           return true;`,
+        ).catch(() => undefined);
+        await client.executeAsync<string>(
+          `const cb = arguments[arguments.length - 1];
+           Promise.resolve(window.__KANNA_TASK_CLOSE_GATE__?.closePromise)
+             .catch(() => undefined)
+             .then(() => cb("settled"));`,
+        ).catch(() => undefined);
+        await client.executeSync(
+          `delete window.__KANNA_TASK_CLOSE_GATE__; return true;`,
+        ).catch(() => undefined);
+      }
     } finally {
-      for (const taskId of [repoATaskId, repoBTaskId]) {
+      for (const taskId of [repoATaskId, repoBTaskId, delayedRepoATaskId]) {
         if (!taskId) continue;
         await callVueMethod(client, "store.closeTask", taskId, { selectNext: false })
           .catch(() => undefined);

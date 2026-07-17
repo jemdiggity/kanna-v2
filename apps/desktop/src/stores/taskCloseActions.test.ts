@@ -7,11 +7,11 @@ import {
 import { createStoreContext, createStoreState } from "./state";
 import { createTaskCloseActions } from "./taskCloseActions";
 
-function repo(): Repo {
+function repo(id = "repo-1"): Repo {
   return {
-    id: "repo-1",
-    path: "/tmp/repo",
-    name: "repo",
+    id,
+    path: `/tmp/${id}`,
+    name: id,
     default_branch: "main",
     remote_url: null,
     remote_url_hash: null,
@@ -60,18 +60,21 @@ function item(id = "task-durable"): PipelineItem {
 
 function createHarness(durableItem = item()) {
   const state = createStoreState();
-  state.repos.value = [repo()];
+  state.repos.value = [repo(), repo("repo-2")];
   state.items.value = [durableItem];
   state.selectedRepoId.value = "repo-1";
   state.selectedItemId.value = "create:stable";
+  const selectedTaskId = ref<string | null>(durableItem.id);
   const selectReplacementAfterItemRemoval = vi.fn(async () => null);
   const selectItem = vi.fn(async (_taskId: string) => {
     state.selectedItemId.value = "create:restored";
   });
   const services = {
-    selectedTaskId: computed(() => durableItem.id),
+    selectedTaskId: computed(() => selectedTaskId.value),
     currentItem: computed(() => durableItem),
-    selectedRepo: computed(() => repo()),
+    selectedRepo: computed(() =>
+      state.repos.value.find((candidate) => candidate.id === state.selectedRepoId.value) ?? null,
+    ),
     selectReplacementAfterItemRemoval,
     selectItem,
     reloadSnapshot: vi.fn(async () => {}),
@@ -86,7 +89,15 @@ function createHarness(durableItem = item()) {
     error: vi.fn(),
   }, services);
   const actions = createTaskCloseActions(context, { checkUnblocked: vi.fn(async () => {}) });
-  return { state, services, actions };
+  return { state, services, actions, selectedTaskId };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 describe("task close durable selection", () => {
@@ -109,6 +120,48 @@ describe("task close durable selection", () => {
     await actions.closeTask(durableItem.id);
 
     expect(services.selectReplacementAfterItemRemoval).toHaveBeenCalledWith(durableItem);
+  });
+
+  it("keeps close ownership when a live snapshot removes the selected task", async () => {
+    const closeResponse = deferred<void>();
+    const closeTask = vi.fn(async () => closeResponse.promise);
+    setDesktopServerClientHandlersForTests({ closeTask });
+    const durableItem = item();
+    const { actions, services, state, selectedTaskId } = createHarness(durableItem);
+
+    const closePromise = actions.closeTask(durableItem.id);
+    await vi.waitFor(() => expect(closeTask).toHaveBeenCalledWith(durableItem.id));
+
+    // A server snapshot may reconcile visible selection before the older
+    // close response resolves. That is not a newer user navigation intent.
+    state.items.value = [];
+    state.selectedItemId.value = "task-from-snapshot";
+    selectedTaskId.value = "task-from-snapshot";
+    closeResponse.resolve();
+    await closePromise;
+
+    expect(services.selectReplacementAfterItemRemoval).toHaveBeenCalledWith(durableItem);
+  });
+
+  it("preserves a newer task selection while close completion is pending", async () => {
+    const closeResponse = deferred<void>();
+    const closeTask = vi.fn(async () => closeResponse.promise);
+    setDesktopServerClientHandlersForTests({ closeTask });
+    const durableItem = item();
+    const { actions, services, state, selectedTaskId } = createHarness(durableItem);
+
+    const closePromise = actions.closeTask(durableItem.id);
+    await vi.waitFor(() => expect(closeTask).toHaveBeenCalledWith(durableItem.id));
+
+    state.selectedItemId.value = "create:newer";
+    selectedTaskId.value = "task-newer";
+    state.selectionIntentVersion.value += 1;
+    closeResponse.resolve();
+    await closePromise;
+
+    expect(services.selectReplacementAfterItemRemoval).not.toHaveBeenCalled();
+    expect(state.selectedRepoId.value).toBe("repo-1");
+    expect(state.selectedItemId.value).toBe("create:newer");
   });
 
   it("keeps the stable slot selected after undo delegates restoration to selectItem", async () => {
