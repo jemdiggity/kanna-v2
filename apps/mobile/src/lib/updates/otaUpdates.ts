@@ -5,13 +5,6 @@ export interface OtaUpdateCheckResult {
   error?: unknown;
 }
 
-export interface CurrentUpdateInfo {
-  enabled: boolean;
-  updateId: string | null;
-  runtimeVersion: string | null;
-  channel: string | null;
-}
-
 export interface ExpoUpdatesApi {
   isEnabled: boolean;
   updateId: string | null;
@@ -50,17 +43,6 @@ export async function reloadToApplyUpdate(
   }
 
   await updates.reloadAsync();
-}
-
-export function getCurrentUpdateInfo(
-  updates: ExpoUpdatesApi = getDefaultUpdatesApi()
-): CurrentUpdateInfo {
-  return {
-    enabled: updates.isEnabled,
-    updateId: updates.updateId ?? null,
-    runtimeVersion: updates.runtimeVersion ?? null,
-    channel: updates.channel ?? null
-  };
 }
 
 function getDefaultUpdatesApi(): ExpoUpdatesApi {

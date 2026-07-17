@@ -1,5 +1,6 @@
 export const MOBILE_E2E_IDS = {
   appShell: "mobile.app-shell",
+  moreScreen: "mobile.more-screen",
   tasksScreen: "mobile.tasks-screen",
   taskDetailScreen: "mobile.task-detail-screen",
   taskDetailTitle: "mobile.task-detail-title",
@@ -49,7 +50,6 @@ export const MOBILE_E2E_IDS = {
   createTaskAgentOption(provider: string): string {
     return `mobile.create-task.agent.${provider}`;
   },
-  updateInfoOtaValue: "mobile.update-info.ota",
   updateReadyBanner: "mobile.update-ready",
   updateReadyDismissButton: "mobile.update-ready.dismiss",
   updateReadyRestartButton: "mobile.update-ready.restart",

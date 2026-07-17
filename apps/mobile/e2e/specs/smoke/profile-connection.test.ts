@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  assertOtaDisabledInDevSmoke,
+  assertOtaDiagnosticsHidden,
   assertProfileConnectionControlsReachable,
   assertProfileConnectionDisconnected,
   assertProfilePasswordCanRevealAndHide,
@@ -78,35 +78,53 @@ describe("openProfileConnectionSheet", () => {
   });
 });
 
-describe("assertOtaDisabledInDevSmoke", () => {
-  it("opens More and verifies the dev OTA status is disabled", async () => {
-    const moreTab = createElement();
-    const otaStatus = {
+describe("assertOtaDiagnosticsHidden", () => {
+  it("waits for More navigation before checking that the legacy OTA element is absent", async () => {
+    const events: string[] = [];
+    const moreTab = {
       ...createElement(),
-      getText: vi.fn(async () => "disabled")
+      click: vi.fn(async () => {
+        events.push("click More");
+      })
+    };
+    const moreScreen = {
+      ...createElement(),
+      waitForDisplayed: vi.fn(async () => {
+        events.push("More displayed");
+      })
+    };
+    const otaStatus = {
+      ...createElement(false),
+      isExisting: vi.fn(async () => {
+        events.push("check OTA absent");
+        return false;
+      })
     };
     const ui = {
       getMoreTab: vi.fn(async () => moreTab),
+      getMoreScreen: vi.fn(async () => moreScreen),
       getOtaStatusValue: vi.fn(async () => otaStatus)
     };
 
-    await assertOtaDisabledInDevSmoke(ui);
+    await assertOtaDiagnosticsHidden(ui);
 
-    expect(moreTab.click).toHaveBeenCalledOnce();
-    expect(otaStatus.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(moreTab.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(events).toEqual([
+      "click More",
+      "More displayed",
+      "check OTA absent"
+    ]);
   });
 
-  it("fails when OTA is enabled in a dev smoke run", async () => {
+  it("fails when the legacy OTA element still exists on More", async () => {
     const ui = {
       getMoreTab: vi.fn(async () => createElement()),
-      getOtaStatusValue: vi.fn(async () => ({
-        ...createElement(),
-        getText: vi.fn(async () => "enabled")
-      }))
+      getMoreScreen: vi.fn(async () => createElement()),
+      getOtaStatusValue: vi.fn(async () => createElement())
     };
 
-    await expect(assertOtaDisabledInDevSmoke(ui)).rejects.toThrow(
-      "Expected OTA to be disabled in dev smoke, got enabled"
+    await expect(assertOtaDiagnosticsHidden(ui)).rejects.toThrow(
+      "Expected OTA diagnostics to be absent from More"
     );
   });
 });

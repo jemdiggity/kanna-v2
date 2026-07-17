@@ -1,9 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  checkAndFetchUpdate,
-  getCurrentUpdateInfo,
-  type ExpoUpdatesApi
-} from "./otaUpdates";
+import { checkAndFetchUpdate, type ExpoUpdatesApi } from "./otaUpdates";
 
 function createUpdatesApi(
   overrides: Partial<ExpoUpdatesApi>
@@ -67,25 +63,5 @@ describe("checkAndFetchUpdate", () => {
     });
     expect(updates.checkForUpdateAsync).not.toHaveBeenCalled();
     expect(updates.fetchUpdateAsync).not.toHaveBeenCalled();
-  });
-});
-
-describe("getCurrentUpdateInfo", () => {
-  it("exposes update id, runtime version, channel, and enabled state", () => {
-    expect(
-      getCurrentUpdateInfo(
-        createUpdatesApi({
-          isEnabled: false,
-          updateId: null,
-          runtimeVersion: "1.0.0",
-          channel: null
-        })
-      )
-    ).toEqual({
-      enabled: false,
-      updateId: null,
-      runtimeVersion: "1.0.0",
-      channel: null
-    });
   });
 });

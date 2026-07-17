@@ -34,6 +34,7 @@ export const selectors = {
   accountPasswordToggle: `~${MOBILE_E2E_IDS.accountPasswordToggle}`,
   accountSignInButton: `~${MOBILE_E2E_IDS.accountSignInButton}`,
   accountSignOutButton: `~${MOBILE_E2E_IDS.accountSignOutButton}`,
+  moreScreen: `~${MOBILE_E2E_IDS.moreScreen}`,
   createTaskProvisioning: `~${MOBILE_E2E_IDS.createTaskProvisioning}`,
   createTaskProvisioningBackground:
     `~${MOBILE_E2E_IDS.createTaskProvisioningBackground}`,
@@ -42,7 +43,7 @@ export const selectors = {
   tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
-  updateInfoOtaValue: `~${MOBILE_E2E_IDS.updateInfoOtaValue}`,
+  legacyUpdateInfoOtaValue: "~mobile.update-info.ota",
   taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]'
 } as const;
 
