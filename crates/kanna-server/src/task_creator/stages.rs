@@ -150,6 +150,7 @@ pub(crate) fn prepare_stage_completion_for_api(
     config: &Config,
     source_task_id: &str,
     finished_run_kind: Option<&str>,
+    completion_transition: Option<&str>,
 ) -> Result<Option<PreparedStageTransition>, String> {
     let identity = load_stage_identity(db, source_task_id)?;
     if identity.source_task.closed_at.is_some() {
@@ -178,7 +179,15 @@ pub(crate) fn prepare_stage_completion_for_api(
             if finished_run_kind == Some("post") {
                 return prepare_swap_to_index(db, config, &context, index + 1).map(Some);
             }
-            if stage.policy.transition != PipelineStageTransition::Auto {
+            let transition = match completion_transition {
+                Some("manual") => PipelineStageTransition::Manual,
+                Some("auto") => PipelineStageTransition::Auto,
+                Some(value) => {
+                    return Err(format!("invalid stage run completion transition: {value}"))
+                }
+                None => stage.policy.transition,
+            };
+            if transition != PipelineStageTransition::Auto {
                 return Ok(None);
             }
             if stage.post.is_some() {
@@ -264,6 +273,7 @@ fn prepare_post_dispatch(
         &post_stage,
         &owner.name,
         "post",
+        post_stage.policy.transition,
         None,
         None,
         None,
@@ -299,6 +309,7 @@ fn prepare_stage_run_for_target(
         target_stage,
         item_stage,
         run_kind,
+        target_stage.policy.transition,
         prompt_override,
         feedback,
         None,
@@ -313,6 +324,7 @@ fn prepare_stage_run_for_target_with_provider(
     target_stage: &PipelineStage,
     item_stage: &str,
     run_kind: &'static str,
+    completion_transition: PipelineStageTransition,
     prompt_override: Option<&str>,
     feedback: Option<String>,
     provider_override: Option<String>,
@@ -324,6 +336,7 @@ fn prepare_stage_run_for_target_with_provider(
         target_stage,
         item_stage,
         run_kind,
+        completion_transition,
         prompt_override,
         feedback,
         provider_override,
@@ -340,6 +353,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     target_stage: &PipelineStage,
     item_stage: &str,
     run_kind: &'static str,
+    completion_transition: PipelineStageTransition,
     prompt_override: Option<&str>,
     feedback: Option<String>,
     provider_override: Option<String>,
@@ -412,6 +426,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         target_stage,
         item_stage,
         run_kind,
+        completion_transition,
         workspace_spec,
         final_prompt.clone(),
         branch,
@@ -516,6 +531,7 @@ pub(crate) fn prepare_revision_task_for_api(
         &target_stage,
         &item_stage,
         run_kind,
+        target_stage.policy.revision_transition(),
         Some(&composed_prompt),
         Some(revision_prompt.to_string()),
         loaded.source_task.agent_provider.clone(),
@@ -583,7 +599,7 @@ fn prepare_revision_resume(
         source_task.prompt.as_deref().unwrap_or(""),
         revision_prompt,
         task_id,
-        target_stage.policy.transition,
+        target_stage.policy.revision_transition(),
     );
     // A resumed run continues the recorded run's conversation, so it must
     // resolve to that run's provider — never the agent def's priority list.
@@ -600,6 +616,7 @@ fn prepare_revision_resume(
         target_stage,
         &target_stage.name,
         "main",
+        target_stage.policy.revision_transition(),
         RunWorkspaceSpec::Resume(ResumeWorkspaceSpec {
             cwd: run_cwd,
             branch: resume_branch,

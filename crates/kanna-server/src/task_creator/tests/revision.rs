@@ -41,7 +41,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
             repo_root.join(".kanna/pipelines/qa.json"),
             r#"{
   "stages": [
-    { "name": "in progress", "transition": "auto", "agent_provider": "claude", "prompt": "$TASK_PROMPT" },
+    { "name": "in progress", "policy": { "transition": "manual", "revision_transition": "auto" }, "agent_provider": "claude", "prompt": "$TASK_PROMPT" },
     { "name": "review", "transition": "manual" },
     { "name": "pr", "transition": "manual" }
   ]
@@ -108,6 +108,10 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         "Add integration coverage for spawned Kanna context.",
     )
     .unwrap();
+    assert_eq!(
+        prepared.completion_transition,
+        PipelineStageTransition::Auto
+    );
     let task_id = prepared.task_id.clone();
     let expected_session_id = prepared.session_id.clone();
     let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
@@ -152,6 +156,9 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         other => panic!("expected SpawnAgent, got {other:?}"),
     }
 
+    let revision_run = db.latest_stage_run(&task_id).unwrap().unwrap();
+    assert_eq!(revision_run.completion_transition.as_deref(), Some("auto"));
+
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
@@ -164,7 +171,7 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
         repo_root.join(".kanna/pipelines/qa.json"),
         r#"{
   "stages": [
-    { "name": "in progress", "transition": "manual", "agent": "implement", "prompt": "$TASK_PROMPT" },
+    { "name": "in progress", "policy": { "transition": "manual", "revision_transition": "auto" }, "agent": "implement", "prompt": "$TASK_PROMPT" },
     { "name": "review", "transition": "manual" }
   ]
 }"#,
@@ -377,7 +384,7 @@ fn init_resume_revision_fixture(label: &str, config: &Config) -> (std::path::Pat
         repo_root.join(".kanna/pipelines/qa.json"),
         r#"{
   "stages": [
-    { "name": "in progress", "transition": "manual", "agent": "implement", "prompt": "$TASK_PROMPT" },
+    { "name": "in progress", "policy": { "transition": "manual", "revision_transition": "auto" }, "agent": "implement", "prompt": "$TASK_PROMPT" },
     { "name": "review", "transition": "manual" }
   ]
 }"#,
@@ -505,6 +512,10 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     assert_eq!(prepared.run_kind, "main");
     assert_eq!(prepared.next_stage, "in progress");
     assert_eq!(
+        prepared.completion_transition,
+        PipelineStageTransition::Auto
+    );
+    assert_eq!(
         prepared.feedback.as_deref(),
         Some("Add e2e coverage for the revision loop.")
     );
@@ -533,12 +544,12 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
             assert!(command_line.contains("Original task:\nOriginal implementation prompt"));
             assert!(command_line
                 .contains("Reviewer feedback:\nAdd e2e coverage for the revision loop."));
-            // The target stage is manual, so the resume message must not ask
-            // for a success verdict (which would not advance anything) —
-            // only the failure fallback.
-            assert!(command_line.contains("do not record stage completion"));
+            // The ordinary stage is manual, but reviewer-requested revisions
+            // use the explicit automatic revision policy.
+            assert!(command_line.contains("record stage completion"));
             assert!(command_line.contains("kanna_complete_stage"));
-            assert!(!command_line.contains("--status success"));
+            assert!(command_line.contains("--status success"));
+            assert!(!command_line.contains("do not record stage completion"));
         }
         other => panic!("expected PTY spawn command, got {:?}", other),
     }
@@ -553,6 +564,7 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     assert_eq!(revision_run.stage, "in progress");
     assert_eq!(revision_run.kind, "main");
     assert_eq!(revision_run.status, "running");
+    assert_eq!(revision_run.completion_transition.as_deref(), Some("auto"));
     assert_eq!(
         revision_run.provider_session_id.as_deref(),
         Some(RESUME_SESSION_UUID)

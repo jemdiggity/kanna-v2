@@ -13,11 +13,6 @@ function readRepoFile(path: string): string {
 describe("built-in agent completion protocol", () => {
   const agentNames = readdirSync(resolve(repoRoot, ".kanna/agents"));
 
-  // The implement agent runs on manual-transition `in progress` stages: the
-  // user reviews the work and advances the pipeline, so recording success is
-  // meaningless there and the agent must not be told to do it.
-  const manualStageAgents = new Set(["implement"]);
-
   it.each(agentNames)("%s records stage completion MCP-first with a CLI fallback", (name) => {
     const agent = readRepoFile(`.kanna/agents/${name}/AGENT.md`);
 
@@ -27,8 +22,10 @@ describe("built-in agent completion protocol", () => {
     expect(agent.indexOf("kanna_complete_stage")).toBeLessThan(
       agent.indexOf("kanna-cli stage-complete")
     );
-    if (manualStageAgents.has(name)) {
-      expect(agent).toContain("do not record stage completion");
+    if (name === "implement") {
+      expect(agent).toContain("Follow the Kanna Task Environment completion instructions");
+      expect(agent).not.toContain("This stage advances manually");
+      expect(agent).not.toContain("do not record stage completion");
       expect(agent).not.toContain("--status success");
       expect(agent).not.toContain('"status": "success"');
     } else {
@@ -102,6 +99,25 @@ describe("QA pipeline assets", () => {
     expect(prStage?.post?.name).toBe("approve");
     expect(prStage?.post?.agent).toBe("approve");
     expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
+  });
+
+  it("automates default implement revisions without automating the initial handoff", () => {
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/default.json"));
+    const implement = parsed.stages.find((stage) => stage.name === "in progress");
+
+    expect(implement?.policy).toEqual({
+      transition: "manual",
+      revision_transition: "auto",
+    });
+  });
+
+  it("publishes revision transition values in the pipeline schema", () => {
+    const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json"));
+    const revisionTransition =
+      schema.properties.stages.items.properties.policy
+        .properties.revision_transition;
+
+    expect(revisionTransition.enum).toEqual(["manual", "auto"]);
   });
 
   it("keeps the PR agent agnostic to the development branch name", () => {

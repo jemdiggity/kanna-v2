@@ -7,6 +7,7 @@ export interface PipelineEnvironment {
 
 export interface PipelineStagePolicy {
   transition: "manual" | "auto";
+  revision_transition?: "manual" | "auto";
 }
 
 /**

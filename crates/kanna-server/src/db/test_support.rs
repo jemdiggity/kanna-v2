@@ -128,6 +128,7 @@ impl Db {
                 provider_session_id TEXT,
                 cwd TEXT,
                 resumed_from_run_id TEXT,
+                completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 finished_at TEXT
             );

@@ -4,15 +4,24 @@ use rusqlite::OptionalExtension;
 /// Identity of a run closed by `finish_latest_running_stage_run`.
 pub struct FinishedStageRun {
     pub kind: String,
+    pub completion_transition: Option<String>,
 }
 
 impl Db {
     pub fn insert_stage_run(&self, run: NewStageRun<'_>) -> Result<(), rusqlite::Error> {
+        self.insert_stage_run_with_completion_transition(run, None)
+    }
+
+    pub fn insert_stage_run_with_completion_transition(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
-              session_id, provider_session_id, cwd, resumed_from_run_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run.id,
                 run.task_id,
@@ -28,6 +37,7 @@ impl Db {
                 run.provider_session_id,
                 run.cwd,
                 run.resumed_from_run_id,
+                completion_transition,
             ),
         )?;
         Ok(())
@@ -40,7 +50,8 @@ impl Db {
     ) -> Result<Vec<StageRun>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
-                    session_id, provider_session_id, cwd, resumed_from_run_id, started_at, finished_at
+                    session_id, provider_session_id, cwd, resumed_from_run_id,
+                    completion_transition, started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
              ORDER BY datetime(started_at) ASC, id ASC",
@@ -56,7 +67,7 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        started_at, finished_at
+                        completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
                  ORDER BY datetime(started_at) DESC, id DESC
@@ -86,7 +97,7 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        started_at, finished_at
+                        completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                    AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
@@ -135,13 +146,19 @@ impl Db {
         let run_result = self
             .conn
             .query_row(
-                "SELECT id, kind
+                "SELECT id, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status = 'running'
                  ORDER BY datetime(started_at) DESC, id DESC
                  LIMIT 1",
                 [task_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional();
         let run = match run_result {
@@ -149,11 +166,14 @@ impl Db {
             Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
             Err(err) => return Err(err),
         };
-        let Some((run_id, kind)) = run else {
+        let Some((run_id, kind, completion_transition)) = run else {
             return Ok(None);
         };
         self.finish_stage_run(&run_id, status, result, feedback)?;
-        Ok(Some(FinishedStageRun { kind }))
+        Ok(Some(FinishedStageRun {
+            kind,
+            completion_transition,
+        }))
     }
 
     /// Re-finish the task's most recent already-finished run with a late
@@ -171,13 +191,19 @@ impl Db {
         let run_result = self
             .conn
             .query_row(
-                "SELECT id, kind
+                "SELECT id, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status IN ('succeeded', 'failed')
                  ORDER BY datetime(started_at) DESC, id DESC
                  LIMIT 1",
                 [task_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional();
         let run = match run_result {
@@ -185,11 +211,14 @@ impl Db {
             Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
             Err(err) => return Err(err),
         };
-        let Some((run_id, kind)) = run else {
+        let Some((run_id, kind, completion_transition)) = run else {
             return Ok(None);
         };
         self.finish_stage_run(&run_id, status, result, feedback)?;
-        Ok(Some(FinishedStageRun { kind }))
+        Ok(Some(FinishedStageRun {
+            kind,
+            completion_transition,
+        }))
     }
 
     pub fn cancel_running_stage_runs(&self, task_id: &str) -> Result<(), rusqlite::Error> {
@@ -252,7 +281,8 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         provider_session_id: row.get(11)?,
         cwd: row.get(12)?,
         resumed_from_run_id: row.get(13)?,
-        started_at: row.get(14)?,
-        finished_at: row.get(15)?,
+        completion_transition: row.get(14)?,
+        started_at: row.get(15)?,
+        finished_at: row.get(16)?,
     })
 }

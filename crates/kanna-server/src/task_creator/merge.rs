@@ -61,6 +61,7 @@ fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
             environment: None,
             policy: PipelineStagePolicy {
                 transition: PipelineStageTransition::Manual,
+                revision_transition: None,
             },
             post: None,
         }],

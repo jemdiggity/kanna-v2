@@ -13,7 +13,7 @@ Do not push a branch or create a pull request unless this stage's prompt explici
 
 ## Completion
 
-This stage advances manually: the user reviews your work and advances the pipeline themselves, and recording a result does not move the task forward. When the implementation is complete, finish by summarizing what changed and stop — do not record stage completion. Committing and the later pipeline stages happen after the user advances the task.
+Follow the Kanna Task Environment completion instructions for this run's transition policy. Initial implementation and reviewer-requested revision runs can intentionally use different policies.
 
 If you cannot complete the task, record failure with the reason instead of stopping silently — call the `kanna_complete_stage` MCP tool (`task_id` is the value of the `KANNA_TASK_ID` env var):
 

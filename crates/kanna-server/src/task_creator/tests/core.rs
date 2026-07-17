@@ -1,7 +1,53 @@
-use super::super::definitions::{AgentDefinition, RepoDefinitions};
+use super::super::definitions::{AgentDefinition, PipelineDefinition, RepoDefinitions};
 use super::super::provider::resolve_agent_provider_with;
 use super::*;
 use crate::db::{NewRepo, Repo};
+
+#[test]
+fn pipeline_stage_policy_resolves_revision_transition_with_fallback() {
+    let explicit: PipelineDefinition = serde_json::from_str(
+        r#"{
+          "stages": [{
+            "name": "in progress",
+            "policy": {"transition": "manual", "revision_transition": "auto"}
+          }]
+        }"#,
+    )
+    .unwrap();
+    let explicit_policy = &explicit.stages[0].policy;
+    assert_eq!(explicit_policy.transition, PipelineStageTransition::Manual);
+    assert_eq!(
+        explicit_policy.revision_transition(),
+        PipelineStageTransition::Auto
+    );
+    assert!(serde_json::to_string(&explicit)
+        .unwrap()
+        .contains("revision_transition"));
+
+    let inherited: PipelineDefinition = serde_json::from_str(
+        r#"{
+          "stages": [{
+            "name": "in progress",
+            "policy": {"transition": "manual"}
+          }]
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        inherited.stages[0].policy.revision_transition(),
+        PipelineStageTransition::Manual
+    );
+
+    let invalid = serde_json::from_str::<PipelineDefinition>(
+        r#"{
+          "stages": [{
+            "name": "in progress",
+            "policy": {"transition": "manual", "revision_transition": "sometimes"}
+          }]
+        }"#,
+    );
+    assert!(invalid.is_err());
+}
 
 #[derive(serde::Deserialize)]
 struct ProviderResolutionCase {
@@ -1841,6 +1887,7 @@ fn build_target_stage_prompt_sections_a_carried_task_without_rescanning_it() {
         environment: None,
         policy: super::super::definitions::PipelineStagePolicy {
             transition: PipelineStageTransition::Manual,
+            revision_transition: None,
         },
         post: None,
     };

@@ -8,7 +8,7 @@
       "description": "Agent implements the task, then commits as the stage's tail work",
       "agent": "implement",
       "prompt": "$TASK_PROMPT",
-      "policy": { "transition": "manual" },
+      "policy": { "transition": "manual", "revision_transition": "auto" },
       "post": {
         "name": "commit",
         "agent": "commit",

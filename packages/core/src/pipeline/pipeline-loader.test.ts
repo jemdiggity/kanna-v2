@@ -51,6 +51,44 @@ describe("parsePipelineJson", () => {
     expect(() => parsePipelineJson(json)).toThrow();
   });
 
+  it("parses an optional revision transition", () => {
+    const result = parsePipelineJson(JSON.stringify({
+      name: "Revision loop",
+      stages: [{
+        name: "in progress",
+        policy: { transition: "manual", revision_transition: "auto" },
+      }],
+    }));
+
+    expect(result.stages[0].policy).toEqual({
+      transition: "manual",
+      revision_transition: "auto",
+    });
+  });
+
+  it("leaves revision transition absent for existing policies", () => {
+    const result = parsePipelineJson(JSON.stringify({
+      name: "Existing",
+      stages: [{ name: "in progress", policy: { transition: "manual" } }],
+    }));
+
+    expect(result.stages[0].policy).toEqual({ transition: "manual" });
+  });
+
+  it("rejects an invalid revision transition", () => {
+    const json = JSON.stringify({
+      name: "Invalid",
+      stages: [{
+        name: "in progress",
+        policy: { transition: "manual", revision_transition: "sometimes" },
+      }],
+    });
+
+    expect(() => parsePipelineJson(json)).toThrow(
+      /invalid policy\.revision_transition "sometimes"; must be "manual" or "auto"/
+    );
+  });
+
   it("reports missing transition as undefined instead of an empty string", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
@@ -473,6 +511,21 @@ describe("validatePipeline", () => {
     };
     const errors = validatePipeline(pipeline);
     expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it("returns error for invalid revision transition", () => {
+    const pipeline = {
+      name: "Pipeline",
+      stages: [{
+        name: "Stage 1",
+        policy: {
+          transition: "manual" as const,
+          revision_transition: "bad" as "manual" | "auto",
+        },
+      }],
+    };
+    const errors = validatePipeline(pipeline);
+    expect(errors.some((error) => error.includes("invalid policy.revision_transition"))).toBe(true);
   });
 
   it("returns error for a post whose name collides with a stage name", () => {
