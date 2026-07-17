@@ -249,8 +249,8 @@ workspace boundary.
   keeps at most one pending latest snapshot per task.
 - Event objects are limited to 8 KiB serialized. `choice` and element `id` are
   limited to 256 UTF-8 bytes, visible `text` to 4 KiB, and `event_id` to 128
-  bytes. The server accepts at most 30 events per task/session in a rolling
-  ten-second window.
+  bytes. The server accepts at most 30 events per authenticated KSP
+  connection/task/session in a rolling ten-second window.
 - Companion HTML and events are not written to Kanna logs, Firestore, relay
   metadata, analytics, or cloud storage.
 - The relay authenticates the mobile tunnel using the existing Firebase

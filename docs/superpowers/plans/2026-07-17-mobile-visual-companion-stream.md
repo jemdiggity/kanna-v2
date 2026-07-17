@@ -216,16 +216,15 @@ Test successful JSONL output plus these exact rejections:
 - empty `choice`;
 - serialized event above 8 KiB;
 - `choice`/`id` above 256 bytes, `text` above 4 KiB, `event_id` above 128 bytes;
-- a symlinked `state/events` target;
-- more than 30 accepted events in ten seconds using an injected/test clock.
+- a symlinked `state/events` target.
 
-- [ ] **Step 5: Implement safe event append and rate limiting**
+- [ ] **Step 5: Implement safe event append**
 
 Validate against the current authoritative document immediately before opening
 `state/events`. Open it descriptor-relatively with `O_APPEND | O_CREAT |
 O_NOFOLLOW | O_CLOEXEC`, write one serialized event plus `\n` in one guarded
-operation, and return `StaleRevision`, `InvalidEvent`, `RateLimited`, or
-`Internal` without including HTML/local paths in display messages.
+operation, and return `StaleRevision`, `InvalidEvent`, or `Internal` without
+including HTML/local paths in display messages.
 
 - [ ] **Step 6: Run source tests and commit**
 
@@ -302,12 +301,20 @@ rate-limited events and assert rejected results with stable codes:
 `companion_stale_revision`, `companion_invalid_event`,
 `companion_rate_limited`, and `companion_event_failed`. Assert a source read
 failure emits `CompanionError` and does not emit the generic KSP error frame.
+For rate limiting, send 31 otherwise-valid events for the same task/session
+within ten seconds and assert the first 30 are accepted while the last is
+rejected.
 
 - [ ] **Step 5: Implement companion event handling off the async hot path**
 
-Call `visual_companion::append_event` inside `spawn_blocking`; return exactly one
-`CompanionEventResult` for its `event_id` after the operation completes. Map
-source failures to `CompanionError`. Do not add relay messages or invoke routes.
+Track accepted event timestamps in `StreamConn` by `(task_id, session_id)`,
+pruning timestamps outside a rolling ten-second window before enforcing the
+30-event limit. This makes the throttle local to the authenticated connection
+instead of shared filesystem state. Call `visual_companion::append_event`
+inside `spawn_blocking`; record the timestamp only after a successful append,
+and return exactly one `CompanionEventResult` for its `event_id` after the
+operation completes. Map source failures to `CompanionError`. Do not add relay
+messages or invoke routes.
 
 - [ ] **Step 6: Prove terminal traffic remains responsive and commit**
 
