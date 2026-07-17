@@ -17,6 +17,8 @@ const QUICK_REPLY_LABEL = "SGTM. Proceed.";
 const QUICK_REPLY_MENU_TITLE = "Quick Replies";
 const QUICK_REPLY_LONG_PRESS_MS = 800;
 const TASK_COMPOSER_PLACEHOLDER = "Reply…";
+const TASK_COMPOSER_MULTILINE_DRAFT =
+  "First relay line.\nSecond relay line.\nThird relay line.";
 const TASK_ACTION_MENU_TITLE = "Task Actions";
 const TASK_ACTION_LABELS = ["Advance Stage", "Close Task", "Cancel"] as const;
 
@@ -64,6 +66,7 @@ interface RelayElement {
   addValue(value: string): Promise<unknown>;
   click(): Promise<unknown>;
   getAttribute(name: string): Promise<string | null>;
+  getSize(): Promise<{ height: number; width: number }>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
   longPress(options: { duration: number }): Promise<unknown>;
@@ -96,6 +99,7 @@ interface RelayUi {
   getTaskSendButton(): Promise<RelayElement>;
   getTerminalOverlay(): Promise<RelayElement>;
   inspectTerminalWebView(): ReturnType<typeof inspectTerminalWebView>;
+  isKeyboardShown(): Promise<boolean>;
   pause(ms: number): Promise<unknown>;
   waitUntil(
     condition: () => Promise<boolean>,
@@ -155,6 +159,7 @@ interface RelayPtySnapshotRevisitJourney {
 }
 
 interface RelayTaskJourneys {
+  verifyComposerReset(): Promise<void>;
   verifyFilePreview(): Promise<void>;
   verifyMarkedRead(): Promise<void>;
   verifyPtySnapshotRevisit(): Promise<void>;
@@ -169,6 +174,7 @@ export async function runRelayTaskJourneys(
   await journeys.verifyPtySnapshotRevisit();
   await journeys.verifyTaskActionMenu();
   await journeys.verifyFilePreview();
+  await journeys.verifyComposerReset();
   await journeys.verifyQuickReply();
 }
 
@@ -281,6 +287,9 @@ function createRelayUi(driver: Browser): RelayUi {
     async inspectTerminalWebView() {
       return inspectTerminalWebView(createWebViewContextDriver(driver));
     },
+    async isKeyboardShown() {
+      return driver.isKeyboardShown();
+    },
     async pause(ms) {
       return driver.pause(ms);
     },
@@ -313,6 +322,68 @@ export async function verifyRelayTaskActionMenuJourney(
   }
 
   await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+}
+
+export async function verifyRelayComposerResetJourney(
+  ui: Pick<
+    RelayUi,
+    | "getTaskInput"
+    | "getTaskSendButton"
+    | "isKeyboardShown"
+    | "waitUntil"
+  >,
+): Promise<void> {
+  const input = await ui.getTaskInput();
+  await input.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const initialHeight = (await input.getSize()).height;
+
+  await input.click();
+  await input.setValue(TASK_COMPOSER_MULTILINE_DRAFT);
+
+  let expandedHeight = initialHeight;
+  await ui.waitUntil(
+    async () => {
+      expandedHeight = (await input.getSize()).height;
+      return expandedHeight > initialHeight && await ui.isKeyboardShown();
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected the multiline task composer to expand with the software keyboard shown",
+    },
+  );
+
+  const send = await ui.getTaskSendButton();
+  await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await send.click();
+
+  await ui.waitUntil(
+    async () => {
+      const value = await input.getAttribute("value").catch(() => null);
+      const label = value === null
+        ? await input.getAttribute("label").catch(() => null)
+        : null;
+      const resetHeight = (await input.getSize()).height;
+      const cleared =
+        value === "" ||
+        value === TASK_COMPOSER_PLACEHOLDER ||
+        label === TASK_COMPOSER_PLACEHOLDER;
+
+      return (
+        cleared &&
+        resetHeight <= initialHeight &&
+        resetHeight < expandedHeight &&
+        !(await ui.isKeyboardShown())
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected Send to clear, return to one-line height, and hide the keyboard",
+    },
+  );
 }
 
 export async function verifyRelayQuickReplyJourney(
@@ -1077,6 +1148,7 @@ export async function runRelayTaskFlow(
       await options.emitFilePreviewLinks();
       await verifyTerminalFilePreviewFlow(driver, ui, options.filePreview);
     },
+    verifyComposerReset: () => verifyRelayComposerResetJourney(ui),
     verifyQuickReply: () => verifyRelayQuickReplyJourney(ui, options.draft),
   });
 }
