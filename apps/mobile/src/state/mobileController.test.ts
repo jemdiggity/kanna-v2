@@ -8,6 +8,8 @@ import type { MobileAuthSession, MobileAuthState } from "../lib/firebase/auth";
 import type {
   TaskAgentStreamEvent,
   TaskAgentSubscription,
+  TaskCompanionStreamEvent,
+  TaskCompanionSubscription,
   KannaClient,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
@@ -80,9 +82,29 @@ function createAgentSubscriptionMock(): {
   };
 }
 
+function createCompanionSubscriptionMock(): {
+  subscription: TaskCompanionSubscription;
+  emit(event: TaskCompanionStreamEvent): void;
+} {
+  let listener: ((event: TaskCompanionStreamEvent) => void) | null = null;
+  return {
+    subscription: {
+      close: vi.fn(),
+      sendEvent: vi.fn(),
+      setListener(nextListener: (event: TaskCompanionStreamEvent) => void) {
+        listener = nextListener;
+      }
+    } as TaskCompanionSubscription,
+    emit(event) {
+      listener?.(event);
+    }
+  };
+}
+
 function createClientMock(): ClientMock {
   const terminalStream = createTerminalSubscriptionMock();
   const agentStream = createAgentSubscriptionMock();
+  const companionStream = createCompanionSubscriptionMock();
 
   return {
     getStatus: vi.fn().mockResolvedValue({
@@ -183,8 +205,15 @@ function createClientMock(): ClientMock {
       agentStream.subscription.setListener(listener);
       return agentStream.subscription;
     }),
+    observeTaskCompanion: vi.fn().mockImplementation((_taskId, listener) => {
+      (companionStream.subscription as TaskCompanionSubscription & {
+        setListener(listener: (event: TaskCompanionStreamEvent) => void): void;
+      }).setListener(listener);
+      return companionStream.subscription;
+    }),
     __terminalStream: terminalStream,
-    __agentStream: agentStream
+    __agentStream: agentStream,
+    __companionStream: companionStream
   };
 }
 
@@ -4390,6 +4419,53 @@ describe("createMobileController", () => {
     });
   });
 
+  it("owns one companion stream beside the task view and sends only while active", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    controller.openTask("task-1");
+    expect(client.observeTaskCompanion).toHaveBeenCalledTimes(1);
+    client.__companionStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: "<h2>Choose</h2>"
+    });
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionUnread: true,
+      taskCompanionSnapshot: { revision: "rev-1" }
+    });
+
+    controller.setTaskCompanionOpen("task-1", true);
+    expect(store.getState().taskCompanionUnread).toBe(false);
+    const event = {
+      event_id: "event-1",
+      type: "click" as const,
+      choice: "a",
+      text: "A",
+      id: null,
+      timestamp: 1
+    };
+    controller.sendTaskCompanionEvent("task-1", "123-456", "rev-1", event);
+    expect(client.__companionStream.subscription.sendEvent).toHaveBeenCalledWith(
+      "123-456",
+      "rev-1",
+      event
+    );
+
+    controller.closeTask();
+    expect(client.__companionStream.subscription.close).toHaveBeenCalledOnce();
+    controller.sendTaskCompanionEvent("task-1", "123-456", "rev-1", event);
+    expect(client.__companionStream.subscription.sendEvent).toHaveBeenCalledOnce();
+    expect(store.getState().taskCompanionStatus).toBe("idle");
+  });
+
   it("stores desktop PTY dimensions from an authoritative snapshot", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -5677,6 +5753,10 @@ describe("createMobileController", () => {
       listener: (event: TaskAgentStreamEvent) => void;
       subscription: TaskAgentSubscription;
     }> = [];
+    const companionStreams: Array<{
+      listener: (event: TaskCompanionStreamEvent) => void;
+      subscription: TaskCompanionSubscription;
+    }> = [];
     lan.observeTaskAgent.mockImplementation((_taskId, listener) => {
       const subscription: TaskAgentSubscription = {
         close: vi.fn(),
@@ -5685,6 +5765,14 @@ describe("createMobileController", () => {
         interrupt: vi.fn()
       };
       agentStreams.push({ listener, subscription });
+      return subscription;
+    });
+    lan.observeTaskCompanion.mockImplementation((_taskId, listener) => {
+      const subscription: TaskCompanionSubscription = {
+        close: vi.fn(),
+        sendEvent: vi.fn()
+      };
+      companionStreams.push({ listener, subscription });
       return subscription;
     });
     lan.runMergeAgent.mockImplementation(async () => {
@@ -5734,6 +5822,9 @@ describe("createMobileController", () => {
     expect(agentStreams).toHaveLength(2);
     expect(agentStreams[0]!.subscription.close).toHaveBeenCalledOnce();
     expect(agentStreams[1]!.subscription.close).not.toHaveBeenCalled();
+    expect(companionStreams).toHaveLength(2);
+    expect(companionStreams[0]!.subscription.close).toHaveBeenCalledOnce();
+    expect(companionStreams[1]!.subscription.close).not.toHaveBeenCalled();
 
     agentStreams[1]!.listener({
       type: "snapshot",
@@ -5743,6 +5834,14 @@ describe("createMobileController", () => {
         event: { type: "assistant_text", text: "Before publish", truncated: false }
       }],
       nextSeq: 1
+    });
+    companionStreams[1]!.listener({
+      type: "snapshot",
+      taskId: "local-merge-result",
+      sessionId: "123-456",
+      revision: "rev-before-publish",
+      documentKind: "fragment",
+      html: "<button data-choice=\"ship\">Ship</button>"
     });
 
     cloudTasks = [projectedTask];
@@ -5761,10 +5860,17 @@ describe("createMobileController", () => {
       taskAgentEvents: [{
         seq: 0,
         event: { type: "assistant_text", text: "Before publish", truncated: false }
-      }]
+      }],
+      taskCompanionTaskId: projectedTask.id,
+      taskCompanionStatus: "available",
+      taskCompanionSnapshot: {
+        revision: "rev-before-publish"
+      }
     });
     expect(agentStreams).toHaveLength(2);
     expect(agentStreams[1]!.subscription.close).not.toHaveBeenCalled();
+    expect(companionStreams).toHaveLength(2);
+    expect(companionStreams[1]!.subscription.close).not.toHaveBeenCalled();
 
     agentStreams[1]!.listener({
       type: "event",
@@ -5829,4 +5935,5 @@ describe("createMobileController", () => {
 interface ClientMock extends KannaClient {
   __terminalStream: ReturnType<typeof createTerminalSubscriptionMock>;
   __agentStream: ReturnType<typeof createAgentSubscriptionMock>;
+  __companionStream: ReturnType<typeof createCompanionSubscriptionMock>;
 }

@@ -13,10 +13,16 @@ import {
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskFileContent, TaskSummary } from "../lib/api/types";
 import type {
+  TaskCompanionStatus,
   TaskCreationPhase,
   TaskTerminalStatus
 } from "../state/sessionStore";
-import type { FrameAgentEvent, PermissionDecision } from "@kanna/agent-protocol";
+import type {
+  CompanionDocumentKind,
+  CompanionEvent,
+  FrameAgentEvent,
+  PermissionDecision
+} from "@kanna/agent-protocol";
 import { AgentMessageView } from "./AgentMessageView";
 import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
@@ -48,6 +54,15 @@ interface TaskScreenProps {
   agentErrorMessage: string | null;
   taskCreationPhase?: TaskCreationPhase;
   taskCreationErrorMessage?: string | null;
+  companionStatus?: TaskCompanionStatus;
+  companionSnapshot?: {
+    sessionId: string;
+    revision: string;
+    documentKind: CompanionDocumentKind;
+    html: string;
+  } | null;
+  companionUnread?: boolean;
+  companionErrorMessage?: string | null;
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
@@ -57,6 +72,12 @@ interface TaskScreenProps {
   onStopAgent(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
   onRecoverTaskCreation(): void;
+  onCompanionOpenChange?(isOpen: boolean): void;
+  onSendCompanionEvent?(
+    sessionId: string,
+    revision: string,
+    event: CompanionEvent
+  ): void;
 }
 
 function preserveExpandedTextSelection(): void {
@@ -78,6 +99,10 @@ export function TaskScreen({
   agentErrorMessage,
   taskCreationPhase = "idle",
   taskCreationErrorMessage = null,
+  companionStatus = "idle",
+  companionSnapshot = null,
+  companionUnread = false,
+  companionErrorMessage = null,
   onBack,
   onAdvanceTaskStage,
   onCloseTask,
@@ -86,7 +111,9 @@ export function TaskScreen({
   onSendInput,
   onStopAgent,
   onResolveAgentPermission,
-  onRecoverTaskCreation
+  onRecoverTaskCreation,
+  onCompanionOpenChange,
+  onSendCompanionEvent
 }: TaskScreenProps) {
   const model = buildTaskWorkspaceModel({
     task,

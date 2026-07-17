@@ -112,6 +112,7 @@ export default function App() {
 
     return () => {
       cancelled = true;
+      model.controller.dispose();
     };
   }, [model, runOtaUpdateCheck]);
 

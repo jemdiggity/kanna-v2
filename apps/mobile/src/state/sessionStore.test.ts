@@ -394,6 +394,81 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("tracks visual companion availability, unread revisions, retagging, and cleanup", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-pending");
+    expect(store.getState()).toMatchObject({
+      taskCompanionTaskId: "task-pending",
+      taskCompanionStatus: "connecting",
+      taskCompanionSnapshot: null,
+      taskCompanionUnread: false
+    });
+
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "snapshot",
+      taskId: "task-pending",
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: "<h2>First</h2>"
+    }, false);
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionUnread: true,
+      taskCompanionSnapshot: { revision: "rev-1" }
+    });
+    store.markTaskCompanionViewed("task-pending");
+    expect(store.getState().taskCompanionUnread).toBe(false);
+
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "snapshot",
+      taskId: "task-pending",
+      sessionId: "123-456",
+      revision: "rev-2",
+      documentKind: "full_document",
+      html: "<html><body>Second</body></html>"
+    }, true);
+    expect(store.getState()).toMatchObject({
+      taskCompanionUnread: false,
+      taskCompanionSnapshot: { revision: "rev-2" }
+    });
+
+    store.retagTaskIdentity("task-pending", "task-published");
+    expect(store.getState().taskCompanionTaskId).toBe("task-published");
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "unavailable",
+      taskId: "task-pending"
+    }, false);
+    expect(store.getState().taskCompanionStatus).toBe("available");
+    store.applyTaskCompanionStreamEvent("task-published", {
+      type: "unavailable",
+      taskId: "task-published"
+    }, false);
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "unavailable",
+      taskCompanionSnapshot: null,
+      taskCompanionUnread: false
+    });
+    store.applyTaskCompanionStreamEvent("task-published", {
+      type: "error",
+      taskId: "task-published",
+      code: "companion_source_failed",
+      message: "Unreadable"
+    }, false);
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "error",
+      taskCompanionErrorMessage: "Unreadable"
+    });
+    store.clearTaskCompanion();
+    expect(store.getState()).toMatchObject({
+      taskCompanionTaskId: null,
+      taskCompanionStatus: "idle",
+      taskCompanionSnapshot: null,
+      taskCompanionUnread: false,
+      taskCompanionErrorMessage: null
+    });
+  });
+
   it("clears the selected task when reconciliation finds no remaining collection match", () => {
     const store = createSessionStore();
 

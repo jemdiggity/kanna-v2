@@ -6,7 +6,12 @@ import type {
   RepoSummary,
   RepoCommandCatalog,
 } from "../lib/api/types";
-import type { AgentProvider, FrameAgentEvent } from "@kanna/agent-protocol";
+import type {
+  AgentProvider,
+  CompanionDocumentKind,
+  FrameAgentEvent
+} from "@kanna/agent-protocol";
+import type { TaskCompanionStreamEvent } from "../lib/api/client";
 import type { MobileAuthState } from "../lib/firebase/auth";
 import type {
   PersistedSessionContext,
@@ -70,6 +75,12 @@ function capTerminalOutput(output: string): CappedTerminalOutput {
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
 export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
+export type TaskCompanionStatus =
+  | "idle"
+  | "connecting"
+  | "available"
+  | "unavailable"
+  | "error";
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type AuthState = MobileAuthState;
 export type ComposerAgentProvider = AgentProvider;
@@ -152,6 +163,16 @@ export interface SessionState {
   taskAgentStatus: TaskTerminalStatus;
   taskAgentEvents: FrameAgentEvent[];
   taskAgentErrorMessage: string | null;
+  taskCompanionTaskId: string | null;
+  taskCompanionStatus: TaskCompanionStatus;
+  taskCompanionSnapshot: {
+    sessionId: string;
+    revision: string;
+    documentKind: CompanionDocumentKind;
+    html: string;
+  } | null;
+  taskCompanionUnread: boolean;
+  taskCompanionErrorMessage: string | null;
 }
 
 export interface SessionStore {
@@ -228,9 +249,17 @@ export interface SessionStore {
   setTaskTerminalError(taskId: string, message: string): void;
   beginTaskAgent(taskId: string): void;
   applyTaskAgentStreamEvent(taskId: string, event: { type: "snapshot"; events: FrameAgentEvent[] } | { type: "event"; seq: number; event: FrameAgentEvent["event"] } | { type: "status"; status: string } | { type: "exit"; code: number } | { type: "error"; message: string }): void;
+  beginTaskCompanion(taskId: string): void;
+  applyTaskCompanionStreamEvent(
+    taskId: string,
+    event: TaskCompanionStreamEvent,
+    isOpen: boolean
+  ): void;
+  markTaskCompanionViewed(taskId: string): void;
   reconcileSelectedTask(): void;
   clearTaskTerminal(): void;
   clearTaskAgent(): void;
+  clearTaskCompanion(): void;
 }
 
 export function createSessionStore(): SessionStore {
@@ -286,7 +315,12 @@ export function createSessionStore(): SessionStore {
     taskAgentTaskId: null,
     taskAgentStatus: "idle",
     taskAgentEvents: [],
-    taskAgentErrorMessage: null
+    taskAgentErrorMessage: null,
+    taskCompanionTaskId: null,
+    taskCompanionStatus: "idle",
+    taskCompanionSnapshot: null,
+    taskCompanionUnread: false,
+    taskCompanionErrorMessage: null
   };
 
   const listeners = new Set<() => void>();
@@ -753,7 +787,17 @@ export function createSessionStore(): SessionStore {
         taskAgentEvents:
           selectedTaskId === null ? [] : state.taskAgentEvents,
         taskAgentErrorMessage:
-          selectedTaskId === null ? null : state.taskAgentErrorMessage
+          selectedTaskId === null ? null : state.taskAgentErrorMessage,
+        taskCompanionTaskId:
+          selectedTaskId === null ? null : state.taskCompanionTaskId,
+        taskCompanionStatus:
+          selectedTaskId === null ? "idle" : state.taskCompanionStatus,
+        taskCompanionSnapshot:
+          selectedTaskId === null ? null : state.taskCompanionSnapshot,
+        taskCompanionUnread:
+          selectedTaskId === null ? false : state.taskCompanionUnread,
+        taskCompanionErrorMessage:
+          selectedTaskId === null ? null : state.taskCompanionErrorMessage
       };
       publish();
     },
@@ -770,10 +814,15 @@ export function createSessionStore(): SessionStore {
         state.taskAgentTaskId === previousTaskId
           ? nextTaskId
           : state.taskAgentTaskId;
+      const taskCompanionTaskId =
+        state.taskCompanionTaskId === previousTaskId
+          ? nextTaskId
+          : state.taskCompanionTaskId;
       if (
         selectedTaskId === state.selectedTaskId &&
         taskTerminalTaskId === state.taskTerminalTaskId &&
-        taskAgentTaskId === state.taskAgentTaskId
+        taskAgentTaskId === state.taskAgentTaskId &&
+        taskCompanionTaskId === state.taskCompanionTaskId
       ) {
         return;
       }
@@ -782,7 +831,8 @@ export function createSessionStore(): SessionStore {
         ...state,
         selectedTaskId,
         taskTerminalTaskId,
-        taskAgentTaskId
+        taskAgentTaskId,
+        taskCompanionTaskId
       };
       publish();
     },
@@ -1024,6 +1074,74 @@ export function createSessionStore(): SessionStore {
       };
       publish();
     },
+    beginTaskCompanion(taskId) {
+      state = {
+        ...state,
+        taskCompanionTaskId: taskId,
+        taskCompanionStatus: "connecting",
+        taskCompanionSnapshot: null,
+        taskCompanionUnread: false,
+        taskCompanionErrorMessage: null
+      };
+      publish();
+    },
+    applyTaskCompanionStreamEvent(taskId, event, isOpen) {
+      if (state.taskCompanionTaskId !== taskId) return;
+
+      if (event.type === "snapshot") {
+        const revisionChanged =
+          state.taskCompanionSnapshot?.revision !== event.revision;
+        state = {
+          ...state,
+          taskCompanionStatus: "available",
+          taskCompanionSnapshot: {
+            sessionId: event.sessionId,
+            revision: event.revision,
+            documentKind: event.documentKind,
+            html: event.html
+          },
+          taskCompanionUnread: isOpen
+            ? false
+            : revisionChanged
+              ? true
+              : state.taskCompanionUnread,
+          taskCompanionErrorMessage: null
+        };
+        publish();
+        return;
+      }
+
+      if (event.type === "unavailable") {
+        state = {
+          ...state,
+          taskCompanionStatus: "unavailable",
+          taskCompanionSnapshot: null,
+          taskCompanionUnread: false,
+          taskCompanionErrorMessage: null
+        };
+        publish();
+        return;
+      }
+
+      if (event.type === "error") {
+        state = {
+          ...state,
+          taskCompanionStatus: "error",
+          taskCompanionErrorMessage: event.message
+        };
+        publish();
+      }
+    },
+    markTaskCompanionViewed(taskId) {
+      if (
+        state.taskCompanionTaskId !== taskId ||
+        !state.taskCompanionUnread
+      ) {
+        return;
+      }
+      state = { ...state, taskCompanionUnread: false };
+      publish();
+    },
     reconcileSelectedTask() {
       const selectedSlot = taskUiSlotForSelection(
         state.taskUiSlots,
@@ -1050,7 +1168,12 @@ export function createSessionStore(): SessionStore {
         taskAgentTaskId: null,
         taskAgentStatus: "idle",
         taskAgentEvents: [],
-        taskAgentErrorMessage: null
+        taskAgentErrorMessage: null,
+        taskCompanionTaskId: null,
+        taskCompanionStatus: "idle",
+        taskCompanionSnapshot: null,
+        taskCompanionUnread: false,
+        taskCompanionErrorMessage: null
       };
       publish();
     },
@@ -1073,6 +1196,17 @@ export function createSessionStore(): SessionStore {
         taskAgentStatus: "idle",
         taskAgentEvents: [],
         taskAgentErrorMessage: null
+      };
+      publish();
+    },
+    clearTaskCompanion() {
+      state = {
+        ...state,
+        taskCompanionTaskId: null,
+        taskCompanionStatus: "idle",
+        taskCompanionSnapshot: null,
+        taskCompanionUnread: false,
+        taskCompanionErrorMessage: null
       };
       publish();
     }
