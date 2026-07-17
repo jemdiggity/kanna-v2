@@ -86,9 +86,80 @@ describe("mobile smoke runner", () => {
 
     await waitForExpoAppReady(driver);
 
-    expect(poll).toBe(2);
+    expect(poll).toBe(4);
     expect(devMenuCloseClicks).toBe(1);
     expect(devMenuDismissed).toBe(true);
+  });
+
+  it("does not return before a dev menu that appears over an already-visible app shell", async () => {
+    let poll = 0;
+    let devMenuDismissed = false;
+
+    const driver = {
+      $: async (selector: string) => ({
+        click: async () => {
+          if (selector === "~xmark") devMenuDismissed = true;
+        },
+        isDisplayed: async () => {
+          if (selector === "~xmark") {
+            return poll === 2 && !devMenuDismissed;
+          }
+          if (selector === "~mobile.app-shell") return true;
+          return false;
+        },
+        isExisting: async () => false
+      }),
+      acceptAlert: async () => undefined,
+      execute: async () => undefined,
+      getAlertText: async () => {
+        throw new Error("no alert open");
+      },
+      getWindowSize: async () => ({ width: 393, height: 852 }),
+      waitUntil: async (condition: () => Promise<boolean>) => {
+        while (poll < 6) {
+          poll += 1;
+          if (await condition()) return true;
+        }
+        throw new Error("condition did not become ready");
+      }
+    } as unknown as Browser;
+
+    await waitForExpoAppReady(driver);
+
+    expect(poll).toBeGreaterThan(2);
+    expect(devMenuDismissed).toBe(true);
+  });
+
+  it("keeps handling Expo overlays until the requested relaunch screen is ready", async () => {
+    let poll = 0;
+    const driver = {
+      $: async (selector: string) => ({
+        click: async () => undefined,
+        isDisplayed: async () => {
+          if (selector === "~mobile.app-shell") return true;
+          if (selector === "~mobile.toolbar.tab.recent") return poll >= 4;
+          return false;
+        },
+        isExisting: async () => false
+      }),
+      acceptAlert: async () => undefined,
+      execute: async () => undefined,
+      getAlertText: async () => {
+        throw new Error("no alert open");
+      },
+      getWindowSize: async () => ({ width: 393, height: 852 }),
+      waitUntil: async (condition: () => Promise<boolean>) => {
+        while (poll < 8) {
+          poll += 1;
+          if (await condition()) return true;
+        }
+        throw new Error("condition did not become ready");
+      }
+    } as unknown as Browser;
+
+    await waitForExpoAppReady(driver, "~mobile.toolbar.tab.recent");
+
+    expect(poll).toBeGreaterThanOrEqual(4);
   });
 
   it("supports a force-cloud smoke mode", () => {

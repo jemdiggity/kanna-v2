@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Browser } from "webdriverio";
+import { waitForExpoAppReady } from "../../run";
 import {
   assertOtaDiagnosticsHidden,
   assertMachineOrigins,
@@ -9,6 +11,7 @@ import {
   assertToolbarActionPathsReachable,
   openMachinesFromProfile,
   openProfileSheet,
+  relaunchApp,
   removeManualMachine,
   submitPairingCode
 } from "./profile-connection.e2e";
@@ -38,6 +41,73 @@ function createWaitUntil() {
 }
 
 describe("Profile to Machines smoke helpers", () => {
+  it("dismisses a late Expo dev menu after relaunch before profile interaction", async () => {
+    let expoPoll = 0;
+    let devMenuDismissed = false;
+    const accountButton = createElement();
+    accountButton.click.mockImplementation(async () => {
+      if (!devMenuDismissed) throw new Error("profile interaction raced the Expo dev menu");
+    });
+
+    const driver = {
+      $: async (selector: string) => ({
+        click: async () => {
+          if (selector === "~xmark") devMenuDismissed = true;
+        },
+        isDisplayed: async () => {
+          if (selector === "~xmark") {
+            return expoPoll >= 2 && !devMenuDismissed;
+          }
+          if (selector === "~mobile.app-shell") return devMenuDismissed;
+          if (selector === "~mobile.account-button") return devMenuDismissed;
+          return false;
+        },
+        isExisting: async () => false,
+        waitForDisplayed: async () => {
+          if (selector === "~mobile.app-shell" && !devMenuDismissed) {
+            throw new Error("app shell is blocked by the late Expo dev menu");
+          }
+        }
+      }),
+      acceptAlert: vi.fn(async () => undefined),
+      activateApp: vi.fn(async () => undefined),
+      execute: vi.fn(async () => undefined),
+      getAlertText: async () => {
+        throw new Error("no alert open");
+      },
+      getWindowSize: async () => ({ width: 393, height: 852 }),
+      queryAppState: async () => 1,
+      terminateApp: vi.fn(async () => true),
+      waitUntil: async (
+        condition: () => Promise<boolean>,
+        options: { timeoutMsg: string }
+      ) => {
+        if (options.timeoutMsg.includes("terminate")) {
+          if (await condition()) return true;
+        } else {
+          while (expoPoll < 6) {
+            expoPoll += 1;
+            if (await condition()) return true;
+          }
+        }
+        throw new Error(options.timeoutMsg);
+      }
+    } as unknown as Browser;
+
+    await relaunchApp(
+      driver,
+      "build.kanna.app.dev",
+      async () => undefined,
+      "~mobile.account-button",
+      (readySelector) => waitForExpoAppReady(driver, readySelector)
+    );
+    await accountButton.click();
+
+    expect(expoPoll).toBe(4);
+    expect(devMenuDismissed).toBe(true);
+    expect(accountButton.click).toHaveBeenCalledOnce();
+  });
+
   it("opens Profile from the top bar", async () => {
     const accountButton = createElement();
     const accountSheet = createElement();

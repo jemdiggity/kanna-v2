@@ -429,6 +429,7 @@ export async function runProfileDisconnectedConnectionSmoke(
     hybridFixture: MobileHybridFixture;
     reopenDevelopmentClient(): Promise<void>;
     setLanHttpEnabled(enabled: boolean): Promise<void>;
+    waitForAppReady(readySelector: string): Promise<void>;
   }
 ): Promise<void> {
   const ui = createProfileMachinesUi(driver);
@@ -470,7 +471,13 @@ export async function runProfileDisconnectedConnectionSmoke(
     manual: true
   });
 
-  await relaunchApp(driver, options.bundleId, options.reopenDevelopmentClient);
+  await relaunchApp(
+    driver,
+    options.bundleId,
+    options.reopenDevelopmentClient,
+    selectors.machinesScreen,
+    options.waitForAppReady
+  );
   await (await driver.$(selectors.machinesScreen)).waitForDisplayed({
     timeout: SCREEN_TIMEOUT_MS
   });
@@ -480,6 +487,7 @@ export async function runProfileDisconnectedConnectionSmoke(
   });
 
   await (await driver.$(selectors.machinesBackButton)).click();
+  await options.waitForAppReady(selectors.accountButton);
   await signInFromProfile(driver, ui, options.credentials);
   await openMachinesFromProfile(ui);
   await assertMachineOrigins(ui, options.desktopId, {
@@ -499,7 +507,13 @@ export async function runProfileDisconnectedConnectionSmoke(
   );
 
   await options.setLanHttpEnabled(false);
-  await relaunchApp(driver, options.bundleId, options.reopenDevelopmentClient);
+  await relaunchApp(
+    driver,
+    options.bundleId,
+    options.reopenDevelopmentClient,
+    selectors.recentTab,
+    options.waitForAppReady
+  );
   const relaunchedRecentTab = await driver.$(selectors.recentTab);
   await relaunchedRecentTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await relaunchedRecentTab.click();
@@ -572,10 +586,12 @@ async function acceptRemovalAlert(driver: Browser): Promise<void> {
   if (alertAppeared) await driver.acceptAlert();
 }
 
-async function relaunchApp(
+export async function relaunchApp(
   driver: Browser,
   bundleId: string,
-  reopenDevelopmentClient: () => Promise<void>
+  reopenDevelopmentClient: () => Promise<void>,
+  readySelector: string,
+  waitForAppReady: (readySelector: string) => Promise<void>
 ): Promise<void> {
   await driver.terminateApp(undefined, bundleId);
   await driver.waitUntil(
@@ -589,9 +605,7 @@ async function relaunchApp(
   );
   await driver.activateApp(undefined, bundleId);
   await reopenDevelopmentClient();
-  await (await driver.$(selectors.appShell)).waitForDisplayed({
-    timeout: SCREEN_TIMEOUT_MS
-  });
+  await waitForAppReady(readySelector);
 }
 
 async function signInFromProfile(

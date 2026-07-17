@@ -116,11 +116,20 @@ async function dismissExpoStartupOverlay(driver: Browser): Promise<void> {
   }
 }
 
-export async function waitForExpoAppReady(driver: Browser): Promise<void> {
+export async function waitForExpoAppReady(
+  driver: Browser,
+  readySelector = selectors.appShell
+): Promise<void> {
+  let consecutiveReadyPolls = 0;
   await driver.waitUntil(
     async () => {
       await dismissExpoStartupOverlay(driver);
-      return isDisplayed(driver, selectors.appShell);
+      if (await isDisplayed(driver, readySelector)) {
+        consecutiveReadyPolls += 1;
+      } else {
+        consecutiveReadyPolls = 0;
+      }
+      return consecutiveReadyPolls >= 3;
     },
     {
       interval: 250,
@@ -305,7 +314,9 @@ async function main(): Promise<void> {
             metroPort: env.metroPort
           });
         },
-        setLanHttpEnabled: relayHarness.setLanHttpEnabled
+        setLanHttpEnabled: relayHarness.setLanHttpEnabled,
+        waitForAppReady: (readySelector) =>
+          waitForExpoAppReady(driver!, readySelector)
       });
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {
