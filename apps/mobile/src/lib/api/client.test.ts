@@ -22,27 +22,6 @@ describe("createKannaClient", () => {
     });
   });
 
-  it("classifies a confirmed task ID collision as definitely not created", async () => {
-    const cause = new Error(
-      "taskId already exists with different task data: a1b2c3d4"
-    );
-    const transport = {
-      createTask: vi.fn().mockRejectedValue(cause)
-    } as unknown as KannaTransport;
-    const client = createKannaClient(transport);
-
-    await expect(client.createTask({
-      repoId: "repo-1",
-      prompt: "Ship it",
-      taskId: "a1b2c3d4"
-    })).rejects.toMatchObject({
-      name: "TaskCreationError",
-      outcome: "not-created",
-      message: "taskId already exists with different task data: a1b2c3d4",
-      cause
-    });
-  });
-
   it("preserves a typed task creation outcome from the transport", async () => {
     const failure = new TaskCreationError(
       "not-created",

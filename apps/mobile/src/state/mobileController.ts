@@ -102,7 +102,7 @@ function generateTaskCreationId(): string {
   try {
     const uuid = cryptoObject?.randomUUID?.().replace(/-/g, "").toLowerCase();
     if (uuid && /^[0-9a-f]{32}$/.test(uuid)) {
-      return uuid.slice(0, 8);
+      return uuid;
     }
   } catch {
     // Some React Native runtimes expose a partial crypto shim. Try the next
@@ -111,7 +111,7 @@ function generateTaskCreationId(): string {
 
   try {
     if (cryptoObject?.getRandomValues) {
-      const bytes = cryptoObject.getRandomValues(new Uint8Array(4));
+      const bytes = cryptoObject.getRandomValues(new Uint8Array(16));
       return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
     }
   } catch {
@@ -119,11 +119,18 @@ function generateTaskCreationId(): string {
   }
 
   fallbackTaskCreationCounter = (fallbackTaskCreationCounter + 1) >>> 0;
-  const timestamp = Date.now() >>> 0;
-  const entropy = Math.floor(Math.random() * 0x100000000) >>> 0;
-  const counter = Math.imul(fallbackTaskCreationCounter, 0x9e3779b1);
-  const mixed = (timestamp ^ entropy ^ counter) >>> 0;
-  return mixed.toString(16).padStart(8, "0");
+  const timestamp = Date.now().toString(16).padStart(12, "0").slice(-12);
+  const counter = fallbackTaskCreationCounter
+    .toString(16)
+    .padStart(8, "0")
+    .slice(-8);
+  let entropy = "";
+  while (entropy.length < 12) {
+    entropy += Math.floor(Math.random() * 0x100000000)
+      .toString(16)
+      .padStart(8, "0");
+  }
+  return `${timestamp}${counter}${entropy.slice(0, 12)}`;
 }
 
 export function createMobileController(

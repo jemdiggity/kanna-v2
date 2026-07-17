@@ -100,9 +100,6 @@ export interface KannaClient {
 
 export type TaskCreationOutcome = "not-created" | "unknown";
 
-const TASK_ID_COLLISION_MESSAGE =
-  "taskId already exists with different task data:";
-
 export class TaskCreationError extends Error {
   readonly outcome: TaskCreationOutcome;
   readonly cause: unknown;
@@ -143,13 +140,9 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
         if (error instanceof TaskCreationError) {
           throw error;
         }
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.includes(TASK_ID_COLLISION_MESSAGE)) {
-          throw new TaskCreationError("not-created", message, error);
-        }
         throw new TaskCreationError(
           "unknown",
-          message,
+          error instanceof Error ? error.message : String(error),
           error
         );
       }

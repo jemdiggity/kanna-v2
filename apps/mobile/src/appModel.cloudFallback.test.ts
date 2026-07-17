@@ -447,7 +447,7 @@ describe("createAppModel cloud routing", () => {
         );
       }
       if (
-        /^\/v1\/tasks\/[0-9a-f]{8}$/.test(url.pathname) &&
+        /^\/v1\/tasks\/[0-9a-f]{32}$/.test(url.pathname) &&
         init?.method === "PUT"
       ) {
         lanTaskCreated = true;
@@ -567,7 +567,7 @@ describe("createAppModel cloud routing", () => {
     expect(terminalSocket.close).not.toHaveBeenCalled();
     expect(fetchImpl).toHaveBeenCalledWith(
       expect.stringMatching(
-        /^http:\/\/owner\.local:48120\/v1\/tasks\/[0-9a-f]{8}$/
+        /^http:\/\/owner\.local:48120\/v1\/tasks\/[0-9a-f]{32}$/
       ),
       expect.objectContaining({ method: "PUT" })
     );
@@ -612,7 +612,7 @@ describe("createAppModel cloud routing", () => {
       async (request) => {
         if (
           request.method === "PUT" &&
-          /^\/v1\/tasks\/[0-9a-f]{8}$/.test(request.path)
+          /^\/v1\/tasks\/[0-9a-f]{32}$/.test(request.path)
         ) {
           return {
             taskId: "task-created",
