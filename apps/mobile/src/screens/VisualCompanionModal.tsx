@@ -127,7 +127,7 @@ function parseCompanionEvent(data: string): CompanionEvent | null {
     !isBoundedString(event.text, 4 * 1024) ||
     !(event.id === null || isBoundedString(event.id, 256)) ||
     typeof event.timestamp !== "number" ||
-    !Number.isFinite(event.timestamp) ||
+    !Number.isSafeInteger(event.timestamp) ||
     event.timestamp < 0
   ) {
     return null;

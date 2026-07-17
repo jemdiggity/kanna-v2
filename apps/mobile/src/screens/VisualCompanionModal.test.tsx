@@ -1,4 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  createRelayDesktopClient,
+  type RelaySocketLike
+} from "../lib/transports/relayClient";
 
 const harness = vi.hoisted(() => ({
   hookIndex: 0,
@@ -144,6 +148,23 @@ function bridgeMessage(data: string): { nativeEvent: { data: string } } {
   return { nativeEvent: { data } };
 }
 
+function createRelaySocket(): RelaySocketLike {
+  return {
+    readyState: 1,
+    close: vi.fn(),
+    send: vi.fn(),
+    onclose: null,
+    onerror: null,
+    onmessage: null,
+    onopen: null
+  };
+}
+
+async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe("VisualCompanionModal", () => {
   it("renders the current revision in a tightly constrained WebView", () => {
     let tree = renderModal();
@@ -214,6 +235,25 @@ describe("VisualCompanionModal", () => {
     expect(onSendEvent).toHaveBeenCalledWith("123-456", "rev-1", event);
   });
 
+  it("accepts the largest timestamp represented exactly on the Rust u64 wire", () => {
+    const onSendEvent = vi.fn();
+    const webView = findByType(renderModal({ onSendEvent }), "WebView");
+    const event = {
+      event_id: "mobile-1",
+      type: "click",
+      choice: "ship",
+      text: "Ship",
+      id: null,
+      timestamp: Number.MAX_SAFE_INTEGER
+    };
+
+    (webView?.props?.onMessage as (message: unknown) => void)(
+      bridgeMessage(JSON.stringify({ type: "companion-event", event }))
+    );
+
+    expect(onSendEvent).toHaveBeenCalledWith("123-456", "rev-1", event);
+  });
+
   it.each([
     "not-json",
     JSON.stringify({ type: "other", event: {} }),
@@ -224,6 +264,18 @@ describe("VisualCompanionModal", () => {
     JSON.stringify({
       type: "companion-event",
       event: { event_id: "x", type: "click", choice: "a", text: "x".repeat(8_192), id: null, timestamp: 1 }
+    }),
+    JSON.stringify({
+      type: "companion-event",
+      event: { event_id: "x", type: "click", choice: "a", text: "", id: null, timestamp: 1.5 }
+    }),
+    JSON.stringify({
+      type: "companion-event",
+      event: { event_id: "x", type: "click", choice: "a", text: "", id: null, timestamp: Number.MAX_SAFE_INTEGER + 1 }
+    }),
+    JSON.stringify({
+      type: "companion-event",
+      event: { event_id: "x", type: "click", choice: "a", text: "", id: null, timestamp: Number.MAX_VALUE }
     })
   ])("rejects malformed or oversized bridge data %#", (data) => {
     const onSendEvent = vi.fn();
@@ -232,6 +284,67 @@ describe("VisualCompanionModal", () => {
     (webView?.props?.onMessage as (message: unknown) => void)(bridgeMessage(data));
 
     expect(onSendEvent).not.toHaveBeenCalled();
+  });
+
+  it("keeps hostile bridge timestamps out of the shared relay and terminal stream", async () => {
+    const socket = createRelaySocket();
+    const client = createRelayDesktopClient({
+      createSocket: () => socket,
+      getIdToken: async () => "id-token-1",
+      relayUrl: "wss://relay.example"
+    });
+    const terminalEvents: unknown[] = [];
+    client.observeTaskTerminal(
+      { desktopId: "desktop-1", taskId: "task-1" },
+      (event) => terminalEvents.push(event)
+    );
+    const companion = client.observeTaskCompanion(
+      { desktopId: "desktop-1", taskId: "task-1" },
+      () => {}
+    );
+
+    socket.onopen?.();
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await flushPromises();
+
+    const webView = findByType(
+      renderModal({
+        onSendEvent: (sessionId, revision, event) =>
+          companion.sendEvent(sessionId, revision, event)
+      }),
+      "WebView"
+    );
+    const hostileEvent = {
+      event_id: "hostile-1",
+      type: "click",
+      choice: "ship",
+      text: "Ship",
+      id: null,
+      timestamp: 1.5
+    };
+    (webView?.props?.onMessage as (message: unknown) => void)(
+      bridgeMessage(
+        JSON.stringify({ type: "companion-event", event: hostileEvent })
+      )
+    );
+
+    const frames = vi.mocked(socket.send).mock.calls.map(([payload]) =>
+      JSON.parse(payload) as Record<string, unknown>
+    );
+    expect(frames).not.toContainEqual(
+      expect.objectContaining({
+        type: "companion_event",
+        task_id: "task-1"
+      })
+    );
+    expect(terminalEvents).not.toContainEqual(
+      expect.objectContaining({ type: "error" })
+    );
+    client.close();
   });
 
   it("shows a local send failure without replacing the companion", () => {

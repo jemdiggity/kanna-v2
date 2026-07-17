@@ -73,6 +73,24 @@ pub fn append_event(
     revision: &str,
     event: &CompanionEvent,
 ) -> Result<(), CompanionError> {
+    append_event_with_before_final_workspace_check(
+        db_path,
+        task_id,
+        session_id,
+        revision,
+        event,
+        || {},
+    )
+}
+
+fn append_event_with_before_final_workspace_check(
+    db_path: &str,
+    task_id: &str,
+    session_id: &str,
+    revision: &str,
+    event: &CompanionEvent,
+    before_final_workspace_check: impl FnOnce(),
+) -> Result<(), CompanionError> {
     let serialized = validate_event(event)?;
     #[cfg(unix)]
     {
@@ -96,13 +114,18 @@ pub fn append_event(
         if current.session_id != session_id || current.revision != revision {
             return Err(CompanionError::StaleRevision);
         }
-        let events = openat_owned(
-            state.as_raw_fd(),
-            std::ffi::OsStr::new("events"),
-            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
-        )
-        .map_err(|_| CompanionError::Internal("failed to open visual companion events".into()))?;
+        before_final_workspace_check();
+        let authoritative_root = match open_current_workspace(db_path, task_id) {
+            Ok(root) => root,
+            Err(CompanionError::TaskNotFound | CompanionError::WorkspaceUnavailable) => {
+                return Err(CompanionError::StaleRevision);
+            }
+            Err(error) => return Err(error),
+        };
+        if open_file_identity(&root)? != open_file_identity(&authoritative_root)? {
+            return Err(CompanionError::StaleRevision);
+        }
+        let events = open_append_regular_file(state.as_raw_fd(), "events")?;
         let mut line = serialized;
         line.push(b'\n');
         // A single append-mode write keeps each bounded JSONL event intact
@@ -123,7 +146,14 @@ pub fn append_event(
     }
     #[cfg(not(unix))]
     {
-        let _ = (db_path, task_id, session_id, revision, serialized);
+        let _ = (
+            db_path,
+            task_id,
+            session_id,
+            revision,
+            serialized,
+            before_final_workspace_check,
+        );
         Err(CompanionError::Internal(
             "secure visual companion traversal is unsupported on this platform".into(),
         ))
@@ -396,6 +426,51 @@ fn open_optional_regular_file(
         .metadata()
         .map_err(|_| CompanionError::Internal("failed to inspect visual companion".into()))?;
     Ok(metadata.is_file().then_some(file))
+}
+
+#[cfg(unix)]
+fn open_append_regular_file(
+    directory_fd: std::os::fd::RawFd,
+    name: &str,
+) -> Result<std::fs::File, CompanionError> {
+    let file = openat_owned(
+        directory_fd,
+        std::ffi::OsStr::new(name),
+        libc::O_WRONLY
+            | libc::O_APPEND
+            | libc::O_CREAT
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | libc::O_NONBLOCK,
+        0o600,
+    )
+    .map(std::fs::File::from)
+    .map_err(|_| CompanionError::Internal("failed to open visual companion events".into()))?;
+    let metadata = file.metadata().map_err(|_| {
+        CompanionError::Internal("failed to inspect visual companion events".into())
+    })?;
+    if !metadata.is_file() {
+        return Err(CompanionError::Internal(
+            "visual companion events is not a regular file".into(),
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_file_identity(
+    descriptor: &std::os::fd::OwnedFd,
+) -> Result<(libc::dev_t, libc::ino_t), CompanionError> {
+    use std::os::fd::AsRawFd;
+
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(descriptor.as_raw_fd(), metadata.as_mut_ptr()) } != 0 {
+        return Err(CompanionError::Internal(
+            "failed to inspect task workspace identity".into(),
+        ));
+    }
+    let metadata = unsafe { metadata.assume_init() };
+    Ok((metadata.st_dev, metadata.st_ino))
 }
 
 #[cfg(unix)]
@@ -848,6 +923,41 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn rejects_a_workspace_mapping_replaced_during_event_validation() {
+        let fixture = CompanionFixture::new();
+        fixture.activate("123-456", "layout.html", b"screen");
+        let document = current_document(fixture.db_path(), "task-1")
+            .unwrap()
+            .unwrap();
+        let departed_events = fixture.session_path("123-456").join("state/events");
+        let replacement = fixture.temp_dir.path().join("replacement");
+        std::fs::create_dir_all(&replacement).unwrap();
+
+        let result = append_event_with_before_final_workspace_check(
+            fixture.db_path(),
+            "task-1",
+            &document.session_id,
+            &document.revision,
+            &CompanionFixture::event(),
+            || {
+                fixture
+                    .db
+                    .upsert_worktree(
+                        "wt-task-1",
+                        "task-1",
+                        replacement.to_str().unwrap(),
+                        "replacement-branch",
+                    )
+                    .unwrap();
+            },
+        );
+
+        assert_eq!(result, Err(CompanionError::StaleRevision));
+        assert!(!departed_events.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn refuses_a_symlinked_event_target() {
         let fixture = CompanionFixture::new();
         fixture.activate("123-456", "layout.html", b"screen");
@@ -873,5 +983,66 @@ mod tests {
             Err(CompanionError::Internal(_))
         ));
         assert_eq!(std::fs::read_to_string(outside).unwrap(), "untouched\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_fifo_event_target_promptly_without_writing() {
+        use std::io::Read as _;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::sync::mpsc;
+
+        let fixture = CompanionFixture::new();
+        fixture.activate("123-456", "layout.html", b"screen");
+        let document = current_document(fixture.db_path(), "task-1")
+            .unwrap()
+            .unwrap();
+        let events_path = fixture.session_path("123-456").join("state/events");
+        let fifo_path = std::ffi::CString::new(events_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let db_path = fixture.db_path().to_string();
+        let session_id = document.session_id;
+        let revision = document.revision;
+        let (result_tx, result_rx) = mpsc::channel();
+        let append = std::thread::spawn(move || {
+            let result = append_event(
+                &db_path,
+                "task-1",
+                &session_id,
+                &revision,
+                &CompanionFixture::event(),
+            );
+            result_tx.send(result).unwrap();
+        });
+
+        let prompt_result = result_rx.recv_timeout(Duration::from_millis(250));
+        let returned_promptly = prompt_result.is_ok();
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&events_path)
+            .unwrap();
+        let append_result = match prompt_result {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("opening a FIFO reader should release a blocking writer"),
+            Err(error) => panic!("visual companion append channel failed: {error}"),
+        };
+        append.join().unwrap();
+        let mut written = Vec::new();
+        reader.read_to_end(&mut written).unwrap();
+
+        assert!(
+            returned_promptly,
+            "append_event blocked while opening an untrusted FIFO"
+        );
+        assert!(matches!(append_result, Err(CompanionError::Internal(_))));
+        assert!(
+            written.is_empty(),
+            "append_event wrote into an untrusted FIFO"
+        );
     }
 }
