@@ -1,5 +1,6 @@
 import React from "react";
 import { ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
 
@@ -21,6 +22,7 @@ export function SearchScreen({
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
+      testID={MOBILE_E2E_IDS.searchScreen}
     >
       <View style={styles.wrap}>
         <Text style={styles.heading}>Search</Text>

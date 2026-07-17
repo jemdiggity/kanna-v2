@@ -5,6 +5,11 @@ describe("MOBILE_E2E_IDS", () => {
   it("keeps the smoke-test selectors stable", () => {
     expect(MOBILE_E2E_IDS.appShell).toBe("mobile.app-shell");
     expect(MOBILE_E2E_IDS.tasksScreen).toBe("mobile.tasks-screen");
+    expect(MOBILE_E2E_IDS.recentScreen).toBe("mobile.recent-screen");
+    expect(MOBILE_E2E_IDS.searchScreen).toBe("mobile.search-screen");
+    expect(MOBILE_E2E_IDS.moreScreen).toBe("mobile.more-screen");
+    expect(MOBILE_E2E_IDS.toolbarNavigation).toBe("mobile.toolbar.navigation");
+    expect(MOBILE_E2E_IDS.toolbarSearch).toBe("mobile.toolbar.search");
     expect(MOBILE_E2E_IDS.taskDetailScreen).toBe("mobile.task-detail-screen");
     expect(MOBILE_E2E_IDS.taskDetailTitle).toBe("mobile.task-detail-title");
     expect(MOBILE_E2E_IDS.taskTitleButton).toBe("mobile.task-title-button");

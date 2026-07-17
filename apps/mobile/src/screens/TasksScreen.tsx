@@ -34,6 +34,11 @@ export function TasksScreen({
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
+      testID={
+        isRecentView
+          ? MOBILE_E2E_IDS.recentScreen
+          : MOBILE_E2E_IDS.tasksScreen
+      }
     >
       <View style={styles.wrap}>
         {heading ? <Text style={styles.heading}>{heading}</Text> : null}
@@ -69,7 +74,6 @@ export function TasksScreen({
         <TaskList
           emptyLabel="No tasks yet."
           tasks={displayedTasks}
-          testID={MOBILE_E2E_IDS.tasksScreen}
           onOpenTask={onOpenTask}
         />
       </View>

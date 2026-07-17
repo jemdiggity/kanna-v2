@@ -17,6 +17,7 @@ import {
   readDesktopIdentity,
   resolveDesktopServerUrlForTarget
 } from "./helpers/desktop";
+import { dismissExpoDevClientOverlays } from "./helpers/dev-client";
 import { ensureExpoServer } from "./helpers/metro";
 import {
   assertPhysicalDeviceAppInstalled,
@@ -37,6 +38,7 @@ import {
   runProfileConnectionSmoke,
   runProfileDisconnectedConnectionSmoke
 } from "./specs/smoke/profile-connection.e2e";
+import { runShellVisualSmoke } from "./specs/smoke/shell-visual.e2e";
 import { runCloudTaskFlow } from "./specs/cloud/cloud-task-flow.e2e";
 import { runHybridTaskFlow } from "./specs/hybrid/hybrid-task-flow.e2e";
 import { runRelayTaskFlow } from "./specs/relay/relay-task-flow.e2e";
@@ -47,11 +49,13 @@ export const smokeSpecPaths = [
   "specs/hybrid/hybrid-task-flow.e2e.ts",
   "specs/relay/relay-task-flow.e2e.ts",
   "specs/smoke/list-detail-back.e2e.ts",
-  "specs/smoke/profile-connection.e2e.ts"
+  "specs/smoke/profile-connection.e2e.ts",
+  "specs/smoke/shell-visual.e2e.ts"
 ];
 export const supportedSmokeTargets = ["simulator", "device"] as const;
 export const supportedSmokeModes = [
   "smoke",
+  "shell-visual",
   "profile-disconnected",
   "cloud",
   "relay",
@@ -128,17 +132,6 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-async function dismissExpoDevClientFirstLaunch(driver: Browser): Promise<void> {
-  const continueButton = await driver.$("~Continue");
-  const isVisible = await continueButton
-    .waitForDisplayed({ timeout: 5_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (isVisible) {
-    await continueButton.click();
-  }
-}
-
 async function main(): Promise<void> {
   const mode = process.argv[2] ?? "smoke";
   if (!supportedSmokeModes.includes(mode as (typeof supportedSmokeModes)[number])) {
@@ -165,6 +158,11 @@ async function main(): Promise<void> {
   if (mode === "hybrid" && env.target !== "simulator") {
     throw new Error(
       "The mobile hybrid E2E mode is simulator-only; it must not install or launch a physical device."
+    );
+  }
+  if (mode === "shell-visual" && env.target !== "simulator") {
+    throw new Error(
+      "The mobile shell visual E2E mode is simulator-only so screenshot geometry and colors remain pinned."
     );
   }
   await assertXcuitestDriverInstalled(process.env as Record<string, string | undefined>);
@@ -228,7 +226,7 @@ async function main(): Promise<void> {
       );
     }
 
-    if (mode === "smoke") {
+    if (mode === "smoke" || mode === "shell-visual") {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
     if (mode === "relay" || mode === "hybrid") {
@@ -263,10 +261,21 @@ async function main(): Promise<void> {
         device: simulatorDevice,
         metroPort: env.metroPort
       });
-      await dismissExpoDevClientFirstLaunch(driver);
+      await dismissExpoDevClientOverlays(driver);
     }
 
-    if (mode === "profile-disconnected") {
+    if (mode === "shell-visual") {
+      const desktopIdentity = await readDesktopIdentity(resolvedDesktopServerUrl);
+      await seedTrustedDesktopThroughDeepLink({
+        bundleId: env.bundleId,
+        driver,
+        desktop: {
+          desktopId: desktopIdentity.desktopId,
+          displayName: desktopIdentity.desktopName
+        }
+      });
+      await runShellVisualSmoke(driver);
+    } else if (mode === "profile-disconnected") {
       await runProfileDisconnectedConnectionSmoke(driver);
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {
@@ -319,6 +328,9 @@ async function main(): Promise<void> {
       await runListDetailBackSmoke(driver, {
         desktopServerUrl: resolvedDesktopServerUrl
       });
+      if (env.target === "simulator") {
+        await runShellVisualSmoke(driver);
+      }
       await runProfileConnectionSmoke(driver);
     }
   } finally {

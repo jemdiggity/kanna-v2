@@ -6,7 +6,7 @@
 
 **Architecture:** Keep this narrow presentation change inside the existing root shell and floating toolbar components. Add rendering-level regression tests that assert the root shell has only its content layer and that the floating chrome uses the approved opaque color; no state, navigation, or data APIs change.
 
-**Tech Stack:** React Native 0.86, React 19, TypeScript, Vitest, `react-test-renderer`, pnpm
+**Tech Stack:** React Native 0.86, React 19, TypeScript, Vitest, `react-test-renderer`, Appium/WebdriverIO, PNGJS, pnpm
 
 ---
 
@@ -236,17 +236,109 @@ git commit -m "style(mobile): simplify floating shell chrome"
 ### Task 3: Verify the complete mobile package
 
 **Files:**
-- Verify only; no planned file changes.
+- Modify: `apps/mobile/package.json`
+- Modify: `pnpm-lock.yaml`
+- Modify: `apps/mobile/src/e2eTestIds.ts`
+- Modify: `apps/mobile/src/e2eTestIds.test.ts`
+- Modify: `apps/mobile/src/App.tsx`
+- Modify: `apps/mobile/src/components/FloatingToolbar.tsx`
+- Modify: `apps/mobile/src/screens/TasksScreen.tsx`
+- Modify: `apps/mobile/src/screens/SearchScreen.tsx`
+- Modify: `apps/mobile/src/screens/MoreScreen.tsx`
+- Modify: `apps/mobile/e2e/helpers/selectors.ts`
+- Create: `apps/mobile/e2e/helpers/dev-client.ts`
+- Create: `apps/mobile/e2e/helpers/dev-client.test.ts`
+- Create: `apps/mobile/e2e/helpers/native-shell-visual.ts`
+- Create: `apps/mobile/e2e/helpers/native-shell-visual.test.ts`
+- Create: `apps/mobile/e2e/specs/smoke/shell-visual.e2e.ts`
+- Create: `apps/mobile/e2e/specs/smoke/shell-visual.test.ts`
+- Modify: `apps/mobile/e2e/run.ts`
+- Modify: `apps/mobile/e2e/run.test.ts`
 
-- [ ] **Step 1: Run the full mobile unit test suite**
+- [ ] **Step 1: Add failing tests for screenshot pixel inspection and shell navigation**
+
+Add unit tests that construct small PNG fixtures and require the screenshot
+helper to map native point rectangles to screenshot pixels, measure exact color
+coverage, and report useful failures. Add a smoke-flow unit test with a fake UI
+that requires the flow to visit Tasks, Recent, Search, and More and capture each
+screen.
+
+- [ ] **Step 2: Run the focused tests and verify they fail**
 
 Run:
 
 ```bash
-pnpm --dir apps/mobile test -- --runInBand
+pnpm --dir apps/mobile test -- --runInBand e2e/helpers/native-shell-visual.test.ts e2e/specs/smoke/shell-visual.test.ts
 ```
 
-Expected: all mobile Vitest files pass.
+Expected: FAIL because the screenshot helper and smoke flow do not exist yet.
+
+- [ ] **Step 3: Add stable native selectors and PNG inspection support**
+
+Add `pngjs` and `@types/pngjs` as mobile development dependencies. Extend
+`MOBILE_E2E_IDS` and the Appium selectors with IDs for the Recent, Search, and
+More screen roots, the toolbar navigation container, and the search utility
+button. Apply those IDs to the existing native views without changing their
+layout or behavior. Replace the launch runner's early Expo-overlay probe with
+an app-owned toolbar readiness marker; accept first-launch onboarding or dismiss
+the native developer-menu sheet before visual sampling.
+
+- [ ] **Step 4: Implement the native shell visual smoke**
+
+Implement a pure PNG helper that decodes WebDriver screenshots, maps native
+rectangles using the screenshot/window scale, and asserts exact-color coverage.
+Implement a simulator smoke flow that:
+
+1. waits for Tasks and captures the shell;
+2. visits Recent, Search, and More and captures each rendered screen;
+3. checks right/top and left/lower canvas patches where the removed ambient
+   circles used to appear for exact `#08111E` coverage;
+4. checks exposed search-button and navigation-container patches for exact
+   `#080F1B` coverage across screens with different content behind the floating
+   chrome, so translucent `rgba(...)` surfaces cannot pass by flattening over a
+   similar dark canvas; and
+5. checks that `#1E304C` border pixels remain present around the toolbar.
+
+Wire the flow into simulator `smoke` runs after the list/detail flow has returned
+to the task list, and expose a dedicated `shell-visual` simulator mode that does
+not require the unrelated live PTY fixture. Keep physical-device smoke unchanged
+because its device model, display scale, and human-owned launch flow are
+intentionally not pinned.
+
+- [ ] **Step 5: Run focused unit and simulator coverage**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- --runInBand e2e/helpers/native-shell-visual.test.ts e2e/specs/smoke/shell-visual.test.ts App.component.test.tsx src/components/FloatingToolbar.test.tsx
+pnpm --dir apps/mobile run typecheck
+pnpm --dir apps/mobile run test:e2e:shell-visual
+```
+
+Expected: all focused tests and typecheck pass; the booted simulator visits all
+four top-level screens and the native screenshot assertions pass.
+
+- [ ] **Step 6: Prove the native visual regression fails against the old shell**
+
+Temporarily restore the removed ambient circle views and translucent toolbar
+colors, rerun `pnpm --dir apps/mobile run test:e2e:shell-visual`, and verify the new
+pixel assertion fails for the expected canvas/chrome mismatch. Restore the
+implementation and rerun the simulator smoke to green.
+
+### Task 4: Verify the complete repository
+
+**Files:**
+- Verify only; no planned file changes.
+
+- [ ] **Step 1: Run the reviewer-requested focused tests**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- --runInBand App.component.test.tsx src/components/FloatingToolbar.test.tsx
+```
+
+Expected: both focused component test files pass.
 
 - [ ] **Step 2: Run the mobile TypeScript check**
 
@@ -258,13 +350,34 @@ pnpm --dir apps/mobile run typecheck
 
 Expected: `tsc --noEmit` exits successfully with no diagnostics.
 
-- [ ] **Step 3: Check the final diff**
+- [ ] **Step 3: Run the repository JavaScript/TypeScript suite**
 
 Run:
 
 ```bash
-git diff --check HEAD~2..HEAD
+pnpm test
+```
+
+Expected: all workspace JavaScript/TypeScript test projects pass.
+
+- [ ] **Step 4: Run the daemon Rust suite serially**
+
+Run:
+
+```bash
+cd crates/daemon && cargo test -- --test-threads=1
+```
+
+Expected: all daemon tests pass.
+
+- [ ] **Step 5: Check the final diff**
+
+Run:
+
+```bash
+git diff --check
 git status --short
 ```
 
-Expected: no whitespace errors and no uncommitted implementation files.
+Expected: no whitespace errors; only this revision's intended files are
+uncommitted for the manual pipeline transition.

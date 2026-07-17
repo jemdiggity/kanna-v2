@@ -3,6 +3,11 @@ import { MOBILE_E2E_IDS } from "../../src/e2eTestIds";
 export const selectors = {
   appShell: `~${MOBILE_E2E_IDS.appShell}`,
   tasksScreen: `~${MOBILE_E2E_IDS.tasksScreen}`,
+  recentScreen: `~${MOBILE_E2E_IDS.recentScreen}`,
+  searchScreen: `~${MOBILE_E2E_IDS.searchScreen}`,
+  moreScreen: `~${MOBILE_E2E_IDS.moreScreen}`,
+  toolbarNavigation: `~${MOBILE_E2E_IDS.toolbarNavigation}`,
+  toolbarSearch: `~${MOBILE_E2E_IDS.toolbarSearch}`,
   taskDetailScreen: `~${MOBILE_E2E_IDS.taskDetailScreen}`,
   taskDetailTitle: `~${MOBILE_E2E_IDS.taskDetailTitle}`,
   taskTitleButton: `~${MOBILE_E2E_IDS.taskTitleButton}`,

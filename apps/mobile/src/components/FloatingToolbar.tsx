@@ -32,6 +32,7 @@ export function FloatingToolbar({
         <Pressable
           style={styles.utilityButton}
           accessibilityLabel={searchAction.label}
+          testID={MOBILE_E2E_IDS.toolbarSearch}
           onPress={() => onSelectUtilityAction(searchAction.name)}
         >
           <Ionicons
@@ -42,7 +43,7 @@ export function FloatingToolbar({
         </Pressable>
       ) : null}
 
-      <View style={styles.bar}>
+      <View style={styles.bar} testID={MOBILE_E2E_IDS.toolbarNavigation}>
         {tabs.map((tab) => {
           const active = tab.name === activeTab;
           return (

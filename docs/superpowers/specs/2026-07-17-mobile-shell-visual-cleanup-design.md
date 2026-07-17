@@ -66,11 +66,20 @@ solid canvas with their current contrast and spacing.
 
 ## Testing
 
-- Update component assertions only if they explicitly encode the translucent
-  toolbar background.
+- Keep focused component assertions for the root layer count and exact toolbar
+  style values.
+- Extend the simulator Appium smoke to visit Tasks, Recent, Search, and More,
+  capture the native-rendered shell on each screen, and assert pixel patches at
+  the former ambient-circle locations are the exact `#08111E` canvas color.
+- In the same native screenshot, assert exposed pixels in both the search
+  utility button and navigation container are the exact opaque `#080F1B`
+  chrome color across screens with different content behind the floating
+  controls, while the existing `#1E304C` border remains visible. The contrasting
+  More-screen content makes the old translucent `rgba(...)` chrome fail after
+  native screenshot flattening. This covers the React Native renderer boundary
+  and the intended canvas/chrome separation without a device-model-sized
+  full-screen baseline.
 - Run the mobile unit test suite and TypeScript typecheck.
-- Manually verify the Tasks, Recent, Search, and More screens at an iPhone-sized
-  viewport.
 - Confirm the toolbar remains visually distinct and all text, icons, active
   states, and error banners retain sufficient contrast.
 

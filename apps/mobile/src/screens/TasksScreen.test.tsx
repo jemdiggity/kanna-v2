@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -88,6 +89,7 @@ describe("TasksScreen", () => {
     }) as ElementNode;
 
     expect(findElement(tree, TaskList)?.props?.tasks).toEqual(tasks);
+    expect(tree.props?.testID).toBe(MOBILE_E2E_IDS.recentScreen);
     expect(textContent(tree)).not.toContain("Repo A");
   });
 
@@ -165,5 +167,7 @@ describe("TasksScreen", () => {
     }) as ElementNode;
 
     expect(findElement(tree, TaskList)?.props?.tasks).toEqual([taskA]);
+    expect(tree.props?.testID).toBe(MOBILE_E2E_IDS.tasksScreen);
+    expect(findElement(tree, TaskList)?.props?.testID).toBeUndefined();
   });
 });
