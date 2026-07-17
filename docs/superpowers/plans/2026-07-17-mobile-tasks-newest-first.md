@@ -403,7 +403,7 @@ Expected: PASS with no TypeScript errors.
 - [ ] **Step 3: Run the Kanna server library tests**
 
 ```bash
-cargo test -p kanna-server --lib
+cargo test -p kanna-server
 ```
 
 Expected: PASS.
