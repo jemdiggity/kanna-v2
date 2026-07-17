@@ -191,7 +191,7 @@ const store = {
   takeBackTarget: vi.fn(),
   takeForwardTarget: vi.fn(),
   advanceStage: vi.fn(async () => {}),
-  closeTask: vi.fn(async () => {}),
+  closeTask: vi.fn(async () => true),
   bump: vi.fn(async () => {}),
   pinItem: vi.fn(async () => {}),
   unpinItem: vi.fn(async () => {}),
@@ -1890,6 +1890,7 @@ describe("App", () => {
       localItems.splice(0);
       store.currentItem = null;
       store.selectedItemId = null;
+      return true;
     });
     cloudTasksMock.mockResolvedValue({
       repos: [],

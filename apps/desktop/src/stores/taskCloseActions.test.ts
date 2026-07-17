@@ -90,19 +90,26 @@ function createHarness(durableItem = item()) {
     selectItem,
     persistSelection: vi.fn(async () => {}),
     reconcileSelection: vi.fn(),
+    fetchSnapshot: vi.fn(async () => ({
+      entries: [{ repo: repo(), items: [durableItem] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    })),
     reloadSnapshot: vi.fn(async () => {}),
     getAgentProviderAvailability: vi.fn(async () => ({ claude: true })),
     windowWorkspace: { invalidateSharedData: vi.fn(async () => {}) },
   };
-  const context = createStoreContext(state, {
+  const toast = {
     toasts: ref([]),
     dismiss: vi.fn(),
     info: vi.fn(),
     warning: vi.fn(),
     error: vi.fn(),
-  }, services);
+  };
+  const context = createStoreContext(state, toast, services);
   const actions = createTaskCloseActions(context, { checkUnblocked: vi.fn(async () => {}) });
-  return { state, services, actions, selectedTaskId };
+  return { state, services, actions, selectedTaskId, toast };
 }
 
 function deferred<T>() {
@@ -209,6 +216,50 @@ describe("task close durable selection", () => {
     expect(services.selectReplacementAfterItemRemoval).not.toHaveBeenCalled();
     expect(state.selectedRepoId.value).toBe("repo-2");
     expect(state.selectedItemId.value).toBe(createdSlotId);
+  });
+
+  it("reports failure when the close request fails and the task remains open", async () => {
+    const closeError = new Error("close request failed");
+    setDesktopServerClientHandlersForTests({
+      closeTask: async () => {
+        throw closeError;
+      },
+    });
+    const durableItem = item();
+    const { actions, services, toast } = createHarness(durableItem);
+
+    const closed = await actions.closeTask(durableItem.id);
+
+    expect(closed).toBe(false);
+    expect(services.fetchSnapshot).toHaveBeenCalledOnce();
+    expect(services.selectReplacementAfterItemRemoval).not.toHaveBeenCalled();
+    expect(services.reloadSnapshot).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith("Failed to close task");
+  });
+
+  it("reconciles selection when the close response fails after the task was committed", async () => {
+    const closeError = new Error("close response was lost");
+    setDesktopServerClientHandlersForTests({
+      closeTask: async () => {
+        throw closeError;
+      },
+    });
+    const durableItem = item();
+    const { actions, services, toast } = createHarness(durableItem);
+    services.fetchSnapshot.mockResolvedValueOnce({
+      entries: [{ repo: repo(), items: [] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    });
+
+    const closed = await actions.closeTask(durableItem.id);
+
+    expect(closed).toBe(true);
+    expect(services.selectReplacementAfterItemRemoval).toHaveBeenCalledWith(durableItem);
+    expect(services.reloadSnapshot).toHaveBeenCalledOnce();
+    expect(services.windowWorkspace.invalidateSharedData).toHaveBeenCalledWith("closeTask");
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("keeps the stable slot selected after undo delegates restoration to selectItem", async () => {

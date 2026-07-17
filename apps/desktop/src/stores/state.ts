@@ -227,7 +227,7 @@ export interface StoreServices {
     agentType?: AgentExecutionType,
     opts?: CreateItemOptions,
   ) => Promise<string>;
-  closeTask?: (targetItemId?: string, opts?: { selectNext?: boolean }) => Promise<void>;
+  closeTask?: (targetItemId?: string, opts?: { selectNext?: boolean }) => Promise<boolean>;
   undoClose?: () => Promise<void>;
   checkUnblocked?: (blockerItemId: string) => Promise<void>;
   startBlockedTask?: (item: PipelineItem) => Promise<void>;

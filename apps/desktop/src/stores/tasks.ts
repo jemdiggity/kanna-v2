@@ -24,7 +24,7 @@ export interface TasksApi {
     agentType?: AgentExecutionType,
     opts?: CreateItemOptions,
   ) => Promise<string>;
-  closeTask: (targetItemId?: string, opts?: { selectNext?: boolean }) => Promise<void>;
+  closeTask: (targetItemId?: string, opts?: { selectNext?: boolean }) => Promise<boolean>;
   undoClose: () => Promise<void>;
   blockTask: (blockerIds: string[]) => Promise<void>;
   editBlockedTask: (itemId: string, newBlockerIds: string[]) => Promise<void>;

@@ -29,6 +29,7 @@ async function waitForCondition(
   predicate: () => Promise<boolean>,
   description: string,
   timeoutMs = 5_000,
+  diagnostics?: () => Promise<unknown>,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
@@ -41,7 +42,17 @@ async function waitForCondition(
     await sleep(100);
   }
 
-  throw new Error(`Timed out waiting for ${description}`);
+  let lastDiagnostics: unknown = null;
+  try {
+    lastDiagnostics = await diagnostics?.();
+  } catch (error) {
+    lastDiagnostics = { diagnosticError: error instanceof Error ? error.message : String(error) };
+  }
+
+  const diagnosticSuffix = diagnostics
+    ? `; last observed state: ${JSON.stringify(lastDiagnostics)}`
+    : "";
+  throw new Error(`Timed out waiting for ${description}${diagnosticSuffix}`);
 }
 
 async function seedPtyTask(
@@ -875,23 +886,69 @@ describe("task lifecycle", () => {
       await callVueMethod(client, "store.selectItem", repoATaskId);
       await persistWindowSelection(client, { repoId: repoAId, itemId: repoATaskId });
 
-      const closeResult = await callVueMethod(client, "closeSelectedWorkspaceTask");
-      if (closeResult && typeof closeResult === "object" && "__error" in closeResult) {
-        throw new Error(String((closeResult as { __error: unknown }).__error));
-      }
+      await client.executeSync(
+        `const originalFetch = globalThis.fetch;
+         window.__KANNA_FIRST_CLOSE_FETCH__ = originalFetch;
+         globalThis.fetch = async (input, init) => {
+           const url = typeof input === "string"
+             ? input
+             : input instanceof URL
+               ? input.href
+               : input.url;
+           const method = String(
+             init?.method ?? (input instanceof Request ? input.method : "GET")
+           ).toUpperCase();
+           const response = await originalFetch(input, init);
+           const path = new URL(url, window.location.href).pathname;
+           if (
+             method === "POST"
+             && path === ${JSON.stringify(`/v1/tasks/${encodeURIComponent(repoATaskId)}/actions/close`)}
+           ) {
+             return new Response("simulated lost close response", {
+               status: 503,
+               statusText: "Service Unavailable",
+             });
+           }
+           return response;
+         };
+         return true;`,
+      );
 
-      await waitForCondition(async () => {
-        const rows = await queryDb(
-          client,
-          "SELECT closed_at FROM pipeline_item WHERE id = ?",
-          [repoATaskId],
-        ) as Array<{ closed_at: string | null }>;
-        const selectedRepoId = await getVueState(client, "selectedRepoId");
-        const selectedItemId = await getVueState(client, "selectedItemId");
-        return Boolean(rows[0]?.closed_at)
-          && selectedRepoId === repoAId
-          && selectedItemId === null;
-      }, "repository A to remain selected after its only task closes", 15_000);
+      let closeResult: unknown;
+      try {
+        closeResult = await callVueMethod(client, "closeSelectedWorkspaceTask");
+      } finally {
+        await client.executeSync(
+          `globalThis.fetch = window.__KANNA_FIRST_CLOSE_FETCH__;
+           delete window.__KANNA_FIRST_CLOSE_FETCH__;
+           return true;`,
+        );
+      }
+      expect(closeResult).toBe(true);
+
+      const closeState = await client.executeAsync<{
+        closedAt: string | null;
+        selectedRepoId: string | null;
+        selectedItemId: string | null;
+      }>(
+        `const cb = arguments[arguments.length - 1];
+         const ctx = window.__KANNA_E2E__.setupState;
+         const read = (value) => value && value.__v_isRef ? value.value : value;
+         const db = ctx.db.value || ctx.db;
+         db.select(
+           "SELECT closed_at FROM pipeline_item WHERE id = ?",
+           [${JSON.stringify(repoATaskId)}],
+         ).then((rows) => cb({
+           closedAt: rows[0]?.closed_at ?? null,
+           selectedRepoId: read(ctx.store.selectedRepoId) ?? null,
+           selectedItemId: read(ctx.store.selectedItemId) ?? null,
+         })).catch((error) => cb({ __error: error?.message || String(error) }));`,
+      );
+      expect(closeState).toEqual({
+        closedAt: expect.any(String),
+        selectedRepoId: repoAId,
+        selectedItemId: null,
+      });
 
       await assertEmptyRepoASelection(repoBTaskId);
 
@@ -901,7 +958,10 @@ describe("task lifecycle", () => {
         const selectedRepoId = await getVueState(client, "selectedRepoId");
         const selectedItemId = await getVueState(client, "selectedItemId");
         return selectedRepoId === repoAId && selectedItemId === null;
-      }, "persisted empty repository A selection after reload", 10_000);
+      }, "persisted empty repository A selection after reload", 10_000, async () => ({
+        selectedRepoId: await getVueState(client, "selectedRepoId"),
+        selectedItemId: await getVueState(client, "selectedItemId"),
+      }));
 
       await assertEmptyRepoASelection(repoBTaskId);
 
