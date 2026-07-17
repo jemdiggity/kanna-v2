@@ -327,6 +327,39 @@ describe("App component wiring", () => {
     );
   });
 
+  it("binds task detail actions to the selected task without opening More", async () => {
+    const { controller, model, sessionStore } = createModel("connected");
+    sessionStore.setRecentTasks([
+      {
+        id: "task-current",
+        repoId: "repo-1",
+        title: "Current task",
+        stage: "review",
+        agentType: "agent"
+      }
+    ]);
+    sessionStore.setSelectedTask("task-current");
+    const advance = vi
+      .spyOn(controller, "advanceDesktopTaskStage")
+      .mockResolvedValue(undefined);
+    const close = vi
+      .spyOn(controller, "closeDesktopTask")
+      .mockResolvedValue(undefined);
+    const showView = vi.spyOn(controller, "showView");
+
+    const renderer = await mountModel(model);
+    const taskScreen = renderer.root.findByType("TaskScreen");
+
+    expect(taskScreen.props.onAdvanceTaskStage).toBeTypeOf("function");
+    expect(taskScreen.props.onCloseTask).toBeTypeOf("function");
+    taskScreen.props.onAdvanceTaskStage();
+    taskScreen.props.onCloseTask();
+
+    expect(advance).toHaveBeenCalledWith("task-current");
+    expect(close).toHaveBeenCalledWith("task-current");
+    expect(showView).not.toHaveBeenCalledWith("more");
+  });
+
   it("exposes the accepted task snapshot to detail-only E2E synchronization", async () => {
     const previous = process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED;
     process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED = "1";
