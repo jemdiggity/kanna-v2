@@ -17,7 +17,6 @@ import {
   readDesktopIdentity,
   resolveDesktopServerUrlForTarget
 } from "./helpers/desktop";
-import { dismissExpoDevClientOverlays } from "./helpers/dev-client";
 import { ensureExpoServer } from "./helpers/metro";
 import {
   assertPhysicalDeviceAppInstalled,
@@ -25,6 +24,7 @@ import {
 } from "./helpers/device";
 import { resolveRequiredMobileE2eEnv } from "./helpers/env";
 import { createMobileSession } from "./helpers/session";
+import { selectors } from "./helpers/selectors";
 import { seedTrustedDesktopThroughDeepLink } from "./helpers/trust-seed";
 import {
   assertSimulatorAppInstalled,
@@ -87,6 +87,62 @@ export function resolveSimulatorAlertHandling(
     return "manual";
   }
   return "dismiss";
+}
+
+async function isDisplayed(driver: Browser, selector: string): Promise<boolean> {
+  const element = await driver.$(selector);
+  return element.isDisplayed().catch(() => false);
+}
+
+async function dismissExpoStartupOverlay(driver: Browser): Promise<void> {
+  const alertText = await driver.getAlertText().catch(() => null);
+  if (alertText && isBonjourPermissionAlert(alertText)) {
+    await driver.acceptAlert();
+  }
+
+  const continueButton = await driver.$("~Continue");
+  if (await continueButton.isDisplayed().catch(() => false)) {
+    await continueButton.click();
+  }
+  const devMenuCloseButton = await driver.$("~xmark");
+  if (await devMenuCloseButton.isDisplayed().catch(() => false)) {
+    await devMenuCloseButton.click();
+  } else {
+    const devMenuMarker = await driver.$("~Toggle performance monitor");
+    if (await devMenuMarker.isExisting()) {
+      const closePoint = resolveExpoDevMenuClosePoint(await driver.getWindowSize());
+      await driver.execute("mobile: tap", closePoint);
+    }
+  }
+}
+
+export async function waitForExpoAppReady(driver: Browser): Promise<void> {
+  await driver.waitUntil(
+    async () => {
+      await dismissExpoStartupOverlay(driver);
+      return isDisplayed(driver, selectors.appShell);
+    },
+    {
+      interval: 250,
+      timeout: 90_000,
+      timeoutMsg:
+        "Kanna's mobile app shell did not become visible after Expo startup overlays were handled."
+    }
+  );
+}
+
+export function isBonjourPermissionAlert(text: string): boolean {
+  return /local network|find and connect|devices on your local network/i.test(text);
+}
+
+export function resolveExpoDevMenuClosePoint(viewport: {
+  width: number;
+  height: number;
+}): { x: number; y: number } {
+  return {
+    x: viewport.width - 40,
+    y: Math.round(viewport.height * 0.48)
+  };
 }
 
 async function main(): Promise<void> {
@@ -217,7 +273,7 @@ async function main(): Promise<void> {
         device: simulatorDevice,
         metroPort: env.metroPort
       });
-      await dismissExpoDevClientOverlays(driver);
+      await waitForExpoAppReady(driver);
     }
 
     if (mode === "shell-visual") {

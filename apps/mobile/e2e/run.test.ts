@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { Browser } from "webdriverio";
 import {
   requiresExactExpoEnvironment,
   resolveSimulatorAlertHandling,
   resolveSmokeModeAppEnv,
   smokeSpecPaths,
   supportedSmokeModes,
-  supportedSmokeTargets
+  supportedSmokeTargets,
+  waitForExpoAppReady
 } from "./run";
 
 describe("mobile smoke runner", () => {
@@ -41,6 +43,52 @@ describe("mobile smoke runner", () => {
   it("supports a simulator shell visual mode without the PTY fixture", () => {
     expect(supportedSmokeModes).toContain("shell-visual");
     expect(smokeSpecPaths).toContain("specs/smoke/shell-visual.e2e.ts");
+  });
+
+  it("dismisses a dev menu that appears after the initial startup poll", async () => {
+    let poll = 0;
+    let devMenuDismissed = false;
+    let devMenuCloseClicks = 0;
+
+    const driver = {
+      $: async (selector: string) => ({
+        click: async () => {
+          if (selector === "~xmark") {
+            devMenuCloseClicks += 1;
+            devMenuDismissed = true;
+          }
+        },
+        isDisplayed: async () => {
+          if (selector === "~xmark") {
+            return poll >= 2 && !devMenuDismissed;
+          }
+          if (selector === "~mobile.app-shell") {
+            return devMenuDismissed;
+          }
+          return false;
+        },
+        isExisting: async () => false
+      }),
+      acceptAlert: async () => undefined,
+      execute: async () => undefined,
+      getAlertText: async () => {
+        throw new Error("no alert open");
+      },
+      getWindowSize: async () => ({ width: 393, height: 852 }),
+      waitUntil: async (condition: () => Promise<boolean>) => {
+        while (poll < 4) {
+          poll += 1;
+          if (await condition()) return true;
+        }
+        throw new Error("condition did not become ready");
+      }
+    } as unknown as Browser;
+
+    await waitForExpoAppReady(driver);
+
+    expect(poll).toBe(2);
+    expect(devMenuCloseClicks).toBe(1);
+    expect(devMenuDismissed).toBe(true);
   });
 
   it("supports a force-cloud smoke mode", () => {
