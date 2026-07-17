@@ -38,6 +38,7 @@ import {
   runProfileConnectionSmoke,
   runProfileDisconnectedConnectionSmoke
 } from "./specs/smoke/profile-connection.e2e";
+import { runSearchFocusSmoke } from "./specs/smoke/search-focus.e2e";
 import { runShellVisualSmoke } from "./specs/smoke/shell-visual.e2e";
 import { runCloudTaskFlow } from "./specs/cloud/cloud-task-flow.e2e";
 import { runHybridTaskFlow } from "./specs/hybrid/hybrid-task-flow.e2e";
@@ -50,11 +51,13 @@ export const smokeSpecPaths = [
   "specs/relay/relay-task-flow.e2e.ts",
   "specs/smoke/list-detail-back.e2e.ts",
   "specs/smoke/profile-connection.e2e.ts",
+  "specs/smoke/search-focus.e2e.ts",
   "specs/smoke/shell-visual.e2e.ts"
 ];
 export const supportedSmokeTargets = ["simulator", "device"] as const;
 export const supportedSmokeModes = [
   "smoke",
+  "search-focus",
   "shell-visual",
   "profile-disconnected",
   "cloud",
@@ -226,7 +229,11 @@ async function main(): Promise<void> {
       );
     }
 
-    if (mode === "smoke" || mode === "shell-visual") {
+    if (
+      mode === "smoke" ||
+      mode === "search-focus" ||
+      mode === "shell-visual"
+    ) {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
     if (mode === "relay" || mode === "hybrid") {
@@ -325,13 +332,18 @@ async function main(): Promise<void> {
           displayName: desktopIdentity.desktopName
         }
       });
-      await runListDetailBackSmoke(driver, {
-        desktopServerUrl: resolvedDesktopServerUrl
-      });
-      if (env.target === "simulator") {
-        await runShellVisualSmoke(driver);
+      if (mode === "search-focus") {
+        await runSearchFocusSmoke(driver);
+      } else {
+        await runListDetailBackSmoke(driver, {
+          desktopServerUrl: resolvedDesktopServerUrl
+        });
+        await runSearchFocusSmoke(driver);
+        if (env.target === "simulator") {
+          await runShellVisualSmoke(driver);
+        }
+        await runProfileConnectionSmoke(driver);
       }
-      await runProfileConnectionSmoke(driver);
     }
   } finally {
     if (driver) {

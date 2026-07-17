@@ -7,6 +7,10 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.tasksScreen).toBe("mobile.tasks-screen");
     expect(MOBILE_E2E_IDS.recentScreen).toBe("mobile.recent-screen");
     expect(MOBILE_E2E_IDS.searchScreen).toBe("mobile.search-screen");
+    expect(MOBILE_E2E_IDS.searchInput).toBe("mobile.search-input");
+    expect(MOBILE_E2E_IDS.searchKeyboardDismissTarget).toBe(
+      "mobile.search-keyboard-dismiss-target"
+    );
     expect(MOBILE_E2E_IDS.moreScreen).toBe("mobile.more-screen");
     expect(MOBILE_E2E_IDS.toolbarNavigation).toBe("mobile.toolbar.navigation");
     expect(MOBILE_E2E_IDS.toolbarSearch).toBe("mobile.toolbar.search");

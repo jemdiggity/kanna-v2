@@ -16,6 +16,11 @@ describe("mobile smoke runner", () => {
     expect(smokeSpecPaths).toContain("specs/smoke/profile-connection.e2e.ts");
   });
 
+  it("registers the Search focus smoke spec", () => {
+    expect(smokeSpecPaths).toContain("specs/smoke/search-focus.e2e.ts");
+    expect(supportedSmokeModes).toContain("search-focus");
+  });
+
   it("supports both simulator and physical-device targets", () => {
     expect(supportedSmokeTargets).toEqual(["simulator", "device"]);
   });
