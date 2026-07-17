@@ -5,7 +5,11 @@ import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
 import { runCommand } from "./processes";
-import { writeScriptedAgentBinary } from "./scriptedAgent";
+import {
+  SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL,
+  writeScriptedAgentBinary,
+  type ScriptedAgentOptions,
+} from "./scriptedAgent";
 import type { RemoteHarness } from "./harness";
 import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../../apps/mobile/src/lib/api/client";
 
@@ -59,6 +63,21 @@ export interface TerminalEventCollector {
   outputText(): string;
   waitForExit(expectedCode: number, timeoutMs?: number): Promise<void>;
   waitForOutput(marker: string, timeoutMs?: number): Promise<string>;
+  waitForSnapshot(
+    expectation: TerminalSnapshotExpectation,
+    timeoutMs?: number,
+  ): Promise<ObservedTerminalSnapshot>;
+}
+
+export interface TerminalSnapshotExpectation {
+  minEncodedChars: number;
+  sentinel: string;
+}
+
+export interface ObservedTerminalSnapshot {
+  cols: number;
+  dataB64: string;
+  rows: number;
 }
 
 export async function connectRawRelayClient(harness: RemoteHarness): Promise<RawRelayClient> {
@@ -78,6 +97,7 @@ export async function createScriptedTask(
     notifyTaskId?: string;
     prompt?: string;
     repoName?: string;
+    snapshotHistory?: ScriptedAgentOptions["snapshotHistory"];
     waitingPromptSnippet?: string;
   }
 ): Promise<ScriptedTask> {
@@ -85,7 +105,9 @@ export async function createScriptedTask(
     harness.paths.root,
     `scripted-repo-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
-  await writeScriptedRepo(repoPath);
+  await writeScriptedRepo(repoPath, {
+    snapshotHistory: options.snapshotHistory,
+  });
 
   const repo = asCreatedRepo(await harness.client.invokeDesktop({
     desktopId: harness.desktopId,
@@ -97,13 +119,18 @@ export async function createScriptedTask(
     }
   }));
 
+  const basePrompt =
+    options.prompt ?? `Run deterministic scripted task for ${options.displayName}`;
+  const taskPrompt = options.snapshotHistory
+    ? `${basePrompt}\n${SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL}`
+    : basePrompt;
   const task = asCreatedTask(await harness.client.invokeDesktop({
     desktopId: harness.desktopId,
     method: "POST",
     path: "/v1/tasks",
     body: {
       repoId: repo.id,
-      prompt: options.prompt ?? `Run deterministic scripted task for ${options.displayName}`,
+      prompt: taskPrompt,
       displayName: options.displayName,
       agentProvider: "codex",
       agentType: "pty",
@@ -296,10 +323,15 @@ class RawRelayClientImpl implements RawRelayClient {
 }
 
 class TerminalEventCollectorImpl implements TerminalEventCollector {
-  private readonly chunks: string[] = [];
+  private chunks: string[] = [];
+  private lastSnapshot: ObservedTerminalSnapshot | null = null;
   private readonly outputWaiters: Array<{
     marker: string;
     resolve(output: string): void;
+  }> = [];
+  private readonly snapshotWaiters: Array<{
+    expectation: TerminalSnapshotExpectation;
+    resolve(snapshot: ObservedTerminalSnapshot): void;
   }> = [];
   private readonly exitWaiters: Array<{
     expectedCode: number;
@@ -350,6 +382,37 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
     });
   }
 
+  async waitForSnapshot(
+    expectation: TerminalSnapshotExpectation,
+    timeoutMs = 10_000,
+  ): Promise<ObservedTerminalSnapshot> {
+    if (this.lastSnapshot && snapshotMatches(this.lastSnapshot, expectation)) {
+      return this.lastSnapshot;
+    }
+    return await new Promise<ObservedTerminalSnapshot>((resolve, reject) => {
+      const waiter = { expectation, resolve };
+      const timeout = setTimeout(() => {
+        const index = this.snapshotWaiters.indexOf(waiter);
+        if (index >= 0) {
+          this.snapshotWaiters.splice(index, 1);
+        }
+        const lastEncodedChars = this.lastSnapshot?.dataB64.length ?? 0;
+        reject(new Error(
+          `timed out waiting for terminal snapshot from ${this.taskId}; ` +
+            `last encoded length=${lastEncodedChars}, expected >` +
+            `${expectation.minEncodedChars} with ${expectation.sentinel}`,
+        ));
+      }, timeoutMs);
+      this.snapshotWaiters.push({
+        expectation,
+        resolve: (snapshot) => {
+          clearTimeout(timeout);
+          resolve(snapshot);
+        },
+      });
+    });
+  }
+
   async waitForExit(expectedCode: number, timeoutMs = 10_000): Promise<void> {
     if (this.exitCode !== null) {
       if (this.exitCode !== expectedCode) {
@@ -382,15 +445,26 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
 
   private onEvent(event: TaskTerminalStreamEvent): void {
     switch (event.type) {
-      case "output": {
-        this.chunks.push(Buffer.from(event.dataB64, "base64").toString("utf8"));
-        const output = this.outputText();
-        for (const waiter of [...this.outputWaiters]) {
-          if (output.includes(waiter.marker)) {
-            this.outputWaiters.splice(this.outputWaiters.indexOf(waiter), 1);
-            waiter.resolve(output);
+      case "snapshot": {
+        const decoded = Buffer.from(event.dataB64, "base64").toString("utf8");
+        this.chunks = [decoded];
+        this.lastSnapshot = {
+          cols: event.cols,
+          dataB64: event.dataB64,
+          rows: event.rows,
+        };
+        this.resolveOutputWaiters();
+        for (const waiter of [...this.snapshotWaiters]) {
+          if (snapshotMatches(this.lastSnapshot, waiter.expectation)) {
+            this.snapshotWaiters.splice(this.snapshotWaiters.indexOf(waiter), 1);
+            waiter.resolve(this.lastSnapshot);
           }
         }
+        return;
+      }
+      case "output": {
+        this.chunks.push(Buffer.from(event.dataB64, "base64").toString("utf8"));
+        this.resolveOutputWaiters();
         return;
       }
       case "exit": {
@@ -411,15 +485,39 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
           this.exitWaiters.splice(this.exitWaiters.indexOf(waiter), 1);
           waiter.reject(error);
         }
+        this.snapshotWaiters.splice(0);
         return;
       }
-      case "ready":
-        return;
+    }
+  }
+
+  private resolveOutputWaiters(): void {
+    const output = this.outputText();
+    for (const waiter of [...this.outputWaiters]) {
+      if (output.includes(waiter.marker)) {
+        this.outputWaiters.splice(this.outputWaiters.indexOf(waiter), 1);
+        waiter.resolve(output);
+      }
     }
   }
 }
 
-async function writeScriptedRepo(repoPath: string): Promise<void> {
+function snapshotMatches(
+  snapshot: ObservedTerminalSnapshot,
+  expectation: TerminalSnapshotExpectation,
+): boolean {
+  return (
+    snapshot.dataB64.length > expectation.minEncodedChars &&
+    Buffer.from(snapshot.dataB64, "base64")
+      .toString("utf8")
+      .includes(expectation.sentinel)
+  );
+}
+
+async function writeScriptedRepo(
+  repoPath: string,
+  options: ScriptedAgentOptions = {},
+): Promise<void> {
   await mkdir(join(repoPath, ".kanna"), { recursive: true });
   await mkdir(join(repoPath, "bin"), { recursive: true });
   await writeFile(
@@ -438,7 +536,7 @@ async function writeScriptedRepo(repoPath: string): Promise<void> {
   );
   await writeFile(join(repoPath, "README.md"), "# Remote E2E scripted repo\n");
   const codexPath = join(repoPath, "bin", "codex");
-  await writeScriptedAgentBinary(codexPath);
+  await writeScriptedAgentBinary(codexPath, options);
   await runCommand("git", ["init"], { cwd: repoPath, env: process.env });
   await runCommand("git", ["config", "user.email", "remote-e2e@example.invalid"], {
     cwd: repoPath,

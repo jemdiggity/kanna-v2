@@ -11,6 +11,45 @@ import {
   verifyTerminalMarkdownFileControls,
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
+import * as relayTaskFlow from "./relay-task-flow.e2e";
+
+describe("oversized PTY snapshot revisit", () => {
+  it("renders the authoritative snapshot before and after reopening the task", async () => {
+    const calls: string[] = [];
+    const verifyRelayPtySnapshotRevisit = (
+      relayTaskFlow as typeof relayTaskFlow & {
+        verifyRelayPtySnapshotRevisit?: (journey: {
+          closeTask(): Promise<void>;
+          openTask(): Promise<void>;
+          waitForRenderedTerminal(): Promise<void>;
+        }) => Promise<void>;
+      }
+    ).verifyRelayPtySnapshotRevisit;
+
+    expect(verifyRelayPtySnapshotRevisit).toBeTypeOf("function");
+    if (!verifyRelayPtySnapshotRevisit) return;
+
+    await verifyRelayPtySnapshotRevisit({
+      async openTask() {
+        calls.push("open");
+      },
+      async waitForRenderedTerminal() {
+        calls.push("rendered");
+      },
+      async closeTask() {
+        calls.push("close");
+      },
+    });
+
+    expect(calls).toEqual([
+      "open",
+      "rendered",
+      "close",
+      "open",
+      "rendered",
+    ]);
+  });
+});
 
 describe("Tasks-tab creation ordering journey", () => {
   it("selects Tasks and accepts native task rows only in newest-first order", async () => {

@@ -265,3 +265,87 @@ existing controller tests to emit snapshots.
 Run the controller, LAN transport, relay transport, and session-store tests,
 then `pnpm --dir apps/mobile typecheck`, `pnpm --dir apps/mobile test`, and
 `git diff --check`. All commands must exit zero before handoff.
+
+### Task 5: Exercise Oversized Snapshot Replay Through Relay and Appium
+
+**Files:**
+- Modify: `tests/remote-e2e/src/scriptedAgent.ts`
+- Modify: `tests/remote-e2e/src/scriptedAgent.test.ts`
+- Modify: `tests/remote-e2e/src/terminalFlowTestUtils.ts`
+- Modify: `apps/mobile/e2e/helpers/relay-harness.ts`
+- Modify: `apps/mobile/e2e/helpers/relay-harness.test.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.test.ts`
+- Test: `apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts`
+
+- [x] **Step 1: Add failing fixture and revisit-journey tests**
+
+Require the deterministic relay fixture to declare an encoded snapshot boundary
+strictly greater than 1,000,000 characters. Add a relay-flow helper test that
+expects this sequence: open task, wait for the terminal to become live, assert
+the WebView snapshot, return to the list, reopen the same task, and assert the
+WebView snapshot again.
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- e2e/helpers/relay-harness.test.ts e2e/specs/relay/relay-task-flow.test.ts
+```
+
+Expected: FAIL because the oversized fixture and revisit helper do not exist.
+
+- [x] **Step 2: Make the scripted PTY produce retained oversized history**
+
+Add an opt-in `snapshotHistory` setting to the shared scripted-agent fixture.
+Before `SCRIPT_READY`, emit 10,050 79-column terminal lines followed by a unique
+sentinel. At 80 columns the daemon retains roughly 10,000 complete history rows,
+so its serialized snapshot remains over 750,000 decoded bytes and therefore over
+1,000,000 base64 characters. Keep this opt-in so unrelated remote E2E tasks stay
+small.
+
+- [x] **Step 3: Observe and validate the authoritative snapshot**
+
+Teach `TerminalEventCollector` to preserve `snapshot` identity, replace its
+accumulated view on a fresh snapshot, and wait for snapshot dimensions, sentinel
+content, and encoded length. In the mobile relay harness, wait for the history
+sentinel, detach, reattach, then reject the fixture unless the new authoritative
+snapshot has more than 1,000,000 encoded characters. Use its decoded size and
+daemon dimensions as the Appium expectation.
+
+- [x] **Step 4: Revisit the task through the real mobile relay path**
+
+Add the Appium helper exercised by `runRelayTaskFlow`: open the exact relay task,
+wait for `TerminalWebView` to report nonblank sentinel text, decoded bytes, and
+daemon dimensions; navigate back; reopen the same task; repeat the same WebView
+assertion. Continue the existing file-preview and quick-reply journey from the
+reopened task.
+
+- [x] **Step 5: Run focused and requested verification**
+
+Run the focused mobile and scripted-agent tests, mobile typecheck, then:
+
+```bash
+pnpm --dir apps/mobile run test:e2e:preflight
+pnpm --dir apps/mobile run test:e2e:relay
+pnpm test
+cd crates/daemon && cargo test -- --test-threads=1
+```
+
+Record any genuine environmental blocker with the exact failing prerequisite;
+do not substitute the unit tests silently. Finish with `git diff --check` and an
+inspection of the scoped diff.
+
+Verification notes:
+
+- The generic Appium preflight could not run because
+  `KANNA_E2E_DESKTOP_SERVER_URL` was unset and no kd-managed desktop fixture was
+  running. Supplying that URL for a live fixture would make the generic smoke
+  path feasible; the reviewer-approved deterministic relay path was used here.
+- The relay harness observed an authoritative 1,085,488-character base64
+  snapshot (814,116 decoded bytes, 80x24) before launching Appium. One relay run
+  completed the initial and reopened `TerminalWebView` assertions, then failed
+  later in the existing task-activity journey. Subsequent reruns exposed the
+  same task-list activity flake earlier (`rendered task row ids were []`) before
+  reaching the terminal step.
+- Focused mobile and scripted-agent tests, both relevant typechecks, `pnpm test`,
+  the serial daemon suite, and `git diff --check` completed successfully.

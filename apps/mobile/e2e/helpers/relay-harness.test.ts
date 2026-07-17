@@ -2,6 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 import * as relayHarness from "./relay-harness";
 
 describe("mobile relay harness helpers", () => {
+  it("defines a deterministic PTY snapshot beyond the retention boundary", () => {
+    const fixture = (
+      relayHarness as typeof relayHarness & {
+        MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE?: {
+          minEncodedChars: number;
+          sentinel: string;
+        };
+      }
+    ).MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE;
+
+    expect(fixture).toBeDefined();
+    expect(fixture?.minEncodedChars).toBeGreaterThan(1_000_000);
+    expect(fixture?.sentinel).toMatch(/MOBILE.*SNAPSHOT/);
+  });
+
   it("describes the real Markdown file and routed failure used by Appium", () => {
     expect(relayHarness.MOBILE_RELAY_FILE_PREVIEW_FIXTURE).toEqual({
       content: [

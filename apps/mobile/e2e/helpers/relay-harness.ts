@@ -33,6 +33,11 @@ const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
 
+export const MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE = {
+  minEncodedChars: 1_000_001,
+  sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL"
+} as const;
+
 export const MOBILE_RELAY_FILE_PREVIEW_FIXTURE = {
   content: [
     "# Mobile Relay Preview",
@@ -102,6 +107,17 @@ interface ScriptedTask {
 interface TerminalEventCollector {
   close(): void;
   outputText(): string;
+  waitForSnapshot(
+    expectation: {
+      minEncodedChars: number;
+      sentinel: string;
+    },
+    timeoutMs?: number,
+  ): Promise<{
+    cols: number;
+    dataB64: string;
+    rows: number;
+  }>;
 }
 
 interface RemoteHarnessModule {
@@ -119,6 +135,9 @@ interface TerminalFlowModule {
       displayName: string;
       prompt?: string;
       repoName?: string;
+      snapshotHistory?: {
+        sentinel: string;
+      };
       waitingPromptSnippet?: string;
     }
   ): Promise<ScriptedTask>;
@@ -313,6 +332,9 @@ export async function startMobileRelayHarness(
         ? {
             prompt: RELAY_ORIGINAL_PROMPT,
             repoName: RELAY_REPO_LABEL,
+            snapshotHistory: {
+              sentinel: MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel,
+            },
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
         : {}),
@@ -346,14 +368,48 @@ export async function startMobileRelayHarness(
     }
 
     terminalEvents = remote.terminal.collectTerminalEvents(harness, localTask.taskId);
-    await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_TASK_SENTINEL);
+    await remote.terminal.waitForTerminalOutput(
+      terminalEvents,
+      mode === "relay"
+        ? MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel
+        : RELAY_TASK_SENTINEL,
+      30_000,
+    );
+    let oversizedSnapshot: {
+      cols: number;
+      dataB64: string;
+      rows: number;
+    } | null = null;
+    if (mode === "relay") {
+      terminalEvents.close();
+      terminalEvents = remote.terminal.collectTerminalEvents(
+        harness,
+        localTask.taskId,
+      );
+      oversizedSnapshot = await terminalEvents.waitForSnapshot(
+        MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE,
+        30_000,
+      );
+      process.stdout.write(
+        `[mobile-e2e] authoritative PTY snapshot encodedChars=` +
+          `${oversizedSnapshot.dataB64.length} decodedBytes=` +
+          `${Buffer.from(oversizedSnapshot.dataB64, "base64").length} ` +
+          `dimensions=${oversizedSnapshot.cols}x${oversizedSnapshot.rows}\n`,
+      );
+    }
     await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_MENU_CURSOR_MARKER);
     const terminalFixture: PtyTerminalFixture = {
       taskId: cloudTaskId,
-      sentinel: RELAY_TASK_SENTINEL,
-      expectedCols: 80,
-      expectedRows: 24,
-      minDecodedBytes: RELAY_TASK_SENTINEL.length
+      sentinel:
+        oversizedSnapshot === null
+          ? RELAY_TASK_SENTINEL
+          : MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel,
+      expectedCols: oversizedSnapshot?.cols ?? 80,
+      expectedRows: oversizedSnapshot?.rows ?? 24,
+      minDecodedBytes:
+        oversizedSnapshot === null
+          ? RELAY_TASK_SENTINEL.length
+          : Buffer.from(oversizedSnapshot.dataB64, "base64").length,
     };
     const hybridFixture: MobileHybridFixture = {
       cloudOnly: {

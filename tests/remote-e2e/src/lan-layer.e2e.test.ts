@@ -221,7 +221,7 @@ function collectLanTerminalEvents(transport: LanTransport, taskId: string): LanT
 }
 
 class LanTerminalCollectorImpl implements LanTerminalCollector {
-  private readonly chunks: string[] = [];
+  private chunks: string[] = [];
   private readonly readyWaiters: Array<{
     resolve(): void;
   }> = [];
@@ -332,11 +332,19 @@ class LanTerminalCollectorImpl implements LanTerminalCollector {
 
   private onEvent(event: TaskTerminalStreamEvent): void {
     switch (event.type) {
-      case "ready": {
+      case "snapshot": {
+        this.chunks = [Buffer.from(event.dataB64, "base64").toString("utf8")];
         this.ready = true;
         for (const waiter of [...this.readyWaiters]) {
           this.readyWaiters.splice(this.readyWaiters.indexOf(waiter), 1);
           waiter.resolve();
+        }
+        const output = this.outputText();
+        for (const waiter of [...this.outputWaiters]) {
+          if (output.includes(waiter.marker)) {
+            this.outputWaiters.splice(this.outputWaiters.indexOf(waiter), 1);
+            waiter.resolve(output);
+          }
         }
         return;
       }

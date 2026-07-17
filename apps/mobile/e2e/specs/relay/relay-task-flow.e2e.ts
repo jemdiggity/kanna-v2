@@ -148,6 +148,22 @@ export type TaskFilePreviewWebViewInspection =
       reason: string;
     };
 
+interface RelayPtySnapshotRevisitJourney {
+  closeTask(): Promise<void>;
+  openTask(): Promise<void>;
+  waitForRenderedTerminal(): Promise<void>;
+}
+
+export async function verifyRelayPtySnapshotRevisit(
+  journey: RelayPtySnapshotRevisitJourney,
+): Promise<void> {
+  await journey.openTask();
+  await journey.waitForRenderedTerminal();
+  await journey.closeTask();
+  await journey.openTask();
+  await journey.waitForRenderedTerminal();
+}
+
 async function dismissSavePasswordPrompt(driver: Browser): Promise<void> {
   for (const selector of [
     "~Not Now",
@@ -1018,6 +1034,14 @@ export async function runRelayTaskFlow(
     options.fixture.taskId,
     options.setTaskActivity,
   );
+  await verifyRelayPtySnapshotRevisit({
+    openTask: () => openRelayFixtureTask(ui, options.fixture.taskId),
+    async waitForRenderedTerminal() {
+      await waitForTaskTerminalLive(ui);
+      await waitForRenderedPtyTerminal(ui, options.fixture);
+    },
+    closeTask: () => returnToTaskListShell(ui),
+  });
   await verifyRelayTaskMarkedRead(ui, options.fixture.taskId, {
     prepareUnread: options.prepareTaskUnreadForMarkRead,
     async openTask() {
