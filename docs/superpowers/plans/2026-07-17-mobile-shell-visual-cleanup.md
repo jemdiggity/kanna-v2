@@ -36,7 +36,7 @@ it("renders the root shell without ambient decoration layers", async () => {
 Run:
 
 ```bash
-pnpm --dir apps/mobile test -- App.component.test.tsx --runInBand
+pnpm --dir apps/mobile test -- --runInBand App.component.test.tsx
 ```
 
 Expected: FAIL because the safe area has three immediate `View` children: the
@@ -90,7 +90,7 @@ backgroundOrb: {
 Run:
 
 ```bash
-pnpm --dir apps/mobile test -- App.component.test.tsx --runInBand
+pnpm --dir apps/mobile test -- --runInBand App.component.test.tsx
 ```
 
 Expected: PASS, including the new root-layer assertion.
@@ -194,7 +194,7 @@ describe("FloatingToolbar", () => {
 Run:
 
 ```bash
-pnpm --dir apps/mobile test -- src/components/FloatingToolbar.test.tsx --runInBand
+pnpm --dir apps/mobile test -- --runInBand src/components/FloatingToolbar.test.tsx
 ```
 
 Expected: FAIL because the navigation bar and search button still use
@@ -221,7 +221,7 @@ Leave the pale active item and primary create button unchanged.
 Run:
 
 ```bash
-pnpm --dir apps/mobile test -- src/components/FloatingToolbar.test.tsx --runInBand
+pnpm --dir apps/mobile test -- --runInBand src/components/FloatingToolbar.test.tsx
 ```
 
 Expected: PASS.
