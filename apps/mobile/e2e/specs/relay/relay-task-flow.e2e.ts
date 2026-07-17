@@ -9,7 +9,10 @@ import {
 } from "../smoke/list-detail-back.e2e";
 import { openProfileSheet } from "../smoke/profile-connection.e2e";
 import type { TaskActivity } from "../../../src/lib/api/types";
-import type { RelayTaskOrderingFixture } from "../../helpers/relay-harness";
+import type {
+  MobileRelayCompanionFixture,
+  RelayTaskOrderingFixture
+} from "../../helpers/relay-harness";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
@@ -28,6 +31,9 @@ interface RelayCredentials {
 }
 
 interface RelayTaskFlowOptions {
+  companion: RelayVisualCompanionActions & {
+    fixture: MobileRelayCompanionFixture;
+  };
   credentials: RelayCredentials;
   emitFilePreviewLinks(): Promise<void>;
   filePreview: RelayFilePreviewFixture;
@@ -38,6 +44,25 @@ interface RelayTaskFlowOptions {
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
+}
+
+interface RelayVisualCompanionActions {
+  reconnect(): Promise<void>;
+  replaceHtml(): Promise<void>;
+  stop(): Promise<void>;
+  waitForEvent(choice: string): Promise<unknown>;
+}
+
+interface RelayVisualCompanionUi {
+  clickChoice(choice: string): Promise<void>;
+  close(): Promise<void>;
+  open(): Promise<void>;
+  readDocumentText(): Promise<string>;
+  waitForEnded(): Promise<void>;
+  waitUntil(
+    condition: () => Promise<boolean>,
+    options: { interval: number; timeout: number; timeoutMsg: string }
+  ): Promise<unknown>;
 }
 
 interface RelayFilePreviewFixture {
@@ -165,6 +190,7 @@ interface RelayTaskJourneys {
   verifyPtySnapshotRevisit(): Promise<void>;
   verifyQuickReply(): Promise<void>;
   verifyTaskActionMenu(): Promise<void>;
+  verifyVisualCompanion(): Promise<void>;
 }
 
 export async function runRelayTaskJourneys(
@@ -173,6 +199,7 @@ export async function runRelayTaskJourneys(
   await journeys.verifyMarkedRead();
   await journeys.verifyPtySnapshotRevisit();
   await journeys.verifyTaskActionMenu();
+  await journeys.verifyVisualCompanion();
   await journeys.verifyFilePreview();
   await journeys.verifyComposerReset();
   await journeys.verifyQuickReply();
@@ -451,6 +478,126 @@ function createWebViewContextDriver(driver: Browser): RelayWebViewContextDriver 
       ? async (context: string) => await driver.switchContext?.(context)
       : undefined
   };
+}
+
+async function withVisualCompanionWebView<T>(
+  driver: Browser,
+  action: () => Promise<T>
+): Promise<T> {
+  if (!driver.getContexts || !driver.switchContext) {
+    throw new Error("Appium did not expose WebView context switching");
+  }
+  const previousContext = driver.getContext
+    ? String(await driver.getContext())
+    : "NATIVE_APP";
+  const contexts = Array.from(await driver.getContexts()).map(String);
+  try {
+    for (const context of contexts) {
+      if (!context.includes("WEBVIEW")) continue;
+      await driver.switchContext(context);
+      const isCompanion = await driver.execute(() =>
+        Boolean(document.querySelector("#kanna-companion-bridge"))
+      );
+      if (isCompanion) return await action();
+    }
+  } finally {
+    await driver.switchContext(previousContext);
+  }
+  throw new Error(
+    `No visual companion WebView context was available. Contexts: ${contexts.join(", ")}`
+  );
+}
+
+function createVisualCompanionUi(driver: Browser): RelayVisualCompanionUi {
+  return {
+    async open() {
+      const button = await driver.$(selectors.visualCompanionButton);
+      await button.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      await button.click();
+      const modal = await driver.$(selectors.visualCompanionModal);
+      await modal.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    },
+    async close() {
+      const close = await driver.$(selectors.visualCompanionClose);
+      await close.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      await close.click();
+      await driver.waitUntil(
+        async () =>
+          !(await driver
+            .$(selectors.visualCompanionModal)
+            .isExisting()
+            .catch(() => false)),
+        {
+          interval: POLL_INTERVAL_MS,
+          timeout: SCREEN_TIMEOUT_MS,
+          timeoutMsg: "Expected the visual companion modal to close"
+        }
+      );
+    },
+    async readDocumentText() {
+      return withVisualCompanionWebView(driver, async () =>
+        String(await driver.execute(() => document.body.innerText))
+      );
+    },
+    async clickChoice(choice) {
+      if (!/^[a-zA-Z0-9_-]+$/.test(choice)) {
+        throw new Error(`Unsafe companion fixture choice ${JSON.stringify(choice)}`);
+      }
+      await withVisualCompanionWebView(driver, async () => {
+        const element = await driver.$(`[data-choice="${choice}"]`);
+        await element.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+        await element.click();
+      });
+    },
+    waitForEnded: () =>
+      expectNativeText(
+        driver,
+        selectors.visualCompanionStatus,
+        "This visual companion has ended."
+      ),
+    waitUntil: (condition, options) => driver.waitUntil(condition, options)
+  };
+}
+
+async function waitForCompanionMarker(
+  ui: Pick<RelayVisualCompanionUi, "readDocumentText" | "waitUntil">,
+  marker: string
+): Promise<void> {
+  let lastText = "";
+  await ui.waitUntil(
+    async () => {
+      lastText = await ui.readDocumentText().catch(() => "");
+      return lastText.includes(marker);
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected visual companion marker ${JSON.stringify(marker)}; ` +
+        `last document text ${JSON.stringify(lastText)}`
+    }
+  );
+}
+
+export async function verifyRelayVisualCompanionJourney(
+  ui: RelayVisualCompanionUi,
+  fixture: MobileRelayCompanionFixture,
+  actions: RelayVisualCompanionActions
+): Promise<void> {
+  await ui.open();
+  await waitForCompanionMarker(ui, fixture.initialMarker);
+  await ui.clickChoice(fixture.choice);
+  await actions.waitForEvent(fixture.choice);
+
+  await actions.replaceHtml();
+  await waitForCompanionMarker(ui, fixture.updatedMarker);
+
+  await actions.stop();
+  await ui.waitForEnded();
+
+  await actions.reconnect();
+  await waitForCompanionMarker(ui, fixture.updatedMarker);
+  await ui.close();
 }
 
 function terminalFileLinkAccessibilityLabel(
@@ -1144,6 +1291,12 @@ export async function runRelayTaskFlow(
       closeTask: () => returnToTaskListShell(ui),
     }),
     verifyTaskActionMenu: () => verifyRelayTaskActionMenuJourney(ui),
+    verifyVisualCompanion: () =>
+      verifyRelayVisualCompanionJourney(
+        createVisualCompanionUi(driver),
+        options.companion.fixture,
+        options.companion
+      ),
     async verifyFilePreview() {
       await options.emitFilePreviewLinks();
       await verifyTerminalFilePreviewFlow(driver, ui, options.filePreview);

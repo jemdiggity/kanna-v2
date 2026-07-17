@@ -1,5 +1,24 @@
 # Terminal Streaming E2E Coverage
 
+## Relay visual companion
+
+`pnpm --dir apps/mobile run test:e2e:relay` now seeds an active
+`.superpowers/brainstorm/mobile-relay-companion` session inside the scripted
+task worktree and exercises it through the ordinary authenticated KSP relay
+tunnel. The simulator journey waits for the native `Visual companion ready`
+action, opens and inspects the real companion WebView, clicks a real
+`data-choice` element, and waits for the desktop fixture's `state/events` JSONL
+entry. It then overwrites the HTML and observes the new revision, writes the
+`server-stopped` marker and observes the ended state, restarts the desktop relay
+owner with the session active again, and verifies that reconnect restores the
+newest screen before returning to the same task terminal.
+
+The relay harness only mutates files under the fixture worktree. It does not
+define a companion-specific relay message, preview HTTP route, public URL, or
+cloud persistence path. The simulator run requires the existing Firebase
+emulators, relay, Appium, and iOS simulator environment managed by the mobile
+E2E runner; it never installs, launches, or automates a physical iPhone.
+
 `pnpm --dir apps/mobile run test:e2e:smoke` exercises the PTY terminal path in
 `specs/smoke/list-detail-back.e2e.ts` only when the run provides a known live
 PTY fixture:

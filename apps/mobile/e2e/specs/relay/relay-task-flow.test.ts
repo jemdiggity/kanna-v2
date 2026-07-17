@@ -7,6 +7,7 @@ import {
   verifyRelayComposerResetJourney,
   verifyRelayTaskActionMenuJourney,
   verifyRelayQuickReplyJourney,
+  verifyRelayVisualCompanionJourney,
   verifyRelayTaskActivityTransitions,
   verifyRelayTaskMarkedRead,
   verifyTerminalMarkdownFileControls,
@@ -27,6 +28,7 @@ describe("relay task flow orchestration", () => {
           verifyPtySnapshotRevisit(): Promise<void>;
           verifyQuickReply(): Promise<void>;
           verifyTaskActionMenu(): Promise<void>;
+          verifyVisualCompanion(): Promise<void>;
         }) => Promise<void>;
       }
     ).runRelayTaskJourneys;
@@ -52,6 +54,10 @@ describe("relay task flow orchestration", () => {
         expect(screen).toBe("detail");
         calls.push("task-actions");
       },
+      async verifyVisualCompanion() {
+        expect(screen).toBe("detail");
+        calls.push("visual-companion");
+      },
       async verifyFilePreview() {
         expect(screen).toBe("detail");
         calls.push("file-preview");
@@ -74,6 +80,7 @@ describe("relay task flow orchestration", () => {
       "open",
       "rendered",
       "task-actions",
+      "visual-companion",
       "file-preview",
       "composer-reset",
       "quick-reply",
@@ -189,6 +196,69 @@ describe("Tasks-tab creation ordering journey", () => {
     ).rejects.toThrow(
       'source order was ["task-older","task-newer"]; native visual order was ["task-older","task-newer"]',
     );
+  });
+});
+
+describe("relay visual companion journey", () => {
+  it("opens, selects, updates, ends, and restores through one UI flow", async () => {
+    const calls: string[] = [];
+    let text = "Initial relay visual companion";
+    const ui = {
+      open: vi.fn(async () => {
+        calls.push("open");
+      }),
+      close: vi.fn(async () => {
+        calls.push("close");
+      }),
+      clickChoice: vi.fn(async (choice: string) => {
+        calls.push(`click:${choice}`);
+      }),
+      readDocumentText: vi.fn(async () => text),
+      waitForEnded: vi.fn(async () => {
+        calls.push("ended");
+      }),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      })
+    };
+    const actions = {
+      reconnect: vi.fn(async () => {
+        calls.push("reconnect");
+      }),
+      replaceHtml: vi.fn(async () => {
+        calls.push("replace");
+        text = "Updated relay visual companion";
+      }),
+      stop: vi.fn(async () => {
+        calls.push("stop");
+      }),
+      waitForEvent: vi.fn(async (choice: string) => {
+        calls.push(`event:${choice}`);
+      })
+    };
+
+    await verifyRelayVisualCompanionJourney(
+      ui,
+      {
+        choice: "relay-layout-a",
+        initialMarker: "Initial relay visual companion",
+        sessionId: "mobile-relay-companion",
+        updatedMarker: "Updated relay visual companion"
+      },
+      actions
+    );
+
+    expect(calls).toEqual([
+      "open",
+      "click:relay-layout-a",
+      "event:relay-layout-a",
+      "replace",
+      "stop",
+      "ended",
+      "reconnect",
+      "close"
+    ]);
   });
 });
 

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as relayHarness from "./relay-harness";
 
 describe("mobile relay harness helpers", () => {
@@ -133,5 +136,51 @@ describe("mobile relay harness helpers", () => {
       "http://127.0.0.1:48120/v1/e2e/mobile-machine-controls",
       expect.objectContaining({ body: JSON.stringify({ expirePairingSession: true }) })
     );
+  });
+
+  it("manages the active visual companion entirely inside the scripted worktree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-mobile-companion-"));
+    const task = { taskId: "task-1", worktreePath: root };
+    try {
+      await relayHarness.seedMobileRelayCompanion(task);
+      const fixture = relayHarness.MOBILE_RELAY_COMPANION_FIXTURE;
+      const sessionRoot = join(
+        root,
+        ".superpowers",
+        "brainstorm",
+        fixture.sessionId
+      );
+      expect(await readFile(join(sessionRoot, "state", "server-info"), "utf8"))
+        .toBe("{}");
+      expect(await readFile(join(sessionRoot, "content", "screen.html"), "utf8"))
+        .toContain(fixture.initialMarker);
+
+      await relayHarness.replaceMobileRelayCompanion(task);
+      expect(await readFile(join(sessionRoot, "content", "screen.html"), "utf8"))
+        .toContain(fixture.updatedMarker);
+
+      await writeFile(
+        join(sessionRoot, "state", "events"),
+        `${JSON.stringify({ type: "click", choice: fixture.choice })}\n`,
+        "utf8"
+      );
+      await expect(relayHarness.readMobileRelayCompanionEvents(task))
+        .resolves.toEqual([{ type: "click", choice: fixture.choice }]);
+
+      await relayHarness.stopMobileRelayCompanion(task);
+      expect(await readFile(join(sessionRoot, "state", "server-stopped"), "utf8"))
+        .toBe("");
+      await relayHarness.resumeMobileRelayCompanion(task);
+      await expect(readFile(join(sessionRoot, "state", "server-stopped"), "utf8"))
+        .rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not define a relay-specific companion protocol or preview route", async () => {
+    const source = await readFile(new URL("./relay-harness.ts", import.meta.url), "utf8");
+    expect(source).not.toContain('type: "companion_');
+    expect(source).not.toMatch(/\/v1\/(?:companion|preview)/);
   });
 });

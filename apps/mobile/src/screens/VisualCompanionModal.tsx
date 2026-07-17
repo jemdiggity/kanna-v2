@@ -26,6 +26,8 @@ import { buildVisualCompanionDocument } from "./buildVisualCompanionDocument";
 
 const WebView = NativeWebView as unknown as React.ComponentType<WebViewProps>;
 const MAX_BRIDGE_MESSAGE_BYTES = 8 * 1024;
+const ENABLE_E2E_WEBVIEW_INSPECTION =
+  process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1";
 
 export interface VisualCompanionSnapshot {
   sessionId: string;
@@ -256,6 +258,7 @@ export function VisualCompanionModal({
             style={styles.webView}
             testID={MOBILE_E2E_IDS.visualCompanionWebView}
             thirdPartyCookiesEnabled={false}
+            webviewDebuggingEnabled={ENABLE_E2E_WEBVIEW_INSPECTION}
           />
         ) : (
           <View style={styles.emptyState}>

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
 import type { TaskActivity } from "../../src/lib/api/types";
@@ -68,6 +68,16 @@ export const MOBILE_RELAY_FILE_PREVIEW_FIXTURE = {
 
 export type MobileRelayFilePreviewFixture =
   typeof MOBILE_RELAY_FILE_PREVIEW_FIXTURE;
+
+export const MOBILE_RELAY_COMPANION_FIXTURE = {
+  choice: "relay-layout-a",
+  initialMarker: "Initial relay visual companion",
+  sessionId: "mobile-relay-companion",
+  updatedMarker: "Updated relay visual companion"
+} as const;
+
+export type MobileRelayCompanionFixture =
+  typeof MOBILE_RELAY_COMPANION_FIXTURE;
 
 type MobileRelayHarnessMode = "relay" | "hybrid";
 
@@ -170,6 +180,13 @@ export interface MobileRelayHarness {
   env: Record<string, string>;
   fixture: PtyTerminalFixture;
   filePreview: MobileRelayFilePreviewFixture;
+  companion: {
+    fixture: MobileRelayCompanionFixture;
+    reconnect(): Promise<void>;
+    replaceHtml(): Promise<void>;
+    stop(): Promise<void>;
+    waitForEvent(choice: string, timeoutMs?: number): Promise<Record<string, unknown>>;
+  };
   harness: RemoteHarness;
   hybridEnv: Record<string, string>;
   hybridFixture: MobileHybridFixture;
@@ -340,6 +357,7 @@ export async function startMobileRelayHarness(
         : {}),
     });
     await seedMobileRelayFilePreview(localTask);
+    await seedMobileRelayCompanion(localTask);
     const lanOnlyTask = mode === "hybrid"
       ? await remote.terminal.createScriptedTask(harness, {
           displayName: HYBRID_LAN_ONLY_TITLE
@@ -450,6 +468,29 @@ export async function startMobileRelayHarness(
       env: mobileRelayExpoEnv(harness),
       fixture: terminalFixture,
       filePreview: MOBILE_RELAY_FILE_PREVIEW_FIXTURE,
+      companion: {
+        fixture: MOBILE_RELAY_COMPANION_FIXTURE,
+        async reconnect() {
+          await resumeMobileRelayCompanion(localTask);
+          await harness.stopServer();
+          await harness.startServer();
+          await harness.waitForDesktop();
+        },
+        replaceHtml: () => replaceMobileRelayCompanion(localTask),
+        stop: () => stopMobileRelayCompanion(localTask),
+        async waitForEvent(choice, timeoutMs = 10_000) {
+          const deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            const events = await readMobileRelayCompanionEvents(localTask);
+            const event = events.find((candidate) => candidate.choice === choice);
+            if (event) return event;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          throw new Error(
+            `Expected visual companion event ${JSON.stringify(choice)}`
+          );
+        }
+      },
       harness,
       hybridEnv: mobileRelayExpoEnv(harness, { forceCloud: false }),
       hybridFixture,
@@ -539,6 +580,95 @@ export async function startMobileRelayHarness(
     await harness.stop();
     throw error;
   }
+}
+
+type CompanionFixtureTask = Pick<ScriptedTask, "taskId" | "worktreePath">;
+
+function companionSessionRoot(task: CompanionFixtureTask): string {
+  if (!task.worktreePath) {
+    throw new Error(
+      `Scripted task ${task.taskId} did not return a worktree for visual companion E2E`
+    );
+  }
+  return join(
+    task.worktreePath,
+    ".superpowers",
+    "brainstorm",
+    MOBILE_RELAY_COMPANION_FIXTURE.sessionId
+  );
+}
+
+function mobileRelayCompanionHtml(marker: string): string {
+  const fixture = MOBILE_RELAY_COMPANION_FIXTURE;
+  return [
+    `<section><h2>${marker}</h2>`,
+    '<div class="options">',
+    `<button class="option" data-choice="${fixture.choice}" ` +
+      'onclick="toggleSelect(this)">Choose relay layout</button>',
+    "</div></section>"
+  ].join("");
+}
+
+export async function seedMobileRelayCompanion(
+  task: CompanionFixtureTask
+): Promise<void> {
+  const root = companionSessionRoot(task);
+  await mkdir(join(root, "content"), { recursive: true });
+  await mkdir(join(root, "state"), { recursive: true });
+  await writeFile(join(root, "state", "server-info"), "{}", "utf8");
+  await writeFile(
+    join(root, "content", "screen.html"),
+    mobileRelayCompanionHtml(MOBILE_RELAY_COMPANION_FIXTURE.initialMarker),
+    "utf8"
+  );
+}
+
+export async function replaceMobileRelayCompanion(
+  task: CompanionFixtureTask
+): Promise<void> {
+  await writeFile(
+    join(companionSessionRoot(task), "content", "screen.html"),
+    mobileRelayCompanionHtml(MOBILE_RELAY_COMPANION_FIXTURE.updatedMarker),
+    "utf8"
+  );
+}
+
+export async function readMobileRelayCompanionEvents(
+  task: CompanionFixtureTask
+): Promise<Array<Record<string, unknown>>> {
+  let content: string;
+  try {
+    content = await readFile(
+      join(companionSessionRoot(task), "state", "events"),
+      "utf8"
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  return content
+    .split(/\r\n|\r|\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+export async function stopMobileRelayCompanion(
+  task: CompanionFixtureTask
+): Promise<void> {
+  await writeFile(
+    join(companionSessionRoot(task), "state", "server-stopped"),
+    "",
+    "utf8"
+  );
+}
+
+export async function resumeMobileRelayCompanion(
+  task: CompanionFixtureTask
+): Promise<void> {
+  await rm(
+    join(companionSessionRoot(task), "state", "server-stopped"),
+    { force: true }
+  );
 }
 
 async function seedMobileRelayFilePreview(task: ScriptedTask): Promise<void> {

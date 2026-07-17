@@ -73,6 +73,16 @@ describe("mobile E2E selector helpers", () => {
     );
   });
 
+  it("exposes the in-app visual companion controls", () => {
+    expect(selectorHelpers.selectors).toMatchObject({
+      visualCompanionButton: "~mobile.visual-companion.button",
+      visualCompanionClose: "~mobile.visual-companion.close",
+      visualCompanionModal: "~mobile.visual-companion.modal",
+      visualCompanionStatus: "~mobile.visual-companion.status",
+      visualCompanionWebView: "~mobile.visual-companion.webview"
+    });
+  });
+
   it("extracts the exact display-task id from an Appium task-row name", () => {
     const extractTaskRowId = (
       selectorHelpers as typeof selectorHelpers & {
