@@ -1167,7 +1167,11 @@ export function createSessionStore(): SessionStore {
         state = {
           ...state,
           taskCompanionStatus: "error",
-          taskCompanionErrorMessage: event.message
+          taskCompanionSnapshot: null,
+          taskCompanionUnread: false,
+          taskCompanionErrorMessage: event.message,
+          taskCompanionEventId: null,
+          taskCompanionEventStatus: "idle"
         };
         publish();
         return;

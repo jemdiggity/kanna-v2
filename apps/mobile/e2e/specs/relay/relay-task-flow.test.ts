@@ -221,8 +221,14 @@ describe("relay visual companion journey", () => {
       waitForEnded: vi.fn(async () => {
         calls.push("ended");
       }),
+      waitForNoInteractiveWebView: vi.fn(async () => {
+        calls.push("no-webview");
+      }),
       waitForReconnecting: vi.fn(async () => {
         calls.push("reconnecting");
+      }),
+      waitForSourceError: vi.fn(async () => {
+        calls.push("source-error");
       }),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (await condition()) return;
@@ -236,14 +242,17 @@ describe("relay visual companion journey", () => {
       expectNoEvent: vi.fn(async (choice: string) => {
         calls.push(`no-event:${choice}`);
       }),
+      invalidateSource: vi.fn(async () => {
+        calls.push("invalidate");
+      }),
       reconnect: vi.fn(async () => {
         calls.push("reconnect");
       }),
       resume: vi.fn(async () => {
         calls.push("resume");
       }),
-      replaceHtml: vi.fn(async () => {
-        calls.push("replace");
+      restoreSource: vi.fn(async () => {
+        calls.push("restore");
         text = "Updated relay visual companion";
       }),
       stop: vi.fn(async () => {
@@ -260,6 +269,8 @@ describe("relay visual companion journey", () => {
         choice: "relay-layout-a",
         initialMarker: "Initial relay visual companion",
         sessionId: "mobile-relay-companion",
+        sourceErrorMessage:
+          "The visual companion is too large. Ask the agent to simplify the screen.",
         updatedMarker: "Updated relay visual companion"
       },
       actions
@@ -267,6 +278,12 @@ describe("relay visual companion journey", () => {
 
     expect(calls).toEqual([
       "open",
+      "invalidate",
+      "source-error",
+      "no-webview",
+      "offline-click-blocked",
+      "no-event:relay-layout-a",
+      "restore",
       "disconnect",
       "reconnecting",
       "offline-click-blocked",
@@ -275,7 +292,6 @@ describe("relay visual companion journey", () => {
       "no-event:relay-layout-a",
       "click:relay-layout-a",
       "event:relay-layout-a",
-      "replace",
       "stop",
       "ended",
       "resume",

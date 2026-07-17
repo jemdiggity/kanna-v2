@@ -73,6 +73,8 @@ export const MOBILE_RELAY_COMPANION_FIXTURE = {
   choice: "relay-layout-a",
   initialMarker: "Initial relay visual companion",
   sessionId: "mobile-relay-companion",
+  sourceErrorMessage:
+    "The visual companion is too large. Ask the agent to simplify the screen.",
   updatedMarker: "Updated relay visual companion"
 } as const;
 
@@ -184,8 +186,9 @@ export interface MobileRelayHarness {
     fixture: MobileRelayCompanionFixture;
     disconnect(): Promise<void>;
     expectNoEvent(choice: string): Promise<void>;
+    invalidateSource(): Promise<void>;
     reconnect(): Promise<void>;
-    replaceHtml(): Promise<void>;
+    restoreSource(): Promise<void>;
     resume(): Promise<void>;
     stop(): Promise<void>;
     waitForEvent(choice: string, timeoutMs?: number): Promise<Record<string, unknown>>;
@@ -485,11 +488,12 @@ export async function startMobileRelayHarness(
             );
           }
         },
+        invalidateSource: () => invalidateMobileRelayCompanion(localTask),
         async reconnect() {
           await harness.startServer();
           await harness.waitForDesktop();
         },
-        replaceHtml: () => replaceMobileRelayCompanion(localTask),
+        restoreSource: () => replaceMobileRelayCompanion(localTask),
         resume: () => resumeMobileRelayCompanion(localTask),
         stop: () => stopMobileRelayCompanion(localTask),
         async waitForEvent(choice, timeoutMs = 10_000) {
@@ -644,6 +648,15 @@ export async function replaceMobileRelayCompanion(
     join(companionSessionRoot(task), "content", "screen.html"),
     mobileRelayCompanionHtml(MOBILE_RELAY_COMPANION_FIXTURE.updatedMarker),
     "utf8"
+  );
+}
+
+export async function invalidateMobileRelayCompanion(
+  task: CompanionFixtureTask
+): Promise<void> {
+  await writeFile(
+    join(companionSessionRoot(task), "content", "screen.html"),
+    new Uint8Array(1024 * 1024 + 1).fill(0x78)
   );
 }
 

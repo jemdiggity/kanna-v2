@@ -454,4 +454,18 @@ describe("VisualCompanionModal", () => {
     expect(findByTestId(tree, "mobile.visual-companion.status")?.props?.children)
       .toBe("Reconnecting to visual companion…");
   });
+
+  it("shows a task-scoped source error without rendering a stale WebView", () => {
+    const message =
+      "The visual companion is too large. Ask the agent to simplify the screen.";
+    const tree = renderModal({
+      status: "error",
+      snapshot,
+      errorMessage: message
+    });
+
+    expect(findByType(tree, "WebView")).toBeNull();
+    expect(findByTestId(tree, "mobile.visual-companion.status")?.props?.children)
+      .toBe(message);
+  });
 });

@@ -565,6 +565,69 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("invalidates stale companion content and pending events on a source error", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-1");
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "session-1",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: '<button data-choice="a">A</button>'
+    }, false);
+    store.beginTaskCompanionEvent("task-1", "event-1");
+
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "error",
+      taskId: "task-1",
+      code: "companion_too_large",
+      message:
+        "The visual companion is too large. Ask the agent to simplify the screen."
+    }, false);
+
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "error",
+      taskCompanionSnapshot: null,
+      taskCompanionUnread: false,
+      taskCompanionErrorMessage:
+        "The visual companion is too large. Ask the agent to simplify the screen.",
+      taskCompanionEventId: null,
+      taskCompanionEventStatus: "idle"
+    });
+  });
+
+  it("keeps the current document visible for a rejected companion event retry", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-1");
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "session-1",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: '<button data-choice="a">A</button>'
+    }, true);
+    store.beginTaskCompanionEvent("task-1", "event-1");
+
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "event_result",
+      taskId: "task-1",
+      eventId: "event-1",
+      accepted: false,
+      code: "companion_event_failed",
+      message: "The selection could not be recorded."
+    }, true);
+
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionSnapshot: { revision: "rev-1" },
+      taskCompanionErrorMessage: "The selection could not be recorded.",
+      taskCompanionEventId: "event-1",
+      taskCompanionEventStatus: "error"
+    });
+  });
+
   it("clears the selected task when reconciliation finds no remaining collection match", () => {
     const store = createSessionStore();
 

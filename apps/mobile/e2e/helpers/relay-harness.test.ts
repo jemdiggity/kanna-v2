@@ -155,6 +155,10 @@ describe("mobile relay harness helpers", () => {
       expect(await readFile(join(sessionRoot, "content", "screen.html"), "utf8"))
         .toContain(fixture.initialMarker);
 
+      await relayHarness.invalidateMobileRelayCompanion(task);
+      expect((await readFile(join(sessionRoot, "content", "screen.html"))).byteLength)
+        .toBeGreaterThan(1024 * 1024);
+
       await relayHarness.replaceMobileRelayCompanion(task);
       expect(await readFile(join(sessionRoot, "content", "screen.html"), "utf8"))
         .toContain(fixture.updatedMarker);

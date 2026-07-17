@@ -156,15 +156,20 @@ export function VisualCompanionModal({
   onSendEvent
 }: VisualCompanionModalProps) {
   const [localErrorMessage, setLocalErrorMessage] = useState<string | null>(null);
+  const interactiveSnapshot = status === "available" ? snapshot : null;
   const document = useMemo(
     () =>
-      snapshot
+      interactiveSnapshot
         ? buildVisualCompanionDocument({
-            documentKind: snapshot.documentKind,
-            html: snapshot.html
+            documentKind: interactiveSnapshot.documentKind,
+            html: interactiveSnapshot.html
           })
         : null,
-    [snapshot?.documentKind, snapshot?.html, snapshot?.revision]
+    [
+      interactiveSnapshot?.documentKind,
+      interactiveSnapshot?.html,
+      interactiveSnapshot?.revision
+    ]
   );
 
   const statusMessage = localErrorMessage
@@ -186,12 +191,16 @@ export function VisualCompanionModal({
                   : null;
 
   const handleMessage = (message: WebViewMessageEvent) => {
-    if (!snapshot) return;
+    if (!interactiveSnapshot) return;
     const event = parseCompanionEvent(message.nativeEvent.data);
     if (!event) return;
 
     try {
-      onSendEvent(snapshot.sessionId, snapshot.revision, event);
+      onSendEvent(
+        interactiveSnapshot.sessionId,
+        interactiveSnapshot.revision,
+        event
+      );
       setLocalErrorMessage(null);
     } catch (error) {
       setLocalErrorMessage(errorText(error));
@@ -237,7 +246,7 @@ export function VisualCompanionModal({
           </Text>
         ) : null}
 
-        {document && snapshot ? (
+        {document && interactiveSnapshot ? (
           <WebView
             allowFileAccess={false}
             allowFileAccessFromFileURLs={false}
@@ -247,7 +256,7 @@ export function VisualCompanionModal({
             domStorageEnabled={false}
             javaScriptCanOpenWindowsAutomatically={false}
             javaScriptEnabled
-            key={`${snapshot.sessionId}:${snapshot.revision}`}
+            key={`${interactiveSnapshot.sessionId}:${interactiveSnapshot.revision}`}
             mixedContentMode="never"
             onMessage={handleMessage}
             onShouldStartLoadWithRequest={(request: WebViewNavigation) =>

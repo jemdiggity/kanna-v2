@@ -1359,6 +1359,31 @@ enum PublishedCompanionState {
     SourceError,
 }
 
+fn companion_source_error(
+    error: &crate::visual_companion::CompanionError,
+) -> (&'static str, &'static str) {
+    use crate::visual_companion::CompanionError;
+
+    match error {
+        CompanionError::TooLarge => (
+            "companion_too_large",
+            "The visual companion is too large. Ask the agent to simplify the screen.",
+        ),
+        CompanionError::UnsupportedContent => (
+            "companion_invalid_document",
+            "The visual companion is not valid UTF-8 HTML. Ask the agent to recreate the screen.",
+        ),
+        CompanionError::TaskNotFound
+        | CompanionError::WorkspaceUnavailable
+        | CompanionError::StaleRevision
+        | CompanionError::InvalidEvent
+        | CompanionError::Internal(_) => (
+            "companion_source_failed",
+            "The visual companion could not be read.",
+        ),
+    }
+}
+
 async fn stream_companion(
     db_path: String,
     task_id: String,
@@ -1393,7 +1418,18 @@ async fn stream_companion(
                     task_id: task_id.clone(),
                 },
             ),
-            Ok(Err(_)) | Err(_) => (
+            Ok(Err(error)) => {
+                let (code, message) = companion_source_error(&error);
+                (
+                    PublishedCompanionState::SourceError,
+                    ServerFrame::CompanionError {
+                        task_id: task_id.clone(),
+                        code: code.into(),
+                        message: message.into(),
+                    },
+                )
+            }
+            Err(_) => (
                 PublishedCompanionState::SourceError,
                 ServerFrame::CompanionError {
                     task_id: task_id.clone(),
@@ -2471,7 +2507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn companion_attach_reports_unavailable_and_source_errors_specifically() {
+    async fn companion_attach_reports_unavailable_and_invalid_source_specifically() {
         let fixture = KspCompanionFixture::new("unavailable");
         let url = fixture.serve().await;
         let mut socket = ws_connect(&url).await;
@@ -2495,11 +2531,70 @@ mod tests {
 
         fixture.activate("invalid", "layout.html", &[0xff, 0xfe]);
         match recv_frame(&mut socket).await {
-            ServerFrame::CompanionError { task_id, code, .. } => {
+            ServerFrame::CompanionError {
+                task_id,
+                code,
+                message,
+            } => {
                 assert_eq!(task_id, "task-1");
-                assert_eq!(code, "companion_source_failed");
+                assert_eq!(code, "companion_invalid_document");
+                assert_eq!(
+                    message,
+                    "The visual companion is not valid UTF-8 HTML. Ask the agent to recreate the screen."
+                );
             }
             other => panic!("expected task-scoped companion error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_attach_reports_oversized_source_specifically() {
+        let fixture = KspCompanionFixture::new("oversized");
+        fixture.activate(
+            "large",
+            "layout.html",
+            &vec![b'x'; crate::visual_companion::MAX_COMPANION_HTML_BYTES as usize + 1],
+        );
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionError {
+                task_id: "task-1".into(),
+                code: "companion_too_large".into(),
+                message: "The visual companion is too large. Ask the agent to simplify the screen."
+                    .into(),
+            }
+        );
+    }
+
+    #[test]
+    fn companion_source_errors_keep_internal_details_private() {
+        for error in [
+            crate::visual_companion::CompanionError::WorkspaceUnavailable,
+            crate::visual_companion::CompanionError::Internal(
+                "failed to read /private/worktree/secret.html".into(),
+            ),
+        ] {
+            assert_eq!(
+                companion_source_error(&error),
+                (
+                    "companion_source_failed",
+                    "The visual companion could not be read."
+                )
+            );
         }
     }
 

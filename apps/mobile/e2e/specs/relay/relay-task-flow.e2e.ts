@@ -49,8 +49,9 @@ interface RelayTaskFlowOptions {
 interface RelayVisualCompanionActions {
   disconnect(): Promise<void>;
   expectNoEvent(choice: string): Promise<void>;
+  invalidateSource(): Promise<void>;
   reconnect(): Promise<void>;
-  replaceHtml(): Promise<void>;
+  restoreSource(): Promise<void>;
   resume(): Promise<void>;
   stop(): Promise<void>;
   waitForEvent(choice: string): Promise<unknown>;
@@ -63,7 +64,9 @@ interface RelayVisualCompanionUi {
   readDocumentText(): Promise<string>;
   tryClickChoice(choice: string): Promise<boolean>;
   waitForEnded(): Promise<void>;
+  waitForNoInteractiveWebView(): Promise<void>;
   waitForReconnecting(): Promise<void>;
+  waitForSourceError(message: string): Promise<void>;
   waitUntil(
     condition: () => Promise<boolean>,
     options: { interval: number; timeout: number; timeoutMsg: string }
@@ -568,12 +571,29 @@ function createVisualCompanionUi(driver: Browser): RelayVisualCompanionUi {
         selectors.visualCompanionStatus,
         "This visual companion has ended."
       ),
+    async waitForNoInteractiveWebView() {
+      await driver.waitUntil(
+        async () =>
+          !(await driver
+            .$(selectors.visualCompanionWebView)
+            .isExisting()
+            .catch(() => false)),
+        {
+          interval: POLL_INTERVAL_MS,
+          timeout: SCREEN_TIMEOUT_MS,
+          timeoutMsg:
+            "Expected the failed visual companion WebView to be removed"
+        }
+      );
+    },
     waitForReconnecting: () =>
       expectNativeText(
         driver,
         selectors.visualCompanionStatus,
         "Reconnecting to visual companion…"
       ),
+    waitForSourceError: (message) =>
+      expectNativeText(driver, selectors.visualCompanionStatus, message),
     waitUntil: (condition, options) => driver.waitUntil(condition, options)
   };
 }
@@ -605,6 +625,17 @@ export async function verifyRelayVisualCompanionJourney(
 ): Promise<void> {
   await ui.open();
   await waitForCompanionMarker(ui, fixture.initialMarker);
+  await actions.invalidateSource();
+  await ui.waitForSourceError(fixture.sourceErrorMessage);
+  await ui.waitForNoInteractiveWebView();
+  if (await ui.tryClickChoice(fixture.choice)) {
+    throw new Error("A stale visual companion choice remained interactive after a source error");
+  }
+  await actions.expectNoEvent(fixture.choice);
+
+  await actions.restoreSource();
+  await waitForCompanionMarker(ui, fixture.updatedMarker);
+
   await actions.disconnect();
   await ui.waitForReconnecting();
   if (await ui.tryClickChoice(fixture.choice)) {
@@ -613,13 +644,10 @@ export async function verifyRelayVisualCompanionJourney(
   await actions.expectNoEvent(fixture.choice);
 
   await actions.reconnect();
-  await waitForCompanionMarker(ui, fixture.initialMarker);
+  await waitForCompanionMarker(ui, fixture.updatedMarker);
   await actions.expectNoEvent(fixture.choice);
   await ui.clickChoice(fixture.choice);
   await actions.waitForEvent(fixture.choice);
-
-  await actions.replaceHtml();
-  await waitForCompanionMarker(ui, fixture.updatedMarker);
 
   await actions.stop();
   await ui.waitForEnded();

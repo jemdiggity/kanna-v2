@@ -143,6 +143,18 @@ export function TaskScreen({
   const [companionModalTaskId, setCompanionModalTaskId] = useState<string | null>(
     null
   );
+  const companionLifecycleRef = useRef<{
+    isOpen: boolean;
+    onOpenChange: ((isOpen: boolean) => void) | undefined;
+    taskId: string;
+  }>({
+    isOpen: false,
+    onOpenChange: onCompanionOpenChange,
+    taskId: task.id
+  });
+  if (companionLifecycleRef.current.taskId === task.id) {
+    companionLifecycleRef.current.onOpenChange = onCompanionOpenChange;
+  }
   const { height: windowHeight } = useWindowDimensions();
   const isAgentTask = task.agentType === "agent";
   const previewScopeRef = useRef({
@@ -254,19 +266,33 @@ export function TaskScreen({
   };
 
   useEffect(() => {
+    const lifecycle = companionLifecycleRef.current;
+    lifecycle.taskId = task.id;
+    lifecycle.onOpenChange = onCompanionOpenChange;
     setExpandedTitleTaskId((currentTaskId) =>
       currentTaskId === task.id ? currentTaskId : null
     );
     setCompanionModalTaskId(null);
+    return () => {
+      if (!lifecycle.isOpen) return;
+      lifecycle.isOpen = false;
+      lifecycle.onOpenChange?.(false);
+    };
   }, [task.id]);
 
   const openCompanion = () => {
     setCompanionModalTaskId(task.id);
-    onCompanionOpenChange?.(true);
+    const lifecycle = companionLifecycleRef.current;
+    if (lifecycle.isOpen) return;
+    lifecycle.isOpen = true;
+    lifecycle.onOpenChange?.(true);
   };
   const closeCompanion = () => {
     setCompanionModalTaskId(null);
-    onCompanionOpenChange?.(false);
+    const lifecycle = companionLifecycleRef.current;
+    if (!lifecycle.isOpen) return;
+    lifecycle.isOpen = false;
+    lifecycle.onOpenChange?.(false);
   };
 
   useEffect(() => {
@@ -462,15 +488,20 @@ export function TaskScreen({
         ]}
       >
         <View style={styles.composerActions}>
-          {companionSnapshot ? (
+          {companionSnapshot ||
+          (companionStatus === "error" && companionErrorMessage) ? (
             <Pressable
-              accessibilityLabel="Visual companion ready"
+              accessibilityLabel={
+                companionStatus === "error"
+                  ? "Visual companion unavailable"
+                  : "Visual companion ready"
+              }
               accessibilityRole="button"
               onPress={openCompanion}
               style={styles.companionButton}
               testID={MOBILE_E2E_IDS.visualCompanionButton}
             >
-              {companionUnread ? (
+              {companionStatus === "available" && companionUnread ? (
                 <View
                   accessibilityLabel="New visual companion update"
                   style={styles.companionUnread}
@@ -478,7 +509,9 @@ export function TaskScreen({
                 />
               ) : null}
               <Text style={styles.companionButtonLabel}>
-                Visual companion ready
+                {companionStatus === "error"
+                  ? "Visual companion unavailable"
+                  : "Visual companion ready"}
               </Text>
             </Pressable>
           ) : null}
@@ -540,7 +573,9 @@ export function TaskScreen({
         <VisualCompanionModal
           errorMessage={companionErrorMessage}
           eventStatus={companionEventStatus}
-          snapshot={companionSnapshot}
+          snapshot={
+            companionStatus === "available" ? companionSnapshot : null
+          }
           status={companionStatus}
           onClose={closeCompanion}
           onSendEvent={(sessionId, revision, event) =>
