@@ -478,6 +478,39 @@ describe("createSessionStore", () => {
     expect(publishes).toBe(0);
   });
 
+  it("publishes when a task creation time is learned", () => {
+    const store = createSessionStore();
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setRepoTasks([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "New task",
+        stage: "in progress"
+      }
+    ]);
+    publishes = 0;
+
+    store.setRepoTasks([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "New task",
+        stage: "in progress",
+        createdAt: "2026-07-17T08:00:00.000Z"
+      }
+    ]);
+
+    expect(publishes).toBe(1);
+    expect(store.getState().repoTasks[0]?.createdAt).toBe(
+      "2026-07-17T08:00:00.000Z"
+    );
+  });
+
   it("publishes when only a task's activity changes", () => {
     const store = createSessionStore();
     let publishes = 0;
