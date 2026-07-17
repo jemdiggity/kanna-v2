@@ -19,6 +19,7 @@ export interface EmitterOutput {
   cols: number;
   rows: number;
   snapshot_at: number;
+  resnapshot_at: number | null;
   used_visible_text_fallback: boolean;
   frames: TerminalFrame[];
 }
@@ -28,10 +29,25 @@ export interface FixtureDefinition {
   description: string;
   bytes: Uint8Array;
   snapshotAt: number;
+  resnapshotAt?: number;
+  chunkPattern?: number[];
   cols?: number;
   rows?: number;
   allowFallback?: boolean;
   replayThroughSessionStore?: boolean;
+  assertStreamCompaction?: boolean;
+}
+
+export interface SessionStoreMutationMetrics {
+  appendCount: number;
+  maxRetainedStart: number;
+  replaceCount: number;
+  snapshotCount: number;
+}
+
+export interface SessionStoreRenderResult {
+  grid: GridSnapshot;
+  metrics: SessionStoreMutationMetrics;
 }
 
 export interface CellSnapshot {

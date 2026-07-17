@@ -148,6 +148,8 @@ interface ElementNode {
 interface RenderTaskScreenOptions {
   agentType?: "agent" | "pty";
   terminalDims?: { cols: number | null; rows: number | null };
+  terminalOutputEpoch?: number;
+  terminalOutputStart?: number;
   e2eTaskSnapshotMarker?: string;
   activity?: "idle" | "working" | "unread";
   draftInput?: string;
@@ -170,6 +172,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
   const {
     agentType = "pty",
     terminalDims = { cols: null, rows: null },
+    terminalOutputEpoch = 1,
+    terminalOutputStart = 0,
     e2eTaskSnapshotMarker,
     activity = "idle",
     draftInput = "",
@@ -202,6 +206,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       activity
     },
     terminalOutput: "terminal",
+    terminalOutputEpoch,
+    terminalOutputStart,
     terminalStatus,
     terminalCols: terminalDims.cols,
     terminalRows: terminalDims.rows,
@@ -428,6 +434,19 @@ describe("TaskScreen", () => {
     expect(terminal?.props).toMatchObject({
       cols: 132,
       rows: 43
+    });
+  });
+
+  it("passes retained terminal stream coordinates to the terminal WebView", () => {
+    const tree = renderTaskScreen({
+      agentType: "pty",
+      terminalOutputEpoch: 9,
+      terminalOutputStart: 600_002
+    });
+
+    expect(findByType(tree, "TerminalWebView")?.props).toMatchObject({
+      outputEpoch: 9,
+      outputStart: 600_002
     });
   });
 

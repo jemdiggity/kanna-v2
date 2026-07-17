@@ -279,10 +279,11 @@ describe("createRelayDesktopClient", () => {
     });
 
     expect(events).toEqual([
-      { type: "ready", taskId: "task-1", cols: 80, rows: 24 },
       {
-        type: "output",
+        type: "snapshot",
         taskId: "task-1",
+        cols: 80,
+        rows: 24,
         dataB64: Buffer.from("restored output").toString("base64")
       },
       { type: "output", taskId: "task-1", dataB64: "bGl2ZSBvdXRwdXQ=" },
@@ -346,7 +347,7 @@ describe("createRelayDesktopClient", () => {
     });
 
     expect(events).toEqual([
-      { type: "ready", taskId: "task-1", cols: 80, rows: 24 },
+      { type: "snapshot", taskId: "task-1", cols: 80, rows: 24, dataB64: "" },
       {
         type: "output",
         taskId: "task-1",

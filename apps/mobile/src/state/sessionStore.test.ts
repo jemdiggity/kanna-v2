@@ -344,10 +344,34 @@ describe("createSessionStore", () => {
 
     // A real TUI snapshot is a single base64 frame far larger than the old
     // 12000-char cap. Char-slicing it corrupted base64 -> blank terminal.
-    const snapshot = "A".repeat(50_000);
+    const snapshot = "A".repeat(1_050_000);
     store.appendTaskTerminal("task-1", `${snapshot}\n`);
 
     expect(store.getState().taskTerminalOutput).toBe(`${snapshot}\n`);
+  });
+
+  it("replaces stale output atomically when an authoritative snapshot arrives", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.appendTaskTerminal("task-1", "stale-frame\n");
+    const previousEpoch = store.getState().taskTerminalOutputEpoch;
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.replaceTaskTerminalSnapshot("task-1", "fresh-snapshot", 132, 43);
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalStatus: "live",
+      taskTerminalOutput: "fresh-snapshot\n",
+      taskTerminalOutputEpoch: previousEpoch + 1,
+      taskTerminalOutputStart: 0,
+      taskTerminalCols: 132,
+      taskTerminalRows: 43,
+      taskTerminalErrorMessage: null
+    });
+    expect(publishes).toBe(1);
   });
 
   it("drops whole oldest base64 frames (never a partial token) when over the cap", () => {
@@ -364,6 +388,7 @@ describe("createSessionStore", () => {
     // Every retained frame is intact; none truncated mid-base64.
     expect(frames.every((segment) => segment === frame)).toBe(true);
     expect(output.length).toBeLessThanOrEqual(1_000_001);
+    expect(store.getState().taskTerminalOutputStart).toBe(600_002);
   });
 
   it("keeps a large snapshot plus live frames decodable through the accumulation cap", () => {

@@ -23,20 +23,30 @@ import {
 
 // Terminal output is accumulated as newline-delimited base64 frames and replayed
 // into xterm.js on WebView (re)mount. Cap the buffer by dropping whole oldest
-// frames — never slice mid-base64, which corrupts decoding. The first frame is a
-// full-screen snapshot (one large base64 line) that must survive intact or the
-// terminal renders blank. 1MB comfortably holds a snapshot plus recent deltas.
+// frames — never slice mid-base64, which corrupts decoding. Retained stream
+// offsets let an already-mounted xterm keep appending after old frames are
+// removed. A single oversized frame remains intact rather than being dropped.
 const MAX_TERMINAL_OUTPUT_CHARS = 1_000_000;
 
-function capTerminalOutput(output: string): string {
+interface CappedTerminalOutput {
+  output: string;
+  droppedChars: number;
+}
+
+function capTerminalOutput(output: string): CappedTerminalOutput {
   if (output.length <= MAX_TERMINAL_OUTPUT_CHARS) {
-    return output;
+    return { output, droppedChars: 0 };
   }
   const cut = output.length - MAX_TERMINAL_OUTPUT_CHARS;
   const newlineIndex = output.indexOf("\n", cut);
   // Keep whole frames only; if a single frame exceeds the cap, keep it rather
   // than emit a corrupt base64 fragment.
-  return newlineIndex === -1 ? output : output.slice(newlineIndex + 1);
+  return newlineIndex === -1 || newlineIndex === output.length - 1
+    ? { output, droppedChars: 0 }
+    : {
+        output: output.slice(newlineIndex + 1),
+        droppedChars: newlineIndex + 1
+      };
 }
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
@@ -100,6 +110,8 @@ export interface SessionState {
   taskTerminalTaskId: string | null;
   taskTerminalStatus: TaskTerminalStatus;
   taskTerminalOutput: string;
+  taskTerminalOutputEpoch: number;
+  taskTerminalOutputStart: number;
   taskTerminalCols: number | null;
   taskTerminalRows: number | null;
   taskTerminalErrorMessage: string | null;
@@ -155,6 +167,7 @@ export interface SessionStore {
   ): void;
   removeTaskUiSlot(slotId: string): void;
   beginTaskTerminal(taskId: string, initialOutput: string): void;
+  replaceTaskTerminalSnapshot(taskId: string, dataB64: string, cols: number, rows: number): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
   setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
@@ -202,6 +215,8 @@ export function createSessionStore(): SessionStore {
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
     taskTerminalOutput: "",
+    taskTerminalOutputEpoch: 0,
+    taskTerminalOutputStart: 0,
     taskTerminalCols: null,
     taskTerminalRows: null,
     taskTerminalErrorMessage: null,
@@ -503,6 +518,12 @@ export function createSessionStore(): SessionStore {
           selectedTaskId === null ? "idle" : state.taskTerminalStatus,
         taskTerminalOutput:
           selectedTaskId === null ? "" : state.taskTerminalOutput,
+        taskTerminalOutputEpoch:
+          selectedTaskId === null
+            ? state.taskTerminalOutputEpoch + 1
+            : state.taskTerminalOutputEpoch,
+        taskTerminalOutputStart:
+          selectedTaskId === null ? 0 : state.taskTerminalOutputStart,
         taskTerminalCols:
           selectedTaskId === null ? null : state.taskTerminalCols,
         taskTerminalRows:
@@ -637,13 +658,35 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     beginTaskTerminal(taskId, initialOutput) {
+      const capped = capTerminalOutput(initialOutput);
       state = {
         ...state,
         taskTerminalTaskId: taskId,
         taskTerminalStatus: "connecting",
-        taskTerminalOutput: initialOutput,
+        taskTerminalOutput: capped.output,
+        taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
+        taskTerminalOutputStart: capped.droppedChars,
         taskTerminalCols: null,
         taskTerminalRows: null,
+        taskTerminalErrorMessage: null
+      };
+      publish();
+    },
+    replaceTaskTerminalSnapshot(taskId, dataB64, cols, rows) {
+      if (state.taskTerminalTaskId !== taskId) {
+        return;
+      }
+
+      const snapshotOutput = dataB64 ? `${dataB64}\n` : "";
+      const capped = capTerminalOutput(snapshotOutput);
+      state = {
+        ...state,
+        taskTerminalStatus: "live",
+        taskTerminalOutput: capped.output,
+        taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
+        taskTerminalOutputStart: capped.droppedChars,
+        taskTerminalCols: cols,
+        taskTerminalRows: rows,
         taskTerminalErrorMessage: null
       };
       publish();
@@ -654,10 +697,13 @@ export function createSessionStore(): SessionStore {
       }
 
       const nextOutput = `${state.taskTerminalOutput}${chunk}`;
+      const capped = capTerminalOutput(nextOutput);
       state = {
         ...state,
         taskTerminalStatus: "live",
-        taskTerminalOutput: capTerminalOutput(nextOutput),
+        taskTerminalOutput: capped.output,
+        taskTerminalOutputStart:
+          state.taskTerminalOutputStart + capped.droppedChars,
         taskTerminalErrorMessage: null
       };
       publish();
@@ -782,6 +828,8 @@ export function createSessionStore(): SessionStore {
         taskTerminalTaskId: null,
         taskTerminalStatus: "idle",
         taskTerminalOutput: "",
+        taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
+        taskTerminalOutputStart: 0,
         taskTerminalErrorMessage: null,
         taskAgentTaskId: null,
         taskAgentStatus: "idle",
@@ -796,6 +844,8 @@ export function createSessionStore(): SessionStore {
         taskTerminalTaskId: null,
         taskTerminalStatus: "idle",
         taskTerminalOutput: "",
+        taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
+        taskTerminalOutputStart: 0,
         taskTerminalErrorMessage: null
       };
       publish();

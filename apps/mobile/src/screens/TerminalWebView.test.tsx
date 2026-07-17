@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WebViewMessageEvent } from "react-native-webview";
 import type { TaskTerminalStatus } from "../state/sessionStore";
 import {
+  buildTerminalAppendScript,
   buildTerminalReplaceScript,
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
@@ -128,6 +129,8 @@ function runEffects() {
 async function renderTerminalWebView(input: {
   taskId?: string;
   output?: string;
+  outputEpoch?: number;
+  outputStart?: number;
   status?: TaskTerminalStatus;
   cols?: number | null;
   rows?: number | null;
@@ -141,6 +144,8 @@ async function renderTerminalWebView(input: {
   const tree = TerminalWebView({
     taskId: input.taskId ?? "task-1",
     output: input.output ?? `${Buffer.from("large snapshot").toString("base64")}\n`,
+    outputEpoch: input.outputEpoch ?? 1,
+    outputStart: input.outputStart ?? 0,
     status: input.status ?? "live",
     cols: input.cols ?? null,
     rows: input.rows ?? null,
@@ -793,5 +798,59 @@ describe("TerminalWebView", () => {
     const multilineHtml = (multilineWebView.props.source as { html: string }).html;
 
     expect(multilineHtml).toBe(initialHtml);
+  });
+
+  it("appends the unseen logical suffix when retained history is compacted", async () => {
+    const initialWebView = await renderTerminalWebView({
+      output: "A\nB\n",
+      outputEpoch: 7,
+      outputStart: 0
+    });
+    (initialWebView.props.onLoadStart as () => void)();
+    runEffects();
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+    injectedScripts.length = 0;
+
+    await renderTerminalWebView({
+      output: "B\nC\n",
+      outputEpoch: 7,
+      outputStart: 2
+    });
+    runEffects();
+
+    expect(injectedScripts).toContain(buildTerminalAppendScript("C\n"));
+    expect(injectedScripts.some((script) => script.includes("__replaceTerminalState"))).toBe(
+      false
+    );
+  });
+
+  it("replaces terminal state once when a new snapshot epoch arrives", async () => {
+    const initialWebView = await renderTerminalWebView({
+      output: "old\n",
+      outputEpoch: 2,
+      outputStart: 100
+    });
+    (initialWebView.props.onLoadStart as () => void)();
+    runEffects();
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+    injectedScripts.length = 0;
+
+    await renderTerminalWebView({
+      output: "fresh\n",
+      outputEpoch: 3,
+      outputStart: 0
+    });
+    runEffects();
+
+    expect(injectedScripts).toContain(
+      buildTerminalReplaceScript({ output: "fresh\n", status: "live" })
+    );
+    expect(
+      injectedScripts.filter((script) => script.includes("__replaceTerminalState"))
+    ).toHaveLength(1);
   });
 });

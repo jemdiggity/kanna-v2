@@ -2081,10 +2081,11 @@ describe("createMobileController", () => {
     store.setSearchResults("keep-query", [taskA]);
     controller.openTask(taskA.id);
     client.__terminalStream.emit({
-      type: "ready",
+      type: "snapshot",
       taskId: taskA.id,
       cols: 80,
-      rows: 24
+      rows: 24,
+      dataB64: ""
     });
     client.__terminalStream.emit({
       type: "output",
@@ -3979,8 +3980,11 @@ describe("createMobileController", () => {
     await controller.bootstrap();
     controller.openTask("task-1");
     client.__terminalStream.emit({
-      type: "ready",
-      taskId: "task-1"
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: ""
     });
     client.__terminalStream.emit({
       type: "output",
@@ -4006,7 +4010,7 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalOutput).not.toContain("First line");
   });
 
-  it("stores desktop PTY dimensions from a ready terminal event", async () => {
+  it("stores desktop PTY dimensions from an authoritative snapshot", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
@@ -4014,14 +4018,54 @@ describe("createMobileController", () => {
     await controller.bootstrap();
     controller.openTask("task-1");
     client.__terminalStream.emit({
-      type: "ready",
+      type: "snapshot",
       taskId: "task-1",
       cols: 132,
-      rows: 43
+      rows: 43,
+      dataB64: "c25hcHNob3Q="
     });
 
     expect(store.getState()).toMatchObject({
       taskTerminalTaskId: "task-1",
+      taskTerminalCols: 132,
+      taskTerminalRows: 43,
+      taskTerminalStatus: "live"
+    });
+  });
+
+  it("replaces stale terminal history when reconnect delivers a fresh snapshot", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "b2xkLXNuYXBzaG90"
+    });
+    client.__terminalStream.emit({
+      type: "output",
+      taskId: "task-1",
+      dataB64: "c3RhbGUtZGVsdGE="
+    });
+    const previousEpoch = store.getState().taskTerminalOutputEpoch;
+
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 132,
+      rows: 43,
+      dataB64: "ZnJlc2gtc25hcHNob3Q="
+    });
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalOutput: "ZnJlc2gtc25hcHNob3Q=\n",
+      taskTerminalOutputEpoch: previousEpoch + 1,
+      taskTerminalOutputStart: 0,
       taskTerminalCols: 132,
       taskTerminalRows: 43,
       taskTerminalStatus: "live"

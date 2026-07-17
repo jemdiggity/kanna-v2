@@ -3,7 +3,12 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Browser, Page } from "playwright";
 import { ARTIFACT_DIR, PACKAGE_ROOT, REPO_ROOT } from "./paths.ts";
-import type { EmitterOutput, GridSnapshot, TermSnapshotFrame } from "./types.ts";
+import type {
+  EmitterOutput,
+  GridSnapshot,
+  SessionStoreRenderResult,
+  TermSnapshotFrame
+} from "./types.ts";
 
 interface MobileDocumentModule {
   buildTerminalDocument(options: {
@@ -51,19 +56,44 @@ interface TerminalHookState {
 
 interface HarnessSessionState {
   taskTerminalOutput: string;
+  taskTerminalOutputEpoch: number;
+  taskTerminalOutputStart: number;
   taskTerminalCols: number | null;
   taskTerminalRows: number | null;
+  taskTerminalStatus: "idle" | "connecting" | "live" | "closed" | "error";
 }
 
 interface HarnessSessionStore {
   getState(): HarnessSessionState;
   beginTaskTerminal(taskId: string, initialOutput: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
-  setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
+  replaceTaskTerminalSnapshot(taskId: string, dataB64: string, cols: number, rows: number): void;
 }
 
 interface SessionStoreModule {
   createSessionStore(): HarnessSessionStore;
+}
+
+type HarnessTerminalMutation =
+  | { kind: "none" }
+  | { kind: "append"; chunk: string }
+  | {
+      kind: "replace";
+      output: string;
+      status: HarnessSessionState["taskTerminalStatus"];
+    };
+
+interface TerminalMutationModule {
+  planTerminalMutation(options: {
+    previousEpoch: number;
+    previousOutput: string;
+    previousStart: number;
+    previousStatus: HarnessSessionState["taskTerminalStatus"];
+    nextEpoch: number;
+    nextOutput: string;
+    nextStart: number;
+    nextStatus: HarnessSessionState["taskTerminalStatus"];
+  }): HarnessTerminalMutation;
 }
 
 const VIEWPORT = { width: 1900, height: 624 };
@@ -537,7 +567,7 @@ export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): 
 export async function renderSessionStorePathGrid(
   browser: Browser,
   emitted: EmitterOutput
-): Promise<GridSnapshot> {
+): Promise<SessionStoreRenderResult> {
   const page = await browser.newPage({ viewport: VIEWPORT });
   try {
     const html = await buildInstrumentedMobileDocument();
@@ -546,30 +576,61 @@ export async function renderSessionStorePathGrid(
     await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
 
     const store = await createHarnessSessionStore();
+    const planTerminalMutation = await loadTerminalMutationPlanner();
     const taskId = emitted.frames[0]?.task_id ?? "tui-fidelity";
     store.beginTaskTerminal(taskId, "");
+    let renderedState = store.getState();
+    const metrics = {
+      appendCount: 0,
+      maxRetainedStart: 0,
+      replaceCount: 0,
+      snapshotCount: 0
+    };
     for (const frame of emitted.frames) {
       if (frame.type === "term_snapshot") {
-        store.setTaskTerminalDims(frame.task_id, frame.cols, frame.rows);
+        metrics.snapshotCount += 1;
+        store.replaceTaskTerminalSnapshot(
+          frame.task_id,
+          frame.data_b64,
+          frame.cols,
+          frame.rows
+        );
+        await setTerminalDims(page, frame);
+      } else {
+        store.appendTaskTerminal(frame.task_id, `${frame.data_b64}\n`);
       }
-      store.appendTaskTerminal(frame.task_id, `${frame.data_b64}\n`);
+
+      const nextState = store.getState();
+      metrics.maxRetainedStart = Math.max(
+        metrics.maxRetainedStart,
+        nextState.taskTerminalOutputStart
+      );
+      const mutation = planTerminalMutation({
+        previousEpoch: renderedState.taskTerminalOutputEpoch,
+        previousOutput: renderedState.taskTerminalOutput,
+        previousStart: renderedState.taskTerminalOutputStart,
+        previousStatus: renderedState.taskTerminalStatus,
+        nextEpoch: nextState.taskTerminalOutputEpoch,
+        nextOutput: nextState.taskTerminalOutput,
+        nextStart: nextState.taskTerminalOutputStart,
+        nextStatus: nextState.taskTerminalStatus
+      });
+      if (mutation.kind === "replace") {
+        metrics.replaceCount += 1;
+        await callHook(page, "__replaceTerminalState", {
+          chunksB64: terminalChunksFromOutput(mutation.output)
+        });
+      } else if (mutation.kind === "append") {
+        metrics.appendCount += 1;
+        await callHook(page, "__appendTerminalChunk", {
+          chunksB64: terminalChunksFromOutput(mutation.chunk)
+        });
+      }
+      renderedState = nextState;
     }
 
-    const state = store.getState();
-    if (state.taskTerminalCols && state.taskTerminalRows) {
-      await setTerminalDims(page, {
-        type: "term_snapshot",
-        task_id: taskId,
-        cols: state.taskTerminalCols,
-        rows: state.taskTerminalRows,
-        data_b64: ""
-      });
-    }
-    await callHook(page, "__replaceTerminalState", {
-      chunksB64: terminalChunksFromOutput(state.taskTerminalOutput)
-    });
     await waitForWrites(page);
-    return await extractGrid(page);
+    return { grid: await extractGrid(page), metrics };
   } finally {
     await page.screenshot({
       path: path.join(ARTIFACT_DIR, `${path.basename(emitted.fixture, ".ansi")}.path.png`),
@@ -621,6 +682,16 @@ async function createHarnessSessionStore(): Promise<HarnessSessionStore> {
   ).href;
   const mod = (await import(moduleUrl)) as SessionStoreModule;
   return mod.createSessionStore();
+}
+
+async function loadTerminalMutationPlanner(): Promise<
+  TerminalMutationModule["planTerminalMutation"]
+> {
+  const moduleUrl = pathToFileURL(
+    path.join(REPO_ROOT, "apps/mobile/src/screens/terminalMutation.ts")
+  ).href;
+  const mod = (await import(moduleUrl)) as TerminalMutationModule;
+  return mod.planTerminalMutation;
 }
 
 async function buildReferenceDocument(cols: number, rows: number): Promise<string> {

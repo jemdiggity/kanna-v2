@@ -12,6 +12,7 @@ The harness also covers three mobile layers that are easy to bypass accidentally
 
 - Snapshot dimensions: `term_snapshot.cols`/`rows` are applied through the mobile document's `__setTerminalDims` hook before replay. The `bottom-anchored-80x24` fixture fails if mobile rendering drops the PTY dimensions and falls back to the old fixed 220-column, viewport-fitted grid.
 - Session accumulation: `large-session-store-snapshot` sends a large snapshot plus live frames through the real `sessionStore` accumulation/cap path before mobile replay. It fails if a large base64 snapshot is sliced mid-frame or renders blank after store replay.
+- Stream compaction and reconnect: `status-redraw-stream-compaction` renders every real store publication through the production mutation planner and generated xterm hooks. It crosses the 1 MB retained-history cap during rapid timer redraws, asserts those updates stay append-only, then applies a second real daemon snapshot and asserts exactly one authoritative reset.
 - Composer safe region: Chromium loads the generated mobile document with the bundled xterm 6.1 beta runtime, applies normal, multiline, keyboard-shifted, and keyboard-plus-multiline obstructions, and verifies that the real `.xterm-scrollable-element` stays clear. It also verifies that an append preserves manual scrollback and that following resumes within one row of the live bottom.
 
 ## Run
@@ -63,6 +64,7 @@ Synthetic fixtures are defined in `src/fixtures.ts` and materialized as raw `.an
 - `split-sensitive` - live chunks that split UTF-8 and escape sequences
 - `bottom-anchored-80x24` - non-220 PTY grid with UI anchored to row 24
 - `large-session-store-snapshot` - large snapshot and live output replayed through `sessionStore`
+- `status-redraw-stream-compaction` - Codex-like working timer with stable `esc to interrupt` text across retained-history compaction and a reconnect snapshot
 - `codex-pwd-tool` - captured Codex CLI TUI session with status/title spinner redraws, shell tool calls, and a final settled answer
 
 Each fixture sets `snapshotAt`. Bytes before that offset are fed through the real daemon `HeadlessTerminal` and serialized into the initial `term_snapshot`; bytes after that offset are emitted as chunked `term_output` frames.

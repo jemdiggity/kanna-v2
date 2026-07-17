@@ -1,0 +1,10 @@
+{
+  "name": "status-redraw-stream-compaction",
+  "description": "Codex-like working timer crosses the mobile retained-history cap, then receives an authoritative reconnect snapshot.",
+  "snapshotAt": 78,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "Agent response remains stable\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nWorking (230s - esc to interrupt)",
+  "referenceSerialized": "Agent response remains stable\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nWorking (230s - esc to interrupt)"
+}

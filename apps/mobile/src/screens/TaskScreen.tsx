@@ -31,6 +31,8 @@ interface TaskScreenProps {
   task: TaskSummary;
   e2eTaskSnapshotMarker?: string;
   terminalOutput: string;
+  terminalOutputEpoch: number;
+  terminalOutputStart: number;
   terminalStatus: TaskTerminalStatus;
   terminalCols: number | null;
   terminalRows: number | null;
@@ -58,6 +60,8 @@ export function TaskScreen({
   task,
   e2eTaskSnapshotMarker,
   terminalOutput,
+  terminalOutputEpoch,
+  terminalOutputStart,
   terminalStatus,
   terminalCols,
   terminalRows,
@@ -263,6 +267,8 @@ export function TaskScreen({
             fullscreen
             key={task.id}
             output={terminalOutput}
+            outputEpoch={terminalOutputEpoch}
+            outputStart={terminalOutputStart}
             status={terminalStatus}
             cols={terminalCols}
             rows={terminalRows}

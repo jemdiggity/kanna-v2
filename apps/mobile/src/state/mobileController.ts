@@ -734,11 +734,13 @@ export function createMobileController(
           return;
         }
         switch (event.type) {
-          case "ready":
-            if (event.cols && event.rows) {
-              store.setTaskTerminalDims(streamTaskId, event.cols, event.rows);
-            }
-            store.setTaskTerminalStatus(streamTaskId, "live");
+          case "snapshot":
+            store.replaceTaskTerminalSnapshot(
+              streamTaskId,
+              event.dataB64,
+              event.cols,
+              event.rows
+            );
             break;
           case "output":
             store.appendTaskTerminal(streamTaskId, `${event.dataB64}\n`);
