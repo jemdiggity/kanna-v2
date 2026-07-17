@@ -7,7 +7,7 @@
 //! `packages/agent-protocol`).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
@@ -65,10 +65,117 @@ fn status_str(status: SessionStatus) -> &'static str {
     }
 }
 
+#[derive(Clone)]
+struct CompanionFrameSender {
+    pending: Arc<Mutex<HashMap<String, ServerFrame>>>,
+    notify_tx: mpsc::Sender<()>,
+}
+
+impl CompanionFrameSender {
+    fn publish(&self, task_id: String, frame: ServerFrame) -> bool {
+        if self.notify_tx.is_closed() {
+            return false;
+        }
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(task_id, frame);
+        match self.notify_tx.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => true,
+            Err(mpsc::error::TrySendError::Closed(())) => false,
+        }
+    }
+
+    fn clear(&self, task_id: &str) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(task_id);
+    }
+}
+
+struct OutboundFrameReceiver {
+    frame_rx: mpsc::Receiver<ServerFrame>,
+    companion_pending: Arc<Mutex<HashMap<String, ServerFrame>>>,
+    companion_notify_rx: mpsc::Receiver<()>,
+    frame_closed: bool,
+    companion_closed: bool,
+}
+
+fn outbound_frame_channel(
+    capacity: usize,
+) -> (
+    mpsc::Sender<ServerFrame>,
+    CompanionFrameSender,
+    OutboundFrameReceiver,
+) {
+    let (frame_tx, frame_rx) = mpsc::channel(capacity);
+    let (notify_tx, companion_notify_rx) = mpsc::channel(1);
+    let companion_pending = Arc::new(Mutex::new(HashMap::new()));
+    (
+        frame_tx,
+        CompanionFrameSender {
+            pending: companion_pending.clone(),
+            notify_tx,
+        },
+        OutboundFrameReceiver {
+            frame_rx,
+            companion_pending,
+            companion_notify_rx,
+            frame_closed: false,
+            companion_closed: false,
+        },
+    )
+}
+
+impl OutboundFrameReceiver {
+    fn take_companion(&self) -> Option<ServerFrame> {
+        let mut pending = self
+            .companion_pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let task_id = pending.keys().next()?.clone();
+        pending.remove(&task_id)
+    }
+
+    async fn recv(&mut self) -> Option<ServerFrame> {
+        loop {
+            if !self.frame_closed {
+                match self.frame_rx.try_recv() {
+                    Ok(frame) => return Some(frame),
+                    Err(mpsc::error::TryRecvError::Disconnected) => self.frame_closed = true,
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
+            if let Some(frame) = self.take_companion() {
+                return Some(frame);
+            }
+            if self.frame_closed && self.companion_closed {
+                return None;
+            }
+
+            tokio::select! {
+                biased;
+                frame = self.frame_rx.recv(), if !self.frame_closed => {
+                    match frame {
+                        Some(frame) => return Some(frame),
+                        None => self.frame_closed = true,
+                    }
+                }
+                notification = self.companion_notify_rx.recv(), if !self.companion_closed => {
+                    if notification.is_none() {
+                        self.companion_closed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (incoming_tx, incoming_rx) = mpsc::channel::<String>(256);
-    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(256);
+    let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
 
     let reader_task = tokio::spawn(async move {
         while let Some(Ok(message)) = ws_rx.next().await {
@@ -84,14 +191,24 @@ pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     });
     let writer_task = tokio::spawn(async move {
-        while let Some(json) = outgoing_rx.recv().await {
+        while let Some(frame) = outbound_rx.recv().await {
+            let Ok(json) = serde_json::to_string(&frame) else {
+                continue;
+            };
             if ws_tx.send(WsMessage::Text(json.into())).await.is_err() {
                 return;
             }
         }
     });
 
-    handle_stream_channels(incoming_rx, outgoing_tx, state, AuthMode::AllowEmpty).await;
+    handle_stream_channels(
+        incoming_rx,
+        frame_tx,
+        companion_tx,
+        state,
+        AuthMode::AllowEmpty,
+    )
+    .await;
     reader_task.abort();
     let _ = writer_task.await;
 }
@@ -103,7 +220,7 @@ pub async fn handle_tungstenite_stream(
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (incoming_tx, incoming_rx) = mpsc::channel::<String>(256);
-    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(256);
+    let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
 
     let reader_task = tokio::spawn(async move {
         while let Some(Ok(message)) = ws_rx.next().await {
@@ -119,7 +236,10 @@ pub async fn handle_tungstenite_stream(
         }
     });
     let writer_task = tokio::spawn(async move {
-        while let Some(json) = outgoing_rx.recv().await {
+        while let Some(frame) = outbound_rx.recv().await {
+            let Ok(json) = serde_json::to_string(&frame) else {
+                continue;
+            };
             if ws_tx
                 .send(TungsteniteMessage::Text(json.into()))
                 .await
@@ -130,19 +250,18 @@ pub async fn handle_tungstenite_stream(
         }
     });
 
-    handle_stream_channels(incoming_rx, outgoing_tx, state, auth_mode).await;
+    handle_stream_channels(incoming_rx, frame_tx, companion_tx, state, auth_mode).await;
     reader_task.abort();
     let _ = writer_task.await;
 }
 
 async fn handle_stream_channels(
     mut incoming_rx: mpsc::Receiver<String>,
-    outgoing_tx: mpsc::Sender<String>,
+    frame_tx: mpsc::Sender<ServerFrame>,
+    companion_tx: CompanionFrameSender,
     state: Arc<AppState>,
     auth_mode: AuthMode,
 ) {
-    let (frame_tx, frame_rx) = mpsc::channel::<ServerFrame>(256);
-    let writer_task = tokio::spawn(write_frames(outgoing_tx, frame_rx));
     let mut state_change_rx = state.subscribe_state_changes();
     let state_change_tx = frame_tx.clone();
     let state_change_task = tokio::spawn(async move {
@@ -161,6 +280,7 @@ async fn handle_stream_channels(
     let mut conn = StreamConn {
         state,
         frame_tx,
+        companion_tx,
         attachments: HashMap::new(),
         terminal_controls: HashMap::new(),
         agent_commands: None,
@@ -187,13 +307,11 @@ async fn handle_stream_channels(
         }
     }
 
-    // Abort attachment tasks (each holds a frame_tx clone), then drop our
-    // own sender so the writer drains queued frames and exits — aborting it
-    // would lose final frames (e.g. the unauthenticated error).
+    // Abort attachment tasks, then drop our senders so the socket writer
+    // drains queued ordinary frames and latest companion values before exit.
     conn.shutdown().await;
     drop(conn);
     state_change_task.abort();
-    let _ = writer_task.await;
 }
 
 fn is_relay_tunnel_control_message(message: &str) -> bool {
@@ -208,23 +326,10 @@ fn is_relay_tunnel_control_message(message: &str) -> bool {
         .is_some_and(|kind| kind == "tunnel_ready")
 }
 
-async fn write_frames(
-    outgoing_tx: mpsc::Sender<String>,
-    mut frame_rx: mpsc::Receiver<ServerFrame>,
-) {
-    while let Some(frame) = frame_rx.recv().await {
-        let Ok(json) = serde_json::to_string(&frame) else {
-            continue;
-        };
-        if outgoing_tx.send(json).await.is_err() {
-            return;
-        }
-    }
-}
-
 struct StreamConn {
     state: Arc<AppState>,
     frame_tx: mpsc::Sender<ServerFrame>,
+    companion_tx: CompanionFrameSender,
     attachments: HashMap<(String, StreamKind), JoinHandle<()>>,
     terminal_controls: HashMap<String, TerminalControlHandle>,
     agent_commands: Option<AgentCommandWorker>,
@@ -673,8 +778,11 @@ impl StreamConn {
     }
 
     async fn shutdown(&mut self) {
-        for (_, task) in self.attachments.drain() {
+        for ((task_id, kind), task) in self.attachments.drain() {
             task.abort();
+            if kind == StreamKind::Companion {
+                self.companion_tx.clear(&task_id);
+            }
         }
         let controls = self
             .terminal_controls
@@ -1007,6 +1115,9 @@ impl StreamConn {
                         Self::retire_terminal_control(control).await;
                     }
                 }
+                if kind == StreamKind::Companion {
+                    self.companion_tx.clear(&task_id);
+                }
             }
             ClientFrame::AgentInput { task_id, text } => {
                 self.enqueue_agent_command(task_id, AgentControlCommand::Input(text));
@@ -1125,13 +1236,16 @@ impl StreamConn {
         if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
             existing.abort();
         }
+        if kind == StreamKind::Companion {
+            self.companion_tx.clear(&task_id);
+        }
 
         if kind == StreamKind::Companion {
             let key = (task_id.clone(), kind);
             let task = tokio::spawn(stream_companion(
                 self.state.config().db_path.clone(),
                 task_id,
-                self.frame_tx.clone(),
+                self.companion_tx.clone(),
             ));
             self.attachments.insert(key, task);
             return;
@@ -1178,7 +1292,7 @@ impl StreamConn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SentCompanionState {
+enum PublishedCompanionState {
     Never,
     Unavailable,
     Snapshot {
@@ -1188,8 +1302,8 @@ enum SentCompanionState {
     SourceError,
 }
 
-async fn stream_companion(db_path: String, task_id: String, frame_tx: mpsc::Sender<ServerFrame>) {
-    let mut sent = SentCompanionState::Never;
+async fn stream_companion(db_path: String, task_id: String, companion_tx: CompanionFrameSender) {
+    let mut published = PublishedCompanionState::Never;
     loop {
         let scan_db_path = db_path.clone();
         let scan_task_id = task_id.clone();
@@ -1200,7 +1314,7 @@ async fn stream_companion(db_path: String, task_id: String, frame_tx: mpsc::Send
 
         let (next_state, frame) = match result {
             Ok(Ok(Some(document))) => (
-                SentCompanionState::Snapshot {
+                PublishedCompanionState::Snapshot {
                     session_id: document.session_id.clone(),
                     revision: document.revision.clone(),
                 },
@@ -1213,13 +1327,13 @@ async fn stream_companion(db_path: String, task_id: String, frame_tx: mpsc::Send
                 },
             ),
             Ok(Ok(None)) => (
-                SentCompanionState::Unavailable,
+                PublishedCompanionState::Unavailable,
                 ServerFrame::CompanionUnavailable {
                     task_id: task_id.clone(),
                 },
             ),
             Ok(Err(_)) | Err(_) => (
-                SentCompanionState::SourceError,
+                PublishedCompanionState::SourceError,
                 ServerFrame::CompanionError {
                     task_id: task_id.clone(),
                     code: "companion_source_failed".into(),
@@ -1228,12 +1342,11 @@ async fn stream_companion(db_path: String, task_id: String, frame_tx: mpsc::Send
             ),
         };
 
-        if next_state != sent {
-            match frame_tx.try_send(frame) {
-                Ok(()) => sent = next_state,
-                Err(mpsc::error::TrySendError::Full(_)) => {}
-                Err(mpsc::error::TrySendError::Closed(_)) => return,
+        if next_state != published {
+            if !companion_tx.publish(task_id.clone(), frame) {
+                return;
             }
+            published = next_state;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -2075,6 +2188,46 @@ mod tests {
                 timestamp: 1_784_268_000_000,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn companion_outbound_coalesces_backpressured_revisions_without_starving_terminal() {
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
+        let snapshot = |revision: &str| ServerFrame::CompanionSnapshot {
+            task_id: "task-1".into(),
+            session_id: "session-1".into(),
+            revision: revision.into(),
+            document_kind: CompanionDocumentKind::Fragment,
+            html: format!("<p>{revision}</p>"),
+        };
+
+        for revision in ["revision-1", "revision-2", "revision-3"] {
+            assert!(companion_tx.publish("task-1".into(), snapshot(revision)));
+        }
+        frame_tx
+            .send(ServerFrame::TermOutput {
+                task_id: "task-1".into(),
+                data_b64: b64(b"responsive"),
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::TermOutput { .. })
+        ));
+        match outbound_rx.recv().await {
+            Some(ServerFrame::CompanionSnapshot { revision, .. }) => {
+                assert_eq!(revision, "revision-3")
+            }
+            other => panic!("expected newest companion snapshot, got {other:?}"),
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), outbound_rx.recv())
+                .await
+                .is_err(),
+            "intermediate companion snapshots must be discarded"
+        );
     }
 
     #[tokio::test]
@@ -3122,10 +3275,11 @@ mod tests {
 
         let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 2).await;
         let state = Arc::new(AppState::new(config));
-        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
         let mut conn = StreamConn {
             state,
             frame_tx,
+            companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
             agent_commands: None,
@@ -3922,10 +4076,11 @@ mod tests {
             "KSP Auth Test",
         )));
         let (incoming_tx, incoming_rx) = mpsc::channel(8);
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
         let task = tokio::spawn(handle_stream_channels(
             incoming_rx,
-            outgoing_tx,
+            frame_tx,
+            companion_tx,
             state,
             AuthMode::RequireCredential,
         ));
@@ -3934,8 +4089,7 @@ mod tests {
             .send(serde_json::to_string(&ClientFrame::Auth { credential: None }).unwrap())
             .await
             .unwrap();
-        let frame: ServerFrame =
-            serde_json::from_str(&outgoing_rx.recv().await.expect("error frame")).unwrap();
+        let frame = outbound_rx.recv().await.expect("error frame");
         match frame {
             ServerFrame::Error { code, .. } => assert_eq!(code, "unauthorized"),
             other => panic!("expected unauthorized error, got {other:?}"),
@@ -3950,10 +4104,11 @@ mod tests {
         config.desktop_secret = Some("desktop-secret".to_string());
         let state = Arc::new(crate::http_api::AppState::new(config));
         let (incoming_tx, incoming_rx) = mpsc::channel(8);
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
         let task = tokio::spawn(handle_stream_channels(
             incoming_rx,
-            outgoing_tx,
+            frame_tx,
+            companion_tx,
             state,
             AuthMode::RequireCredential,
         ));
@@ -3967,8 +4122,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let frame: ServerFrame =
-            serde_json::from_str(&outgoing_rx.recv().await.expect("auth ok frame")).unwrap();
+        let frame = outbound_rx.recv().await.expect("auth ok frame");
         assert_eq!(frame, ServerFrame::AuthOk);
         drop(incoming_tx);
         let _ = task.await;
@@ -3982,10 +4136,11 @@ mod tests {
         config.desktop_secret = Some("desktop-secret".to_string());
         let state = Arc::new(crate::http_api::AppState::new(config));
         let (incoming_tx, incoming_rx) = mpsc::channel(8);
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
         let task = tokio::spawn(handle_stream_channels(
             incoming_rx,
-            outgoing_tx,
+            frame_tx,
+            companion_tx,
             state,
             AuthMode::RequireCredential,
         ));
@@ -3999,8 +4154,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let frame: ServerFrame =
-            serde_json::from_str(&outgoing_rx.recv().await.expect("error frame")).unwrap();
+        let frame = outbound_rx.recv().await.expect("error frame");
         match frame {
             ServerFrame::Error { code, .. } => assert_eq!(code, "unauthorized"),
             other => panic!("expected unauthorized error, got {other:?}"),
