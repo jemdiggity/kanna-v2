@@ -7,7 +7,7 @@ import {
   waitForTaskTerminalLive,
   type PtyTerminalFixture
 } from "../smoke/list-detail-back.e2e";
-import { openProfileConnectionSheet } from "../smoke/profile-connection.e2e";
+import { openProfileSheet } from "../smoke/profile-connection.e2e";
 import type { TaskActivity } from "../../../src/lib/api/types";
 import type { RelayTaskOrderingFixture } from "../../helpers/relay-harness";
 
@@ -74,8 +74,6 @@ interface RelayElement {
 interface RelayUi {
   getAccountButton(): Promise<RelayElement>;
   getAccountCloseButton(): Promise<RelayElement>;
-  getAccountConnectionStatus(): Promise<RelayElement>;
-  getAccountConnectionTitle(): Promise<RelayElement>;
   getAccountEmailInput(): Promise<RelayElement>;
   getAccountPasswordInput(): Promise<RelayElement>;
   getAccountSheet(): Promise<RelayElement>;
@@ -182,12 +180,6 @@ function createRelayUi(driver: Browser): RelayUi {
     },
     async getAccountCloseButton() {
       return driver.$(selectors.accountCloseButton);
-    },
-    async getAccountConnectionStatus() {
-      return driver.$(selectors.accountConnectionStatus);
-    },
-    async getAccountConnectionTitle() {
-      return driver.$(selectors.accountConnectionTitle);
     },
     async getAccountEmailInput() {
       return driver.$(selectors.accountEmailInput);
@@ -751,19 +743,8 @@ async function verifyTerminalFilePreviewFlow(
   await closeTaskFilePreview(driver);
 }
 
-async function isRelayConnected(driver: Browser, ui: RelayUi): Promise<boolean> {
-  const title = await ui.getAccountConnectionTitle();
-  const status = await ui.getAccountConnectionStatus();
-  const titleText = await title.getText().catch(() => "");
-  const statusText = await status.getText().catch(() => "");
-  if (titleText.includes("Kanna Cloud") && /connected|online|relay/i.test(statusText)) {
-    return true;
-  }
-
-  const cloudText = await driver.$('-ios predicate string:name == "Kanna Cloud" OR label == "Kanna Cloud"');
-  const connectedText = await driver.$('-ios predicate string:name == "Connected" OR label == "Connected"');
-  return await cloudText.isExisting().catch(() => false) &&
-    await connectedText.isExisting().catch(() => false);
+async function isRelaySignedIn(ui: RelayUi): Promise<boolean> {
+  return (await ui.getAccountSignOutButton()).isExisting().catch(() => false);
 }
 
 async function closeAccountSheet(driver: Browser, ui: RelayUi): Promise<void> {
@@ -984,7 +965,7 @@ async function signInToRelay(
   ui: RelayUi,
   credentials: RelayCredentials
 ): Promise<void> {
-  await openProfileConnectionSheet(ui);
+  await openProfileSheet(ui);
 
   const signOutButton = await ui.getAccountSignOutButton();
   if (await signOutButton.isExisting().catch(() => false)) {
@@ -1003,7 +984,7 @@ async function signInToRelay(
   await ui.waitUntil(
     async () => {
       await dismissSavePasswordPrompt(driver);
-      return await isRelayConnected(driver, ui);
+      return await isRelaySignedIn(ui);
     },
     {
       interval: POLL_INTERVAL_MS,

@@ -131,3 +131,27 @@ export async function openSimulatorDevelopmentClient(input: {
     )
   ]);
 }
+
+export function buildDisableExpoDevMenuFabArgs(
+  deviceUdid: string,
+  bundleId: string
+): string[] {
+  return [
+    "simctl",
+    "spawn",
+    deviceUdid,
+    "defaults",
+    "write",
+    bundleId,
+    "EXDevMenuShowFloatingActionButton",
+    "-bool",
+    "false"
+  ];
+}
+
+export async function disableSimulatorExpoDevMenuFab(
+  device: AvailableSimulatorDevice,
+  bundleId: string
+): Promise<void> {
+  await execFileAsync("xcrun", buildDisableExpoDevMenuFabArgs(device.udid, bundleId));
+}

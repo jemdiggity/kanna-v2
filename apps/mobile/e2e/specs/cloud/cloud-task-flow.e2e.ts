@@ -4,7 +4,7 @@ import {
   ensureTaskListVisible,
   waitForTaskTerminalLive
 } from "../smoke/list-detail-back.e2e";
-import { openProfileConnectionSheet } from "../smoke/profile-connection.e2e";
+import { openProfileSheet } from "../smoke/profile-connection.e2e";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
@@ -17,6 +17,7 @@ interface CloudCredentials {
 interface CloudElement {
   addValue(value: string): Promise<unknown>;
   click(): Promise<unknown>;
+  getAttribute(name: string): Promise<string | null>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
   setValue(value: string): Promise<unknown>;
@@ -25,12 +26,13 @@ interface CloudElement {
 
 interface CloudUi {
   getAccountButton(): Promise<CloudElement>;
+  getAccountCloseButton(): Promise<CloudElement>;
   getAccountSheet(): Promise<CloudElement>;
   getBackButton(): Promise<CloudElement>;
-  getConnectionTitle(): Promise<CloudElement>;
   getEmailInput(): Promise<CloudElement>;
   getPasswordInput(): Promise<CloudElement>;
   getSignInButton(): Promise<CloudElement>;
+  getSignOutButton(): Promise<CloudElement>;
   getAgentMessageView(): Promise<CloudElement>;
   getAgentMessageReady(): Promise<CloudElement>;
   getTaskDetailScreen(): Promise<CloudElement>;
@@ -52,14 +54,14 @@ function createCloudUi(driver: Browser): CloudUi {
     async getAccountButton() {
       return driver.$(selectors.accountButton);
     },
+    async getAccountCloseButton() {
+      return driver.$(selectors.accountCloseButton);
+    },
     async getAccountSheet() {
       return driver.$(selectors.accountSheet);
     },
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
-    },
-    async getConnectionTitle() {
-      return driver.$(selectors.accountConnectionTitle);
     },
     async getEmailInput() {
       return driver.$(selectors.accountEmailInput);
@@ -69,6 +71,9 @@ function createCloudUi(driver: Browser): CloudUi {
     },
     async getSignInButton() {
       return driver.$(selectors.accountSignInButton);
+    },
+    async getSignOutButton() {
+      return driver.$(selectors.accountSignOutButton);
     },
     async getAgentMessageView() {
       return driver.$(selectors.agentMessageView);
@@ -98,7 +103,7 @@ async function signInToCloud(
   ui: CloudUi,
   credentials: Required<CloudCredentials>
 ): Promise<void> {
-  await openProfileConnectionSheet(ui);
+  await openProfileSheet(ui);
 
   const emailInput = await ui.getEmailInput();
   await emailInput.setValue(credentials.email);
@@ -109,16 +114,15 @@ async function signInToCloud(
 
   await ui.waitUntil(
     async () => {
-      const title = await ui.getConnectionTitle();
-      return (await title.getText()).includes("Kanna Cloud");
+      return (await ui.getSignOutButton()).isExisting();
     },
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg:
-        "Expected force-cloud E2E to connect through Kanna Cloud instead of LAN"
+      timeoutMsg: "Expected cloud E2E sign-in to complete"
     }
   );
+  await (await ui.getAccountCloseButton()).click();
 }
 
 function requireCloudCredentials(

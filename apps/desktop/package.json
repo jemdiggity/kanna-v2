@@ -42,6 +42,7 @@
     "markdown-it-strikethrough-alt": "^1.0.0",
     "markdown-it-task-lists": "^2.1.1",
     "pinia": "^3.0.4",
+    "qrcode": "1.5.4",
     "shiki": "^4.0.2",
     "vue": "^3.5.13",
     "vue-chartjs": "^5",

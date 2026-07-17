@@ -10,37 +10,27 @@ import {
   View
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import type { AuthState, ConnectionState } from "../state/sessionStore";
+import type { AuthState } from "../state/sessionStore";
 import { getAccountBadgePresentation } from "./accountBadgePresentation";
 
 interface AccountSheetProps {
   auth: AuthState;
-  connectionState: ConnectionState;
-  desktopName: string | null;
-  errorMessage: string | null;
-  pairingCode: string | null;
+  machineCount: number;
+  availableMachineCount: number;
   visible: boolean;
-  forceCloudEnabled: boolean;
-  showDevForceCloudToggle: boolean;
-  onConnectLocal(): void;
   onClose(): void;
-  onForceCloudChange(enabled: boolean): void;
+  onOpenMachines(): void;
   onSignIn(email: string, password: string): void;
   onSignOut(): void;
 }
 
 export function AccountSheet({
   auth,
-  connectionState,
-  desktopName,
-  errorMessage,
-  forceCloudEnabled,
-  pairingCode,
-  showDevForceCloudToggle,
+  machineCount,
+  availableMachineCount,
   visible,
-  onConnectLocal,
   onClose,
-  onForceCloudChange,
+  onOpenMachines,
   onSignIn,
   onSignOut
 }: AccountSheetProps) {
@@ -48,12 +38,6 @@ export function AccountSheet({
   const [password, setPassword] = useState("");
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
   const presentation = getAccountBadgePresentation(auth);
-  const connection = getConnectionStatusPresentation(
-    connectionState,
-    desktopName,
-    pairingCode,
-    errorMessage
-  );
   const canSubmit = email.trim().length > 3 && password.length > 0;
   const closeSheet = () => {
     setIsPasswordVisible(false);
@@ -73,9 +57,17 @@ export function AccountSheet({
         <Pressable style={styles.scrim} onPress={closeSheet} />
         <View style={styles.sheet} testID={MOBILE_E2E_IDS.accountSheet}>
           <View style={styles.header}>
-            <View>
-              <Text style={styles.title}>{presentation.label}</Text>
-              <Text style={styles.detail}>{presentation.detail}</Text>
+            <View style={styles.identity}>
+              <View
+                accessibilityLabel={`Account initials ${presentation.initials}`}
+                style={styles.avatar}
+              >
+                <Text style={styles.avatarLabel}>{presentation.initials}</Text>
+              </View>
+              <View>
+                <Text style={styles.title}>{presentation.label}</Text>
+                <Text style={styles.detail}>{presentation.detail}</Text>
+              </View>
             </View>
             <Pressable
               accessibilityLabel="Close account"
@@ -85,55 +77,22 @@ export function AccountSheet({
             >
               <Text style={styles.closeLabel}>×</Text>
             </Pressable>
-            {showDevForceCloudToggle ? (
-              <Pressable
-                accessibilityLabel="Force Cloud"
-                accessibilityState={{ checked: forceCloudEnabled }}
-                style={styles.devToggle}
-                testID={MOBILE_E2E_IDS.accountForceCloudToggle}
-                onPress={() => onForceCloudChange(!forceCloudEnabled)}
-              >
-                <View
-                  style={[
-                    styles.devToggleIndicator,
-                    forceCloudEnabled ? styles.devToggleIndicatorActive : null
-                  ]}
-                />
-                <View style={styles.devToggleText}>
-                  <Text style={styles.devToggleTitle}>Force Cloud</Text>
-                  <Text style={styles.devToggleDetail}>
-                    {forceCloudEnabled ? "Relay only" : "LAN fallback allowed"}
-                  </Text>
-                </View>
-              </Pressable>
-            ) : null}
           </View>
 
-          <View
-            style={styles.connectionCard}
-            testID={MOBILE_E2E_IDS.accountConnectionStatus}
+          <Pressable
+            accessibilityLabel="Open Machines"
+            style={styles.machinesRow}
+            testID={MOBILE_E2E_IDS.accountMachinesButton}
+            onPress={onOpenMachines}
           >
-            <Text style={styles.sectionLabel}>Connection</Text>
-            <Text
-              style={styles.connectionTitle}
-              testID={MOBILE_E2E_IDS.accountConnectionTitle}
-            >
-              {connection.title}
-            </Text>
-            <Text style={styles.connectionDetail}>{connection.detail}</Text>
-            <Pressable
-              accessibilityLabel="Connect on Local Network"
-              style={styles.secondaryButton}
-              testID={MOBILE_E2E_IDS.accountConnectLocalButton}
-              onPress={onConnectLocal}
-            >
-              <Text style={styles.secondaryLabel}>
-                {connectionState === "connecting"
-                  ? "Connecting..."
-                  : "Connect on Local Network"}
+            <View>
+              <Text style={styles.machinesTitle}>Machines</Text>
+              <Text style={styles.machinesDetail}>
+                {machineSummary(machineCount, availableMachineCount)}
               </Text>
-            </Pressable>
-          </View>
+            </View>
+            <Text style={styles.disclosure}>›</Text>
+          </Pressable>
 
           {auth.status === "signedIn" ? (
             <Pressable
@@ -204,37 +163,9 @@ export function AccountSheet({
   );
 }
 
-export function getConnectionStatusPresentation(
-  connectionState: ConnectionState,
-  desktopName: string | null,
-  pairingCode: string | null,
-  errorMessage: string | null
-): { title: string; detail: string } {
-  if (connectionState === "connected") {
-    return {
-      title: desktopName ?? "Connected",
-      detail: pairingCode ? `Pairing code ${pairingCode}` : "Connected"
-    };
-  }
-
-  if (connectionState === "connecting") {
-    return {
-      title: "Connecting",
-      detail: pairingCode ? `Pairing code ${pairingCode}` : "Checking desktop access"
-    };
-  }
-
-  if (connectionState === "error") {
-    return {
-      title: "Not connected",
-      detail: errorMessage ?? "Connection failed"
-    };
-  }
-
-  return {
-    title: "Not connected",
-    detail: pairingCode ? `Pairing code ${pairingCode}` : "No active pairing session"
-  };
+function machineSummary(total: number, available: number): string {
+  if (total === 0) return "No machines added";
+  return `${total} ${total === 1 ? "machine" : "machines"} · ${available} available`;
 }
 
 const styles = StyleSheet.create({
@@ -265,6 +196,24 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between"
   },
+  identity: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 12
+  },
+  avatar: {
+    alignItems: "center",
+    backgroundColor: "#2C5EA8",
+    borderRadius: 20,
+    height: 40,
+    justifyContent: "center",
+    width: 40
+  },
+  avatarLabel: {
+    color: "#F5F7FB",
+    fontSize: 14,
+    fontWeight: "800"
+  },
   title: {
     color: "#F5F7FB",
     fontSize: 20,
@@ -291,64 +240,29 @@ const styles = StyleSheet.create({
   form: {
     gap: 12
   },
-  connectionCard: {
+  machinesRow: {
+    alignItems: "center",
     backgroundColor: "#10192A",
     borderColor: "#22304D",
     borderRadius: 16,
     borderWidth: 1,
-    gap: 8,
+    flexDirection: "row",
+    justifyContent: "space-between",
     padding: 14
   },
-  devToggle: {
-    alignItems: "center",
-    borderColor: "#2D4166",
-    borderRadius: 12,
-    borderWidth: 1,
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 4,
-    padding: 10
-  },
-  devToggleDetail: {
-    color: "#8FA4C0",
-    fontSize: 12,
-    marginTop: 2
-  },
-  devToggleIndicator: {
-    backgroundColor: "#1A2740",
-    borderColor: "#3B5278",
-    borderRadius: 7,
-    borderWidth: 1,
-    height: 14,
-    width: 14
-  },
-  devToggleIndicatorActive: {
-    backgroundColor: "#56A2FF",
-    borderColor: "#8EC2FF"
-  },
-  devToggleText: {
-    flex: 1
-  },
-  devToggleTitle: {
+  machinesTitle: {
     color: "#F5F7FB",
-    fontSize: 13,
-    fontWeight: "700"
-  },
-  sectionLabel: {
-    color: "#7FA7D9",
-    fontSize: 12,
-    fontWeight: "800",
-    textTransform: "uppercase"
-  },
-  connectionTitle: {
-    color: "#F5F7FB",
-    fontSize: 17,
+    fontSize: 15,
     fontWeight: "800"
   },
-  connectionDetail: {
+  machinesDetail: {
     color: "#9EB0CA",
     fontSize: 13,
-    lineHeight: 18
+    marginTop: 3
+  },
+  disclosure: {
+    color: "#8EADD8",
+    fontSize: 26
   },
   input: {
     backgroundColor: "#10192A",

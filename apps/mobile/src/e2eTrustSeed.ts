@@ -16,6 +16,7 @@ declare const require: ((id: string) => ReactNativeModule) | undefined;
 
 export function installE2eTrustSeedHandler(input: {
   getPersistence(): Promise<SessionPersistence>;
+  pairPayload(payload: string): Promise<string>;
   reload(): Promise<void>;
 }): () => void {
   const linking = loadLinking();
@@ -24,7 +25,10 @@ export function installE2eTrustSeedHandler(input: {
   }
 
   const handleUrl = (url: string) => {
-    void seedTrustedDesktopFromUrl(url, input);
+    void Promise.all([
+      seedTrustedDesktopFromUrl(url, input),
+      claimPairingPayloadFromUrl(url, input.pairPayload)
+    ]);
   };
   const subscription = linking.addEventListener("url", (event) => handleUrl(event.url));
   void linking.getInitialURL().then((url) => {
@@ -33,6 +37,19 @@ export function installE2eTrustSeedHandler(input: {
     }
   });
   return () => subscription.remove();
+}
+
+export async function claimPairingPayloadFromUrl(
+  url: string,
+  pairPayload: (payload: string) => Promise<string>
+): Promise<void> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "kanna:" || parsed.hostname !== "e2e-pair") {
+    return;
+  }
+  const payload = parsed.searchParams.get("payload");
+  if (!payload) return;
+  await pairPayload(payload);
 }
 
 export async function seedTrustedDesktopFromUrl(
@@ -56,6 +73,7 @@ export async function seedTrustedDesktopFromUrl(
   const seededAt = new Date().toISOString();
   const lanBaseUrl = parsed.searchParams.get("lanBaseUrl")?.trim() || null;
   await persistence.save({
+    mobileDeviceId: null,
     selectedDesktopId: desktopId,
     selectedRepoId: parsed.searchParams.get("selectedRepoId")?.trim() || null,
     selectedTaskId: parsed.searchParams.get("selectedTaskId")?.trim() || null,

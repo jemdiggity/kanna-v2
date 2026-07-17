@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { renderPairingQr } from "../utils/pairingQr";
 
 type ServerStatus = "running" | "stopped" | "error";
 
@@ -7,6 +8,8 @@ const props = defineProps<{
   desktopName: string;
   serverStatus: ServerStatus;
   pairingCode: string | null;
+  pairingPayload: string | null;
+  expiresAtUnixMs?: number | null;
 }>();
 
 const emit = defineEmits<{
@@ -20,6 +23,55 @@ const statusLabel = computed(() => {
 });
 
 const statusClass = computed(() => `status-${props.serverStatus}`);
+const pairingQrUrl = ref<string | null>(null);
+const pairingQrError = ref<string | null>(null);
+const pairingExpired = ref(false);
+let qrGeneration = 0;
+let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(
+  () => [props.pairingCode, props.expiresAtUnixMs] as const,
+  ([pairingCode, expiresAtUnixMs]) => {
+    if (expiryTimer) clearTimeout(expiryTimer);
+    expiryTimer = null;
+    pairingExpired.value = Boolean(
+      pairingCode && expiresAtUnixMs && expiresAtUnixMs <= Date.now()
+    );
+    if (!pairingCode || !expiresAtUnixMs || pairingExpired.value) return;
+
+    expiryTimer = setTimeout(() => {
+      pairingExpired.value = true;
+      expiryTimer = null;
+    }, Math.max(0, expiresAtUnixMs - Date.now()));
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [props.pairingPayload, pairingExpired.value] as const,
+  async ([payload, expired]) => {
+    const generation = ++qrGeneration;
+    pairingQrUrl.value = null;
+    pairingQrError.value = null;
+    if (!payload || expired) return;
+
+    try {
+      const url = await renderPairingQr(payload);
+      if (generation === qrGeneration) pairingQrUrl.value = url;
+    } catch (error) {
+      if (generation === qrGeneration) {
+        pairingQrError.value = error instanceof Error
+          ? error.message
+          : "Could not render the pairing QR code.";
+      }
+    }
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  if (expiryTimer) clearTimeout(expiryTimer);
+});
 </script>
 
 <template>
@@ -41,14 +93,27 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
     </p>
 
     <div class="pairing-area">
-      <div class="pairing-code">
+      <div v-if="pairingCode && !pairingExpired" class="pairing-session">
+        <img
+          v-if="pairingQrUrl"
+          :src="pairingQrUrl"
+          alt="Mobile pairing QR code"
+          class="pairing-qr"
+          data-testid="mobile-access-pairing-qr"
+        />
+        <span v-else-if="pairingQrError" class="qr-error">{{ pairingQrError }}</span>
+        <div class="pairing-code">
+          <span class="label">Pairing code</span>
+          <code
+            class="code"
+            data-testid="mobile-access-pairing-code"
+          >{{ pairingCode }}</code>
+          <span class="expiry">Expires in five minutes</span>
+        </div>
+      </div>
+      <div v-else class="pairing-code">
         <span class="label">Pairing code</span>
-        <code
-          v-if="pairingCode"
-          class="code"
-          data-testid="mobile-access-pairing-code"
-        >{{ pairingCode }}</code>
-        <span v-else class="placeholder">No pairing session active</span>
+        <span class="placeholder">No pairing session active</span>
       </div>
 
       <button
@@ -132,9 +197,23 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
 .pairing-area {
   margin-top: 14px;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
+}
+
+.pairing-session {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pairing-qr {
+  width: 120px;
+  height: 120px;
+  border-radius: 8px;
+  background: #fff;
 }
 
 .pairing-code {
@@ -166,6 +245,17 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
 .placeholder {
   font-size: 12px;
   color: var(--kn-text-muted);
+}
+
+.expiry,
+.qr-error {
+  font-size: 11px;
+  color: var(--kn-text-muted);
+}
+
+.qr-error {
+  max-width: 120px;
+  color: var(--kn-danger);
 }
 
 .start-pairing {

@@ -38,6 +38,29 @@ describe("mobile E2E selector helpers", () => {
     );
   });
 
+  it("exposes the profile-to-Machines pairing flow", () => {
+    expect(selectorHelpers.selectors).toMatchObject({
+      accountMachinesButton: "~mobile.account-machines",
+      machinesScreen: "~mobile.machines-screen",
+      machinesBackButton: "~mobile.machines-back",
+      machinesAddButton: "~mobile.machines-add",
+      machinePairingSheet: "~mobile.machine-pairing.sheet",
+      machinePairingCodeInput: "~mobile.machine-pairing.code",
+      machinePairingSubmit: "~mobile.machine-pairing.submit",
+      machinePairingError: "~mobile.machine-pairing.error",
+      machinePairingClose: "~mobile.machine-pairing.close",
+      machinePairingCamera: "~mobile.machine-pairing.camera",
+      machinePairingScanMode: "~mobile.machine-pairing.mode.scan",
+      machinePairingOpenSettings: "~mobile.machine-pairing.open-settings"
+    });
+    expect(selectorHelpers.machineRowsXPath("desktop-1")).toBe(
+      '//*[@name="mobile.machine.desktop-1.name"]'
+    );
+    expect(selectorHelpers.machineOriginSelector("desktop-1", "manual")).toBe(
+      "~mobile.machine.desktop-1.origin.manual"
+    );
+  });
+
   it("extracts the exact display-task id from an Appium task-row name", () => {
     const extractTaskRowId = (
       selectorHelpers as typeof selectorHelpers & {

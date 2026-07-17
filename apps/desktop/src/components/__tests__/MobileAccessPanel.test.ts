@@ -1,8 +1,12 @@
 // @vitest-environment happy-dom
 
-import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { describe, expect, it, vi } from "vitest";
 import MobileAccessPanel from "../MobileAccessPanel.vue";
+
+vi.mock("../../utils/pairingQr", () => ({
+  renderPairingQr: vi.fn(async () => "data:image/png;base64,qr"),
+}));
 
 describe("MobileAccessPanel", () => {
   it("shows the desktop name and a start pairing action", () => {
@@ -11,6 +15,7 @@ describe("MobileAccessPanel", () => {
         desktopName: "Studio Mac",
         serverStatus: "running",
         pairingCode: null,
+        pairingPayload: null,
       },
     });
 
@@ -24,6 +29,7 @@ describe("MobileAccessPanel", () => {
         desktopName: "Studio Mac",
         serverStatus: "running",
         pairingCode: "123456",
+        pairingPayload: null,
       },
     });
 
@@ -31,5 +37,45 @@ describe("MobileAccessPanel", () => {
     expect(wrapper.get('[data-testid="mobile-access-status"]').text()).toBe("Online");
     expect(wrapper.get('[data-testid="mobile-access-pairing-code"]').text()).toBe("123456");
     expect(wrapper.get('[data-testid="mobile-access-start-pairing"]').text()).toMatch(/start pairing/i);
+  });
+
+  it("renders the QR generated from the same session as the short code", async () => {
+    const wrapper = mount(MobileAccessPanel, {
+      props: {
+        desktopName: "Studio Mac",
+        serverStatus: "running",
+        pairingCode: "ABC123",
+        pairingPayload: '{"type":"kanna.machine-pairing","version":1,"desktopId":"desktop-1","code":"ABC123"}',
+      },
+    });
+
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="mobile-access-pairing-qr"]').attributes("src"))
+      .toBe("data:image/png;base64,qr");
+    expect(wrapper.get('[data-testid="mobile-access-pairing-code"]').text())
+      .toBe("ABC123");
+  });
+
+  it("stops displaying pairing credentials when the session expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-17T00:00:00Z"));
+    const wrapper = mount(MobileAccessPanel, {
+      props: {
+        desktopName: "Studio Mac",
+        serverStatus: "running",
+        pairingCode: "ABC123",
+        pairingPayload: '{"type":"kanna.machine-pairing","version":1}',
+        expiresAtUnixMs: Date.now() + 1_000,
+      },
+    });
+
+    await flushPromises();
+    expect(wrapper.find('[data-testid="mobile-access-pairing-code"]').exists()).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(wrapper.find('[data-testid="mobile-access-pairing-code"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("No pairing session active");
+    vi.useRealTimers();
   });
 });

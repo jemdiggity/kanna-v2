@@ -76,6 +76,7 @@ export type TaskCreationState =
     };
 
 export interface SessionState {
+  mobileDeviceId: string | null;
   connectionMode: DesktopMode | null;
   connectionState: ConnectionState;
   desktopId: string | null;
@@ -85,7 +86,10 @@ export interface SessionState {
   refreshStatus: RefreshStatus;
   auth: AuthState;
   desktops: DesktopSummary[];
+  accountDesktops: DesktopSummary[];
+  liveLanDesktops: DesktopSummary[];
   trustedDesktops: TrustedDesktopRecord[];
+  machineSourceWarnings: { account: string | null; local: string | null };
   repoCreationProfiles: RepoCreationProfile[];
   selectedDesktopId: string | null;
   repos: RepoSummary[];
@@ -126,6 +130,7 @@ export interface SessionStore {
   subscribe(listener: () => void): () => void;
   getPersistedContext(): PersistedSessionContext;
   hydrateContext(context: PersistedSessionContext): void;
+  ensureMobileDeviceId(generate: () => string): string;
   setConnectionMode(mode: DesktopMode | null): void;
   setConnectionState(state: ConnectionState): void;
   setDesktopStatus(status: string | null, desktopName: string | null, pairingCode: string | null, desktopId?: string | null): void;
@@ -133,8 +138,17 @@ export interface SessionStore {
   setRefreshStatus(status: RefreshStatus): void;
   setAuthState(auth: AuthState): void;
   setDesktops(desktops: DesktopSummary[]): void;
+  setMachineSourceDesktops(sources: {
+    account: DesktopSummary[];
+    local: DesktopSummary[];
+  }): void;
   setTrustedDesktops(desktops: TrustedDesktopRecord[]): void;
   upsertTrustedDesktop(desktop: TrustedDesktopRecord): void;
+  removeTrustedDesktop(desktopId: string): void;
+  setMachineSourceWarnings(warnings: {
+    account: string | null;
+    local: string | null;
+  }): void;
   upsertRepoCreationProfile(profile: RepoCreationProfile): void;
   selectDesktop(desktopId: string): void;
   setRepos(repos: RepoSummary[]): void;
@@ -181,6 +195,7 @@ export interface SessionStore {
 
 export function createSessionStore(): SessionStore {
   let state: SessionState = {
+    mobileDeviceId: null,
     connectionMode: null,
     connectionState: "idle",
     desktopId: null,
@@ -190,7 +205,10 @@ export function createSessionStore(): SessionStore {
     refreshStatus: "idle",
     auth: { status: "signedOut" },
     desktops: [],
+    accountDesktops: [],
+    liveLanDesktops: [],
     trustedDesktops: [],
+    machineSourceWarnings: { account: null, local: null },
     repoCreationProfiles: [],
     selectedDesktopId: null,
     repos: [],
@@ -294,6 +312,7 @@ export function createSessionStore(): SessionStore {
         state.selectedTaskId
       );
       return {
+        mobileDeviceId: state.mobileDeviceId,
         selectedDesktopId: state.selectedDesktopId,
         selectedRepoId: state.selectedRepoId,
         selectedTaskId:
@@ -317,6 +336,7 @@ export function createSessionStore(): SessionStore {
           : context.selectedTaskId;
       state = {
         ...state,
+        mobileDeviceId: context.mobileDeviceId,
         selectedDesktopId: context.selectedDesktopId,
         selectedRepoId: context.selectedRepoId,
         selectedTaskId,
@@ -343,6 +363,19 @@ export function createSessionStore(): SessionStore {
           : state.taskUiSlots
       };
       publish();
+    },
+    ensureMobileDeviceId(generate) {
+      if (state.mobileDeviceId) {
+        return state.mobileDeviceId;
+      }
+
+      const mobileDeviceId = generate().trim();
+      if (!mobileDeviceId) {
+        throw new Error("Mobile device ID generator returned an empty value.");
+      }
+      state = { ...state, mobileDeviceId };
+      publish();
+      return mobileDeviceId;
     },
     setConnectionMode(mode) {
       state = { ...state, connectionMode: mode };
@@ -381,6 +414,14 @@ export function createSessionStore(): SessionStore {
       };
       publish();
     },
+    setMachineSourceDesktops({ account, local }) {
+      state = {
+        ...state,
+        accountDesktops: account,
+        liveLanDesktops: local
+      };
+      publish();
+    },
     setTrustedDesktops(trustedDesktops) {
       state = { ...state, trustedDesktops };
       publish();
@@ -402,6 +443,26 @@ export function createSessionStore(): SessionStore {
       }
 
       state = { ...state, trustedDesktops };
+      publish();
+    },
+    removeTrustedDesktop(desktopId) {
+      const trustedDesktops = state.trustedDesktops.filter(
+        (desktop) => desktop.desktopId !== desktopId
+      );
+      if (trustedDesktops.length === state.trustedDesktops.length) {
+        return;
+      }
+      state = { ...state, trustedDesktops };
+      publish();
+    },
+    setMachineSourceWarnings(machineSourceWarnings) {
+      if (
+        state.machineSourceWarnings.account === machineSourceWarnings.account &&
+        state.machineSourceWarnings.local === machineSourceWarnings.local
+      ) {
+        return;
+      }
+      state = { ...state, machineSourceWarnings };
       publish();
     },
     upsertRepoCreationProfile(profile) {

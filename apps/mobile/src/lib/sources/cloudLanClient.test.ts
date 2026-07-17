@@ -73,14 +73,6 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     }),
     observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
     observeTaskAgent: vi.fn(() => agentSubscription()),
-    createPairingSession: vi.fn().mockResolvedValue({
-      code: "ABC123",
-      desktopId: "desktop-lan",
-      desktopName: "LAN Desktop",
-      lanHost: "192.168.1.10",
-      lanPort: 48120,
-      expiresAtUnixMs: 1
-    }),
     ...overrides
   };
 }
@@ -1885,7 +1877,7 @@ describe("createCloudLanClient", () => {
     expect(probeLan.closeTask).not.toHaveBeenCalled();
   });
 
-  it("keeps ordinary disabled composition off LAN while pairing remains LAN-only", async () => {
+  it("keeps disabled composition entirely off LAN", async () => {
     const cloud = createClientMock();
     const lan = createClientMock();
     const client = createCloudLanClient(cloud, lan, {
@@ -1910,16 +1902,9 @@ describe("createCloudLanClient", () => {
     client.observeTaskTerminal("cloud-task", vi.fn());
     client.observeTaskAgent("cloud-task", vi.fn());
 
-    for (const [name, method] of Object.entries(lan)) {
-      if (name === "createPairingSession") {
-        continue;
-      }
+    for (const method of Object.values(lan)) {
       expect(method).not.toHaveBeenCalled();
     }
-
-    await client.createPairingSession();
-    expect(lan.createPairingSession).toHaveBeenCalledTimes(1);
-    expect(cloud.createPairingSession).not.toHaveBeenCalled();
   });
 
   it("stops using previously learned LAN routes when LAN becomes disabled", async () => {
@@ -2409,6 +2394,94 @@ describe("createCloudLanClient", () => {
       cloudDesktop,
       replacementLanDesktop
     ]);
+  });
+
+  it("reports per-source desktop warnings while preserving last-good records", async () => {
+    const cloudDesktop: DesktopSummary = {
+      id: "desktop-cloud",
+      name: "Cloud Desktop",
+      online: true,
+      mode: "remote"
+    };
+    const lanDesktop: DesktopSummary = {
+      id: "desktop-lan",
+      name: "LAN Desktop",
+      online: true,
+      mode: "lan"
+    };
+    const cloud = createClientMock({
+      listDesktops: vi
+        .fn<KannaClient["listDesktops"]>()
+        .mockResolvedValueOnce([cloudDesktop])
+        .mockRejectedValueOnce(new Error("cloud desktops unavailable"))
+        .mockResolvedValueOnce([cloudDesktop])
+    });
+    const lan = createClientMock({
+      listDesktops: vi
+        .fn<KannaClient["listDesktops"]>()
+        .mockResolvedValueOnce([lanDesktop])
+        .mockResolvedValueOnce([lanDesktop])
+        .mockRejectedValueOnce(new Error("LAN desktops unavailable"))
+    });
+    const onDesktopSourceWarnings = vi.fn();
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      onDesktopSourceWarnings
+    });
+
+    await client.listDesktops();
+    await expect(client.listDesktops()).resolves.toEqual([cloudDesktop, lanDesktop]);
+    expect(onDesktopSourceWarnings).toHaveBeenLastCalledWith({
+      account: "cloud desktops unavailable",
+      local: null
+    });
+
+    await expect(client.listDesktops()).resolves.toEqual([cloudDesktop, lanDesktop]);
+    expect(onDesktopSourceWarnings).toHaveBeenLastCalledWith({
+      account: null,
+      local: "LAN desktops unavailable"
+    });
+  });
+
+  it("preserves and republishes separate source inventories across client replacement", async () => {
+    const accountDesktop: DesktopSummary = {
+      id: "desktop-account",
+      name: "Account Mac",
+      online: true,
+      mode: "remote"
+    };
+    const localDesktop: DesktopSummary = {
+      id: "desktop-local",
+      name: "Nearby Mac",
+      online: true,
+      mode: "lan"
+    };
+    const onDesktopSourcesChanged = vi.fn();
+    const client = createCloudLanClient(
+      createClientMock({
+        listDesktops: vi.fn().mockRejectedValue(new Error("account unavailable"))
+      }),
+      createClientMock({
+        listDesktops: vi.fn().mockRejectedValue(new Error("LAN unavailable"))
+      }),
+      {
+        isLanEnabled: () => true,
+        initialDesktopSources: {
+          account: [accountDesktop],
+          local: [localDesktop]
+        },
+        onDesktopSourcesChanged
+      }
+    );
+
+    await expect(client.listDesktops()).resolves.toEqual([
+      accountDesktop,
+      localDesktop
+    ]);
+    expect(onDesktopSourcesChanged).toHaveBeenLastCalledWith({
+      account: [accountDesktop],
+      local: [localDesktop]
+    });
   });
 
   it("returns cloud desktops after the optional LAN wait expires", async () => {

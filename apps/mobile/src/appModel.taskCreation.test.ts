@@ -237,6 +237,52 @@ describe("createAppModel task creation persistence", () => {
       agentType: "pty"
     });
   });
+
+  it("retries a failed prospective manual-removal snapshot", async () => {
+    let removalAttempts = 0;
+    const persistence = {
+      load: vi.fn().mockResolvedValue({
+        mobileDeviceId: "mobile-e2e",
+        selectedDesktopId: "desktop-lan",
+        selectedRepoId: null,
+        selectedTaskId: null,
+        activeView: "desktops" as const,
+        trustedDesktops: [{
+          desktopId: "desktop-lan",
+          displayName: "LAN Mac",
+          lanEndpoints: [],
+          lastSeenAt: "2026-07-17T00:00:00.000Z"
+        }]
+      }),
+      save: vi.fn(async (context) => {
+        if (context.trustedDesktops?.length === 0) {
+          removalAttempts += 1;
+          if (removalAttempts === 1) throw new Error("storage unavailable");
+        }
+      })
+    };
+    const app = createAppModel({
+      authSession: createSignedOutAuthSession(),
+      persistence,
+      options: {
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        forceCloud: false,
+        relayUrl: null
+      }
+    });
+    await app.initialize();
+
+    await expect(
+      app.controller.removeManualMachine("desktop-lan")
+    ).rejects.toThrow("storage unavailable");
+    expect(app.sessionStore.getState().trustedDesktops).toHaveLength(1);
+
+    await expect(
+      app.controller.removeManualMachine("desktop-lan")
+    ).resolves.toBeUndefined();
+    expect(removalAttempts).toBeGreaterThanOrEqual(2);
+    expect(app.sessionStore.getState().trustedDesktops).toEqual([]);
+  });
 });
 
 function response(value: unknown): Response {

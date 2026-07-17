@@ -1,4 +1,3 @@
-import { createServer, type Server } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Browser } from "webdriverio";
@@ -18,7 +17,6 @@ import {
   readDesktopIdentity,
   resolveDesktopServerUrlForTarget
 } from "./helpers/desktop";
-import { dismissExpoDevClientOverlays } from "./helpers/dev-client";
 import { ensureExpoServer } from "./helpers/metro";
 import {
   assertPhysicalDeviceAppInstalled,
@@ -26,10 +24,12 @@ import {
 } from "./helpers/device";
 import { resolveRequiredMobileE2eEnv } from "./helpers/env";
 import { createMobileSession } from "./helpers/session";
+import { selectors } from "./helpers/selectors";
 import { seedTrustedDesktopThroughDeepLink } from "./helpers/trust-seed";
 import {
   assertSimulatorAppInstalled,
   bootSimulator,
+  disableSimulatorExpoDevMenuFab,
   openSimulatorDevelopmentClient,
   resolveSimulatorDevice,
   type AvailableSimulatorDevice
@@ -74,7 +74,7 @@ export function resolveSmokeModeAppEnv(
 }
 
 export function requiresExactExpoEnvironment(mode: string): boolean {
-  return mode === "relay" || mode === "hybrid";
+  return mode === "relay" || mode === "hybrid" || mode === "profile-disconnected";
 }
 
 export function resolveSimulatorAlertHandling(
@@ -83,69 +83,75 @@ export function resolveSimulatorAlertHandling(
   if (mode === "hybrid") {
     return "accept";
   }
-  if (mode === "relay") {
+  if (mode === "relay" || mode === "profile-disconnected") {
     return "manual";
   }
   return "dismiss";
 }
 
-interface StoppedDesktopServerHandle {
-  baseUrl: string;
-  close(): Promise<void>;
+async function isDisplayed(driver: Browser, selector: string): Promise<boolean> {
+  const element = await driver.$(selector);
+  return element.isDisplayed().catch(() => false);
 }
 
-async function startStoppedDesktopStatusServer(): Promise<StoppedDesktopServerHandle> {
-  const server = createServer((request, response) => {
-    if (request.method === "GET" && request.url === "/v1/status") {
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(
-        JSON.stringify({
-          state: "stopped",
-          desktopId: "offline",
-          desktopName: "Offline Desktop",
-          lanHost: "0.0.0.0",
-          lanPort: 0,
-          pairingCode: null
-        })
-      );
-      return;
-    }
-
-    response.writeHead(404, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ error: "Not found" }));
-  });
-
-  await new Promise<void>((resolveReady, rejectReady) => {
-    server.once("error", rejectReady);
-    server.listen(0, "0.0.0.0", () => {
-      server.off("error", rejectReady);
-      resolveReady();
-    });
-  });
-
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    await closeServer(server);
-    throw new Error("Could not resolve stopped desktop status server port.");
+async function dismissExpoStartupOverlay(driver: Browser): Promise<void> {
+  const alertText = await driver.getAlertText().catch(() => null);
+  if (alertText && isBonjourPermissionAlert(alertText)) {
+    await driver.acceptAlert();
   }
 
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
-    close: () => closeServer(server)
-  };
+  const continueButton = await driver.$("~Continue");
+  if (await continueButton.isDisplayed().catch(() => false)) {
+    await continueButton.click();
+  }
+  const devMenuCloseButton = await driver.$("~xmark");
+  if (await devMenuCloseButton.isDisplayed().catch(() => false)) {
+    await devMenuCloseButton.click();
+  } else {
+    const devMenuMarker = await driver.$("~Toggle performance monitor");
+    if (await devMenuMarker.isExisting()) {
+      const closePoint = resolveExpoDevMenuClosePoint(await driver.getWindowSize());
+      await driver.execute("mobile: tap", closePoint);
+    }
+  }
 }
 
-async function closeServer(server: Server): Promise<void> {
-  await new Promise<void>((resolveClosed, rejectClosed) => {
-    server.close((error) => {
-      if (error) {
-        rejectClosed(error);
-        return;
+export async function waitForExpoAppReady(
+  driver: Browser,
+  readySelector: string = selectors.appShell
+): Promise<void> {
+  let consecutiveReadyPolls = 0;
+  await driver.waitUntil(
+    async () => {
+      await dismissExpoStartupOverlay(driver);
+      if (await isDisplayed(driver, readySelector)) {
+        consecutiveReadyPolls += 1;
+      } else {
+        consecutiveReadyPolls = 0;
       }
+      return consecutiveReadyPolls >= 3;
+    },
+    {
+      interval: 250,
+      timeout: 90_000,
+      timeoutMsg:
+        "Kanna's mobile app shell did not become visible after Expo startup overlays were handled."
+    }
+  );
+}
 
-      resolveClosed();
-    });
-  });
+export function isBonjourPermissionAlert(text: string): boolean {
+  return /local network|find and connect|devices on your local network/i.test(text);
+}
+
+export function resolveExpoDevMenuClosePoint(viewport: {
+  width: number;
+  height: number;
+}): { x: number; y: number } {
+  return {
+    x: viewport.width - 40,
+    y: Math.round(viewport.height * 0.48)
+  };
 }
 
 async function main(): Promise<void> {
@@ -154,7 +160,7 @@ async function main(): Promise<void> {
     throw new Error(`Unsupported mobile E2E mode: ${mode}`);
   }
   if (
-    (mode === "relay" || mode === "hybrid") &&
+    (mode === "relay" || mode === "hybrid" || mode === "profile-disconnected") &&
     !process.env.KANNA_E2E_DESKTOP_SERVER_URL
   ) {
     process.env.KANNA_E2E_DESKTOP_SERVER_URL = "http://127.0.0.1:1";
@@ -171,9 +177,9 @@ async function main(): Promise<void> {
     env.desktopServerUrl,
     env.target
   );
-  if (mode === "hybrid" && env.target !== "simulator") {
+  if ((mode === "hybrid" || mode === "profile-disconnected") && env.target !== "simulator") {
     throw new Error(
-      "The mobile hybrid E2E mode is simulator-only; it must not install or launch a physical device."
+      `The mobile ${mode} E2E mode is simulator-only; it must not install or launch a physical device.`
     );
   }
   if (mode === "shell-visual" && env.target !== "simulator") {
@@ -189,7 +195,6 @@ async function main(): Promise<void> {
   let driver: Browser | null = null;
   let expoServer: Awaited<ReturnType<typeof ensureExpoServer>> | null = null;
   let relayHarness: Awaited<ReturnType<typeof startMobileRelayHarness>> | null = null;
-  let stoppedDesktopServer: StoppedDesktopServerHandle | null = null;
   let simulatorDevice: AvailableSimulatorDevice | null = null;
 
   try {
@@ -223,6 +228,7 @@ async function main(): Promise<void> {
       simulatorDevice = device;
       await bootSimulator(device);
       await assertSimulatorAppInstalled(device, env.bundleId);
+      await disableSimulatorExpoDevMenuFab(device, env.bundleId);
       capabilities = createSimulatorCapabilities({
         appiumPort: env.appiumPort,
         alertHandling: resolveSimulatorAlertHandling(mode),
@@ -233,14 +239,7 @@ async function main(): Promise<void> {
     }
 
     const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-    let resolvedDesktopServerUrl = desktopServerUrl;
-    if (mode === "profile-disconnected") {
-      stoppedDesktopServer = await startStoppedDesktopStatusServer();
-      resolvedDesktopServerUrl = resolveDesktopServerUrlForTarget(
-        stoppedDesktopServer.baseUrl,
-        env.target
-      );
-    }
+    const resolvedDesktopServerUrl = desktopServerUrl;
 
     if (
       mode === "smoke" ||
@@ -249,13 +248,15 @@ async function main(): Promise<void> {
     ) {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
-    if (mode === "relay" || mode === "hybrid") {
-      relayHarness = await startMobileRelayHarness({ mode });
+    if (mode === "relay" || mode === "hybrid" || mode === "profile-disconnected") {
+      relayHarness = await startMobileRelayHarness({
+        mode: mode === "relay" ? "relay" : "hybrid"
+      });
     }
 
     expoServer = await ensureExpoServer({
       env:
-        mode === "hybrid" && relayHarness
+        (mode === "hybrid" || mode === "profile-disconnected") && relayHarness
           ? relayHarness.hybridEnv
           : mode === "relay" && relayHarness
           ? relayHarness.env
@@ -281,7 +282,7 @@ async function main(): Promise<void> {
         device: simulatorDevice,
         metroPort: env.metroPort
       });
-      await dismissExpoDevClientOverlays(driver);
+      await waitForExpoAppReady(driver);
     }
 
     if (mode === "shell-visual") {
@@ -295,8 +296,28 @@ async function main(): Promise<void> {
         }
       });
       await runShellVisualSmoke(driver);
-    } else if (mode === "profile-disconnected") {
-      await runProfileDisconnectedConnectionSmoke(driver);
+    } else if (mode === "profile-disconnected" && relayHarness) {
+      await runProfileDisconnectedConnectionSmoke(driver, {
+        bundleId: env.bundleId,
+        createPairingSession: relayHarness.createPairingSession,
+        credentials: relayHarness.credentials,
+        desktopId: relayHarness.hybridFixture.desktop.desktopId,
+        expirePairingSession: relayHarness.expirePairingSession,
+        hybridFixture: relayHarness.hybridFixture,
+        reopenDevelopmentClient: async () => {
+          if (!simulatorDevice) {
+            throw new Error("Profile machine E2E requires a simulator");
+          }
+          await openSimulatorDevelopmentClient({
+            appScheme: env.appScheme,
+            device: simulatorDevice,
+            metroPort: env.metroPort
+          });
+        },
+        setLanHttpEnabled: relayHarness.setLanHttpEnabled,
+        waitForAppReady: (readySelector) =>
+          waitForExpoAppReady(driver!, readySelector)
+      });
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {
         credentials: relayHarness.credentials,
@@ -366,7 +387,6 @@ async function main(): Promise<void> {
     appiumServer.kill("SIGTERM");
     await expoServer?.stop();
     await relayHarness?.stop();
-    await stoppedDesktopServer?.close();
   }
 }
 

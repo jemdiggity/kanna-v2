@@ -27,14 +27,34 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.accountButton).toBe("mobile.account-button");
     expect(MOBILE_E2E_IDS.accountSheet).toBe("mobile.account-sheet");
     expect(MOBILE_E2E_IDS.accountCloseButton).toBe("mobile.account-close");
-    expect(MOBILE_E2E_IDS.accountConnectionStatus).toBe(
-      "mobile.account-connection-status"
+    expect(MOBILE_E2E_IDS.accountMachinesButton).toBe("mobile.account-machines");
+    expect(MOBILE_E2E_IDS.machinesScreen).toBe("mobile.machines-screen");
+    expect(MOBILE_E2E_IDS.machinesBackButton).toBe("mobile.machines-back");
+    expect(MOBILE_E2E_IDS.machinesAddButton).toBe("mobile.machines-add");
+    expect(MOBILE_E2E_IDS.machinePairingSheet).toBe("mobile.machine-pairing.sheet");
+    expect(MOBILE_E2E_IDS.machinePairingCodeInput).toBe("mobile.machine-pairing.code");
+    expect(MOBILE_E2E_IDS.machinePairingSubmitButton).toBe("mobile.machine-pairing.submit");
+    expect(MOBILE_E2E_IDS.machinePairingError).toBe("mobile.machine-pairing.error");
+    expect(MOBILE_E2E_IDS.machinePairingCloseButton).toBe("mobile.machine-pairing.close");
+    expect(MOBILE_E2E_IDS.machinePairingCamera).toBe("mobile.machine-pairing.camera");
+    expect(MOBILE_E2E_IDS.machinePairingScanModeButton).toBe(
+      "mobile.machine-pairing.mode.scan"
     );
-    expect(MOBILE_E2E_IDS.accountConnectionTitle).toBe(
-      "mobile.account-connection-title"
+    expect(MOBILE_E2E_IDS.machinePairingOpenSettingsButton).toBe(
+      "mobile.machine-pairing.open-settings"
     );
-    expect(MOBILE_E2E_IDS.accountConnectLocalButton).toBe(
-      "mobile.account-connect-local"
+    expect(MOBILE_E2E_IDS.developerForceCloudToggle).toBe(
+      "mobile.developer.force-cloud"
+    );
+    expect(MOBILE_E2E_IDS.machineRow("desktop-1")).toBe("mobile.machine.desktop-1");
+    expect(MOBILE_E2E_IDS.machineName("desktop-1")).toBe(
+      "mobile.machine.desktop-1.name"
+    );
+    expect(MOBILE_E2E_IDS.machineOrigin("desktop-1", "manual")).toBe(
+      "mobile.machine.desktop-1.origin.manual"
+    );
+    expect(MOBILE_E2E_IDS.machineRemoveButton("desktop-1")).toBe(
+      "mobile.machine.desktop-1.remove"
     );
     expect(MOBILE_E2E_IDS.accountEmailInput).toBe("mobile.account-email");
     expect(MOBILE_E2E_IDS.accountPasswordInput).toBe("mobile.account-password");

@@ -85,7 +85,6 @@ describe("mobile Appium config", () => {
     expect(capabilities).not.toHaveProperty("appium:autoAcceptAlerts");
     expect(capabilities).not.toHaveProperty("appium:autoDismissAlerts");
   });
-
   it("builds real-device capabilities with the selected UDID", () => {
     expect(
       createPhysicalDeviceCapabilities({

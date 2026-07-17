@@ -160,7 +160,9 @@ export interface MobileRelayHarness {
   };
   lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
+  createPairingSession(): Promise<HarnessPairingSession>;
   emitFilePreviewLinks(): Promise<void>;
+  expirePairingSession(): Promise<void>;
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: {
@@ -173,6 +175,7 @@ export interface MobileRelayHarness {
   taskOrdering: RelayTaskOrderingFixture;
   terminalEvents: TerminalEventCollector;
   publishHybridCloudRefresh(): Promise<void>;
+  setLanHttpEnabled(enabled: boolean): Promise<void>;
   stop(): Promise<void>;
   waitForQuickReplyInput(
     expectedInput: string,
@@ -184,6 +187,55 @@ export interface MobileRelayHarness {
 export interface RelayTaskOrderingFixture {
   sourceOrderTaskIds: [string, string];
   expectedVisualOrderTaskIds: [string, string];
+}
+
+export interface HarnessPairingSession {
+  code: string;
+  pairingPayload: string;
+  desktopId: string;
+  desktopName: string;
+  lanHost: string;
+  lanPort: number;
+  expiresAtUnixMs: number;
+}
+
+export async function createHarnessPairingSession(
+  baseUrl: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<HarnessPairingSession> {
+  const response = await fetchImpl(`${baseUrl}/v1/pairing/sessions`, {
+    method: "POST"
+  });
+  const body = await response.json().catch(() => null) as HarnessPairingSession | null;
+  if (!response.ok || !body?.code || !body.pairingPayload) {
+    throw new Error(
+      `Failed to create mobile E2E pairing session: ${response.status} ${JSON.stringify(body)}`
+    );
+  }
+  return body;
+}
+
+export async function updateHarnessMobileMachineControls(
+  baseUrl: string,
+  controls: {
+    expirePairingSession?: boolean;
+    lanHttpEnabled?: boolean;
+  },
+  fetchImpl: typeof fetch = fetch
+): Promise<void> {
+  const response = await fetchImpl(
+    `${baseUrl}/v1/e2e/mobile-machine-controls`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(controls)
+    }
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Failed to update mobile E2E machine controls: ${response.status} ${await response.text()}`
+    );
+  }
 }
 
 export function assertSingleSubmittedTaskInput(
@@ -351,6 +403,7 @@ export async function startMobileRelayHarness(
       },
       lanOnlyTask,
       localTask,
+      createPairingSession: () => createHarnessPairingSession(harness.lanBaseUrl),
       async emitFilePreviewLinks() {
         for (const link of [
           MOBILE_RELAY_FILE_PREVIEW_FIXTURE.renderedLink,
@@ -368,6 +421,10 @@ export async function startMobileRelayHarness(
           );
         }
       },
+      expirePairingSession: () => updateHarnessMobileMachineControls(
+        harness.lanBaseUrl,
+        { expirePairingSession: true }
+      ),
       async prepareTaskUnreadForMarkRead() {
         await setPublishedTaskActivity({
           activity: "unread",
@@ -395,6 +452,10 @@ export async function startMobileRelayHarness(
       terminalEvents,
       publishHybridCloudRefresh: () =>
         publishHybridCloudRefresh({ harness }),
+      setLanHttpEnabled: (enabled) => updateHarnessMobileMachineControls(
+        harness.lanBaseUrl,
+        { lanHttpEnabled: enabled }
+      ),
       async stop() {
         terminalEvents?.close();
         await harness.stop();

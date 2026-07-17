@@ -9,12 +9,12 @@ import {
 } from "./moreCommands";
 
 interface MoreScreenProps {
-  pairingCode: string | null;
+  forceCloudEnabled: boolean;
+  showDeveloperDiagnostics: boolean;
   refreshStatus: RefreshStatus;
   selectedTask: TaskSummary | null;
   onRefresh(): void;
-  onShowDesktops(): void;
-  onStartPairing(): void;
+  onForceCloudChange(enabled: boolean): void;
   onOpenComposer(): void;
   onAdvanceTaskStage(taskId: string): void;
   onRunMergeAgent(taskId: string): void;
@@ -22,12 +22,12 @@ interface MoreScreenProps {
 }
 
 export function MoreScreen({
-  pairingCode,
+  forceCloudEnabled,
+  showDeveloperDiagnostics,
   refreshStatus,
   selectedTask,
   onRefresh,
-  onShowDesktops,
-  onStartPairing,
+  onForceCloudChange,
   onOpenComposer,
   onAdvanceTaskStage,
   onRunMergeAgent,
@@ -35,20 +35,14 @@ export function MoreScreen({
 }: MoreScreenProps) {
   const [query, setQuery] = useState("");
   const paletteEntries = useMemo(
-    () => buildMoreCommandPalette({ pairingCode, refreshStatus, selectedTask }, query),
-    [pairingCode, query, refreshStatus, selectedTask]
+    () => buildMoreCommandPalette({ refreshStatus, selectedTask }, query),
+    [query, refreshStatus, selectedTask]
   );
 
   const handleAction = (action: MoreCommandAction) => {
     switch (action.id) {
       case "refresh":
         onRefresh();
-        break;
-      case "pair":
-        onStartPairing();
-        break;
-      case "desktops":
-        onShowDesktops();
         break;
       case "compose":
         onOpenComposer();
@@ -133,12 +127,37 @@ export function MoreScreen({
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>No commands matched</Text>
                 <Text style={styles.emptyCopy}>
-                  Try merge, stage, pair, or task.
+                  Try merge, stage, refresh, or task.
                 </Text>
               </View>
             )}
           </View>
         </View>
+        {showDeveloperDiagnostics ? (
+          <View style={styles.diagnosticsCard}>
+            <Text style={styles.commandLabel}>Developer diagnostics</Text>
+            <Pressable
+              accessibilityLabel="Force Cloud"
+              accessibilityState={{ checked: forceCloudEnabled }}
+              style={styles.diagnosticToggle}
+              testID={MOBILE_E2E_IDS.developerForceCloudToggle}
+              onPress={() => onForceCloudChange(!forceCloudEnabled)}
+            >
+              <View
+                style={[
+                  styles.diagnosticIndicator,
+                  forceCloudEnabled ? styles.diagnosticIndicatorActive : null
+                ]}
+              />
+              <View style={styles.diagnosticText}>
+                <Text style={styles.actionTitle}>Force Cloud</Text>
+                <Text style={styles.actionCopy}>
+                  {forceCloudEnabled ? "Relay only" : "Automatic LAN preferred"}
+                </Text>
+              </View>
+            </Pressable>
+          </View>
+        ) : null}
       </View>
     </ScrollView>
   );
@@ -162,6 +181,14 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
     gap: 12,
+    padding: 16
+  },
+  diagnosticsCard: {
+    backgroundColor: "#0D1727",
+    borderColor: "#22304D",
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 10,
     padding: 16
   },
   searchInput: {
@@ -253,5 +280,26 @@ const styles = StyleSheet.create({
     color: "#B4C2D8",
     fontSize: 14,
     lineHeight: 20
+  },
+  diagnosticToggle: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 12,
+    paddingVertical: 4
+  },
+  diagnosticIndicator: {
+    backgroundColor: "#172338",
+    borderColor: "#3B5278",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 16,
+    width: 16
+  },
+  diagnosticIndicatorActive: {
+    backgroundColor: "#56A2FF",
+    borderColor: "#8EC2FF"
+  },
+  diagnosticText: {
+    flex: 1
   }
 });

@@ -7,7 +7,11 @@ import {
   createBonjourBrowser,
   type BonjourBrowser
 } from "./lib/discovery/bonjour";
-import { resolveTrustedBonjourEndpoint } from "./lib/discovery/trustedBonjour";
+import {
+  resolveTrustedBonjourEndpoint,
+  resolveTrustedBonjourEndpoints
+} from "./lib/discovery/trustedBonjour";
+import { createMachinePairingService } from "./lib/pairing/machinePairing";
 import type { MobileAuthSession, MobileAuthState } from "./lib/firebase/auth";
 import { createConfiguredMobileAuthSession } from "./lib/firebase/sdk";
 import {
@@ -40,7 +44,7 @@ import {
   type TrustedDesktopRecord
 } from "./state/sessionPersistence";
 import { readKannaExpoExtra } from "./mobileEnvironment";
-import type { TaskSummary } from "./lib/api/types";
+import type { DesktopSummary, TaskSummary } from "./lib/api/types";
 
 const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
 const CLOUD_TASK_RECOVERY_INITIAL_RETRY_MS = 1_000;
@@ -162,19 +166,44 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let clientGeneration = 0;
   let currentLiveTaskRepublish: (() => Promise<void>) | null = null;
   let currentLiveTaskRecoveryInvalidation: (() => void) | null = null;
+  let currentLanInventoryRefresh: (() => Promise<void>) | null = null;
+  let currentLanDiscoveryRefresh: (() => Promise<void>) | null = null;
+  let lanDiscoveryRefreshQueued = false;
   let activeAuthUid = signedInUid(authSession.getState());
   // Native discovery can settle after the first cloud snapshot and relay
   // presence read. Feed it through the same complete-snapshot drain so the
   // newly reachable LAN source is incorporated without publishing a partial
   // workspace or waiting for an unrelated cloud callback.
   bonjourBrowser.subscribe(() => {
+    const signedIn = authSession.getState().status === "signedIn";
+    const hasTrustedPeer = hasTrustedLanPeer(
+      sessionStore.getState().trustedDesktops
+    );
     if (
       forceCloud ||
-      !hasTrustedLanPeer(sessionStore.getState().trustedDesktops)
+      (!signedIn && !hasTrustedPeer)
     ) {
       return;
     }
-    void currentLiveTaskRepublish?.();
+    if (signedIn && !hasTrustedPeer) {
+      void currentLiveTaskRepublish?.();
+      return;
+    }
+    if (lanDiscoveryRefreshQueued) return;
+    lanDiscoveryRefreshQueued = true;
+    void Promise.resolve().then(async () => {
+      lanDiscoveryRefreshQueued = false;
+      const republishLiveTasks = currentLiveTaskRepublish;
+      if (signedIn) {
+        await currentLanInventoryRefresh?.();
+        const republish = currentLiveTaskRepublish ?? republishLiveTasks;
+        if (republish) {
+          await republish();
+          return;
+        }
+      }
+      await currentLanDiscoveryRefresh?.();
+    });
   });
   const invalidateLiveCloudState = () => {
     liveSubscriptionEpoch += 1;
@@ -194,6 +223,10 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       forceCloud,
       getSelectedDesktopId: () => sessionStore.getState().selectedDesktopId,
       getTrustedDesktops: () => sessionStore.getState().trustedDesktops,
+      getMachineSourceDesktops: () => ({
+        account: sessionStore.getState().accountDesktops,
+        local: sessionStore.getState().liveLanDesktops
+      }),
       getLiveCloudTasks: () => liveCloudTasks,
       getLiveCloudTasksUid: () => liveCloudTasksUid,
       getLiveCloudTasksReadError: () => liveCloudTasksReadError,
@@ -203,6 +236,12 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
           return currentLiveTaskRepublish?.();
         }
       },
+      onMachineSourceWarnings: (warnings) => {
+        sessionStore.setMachineSourceWarnings(warnings);
+      },
+      onMachineSourcesChanged: (sources) => {
+        sessionStore.setMachineSourceDesktops(sources);
+      },
       relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
         extraRelayUrl: extra?.relayUrl
       }),
@@ -210,6 +249,20 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     });
   let activeClient = resolveClient(clientGeneration);
   const replaceActiveClient = () => {
+    const currentState = sessionStore.getState();
+    const trustedIds = new Set([
+      ...currentState.accountDesktops.map((desktop) => desktop.id),
+      ...currentState.trustedDesktops.map((desktop) => desktop.desktopId)
+    ]);
+    const retainedLocalDesktops = currentState.liveLanDesktops.filter((desktop) =>
+      trustedIds.has(desktop.id)
+    );
+    if (retainedLocalDesktops.length !== currentState.liveLanDesktops.length) {
+      sessionStore.setMachineSourceDesktops({
+        account: currentState.accountDesktops,
+        local: retainedLocalDesktops
+      });
+    }
     const previousClient = activeClient;
     const nextGeneration = clientGeneration + 1;
     currentLiveTaskRecoveryInvalidation?.();
@@ -235,8 +288,9 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let lastEnqueuedContextJson: string | null = null;
   let lastEnqueuedSave: Promise<void> = Promise.resolve();
   let persistenceTail: Promise<void> = Promise.resolve();
-  const persistContext = (): Promise<void> => {
-    const context = sessionStore.getPersistedContext();
+  const persistContext = (
+    context = sessionStore.getPersistedContext()
+  ): Promise<void> => {
     const serializedContext = JSON.stringify(context);
     if (serializedContext === lastEnqueuedContextJson) {
       return lastEnqueuedSave;
@@ -247,6 +301,12 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       .then(async () => {
         const resolvedPersistence = await getPersistence();
         await resolvedPersistence.save(context);
+      })
+      .catch((error) => {
+        if (lastEnqueuedSave === save) {
+          lastEnqueuedContextJson = null;
+        }
+        throw error;
       });
     lastEnqueuedContextJson = serializedContext;
     lastEnqueuedSave = save;
@@ -265,8 +325,20 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     }
     replaceActiveClient();
   };
+  const pairingService = createMachinePairingService({
+    bonjourBrowser,
+    fetchImpl,
+    getDeviceIdentity: () => ({
+      deviceId:
+        sessionStore.getState().mobileDeviceId ??
+        sessionStore.ensureMobileDeviceId(generateMobileDeviceId),
+      deviceName: "Kanna Mobile"
+    })
+  });
   const controller = createMobileController(client, sessionStore, authSession, {
+    pairingService,
     persistSessionContext: persistContext,
+    replaceClientForTrustChange: replaceActiveClient,
     subscribeCloudTasks: (uid, onUpdate, onError) => {
       const epoch = ++liveSubscriptionEpoch;
       let updateRevision = 0;
@@ -513,6 +585,17 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       };
     },
   });
+  currentLanInventoryRefresh = async () => {
+    try {
+      await activeClient.client.listDesktops();
+    } catch {
+      // Source-specific inventory warnings are published by the client.
+    }
+  };
+  currentLanDiscoveryRefresh = async () => {
+    await currentLanInventoryRefresh?.();
+    await controller.bootstrap();
+  };
   sessionStore.subscribe(() => {
     void persistContext().catch(() => undefined);
   });
@@ -521,6 +604,16 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     if (nextAuthUid !== activeAuthUid) {
       invalidateLiveCloudState();
       activeAuthUid = nextAuthUid;
+      const currentState = sessionStore.getState();
+      const manualIds = new Set(
+        currentState.trustedDesktops.map((desktop) => desktop.desktopId)
+      );
+      sessionStore.setMachineSourceDesktops({
+        account: [],
+        local: currentState.liveLanDesktops.filter((desktop) =>
+          manualIds.has(desktop.id)
+        )
+      });
       replaceActiveClient();
     }
   });
@@ -528,6 +621,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   if (options.enableE2eTrustSeed) {
     installE2eTrustSeedHandler({
       getPersistence,
+      pairPayload: (payload) => controller.pairMachineByPayload(payload),
       async reload() {
         await hydratePersistedContext();
         await controller.bootstrap();
@@ -541,6 +635,11 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     async initialize() {
       bonjourBrowser.start();
       await hydratePersistedContext();
+      const hadMobileDeviceId = Boolean(sessionStore.getState().mobileDeviceId);
+      sessionStore.ensureMobileDeviceId(generateMobileDeviceId);
+      if (!hadMobileDeviceId) {
+        await persistContext();
+      }
       await controller.bootstrap();
     },
     navigator: createRootNavigator(),
@@ -552,6 +651,12 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   };
 }
 
+function generateMobileDeviceId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return `mobile-${uuid}`;
+  return `mobile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function createClientForMode({
   authSession,
   bonjourBrowser,
@@ -560,11 +665,14 @@ function createClientForMode({
   forceCloud,
   getSelectedDesktopId,
   getTrustedDesktops,
+  getMachineSourceDesktops,
   getLiveCloudTasks,
   getLiveCloudTasksUid,
   getLiveCloudTasksReadError,
   isLiveCloudTasksReady,
   onActiveDesktopIdsChanged,
+  onMachineSourceWarnings,
+  onMachineSourcesChanged,
   relayUrl,
   taskIndex,
 }: {
@@ -579,11 +687,23 @@ function createClientForMode({
   forceCloud: boolean;
   getSelectedDesktopId(): string | null;
   getTrustedDesktops(): readonly TrustedDesktopRecord[];
+  getMachineSourceDesktops(): {
+    account: DesktopSummary[];
+    local: DesktopSummary[];
+  };
   getLiveCloudTasks(): TaskSummary[];
   getLiveCloudTasksUid(): string | null;
   getLiveCloudTasksReadError(): unknown | null;
   isLiveCloudTasksReady(): boolean;
   onActiveDesktopIdsChanged(): Promise<void> | void;
+  onMachineSourceWarnings(warnings: {
+    account: string | null;
+    local: string | null;
+  }): void;
+  onMachineSourcesChanged(sources: {
+    account: DesktopSummary[];
+    local: DesktopSummary[];
+  }): void;
   relayUrl: string | null;
   taskIndex?: CloudTaskIndex;
 }): ResolvedAppClient {
@@ -595,6 +715,9 @@ function createClientForMode({
       onAuthError: () => authSession.notifyAuthExpired(),
     });
     let disposed = false;
+    let accountDesktopIds = new Set(
+      getMachineSourceDesktops().account.map((desktop) => desktop.id)
+    );
     let lastActiveDesktopIds: Set<string> | null = null;
     let activeDesktopIdsRefresh: Promise<void> | null = null;
     const refreshActiveDesktopIds = () => {
@@ -647,6 +770,7 @@ function createClientForMode({
     const listCloudDesktopRecords = async () => {
       refreshActiveDesktopIds();
       const records = await resolvedTaskIndex.listDesktops(authState.user.uid);
+      accountDesktopIds = new Set(records.map((record) => record.desktopId));
       return records.map((record) =>
         mapCloudDesktopRecord(record, lastActiveDesktopIds)
       );
@@ -661,11 +785,15 @@ function createClientForMode({
         listCloudTasks: listCloudTasksForRouting,
       }),
     );
+    const getTrustedDesktopIds = () => Array.from(new Set([
+      ...accountDesktopIds,
+      ...getTrustedDesktops().map((desktop) => desktop.desktopId)
+    ]));
     const trustedLanClient = createTrustedLanFallbackClient({
       bonjourBrowser,
       fetchImpl,
       getSelectedDesktopId,
-      getTrustedDesktops
+      getTrustedDesktopIds
     });
 
     const composedClient = createCloudLanClient(
@@ -673,8 +801,11 @@ function createClientForMode({
       trustedLanClient.client,
       {
         isLanEnabled: () =>
-          !forceCloud && hasTrustedLanPeer(getTrustedDesktops()),
-        lanClientForDesktop: trustedLanClient.clientForDesktop
+          !forceCloud && getTrustedDesktopIds().length > 0,
+        lanClientForDesktop: trustedLanClient.clientForDesktop,
+        initialDesktopSources: getMachineSourceDesktops(),
+        onDesktopSourceWarnings: onMachineSourceWarnings,
+        onDesktopSourcesChanged: onMachineSourcesChanged
       }
     );
 
@@ -691,17 +822,28 @@ function createClientForMode({
   }
 
   if (hasTrustedLanPeer(getTrustedDesktops())) {
+    const trustedLanClient = createTrustedLanFallbackClient({
+      bonjourBrowser,
+      fetchImpl,
+      getSelectedDesktopId,
+      getTrustedDesktopIds: () =>
+        getTrustedDesktops().map((desktop) => desktop.desktopId)
+    });
+    const sourceTrackingClient: KannaClient = {
+      ...trustedLanClient.client,
+      async listDesktops() {
+        const local = await trustedLanClient.client.listDesktops();
+        onMachineSourcesChanged({ account: [], local });
+        return local;
+      }
+    };
     return {
-      client: createTrustedLanFallbackClient({
-        bonjourBrowser,
-        fetchImpl,
-        getSelectedDesktopId,
-        getTrustedDesktops
-      }).client,
+      client: sourceTrackingClient,
       dispose() {}
     };
   }
 
+  onMachineSourcesChanged({ account: [], local: [] });
   return { client: createDisconnectedClient(), dispose() {} };
 }
 
@@ -761,8 +903,7 @@ function createDisconnectedClient(): KannaClient {
         sendPermission() {},
         interrupt() {}
       };
-    },
-    createPairingSession: unavailable
+    }
   };
 }
 
@@ -770,12 +911,12 @@ function createTrustedLanFallbackClient({
   bonjourBrowser,
   fetchImpl,
   getSelectedDesktopId,
-  getTrustedDesktops
+  getTrustedDesktopIds
 }: {
   bonjourBrowser: BonjourBrowser;
   fetchImpl: FetchLike;
   getSelectedDesktopId(): string | null;
-  getTrustedDesktops(): readonly TrustedDesktopRecord[];
+  getTrustedDesktopIds(): readonly string[];
 }): {
   client: KannaClient;
   clientForDesktop(desktopId: string): KannaClient | null;
@@ -785,9 +926,9 @@ function createTrustedLanFallbackClient({
   const clientForBaseUrl = (resolvedBaseUrl: string) =>
     createKannaClient(createLanTransport(resolvedBaseUrl, fetchImpl));
   const resolveClient = async (desktopId: string | null) => {
-    const trustedDesktops = desktopId
-      ? getTrustedDesktops().filter((desktop) => desktop.desktopId === desktopId)
-      : getTrustedDesktops();
+    const trustedDesktopIds = desktopId
+      ? getTrustedDesktopIds().filter((trustedId) => trustedId === desktopId)
+      : getTrustedDesktopIds();
     const services = desktopId
       ? bonjourBrowser
           .getServices()
@@ -796,8 +937,8 @@ function createTrustedLanFallbackClient({
     const endpoint = await resolveTrustedBonjourEndpoint({
       fetchImpl,
       services,
-      selectedDesktopId: desktopId ?? getSelectedDesktopId(),
-      trustedDesktops
+      preferredDesktopId: desktopId ?? getSelectedDesktopId(),
+      trustedDesktopIds
     });
     if (!endpoint) {
       return createDisconnectedClient();
@@ -845,18 +986,38 @@ function createTrustedLanFallbackClient({
     observeTaskTerminal: (taskId, listener) =>
       currentClient(desktopId).observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>
-      currentClient(desktopId).observeTaskAgent(taskId, listener),
-    createPairingSession: async () =>
-      (await resolveClient(desktopId)).createPairingSession()
+      currentClient(desktopId).observeTaskAgent(taskId, listener)
   });
-  const client = createResolvingClient(null);
+  const client: KannaClient = {
+    ...createResolvingClient(null),
+    async listDesktops() {
+      const endpoints = await resolveTrustedBonjourEndpoints({
+        fetchImpl,
+        services: bonjourBrowser.getServices(),
+        preferredDesktopId: getSelectedDesktopId(),
+        trustedDesktopIds: getTrustedDesktopIds()
+      });
+      validatedBaseUrls.clear();
+      for (const endpoint of endpoints) {
+        validatedBaseUrls.set(endpoint.desktopId, endpoint.baseUrl);
+      }
+      if (endpoints[0]) lastValidatedDesktopId = endpoints[0].desktopId;
+      return endpoints.map((endpoint): DesktopSummary => ({
+        id: endpoint.desktopId,
+        name: endpoint.displayName,
+        online: true,
+        mode: "lan",
+        reachableViaRelay: false,
+        connectionMode: "lan",
+        lastSeenAt: new Date().toISOString()
+      }));
+    }
+  };
   return {
     client,
     clientForDesktop(desktopId) {
       if (
-        !getTrustedDesktops().some(
-          (desktop) => desktop.desktopId === desktopId
-        )
+        !getTrustedDesktopIds().includes(desktopId)
       ) {
         return null;
       }
@@ -995,7 +1156,6 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     observeTaskTerminal: (taskId, listener) =>
       getClient().observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>
-      getClient().observeTaskAgent(taskId, listener),
-    createPairingSession: () => getClient().createPairingSession()
+      getClient().observeTaskAgent(taskId, listener)
   };
 }

@@ -35,9 +35,19 @@ export const selectors = {
   accountButton: `~${MOBILE_E2E_IDS.accountButton}`,
   accountSheet: `~${MOBILE_E2E_IDS.accountSheet}`,
   accountCloseButton: `~${MOBILE_E2E_IDS.accountCloseButton}`,
-  accountConnectionStatus: `~${MOBILE_E2E_IDS.accountConnectionStatus}`,
-  accountConnectionTitle: `~${MOBILE_E2E_IDS.accountConnectionTitle}`,
-  accountConnectLocalButton: `~${MOBILE_E2E_IDS.accountConnectLocalButton}`,
+  accountMachinesButton: `~${MOBILE_E2E_IDS.accountMachinesButton}`,
+  machinesScreen: `~${MOBILE_E2E_IDS.machinesScreen}`,
+  machinesBackButton: `~${MOBILE_E2E_IDS.machinesBackButton}`,
+  machinesAddButton: `~${MOBILE_E2E_IDS.machinesAddButton}`,
+  machinePairingSheet: `~${MOBILE_E2E_IDS.machinePairingSheet}`,
+  machinePairingCodeInput: `~${MOBILE_E2E_IDS.machinePairingCodeInput}`,
+  machinePairingSubmit: `~${MOBILE_E2E_IDS.machinePairingSubmitButton}`,
+  machinePairingError: `~${MOBILE_E2E_IDS.machinePairingError}`,
+  machinePairingClose: `~${MOBILE_E2E_IDS.machinePairingCloseButton}`,
+  machinePairingCamera: `~${MOBILE_E2E_IDS.machinePairingCamera}`,
+  machinePairingScanMode: `~${MOBILE_E2E_IDS.machinePairingScanModeButton}`,
+  machinePairingOpenSettings:
+    `~${MOBILE_E2E_IDS.machinePairingOpenSettingsButton}`,
   accountEmailInput: `~${MOBILE_E2E_IDS.accountEmailInput}`,
   accountPasswordInput: `~${MOBILE_E2E_IDS.accountPasswordInput}`,
   accountPasswordToggle: `~${MOBILE_E2E_IDS.accountPasswordToggle}`,
@@ -54,8 +64,28 @@ export const selectors = {
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
   legacyUpdateInfoOtaValue: "~mobile.update-info.ota",
+  developerForceCloudToggle: `~${MOBILE_E2E_IDS.developerForceCloudToggle}`,
   taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]'
 } as const;
+
+export function machineRowSelector(desktopId: string): string {
+  return `~${MOBILE_E2E_IDS.machineRow(desktopId)}`;
+}
+
+export function machineRowsXPath(desktopId: string): string {
+  return `//*[@name="${MOBILE_E2E_IDS.machineName(desktopId)}"]`;
+}
+
+export function machineOriginSelector(
+  desktopId: string,
+  origin: "account" | "manual"
+): string {
+  return `~${MOBILE_E2E_IDS.machineOrigin(desktopId, origin)}`;
+}
+
+export function machineRemoveButtonSelector(desktopId: string): string {
+  return `~${MOBILE_E2E_IDS.machineRemoveButton(desktopId)}`;
+}
 
 const TASK_ROW_PREFIX = "mobile.task-row.";
 

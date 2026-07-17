@@ -9,7 +9,6 @@ import type {
   RepoSummary,
   DesktopSummary,
   MobileServerStatus,
-  PairingSession,
   TaskActionResponse,
   TaskActivityResponse,
   TaskFileContent,
@@ -71,7 +70,6 @@ export interface KannaTransport {
     taskId: string,
     listener: (event: TaskAgentStreamEvent) => void
   ): TaskAgentSubscription;
-  createPairingSession(): Promise<PairingSession>;
 }
 
 export interface KannaClient {
@@ -98,7 +96,6 @@ export interface KannaClient {
     taskId: string,
     listener: (event: TaskAgentStreamEvent) => void
   ): TaskAgentSubscription;
-  createPairingSession(): Promise<PairingSession>;
 }
 
 export type TaskCreationOutcome = "not-created" | "unknown";
@@ -159,7 +156,6 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     observeTaskTerminal: (taskId, listener) =>
       transport.observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>
-      transport.observeTaskAgent(taskId, listener),
-    createPairingSession: () => transport.createPairingSession()
+      transport.observeTaskAgent(taskId, listener)
   };
 }

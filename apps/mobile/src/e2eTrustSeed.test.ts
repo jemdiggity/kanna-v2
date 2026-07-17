@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { seedTrustedDesktopFromUrl } from "./e2eTrustSeed";
+import {
+  claimPairingPayloadFromUrl,
+  seedTrustedDesktopFromUrl
+} from "./e2eTrustSeed";
 import { createSessionPersistence, type StorageAdapter } from "./state/sessionPersistence";
 
 function createMemoryStorage(): StorageAdapter {
@@ -82,5 +85,33 @@ describe("seedTrustedDesktopFromUrl", () => {
     );
 
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("claimPairingPayloadFromUrl", () => {
+  it("sends a simulator QR payload through the controller pairing contract", async () => {
+    const pairPayload = vi.fn().mockResolvedValue("desktop-e2e");
+    const payload = JSON.stringify({
+      type: "kanna.machine-pairing",
+      version: 1,
+      desktopId: "desktop-e2e",
+      code: "ABC123"
+    });
+
+    await claimPairingPayloadFromUrl(
+      `kanna://e2e-pair?payload=${encodeURIComponent(payload)}`,
+      pairPayload
+    );
+
+    expect(pairPayload).toHaveBeenCalledWith(payload);
+  });
+
+  it("ignores unrelated and incomplete deep links", async () => {
+    const pairPayload = vi.fn().mockResolvedValue("desktop-e2e");
+
+    await claimPairingPayloadFromUrl("kanna://e2e-trust", pairPayload);
+    await claimPairingPayloadFromUrl("kanna://e2e-pair", pairPayload);
+
+    expect(pairPayload).not.toHaveBeenCalled();
   });
 });

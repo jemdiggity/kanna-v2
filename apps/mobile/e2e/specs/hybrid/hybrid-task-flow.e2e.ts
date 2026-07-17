@@ -5,7 +5,7 @@ import {
   openPtyFixtureTask,
   waitForTaskTerminalLive
 } from "../smoke/list-detail-back.e2e";
-import { openProfileConnectionSheet } from "../smoke/profile-connection.e2e";
+import { openProfileSheet } from "../smoke/profile-connection.e2e";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
@@ -74,7 +74,7 @@ async function signInToHybridCloud(
   driver: Browser,
   credentials: HybridCredentials
 ): Promise<void> {
-  await openProfileConnectionSheet({
+  await openProfileSheet({
     getAccountButton: async () => await driver.$(selectors.accountButton),
     getAccountSheet: async () => await driver.$(selectors.accountSheet)
   });
@@ -107,7 +107,7 @@ async function signInToHybridCloud(
 }
 
 async function assertRestoredHybridSignIn(driver: Browser): Promise<void> {
-  await openProfileConnectionSheet({
+  await openProfileSheet({
     getAccountButton: async () => await driver.$(selectors.accountButton),
     getAccountSheet: async () => await driver.$(selectors.accountSheet)
   });

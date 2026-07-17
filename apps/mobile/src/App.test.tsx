@@ -951,8 +951,9 @@ describe("createAppModel", () => {
     await expect(model.client.listRecentTasks()).resolves.toEqual([
       expect.objectContaining({ id: "task-trusted", title: "Trusted LAN task" })
     ]);
-    expect(fetchImpl).not.toHaveBeenCalledWith("http://wrong.lan:48120/v1/status");
-    expect(fetchImpl).toHaveBeenCalledWith("http://right.lan:48120/v1/status");
+    const requestedUrls = fetchImpl.mock.calls.map(([url]) => url);
+    expect(requestedUrls).not.toContain("http://wrong.lan:48120/v1/status");
+    expect(requestedUrls).toContain("http://right.lan:48120/v1/status");
   });
 
   it("hydrates persisted mobile context before bootstrap", async () => {

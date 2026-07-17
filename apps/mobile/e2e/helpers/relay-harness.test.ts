@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as relayHarness from "./relay-harness";
 
 describe("mobile relay harness helpers", () => {
@@ -59,7 +59,6 @@ describe("mobile relay harness helpers", () => {
       EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT: "8080"
     });
   });
-
   it("defines relay source order opposite the required Tasks-tab creation order", () => {
     expect(relayHarness.relayTaskOrderingFixture("repo-ordering")).toEqual({
       sourceOrderTaskIds: [
@@ -71,5 +70,53 @@ describe("mobile relay harness helpers", () => {
         "cloud:mobile-relay-ordering-desktop:repo-ordering:mobile-relay-ordering-older",
       ],
     });
+  });
+  it("creates real pairing sessions and drives debug-only failure controls", async () => {
+    const pairing = {
+      code: "ABC123",
+      pairingPayload: "pairing-payload",
+      desktopId: "desktop-e2e",
+      desktopName: "E2E Desktop",
+      lanHost: "0.0.0.0",
+      lanPort: 48120,
+      expiresAtUnixMs: Date.now() + 60_000
+    };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(pairing), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        lanHttpEnabled: true,
+        pairingSessionExpired: true
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        lanHttpEnabled: false,
+        pairingSessionExpired: false
+      }), { status: 200 }));
+
+    await expect(relayHarness.createHarnessPairingSession(
+      "http://127.0.0.1:48120",
+      fetchImpl
+    )).resolves.toEqual(pairing);
+    await relayHarness.updateHarnessMobileMachineControls(
+      "http://127.0.0.1:48120",
+      { expirePairingSession: true },
+      fetchImpl
+    );
+    await relayHarness.updateHarnessMobileMachineControls(
+      "http://127.0.0.1:48120",
+      { lanHttpEnabled: false },
+      fetchImpl
+    );
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:48120/v1/pairing/sessions",
+      { method: "POST" }
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:48120/v1/e2e/mobile-machine-controls",
+      expect.objectContaining({ body: JSON.stringify({ expirePairingSession: true }) })
+    );
   });
 });

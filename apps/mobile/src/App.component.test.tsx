@@ -86,7 +86,7 @@ vi.mock("./components/FloatingToolbar", () => ({
 vi.mock("./components/UpdateReadyBanner", () => ({
   UpdateReadyBanner: "UpdateReadyBanner"
 }));
-vi.mock("./screens/DesktopsScreen", () => ({ DesktopsScreen: "DesktopsScreen" }));
+vi.mock("./screens/MachinesScreen", () => ({ MachinesScreen: "MachinesScreen" }));
 vi.mock("./screens/MoreScreen", () => ({ MoreScreen: "MoreScreen" }));
 vi.mock("./screens/SearchScreen", () => ({ SearchScreen: "SearchScreen" }));
 vi.mock("./screens/TaskScreen", () => ({ TaskScreen: "TaskScreen" }));
@@ -178,15 +178,7 @@ function createClientMock() {
       interrupt: vi.fn(),
       sendInput: vi.fn(),
       sendPermission: vi.fn()
-    })),
-    createPairingSession: vi.fn<KannaClient["createPairingSession"]>().mockResolvedValue({
-      code: "ABC123",
-      desktopId: "desktop-1",
-      desktopName: "Studio Mac",
-      lanHost: "0.0.0.0",
-      lanPort: 48120,
-      expiresAtUnixMs: 1
-    })
+    }))
   } satisfies KannaClient;
 }
 
@@ -196,6 +188,10 @@ function createModel(connectionState: "connected" | "idle" | "error" = "connecte
   sessionStore.setDesktops([
     { id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }
   ]);
+  sessionStore.setMachineSourceDesktops({
+    account: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "remote" }],
+    local: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }]
+  });
   sessionStore.setRepos([{ id: "repo-1", name: "Repo One" }]);
   sessionStore.selectDesktop("desktop-1");
   sessionStore.selectRepo("repo-1");
@@ -277,6 +273,77 @@ describe("App component wiring", () => {
     });
 
     expect(renderer.root.findByType("SearchScreen").props.focusRequestKey).toBe(2);
+  });
+
+  it("opens Machines from the profile and returns to the originating root", async () => {
+    const { model, sessionStore } = createModel("connected");
+    sessionStore.setActiveView("recent");
+    const renderer = await mountModel(model);
+
+    await act(async () => {
+      renderer.root.findByType("AccountSheet").props.onOpenMachines();
+    });
+
+    expect(renderer.root.findAllByType("MachinesScreen")).toHaveLength(1);
+    expect(renderer.root.findAllByType("AccountBadge")).toHaveLength(0);
+    expect(renderer.root.findAllByType("FloatingToolbar")).toHaveLength(0);
+
+    await act(async () => {
+      renderer.root.findByType("MachinesScreen").props.onBack();
+    });
+
+    expect(renderer.root.findByType("TasksScreen").props.heading).toBe("Recent");
+  });
+
+  it("deduplicates account and manually paired machines in profile and inventory", async () => {
+    const { model, sessionStore } = createModel("connected");
+    sessionStore.setTrustedDesktops([
+      {
+        desktopId: "desktop-1",
+        displayName: "Studio Mac",
+        lanEndpoints: [
+          {
+            baseUrl: "http://studio.local:48120",
+            lastSeenAt: "2026-07-17T00:00:00.000Z"
+          }
+        ],
+        lastSeenAt: "2026-07-17T00:00:00.000Z"
+      }
+    ]);
+    const renderer = await mountModel(model);
+
+    expect(renderer.root.findByType("AccountSheet").props.machineCount).toBe(1);
+    expect(renderer.root.findByType("AccountSheet").props.availableMachineCount).toBe(1);
+
+    await act(async () => {
+      renderer.root.findByType("AccountSheet").props.onOpenMachines();
+    });
+
+    const machines = renderer.root.findByType("MachinesScreen").props.machines;
+    expect(machines).toHaveLength(1);
+    expect(machines[0].origins).toEqual({ account: true, manual: true });
+  });
+
+  it("keeps a signed-out manual-only machine distinct from account inventory", async () => {
+    const { model, sessionStore } = createModel("connected");
+    sessionStore.setMachineSourceDesktops({
+      account: [],
+      local: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }]
+    });
+    sessionStore.setTrustedDesktops([{
+      desktopId: "desktop-1",
+      displayName: "Studio Mac",
+      lanEndpoints: [],
+      lastSeenAt: "2026-07-17T00:00:00.000Z"
+    }]);
+    const renderer = await mountModel(model);
+
+    await act(async () => {
+      renderer.root.findByType("AccountSheet").props.onOpenMachines();
+    });
+
+    expect(renderer.root.findByType("MachinesScreen").props.machines[0].origins)
+      .toEqual({ account: false, manual: true });
   });
 
   it("creates tasks with geometry derived from the measured task-detail surface", async () => {

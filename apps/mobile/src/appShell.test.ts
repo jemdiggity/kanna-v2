@@ -26,21 +26,27 @@ describe("isTaskDetailVisible", () => {
 });
 
 describe("shouldShowFloatingToolbar", () => {
-  it("is the inverse of resolved task detail visibility", () => {
-    expect(shouldShowFloatingToolbar(false)).toBe(true);
-    expect(shouldShowFloatingToolbar(true)).toBe(false);
+  it("hides for task details and the self-contained Machines screen", () => {
+    expect(shouldShowFloatingToolbar(false, "tasks")).toBe(true);
+    expect(shouldShowFloatingToolbar(true, "tasks")).toBe(false);
+    expect(shouldShowFloatingToolbar(false, "desktops")).toBe(false);
   });
 });
 
 describe("shouldShowTopBar", () => {
-  it("is the inverse of resolved task detail visibility", () => {
-    expect(shouldShowTopBar(false)).toBe(true);
-    expect(shouldShowTopBar(true)).toBe(false);
+  it("hides for task details and the self-contained Machines screen", () => {
+    expect(shouldShowTopBar(false, "tasks")).toBe(true);
+    expect(shouldShowTopBar(true, "tasks")).toBe(false);
+    expect(shouldShowTopBar(false, "desktops")).toBe(false);
   });
 });
 
 describe("getShellTitle", () => {
   it("uses task-specific copy instead of the product name for the default shell title", () => {
     expect(getShellTitle("tasks")).toBe("Tasks");
+  });
+
+  it("uses the product language for the machine inventory", () => {
+    expect(getShellTitle("desktops")).toBe("Machines");
   });
 });

@@ -3,6 +3,18 @@ use rusqlite::Connection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+fn pairing_create_request(peer: [u8; 4]) -> Request<Body> {
+    let mut request = Request::post("/v1/pairing/sessions")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 49152,
+        ))));
+    request
+}
+
 #[tokio::test]
 async fn list_desktops_route_returns_configured_desktop() {
     let app = super::test_router("desktop-1", "Studio Mac");
@@ -2319,11 +2331,7 @@ async fn search_tasks_route_filters_by_query_text() {
 async fn create_pairing_session_route_returns_pairing_payload() {
     let app = super::test_router("desktop-1", "Studio Mac");
     let response = app
-        .oneshot(
-            Request::post("/v1/pairing/sessions")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(pairing_create_request([127, 0, 0, 1]))
         .await
         .unwrap();
 
@@ -2336,6 +2344,85 @@ async fn create_pairing_session_route_returns_pairing_payload() {
     assert_eq!(pairing.desktop_name, "Studio Mac");
     assert_eq!(pairing.lan_port, 48120);
     assert_eq!(pairing.code.len(), 6);
+    let payload: serde_json::Value = from_slice(pairing.pairing_payload.as_bytes()).unwrap();
+    assert_eq!(payload["desktopId"], "desktop-1");
+    assert_eq!(payload["code"], pairing.code);
+}
+
+#[tokio::test]
+async fn create_pairing_session_route_rejects_lan_clients() {
+    let response = super::test_router("desktop-private-pairing", "Private Mac")
+        .oneshot(pairing_create_request([192, 168, 1, 42]))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_pairing_session_route_rejects_authenticated_relay_dispatch() {
+    let response = crate::http_api::dispatch_authenticated_http_invoke(
+        super::test_state_with_seed("desktop-1", "Studio Mac", |_| {}),
+        "POST",
+        "/v1/pairing/sessions",
+        serde_json::Value::Null,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::FORBIDDEN.as_u16());
+    assert!(response
+        .error
+        .as_deref()
+        .is_some_and(|message| message.contains("desktop app")));
+}
+
+#[tokio::test]
+async fn pairing_claim_route_is_single_use() {
+    let app = super::test_router("desktop-claim", "Claim Mac");
+    let create_response = app
+        .clone()
+        .oneshot(pairing_create_request([127, 0, 0, 1]))
+        .await
+        .unwrap();
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let pairing: crate::pairing::PairingSession = from_slice(&create_body).unwrap();
+
+    let claim_body = serde_json::json!({
+        "code": pairing.code,
+        "deviceId": "phone-1",
+        "deviceName": "Kanna Mobile"
+    })
+    .to_string();
+    let claim_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/pairing/sessions/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(claim_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(claim_response.status(), StatusCode::OK);
+    let claim_response_body = axum::body::to_bytes(claim_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let claimed: serde_json::Value = from_slice(&claim_response_body).unwrap();
+    assert_eq!(claimed["desktopId"], "desktop-claim");
+    assert_eq!(claimed["desktopName"], "Claim Mac");
+
+    let replay_response = app
+        .oneshot(
+            Request::post("/v1/pairing/sessions/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(claim_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -2367,11 +2454,7 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
     let app = super::router(Arc::new(super::AppState::new(config)));
 
     let response = app
-        .oneshot(
-            Request::post("/v1/pairing/sessions")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(pairing_create_request([127, 0, 0, 1]))
         .await
         .unwrap();
 

@@ -1,16 +1,23 @@
 use crate::config::Config;
-use crate::pairing::{self, PairingSession};
+use crate::pairing::{self, ActivePairingSession};
 use kanna_agent_protocol::{ServerFrame, StateChangeScope};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, Mutex};
+
+#[derive(Clone, Copy)]
+pub(super) struct TunneledHttpInvoke;
 
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Config,
-    pub(super) pairing_session: Arc<Mutex<Option<PairingSession>>>,
+    pub(super) pairing_session: Arc<Mutex<Option<ActivePairingSession>>>,
+    #[cfg(debug_assertions)]
+    pub(super) e2e_lan_http_enabled: Arc<AtomicBool>,
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     requested_task_creation_flights: Arc<StdMutex<HashSet<String>>>,
     state_changes: broadcast::Sender<ServerFrame>,
@@ -141,6 +148,8 @@ impl AppState {
         Self {
             config,
             pairing_session: Arc::new(Mutex::new(None)),
+            #[cfg(debug_assertions)]
+            e2e_lan_http_enabled: Arc::new(AtomicBool::new(true)),
             session_replacements: crate::session_replacements::SessionReplacements::default(),
             requested_task_creation_flights: Arc::new(StdMutex::new(HashSet::new())),
             state_changes: broadcast::channel(256).0,
@@ -164,11 +173,7 @@ impl AppState {
     }
 
     pub async fn mobile_server_status(&self) -> crate::mobile_api::MobileServerStatus {
-        let pairing_code = {
-            let session = self.pairing_session.lock().await;
-            pairing::active_pairing_code(session.as_ref())
-        };
-        crate::mobile_api::build_mobile_server_status(&self.config, pairing_code)
+        crate::mobile_api::build_mobile_server_status(&self.config, None)
     }
 
     pub fn subscribe_state_changes(&self) -> broadcast::Receiver<ServerFrame> {

@@ -1,8 +1,12 @@
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const PAIRING_TTL_MS: u64 = 5 * 60 * 1_000;
+pub const MAX_FAILED_CLAIMS: u8 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TrustedDevice {
@@ -19,12 +23,59 @@ pub struct PairingStore {
 #[serde(rename_all = "camelCase")]
 pub struct PairingSession {
     pub code: String,
+    pub pairing_payload: String,
     pub desktop_id: String,
     pub desktop_name: String,
     pub lan_host: String,
     pub lan_port: u16,
     pub expires_at_unix_ms: u64,
 }
+
+#[derive(Debug, Clone)]
+pub struct ActivePairingSession {
+    pub session: PairingSession,
+    pub failed_claims: u8,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingClaimRequest {
+    pub code: String,
+    pub device_id: String,
+    pub device_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingClaimResponse {
+    pub desktop_id: String,
+    pub desktop_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairingClaimError {
+    NoActiveSession,
+    InvalidRequest,
+    InvalidCode,
+    Expired,
+    RateLimited,
+    Persistence(String),
+}
+
+impl fmt::Display for PairingClaimError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoActiveSession => formatter.write_str("no pairing session is active"),
+            Self::InvalidRequest => formatter.write_str("pairing claim is invalid"),
+            Self::InvalidCode => formatter.write_str("pairing code is invalid"),
+            Self::Expired => formatter.write_str("pairing session expired"),
+            Self::RateLimited => formatter.write_str("too many failed pairing attempts"),
+            Self::Persistence(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for PairingClaimError {}
 
 impl PairingStore {
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -38,7 +89,6 @@ impl PairingStore {
             .map_err(|e| format!("failed to parse pairing store {}: {}", path.display(), e))
     }
 
-    #[cfg(test)]
     pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -52,19 +102,41 @@ impl PairingStore {
 
         let body = serde_json::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize pairing store: {}", e))?;
-        std::fs::write(path, body)
-            .map_err(|e| format!("failed to write pairing store {}: {}", path.display(), e))
+        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::write(&temp_path, body).map_err(|e| {
+            format!(
+                "failed to write pairing store temp file {}: {}",
+                temp_path.display(),
+                e
+            )
+        })?;
+        std::fs::rename(&temp_path, path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!(
+                "failed to replace pairing store {} from {}: {}",
+                path.display(),
+                temp_path.display(),
+                e
+            )
+        })
     }
 
-    #[cfg(test)]
     pub fn add_trusted_device(&mut self, desktop_id: &str, device_id: &str, name: &str) {
-        self.trusted_devices
+        let devices = self
+            .trusted_devices
             .entry(desktop_id.to_string())
-            .or_default()
-            .push(TrustedDevice {
+            .or_default();
+        if let Some(device) = devices
+            .iter_mut()
+            .find(|device| device.device_id == device_id)
+        {
+            device.device_name = name.to_string();
+        } else {
+            devices.push(TrustedDevice {
                 device_id: device_id.to_string(),
                 device_name: name.to_string(),
             });
+        }
     }
 
     #[cfg(test)]
@@ -76,31 +148,97 @@ impl PairingStore {
     }
 }
 
+#[cfg(test)]
 pub fn create_pairing_session(config: &Config) -> Result<PairingSession, String> {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("system clock error: {}", e))?
-        .as_millis() as u64;
+    Ok(create_active_pairing_session(config)?.session)
+}
 
-    Ok(PairingSession {
-        code: generate_pairing_code()?,
-        desktop_id: config.desktop_id.clone(),
-        desktop_name: config.desktop_name.clone(),
-        lan_host: config.lan_host.clone(),
-        lan_port: config.lan_port,
-        expires_at_unix_ms: now_ms + 5 * 60 * 1000,
+pub fn create_active_pairing_session(config: &Config) -> Result<ActivePairingSession, String> {
+    create_pairing_session_at(config, unix_time_ms()?)
+}
+
+fn create_pairing_session_at(config: &Config, now_ms: u64) -> Result<ActivePairingSession, String> {
+    let code = generate_pairing_code()?;
+    let pairing_payload = serde_json::to_string(&serde_json::json!({
+        "type": "kanna.machine-pairing",
+        "version": 1,
+        "desktopId": config.desktop_id,
+        "code": code,
+    }))
+    .map_err(|error| format!("failed to serialize pairing payload: {error}"))?;
+
+    Ok(ActivePairingSession {
+        session: PairingSession {
+            code,
+            pairing_payload,
+            desktop_id: config.desktop_id.clone(),
+            desktop_name: config.desktop_name.clone(),
+            lan_host: config.lan_host.clone(),
+            lan_port: config.lan_port,
+            expires_at_unix_ms: now_ms + PAIRING_TTL_MS,
+        },
+        failed_claims: 0,
     })
 }
 
-pub fn active_pairing_code(session: Option<&PairingSession>) -> Option<String> {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis() as u64;
+pub fn claim_pairing_session(
+    config: &Config,
+    active: &mut Option<ActivePairingSession>,
+    request: PairingClaimRequest,
+) -> Result<PairingClaimResponse, PairingClaimError> {
+    let now_ms = unix_time_ms().map_err(PairingClaimError::Persistence)?;
+    claim_pairing_session_at(config, active, request, now_ms)
+}
 
-    session
-        .filter(|pairing| pairing.expires_at_unix_ms > now_ms)
-        .map(|pairing| pairing.code.clone())
+fn claim_pairing_session_at(
+    config: &Config,
+    active: &mut Option<ActivePairingSession>,
+    request: PairingClaimRequest,
+    now_ms: u64,
+) -> Result<PairingClaimResponse, PairingClaimError> {
+    let device_id = request.device_id.trim();
+    let device_name = request.device_name.trim();
+    if device_id.is_empty()
+        || device_name.is_empty()
+        || device_id.len() > 256
+        || device_name.len() > 256
+    {
+        return Err(PairingClaimError::InvalidRequest);
+    }
+
+    let Some(current) = active.as_mut() else {
+        return Err(PairingClaimError::NoActiveSession);
+    };
+    if now_ms > current.session.expires_at_unix_ms {
+        *active = None;
+        return Err(PairingClaimError::Expired);
+    }
+    if current.failed_claims >= MAX_FAILED_CLAIMS {
+        return Err(PairingClaimError::RateLimited);
+    }
+
+    let normalized_code = request.code.trim().to_ascii_uppercase();
+    if normalized_code != current.session.code {
+        current.failed_claims += 1;
+        return if current.failed_claims >= MAX_FAILED_CLAIMS {
+            Err(PairingClaimError::RateLimited)
+        } else {
+            Err(PairingClaimError::InvalidCode)
+        };
+    }
+
+    let response = PairingClaimResponse {
+        desktop_id: current.session.desktop_id.clone(),
+        desktop_name: current.session.desktop_name.clone(),
+    };
+    let store_path = Path::new(&config.pairing_store_path);
+    let mut store = PairingStore::load(store_path).map_err(PairingClaimError::Persistence)?;
+    store.add_trusted_device(&response.desktop_id, device_id, device_name);
+    store
+        .save(store_path)
+        .map_err(PairingClaimError::Persistence)?;
+    *active = None;
+    Ok(response)
 }
 
 fn generate_pairing_code() -> Result<String, String> {
@@ -114,10 +252,44 @@ fn generate_pairing_code() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{:02X}", b)).collect())
 }
 
+fn unix_time_ms() -> Result<u64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock error: {}", e))
+        .map(|duration| duration.as_millis() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    fn test_config(label: &str) -> Config {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: "/tmp/kanna.db".to_string(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48_120,
+            pairing_store_path: std::env::temp_dir()
+                .join(format!("kanna-pairing-{label}-{unique}.json"))
+                .to_string_lossy()
+                .to_string(),
+        }
+    }
 
     #[test]
     fn trusted_device_roundtrip_preserves_desktop_binding() {
@@ -171,5 +343,104 @@ mod tests {
         assert_eq!(session.desktop_name, "Studio Mac");
         assert_eq!(session.lan_port, 48120);
         assert_eq!(session.code.len(), 6);
+    }
+
+    #[test]
+    fn pairing_payload_is_versioned_and_contains_identity() {
+        let config = test_config("payload");
+        let active = super::create_pairing_session_at(&config, 1_000).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&active.session.pairing_payload).unwrap();
+
+        assert_eq!(payload["type"], "kanna.machine-pairing");
+        assert_eq!(payload["version"], 1);
+        assert_eq!(payload["desktopId"], "desktop-1");
+        assert_eq!(payload["code"], active.session.code);
+    }
+
+    #[test]
+    fn successful_claim_is_single_use_and_persists_device() {
+        let config = test_config("success");
+        let mut active = Some(super::create_pairing_session_at(&config, 1_000).unwrap());
+        let code = active.as_ref().unwrap().session.code.clone();
+
+        let claimed = super::claim_pairing_session_at(
+            &config,
+            &mut active,
+            super::PairingClaimRequest {
+                code,
+                device_id: "phone-1".to_string(),
+                device_name: "Kanna Mobile".to_string(),
+            },
+            2_000,
+        )
+        .unwrap();
+
+        assert_eq!(claimed.desktop_id, "desktop-1");
+        assert!(active.is_none());
+        let store = super::PairingStore::load(Path::new(&config.pairing_store_path)).unwrap();
+        assert!(store.is_trusted("desktop-1", "phone-1"));
+    }
+
+    #[test]
+    fn invalid_claims_are_rate_limited() {
+        let config = test_config("rate-limit");
+        let mut active = Some(super::create_pairing_session_at(&config, 1_000).unwrap());
+
+        for attempt in 0..super::MAX_FAILED_CLAIMS {
+            let error = super::claim_pairing_session_at(
+                &config,
+                &mut active,
+                super::PairingClaimRequest {
+                    code: "BAD000".to_string(),
+                    device_id: "phone-1".to_string(),
+                    device_name: "Kanna Mobile".to_string(),
+                },
+                2_000,
+            )
+            .unwrap_err();
+            let expected = if attempt + 1 == super::MAX_FAILED_CLAIMS {
+                super::PairingClaimError::RateLimited
+            } else {
+                super::PairingClaimError::InvalidCode
+            };
+            assert_eq!(error, expected);
+        }
+
+        assert_eq!(
+            super::claim_pairing_session_at(
+                &config,
+                &mut active,
+                super::PairingClaimRequest {
+                    code: "BAD000".to_string(),
+                    device_id: "phone-1".to_string(),
+                    device_name: "Kanna Mobile".to_string(),
+                },
+                2_000,
+            ),
+            Err(super::PairingClaimError::RateLimited)
+        );
+    }
+
+    #[test]
+    fn expired_claim_consumes_the_stale_session() {
+        let config = test_config("expired");
+        let mut active = Some(super::create_pairing_session_at(&config, 1_000).unwrap());
+        let code = active.as_ref().unwrap().session.code.clone();
+
+        assert_eq!(
+            super::claim_pairing_session_at(
+                &config,
+                &mut active,
+                super::PairingClaimRequest {
+                    code,
+                    device_id: "phone-1".to_string(),
+                    device_name: "Kanna Mobile".to_string(),
+                },
+                1_000 + super::PAIRING_TTL_MS + 1,
+            ),
+            Err(super::PairingClaimError::Expired)
+        );
+        assert!(active.is_none());
     }
 }

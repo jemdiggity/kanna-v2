@@ -3,9 +3,11 @@ use super::backup::create_backup;
 use super::desktop::list_desktops;
 #[cfg(debug_assertions)]
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
+#[cfg(debug_assertions)]
+use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine_controls};
 use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
-use super::pairing::create_pairing_session;
+use super::pairing::{claim_pairing_session, create_pairing_session};
 use super::repos::{
     add_repo, dependent_tasks_exist, get_repo_agent_definition, get_repo_by_path,
     get_repo_kanna_definitions, get_repo_pipeline_definition, list_available_agent_providers,
@@ -14,7 +16,7 @@ use super::repos::{
 use super::settings::{delete_setting, get_setting, put_setting};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
-use super::state::{AppState, HttpInvokeResponse};
+use super::state::{AppState, HttpInvokeResponse, TunneledHttpInvoke};
 use super::status::status;
 use super::task_actions::{
     advance_stage, close_task, complete_stage, pin_task, reopen_task, reorder_pinned_tasks,
@@ -188,12 +190,21 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/transfers/{transfer_id}/actions/fail",
             post(fail_pending_incoming_transfer),
         )
-        .route("/v1/pairing/sessions", post(create_pairing_session));
+        .route("/v1/pairing/sessions", post(create_pairing_session))
+        .route("/v1/pairing/sessions/claim", post(claim_pairing_session));
 
     #[cfg(debug_assertions)]
     let router = router
         .route("/v1/e2e/sql", post(execute_e2e_sql))
-        .route("/v1/e2e/server-work", post(execute_e2e_server_work));
+        .route("/v1/e2e/server-work", post(execute_e2e_server_work))
+        .route(
+            "/v1/e2e/mobile-machine-controls",
+            post(update_e2e_mobile_machine_controls),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            gate_direct_lan_http,
+        ));
 
     router
         .layer(CorsLayer::permissive())
@@ -310,12 +321,15 @@ async fn dispatch_http_invoke_with_access(
             };
         }
     };
+    // Preserve loopback identity for the debug-only remote E2E API while
+    // explicitly marking every KSP/relay dispatch as tunneled. Privileged
+    // desktop control routes reject that marker; the desktop command reaches
+    // the server over its real loopback listener and has no marker.
+    let invoke_peer = SocketAddr::from(([127, 0, 0, 1], 0));
     request
         .extensions_mut()
-        .insert(axum::extract::ConnectInfo(SocketAddr::from((
-            [127, 0, 0, 1],
-            0,
-        ))));
+        .insert(axum::extract::ConnectInfo(invoke_peer));
+    request.extensions_mut().insert(TunneledHttpInvoke);
     if authenticated_file_access {
         request
             .extensions_mut()

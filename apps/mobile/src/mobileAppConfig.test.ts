@@ -22,9 +22,9 @@ describe("mobile app config", () => {
         channel: "production",
         manifestUrl: "https://relay.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.0.1"
+      runtimeVersion: "2.1.0"
     });
-    expect(config.runtimeVersion).toBe("2.0.1");
+    expect(config.runtimeVersion).toBe("2.1.0");
     expect(config.updates).toMatchObject({
       url: "https://relay.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "production" },
@@ -75,9 +75,9 @@ describe("mobile app config", () => {
         channel: null,
         manifestUrl: null
       },
-      runtimeVersion: "2.0.1"
+      runtimeVersion: "2.1.0"
     });
-    expect(config.runtimeVersion).toBe("2.0.1");
+    expect(config.runtimeVersion).toBe("2.1.0");
     expect(config.updates).toBeUndefined();
   });
 
@@ -105,9 +105,9 @@ describe("mobile app config", () => {
         channel: "staging",
         manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.0.1"
+      runtimeVersion: "2.1.0"
     });
-    expect(config.runtimeVersion).toBe("2.0.1");
+    expect(config.runtimeVersion).toBe("2.1.0");
     expect(config.updates).toMatchObject({
       url: "https://relay-staging.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "staging" }
@@ -116,5 +116,19 @@ describe("mobile app config", () => {
 
   it("falls back to prod for unknown KANNA_APP_ENV values", () => {
     expect(resolveMobileAppEnvironment("qa").name).toBe("prod");
+  });
+
+  it("configures QR-only camera access and a new native runtime", () => {
+    const config = createExpoConfig({ KANNA_APP_ENV: "dev" });
+
+    expect(config.plugins).toContainEqual([
+      "expo-camera",
+      {
+        cameraPermission: "Allow Kanna to scan machine pairing QR codes.",
+        barcodeScannerEnabled: true,
+        recordAudioAndroid: false
+      }
+    ]);
+    expect(config.runtimeVersion).toBe("2.1.0");
   });
 });

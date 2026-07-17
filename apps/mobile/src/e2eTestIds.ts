@@ -35,15 +35,36 @@ export const MOBILE_E2E_IDS = {
   accountButton: "mobile.account-button",
   accountSheet: "mobile.account-sheet",
   accountCloseButton: "mobile.account-close",
-  accountConnectionStatus: "mobile.account-connection-status",
-  accountConnectionTitle: "mobile.account-connection-title",
-  accountConnectLocalButton: "mobile.account-connect-local",
-  accountForceCloudToggle: "mobile.account-force-cloud",
+  accountMachinesButton: "mobile.account-machines",
   accountEmailInput: "mobile.account-email",
   accountPasswordInput: "mobile.account-password",
   accountPasswordToggle: "mobile.account-toggle-password",
   accountSignInButton: "mobile.account-sign-in",
   accountSignOutButton: "mobile.account-sign-out",
+  machinesScreen: "mobile.machines-screen",
+  machinesBackButton: "mobile.machines-back",
+  machinesAddButton: "mobile.machines-add",
+  machinePairingSheet: "mobile.machine-pairing.sheet",
+  machinePairingCamera: "mobile.machine-pairing.camera",
+  machinePairingScanModeButton: "mobile.machine-pairing.mode.scan",
+  machinePairingCodeInput: "mobile.machine-pairing.code",
+  machinePairingSubmitButton: "mobile.machine-pairing.submit",
+  machinePairingError: "mobile.machine-pairing.error",
+  machinePairingCloseButton: "mobile.machine-pairing.close",
+  machinePairingOpenSettingsButton: "mobile.machine-pairing.open-settings",
+  developerForceCloudToggle: "mobile.developer.force-cloud",
+  machineRow(desktopId: string): string {
+    return `mobile.machine.${desktopId}`;
+  },
+  machineName(desktopId: string): string {
+    return `mobile.machine.${desktopId}.name`;
+  },
+  machineOrigin(desktopId: string, origin: "account" | "manual"): string {
+    return `mobile.machine.${desktopId}.origin.${origin}`;
+  },
+  machineRemoveButton(desktopId: string): string {
+    return `mobile.machine.${desktopId}.remove`;
+  },
   createTaskPromptInput: "mobile.create-task.prompt",
   createTaskCancelButton: "mobile.create-task.cancel",
   createTaskSubmitButton: "mobile.create-task.submit",

@@ -1,88 +1,296 @@
 import { describe, expect, it, vi } from "vitest";
-import * as profileConnectionSmoke from "./profile-connection.e2e";
-
-const {
+import type { Browser } from "webdriverio";
+import { waitForExpoAppReady } from "../../run";
+import {
   assertOtaDiagnosticsHidden,
-  assertProfileConnectionControlsReachable,
-  assertProfileConnectionDisconnected,
+  assertMachineOrigins,
+  assertPairingFailure,
+  assertPairingSheetFresh,
   assertProfilePasswordCanRevealAndHide,
-  openProfileConnectionSheet
-} = profileConnectionSmoke;
-
-interface FakeElement {
-  click: ReturnType<typeof vi.fn>;
-  getAttribute: ReturnType<typeof vi.fn>;
-  getText: ReturnType<typeof vi.fn>;
-  isExisting: ReturnType<typeof vi.fn>;
-  waitForDisplayed: ReturnType<typeof vi.fn>;
-}
+  assertProfileSignInControlsReachable,
+  assertSignedOutMachineEntryPoints,
+  assertToolbarActionPathsReachable,
+  openMachinesFromProfile,
+  openProfileSheet,
+  relaunchApp,
+  removeManualMachine,
+  submitPairingCode
+} from "./profile-connection.e2e";
 
 interface FakeWaitUntilOptions {
   timeoutMsg: string;
 }
 
-function createElement(exists = true): FakeElement {
+function createElement(exists = true) {
   return {
     click: vi.fn(async () => undefined),
-    getAttribute: vi.fn(async () => null),
+    getAttribute: vi.fn(async () => null as string | null),
     getText: vi.fn(async () => ""),
     isExisting: vi.fn(async () => exists),
+    setValue: vi.fn(async () => undefined),
     waitForDisplayed: vi.fn(async () => undefined)
   };
 }
 
-function createReachableControlsUi(
-  overrides: Partial<{
-    getConnectionTitle: ReturnType<typeof vi.fn>;
-    getConnectionStatus: ReturnType<typeof vi.fn>;
-    getConnectLocalButton: ReturnType<typeof vi.fn>;
-    getEmailInput: ReturnType<typeof vi.fn>;
-    getPasswordInput: ReturnType<typeof vi.fn>;
-    getPasswordToggle: ReturnType<typeof vi.fn>;
-    getSignInButton: ReturnType<typeof vi.fn>;
-  }> = {}
-) {
-  return {
-    getConnectionTitle: vi.fn(async () => createElement()),
-    getConnectionStatus: vi.fn(async () => createElement()),
-    getConnectLocalButton: vi.fn(async () => createElement()),
-    getEmailInput: vi.fn(async () => createElement()),
-    getPasswordInput: vi.fn(async () => createElement()),
-    getPasswordToggle: vi.fn(async () => createElement()),
-    getSignInButton: vi.fn(async () => createElement()),
-    waitUntil: vi.fn(
-      async (condition: () => Promise<boolean>, options: FakeWaitUntilOptions) => {
-        if (await condition()) {
-          return;
-        }
-
-        throw new Error(options.timeoutMsg);
-      }
-    ),
-    ...overrides
-  };
+function createWaitUntil() {
+  return vi.fn(async (
+    condition: () => Promise<boolean>,
+    options: FakeWaitUntilOptions
+  ) => {
+    if (!(await condition())) throw new Error(options.timeoutMsg);
+  });
 }
 
-describe("openProfileConnectionSheet", () => {
-  it("opens the account sheet from the app top bar", async () => {
-    const accountButton = createElement();
-    const accountSheet = createElement();
-    const ui = {
-      getAccountButton: vi.fn(async () => accountButton),
-      getAccountSheet: vi.fn(async () => accountSheet)
+describe("Profile to Machines smoke helpers", () => {
+  it("requires a successfully consumed pairing sheet to reopen fresh", async () => {
+    const scanMode = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "selected" ? "true" : null)
+    };
+    const codeInput = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "value" ? "" : null),
+      getText: vi.fn(async () => "")
+    };
+    const error = createElement(false);
+    const submit = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "enabled" ? "false" : null)
     };
 
-    await openProfileConnectionSheet(ui);
+    await expect(assertPairingSheetFresh({
+      getPairingScanMode: async () => scanMode,
+      getPairingCodeInput: async () => codeInput,
+      getPairingError: async () => error,
+      getPairingSubmit: async () => submit
+    }, "ABC123")).resolves.toBeUndefined();
 
-    expect(accountButton.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
-    expect(accountButton.click).toHaveBeenCalledTimes(1);
+    expect(scanMode.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(scanMode.getAttribute).toHaveBeenCalledWith("selected");
+    expect(error.isExisting).toHaveBeenCalledOnce();
+    expect(submit.getAttribute).toHaveBeenCalledWith("enabled");
+  });
+
+  it("rejects a pairing sheet that retains its consumed code", async () => {
+    const staleInput = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "value" ? "abc-123" : null)
+    };
+    const submit = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "enabled" ? "false" : null)
+    };
+
+    await expect(assertPairingSheetFresh({
+      getPairingScanMode: async () => ({
+        ...createElement(),
+        getAttribute: vi.fn(async (name: string) => name === "selected" ? "true" : null)
+      }),
+      getPairingCodeInput: async () => staleInput,
+      getPairingError: async () => createElement(false),
+      getPairingSubmit: async () => submit
+    }, "ABC123")).rejects.toThrow("consumed pairing code");
+  });
+
+  it("dismisses a late Expo dev menu after relaunch before profile interaction", async () => {
+    let expoPoll = 0;
+    let devMenuDismissed = false;
+    const accountButton = createElement();
+    accountButton.click.mockImplementation(async () => {
+      if (!devMenuDismissed) throw new Error("profile interaction raced the Expo dev menu");
+    });
+
+    const driver = {
+      $: async (selector: string) => ({
+        click: async () => {
+          if (selector === "~xmark") devMenuDismissed = true;
+        },
+        isDisplayed: async () => {
+          if (selector === "~xmark") {
+            return expoPoll >= 2 && !devMenuDismissed;
+          }
+          if (selector === "~mobile.app-shell") return devMenuDismissed;
+          if (selector === "~mobile.account-button") return devMenuDismissed;
+          return false;
+        },
+        isExisting: async () => false,
+        waitForDisplayed: async () => {
+          if (selector === "~mobile.app-shell" && !devMenuDismissed) {
+            throw new Error("app shell is blocked by the late Expo dev menu");
+          }
+        }
+      }),
+      acceptAlert: vi.fn(async () => undefined),
+      activateApp: vi.fn(async () => undefined),
+      execute: vi.fn(async () => undefined),
+      getAlertText: async () => {
+        throw new Error("no alert open");
+      },
+      getWindowSize: async () => ({ width: 393, height: 852 }),
+      queryAppState: async () => 1,
+      terminateApp: vi.fn(async () => true),
+      waitUntil: async (
+        condition: () => Promise<boolean>,
+        options: { timeoutMsg: string }
+      ) => {
+        if (options.timeoutMsg.includes("terminate")) {
+          if (await condition()) return true;
+        } else {
+          while (expoPoll < 6) {
+            expoPoll += 1;
+            if (await condition()) return true;
+          }
+        }
+        throw new Error(options.timeoutMsg);
+      }
+    } as unknown as Browser;
+
+    await relaunchApp(
+      driver,
+      "build.kanna.app.dev",
+      async () => undefined,
+      "~mobile.account-button",
+      (readySelector) => waitForExpoAppReady(driver, readySelector)
+    );
+    await accountButton.click();
+
+    expect(expoPoll).toBe(4);
+    expect(devMenuDismissed).toBe(true);
+    expect(accountButton.click).toHaveBeenCalledOnce();
+  });
+
+  it("opens Profile from the top bar", async () => {
+    const accountButton = createElement();
+    const accountSheet = createElement();
+    await openProfileSheet({
+      getAccountButton: async () => accountButton,
+      getAccountSheet: async () => accountSheet
+    });
+
+    expect(accountButton.click).toHaveBeenCalledOnce();
     expect(accountSheet.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("opens the dedicated Machines screen from Profile", async () => {
+    const machinesButton = createElement();
+    const machinesScreen = createElement();
+    await openMachinesFromProfile({
+      getAccountButton: async () => createElement(),
+      getAccountSheet: async () => createElement(),
+      getMachinesButton: async () => machinesButton,
+      getMachinesScreen: async () => machinesScreen
+    });
+
+    expect(machinesButton.click).toHaveBeenCalledOnce();
+    expect(machinesScreen.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("keeps manual pairing reachable while signed out", async () => {
+    const addButton = createElement();
+    const codeInput = createElement();
+    await assertSignedOutMachineEntryPoints({
+      getAccountButton: async () => createElement(),
+      getAccountSheet: async () => createElement(),
+      getMachinesButton: async () => createElement(),
+      getMachinesScreen: async () => createElement(),
+      getMachinesAddButton: async () => addButton,
+      getPairingCodeInput: async () => codeInput
+    });
+
+    expect(addButton.click).toHaveBeenCalledOnce();
+    expect(codeInput.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("requires Profile identity controls plus the Machines entry point", async () => {
+    const waitUntil = createWaitUntil();
+    await assertProfileSignInControlsReachable({
+      getMachinesButton: async () => createElement(),
+      getEmailInput: async () => createElement(),
+      getPasswordInput: async () => createElement(),
+      getPasswordToggle: async () => createElement(),
+      getSignInButton: async () => createElement(),
+      waitUntil
+    });
+
+    expect(waitUntil).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({
+        timeoutMsg: "Expected Profile identity controls and Machines entry point to be reachable"
+      })
+    );
+  });
+
+  it("submits a pairing code and waits for the claimed machine row", async () => {
+    const codeInput = createElement();
+    const submit = createElement();
+    const machineRow = createElement();
+
+    await submitPairingCode({
+      getPairingCodeInput: async () => codeInput,
+      getPairingSubmit: async () => submit,
+      getMachineRow: async () => machineRow
+    }, "ABC123", "desktop-e2e");
+
+    expect(codeInput.setValue).toHaveBeenCalledWith("ABC123");
+    expect(submit.click).toHaveBeenCalledOnce();
+    expect(machineRow.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("requires invalid and expired pairing copy while keeping recovery controls", async () => {
+    const error = {
+      ...createElement(),
+      getText: vi.fn(async () => "That pairing session expired. Start a new one on the desktop.")
+    };
+    const codeInput = createElement();
+
+    await assertPairingFailure({
+      getPairingCodeInput: async () => codeInput,
+      getPairingError: async () => error
+    }, "expired");
+
+    expect(codeInput.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("asserts a single deduplicated dual-origin machine", async () => {
+    const row = {
+      ...createElement(),
+      getText: vi.fn(async () => "Remote E2E Desktop Account Paired")
+    };
+
+    await assertMachineOrigins({
+      getMachineOrigin: async (_desktopId, origin) => createElement(origin === "account" || origin === "manual"),
+      getMachineRow: async () => row,
+      getMachineRows: async () => [row],
+      waitUntil: createWaitUntil()
+    }, "desktop-e2e", { account: true, manual: true });
+
+    expect(row.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("removes only the manual origin while retaining a dual-origin row", async () => {
+    const remove = createElement();
+    const row = {
+      ...createElement(),
+      getText: vi.fn(async () => "Remote E2E Desktop Account")
+    };
+
+    await removeManualMachine({
+      getMachineOrigin: async (_desktopId, origin) => createElement(origin === "account"),
+      getMachineRemoveButton: async () => remove,
+      getMachineRow: async () => row,
+      getMachineRows: async () => [row],
+      waitUntil: createWaitUntil()
+    }, "desktop-e2e", true);
+
+    expect(remove.click).toHaveBeenCalledOnce();
+    expect(await row.getText()).not.toContain("Paired");
   });
 });
 
-describe("assertToolbarActionPathsReachable", () => {
+describe("Toolbar action paths", () => {
   it("opens the task composer from both Add task and the More command", async () => {
     const events: string[] = [];
+    let composerOpen = false;
     const addTaskButton = {
       ...createElement(),
       click: vi.fn(async () => {
@@ -106,7 +314,6 @@ describe("assertToolbarActionPathsReachable", () => {
         events.push("click Create Task");
       })
     };
-    let composerOpen = false;
     const promptInput = {
       ...createElement(),
       isExisting: vi.fn(async () => composerOpen),
@@ -126,20 +333,9 @@ describe("assertToolbarActionPathsReachable", () => {
       getCreateTaskPromptInput: vi.fn(async () => promptInput),
       getMoreScreen: vi.fn(async () => moreScreen),
       getMoreTab: vi.fn(async () => moreTab),
-      waitUntil: vi.fn(
-        async (condition: () => Promise<boolean>, options: FakeWaitUntilOptions) => {
-          if (await condition()) return;
-          throw new Error(options.timeoutMsg);
-        }
-      )
+      waitUntil: createWaitUntil()
     };
-    const assertToolbarActionPathsReachable = (
-      profileConnectionSmoke as typeof profileConnectionSmoke & {
-        assertToolbarActionPathsReachable: (value: typeof ui) => Promise<void>;
-      }
-    ).assertToolbarActionPathsReachable;
 
-    expect(assertToolbarActionPathsReachable).toBeTypeOf("function");
     await assertToolbarActionPathsReachable(ui);
 
     expect(events).toEqual([
@@ -160,20 +356,16 @@ describe("assertToolbarActionPathsReachable", () => {
   });
 });
 
-describe("assertOtaDiagnosticsHidden", () => {
+describe("OTA diagnostics", () => {
   it("waits for More navigation before checking that the legacy OTA element is absent", async () => {
     const events: string[] = [];
     const moreTab = {
       ...createElement(),
-      click: vi.fn(async () => {
-        events.push("click More");
-      })
+      click: vi.fn(async () => events.push("click More"))
     };
     const moreScreen = {
       ...createElement(),
-      waitForDisplayed: vi.fn(async () => {
-        events.push("More displayed");
-      })
+      waitForDisplayed: vi.fn(async () => events.push("More displayed"))
     };
     const otaStatus = {
       ...createElement(false),
@@ -182,95 +374,42 @@ describe("assertOtaDiagnosticsHidden", () => {
         return false;
       })
     };
-    const ui = {
-      getMoreTab: vi.fn(async () => moreTab),
-      getMoreScreen: vi.fn(async () => moreScreen),
-      getOtaStatusValue: vi.fn(async () => otaStatus)
-    };
 
-    await assertOtaDiagnosticsHidden(ui);
+    await assertOtaDiagnosticsHidden({
+      getMoreTab: async () => moreTab,
+      getMoreScreen: async () => moreScreen,
+      getOtaStatusValue: async () => otaStatus
+    });
 
     expect(moreTab.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
-    expect(events).toEqual([
-      "click More",
-      "More displayed",
-      "check OTA absent"
-    ]);
+    expect(events).toEqual(["click More", "More displayed", "check OTA absent"]);
   });
 
   it("fails when the legacy OTA element still exists on More", async () => {
-    const ui = {
-      getMoreTab: vi.fn(async () => createElement()),
-      getMoreScreen: vi.fn(async () => createElement()),
-      getOtaStatusValue: vi.fn(async () => createElement())
-    };
-
-    await expect(assertOtaDiagnosticsHidden(ui)).rejects.toThrow(
-      "Expected OTA diagnostics to be absent from More"
-    );
+    await expect(assertOtaDiagnosticsHidden({
+      getMoreTab: async () => createElement(),
+      getMoreScreen: async () => createElement(),
+      getOtaStatusValue: async () => createElement()
+    })).rejects.toThrow("Expected OTA diagnostics to be absent from More");
   });
 });
 
-describe("assertProfileConnectionControlsReachable", () => {
-  it("waits for connection status, local connect, and email sign-in controls", async () => {
-    const ui = createReachableControlsUi();
-
-    await assertProfileConnectionControlsReachable(ui);
-
-    expect(ui.waitUntil).toHaveBeenCalledWith(
-      expect.any(Function),
-      expect.objectContaining({
-        timeoutMsg:
-          "Expected profile drawer connection controls and sign-in form to be reachable"
-      })
-    );
-    expect(ui.getPasswordToggle).toHaveBeenCalled();
-  });
-});
-
-describe("assertProfilePasswordCanRevealAndHide", () => {
-  it("clicks the profile password toggle through native accessibility label states", async () => {
-    let toggleLabel = "Show password";
-    const passwordToggle = {
+describe("Profile password visibility", () => {
+  it("reveals and hides the password through accessibility labels", async () => {
+    let label = "Show password";
+    const toggle = {
       ...createElement(),
       click: vi.fn(async () => {
-        toggleLabel = toggleLabel === "Show password" ? "Hide password" : "Show password";
+        label = label === "Show password" ? "Hide password" : "Show password";
       }),
-      getAttribute: vi.fn(async (attributeName: string) =>
-        attributeName === "label" ? toggleLabel : null
-      ),
-      getText: vi.fn(async () => toggleLabel)
+      getAttribute: vi.fn(async (name: string) => name === "label" ? label : null)
     };
-    const ui = createReachableControlsUi({
-      getPasswordToggle: vi.fn(async () => passwordToggle)
+    await assertProfilePasswordCanRevealAndHide({
+      getPasswordToggle: async () => toggle,
+      waitUntil: createWaitUntil()
     });
 
-    await assertProfilePasswordCanRevealAndHide(ui);
-
-    expect(passwordToggle.click).toHaveBeenCalledTimes(2);
-    expect(passwordToggle.getAttribute).toHaveBeenCalledWith("label");
-    expect(passwordToggle.getText).not.toHaveBeenCalled();
-    expect(ui.getPasswordToggle).toHaveBeenCalledTimes(5);
-    expect(toggleLabel).toBe("Show password");
-  });
-});
-
-describe("assertProfileConnectionDisconnected", () => {
-  it("waits for the profile drawer to report the disconnected state", async () => {
-    const ui = createReachableControlsUi({
-      getConnectionTitle: vi.fn(async () => ({
-        ...createElement(),
-        getText: vi.fn(async () => "Not connected")
-      }))
-    });
-
-    await assertProfileConnectionDisconnected(ui);
-
-    expect(ui.waitUntil).toHaveBeenCalledWith(
-      expect.any(Function),
-      expect.objectContaining({
-        timeoutMsg: "Expected profile drawer connection status to be disconnected"
-      })
-    );
+    expect(toggle.click).toHaveBeenCalledTimes(2);
+    expect(label).toBe("Show password");
   });
 });

@@ -4,7 +4,6 @@ import { buildMoreCommandPalette, buildMoreCommandSections } from "./moreCommand
 describe("buildMoreCommandSections", () => {
   it("builds compact workspace and task command sections", () => {
     const sections = buildMoreCommandSections({
-      pairingCode: "ABC123",
       selectedTask: {
         id: "task-1",
         repoId: "repo-1",
@@ -16,7 +15,7 @@ describe("buildMoreCommandSections", () => {
 
     expect(sections[0]).toMatchObject({
       title: "Workspace",
-      headline: "ABC123"
+      headline: "Commands"
     });
     expect(sections[1]?.actions.map((action) => action.id)).toEqual([
       "advance-stage",
@@ -32,19 +31,16 @@ describe("buildMoreCommandSections", () => {
 
   it("omits task actions when no task is selected", () => {
     const sections = buildMoreCommandSections({
-      pairingCode: null,
       selectedTask: null
     });
 
     expect(sections).toHaveLength(1);
     expect(sections[0]).toMatchObject({
       title: "Workspace",
-      headline: "No pairing session"
+      headline: "Commands"
     });
     expect(sections[0]?.actions.map((action) => action.id)).toEqual([
       "refresh",
-      "pair",
-      "desktops",
       "compose"
     ]);
   });
@@ -52,7 +48,6 @@ describe("buildMoreCommandSections", () => {
   it("builds a searchable command palette and filters matching actions", () => {
     const entries = buildMoreCommandPalette(
       {
-        pairingCode: "ABC123",
         selectedTask: {
           id: "task-1",
           repoId: "repo-1",
@@ -76,7 +71,6 @@ describe("buildMoreCommandSections", () => {
   it("keeps only global commands in the palette when no task is selected", () => {
     const entries = buildMoreCommandPalette(
       {
-        pairingCode: null,
         selectedTask: null
       },
       ""
@@ -84,8 +78,6 @@ describe("buildMoreCommandSections", () => {
 
     expect(entries.map((entry) => entry.id)).toEqual([
       "refresh",
-      "pair",
-      "desktops",
       "compose"
     ]);
   });
@@ -93,7 +85,6 @@ describe("buildMoreCommandSections", () => {
   it("labels the refresh command while refresh is in progress", () => {
     const entries = buildMoreCommandPalette(
       {
-        pairingCode: null,
         refreshStatus: "refreshing",
         selectedTask: null
       },
@@ -103,7 +94,7 @@ describe("buildMoreCommandSections", () => {
     expect(entries[0]).toMatchObject({
       id: "refresh",
       title: "Refreshing...",
-      copy: "Reloading desktops, repos, and recent tasks."
+      copy: "Reloading machines, repos, and recent tasks."
     });
   });
 });
