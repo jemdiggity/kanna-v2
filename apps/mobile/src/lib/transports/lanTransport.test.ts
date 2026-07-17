@@ -364,8 +364,13 @@ describe("createLanTransport", () => {
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
     expect(events).toEqual([
-      { type: "ready", taskId: "task-1", cols: 80, rows: 24 },
-      { type: "output", taskId: "task-1", dataB64: "4pSA55WM" },
+      {
+        type: "snapshot",
+        taskId: "task-1",
+        cols: 80,
+        rows: 24,
+        dataB64: "4pSA55WM"
+      },
       { type: "output", taskId: "task-1", dataB64: "8J8=" },
       { type: "output", taskId: "task-1", dataB64: "mIA=" },
       { type: "exit", taskId: "task-1", code: 0 }

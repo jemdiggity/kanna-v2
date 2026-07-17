@@ -136,10 +136,7 @@ export function createLanTransport(
 
       client.attachTerminal(taskId, {
         onSnapshot(cols, rows, dataB64) {
-          listener({ type: "ready", taskId, cols, rows });
-          if (dataB64) {
-            listener({ type: "output", taskId, dataB64 });
-          }
+          listener({ type: "snapshot", taskId, cols, rows, dataB64 });
         },
         onOutput(dataB64) {
           if (dataB64) {

@@ -185,6 +185,8 @@ export default function App() {
           task={selectedTask}
           terminalErrorMessage={state.taskTerminalErrorMessage}
           terminalOutput={state.taskTerminalOutput}
+          terminalOutputEpoch={state.taskTerminalOutputEpoch}
+          terminalOutputStart={state.taskTerminalOutputStart}
           terminalStatus={state.taskTerminalStatus}
           terminalCols={state.taskTerminalCols}
           terminalRows={state.taskTerminalRows}

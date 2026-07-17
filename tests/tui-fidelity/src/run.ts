@@ -40,16 +40,43 @@ async function main(): Promise<void> {
         fixturePath,
         cols,
         rows,
-        snapshotAt: fixture.snapshotAt
+        snapshotAt: fixture.snapshotAt,
+        resnapshotAt: fixture.resnapshotAt,
+        chunkPattern: fixture.chunkPattern
       });
       if (emitted.used_visible_text_fallback && !fixture.allowFallback) {
         throw new Error(`${fixture.name} unexpectedly used visible_text_vt fallback`);
       }
-      const pathGrid = fixture.replayThroughSessionStore
+      const sessionStoreResult = fixture.replayThroughSessionStore
         ? await renderSessionStorePathGrid(browser, emitted)
-        : await renderPathGrid(browser, emitted);
+        : null;
+      const pathGrid = sessionStoreResult?.grid ?? await renderPathGrid(browser, emitted);
       if (fixture.replayThroughSessionStore && pathGrid.serialized.trim().length === 0) {
         throw new Error(`${fixture.name} rendered a blank terminal after sessionStore replay`);
+      }
+      if (fixture.assertStreamCompaction) {
+        if (!sessionStoreResult) {
+          throw new Error(`${fixture.name} did not use the sessionStore render path`);
+        }
+        const { metrics } = sessionStoreResult;
+        if (metrics.maxRetainedStart <= 0) {
+          throw new Error(`${fixture.name} did not cross the retained-history cap`);
+        }
+        if (metrics.snapshotCount !== 2 || metrics.replaceCount !== metrics.snapshotCount) {
+          throw new Error(
+            `${fixture.name} expected one replacement per authoritative snapshot; ` +
+            `snapshots=${metrics.snapshotCount}, replacements=${metrics.replaceCount}`
+          );
+        }
+        if (metrics.appendCount <= 0) {
+          throw new Error(`${fixture.name} did not exercise live append mutations`);
+        }
+        const visibleText = pathGrid.cells.map((cell) => cell.chars).join("");
+        if (!visibleText.includes("230s") || !visibleText.includes("esc to interrupt")) {
+          throw new Error(
+            `${fixture.name} lost static or changing status text after compaction/reconnect`
+          );
+        }
       }
       const referenceGrid = await renderReferenceGrid(
         browser,

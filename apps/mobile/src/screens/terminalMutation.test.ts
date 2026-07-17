@@ -5,9 +5,13 @@ describe("planTerminalMutation", () => {
   it("replaces the terminal contents when the first output arrives", () => {
     expect(
       planTerminalMutation({
+        previousEpoch: 1,
         previousOutput: "",
+        previousStart: 0,
         previousStatus: "connecting",
+        nextEpoch: 1,
         nextOutput: "Claude Code is starting\n",
+        nextStart: 0,
         nextStatus: "live"
       })
     ).toEqual({
@@ -20,9 +24,13 @@ describe("planTerminalMutation", () => {
   it("appends only the new chunk when output grows", () => {
     expect(
       planTerminalMutation({
+        previousEpoch: 1,
         previousOutput: "First line\n",
+        previousStart: 0,
         previousStatus: "live",
+        nextEpoch: 1,
         nextOutput: "First line\nSecond line\n",
+        nextStart: 0,
         nextStatus: "live"
       })
     ).toEqual({
@@ -31,27 +39,79 @@ describe("planTerminalMutation", () => {
     });
   });
 
-  it("replaces the terminal when the visible buffer no longer extends the previous output", () => {
+  it("appends from the logical stream end after the retained prefix is compacted", () => {
     expect(
       planTerminalMutation({
-        previousOutput: "First line\nSecond line\n",
+        previousEpoch: 7,
+        previousOutput: "A\nB\n",
+        previousStart: 0,
         previousStatus: "live",
-        nextOutput: "Second line\nThird line\n",
+        nextEpoch: 7,
+        nextOutput: "B\nC\n",
+        nextStart: 2,
         nextStatus: "live"
       })
     ).toEqual({
-      kind: "replace",
-      output: "Second line\nThird line\n",
-      status: "live"
+      kind: "append",
+      chunk: "C\n"
     });
+  });
+
+  it("appends every unseen frame when React coalesces store publications", () => {
+    expect(
+      planTerminalMutation({
+        previousEpoch: 3,
+        previousOutput: "A\nB\n",
+        previousStart: 0,
+        previousStatus: "live",
+        nextEpoch: 3,
+        nextOutput: "C\nD\nE\n",
+        nextStart: 4,
+        nextStatus: "live"
+      })
+    ).toEqual({ kind: "append", chunk: "C\nD\nE\n" });
+  });
+
+  it("replaces once when an authoritative snapshot starts a new epoch", () => {
+    expect(
+      planTerminalMutation({
+        previousEpoch: 4,
+        previousOutput: "old\n",
+        previousStart: 100,
+        previousStatus: "live",
+        nextEpoch: 5,
+        nextOutput: "snapshot\n",
+        nextStart: 0,
+        nextStatus: "live"
+      })
+    ).toEqual({ kind: "replace", output: "snapshot\n", status: "live" });
+  });
+
+  it("uses the safe replacement path when compaction creates a genuine gap", () => {
+    expect(
+      planTerminalMutation({
+        previousEpoch: 2,
+        previousOutput: "A\n",
+        previousStart: 0,
+        previousStatus: "live",
+        nextEpoch: 2,
+        nextOutput: "C\nD\n",
+        nextStart: 4,
+        nextStatus: "live"
+      })
+    ).toEqual({ kind: "replace", output: "C\nD\n", status: "live" });
   });
 
   it("replaces status copy when there is no terminal output", () => {
     expect(
       planTerminalMutation({
+        previousEpoch: 1,
         previousOutput: "",
+        previousStart: 0,
         previousStatus: "connecting",
+        nextEpoch: 1,
         nextOutput: "",
+        nextStart: 0,
         nextStatus: "idle"
       })
     ).toEqual({
@@ -64,9 +124,13 @@ describe("planTerminalMutation", () => {
   it("does nothing when neither the output nor the visible empty-state changes", () => {
     expect(
       planTerminalMutation({
+        previousEpoch: 1,
         previousOutput: "First line\n",
+        previousStart: 0,
         previousStatus: "live",
+        nextEpoch: 1,
         nextOutput: "First line\n",
+        nextStart: 0,
         nextStatus: "closed"
       })
     ).toEqual({ kind: "none" });

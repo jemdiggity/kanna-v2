@@ -16,6 +16,7 @@ struct Emission {
     cols: u16,
     rows: u16,
     snapshot_at: usize,
+    resnapshot_at: Option<usize>,
     used_visible_text_fallback: bool,
     frames: Vec<ServerFrame>,
 }
@@ -30,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.cols,
         config.rows,
         config.snapshot_at.unwrap_or(0),
+        config.resnapshot_at,
         &config.chunk_pattern,
     )?;
     let json = serde_json::to_string_pretty(&emitted)?;
@@ -47,6 +49,7 @@ struct CliConfig {
     cols: u16,
     rows: u16,
     snapshot_at: Option<usize>,
+    resnapshot_at: Option<usize>,
     chunk_pattern: Vec<usize>,
 }
 
@@ -59,6 +62,7 @@ where
     let mut cols = DEFAULT_COLS;
     let mut rows = DEFAULT_ROWS;
     let mut snapshot_at = None;
+    let mut resnapshot_at = None;
     let mut chunk_pattern = DEFAULT_CHUNK_PATTERN.to_vec();
     let mut args = args.into_iter();
 
@@ -67,6 +71,7 @@ where
             "--cols" => cols = parse_next(&mut args, "--cols")?,
             "--rows" => rows = parse_next(&mut args, "--rows")?,
             "--snapshot-at" => snapshot_at = Some(parse_next(&mut args, "--snapshot-at")?),
+            "--resnapshot-at" => resnapshot_at = Some(parse_next(&mut args, "--resnapshot-at")?),
             "--chunk-pattern" => {
                 let value: String = parse_next(&mut args, "--chunk-pattern")?;
                 chunk_pattern = parse_chunk_pattern(&value)?;
@@ -92,6 +97,7 @@ where
         cols,
         rows,
         snapshot_at,
+        resnapshot_at,
         chunk_pattern,
     })
 }
@@ -126,7 +132,7 @@ fn parse_chunk_pattern(
 }
 
 fn usage() -> String {
-    "usage: tui-fidelity-emit [--cols N] [--rows N] [--snapshot-at N] [--chunk-pattern 7,1,13] [--output PATH] FIXTURE".to_string()
+    "usage: tui-fidelity-emit [--cols N] [--rows N] [--snapshot-at N] [--resnapshot-at N] [--chunk-pattern 7,1,13] [--output PATH] FIXTURE".to_string()
 }
 
 fn emit_fixture_with_snapshot_at(
@@ -135,12 +141,17 @@ fn emit_fixture_with_snapshot_at(
     cols: u16,
     rows: u16,
     snapshot_at: usize,
+    resnapshot_at: Option<usize>,
     pattern: &[usize],
 ) -> Result<Emission, Box<dyn std::error::Error + Send + Sync>> {
     let snapshot_at = snapshot_at.min(bytes.len());
+    let resnapshot_at = resnapshot_at
+        .map(|offset| offset.min(bytes.len()))
+        .filter(|offset| *offset > snapshot_at);
     let mut terminal = HeadlessTerminal::new(cols, rows, 10_000)?;
     terminal.write(&bytes[..snapshot_at]);
     let snapshot = terminal.snapshot_with_metadata()?;
+    let mut used_visible_text_fallback = snapshot.used_visible_text_fallback;
 
     let mut frames = vec![ServerFrame::TermSnapshot {
         task_id: DEFAULT_TASK_ID.to_string(),
@@ -148,11 +159,29 @@ fn emit_fixture_with_snapshot_at(
         rows: snapshot.snapshot.rows,
         data_b64: b64(snapshot.snapshot.vt.as_bytes()),
     }];
-    for chunk in split_chunks(&bytes[snapshot_at..], pattern) {
+    let first_output_end = resnapshot_at.unwrap_or(bytes.len());
+    for chunk in split_chunks(&bytes[snapshot_at..first_output_end], pattern) {
+        terminal.write(&chunk);
         frames.push(ServerFrame::TermOutput {
             task_id: DEFAULT_TASK_ID.to_string(),
             data_b64: b64(&chunk),
         });
+    }
+    if let Some(resnapshot_at) = resnapshot_at {
+        let resnapshot = terminal.snapshot_with_metadata()?;
+        used_visible_text_fallback |= resnapshot.used_visible_text_fallback;
+        frames.push(ServerFrame::TermSnapshot {
+            task_id: DEFAULT_TASK_ID.to_string(),
+            cols: resnapshot.snapshot.cols,
+            rows: resnapshot.snapshot.rows,
+            data_b64: b64(resnapshot.snapshot.vt.as_bytes()),
+        });
+        for chunk in split_chunks(&bytes[resnapshot_at..], pattern) {
+            frames.push(ServerFrame::TermOutput {
+                task_id: DEFAULT_TASK_ID.to_string(),
+                data_b64: b64(&chunk),
+            });
+        }
     }
 
     Ok(Emission {
@@ -160,7 +189,8 @@ fn emit_fixture_with_snapshot_at(
         cols,
         rows,
         snapshot_at,
-        used_visible_text_fallback: snapshot.used_visible_text_fallback,
+        resnapshot_at,
+        used_visible_text_fallback,
         frames,
     })
 }
@@ -215,7 +245,7 @@ mod tests {
     #[test]
     fn emits_snapshot_then_chunked_ksp_output_frames() {
         let emitted =
-            super::emit_fixture_with_snapshot_at("fixture.bin", b"hello", 80, 24, 1, &[2, 3])
+            super::emit_fixture_with_snapshot_at("fixture.bin", b"hello", 80, 24, 1, None, &[2, 3])
                 .unwrap();
 
         assert_eq!(emitted.fixture, "fixture.bin");
@@ -240,6 +270,45 @@ mod tests {
             ServerFrame::TermOutput {
                 task_id: "tui-fidelity".to_string(),
                 data_b64: "bG8=".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn emits_a_second_authoritative_snapshot_after_intervening_output() {
+        let emitted = super::emit_fixture_with_snapshot_at(
+            "fixture.bin",
+            b"initial-live-tail",
+            80,
+            24,
+            7,
+            Some(12),
+            &[5],
+        )
+        .unwrap();
+
+        assert_eq!(emitted.resnapshot_at, Some(12));
+        assert_eq!(emitted.frames.len(), 4);
+        assert!(matches!(
+            emitted.frames[0],
+            ServerFrame::TermSnapshot { .. }
+        ));
+        assert_eq!(
+            emitted.frames[1],
+            ServerFrame::TermOutput {
+                task_id: "tui-fidelity".to_string(),
+                data_b64: "LWxpdmU=".to_string(),
+            }
+        );
+        assert!(matches!(
+            emitted.frames[2],
+            ServerFrame::TermSnapshot { .. }
+        ));
+        assert_eq!(
+            emitted.frames[3],
+            ServerFrame::TermOutput {
+                task_id: "tui-fidelity".to_string(),
+                data_b64: "LXRhaWw=".to_string(),
             }
         );
     }

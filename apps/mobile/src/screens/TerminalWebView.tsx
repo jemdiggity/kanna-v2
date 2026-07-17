@@ -21,6 +21,8 @@ import { MOBILE_E2E_IDS } from "../e2eTestIds";
 interface TerminalWebViewProps {
   taskId: string;
   output: string;
+  outputEpoch: number;
+  outputStart: number;
   status: TaskTerminalStatus;
   cols: number | null;
   rows: number | null;
@@ -87,6 +89,8 @@ const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<
 export function TerminalWebView({
   taskId,
   output,
+  outputEpoch,
+  outputStart,
   status,
   cols,
   rows,
@@ -100,6 +104,8 @@ export function TerminalWebView({
   const pendingScriptsRef = useRef<string[]>([]);
   const previousTaskIdRef = useRef<string | null>(null);
   const previousOutputRef = useRef("");
+  const previousOutputEpochRef = useRef(0);
+  const previousOutputStartRef = useRef(0);
   const previousStatusRef = useRef<TaskTerminalStatus>("idle");
   const activeTaskIdRef = useRef(taskId);
   activeTaskIdRef.current = taskId;
@@ -180,19 +186,27 @@ export function TerminalWebView({
       setSelectionCopyPending(false);
       previousTaskIdRef.current = taskId;
       previousOutputRef.current = output;
+      previousOutputEpochRef.current = outputEpoch;
+      previousOutputStartRef.current = outputStart;
       previousStatusRef.current = status;
       injectOrQueueScript(replaceScript);
       return;
     }
 
     const mutation = planTerminalMutation({
+      previousEpoch: previousOutputEpochRef.current,
       previousOutput: previousOutputRef.current,
+      previousStart: previousOutputStartRef.current,
       previousStatus: previousStatusRef.current,
+      nextEpoch: outputEpoch,
       nextOutput: output,
+      nextStart: outputStart,
       nextStatus: status
     });
 
     previousOutputRef.current = output;
+    previousOutputEpochRef.current = outputEpoch;
+    previousOutputStartRef.current = outputStart;
     previousStatusRef.current = status;
 
     switch (mutation.kind) {
@@ -211,7 +225,7 @@ export function TerminalWebView({
       default:
         break;
     }
-  }, [output, replaceScript, status, taskId]);
+  }, [output, outputEpoch, outputStart, replaceScript, status, taskId]);
 
   useEffect(() => {
     if (cols && rows) {
@@ -478,6 +492,8 @@ export function TerminalWebView({
         onLoadEnd={() => {
           previousTaskIdRef.current = taskId;
           previousOutputRef.current = output;
+          previousOutputEpochRef.current = outputEpoch;
+          previousOutputStartRef.current = outputStart;
           previousStatusRef.current = status;
         }}
         scrollEnabled

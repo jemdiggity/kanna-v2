@@ -51,7 +51,8 @@ function buildSyntheticFixtures(): FixtureDefinition[] {
     spinnerRedraw(),
     splitSensitiveUtf8AndEscape(),
     bottomAnchoredNon220(),
-    largeSnapshotThroughSessionStore()
+    largeSnapshotThroughSessionStore(),
+    statusRedrawAcrossCompaction()
   ];
 }
 
@@ -222,5 +223,38 @@ function largeSnapshotThroughSessionStore(): FixtureDefinition {
     cols: 220,
     rows,
     replayThroughSessionStore: true
+  };
+}
+
+function statusRedrawAcrossCompaction(): FixtureDefinition {
+  const cols = 80;
+  const rows = 24;
+  const initial = [
+    "\x1b[2J\x1b[HAgent response remains stable",
+    "\x1b[24;1H\x1b[2KWorking (0s - esc to interrupt)"
+  ].join("");
+  const updates = Array.from({ length: 230 }, (_value, index) => {
+    const seconds = index + 1;
+    // The title update is intentionally large but grid-neutral. Its KSP/base64
+    // representation pushes the real sessionStore across the 1 MB cap while
+    // the visible status line behaves like Codex's rapid timer redraw.
+    return `\x1b[24;1H\x1b[2KWorking (${seconds}s - esc to interrupt)\x1b]0;${"x".repeat(3600)}\x07`;
+  });
+  const snapshotAt = encoder.encode(initial).length;
+  const beforeReconnect = updates.slice(0, 220).join("");
+  const text = `${initial}${updates.join("")}`;
+
+  return {
+    name: "status-redraw-stream-compaction",
+    description:
+      "Codex-like working timer crosses the mobile retained-history cap, then receives an authoritative reconnect snapshot.",
+    bytes: bytes(text),
+    snapshotAt,
+    resnapshotAt: snapshotAt + encoder.encode(beforeReconnect).length,
+    chunkPattern: [4096],
+    cols,
+    rows,
+    replayThroughSessionStore: true,
+    assertStreamCompaction: true
   };
 }

@@ -15,19 +15,38 @@ export type TerminalMutation =
     };
 
 interface PlanTerminalMutationOptions {
+  previousEpoch: number;
   previousOutput: string;
+  previousStart: number;
   previousStatus: TaskTerminalStatus;
+  nextEpoch: number;
   nextOutput: string;
+  nextStart: number;
   nextStatus: TaskTerminalStatus;
 }
 
 export function planTerminalMutation({
+  previousEpoch,
   previousOutput,
+  previousStart,
   previousStatus,
+  nextEpoch,
   nextOutput,
+  nextStart,
   nextStatus
 }: PlanTerminalMutationOptions): TerminalMutation {
-  if (nextOutput === previousOutput) {
+  if (nextEpoch !== previousEpoch) {
+    return {
+      kind: "replace",
+      output: nextOutput,
+      status: nextStatus
+    };
+  }
+
+  const previousEnd = previousStart + previousOutput.length;
+  const nextEnd = nextStart + nextOutput.length;
+
+  if (previousEnd === nextEnd) {
     if (!nextOutput.trim() && nextStatus !== previousStatus) {
       return {
         kind: "replace",
@@ -47,10 +66,10 @@ export function planTerminalMutation({
     };
   }
 
-  if (nextOutput.startsWith(previousOutput)) {
+  if (previousEnd >= nextStart && previousEnd <= nextEnd) {
     return {
       kind: "append",
-      chunk: nextOutput.slice(previousOutput.length)
+      chunk: nextOutput.slice(previousEnd - nextStart)
     };
   }
 

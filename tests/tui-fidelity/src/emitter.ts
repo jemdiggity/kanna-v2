@@ -11,6 +11,8 @@ export interface EmitFixtureOptions {
   cols: number;
   rows: number;
   snapshotAt: number;
+  resnapshotAt?: number;
+  chunkPattern?: number[];
 }
 
 export async function emitFixtureFrames(options: EmitFixtureOptions): Promise<EmitterOutput> {
@@ -30,8 +32,11 @@ export async function emitFixtureFrames(options: EmitFixtureOptions): Promise<Em
       String(options.rows),
       "--snapshot-at",
       String(options.snapshotAt),
+      ...(options.resnapshotAt === undefined
+        ? []
+        : ["--resnapshot-at", String(options.resnapshotAt)]),
       "--chunk-pattern",
-      "7,1,13,2,31",
+      (options.chunkPattern ?? [7, 1, 13, 2, 31]).join(","),
       path.resolve(options.fixturePath)
     ],
     {
@@ -59,6 +64,7 @@ function isEmitterOutput(value: unknown): value is EmitterOutput {
     typeof value.cols === "number" &&
     typeof value.rows === "number" &&
     typeof value.snapshot_at === "number" &&
+    (value.resnapshot_at === null || typeof value.resnapshot_at === "number") &&
     typeof value.used_visible_text_fallback === "boolean" &&
     Array.isArray(value.frames) &&
     value.frames.every(isTerminalFrame)
