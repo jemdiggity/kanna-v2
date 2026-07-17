@@ -4136,6 +4136,46 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalOutput).not.toContain("First line");
   });
 
+  it("replaces stale replay output with an authoritative reconnect snapshot", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const reconnectSnapshot = "B".repeat(1_100_000);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: "aW5pdGlhbCBzbmFwc2hvdA=="
+    });
+    client.__terminalStream.emit({
+      type: "output",
+      taskId: "task-1",
+      dataB64: "c3RhbGUgbGl2ZSBvdXRwdXQ="
+    });
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 132,
+      rows: 43,
+      dataB64: reconnectSnapshot
+    });
+    client.__terminalStream.emit({
+      type: "output",
+      taskId: "task-1",
+      dataB64: "ZnJlc2ggbGl2ZSBvdXRwdXQ="
+    });
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalCols: 132,
+      taskTerminalRows: 43,
+      taskTerminalOutput: `${reconnectSnapshot}\nZnJlc2ggbGl2ZSBvdXRwdXQ=\n`
+    });
+  });
+
   it("stores desktop PTY dimensions from an authoritative snapshot", async () => {
     const store = createSessionStore();
     const client = createClientMock();
