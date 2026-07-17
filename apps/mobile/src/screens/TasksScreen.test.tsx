@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
+import { projectTaskUiSlots } from "../state/taskUiSlots";
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -13,11 +14,13 @@ vi.mock("react-native", () => ({
 
 let TasksScreen: typeof import("./TasksScreen").TasksScreen | null = null;
 let TaskList: typeof import("../components/TaskList").TaskList | null = null;
+let TaskCard: typeof import("../components/TaskCard").TaskCard | null = null;
 
 beforeAll(async () => {
-  [TasksScreen, TaskList] = await Promise.all([
+  [TasksScreen, TaskList, TaskCard] = await Promise.all([
     import("./TasksScreen").then((module) => module.TasksScreen),
-    import("../components/TaskList").then((module) => module.TaskList)
+    import("../components/TaskList").then((module) => module.TaskList),
+    import("../components/TaskCard").then((module) => module.TaskCard)
   ]);
 });
 
@@ -61,7 +64,7 @@ describe("TasksScreen", () => {
       heading: "Tasks",
       repos: [{ id: "repo-1", name: "Repo One" }],
       selectedRepoId: "repo-1",
-      tasks: [],
+      taskSlots: [],
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
     }) as ElementNode;
@@ -70,7 +73,7 @@ describe("TasksScreen", () => {
   });
 
   it("keeps Recent pan-repo even when the Tasks view has a selected repo", () => {
-    if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
+    if (!TasksScreen || !TaskList || !TaskCard) throw new Error("TasksScreen was not loaded");
     const tasks = [
       { id: "task-a", repoId: "repo-a", title: "Task A", stage: "review" },
       { id: "task-b", repoId: "repo-b", title: "Task B", stage: "in progress" }
@@ -83,12 +86,14 @@ describe("TasksScreen", () => {
         { id: "repo-b", name: "Repo B" }
       ],
       selectedRepoId: "repo-a",
-      tasks,
+      taskSlots: projectTaskUiSlots(tasks, []),
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
     }) as ElementNode;
 
-    expect(findElement(tree, TaskList)?.props?.tasks).toEqual(tasks);
+    expect(findElement(tree, TaskList)?.props?.taskSlots).toEqual(
+      projectTaskUiSlots(tasks, [])
+    );
     expect(tree.props?.testID).toBe(MOBILE_E2E_IDS.recentScreen);
     expect(textContent(tree)).not.toContain("Repo A");
   });
@@ -130,14 +135,16 @@ describe("TasksScreen", () => {
       heading: "Recent",
       repos: [],
       selectedRepoId: "repo-a",
-      tasks,
+      taskSlots: projectTaskUiSlots(tasks, []),
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
     }) as ElementNode;
 
     expect(
-      (findElement(tree, TaskList)?.props?.tasks as typeof tasks).map(
-        ({ id }) => id
+      (findElement(tree, TaskList)?.props?.taskSlots as Array<{
+        taskId: string | null;
+      }>).map(
+        ({ taskId }) => taskId
       )
     ).toEqual(["unread-1", "unread-2", "idle-1", "working-1"]);
   });
@@ -158,16 +165,43 @@ describe("TasksScreen", () => {
         { id: "repo-b", name: "Repo B" }
       ],
       selectedRepoId: "repo-a",
-      tasks: [
+      taskSlots: projectTaskUiSlots([
         taskA,
         { id: "task-b", repoId: "repo-b", title: "Task B", stage: "review" }
-      ],
+      ], []),
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
     }) as ElementNode;
 
-    expect(findElement(tree, TaskList)?.props?.tasks).toEqual([taskA]);
+    expect(findElement(tree, TaskList)?.props?.taskSlots).toEqual(
+      projectTaskUiSlots([taskA], [])
+    );
     expect(tree.props?.testID).toBe(MOBILE_E2E_IDS.tasksScreen);
     expect(findElement(tree, TaskList)?.props?.testID).toBeUndefined();
+  });
+
+  it("opens an acknowledged task through its stable UI slot id", () => {
+    if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
+    const onOpenTask = vi.fn();
+    const [slot] = projectTaskUiSlots(
+      [{ id: "task-durable", repoId: "repo-1", title: "Task", stage: "review" }],
+      []
+    );
+    const stableSlot = { ...slot!, slotId: "create:slot-1" };
+    const tree = TasksScreen({
+      heading: "Recent",
+      repos: [],
+      selectedRepoId: null,
+      taskSlots: [stableSlot],
+      onOpenTask,
+      onSelectRepo: vi.fn()
+    }) as ElementNode;
+    const taskListTree = TaskList(findElement(tree, TaskList)?.props as never) as ElementNode;
+    const taskCard = findElement(taskListTree, TaskCard);
+    const row = TaskCard(taskCard?.props as never) as ElementNode;
+
+    expect(row?.props?.testID).toBe("mobile.task-row.create:slot-1");
+    (row?.props?.onPress as (() => void) | undefined)?.();
+    expect(onOpenTask).toHaveBeenCalledWith("create:slot-1");
   });
 });

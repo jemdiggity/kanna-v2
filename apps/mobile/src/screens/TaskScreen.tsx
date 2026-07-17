@@ -11,7 +11,10 @@ import {
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskFileContent, TaskSummary } from "../lib/api/types";
-import type { TaskTerminalStatus } from "../state/sessionStore";
+import type {
+  TaskCreationPhase,
+  TaskTerminalStatus
+} from "../state/sessionStore";
 import type { FrameAgentEvent, PermissionDecision } from "@kanna/agent-protocol";
 import { AgentMessageView } from "./AgentMessageView";
 import { TaskFilePreview } from "./TaskFilePreview";
@@ -34,12 +37,15 @@ interface TaskScreenProps {
   agentEvents: FrameAgentEvent[];
   agentStatus: TaskTerminalStatus;
   agentErrorMessage: string | null;
+  taskCreationPhase?: TaskCreationPhase;
+  taskCreationErrorMessage?: string | null;
   onBack(): void;
   onOpenMore(): void;
   onReadTaskFile(path: string): Promise<TaskFileContent>;
   onSendInput(input: string): void;
   onStopAgent(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
+  onRecoverTaskCreation(): void;
 }
 
 function preserveExpandedTextSelection(): void {
@@ -57,17 +63,21 @@ export function TaskScreen({
   agentEvents,
   agentStatus,
   agentErrorMessage,
+  taskCreationPhase = "idle",
+  taskCreationErrorMessage = null,
   onBack,
   onOpenMore,
   onReadTaskFile,
   onSendInput,
   onStopAgent,
-  onResolveAgentPermission
+  onResolveAgentPermission,
+  onRecoverTaskCreation
 }: TaskScreenProps) {
   const model = buildTaskWorkspaceModel({
     task,
     terminalStatus,
-    terminalErrorMessage
+    terminalErrorMessage,
+    taskCreationPhase
   });
   const [draftInput, setDraftInput] = useState("");
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -111,7 +121,9 @@ export function TaskScreen({
       ? task.activity
       : "idle";
   const isComposerDisabled = isAgentTask
-    ? agentStatus === "connecting" || agentStatus === "error"
+    ? taskCreationPhase !== "idle" ||
+      agentStatus === "connecting" ||
+      agentStatus === "error"
     : model.isComposerDisabled;
   const terminalBottomInset = getTerminalBottomInset(screenHeight, composerTop);
   const composerSnapshotRef = useRef({
@@ -201,7 +213,29 @@ export function TaskScreen({
         </Text>
       ) : null}
       <View style={styles.terminalCanvas}>
-        {task.agentType === "agent" ? (
+        {taskCreationPhase !== "idle" ? (
+          <View style={styles.terminalSkeleton}>
+            <View style={styles.skeletonLineWide} />
+            <View style={styles.skeletonLineMid} />
+            <View style={styles.skeletonLineShort} />
+            <View style={styles.terminalOverlay} testID={MOBILE_E2E_IDS.terminalOverlay}>
+              <Text style={styles.terminalOverlayLabel}>{model.overlayLabel}</Text>
+              {taskCreationErrorMessage ? (
+                <Text style={styles.taskCreationError}>{taskCreationErrorMessage}</Text>
+              ) : null}
+              {model.canRecoverTaskCreation ? (
+                <Pressable
+                  accessibilityRole="button"
+                  style={styles.taskCreationRecoverButton}
+                  testID={MOBILE_E2E_IDS.taskCreationRecoverButton}
+                  onPress={onRecoverTaskCreation}
+                >
+                  <Text style={styles.taskCreationRecoverLabel}>Recover task</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        ) : task.agentType === "agent" ? (
           <AgentMessageView
             errorMessage={agentErrorMessage}
             events={agentEvents}
@@ -432,6 +466,7 @@ const styles = StyleSheet.create({
   terminalOverlay: {
     alignItems: "center",
     bottom: 0,
+    gap: 12,
     justifyContent: "center",
     left: 0,
     position: "absolute",
@@ -449,6 +484,23 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     paddingHorizontal: 12,
     paddingVertical: 8
+  },
+  taskCreationError: {
+    color: "#D6A5A5",
+    fontSize: 12,
+    maxWidth: 280,
+    textAlign: "center"
+  },
+  taskCreationRecoverButton: {
+    backgroundColor: "#E8F1FF",
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  taskCreationRecoverLabel: {
+    color: "#0B1220",
+    fontSize: 13,
+    fontWeight: "700"
   },
   topChrome: {
     alignItems: "flex-start",

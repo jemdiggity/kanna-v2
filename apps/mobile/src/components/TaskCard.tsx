@@ -6,10 +6,11 @@ import { buildTaskListItemModel } from "../screens/taskPresentation";
 
 interface TaskCardProps {
   task: TaskSummary;
+  uiId?: string;
   onPress(): void;
 }
 
-export function TaskCard({ task, onPress }: TaskCardProps) {
+export function TaskCard({ task, uiId = task.id, onPress }: TaskCardProps) {
   const model = buildTaskListItemModel(task);
   const accessibilityLabel = [
     model.title,
@@ -36,7 +37,7 @@ export function TaskCard({ task, onPress }: TaskCardProps) {
       accessibilityValue={{ text: effectiveActivity }}
       accessible
       style={styles.card}
-      testID={MOBILE_E2E_IDS.taskListItem(task.id)}
+      testID={MOBILE_E2E_IDS.taskListItem(uiId)}
       onPress={onPress}
     >
       <View style={styles.row}>

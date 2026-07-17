@@ -1,5 +1,8 @@
 import type { TaskSummary } from "../lib/api/types";
-import type { TaskTerminalStatus } from "../state/sessionStore";
+import type {
+  TaskCreationPhase,
+  TaskTerminalStatus
+} from "../state/sessionStore";
 
 export interface TaskWorkspaceModel {
   stageLabel: string;
@@ -7,6 +10,7 @@ export interface TaskWorkspaceModel {
   isTerminalHealthy: boolean;
   overlayLabel: string | null;
   isComposerDisabled: boolean;
+  canRecoverTaskCreation: boolean;
   chromeStyle: "floating";
   terminalLayout: "fullscreen";
   titlePresentation: "chip";
@@ -16,23 +20,46 @@ interface BuildTaskWorkspaceModelOptions {
   task: TaskSummary;
   terminalStatus: TaskTerminalStatus;
   terminalErrorMessage?: string | null;
+  taskCreationPhase?: TaskCreationPhase;
 }
 
 export function buildTaskWorkspaceModel({
   task,
   terminalStatus,
-  terminalErrorMessage = null
+  terminalErrorMessage = null,
+  taskCreationPhase = "idle"
 }: BuildTaskWorkspaceModelOptions): TaskWorkspaceModel {
+  const creationOverlayLabel = getCreationOverlayLabel(taskCreationPhase);
+
   return {
     stageLabel: task.stage ?? "unknown",
     title: task.title,
-    isTerminalHealthy: terminalStatus === "live",
-    overlayLabel: getOverlayLabel(terminalStatus, terminalErrorMessage),
-    isComposerDisabled: terminalStatus !== "live",
+    isTerminalHealthy:
+      taskCreationPhase === "idle" && terminalStatus === "live",
+    overlayLabel:
+      creationOverlayLabel ??
+      getOverlayLabel(terminalStatus, terminalErrorMessage),
+    isComposerDisabled:
+      taskCreationPhase !== "idle" || terminalStatus !== "live",
+    canRecoverTaskCreation: taskCreationPhase === "uncertain",
     chromeStyle: "floating",
     terminalLayout: "fullscreen",
     titlePresentation: "chip"
   };
+}
+
+function getCreationOverlayLabel(phase: TaskCreationPhase): string | null {
+  switch (phase) {
+    case "pending":
+      return "Creating task";
+    case "recovering":
+      return "Recovering task";
+    case "uncertain":
+      return "Task creation interrupted";
+    case "idle":
+    default:
+      return null;
+  }
 }
 
 function getOverlayLabel(

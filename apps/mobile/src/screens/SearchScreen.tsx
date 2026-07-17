@@ -3,6 +3,7 @@ import { ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
+import { projectTaskUiSlots } from "../state/taskUiSlots";
 
 interface SearchScreenProps {
   query: string;
@@ -43,7 +44,7 @@ export function SearchScreen({
               ? "No tasks matched that search yet."
               : "Start typing to search tasks across your desktop."
           }
-          tasks={results}
+          taskSlots={projectTaskUiSlots(results, [])}
           onOpenTask={onOpenTask}
         />
       </View>

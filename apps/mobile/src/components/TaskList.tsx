@@ -1,11 +1,12 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
-import type { TaskSummary } from "../lib/api/types";
+import type { TaskUiSlot } from "../state/taskUiSlots";
+import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 import { TaskCard } from "./TaskCard";
 
 interface TaskListProps {
   emptyLabel: string;
-  tasks: TaskSummary[];
+  taskSlots: TaskUiSlot[];
   testID?: string;
   onOpenTask(taskId: string): void;
 }
@@ -13,10 +14,10 @@ interface TaskListProps {
 export function TaskList({
   emptyLabel,
   testID,
-  tasks,
+  taskSlots,
   onOpenTask
 }: TaskListProps) {
-  if (!tasks.length) {
+  if (!taskSlots.length) {
     return (
       <View collapsable={false} style={styles.emptyCard} testID={testID}>
         <Text style={styles.emptyLabel}>{emptyLabel}</Text>
@@ -26,13 +27,17 @@ export function TaskList({
 
   return (
     <View collapsable={false} style={styles.list} testID={testID}>
-      {tasks.map((task) => (
-        <TaskCard
-          key={task.id}
-          task={task}
-          onPress={() => onOpenTask(task.id)}
-        />
-      ))}
+      {taskSlots.map((slot) => {
+        const task = taskUiSlotToTaskSummary(slot);
+        return (
+          <TaskCard
+            key={slot.slotId}
+            task={task}
+            uiId={slot.slotId}
+            onPress={() => onOpenTask(slot.slotId)}
+          />
+        );
+      })}
     </View>
   );
 }

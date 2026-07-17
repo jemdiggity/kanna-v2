@@ -526,8 +526,9 @@ describe("createAppModel cloud routing", () => {
     await app.controller.createTask();
 
     const canonicalTaskId = "cloud:desktop-owner:repo-1:task-created";
+    const stableSlotId = app.sessionStore.getState().taskUiSlots[0]?.slotId;
     expect(app.sessionStore.getState()).toMatchObject({
-      selectedTaskId: canonicalTaskId,
+      selectedTaskId: stableSlotId,
       taskTerminalTaskId: canonicalTaskId,
       activeView: "tasks"
     });
@@ -538,7 +539,7 @@ describe("createAppModel cloud routing", () => {
 
     pushCloudTasks?.([]);
     await vi.waitFor(() => {
-      expect(app.sessionStore.getState().selectedTaskId).toBe(canonicalTaskId);
+      expect(app.sessionStore.getState().selectedTaskId).toBe(stableSlotId);
     });
     expect(terminalSocket.close).not.toHaveBeenCalled();
 
@@ -565,7 +566,7 @@ describe("createAppModel cloud routing", () => {
     });
 
     expect(app.sessionStore.getState()).toMatchObject({
-      selectedTaskId: canonicalTaskId,
+      selectedTaskId: stableSlotId,
       taskTerminalTaskId: canonicalTaskId,
       activeView: "tasks"
     });
@@ -710,8 +711,9 @@ describe("createAppModel cloud routing", () => {
     app.controller.updateComposerPrompt("Create from mobile");
     await app.controller.createTask();
     const canonicalTaskId = "cloud:desktop-owner:repo-1:task-created";
+    const stableSlotId = app.sessionStore.getState().taskUiSlots[0]?.slotId;
     expect(app.sessionStore.getState()).toMatchObject({
-      selectedTaskId: canonicalTaskId,
+      selectedTaskId: stableSlotId,
       taskTerminalTaskId: canonicalTaskId,
       activeView: "tasks"
     });

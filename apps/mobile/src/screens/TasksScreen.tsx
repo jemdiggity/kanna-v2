@@ -1,15 +1,17 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import type { RepoSummary, TaskSummary } from "../lib/api/types";
+import type { RepoSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
 import { orderActivityTasks } from "./activityTaskOrder";
+import type { TaskUiSlot } from "../state/taskUiSlots";
+import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 
 interface TasksScreenProps {
   heading?: string | null;
   repos: RepoSummary[];
   selectedRepoId: string | null;
-  tasks: TaskSummary[];
+  taskSlots: TaskUiSlot[];
   onSelectRepo(repoId: string): void;
   onOpenTask(taskId: string): void;
 }
@@ -18,16 +20,22 @@ export function TasksScreen({
   heading,
   repos,
   selectedRepoId,
-  tasks,
+  taskSlots,
   onSelectRepo,
   onOpenTask
 }: TasksScreenProps) {
   const isRecentView = heading === "Recent";
-  const displayedTasks = isRecentView
-    ? orderActivityTasks(tasks)
+  const displayedTaskSlots = isRecentView
+    ? orderActivityTasks(taskSlots.map(taskUiSlotToTaskSummary)).map(
+        (task) => taskSlots.find(
+          (slot) => taskUiSlotToTaskSummary(slot).id === task.id
+        )!
+      )
     : selectedRepoId
-      ? tasks.filter((task) => task.repoId === selectedRepoId)
-      : tasks;
+      ? taskSlots.filter(
+          (slot) => taskUiSlotToTaskSummary(slot).repoId === selectedRepoId
+        )
+      : taskSlots;
 
   return (
     <ScrollView
@@ -73,7 +81,7 @@ export function TasksScreen({
 
         <TaskList
           emptyLabel="No tasks yet."
-          tasks={displayedTasks}
+          taskSlots={displayedTaskSlots}
           onOpenTask={onOpenTask}
         />
       </View>

@@ -39,11 +39,8 @@ export const selectors = {
   accountSignInButton: `~${MOBILE_E2E_IDS.accountSignInButton}`,
   accountSignOutButton: `~${MOBILE_E2E_IDS.accountSignOutButton}`,
   moreScreen: `~${MOBILE_E2E_IDS.moreScreen}`,
-  createTaskProvisioning: `~${MOBILE_E2E_IDS.createTaskProvisioning}`,
-  createTaskProvisioningBackground:
-    `~${MOBILE_E2E_IDS.createTaskProvisioningBackground}`,
-  createTaskProvisioningRecover:
-    `~${MOBILE_E2E_IDS.createTaskProvisioningRecover}`,
+  taskCreationRecoverButton:
+    `~${MOBILE_E2E_IDS.taskCreationRecoverButton}`,
   tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,

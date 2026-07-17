@@ -12,6 +12,13 @@ import type {
   RepoCreationProfile,
   TrustedDesktopRecord
 } from "./sessionPersistence";
+import {
+  acknowledgeTaskUiSlot as acknowledgeTaskUiSlotState,
+  buildCreatingTaskUiSlot,
+  removeTaskUiSlot as removeTaskUiSlotState,
+  taskUiSlotForSelection,
+  type TaskUiSlot
+} from "./taskUiSlots";
 
 // Terminal output is accumulated as newline-delimited base64 frames and replayed
 // into xterm.js on WebView (re)mount. Cap the buffer by dropping whole oldest
@@ -40,6 +47,7 @@ export type ComposerAgentProvider = AgentProvider;
 export type TaskCreationPhase = "idle" | "pending" | "recovering" | "uncertain";
 
 export interface PendingTaskCreation {
+  slotId: string;
   taskId: string;
   repoId: string;
   prompt: string;
@@ -87,6 +95,7 @@ export interface SessionState {
   composerErrorMessage: string | null;
   pendingTaskCreation: PendingTaskCreation | null;
   taskCreationPhase: TaskCreationPhase;
+  taskUiSlots: TaskUiSlot[];
   taskTerminalTaskId: string | null;
   taskTerminalStatus: TaskTerminalStatus;
   taskTerminalOutput: string;
@@ -123,7 +132,11 @@ export interface SessionStore {
   setTaskActivity(taskId: string, activity: TaskActivity): void;
   setTaskPrompt(taskId: string, prompt: string): void;
   setSelectedTask(taskId: string | null): void;
-  retagTaskIdentity(previousTaskId: string, nextTaskId: string): void;
+  retagTaskIdentity(
+    previousTaskId: string,
+    nextTaskId: string,
+    options?: { preserveSelection?: boolean }
+  ): void;
   setActiveView(view: MobileView): void;
   setPairingCode(code: string | null): void;
   setComposerState(isOpen: boolean, prompt: string): void;
@@ -133,6 +146,9 @@ export interface SessionStore {
   setComposerOptionsExpanded(isExpanded: boolean): void;
   setComposerErrorMessage(message: string | null): void;
   setTaskCreationState(taskCreationState: TaskCreationState): void;
+  addTaskUiSlot(slot: TaskUiSlot): void;
+  acknowledgeTaskUiSlot(slotId: string, task: TaskSummary): void;
+  removeTaskUiSlot(slotId: string): void;
   beginTaskTerminal(taskId: string, initialOutput: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
@@ -177,6 +193,7 @@ export function createSessionStore(): SessionStore {
     composerErrorMessage: null,
     pendingTaskCreation: null,
     taskCreationPhase: "idle",
+    taskUiSlots: [],
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
     taskTerminalOutput: "",
@@ -251,10 +268,17 @@ export function createSessionStore(): SessionStore {
       };
     },
     getPersistedContext() {
+      const selectedSlot = taskUiSlotForSelection(
+        state.taskUiSlots,
+        state.selectedTaskId
+      );
       return {
         selectedDesktopId: state.selectedDesktopId,
         selectedRepoId: state.selectedRepoId,
-        selectedTaskId: state.selectedTaskId,
+        selectedTaskId:
+          selectedSlot?.state === "ready"
+            ? selectedSlot.taskId
+            : state.selectedTaskId,
         activeView: state.activeView,
         authUser: state.auth.status === "signedIn" ? state.auth.user : null,
         trustedDesktops: state.trustedDesktops,
@@ -264,11 +288,17 @@ export function createSessionStore(): SessionStore {
     },
     hydrateContext(context) {
       const pendingTaskCreation = context.pendingTaskCreation ?? null;
+      const selectedTaskId =
+        pendingTaskCreation &&
+        (context.selectedTaskId === pendingTaskCreation.taskId ||
+          context.selectedTaskId === pendingTaskCreation.slotId)
+          ? pendingTaskCreation.slotId
+          : context.selectedTaskId;
       state = {
         ...state,
         selectedDesktopId: context.selectedDesktopId,
         selectedRepoId: context.selectedRepoId,
-        selectedTaskId: context.selectedTaskId,
+        selectedTaskId,
         activeView: context.activeView,
         auth: context.authUser
           ? { status: "signedIn", user: context.authUser }
@@ -286,7 +316,10 @@ export function createSessionStore(): SessionStore {
           ? null
           : state.composerErrorMessage,
         pendingTaskCreation,
-        taskCreationPhase: pendingTaskCreation ? "uncertain" : "idle"
+        taskCreationPhase: pendingTaskCreation ? "uncertain" : "idle",
+        taskUiSlots: pendingTaskCreation
+          ? [buildCreatingTaskUiSlot(pendingTaskCreation)]
+          : state.taskUiSlots
       };
       publish();
     },
@@ -482,9 +515,9 @@ export function createSessionStore(): SessionStore {
       };
       publish();
     },
-    retagTaskIdentity(previousTaskId, nextTaskId) {
+    retagTaskIdentity(previousTaskId, nextTaskId, options) {
       const selectedTaskId =
-        state.selectedTaskId === previousTaskId
+        !options?.preserveSelection && state.selectedTaskId === previousTaskId
           ? nextTaskId
           : state.selectedTaskId;
       const taskTerminalTaskId =
@@ -556,6 +589,34 @@ export function createSessionStore(): SessionStore {
         ...state,
         pendingTaskCreation: taskCreationState.pendingTaskCreation,
         taskCreationPhase: taskCreationState.phase
+      };
+      publish();
+    },
+    addTaskUiSlot(slot) {
+      state = {
+        ...state,
+        taskUiSlots: [
+          slot,
+          ...state.taskUiSlots.filter(
+            (candidate) =>
+              candidate.slotId !== slot.slotId &&
+              (!slot.taskId || candidate.taskId !== slot.taskId)
+          )
+        ]
+      };
+      publish();
+    },
+    acknowledgeTaskUiSlot(slotId, task) {
+      state = {
+        ...state,
+        taskUiSlots: acknowledgeTaskUiSlotState(state.taskUiSlots, slotId, task)
+      };
+      publish();
+    },
+    removeTaskUiSlot(slotId) {
+      state = {
+        ...state,
+        taskUiSlots: removeTaskUiSlotState(state.taskUiSlots, slotId)
       };
       publish();
     },
@@ -686,7 +747,16 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     reconcileSelectedTask() {
-      if (hasTaskInCollections(state.selectedTaskId)) {
+      const selectedSlot = taskUiSlotForSelection(
+        state.taskUiSlots,
+        state.selectedTaskId
+      );
+      if (
+        selectedSlot?.state === "creating" ||
+        (selectedSlot?.state === "ready" &&
+          hasTaskInCollections(selectedSlot.taskId)) ||
+        hasTaskInCollections(state.selectedTaskId)
+      ) {
         return;
       }
 

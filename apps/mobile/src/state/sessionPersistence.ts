@@ -212,7 +212,18 @@ function parsePendingTaskCreation(value: unknown): PendingTaskCreation | null {
     return null;
   }
 
+  const slotId = candidate.slotId === undefined
+    ? `create:${candidate.taskId}`
+    : isNonBlankString(candidate.slotId) &&
+        candidate.slotId.startsWith("create:")
+      ? candidate.slotId
+      : null;
+  if (!slotId) {
+    return null;
+  }
+
   return {
+    slotId,
     taskId: candidate.taskId,
     repoId: candidate.repoId,
     prompt: candidate.prompt,
