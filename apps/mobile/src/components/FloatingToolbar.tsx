@@ -68,8 +68,12 @@ export function FloatingToolbar({
 
       {createAction ? (
         <Pressable
-          style={styles.utilityButtonPrimary}
+          style={({ pressed }) => [
+            styles.utilityButtonPrimary,
+            pressed ? styles.utilityButtonPrimaryPressed : null
+          ]}
           accessibilityLabel={createAction.label}
+          testID={MOBILE_E2E_IDS.toolbarUtilityAction(createAction.name)}
           onPress={() => onSelectUtilityAction(createAction.name)}
         >
           <Ionicons
@@ -146,6 +150,11 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 14 },
     shadowOpacity: 0.28,
     shadowRadius: 20
+  },
+  utilityButtonPrimaryPressed: {
+    backgroundColor: "#C8D9F0",
+    opacity: 0.84,
+    transform: [{ scale: 0.94 }]
   },
   label: {
     color: "#8EA3C4",

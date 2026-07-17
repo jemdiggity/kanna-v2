@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import {
+import * as profileConnectionSmoke from "./profile-connection.e2e";
+
+const {
   assertOtaDiagnosticsHidden,
   assertProfileConnectionControlsReachable,
   assertProfileConnectionDisconnected,
   assertProfilePasswordCanRevealAndHide,
   openProfileConnectionSheet
-} from "./profile-connection.e2e";
+} = profileConnectionSmoke;
 
 interface FakeElement {
   click: ReturnType<typeof vi.fn>;
@@ -75,6 +77,86 @@ describe("openProfileConnectionSheet", () => {
     expect(accountButton.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
     expect(accountButton.click).toHaveBeenCalledTimes(1);
     expect(accountSheet.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+});
+
+describe("assertToolbarActionPathsReachable", () => {
+  it("opens the task composer from both Add task and the More command", async () => {
+    const events: string[] = [];
+    const addTaskButton = {
+      ...createElement(),
+      click: vi.fn(async () => {
+        composerOpen = true;
+        events.push("click Add task");
+      })
+    };
+    const moreTab = {
+      ...createElement(),
+      click: vi.fn(async () => events.push("click More"))
+    };
+    const moreScreen = {
+      ...createElement(),
+      waitForDisplayed: vi.fn(async () => events.push("More displayed"))
+    };
+    const createTaskCommand = {
+      ...createElement(),
+      scrollIntoView: vi.fn(async () => events.push("scroll Create Task")),
+      click: vi.fn(async () => {
+        composerOpen = true;
+        events.push("click Create Task");
+      })
+    };
+    let composerOpen = false;
+    const promptInput = {
+      ...createElement(),
+      isExisting: vi.fn(async () => composerOpen),
+      waitForDisplayed: vi.fn(async () => events.push("composer displayed"))
+    };
+    const cancelButton = {
+      ...createElement(),
+      click: vi.fn(async () => {
+        composerOpen = false;
+        events.push("cancel composer");
+      })
+    };
+    const ui = {
+      getAddTaskButton: vi.fn(async () => addTaskButton),
+      getCreateTaskCancelButton: vi.fn(async () => cancelButton),
+      getCreateTaskCommand: vi.fn(async () => createTaskCommand),
+      getCreateTaskPromptInput: vi.fn(async () => promptInput),
+      getMoreScreen: vi.fn(async () => moreScreen),
+      getMoreTab: vi.fn(async () => moreTab),
+      waitUntil: vi.fn(
+        async (condition: () => Promise<boolean>, options: FakeWaitUntilOptions) => {
+          if (await condition()) return;
+          throw new Error(options.timeoutMsg);
+        }
+      )
+    };
+    const assertToolbarActionPathsReachable = (
+      profileConnectionSmoke as typeof profileConnectionSmoke & {
+        assertToolbarActionPathsReachable: (value: typeof ui) => Promise<void>;
+      }
+    ).assertToolbarActionPathsReachable;
+
+    expect(assertToolbarActionPathsReachable).toBeTypeOf("function");
+    await assertToolbarActionPathsReachable(ui);
+
+    expect(events).toEqual([
+      "click Add task",
+      "composer displayed",
+      "cancel composer",
+      "click More",
+      "More displayed",
+      "scroll Create Task",
+      "click Create Task",
+      "composer displayed",
+      "cancel composer"
+    ]);
+    expect(createTaskCommand.scrollIntoView).toHaveBeenCalledWith({
+      direction: "down",
+      maxScrolls: 5
+    });
   });
 });
 

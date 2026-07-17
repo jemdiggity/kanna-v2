@@ -42,5 +42,14 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.taskCreationRecoverButton).toBe(
       "mobile.task-creation.recover"
     );
+    expect(MOBILE_E2E_IDS.createTaskCancelButton).toBe(
+      "mobile.create-task.cancel"
+    );
+    expect(MOBILE_E2E_IDS.toolbarUtilityAction("create")).toBe(
+      "mobile.toolbar.utility.create"
+    );
+    expect(MOBILE_E2E_IDS.moreCommand("compose")).toBe(
+      "mobile.more.command.compose"
+    );
   });
 });

@@ -41,6 +41,10 @@ export const selectors = {
   moreScreen: `~${MOBILE_E2E_IDS.moreScreen}`,
   taskCreationRecoverButton:
     `~${MOBILE_E2E_IDS.taskCreationRecoverButton}`,
+  addTaskButton: `~${MOBILE_E2E_IDS.toolbarUtilityAction("create")}`,
+  createTaskCancelButton: `~${MOBILE_E2E_IDS.createTaskCancelButton}`,
+  createTaskPromptInput: `~${MOBILE_E2E_IDS.createTaskPromptInput}`,
+  createTaskCommand: `~${MOBILE_E2E_IDS.moreCommand("compose")}`,
   tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,

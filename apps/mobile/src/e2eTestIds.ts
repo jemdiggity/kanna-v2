@@ -43,6 +43,7 @@ export const MOBILE_E2E_IDS = {
   accountSignInButton: "mobile.account-sign-in",
   accountSignOutButton: "mobile.account-sign-out",
   createTaskPromptInput: "mobile.create-task.prompt",
+  createTaskCancelButton: "mobile.create-task.cancel",
   createTaskSubmitButton: "mobile.create-task.submit",
   createTaskError: "mobile.create-task.error",
   createTaskOptionsToggle: "mobile.create-task.options-toggle",
@@ -57,6 +58,12 @@ export const MOBILE_E2E_IDS = {
   updateReadyRestartButton: "mobile.update-ready.restart",
   toolbarTab(tabName: string): string {
     return `mobile.toolbar.tab.${tabName}`;
+  },
+  toolbarUtilityAction(actionName: string): string {
+    return `mobile.toolbar.utility.${actionName}`;
+  },
+  moreCommand(actionId: string): string {
+    return `mobile.more.command.${actionId}`;
   },
   taskListItem(taskId: string): string {
     return `mobile.task-row.${taskId}`;

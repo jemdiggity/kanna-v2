@@ -4,10 +4,14 @@ import {
   create,
   type ReactTestRenderer
 } from "react-test-renderer";
-import { describe, expect, it, vi } from "vitest";
-import { FloatingToolbar } from "./FloatingToolbar";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-vi.mock("@expo/vector-icons", () => ({ Ionicons: "Ionicons" }));
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+vi.mock("@expo/vector-icons", () => ({
+  Ionicons: "Ionicons"
+}));
+
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
   StyleSheet: {
@@ -16,8 +20,6 @@ vi.mock("react-native", () => ({
   Text: "Text",
   View: "View"
 }));
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function flattenStyle(style: unknown): Record<string, unknown> {
   if (Array.isArray(style)) {
@@ -32,33 +34,50 @@ function flattenStyle(style: unknown): Record<string, unknown> {
     : {};
 }
 
+let FloatingToolbar:
+  | typeof import("./FloatingToolbar").FloatingToolbar
+  | null = null;
+let rendered: ReactTestRenderer | null = null;
+
+beforeAll(async () => {
+  FloatingToolbar = (await import("./FloatingToolbar")).FloatingToolbar;
+});
+
+afterEach(async () => {
+  if (rendered) {
+    await act(async () => rendered?.unmount());
+    rendered = null;
+  }
+});
+
 describe("FloatingToolbar", () => {
-  it("uses opaque dark surfaces for secondary floating chrome", () => {
-    let renderer: ReactTestRenderer | undefined;
-    act(() => {
-      renderer = create(
-        <FloatingToolbar
-          activeTab="tasks"
-          tabs={[
+  it("uses opaque dark surfaces for secondary floating chrome", async () => {
+    if (!FloatingToolbar) throw new Error("FloatingToolbar was not loaded");
+
+    await act(async () => {
+      rendered = create(
+        React.createElement(FloatingToolbar, {
+          activeTab: "tasks",
+          tabs: [
             { name: "tasks", label: "Tasks", icon: "home-outline" },
             { name: "recent", label: "Activity", icon: "notifications-outline" },
             { name: "more", label: "More", icon: "ellipsis-horizontal" }
-          ]}
-          utilityActions={[
+          ],
+          utilityActions: [
             { name: "search", label: "Search", icon: "search-outline" },
             { name: "create", label: "Add task", icon: "add" }
-          ]}
-          onSelectTab={vi.fn()}
-          onSelectUtilityAction={vi.fn()}
-        />
+          ],
+          onSelectTab: vi.fn(),
+          onSelectUtilityAction: vi.fn()
+        })
       );
     });
 
-    const searchButton = renderer!.root.find(
+    const searchButton = rendered.root.find(
       (node) =>
         node.type === "Pressable" && node.props.accessibilityLabel === "Search"
     );
-    const navigationBar = renderer!.root.findAllByType("View").find(
+    const navigationBar = rendered.root.findAllByType("View").find(
       (node) => node.findAllByType("Pressable", { deep: false }).length === 3
     );
 
@@ -68,7 +87,53 @@ describe("FloatingToolbar", () => {
     expect(flattenStyle(navigationBar?.props.style).backgroundColor).toBe(
       "#080F1B"
     );
+  });
 
-    act(() => renderer!.unmount());
+  it("visibly responds while the Add task button is pressed", async () => {
+    if (!FloatingToolbar) throw new Error("FloatingToolbar was not loaded");
+
+    await act(async () => {
+      rendered = create(
+        React.createElement(FloatingToolbar, {
+          activeTab: "tasks",
+          tabs: [
+            { name: "tasks", label: "Tasks", icon: "home-outline" },
+            { name: "more", label: "More", icon: "ellipsis-horizontal" }
+          ],
+          utilityActions: [
+            { name: "search", label: "Search", icon: "search-outline" },
+            { name: "create", label: "Add task", icon: "add" }
+          ],
+          onSelectTab: vi.fn(),
+          onSelectUtilityAction: vi.fn()
+        })
+      );
+    });
+
+    const addTaskButton = rendered.root.find(
+      (node) =>
+        node.type === "Pressable" &&
+        node.props.accessibilityLabel === "Add task"
+    );
+    const resolveStyle = addTaskButton.props.style;
+
+    expect(resolveStyle).toBeTypeOf("function");
+    expect(resolveStyle({ pressed: true })).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          backgroundColor: "#C8D9F0",
+          opacity: 0.84,
+          transform: [{ scale: 0.94 }]
+        })
+      ])
+    );
+    expect(resolveStyle({ pressed: false })).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ backgroundColor: "#E8F1FF" })
+      ])
+    );
+    expect(resolveStyle({ pressed: true })).not.toEqual(
+      resolveStyle({ pressed: false })
+    );
   });
 });

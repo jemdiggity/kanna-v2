@@ -34,6 +34,64 @@ afterEach(async () => {
 });
 
 describe("MoreScreen", () => {
+  it("shares visible pressed feedback across global and task commands", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+
+    const props = {
+      pairingCode: null,
+      refreshStatus: "idle",
+      selectedTask: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Review mobile shell",
+        stage: "review"
+      },
+      onRefresh: vi.fn(),
+      onShowDesktops: vi.fn(),
+      onStartPairing: vi.fn(),
+      onOpenComposer: vi.fn(),
+      onAdvanceTaskStage: vi.fn(),
+      onRunMergeAgent: vi.fn(),
+      onCloseTask: vi.fn()
+    } as Parameters<typeof MoreScreen>[0];
+
+    await act(async () => {
+      rendered = create(React.createElement(MoreScreen, props));
+    });
+
+    const buttons = rendered.root.findAll((node) => node.type === "Pressable");
+    const findCommandButton = (title: string) =>
+      buttons.find((node) =>
+        node
+          .findAll((child) => child.type === "Text")
+          .some((child) => child.children.join("") === title)
+      );
+    const createTaskStyle = findCommandButton("Create Task")?.props.style;
+    const advanceStageStyle = findCommandButton("Advance Stage")?.props.style;
+
+    expect(createTaskStyle).toBeTypeOf("function");
+    expect(advanceStageStyle).toBeTypeOf("function");
+    expect(createTaskStyle({ pressed: true })).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          backgroundColor: "#182842",
+          borderColor: "#3A5F91",
+          opacity: 0.82,
+          transform: [{ scale: 0.98 }]
+        })
+      ])
+    );
+    expect(createTaskStyle({ pressed: true })).toEqual(
+      advanceStageStyle({ pressed: true })
+    );
+    expect(createTaskStyle({ pressed: true })).not.toEqual(
+      createTaskStyle({ pressed: false })
+    );
+    expect(advanceStageStyle({ pressed: true })).not.toEqual(
+      advanceStageStyle({ pressed: false })
+    );
+  });
+
   it("does not expose OTA diagnostics", async () => {
     if (!MoreScreen) throw new Error("MoreScreen was not loaded");
 
