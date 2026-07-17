@@ -99,6 +99,7 @@ export interface TaskSummary {
   title: string;
   prompt?: string | null;
   stage: string | null;
+  createdAt?: string | null;
   waitingPromptSnippet?: string | null;
   agentProvider?: string | null;
   agentType?: "pty" | "agent" | null;

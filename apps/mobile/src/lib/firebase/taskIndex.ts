@@ -29,6 +29,7 @@ export interface CloudTaskSnapshot {
   status?: string;
   repo: { cloudRepoId: string; name: string };
   agent?: { provider?: string | null; type?: string | null } | null;
+  createdAt: string;
   updatedAt: string;
   closedAt?: string | null;
 }
@@ -246,6 +247,10 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
   if (!isRecord(value.repo)) {
     throw new Error("cloud task document repo must be an object");
   }
+  const createdAt = normalizeCloudTimestamp(value.createdAt);
+  if (!createdAt) {
+    throw new Error("cloud task document createdAt must be a timestamp");
+  }
   const updatedAt = normalizeCloudTimestamp(value.updatedAt);
   if (!updatedAt) {
     throw new Error("cloud task document updatedAt must be a timestamp");
@@ -268,6 +273,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
       name: requiredString(value.repo.name, "repo.name"),
     },
     agent: parseCloudTaskAgent(value.agent),
+    createdAt,
     updatedAt,
     closedAt: value.closedAt === null
       ? null
@@ -314,6 +320,7 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     title: snapshot.displayName ?? snapshot.title,
     prompt: snapshot.promptSnippet ?? undefined,
     stage: snapshot.stage,
+    createdAt: snapshot.createdAt,
     waitingPromptSnippet: snapshot.waitingPromptSnippet ?? undefined,
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),
