@@ -285,7 +285,7 @@ describe("TaskFilePreview", () => {
     webView = findByType(tree, "WebView");
 
     expect((webView?.props?.source as { html: string }).html).toContain(
-      '<pre class="raw"># Spec</pre>'
+      '<span class="hljs-section"># Spec</span>'
     );
     expect(findPressableByText(tree, "Rendered")).not.toBeNull();
   });
@@ -340,7 +340,7 @@ describe("TaskFilePreview", () => {
 
     const webView = findByType(tree, "WebView");
     expect((webView?.props?.source as { html: string }).html).toContain(
-      '<pre class="raw">const value = 1;</pre>'
+      '<span class="hljs-keyword">const</span>'
     );
     expect(findPressableByText(tree, "Rendered")).toBeNull();
     expect(findPressableByText(tree, "Raw")).toBeNull();
@@ -357,7 +357,8 @@ describe("TaskFilePreview", () => {
 
     const webView = findByType(tree, "WebView");
     const html = (webView?.props?.source as { html: string }).html;
-    expect(html).toContain('data-line="2"');
+    expect(html).toContain("document.createTreeWalker");
+    expect(html).toContain("document.createRange");
     expect(html).toContain("scrollIntoView");
     expect(findPressableByText(tree, "Rendered")).not.toBeNull();
   });

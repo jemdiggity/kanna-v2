@@ -1,4 +1,9 @@
 import MarkdownIt from "markdown-it";
+import {
+  escapeTaskFileHtml,
+  highlightMarkdownFence,
+  highlightTaskFileSource
+} from "./taskFileSyntaxHighlight";
 
 export type TaskFilePreviewMode = "rendered" | "raw";
 
@@ -26,7 +31,10 @@ interface TaskFilePreviewDocumentOptions {
 const markdown = new MarkdownIt({
   html: false,
   linkify: false,
-  typographer: false
+  typographer: false,
+  highlight(content, info) {
+    return highlightMarkdownFence(content, info);
+  }
 });
 
 type MarkdownTokens = ReturnType<typeof markdown.parse>;
@@ -117,59 +125,8 @@ markdown.renderer.rules.link_open = (tokens, index, options, _environment, rende
   return renderer.renderToken(tokens, index, options);
 };
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => {
-    switch (character) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case '"':
-        return "&quot;";
-      case "'":
-        return "&#39;";
-      default:
-        return character;
-    }
-  });
-}
-
-function buildRawContent(content: string, initialLine?: number): string {
-  if (!Number.isInteger(initialLine) || (initialLine ?? 0) <= 0) {
-    return escapeHtml(content);
-  }
-
-  let lineStart = 0;
-  for (let line = 1; line < initialLine!; line += 1) {
-    let newline = lineStart;
-    while (
-      newline < content.length &&
-      content[newline] !== "\n" &&
-      content[newline] !== "\r"
-    ) {
-      newline += 1;
-    }
-    if (newline >= content.length) return escapeHtml(content);
-    lineStart =
-      content[newline] === "\r" && content[newline + 1] === "\n"
-        ? newline + 2
-        : newline + 1;
-  }
-
-  let lineEnd = lineStart;
-  while (
-    lineEnd < content.length &&
-    content[lineEnd] !== "\n" &&
-    content[lineEnd] !== "\r"
-  ) {
-    lineEnd += 1;
-  }
-  const before = escapeHtml(content.slice(0, lineStart));
-  const target = escapeHtml(content.slice(lineStart, lineEnd)) || "&#8203;";
-  const after = escapeHtml(content.slice(lineEnd));
-  return `${before}<span class="raw-line" data-line="${initialLine}">${target}</span>${after}`;
+function buildRawContent(content: string, path: string): string {
+  return highlightTaskFileSource(content, path);
 }
 
 function buildLineTargetScript(mode: TaskFilePreviewMode, initialLine?: number): string {
@@ -183,10 +140,78 @@ function buildLineTargetScript(mode: TaskFilePreviewMode, initialLine?: number):
 
   return `<script>
     (() => {
-      const line = document.querySelector('[data-line="${initialLine}"]');
-      if (!line) return;
+      const root = document.querySelector(".raw");
+      if (!root) return;
+      const targetLine = ${initialLine};
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let currentLine = 1;
+      let startNode = null;
+      let startOffset = 0;
+      let endNode = null;
+      let endOffset = 0;
+      let node;
+
+      outer: while ((node = walker.nextNode())) {
+        const text = node.data;
+        for (let offset = 0; offset < text.length; offset += 1) {
+          if (currentLine === targetLine && startNode === null) {
+            startNode = node;
+            startOffset = offset;
+          }
+          if (text[offset] !== "\\n" && text[offset] !== "\\r") continue;
+          if (currentLine === targetLine) {
+            endNode = node;
+            endOffset = offset;
+            break outer;
+          }
+          if (text[offset] === "\\r" && text[offset + 1] === "\\n") offset += 1;
+          currentLine += 1;
+          if (currentLine === targetLine) {
+            startNode = node;
+            startOffset = offset + 1;
+            endNode = node;
+            endOffset = offset + 1;
+          }
+        }
+        if (currentLine === targetLine && startNode !== null) {
+          endNode = node;
+          endOffset = text.length;
+        }
+      }
+
+      if (startNode === null || endNode === null) return;
+      const range = document.createRange();
+      range.setStart(startNode, startOffset);
+      range.setEnd(endNode, endOffset);
+      let bounds = range.getBoundingClientRect();
+      let anchor = null;
+      if (bounds.height === 0) {
+        anchor = document.createElement("span");
+        anchor.textContent = "\u200b";
+        range.insertNode(anchor);
+        bounds = anchor.getBoundingClientRect();
+      }
+
+      const rootBounds = root.getBoundingClientRect();
+      const computedLineHeight = parseFloat(getComputedStyle(root).lineHeight);
+      const minimumHeight = Number.isFinite(computedLineHeight)
+        ? computedLineHeight
+        : bounds.height || 1;
+      const line = document.createElement("span");
+      line.className = "raw-line";
+      line.dataset.line = String(targetLine);
+      line.setAttribute("aria-hidden", "true");
+      line.style.height = Math.max(bounds.height, minimumHeight) + "px";
+      line.style.top = bounds.top - rootBounds.top + "px";
+      root.appendChild(line);
+      if (anchor) anchor.remove();
       line.scrollIntoView({ block: "center" });
       line.classList.add("line-flash");
+      line.dataset.flashStarted = String(
+        getComputedStyle(line).animationName
+          .split(",")
+          .some((name) => name.trim() === "line-flash")
+      );
       setTimeout(() => line.classList.remove("line-flash"), 1600);
     })();
   </script>`;
@@ -213,7 +238,7 @@ export function buildTaskFilePreviewDocument({
   const body =
     renderedMarkdown !== null
       ? `<main class="markdown">${renderedMarkdown.html}</main>`
-      : `<pre class="raw">${buildRawContent(content, initialLine)}</pre>`;
+      : `<pre class="raw">${buildRawContent(content, path)}</pre>`;
 
   return `<!doctype html>
 <html>
@@ -252,6 +277,15 @@ export function buildTaskFilePreviewDocument({
     code { border-radius: 4px; background: #111c2e; color: #e6edf7; padding: 0.12em 0.35em; }
     pre { border: 1px solid #24344d; border-radius: 10px; background: #0b1422; overflow-x: auto; padding: 14px; }
     pre code { background: transparent; padding: 0; }
+    .hljs-comment, .hljs-quote { color: #7f8da3; font-style: italic; }
+    .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-link { color: #ff7ab2; }
+    .hljs-string, .hljs-title, .hljs-name, .hljs-type, .hljs-attribute, .hljs-symbol, .hljs-bullet, .hljs-addition { color: #a8e6a3; }
+    .hljs-number, .hljs-meta, .hljs-built_in, .hljs-builtin-name, .hljs-params { color: #d9a8ff; }
+    .hljs-variable, .hljs-template-variable, .hljs-selector-id, .hljs-selector-class { color: #73b7ff; }
+    .hljs-regexp, .hljs-deletion { color: #ff9f92; }
+    .hljs-attr, .hljs-property { color: #8bd5ff; }
+    .hljs-emphasis { font-style: italic; }
+    .hljs-strong { font-weight: 700; }
     table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
     th, td { border: 1px solid #31415b; padding: 7px 10px; text-align: left; }
     th { background: #111c2e; color: #f4f8ff; }
@@ -267,10 +301,11 @@ export function buildTaskFilePreviewDocument({
       min-width: 100%;
       overflow: visible;
       padding: 0;
+      position: relative;
       white-space: pre-wrap;
       word-break: break-word;
     }
-    .raw-line { border-radius: 3px; display: inline; margin: 0 -2px; padding: 0 2px; }
+    .raw-line { border-radius: 3px; left: -2px; pointer-events: none; position: absolute; right: -2px; }
     .raw-line.line-flash { animation: line-flash 1.6s ease-out; background: rgba(90, 155, 255, 0.28); }
     @keyframes line-flash {
       0%, 45% { background: rgba(90, 155, 255, 0.38); }
@@ -279,7 +314,7 @@ export function buildTaskFilePreviewDocument({
   </style>
 </head>
 <body>
-  <div class="document-path">${escapeHtml(path)}</div>
+  <div class="document-path">${escapeTaskFileHtml(path)}</div>
   ${body}
   ${buildLineTargetScript(effectiveMode, initialLine)}
 </body>

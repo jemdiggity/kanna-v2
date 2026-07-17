@@ -8,12 +8,18 @@ describe("mobile relay harness helpers", () => {
         "# Mobile Relay Preview",
         "",
         "Rendered through the authenticated owner relay.",
+        "",
+        "```ts",
+        'const relayStatus: string = "connected";',
+        "```",
         "TARGET RAW LINE"
       ].join("\n"),
       expectedHeading: "Mobile Relay Preview",
+      expectedHighlightedToken: "const",
+      expectedHighlightedTokenClass: "hljs-keyword",
       expectedRenderedText: "Rendered through the authenticated owner relay.",
       expectedRawLine: "TARGET RAW LINE",
-      line: 4,
+      line: 8,
       missingLink: "docs/mobile-preview-missing.md",
       nonMarkdownLinks: [
         "apps/mobile/src/screens/TerminalWebView.tsx:42",
@@ -21,7 +27,7 @@ describe("mobile relay harness helpers", () => {
         "crates/daemon/src/lib.rs:9"
       ],
       path: "docs/mobile-file-preview.md",
-      rawLink: "docs/mobile-file-preview.md:4",
+      rawLink: "docs/mobile-file-preview.md:8",
       renderedLink: "docs/mobile-file-preview.md"
     });
   });
