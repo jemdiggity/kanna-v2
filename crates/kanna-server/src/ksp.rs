@@ -67,36 +67,92 @@ fn status_str(status: SessionStatus) -> &'static str {
 
 #[derive(Clone)]
 struct CompanionFrameSender {
-    pending: Arc<Mutex<HashMap<String, ServerFrame>>>,
+    state: Arc<Mutex<CompanionFrameState>>,
     notify_tx: mpsc::Sender<()>,
 }
 
 impl CompanionFrameSender {
-    fn publish(&self, task_id: String, frame: ServerFrame) -> bool {
+    fn attachment(&self, task_id: String) -> CompanionAttachmentSender {
+        let generation = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .invalidate(&task_id);
+        CompanionAttachmentSender {
+            task_id,
+            generation,
+            state: self.state.clone(),
+            notify_tx: self.notify_tx.clone(),
+        }
+    }
+
+    fn invalidate(&self, task_id: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .invalidate(task_id);
+    }
+}
+
+#[derive(Default)]
+struct CompanionFrameState {
+    pending: HashMap<String, ServerFrame>,
+    ready: VecDeque<String>,
+    generations: HashMap<String, u64>,
+}
+
+impl CompanionFrameState {
+    fn invalidate(&mut self, task_id: &str) -> u64 {
+        let generation = {
+            let current = self.generations.entry(task_id.to_string()).or_default();
+            *current = current.wrapping_add(1);
+            if *current == 0 {
+                *current = 1;
+            }
+            *current
+        };
+        self.pending.remove(task_id);
+        self.ready.retain(|queued_task| queued_task != task_id);
+        generation
+    }
+}
+
+#[derive(Clone)]
+struct CompanionAttachmentSender {
+    task_id: String,
+    generation: u64,
+    state: Arc<Mutex<CompanionFrameState>>,
+    notify_tx: mpsc::Sender<()>,
+}
+
+impl CompanionAttachmentSender {
+    fn publish(&self, frame: ServerFrame) -> bool {
         if self.notify_tx.is_closed() {
             return false;
         }
-        self.pending
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(task_id, frame);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.generations.get(&self.task_id) != Some(&self.generation) {
+            return false;
+        }
+        if !state.pending.contains_key(&self.task_id) {
+            state.ready.push_back(self.task_id.clone());
+        }
+        state.pending.insert(self.task_id.clone(), frame);
+        drop(state);
+
         match self.notify_tx.try_send(()) {
             Ok(()) | Err(mpsc::error::TrySendError::Full(())) => true,
             Err(mpsc::error::TrySendError::Closed(())) => false,
         }
     }
-
-    fn clear(&self, task_id: &str) {
-        self.pending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(task_id);
-    }
 }
 
 struct OutboundFrameReceiver {
     frame_rx: mpsc::Receiver<ServerFrame>,
-    companion_pending: Arc<Mutex<HashMap<String, ServerFrame>>>,
+    companion_state: Arc<Mutex<CompanionFrameState>>,
     companion_notify_rx: mpsc::Receiver<()>,
     frame_closed: bool,
     companion_closed: bool,
@@ -111,16 +167,16 @@ fn outbound_frame_channel(
 ) {
     let (frame_tx, frame_rx) = mpsc::channel(capacity);
     let (notify_tx, companion_notify_rx) = mpsc::channel(1);
-    let companion_pending = Arc::new(Mutex::new(HashMap::new()));
+    let companion_state = Arc::new(Mutex::new(CompanionFrameState::default()));
     (
         frame_tx,
         CompanionFrameSender {
-            pending: companion_pending.clone(),
+            state: companion_state.clone(),
             notify_tx,
         },
         OutboundFrameReceiver {
             frame_rx,
-            companion_pending,
+            companion_state,
             companion_notify_rx,
             frame_closed: false,
             companion_closed: false,
@@ -130,12 +186,16 @@ fn outbound_frame_channel(
 
 impl OutboundFrameReceiver {
     fn take_companion(&self) -> Option<ServerFrame> {
-        let mut pending = self
-            .companion_pending
+        let mut state = self
+            .companion_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let task_id = pending.keys().next()?.clone();
-        pending.remove(&task_id)
+        while let Some(task_id) = state.ready.pop_front() {
+            if let Some(frame) = state.pending.remove(&task_id) {
+                return Some(frame);
+            }
+        }
+        None
     }
 
     async fn recv(&mut self) -> Option<ServerFrame> {
@@ -781,7 +841,7 @@ impl StreamConn {
         for ((task_id, kind), task) in self.attachments.drain() {
             task.abort();
             if kind == StreamKind::Companion {
-                self.companion_tx.clear(&task_id);
+                self.companion_tx.invalidate(&task_id);
             }
         }
         let controls = self
@@ -1116,7 +1176,7 @@ impl StreamConn {
                     }
                 }
                 if kind == StreamKind::Companion {
-                    self.companion_tx.clear(&task_id);
+                    self.companion_tx.invalidate(&task_id);
                 }
             }
             ClientFrame::AgentInput { task_id, text } => {
@@ -1237,15 +1297,12 @@ impl StreamConn {
             existing.abort();
         }
         if kind == StreamKind::Companion {
-            self.companion_tx.clear(&task_id);
-        }
-
-        if kind == StreamKind::Companion {
             let key = (task_id.clone(), kind);
+            let companion_tx = self.companion_tx.attachment(task_id.clone());
             let task = tokio::spawn(stream_companion(
                 self.state.config().db_path.clone(),
                 task_id,
-                self.companion_tx.clone(),
+                companion_tx,
             ));
             self.attachments.insert(key, task);
             return;
@@ -1302,7 +1359,11 @@ enum PublishedCompanionState {
     SourceError,
 }
 
-async fn stream_companion(db_path: String, task_id: String, companion_tx: CompanionFrameSender) {
+async fn stream_companion(
+    db_path: String,
+    task_id: String,
+    companion_tx: CompanionAttachmentSender,
+) {
     let mut published = PublishedCompanionState::Never;
     loop {
         let scan_db_path = db_path.clone();
@@ -1343,7 +1404,7 @@ async fn stream_companion(db_path: String, task_id: String, companion_tx: Compan
         };
 
         if next_state != published {
-            if !companion_tx.publish(task_id.clone(), frame) {
+            if !companion_tx.publish(frame) {
                 return;
             }
             published = next_state;
@@ -2193,6 +2254,7 @@ mod tests {
     #[tokio::test]
     async fn companion_outbound_coalesces_backpressured_revisions_without_starving_terminal() {
         let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
+        let companion_attachment = companion_tx.attachment("task-1".into());
         let snapshot = |revision: &str| ServerFrame::CompanionSnapshot {
             task_id: "task-1".into(),
             session_id: "session-1".into(),
@@ -2202,7 +2264,7 @@ mod tests {
         };
 
         for revision in ["revision-1", "revision-2", "revision-3"] {
-            assert!(companion_tx.publish("task-1".into(), snapshot(revision)));
+            assert!(companion_attachment.publish(snapshot(revision)));
         }
         frame_tx
             .send(ServerFrame::TermOutput {
@@ -2227,6 +2289,92 @@ mod tests {
                 .await
                 .is_err(),
             "intermediate companion snapshots must be discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn companion_outbound_serves_each_pending_task_before_repeated_updates() {
+        let (_frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
+        let task_a_tx = companion_tx.attachment("task-a".into());
+        let task_b_tx = companion_tx.attachment("task-b".into());
+        let snapshot = |task_id: &str, revision: &str| ServerFrame::CompanionSnapshot {
+            task_id: task_id.into(),
+            session_id: format!("session-{task_id}"),
+            revision: revision.into(),
+            document_kind: CompanionDocumentKind::Fragment,
+            html: format!("<p>{task_id}-{revision}</p>"),
+        };
+
+        assert!(task_a_tx.publish(snapshot("task-a", "revision-a1")));
+        assert!(task_b_tx.publish(snapshot("task-b", "revision-b1")));
+
+        let first_task = match outbound_rx.recv().await {
+            Some(ServerFrame::CompanionSnapshot { task_id, .. }) => task_id,
+            other => panic!("expected first companion snapshot, got {other:?}"),
+        };
+        let other_task = if first_task == "task-a" {
+            "task-b"
+        } else {
+            "task-a"
+        };
+        let noisy_tx = if first_task == "task-a" {
+            &task_a_tx
+        } else {
+            &task_b_tx
+        };
+        assert!(noisy_tx.publish(snapshot(&first_task, "revision-2")));
+        assert!(noisy_tx.publish(snapshot(&first_task, "revision-3")));
+
+        match outbound_rx.recv().await {
+            Some(ServerFrame::CompanionSnapshot { task_id, .. }) => {
+                assert_eq!(task_id, other_task, "a noisy task must not starve its peer")
+            }
+            other => panic!("expected peer companion snapshot, got {other:?}"),
+        }
+        match outbound_rx.recv().await {
+            Some(ServerFrame::CompanionSnapshot {
+                task_id, revision, ..
+            }) => {
+                assert_eq!(task_id, first_task);
+                assert_eq!(revision, "revision-3");
+            }
+            other => panic!("expected coalesced repeated update, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_outbound_rejects_a_publisher_invalidated_by_reattach() {
+        let (_frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
+        let snapshot = |revision: &str| ServerFrame::CompanionSnapshot {
+            task_id: "task-1".into(),
+            session_id: "session-1".into(),
+            revision: revision.into(),
+            document_kind: CompanionDocumentKind::Fragment,
+            html: format!("<p>{revision}</p>"),
+        };
+
+        let old_attachment = companion_tx.attachment("task-1".into());
+        assert!(old_attachment.publish(snapshot("revision-1")));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::CompanionSnapshot { revision, .. }) if revision == "revision-1"
+        ));
+
+        let current_attachment = companion_tx.attachment("task-1".into());
+        assert!(
+            !old_attachment.publish(snapshot("stale-revision")),
+            "a publisher resumed after re-attach must be rejected"
+        );
+        assert!(current_attachment.publish(snapshot("current-revision")));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::CompanionSnapshot { revision, .. }) if revision == "current-revision"
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), outbound_rx.recv())
+                .await
+                .is_err(),
+            "the invalidated attachment must not repopulate the pending slot"
         );
     }
 

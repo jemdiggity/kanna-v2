@@ -13,17 +13,17 @@ KSP currently sends every changed companion document into the same bounded FIFO 
 Introduce a connection-scoped outbound channel with two paths:
 
 - A bounded FIFO for ordinary `ServerFrame` traffic. Existing terminal, agent, response, error, and state-change producers retain their ordered, lossless behavior.
-- A per-task latest-value store for companion snapshots, unavailable states, and source errors. Publishing replaces any pending companion frame for that task and signals the receiver without blocking.
+- A per-task latest-value store for companion snapshots, unavailable states, and source errors. Publishing replaces any pending companion frame for that task and signals the receiver without blocking. A deduplicated FIFO of ready task ids gives each pending task a turn even if another task publishes continuously.
 
 The actual WebSocket writer consumes this combined receiver directly. There is no intermediate serialized-frame FIFO. Before taking a companion frame, the receiver checks ordinary traffic, ensuring a terminal or agent frame already waiting is not placed behind obsolete companion documents. A companion frame already handed to the socket is in flight and cannot be preempted; only unsent frames are coalesced.
 
-The latest-value store is keyed by task id because one KSP connection may attach companion streams for multiple tasks. Pending state is cleared when that task's companion attachment is detached or replaced. Connection shutdown aborts producers, drops senders, drains the remaining ordinary frames and latest companion values, and then lets the writer exit.
+The latest-value store is keyed by task id because one KSP connection may attach companion streams for multiple tasks. Each attachment receives a generation-scoped publisher. Detach or replacement increments the task generation and clears its pending value, so an aborted producer that resumes between await points cannot repopulate the slot or overwrite a newer attachment. Connection shutdown invalidates producers, drops senders, drains the remaining ordinary frames and latest companion values, and then lets the writer exit.
 
 ## Data Flow
 
 1. `stream_companion` scans the current document and compares its state with the most recently published state.
 2. A changed state is published into the task's latest-value slot. Publication replaces an older unsent state and records the new state as observed.
-3. The outbound receiver selects ordinary FIFO traffic first when available; otherwise it takes one pending companion value.
+3. The outbound receiver selects ordinary FIFO traffic first when available; otherwise it takes the next task from the companion ready queue. A task requeued while its previous value is in flight goes behind peers that were already waiting.
 4. The WebSocket writer serializes that selected frame immediately before sending it to the socket.
 
 Serialization failures continue to discard only the affected frame. A closed outbound receiver terminates companion producers and all existing stream producers through their normal send failure paths.
@@ -35,6 +35,8 @@ Add a KSP test around the real outbound abstraction. The test deliberately does 
 1. The terminal frame before any pending companion frame.
 2. Only the newest companion revision.
 3. No remaining intermediate companion revisions.
+
+Additional deterministic tests verify that repeated updates from one task cannot starve another pending task and that a publisher invalidated by re-attach cannot publish stale state.
 
 Existing companion attachment, source-error, event-validation, terminal-responsiveness, and relay happy-path coverage remains unchanged. Appium coverage is outside this server-side fix.
 

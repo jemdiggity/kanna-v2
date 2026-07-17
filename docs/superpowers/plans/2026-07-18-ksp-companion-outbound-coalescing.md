@@ -4,7 +4,7 @@
 
 **Goal:** Enforce one pending latest companion frame per task at the WebSocket boundary without allowing obsolete companion documents to delay terminal or agent traffic.
 
-**Architecture:** Replace the two-stage shared FIFO writer with a combined outbound receiver consumed directly by each WebSocket sink. Ordinary frames retain their bounded FIFO; companion frames use a task-keyed latest-value map plus a capacity-one wake channel, and the receiver checks ordinary frames before taking a companion value.
+**Architecture:** Replace the two-stage shared FIFO writer with a combined outbound receiver consumed directly by each WebSocket sink. Ordinary frames retain their bounded FIFO; companion frames use a task-keyed latest-value map, a deduplicated FIFO of ready task ids, attachment generations, and a capacity-one wake channel. The receiver checks ordinary frames before taking a fair companion value, while invalidated attachments cannot publish stale state.
 
 **Tech Stack:** Rust, Tokio `mpsc`, Axum WebSockets, tokio-tungstenite, KSP `ServerFrame` integration tests.
 
@@ -338,3 +338,35 @@ Confirm only the approved KSP implementation/test and superpowers documentation 
 git add crates/kanna-server/src/ksp.rs docs/superpowers/plans/2026-07-18-ksp-companion-outbound-coalescing.md
 git commit -m "fix(server): coalesce companion outbound frames"
 ```
+
+### Task 5: Address completion-review concurrency findings
+
+**Files:**
+- Modify: `crates/kanna-server/src/ksp.rs`
+- Modify: `docs/superpowers/specs/2026-07-18-ksp-companion-outbound-coalescing-design.md`
+
+- [x] **Step 1: Reproduce multi-task starvation**
+
+Add a deterministic test that queues two tasks, consumes one task, republishes that noisy task twice, and requires the other already-pending task before the noisy task's newest revision.
+
+- [x] **Step 2: Reproduce stale publication after re-attach**
+
+Add a deterministic test that retains an old attachment publisher, creates a replacement publisher, resumes the old publisher, and requires the stale publication to be rejected.
+
+- [x] **Step 3: Implement fair ready-task ordering**
+
+Maintain a deduplicated `VecDeque<String>` beside the latest-value map. Queue a task only when it transitions from no pending value to a pending value, then pop task ids in FIFO order.
+
+- [x] **Step 4: Implement generation-scoped attachment publishers**
+
+Increment a per-task generation when attaching, detaching, or shutting down. A publisher installs a frame only when its captured generation still matches the task's active generation.
+
+- [x] **Step 5: Verify focused companion coverage**
+
+Run:
+
+```bash
+cargo test -p kanna-server ksp::tests::companion -- --nocapture
+```
+
+Expected: all six companion tests pass.
