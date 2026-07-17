@@ -33,6 +33,7 @@ Pipeline files may reference the bundled schema with `"$schema": "./schema.json"
       "environment": "<optional: env-name from environments above>",
       "policy": {
         "transition": "manual",
+        "revision_transition": "auto",
         "execution": "continue"
       }
     }
@@ -60,7 +61,7 @@ Pipeline files may reference the bundled schema with `"$schema": "./schema.json"
 | `prompt` | string | no | Stage-specific assignment rendered under `## Your Task` after the agent's `## Agent Instructions` section. Can reference `$TASK_PROMPT`, `$PREV_RESULT`, `$BRANCH`, `$BASE_REF`, and `$SOURCE_WORKTREE`. |
 | `agent_provider` | string or string[] | no | Override agent provider for this stage. Valid providers: `claude`, `copilot`, `codex`, `opencode`, `antigravity`. Use a string for one required provider, or an ordered array so Kanna chooses the first installed provider from that list. |
 | `environment` | string | no | Environment name from the `environments` map. Null = no setup/teardown. |
-| `policy` | object | yes | Stage policy. `policy.transition` is `"manual"` or `"auto"`. Optional `policy.execution: "continue"` keeps the same task, worktree, branch, and agent session, updates the stage in place, and sends the stage prompt to the existing agent. Omit `execution` for a new next-stage task/worktree. |
+| `policy` | object | yes | Stage policy. `policy.transition` is `"manual"` or `"auto"`. Optional `policy.revision_transition` independently controls completion of runs entered through a revision request and defaults to `transition` when omitted. Optional legacy `policy.execution: "continue"` folds the stage into the preceding stage's post. |
 
 For PR stages, omit `policy.execution` so PR creation runs in a separate next-stage task/worktree.
 

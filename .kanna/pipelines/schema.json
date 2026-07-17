@@ -92,6 +92,10 @@
             "properties": {
               "transition": {
                 "enum": ["manual", "auto"]
+              },
+              "revision_transition": {
+                "description": "Completion policy for main runs entered through a revision request. Defaults to transition when omitted.",
+                "enum": ["manual", "auto"]
               }
             }
           },
@@ -133,7 +137,7 @@
           "name": "in progress",
           "agent": "implement",
           "prompt": "$TASK_PROMPT",
-          "policy": { "transition": "manual" },
+          "policy": { "transition": "manual", "revision_transition": "auto" },
           "post": {
             "name": "commit",
             "agent": "commit",

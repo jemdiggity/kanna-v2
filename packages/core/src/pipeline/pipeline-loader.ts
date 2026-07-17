@@ -89,6 +89,13 @@ function parseStagePolicy(raw: Record<string, unknown>, stageName: string): Pars
       throw validationError(`Stage "${stageName}" has invalid policy "${formatRawValue(policy)}"; must be an object`);
     }
     const p = policy as Record<string, unknown>;
+    const revisionTransition = p["revision_transition"] === undefined
+      ? undefined
+      : parseTransition(
+          p["revision_transition"],
+          (transition) =>
+            `Stage "${stageName}" has invalid policy.revision_transition "${transition}"; must be "manual" or "auto"`
+        );
     return {
       policy: {
         transition: parseTransition(
@@ -96,6 +103,9 @@ function parseStagePolicy(raw: Record<string, unknown>, stageName: string): Pars
           (transition) =>
             `Stage "${stageName}" has invalid policy.transition "${transition}"; must be "manual" or "auto"`
         ),
+        ...(revisionTransition === undefined
+          ? {}
+          : { revision_transition: revisionTransition }),
       },
       legacyContinue: parseLegacyContinueMarker(p["execution"], stageName),
     };
@@ -143,6 +153,16 @@ export function validatePipeline(def: PipelineDefinition): string[] {
     if (stage.policy?.transition !== "manual" && stage.policy?.transition !== "auto") {
       errors.push(
         `Stage "${stage.name ?? "(unnamed)"}" has invalid policy.transition "${stage.policy?.transition as string}"; must be "manual" or "auto"`
+      );
+    }
+
+    if (
+      stage.policy?.revision_transition !== undefined &&
+      stage.policy.revision_transition !== "manual" &&
+      stage.policy.revision_transition !== "auto"
+    ) {
+      errors.push(
+        `Stage "${stage.name ?? "(unnamed)"}" has invalid policy.revision_transition "${stage.policy.revision_transition as string}"; must be "manual" or "auto"`
       );
     }
 

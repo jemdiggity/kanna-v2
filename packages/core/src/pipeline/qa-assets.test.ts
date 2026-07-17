@@ -104,6 +104,25 @@ describe("QA pipeline assets", () => {
     expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
   });
 
+  it("automates default implement revisions without automating the initial handoff", () => {
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/default.json"));
+    const implement = parsed.stages.find((stage) => stage.name === "in progress");
+
+    expect(implement?.policy).toEqual({
+      transition: "manual",
+      revision_transition: "auto",
+    });
+  });
+
+  it("publishes revision transition values in the pipeline schema", () => {
+    const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json"));
+    const revisionTransition =
+      schema.properties.stages.items.properties.policy
+        .properties.revision_transition;
+
+    expect(revisionTransition.enum).toEqual(["manual", "auto"]);
+  });
+
   it("keeps the PR agent agnostic to the development branch name", () => {
     const prAgent = readRepoFile(".kanna/agents/pr/AGENT.md");
 
