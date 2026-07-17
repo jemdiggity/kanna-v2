@@ -971,6 +971,8 @@ describe("task executors", () => {
         "--terminate-existing",
         "--device",
         "00008130-001015CA1091401C",
+        "--payload-url",
+        "exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F172.16.0.193%3A1430",
         "build.kanna.app.dev"
       ]
     });

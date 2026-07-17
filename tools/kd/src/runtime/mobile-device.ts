@@ -52,7 +52,10 @@ interface BuildMobileDevicePrebuildCommandInput {
 
 interface BuildMobileDeviceRelaunchCommandInput {
   bundleId: string;
+  devClientScheme: string;
   deviceUdid: string;
+  lanHost: string;
+  metroPort: number;
 }
 
 interface PhysicalDeviceRunPreflightInput {
@@ -123,6 +126,7 @@ const fallbackMobileEnvironmentRegistry = {
 export interface MobileNativeIdentity {
   appEnv: MobileAppEnv;
   bundleId: string;
+  devClientScheme: string;
   displayName: string;
 }
 
@@ -141,6 +145,10 @@ const mobileEnvironmentsPath = join(
   "mobileEnvironments.json"
 );
 let mobileEnvironmentRegistry: Record<MobileAppEnv, MobileEnvironmentRecord> | undefined;
+
+// Expo Dev Client derives this from the app config slug (`kanna-mobile`) and
+// prefers it over the app's environment-specific deep-link schemes.
+const mobileDevClientScheme = "exp+kanna-mobile";
 
 function readMobileEnvironmentRegistry(): Record<MobileAppEnv, MobileEnvironmentRecord> {
   if (mobileEnvironmentRegistry) {
@@ -320,6 +328,8 @@ export function buildMobileDevicePrebuildCommand(
 export function buildMobileDeviceRelaunchCommand(
   input: BuildMobileDeviceRelaunchCommandInput
 ): Omit<MobileDeviceRunCommand, "cwd" | "env"> {
+  const metroUrl = `http://${input.lanHost}:${input.metroPort}`;
+  const payloadUrl = `${input.devClientScheme}://expo-development-client/?url=${encodeURIComponent(metroUrl)}`;
   return {
     command: "xcrun",
     args: [
@@ -330,6 +340,8 @@ export function buildMobileDeviceRelaunchCommand(
       "--terminate-existing",
       "--device",
       input.deviceUdid,
+      "--payload-url",
+      payloadUrl,
       input.bundleId
     ]
   };
@@ -357,6 +369,7 @@ export function resolveMobileNativeIdentity(env: NodeJS.ProcessEnv): MobileNativ
   return {
     appEnv,
     bundleId: explicitBundleId || environment.iosBundleId || mobileBundleIds[appEnv],
+    devClientScheme: mobileDevClientScheme,
     displayName: environment.displayName
   };
 }
