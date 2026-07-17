@@ -4458,6 +4458,17 @@ describe("createMobileController", () => {
       "rev-1",
       event
     );
+    expect(store.getState()).toMatchObject({
+      taskCompanionEventId: "event-1",
+      taskCompanionEventStatus: "sending"
+    });
+    client.__companionStream.emit({
+      type: "event_result",
+      taskId: "task-1",
+      eventId: "event-1",
+      accepted: true
+    });
+    expect(store.getState().taskCompanionEventStatus).toBe("sent");
 
     controller.closeTask();
     expect(client.__companionStream.subscription.close).toHaveBeenCalledOnce();

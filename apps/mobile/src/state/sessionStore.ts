@@ -81,6 +81,11 @@ export type TaskCompanionStatus =
   | "available"
   | "unavailable"
   | "error";
+export type TaskCompanionEventStatus =
+  | "idle"
+  | "sending"
+  | "sent"
+  | "error";
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type AuthState = MobileAuthState;
 export type ComposerAgentProvider = AgentProvider;
@@ -173,6 +178,8 @@ export interface SessionState {
   } | null;
   taskCompanionUnread: boolean;
   taskCompanionErrorMessage: string | null;
+  taskCompanionEventId: string | null;
+  taskCompanionEventStatus: TaskCompanionEventStatus;
 }
 
 export interface SessionStore {
@@ -256,6 +263,7 @@ export interface SessionStore {
     isOpen: boolean
   ): void;
   markTaskCompanionViewed(taskId: string): void;
+  beginTaskCompanionEvent(taskId: string, eventId: string): void;
   reconcileSelectedTask(): void;
   clearTaskTerminal(): void;
   clearTaskAgent(): void;
@@ -320,7 +328,9 @@ export function createSessionStore(): SessionStore {
     taskCompanionStatus: "idle",
     taskCompanionSnapshot: null,
     taskCompanionUnread: false,
-    taskCompanionErrorMessage: null
+    taskCompanionErrorMessage: null,
+    taskCompanionEventId: null,
+    taskCompanionEventStatus: "idle"
   };
 
   const listeners = new Set<() => void>();
@@ -797,7 +807,11 @@ export function createSessionStore(): SessionStore {
         taskCompanionUnread:
           selectedTaskId === null ? false : state.taskCompanionUnread,
         taskCompanionErrorMessage:
-          selectedTaskId === null ? null : state.taskCompanionErrorMessage
+          selectedTaskId === null ? null : state.taskCompanionErrorMessage,
+        taskCompanionEventId:
+          selectedTaskId === null ? null : state.taskCompanionEventId,
+        taskCompanionEventStatus:
+          selectedTaskId === null ? "idle" : state.taskCompanionEventStatus
       };
       publish();
     },
@@ -1081,7 +1095,9 @@ export function createSessionStore(): SessionStore {
         taskCompanionStatus: "connecting",
         taskCompanionSnapshot: null,
         taskCompanionUnread: false,
-        taskCompanionErrorMessage: null
+        taskCompanionErrorMessage: null,
+        taskCompanionEventId: null,
+        taskCompanionEventStatus: "idle"
       };
       publish();
     },
@@ -1105,7 +1121,9 @@ export function createSessionStore(): SessionStore {
             : revisionChanged
               ? true
               : state.taskCompanionUnread,
-          taskCompanionErrorMessage: null
+          taskCompanionErrorMessage: null,
+          taskCompanionEventId: null,
+          taskCompanionEventStatus: "idle"
         };
         publish();
         return;
@@ -1117,7 +1135,9 @@ export function createSessionStore(): SessionStore {
           taskCompanionStatus: "unavailable",
           taskCompanionSnapshot: null,
           taskCompanionUnread: false,
-          taskCompanionErrorMessage: null
+          taskCompanionErrorMessage: null,
+          taskCompanionEventId: null,
+          taskCompanionEventStatus: "idle"
         };
         publish();
         return;
@@ -1130,6 +1150,22 @@ export function createSessionStore(): SessionStore {
           taskCompanionErrorMessage: event.message
         };
         publish();
+        return;
+      }
+
+      if (event.type === "event_result") {
+        if (state.taskCompanionEventId !== event.eventId) return;
+        state = {
+          ...state,
+          taskCompanionErrorMessage: event.accepted
+            ? null
+            : event.message ??
+              (event.code
+                ? `Selection rejected: ${event.code}`
+                : "The visual companion rejected this selection."),
+          taskCompanionEventStatus: event.accepted ? "sent" : "error"
+        };
+        publish();
       }
     },
     markTaskCompanionViewed(taskId) {
@@ -1140,6 +1176,16 @@ export function createSessionStore(): SessionStore {
         return;
       }
       state = { ...state, taskCompanionUnread: false };
+      publish();
+    },
+    beginTaskCompanionEvent(taskId, eventId) {
+      if (state.taskCompanionTaskId !== taskId) return;
+      state = {
+        ...state,
+        taskCompanionErrorMessage: null,
+        taskCompanionEventId: eventId,
+        taskCompanionEventStatus: "sending"
+      };
       publish();
     },
     reconcileSelectedTask() {
@@ -1173,7 +1219,9 @@ export function createSessionStore(): SessionStore {
         taskCompanionStatus: "idle",
         taskCompanionSnapshot: null,
         taskCompanionUnread: false,
-        taskCompanionErrorMessage: null
+        taskCompanionErrorMessage: null,
+        taskCompanionEventId: null,
+        taskCompanionEventStatus: "idle"
       };
       publish();
     },
@@ -1206,7 +1254,9 @@ export function createSessionStore(): SessionStore {
         taskCompanionStatus: "idle",
         taskCompanionSnapshot: null,
         taskCompanionUnread: false,
-        taskCompanionErrorMessage: null
+        taskCompanionErrorMessage: null,
+        taskCompanionEventId: null,
+        taskCompanionEventStatus: "idle"
       };
       publish();
     }

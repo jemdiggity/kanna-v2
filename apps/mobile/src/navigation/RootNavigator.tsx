@@ -547,6 +547,7 @@ function TaskDetailRoute({
       companionSnapshot={state.taskCompanionSnapshot}
       companionUnread={state.taskCompanionUnread}
       companionErrorMessage={state.taskCompanionErrorMessage}
+      companionEventStatus={state.taskCompanionEventStatus}
       taskCreationPhase={resolveTaskCreationPhase(state, routeTaskId)}
       taskCreationErrorMessage={state.composerErrorMessage}
       onBack={() => navigation.goBack()}

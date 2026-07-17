@@ -2199,6 +2199,7 @@ export function createMobileController(
 
     sendTaskCompanionEvent(taskId, sessionId, revision, event) {
       if (activeTaskCompanion?.taskId !== taskId) return;
+      store.beginTaskCompanionEvent(taskId, event.event_id);
       activeTaskCompanion.subscription.sendEvent(sessionId, revision, event);
     },
 

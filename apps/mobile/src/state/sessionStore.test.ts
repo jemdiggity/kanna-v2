@@ -432,6 +432,41 @@ describe("createSessionStore", () => {
       taskCompanionUnread: false,
       taskCompanionSnapshot: { revision: "rev-2" }
     });
+    store.beginTaskCompanionEvent("task-pending", "mobile-1");
+    expect(store.getState().taskCompanionEventStatus).toBe("sending");
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "event_result",
+      taskId: "task-pending",
+      eventId: "mobile-1",
+      accepted: false,
+      code: "stale_revision",
+      message: "The companion changed before the selection arrived."
+    }, true);
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionSnapshot: { revision: "rev-2" },
+      taskCompanionErrorMessage:
+        "The companion changed before the selection arrived.",
+      taskCompanionEventStatus: "error"
+    });
+    store.beginTaskCompanionEvent("task-pending", "mobile-2");
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "event_result",
+      taskId: "task-pending",
+      eventId: "mobile-1",
+      accepted: true
+    }, true);
+    expect(store.getState().taskCompanionEventStatus).toBe("sending");
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "event_result",
+      taskId: "task-pending",
+      eventId: "mobile-2",
+      accepted: true
+    }, true);
+    expect(store.getState()).toMatchObject({
+      taskCompanionErrorMessage: null,
+      taskCompanionEventStatus: "sent"
+    });
 
     store.retagTaskIdentity("task-pending", "task-published");
     expect(store.getState().taskCompanionTaskId).toBe("task-published");

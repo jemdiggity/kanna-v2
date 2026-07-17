@@ -13,6 +13,7 @@ import {
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskFileContent, TaskSummary } from "../lib/api/types";
 import type {
+  TaskCompanionEventStatus,
   TaskCompanionStatus,
   TaskCreationPhase,
   TaskTerminalStatus
@@ -27,6 +28,7 @@ import { AgentMessageView } from "./AgentMessageView";
 import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
 import { showTaskActionMenu, type TaskAction } from "./taskActionMenu";
+import { VisualCompanionModal } from "./VisualCompanionModal";
 import {
   clampTaskComposerHeight,
   TASK_COMPOSER_MAX_HEIGHT,
@@ -63,6 +65,7 @@ interface TaskScreenProps {
   } | null;
   companionUnread?: boolean;
   companionErrorMessage?: string | null;
+  companionEventStatus?: TaskCompanionEventStatus;
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
@@ -103,6 +106,7 @@ export function TaskScreen({
   companionSnapshot = null,
   companionUnread = false,
   companionErrorMessage = null,
+  companionEventStatus = "idle",
   onBack,
   onAdvanceTaskStage,
   onCloseTask,
@@ -134,6 +138,9 @@ export function TaskScreen({
     previewRevision: number;
   } | null>(null);
   const [expandedTitleTaskId, setExpandedTitleTaskId] = useState<string | null>(
+    null
+  );
+  const [companionModalTaskId, setCompanionModalTaskId] = useState<string | null>(
     null
   );
   const { height: windowHeight } = useWindowDimensions();
@@ -250,7 +257,17 @@ export function TaskScreen({
     setExpandedTitleTaskId((currentTaskId) =>
       currentTaskId === task.id ? currentTaskId : null
     );
+    setCompanionModalTaskId(null);
   }, [task.id]);
+
+  const openCompanion = () => {
+    setCompanionModalTaskId(task.id);
+    onCompanionOpenChange?.(true);
+  };
+  const closeCompanion = () => {
+    setCompanionModalTaskId(null);
+    onCompanionOpenChange?.(false);
+  };
 
   useEffect(() => {
     const showSubscription = Keyboard.addListener("keyboardWillShow", (event) => {
@@ -445,6 +462,26 @@ export function TaskScreen({
         ]}
       >
         <View style={styles.composerActions}>
+          {companionSnapshot ? (
+            <Pressable
+              accessibilityLabel="Visual companion ready"
+              accessibilityRole="button"
+              onPress={openCompanion}
+              style={styles.companionButton}
+              testID={MOBILE_E2E_IDS.visualCompanionButton}
+            >
+              {companionUnread ? (
+                <View
+                  accessibilityLabel="New visual companion update"
+                  style={styles.companionUnread}
+                  testID={MOBILE_E2E_IDS.visualCompanionUnread}
+                />
+              ) : null}
+              <Text style={styles.companionButtonLabel}>
+                Visual companion ready
+              </Text>
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityLabel="Task actions"
             accessibilityRole="button"
@@ -497,6 +534,18 @@ export function TaskScreen({
           path={activeSelectedFile.path}
           readFile={() => onReadTaskFile(activeSelectedFile.path)}
           onClose={() => setSelectedFile(null)}
+        />
+      ) : null}
+      {companionModalTaskId === task.id ? (
+        <VisualCompanionModal
+          errorMessage={companionErrorMessage}
+          eventStatus={companionEventStatus}
+          snapshot={companionSnapshot}
+          status={companionStatus}
+          onClose={closeCompanion}
+          onSendEvent={(sessionId, revision, event) =>
+            onSendCompanionEvent?.(sessionId, revision, event)
+          }
         />
       ) : null}
     </View>
@@ -686,8 +735,33 @@ const styles = StyleSheet.create({
     zIndex: 3
   },
   composerActions: {
-    alignItems: "flex-end",
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+    justifyContent: "flex-end",
     marginBottom: 8
+  },
+  companionButton: {
+    alignItems: "center",
+    backgroundColor: "rgba(25, 55, 91, 0.92)",
+    borderColor: "#3B6A9F",
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 7,
+    minHeight: 40,
+    paddingHorizontal: 13
+  },
+  companionButtonLabel: {
+    color: "#E8F1FF",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  companionUnread: {
+    backgroundColor: "#73B7FF",
+    borderRadius: 999,
+    height: 8,
+    width: 8
   },
   plusButton: {
     alignItems: "center",
