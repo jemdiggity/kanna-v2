@@ -40,6 +40,7 @@ interface RelayFilePreviewFixture {
   expectedRenderedText: string;
   line: number;
   missingLink: string;
+  nonMarkdownLinks: readonly string[];
   path: string;
   rawLink: string;
   renderedLink: string;
@@ -293,6 +294,13 @@ async function terminalFileLink(
   return link;
 }
 
+function terminalFileTarget(raw: string): { line?: number; path: string } {
+  const match = raw.match(/^(.*?):(\d+)(?::\d+)?$/);
+  return match
+    ? { path: match[1], line: Number.parseInt(match[2], 10) }
+    : { path: raw };
+}
+
 async function inspectTaskFilePreview(
   driver: Browser
 ): Promise<TaskFilePreviewInspection> {
@@ -343,12 +351,66 @@ async function closeTaskFilePreview(driver: Browser): Promise<void> {
   );
 }
 
-async function verifyTerminalFilePreviewFlow(
+// Xterm link hitboxes live inside a React Native WebView and are not exposed as
+// XCUITest-native accessibility elements. The bridged native controls are the
+// Appium-drivable inspection/activation surface; buildTerminalDocument tests
+// separately exercise the exact xterm provider ranges and activation callback.
+// True hitbox E2E would require E2E-only WebView instrumentation that reports
+// provider ranges and activates a chosen row/cell through the native bridge.
+export async function verifyTerminalMarkdownFileControls(
   driver: Browser,
+  ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
   fixture: RelayFilePreviewFixture
 ): Promise<void> {
+  const terminalPaths = [
+    fixture.renderedLink,
+    fixture.rawLink,
+    fixture.missingLink,
+    ...fixture.nonMarkdownLinks
+  ];
+  let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
+
+  await ui.waitUntil(
+    async () => {
+      lastInspection = await ui.inspectTerminalWebView();
+      return lastInspection.kind === "rendered" && terminalPaths.every(
+        (path) => lastInspection?.kind === "rendered" && lastInspection.text.includes(path)
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected emitted file paths to remain visible inside xterm; last inspection ${JSON.stringify(lastInspection)}`
+    }
+  );
+
+  for (const { path, line } of [
+    { path: fixture.path, line: undefined },
+    { path: fixture.path, line: fixture.line },
+    { path: fixture.missingLink, line: undefined }
+  ]) {
+    await terminalFileLink(driver, path, line);
+  }
+
+  for (const raw of fixture.nonMarkdownLinks) {
+    const { path, line } = terminalFileTarget(raw);
+    const accessibilityLabel = terminalFileLinkAccessibilityLabel(path, line);
+    const control = await driver.$(`~${accessibilityLabel}`);
+    if (await control.isExisting().catch(() => false)) {
+      throw new Error(
+        `Expected non-Markdown terminal path ${raw} to remain plain text, but found ${accessibilityLabel}`
+      );
+    }
+  }
+}
+
+async function verifyTerminalFilePreviewFlow(
+  driver: Browser,
+  ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
+  fixture: RelayFilePreviewFixture
+): Promise<void> {
+  await verifyTerminalMarkdownFileControls(driver, ui, fixture);
   const renderedLink = await terminalFileLink(driver, fixture.path);
-  await terminalFileLink(driver, fixture.path, fixture.line);
 
   const [location, size] = await Promise.all([
     renderedLink.getLocation(),
@@ -678,7 +740,7 @@ export async function runRelayTaskFlow(
   await waitForTaskTerminalLive(ui);
   await waitForRenderedPtyTerminal(ui, options.fixture);
   await options.emitFilePreviewLinks();
-  await verifyTerminalFilePreviewFlow(driver, options.filePreview);
+  await verifyTerminalFilePreviewFlow(driver, ui, options.filePreview);
 
   await verifyRelayQuickReplyJourney(ui, options.draft);
 }

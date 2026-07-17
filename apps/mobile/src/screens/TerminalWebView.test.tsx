@@ -167,7 +167,7 @@ describe("TerminalWebView", () => {
     expect(webView.props.webviewDebuggingEnabled).toBe(true);
   });
 
-  it("opens a discovered file through an actual native button press", async () => {
+  it("renders native controls only for discovered Markdown files", async () => {
     const onOpenFile = vi.fn();
     const webView = await renderTerminalWebView({ onOpenFile });
 
@@ -175,7 +175,16 @@ describe("TerminalWebView", () => {
       nativeEvent: {
         data: JSON.stringify({
           type: "terminal-file-links",
-          links: [{ raw: "docs/spec.md:42", path: "  docs/spec.md  ", line: 42 }]
+          links: [
+            { raw: "docs/SPEC.MD:42", path: "  docs/SPEC.MD  ", line: 42 },
+            { raw: "src/App.tsx:12", path: "src/App.tsx", line: 12 },
+            { raw: "config.json", path: "config.json" },
+            { raw: "src/lib.rs", path: "src/lib.rs" },
+            { raw: "pnpm-lock.yaml", path: "pnpm-lock.yaml" },
+            { raw: "Cargo.toml", path: "Cargo.toml" },
+            { raw: "src/theme.css", path: "src/theme.css" },
+            { raw: "src/Forged.tsx", path: "README.md" }
+          ]
         })
       }
     } as WebViewMessageEvent);
@@ -186,18 +195,18 @@ describe("TerminalWebView", () => {
         typeof child === "object" && child !== null &&
         "type" in child && (child as ElementNode).type === "ScrollView"
     );
-    const button = React.Children.toArray(strip?.props.children).find(
+    const buttons = React.Children.toArray(strip?.props.children).filter(
       (child): child is ElementNode =>
         typeof child === "object" && child !== null &&
         "type" in child && (child as ElementNode).type === "Pressable"
     );
-    expect(button?.props.accessibilityLabel).toBe(
-      "Open file docs/spec.md at line 42"
-    );
-    (button?.props.onPress as () => void)();
+    expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual([
+      "Open file docs/SPEC.MD at line 42"
+    ]);
 
+    (buttons[0]?.props.onPress as () => void)();
     expect(onOpenFile).toHaveBeenCalledOnce();
-    expect(onOpenFile).toHaveBeenCalledWith("docs/spec.md", 42);
+    expect(onOpenFile).toHaveBeenCalledWith("docs/SPEC.MD", 42);
   });
 
   it("clears discovered links when switching tasks", async () => {
@@ -245,6 +254,9 @@ describe("TerminalWebView", () => {
 
     send({ type: "terminal-file-link", path: "   ", line: 1 });
     send({ type: "terminal-file-link", path: 123, line: 1 });
+    send({ type: "terminal-file-link", path: "src/App.tsx", line: 1 });
+    send({ type: "terminal-file-link", path: "config.json" });
+    send({ type: "terminal-file-link", path: "src/lib.rs" });
     send(null);
     (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
       nativeEvent: { data: "not-json" }

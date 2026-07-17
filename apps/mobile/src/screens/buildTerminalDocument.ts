@@ -16,7 +16,7 @@ interface BuildTerminalUpdateScriptOptions {
 }
 
 const TERMINAL_FILE_PATH_PATTERN =
-  /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.[a-zA-Z][a-zA-Z0-9]*(?::\d+){0,2})/g.source;
+  /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.md(?::\d+){0,2})(?=$|[\s"'`)\]}>,;!?]|\.(?=$|[\s"'`)\]}>,;!?]))/gi.source;
 
 export function buildTerminalDocument({
   bottomInset,
@@ -247,7 +247,7 @@ export function buildTerminalDocument({
 
       const terminalFilePathRegex = new RegExp(
         ${JSON.stringify(TERMINAL_FILE_PATH_PATTERN)},
-        "g"
+        "gi"
       );
 
       function parseTerminalFileLink(raw) {
@@ -263,7 +263,10 @@ export function buildTerminalDocument({
         }
 
         const path = parts.join(":");
-        if (path.split("/").includes("..")) {
+        if (
+          !path.toLowerCase().endsWith(".md") ||
+          path.split("/").includes("..")
+        ) {
           return null;
         }
         return { path, line: suffixes[0] };

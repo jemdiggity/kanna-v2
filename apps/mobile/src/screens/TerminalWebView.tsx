@@ -52,6 +52,28 @@ interface TerminalFileLink {
   raw: string;
 }
 
+function isMarkdownPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".md");
+}
+
+function parseTerminalFileLinkRaw(raw: string): { line?: number; path: string } | null {
+  const parts = raw.split(":");
+  const suffixes: number[] = [];
+  while (parts.length > 1 && suffixes.length < 2) {
+    const maybeNumber = parts[parts.length - 1];
+    if (!maybeNumber || !/^\d+$/.test(maybeNumber)) break;
+    suffixes.unshift(Number.parseInt(maybeNumber, 10));
+    parts.pop();
+  }
+
+  const path = parts.join(":");
+  if (!isMarkdownPath(path)) return null;
+  return {
+    path,
+    ...(suffixes[0] === undefined ? {} : { line: suffixes[0] })
+  };
+}
+
 const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<
   WebViewProps & React.RefAttributes<TerminalWebViewHandle>
 >;
@@ -208,7 +230,7 @@ export function TerminalWebView({
         return;
       }
       const path = payload.path.trim();
-      if (!path) {
+      if (!path || !isMarkdownPath(path)) {
         return;
       }
       if (
@@ -225,24 +247,36 @@ export function TerminalWebView({
 
     if (payload.type === "terminal-file-links" && Array.isArray(payload.links)) {
       const links: TerminalFileLink[] = [];
-      for (const candidate of payload.links.slice(-6)) {
+      for (const candidate of payload.links) {
         if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
           continue;
         }
         const record = candidate as Record<string, unknown>;
         const path = typeof record.path === "string" ? record.path.trim() : "";
         const raw = typeof record.raw === "string" ? record.raw.trim() : "";
-        if (!path || !raw) continue;
-        const line = record.line;
+        if (!path || !raw || !isMarkdownPath(path)) continue;
+        const candidateLine = record.line;
+        const line =
+          typeof candidateLine === "number" &&
+          Number.isInteger(candidateLine) &&
+          candidateLine > 0
+            ? candidateLine
+            : undefined;
+        const parsedRaw = parseTerminalFileLinkRaw(raw);
+        if (
+          !parsedRaw ||
+          parsedRaw.path !== path ||
+          parsedRaw.line !== line
+        ) {
+          continue;
+        }
         links.push({
           path,
           raw,
-          ...(typeof line === "number" && Number.isInteger(line) && line > 0
-            ? { line }
-            : {})
+          ...(line === undefined ? {} : { line })
         });
       }
-      setTerminalFileLinks(links);
+      setTerminalFileLinks(links.slice(-6));
       return;
     }
 

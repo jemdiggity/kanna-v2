@@ -372,20 +372,21 @@ function createExecutedTerminalDocument({
 }
 
 describe("buildTerminalDocument", () => {
-  it("provides bare, nested, and absolute file links with one-based ranges", () => {
+  it("provides only Markdown file links with case-insensitive extensions and line suffixes", () => {
     const { messages, terminal } = createExecutedTerminalDocument();
     const row = 7;
-    const line = "See README.md and docs/spec.md:42:7 then /tmp/task/notes.md:9";
+    const line =
+      "See README.md. app.tsx config.json docs/SPEC.MD:42:7 src/lib.rs draft.mdx archive.md.bak /tmp/task/notes.md:9";
 
     const links = provideLinks(terminal, row, line);
 
     expect(links?.map((link) => link.text)).toEqual([
       "README.md",
-      "docs/spec.md:42:7",
+      "docs/SPEC.MD:42:7",
       "/tmp/task/notes.md:9"
     ]);
     expect(links?.map((link) => link.range)).toEqual(
-      ["README.md", "docs/spec.md:42:7", "/tmp/task/notes.md:9"].map((text) => {
+      ["README.md", "docs/SPEC.MD:42:7", "/tmp/task/notes.md:9"].map((text) => {
         const start = line.indexOf(text);
         return {
           start: { x: start + 1, y: row },
@@ -402,45 +403,63 @@ describe("buildTerminalDocument", () => {
     expect(
       messages.map((message) => JSON.parse(message).type)
     ).not.toContain("terminal-file-link");
-  });
 
-  it("renders persistent accessible file buttons and opens one through a real click", () => {
-    const { messages, window } = createExecutedTerminalDocument();
-
-    window.__replaceTerminalState({
-      text: "See README.md and docs/spec.md:42\n"
-    });
-
-    const region = window.document.getElementById("terminal-file-links");
-    const button = region?.querySelector<HTMLButtonElement>(
-      'button[data-terminal-file-raw="docs/spec.md:42"]'
-    );
-    expect(region?.getAttribute("role")).toBe("region");
-    expect(region?.getAttribute("aria-label")).toBe(
-      "Files mentioned in terminal"
-    );
-    expect(region?.hidden).toBe(false);
-    expect(button?.textContent).toBe("docs/spec.md:42");
-    expect(button?.getAttribute("aria-label")).toBe(
-      "Open file docs/spec.md at line 42"
-    );
-    expect(button?.classList.contains("terminal-file-link")).toBe(true);
-
-    button?.click();
-
+    links?.[1]?.activate();
     expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
       type: "terminal-file-link",
-      path: "docs/spec.md",
+      path: "docs/SPEC.MD",
       line: 42
     });
   });
 
-  it("keeps the newest six unique file buttons visible", () => {
+  it("renders persistent Markdown buttons while leaving other extensions as plain text", () => {
+    const { messages, window } = createExecutedTerminalDocument();
+
+    window.__replaceTerminalState({
+      text: "See README.md app.tsx config.json docs/SPEC.MD:42 src/lib.rs\n"
+    });
+
+    const region = window.document.getElementById("terminal-file-links");
+    const buttons = Array.from(
+      region?.querySelectorAll<HTMLButtonElement>("button") ?? []
+    );
+    expect(region?.hidden).toBe(false);
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "README.md",
+      "docs/SPEC.MD:42"
+    ]);
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Open file README.md",
+      "Open file docs/SPEC.MD at line 42"
+    ]);
+    expect(region?.textContent).not.toContain("app.tsx");
+    expect(region?.textContent).not.toContain("config.json");
+    expect(region?.textContent).not.toContain("src/lib.rs");
+
+    const discovery = messages
+      .map((message) => JSON.parse(message))
+      .findLast((message) => message.type === "terminal-file-links");
+    expect(discovery?.links).toEqual([
+      { raw: "README.md", path: "README.md" },
+      { raw: "docs/SPEC.MD:42", path: "docs/SPEC.MD", line: 42 }
+    ]);
+
+    buttons[1]?.click();
+    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
+      type: "terminal-file-link",
+      path: "docs/SPEC.MD",
+      line: 42
+    });
+  });
+
+  it("keeps the newest six unique Markdown buttons visible", () => {
     const { window } = createExecutedTerminalDocument();
     window.__replaceTerminalState({
       text: [
         "docs/one.md",
+        "src/ignored.tsx",
         "docs/two.md",
+        "package.json",
         "docs/three.md",
         "docs/four.md",
         "docs/five.md",
@@ -797,7 +816,7 @@ describe("buildTerminalDocument", () => {
         { clientX: 240, clientY: 200 }
       ]
     ]
-  ])("does not open a file after a %s gesture over its button", (_label, start, move) => {
+  ])("does not open a Markdown file after a %s gesture over its button", (_label, start, move) => {
     const { messages, window } = createExecutedTerminalDocument();
     window.__replaceTerminalState({ text: "docs/spec.md\n" });
     const button = window.document.querySelector<HTMLButtonElement>(
