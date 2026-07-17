@@ -34,6 +34,54 @@ afterEach(async () => {
 });
 
 describe("MoreScreen", () => {
+  it("visibly responds while the advance-stage command is pressed", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+
+    const props = {
+      pairingCode: null,
+      refreshStatus: "idle",
+      selectedTask: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Review mobile shell",
+        stage: "review"
+      },
+      onRefresh: vi.fn(),
+      onShowDesktops: vi.fn(),
+      onStartPairing: vi.fn(),
+      onOpenComposer: vi.fn(),
+      onAdvanceTaskStage: vi.fn(),
+      onRunMergeAgent: vi.fn(),
+      onCloseTask: vi.fn()
+    } as Parameters<typeof MoreScreen>[0];
+
+    await act(async () => {
+      rendered = create(React.createElement(MoreScreen, props));
+    });
+
+    const advanceStageButton = rendered.root
+      .findAll((node) => node.type === "Pressable")
+      .find((node) =>
+        node
+          .findAll((child) => child.type === "Text")
+          .some((child) => child.children.join("") === "Advance Stage")
+      );
+    const resolveStyle = advanceStageButton?.props.style;
+
+    expect(resolveStyle).toBeTypeOf("function");
+    expect(resolveStyle({ pressed: true })).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          opacity: expect.any(Number),
+          transform: [{ scale: expect.any(Number) }]
+        })
+      ])
+    );
+    expect(resolveStyle({ pressed: true })).not.toEqual(
+      resolveStyle({ pressed: false })
+    );
+  });
+
   it("does not expose OTA diagnostics", async () => {
     if (!MoreScreen) throw new Error("MoreScreen was not loaded");
 

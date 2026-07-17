@@ -112,7 +112,14 @@ export function MoreScreen({
                   <Pressable
                     disabled={isRefreshing}
                     key={action.id}
-                    style={[styles.action, isRefreshing ? styles.actionDisabled : null]}
+                    style={({ pressed }) => [
+                      styles.action,
+                      isRefreshing
+                        ? styles.actionDisabled
+                        : pressed
+                          ? styles.actionPressed
+                          : null
+                    ]}
                     onPress={() => handleAction(action)}
                   >
                     <Text style={styles.commandLabel}>{action.sectionTitle}</Text>
@@ -229,6 +236,12 @@ const styles = StyleSheet.create({
   },
   actionDisabled: {
     opacity: 0.65
+  },
+  actionPressed: {
+    backgroundColor: "#182842",
+    borderColor: "#3A5F91",
+    opacity: 0.82,
+    transform: [{ scale: 0.98 }]
   },
   actionTitle: {
     color: "#F5F7FB",
