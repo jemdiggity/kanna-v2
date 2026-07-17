@@ -297,3 +297,140 @@ Expected: both commands exit 0 with no new failures.
 git add apps/mobile/src/screens/TaskScreen.tsx apps/mobile/src/screens/TaskScreen.test.tsx
 git commit -m "fix(mobile): reset reply composer after send"
 ```
+
+### Task 3: Prove the reset at the native TextInput boundary
+
+**Files:**
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.test.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts`
+- Reuse: `apps/mobile/e2e/helpers/selectors.ts`
+
+- [ ] **Step 1: Write a failing helper test for native height and keyboard reset**
+
+Import a new `verifyRelayComposerResetJourney` helper. Build a fake relay UI
+whose input begins at height 40, grows to 82 after multiline entry, exposes a
+shown keyboard while focused, and resets only when Send is clicked. Assert the
+helper focuses the input, enters the multiline draft, captures the expanded
+height, clicks Send, and waits for the cleared value, height 40, and hidden
+keyboard:
+
+```ts
+await verifyRelayComposerResetJourney(ui as never);
+
+expect(input.click).toHaveBeenCalledOnce();
+expect(input.setValue).toHaveBeenCalledWith(
+  "First relay line.\nSecond relay line.\nThird relay line."
+);
+expect(input.getSize).toHaveBeenCalled();
+expect(send.click).toHaveBeenCalledOnce();
+expect(ui.isKeyboardShown).toHaveBeenCalled();
+```
+
+Add negative cases where Send leaves the height expanded or the keyboard
+shown, and expect the helper's specific timeout message.
+
+- [ ] **Step 2: Run the relay helper test and verify RED**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- e2e/specs/relay/relay-task-flow.test.ts
+```
+
+Expected: FAIL because `verifyRelayComposerResetJourney` is not exported.
+
+- [ ] **Step 3: Implement the native relay composer journey**
+
+Extend `RelayElement` with the WebdriverIO size method and `RelayUi` with the
+existing Appium keyboard method:
+
+```ts
+getSize(): Promise<{ height: number; width: number }>;
+isKeyboardShown(): Promise<boolean>;
+```
+
+Delegate the real UI method directly to the driver:
+
+```ts
+async isKeyboardShown() {
+  return driver.isKeyboardShown();
+}
+```
+
+Add a multiline draft constant and exported helper. Record the one-line
+height, focus and populate the input, wait for keyboard visibility and native
+growth, capture the expanded height, click Send, then wait for all three
+postconditions together:
+
+```ts
+const initialHeight = (await input.getSize()).height;
+await input.click();
+await input.setValue(TASK_COMPOSER_MULTILINE_DRAFT);
+
+let expandedHeight = initialHeight;
+await ui.waitUntil(async () => {
+  expandedHeight = (await input.getSize()).height;
+  return expandedHeight > initialHeight && await ui.isKeyboardShown();
+}, expandedOptions);
+
+await send.click();
+await ui.waitUntil(async () => {
+  const value = await input.getAttribute("value").catch(() => null);
+  const label = value === null
+    ? await input.getAttribute("label").catch(() => null)
+    : null;
+  const resetHeight = (await input.getSize()).height;
+  const cleared = value === "" || value === TASK_COMPOSER_PLACEHOLDER ||
+    label === TASK_COMPOSER_PLACEHOLDER;
+  return cleared && resetHeight <= initialHeight &&
+    resetHeight < expandedHeight && !(await ui.isKeyboardShown());
+}, resetOptions);
+```
+
+Call this helper in `runRelayTaskFlow` immediately before the existing quick
+reply journey, retaining the quick-reply transport coverage as a separate
+assertion. Continue to resolve both input and Send through the shared
+`selectors.taskInput` and `selectors.taskSendButton` entries.
+
+- [ ] **Step 4: Run the relay helper test and verify GREEN**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- e2e/specs/relay/relay-task-flow.test.ts
+```
+
+Expected: PASS for the successful journey and both failure diagnostics.
+
+- [ ] **Step 5: Run the reviewer-requested focused verification**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- e2e/specs/relay/relay-task-flow.test.ts src/screens/taskComposerInput.test.ts src/screens/TaskScreen.test.tsx
+pnpm --dir apps/mobile typecheck
+```
+
+Expected: both commands exit 0.
+
+- [ ] **Step 6: Run the canonical native simulator lane**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile run test:e2e:relay
+```
+
+Expected: PASS with the real multiline input expanding, normal Send clearing
+and shrinking it, the software keyboard disappearing, and the existing relay
+quick reply completing. If an external simulator/Appium/cloud prerequisite
+prevents execution, capture the exact failing prerequisite and report the
+helper test as narrower substitute coverage rather than a native pass.
+
+- [ ] **Step 7: Commit the native regression coverage**
+
+```bash
+git add apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts \
+  apps/mobile/e2e/specs/relay/relay-task-flow.test.ts
+git commit -m "test(mobile): cover native composer reset in relay flow"
+```
