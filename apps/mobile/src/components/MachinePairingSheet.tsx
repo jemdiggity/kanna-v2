@@ -92,7 +92,11 @@ export function MachinePairingSheet({
               <Text style={styles.title}>Add a machine</Text>
               <Text style={styles.subtitle}>Scan the QR code shown in Kanna on your desktop.</Text>
             </View>
-            <Pressable accessibilityLabel="Close add machine" onPress={resetAndClose}>
+            <Pressable
+              accessibilityLabel="Close add machine"
+              testID={MOBILE_E2E_IDS.machinePairingCloseButton}
+              onPress={resetAndClose}
+            >
               <Text style={styles.close}>×</Text>
             </Pressable>
           </View>
@@ -169,7 +173,11 @@ export function MachinePairingSheet({
             </View>
           </View>
 
-          {error ? <Text style={styles.error}>{error}</Text> : null}
+          {error ? (
+            <Text style={styles.error} testID={MOBILE_E2E_IDS.machinePairingError}>
+              {error}
+            </Text>
+          ) : null}
         </View>
       </KeyboardAvoidingView>
     </Modal>

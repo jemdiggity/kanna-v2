@@ -113,10 +113,25 @@ function MachineSection({
         >
           <View style={styles.cardHeader}>
             <View style={styles.cardIdentity}>
-              <Text style={styles.machineName}>{machine.displayName}</Text>
+              <Text
+                style={styles.machineName}
+                testID={MOBILE_E2E_IDS.machineName(machine.desktopId)}
+              >
+                {machine.displayName}
+              </Text>
               <View style={styles.originRow}>
-                {machine.origins.account ? <OriginPill label="Account" /> : null}
-                {machine.origins.manual ? <OriginPill label="Paired" /> : null}
+                {machine.origins.account ? (
+                  <OriginPill
+                    label="Account"
+                    testID={MOBILE_E2E_IDS.machineOrigin(machine.desktopId, "account")}
+                  />
+                ) : null}
+                {machine.origins.manual ? (
+                  <OriginPill
+                    label="Paired"
+                    testID={MOBILE_E2E_IDS.machineOrigin(machine.desktopId, "manual")}
+                  />
+                ) : null}
               </View>
             </View>
             {machine.origins.manual ? (
@@ -136,10 +151,10 @@ function MachineSection({
   );
 }
 
-function OriginPill({ label }: { label: string }) {
+function OriginPill({ label, testID }: { label: string; testID: string }) {
   return (
     <View style={styles.pill}>
-      <Text style={styles.pillLabel}>{label}</Text>
+      <Text style={styles.pillLabel} testID={testID}>{label}</Text>
     </View>
   );
 }

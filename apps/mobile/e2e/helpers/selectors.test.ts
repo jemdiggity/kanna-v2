@@ -47,9 +47,17 @@ describe("mobile E2E selector helpers", () => {
       machinePairingSheet: "~mobile.machine-pairing.sheet",
       machinePairingCodeInput: "~mobile.machine-pairing.code",
       machinePairingSubmit: "~mobile.machine-pairing.submit",
+      machinePairingError: "~mobile.machine-pairing.error",
+      machinePairingClose: "~mobile.machine-pairing.close",
       machinePairingCamera: "~mobile.machine-pairing.camera",
       machinePairingOpenSettings: "~mobile.machine-pairing.open-settings"
     });
+    expect(selectorHelpers.machineRowsXPath("desktop-1")).toBe(
+      '//*[@name="mobile.machine.desktop-1.name"]'
+    );
+    expect(selectorHelpers.machineOriginSelector("desktop-1", "manual")).toBe(
+      "~mobile.machine.desktop-1.origin.manual"
+    );
   });
 
   it("extracts the exact display-task id from an Appium task-row name", () => {

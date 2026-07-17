@@ -42,6 +42,8 @@ export const selectors = {
   machinePairingSheet: `~${MOBILE_E2E_IDS.machinePairingSheet}`,
   machinePairingCodeInput: `~${MOBILE_E2E_IDS.machinePairingCodeInput}`,
   machinePairingSubmit: `~${MOBILE_E2E_IDS.machinePairingSubmitButton}`,
+  machinePairingError: `~${MOBILE_E2E_IDS.machinePairingError}`,
+  machinePairingClose: `~${MOBILE_E2E_IDS.machinePairingCloseButton}`,
   machinePairingCamera: `~${MOBILE_E2E_IDS.machinePairingCamera}`,
   machinePairingOpenSettings:
     `~${MOBILE_E2E_IDS.machinePairingOpenSettingsButton}`,
@@ -67,6 +69,17 @@ export const selectors = {
 
 export function machineRowSelector(desktopId: string): string {
   return `~${MOBILE_E2E_IDS.machineRow(desktopId)}`;
+}
+
+export function machineRowsXPath(desktopId: string): string {
+  return `//*[@name="${MOBILE_E2E_IDS.machineName(desktopId)}"]`;
+}
+
+export function machineOriginSelector(
+  desktopId: string,
+  origin: "account" | "manual"
+): string {
+  return `~${MOBILE_E2E_IDS.machineOrigin(desktopId, origin)}`;
 }
 
 export function machineRemoveButtonSelector(desktopId: string): string {

@@ -48,10 +48,18 @@ export const MOBILE_E2E_IDS = {
   machinePairingCamera: "mobile.machine-pairing.camera",
   machinePairingCodeInput: "mobile.machine-pairing.code",
   machinePairingSubmitButton: "mobile.machine-pairing.submit",
+  machinePairingError: "mobile.machine-pairing.error",
+  machinePairingCloseButton: "mobile.machine-pairing.close",
   machinePairingOpenSettingsButton: "mobile.machine-pairing.open-settings",
   developerForceCloudToggle: "mobile.developer.force-cloud",
   machineRow(desktopId: string): string {
     return `mobile.machine.${desktopId}`;
+  },
+  machineName(desktopId: string): string {
+    return `mobile.machine.${desktopId}.name`;
+  },
+  machineOrigin(desktopId: string, origin: "account" | "manual"): string {
+    return `mobile.machine.${desktopId}.origin.${origin}`;
   },
   machineRemoveButton(desktopId: string): string {
     return `mobile.machine.${desktopId}.remove`;

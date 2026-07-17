@@ -2,6 +2,8 @@ mod analytics;
 mod backup;
 mod desktop;
 #[cfg(debug_assertions)]
+mod e2e_mobile_controls;
+#[cfg(debug_assertions)]
 mod e2e_sql;
 mod ksp;
 mod operator_events;

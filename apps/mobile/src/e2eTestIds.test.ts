@@ -34,6 +34,8 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.machinePairingSheet).toBe("mobile.machine-pairing.sheet");
     expect(MOBILE_E2E_IDS.machinePairingCodeInput).toBe("mobile.machine-pairing.code");
     expect(MOBILE_E2E_IDS.machinePairingSubmitButton).toBe("mobile.machine-pairing.submit");
+    expect(MOBILE_E2E_IDS.machinePairingError).toBe("mobile.machine-pairing.error");
+    expect(MOBILE_E2E_IDS.machinePairingCloseButton).toBe("mobile.machine-pairing.close");
     expect(MOBILE_E2E_IDS.machinePairingCamera).toBe("mobile.machine-pairing.camera");
     expect(MOBILE_E2E_IDS.machinePairingOpenSettingsButton).toBe(
       "mobile.machine-pairing.open-settings"
@@ -42,6 +44,12 @@ describe("MOBILE_E2E_IDS", () => {
       "mobile.developer.force-cloud"
     );
     expect(MOBILE_E2E_IDS.machineRow("desktop-1")).toBe("mobile.machine.desktop-1");
+    expect(MOBILE_E2E_IDS.machineName("desktop-1")).toBe(
+      "mobile.machine.desktop-1.name"
+    );
+    expect(MOBILE_E2E_IDS.machineOrigin("desktop-1", "manual")).toBe(
+      "mobile.machine.desktop-1.origin.manual"
+    );
     expect(MOBILE_E2E_IDS.machineRemoveButton("desktop-1")).toBe(
       "mobile.machine.desktop-1.remove"
     );

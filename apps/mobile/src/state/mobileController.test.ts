@@ -283,6 +283,31 @@ describe("createMobileController", () => {
     expect(store.getState().desktops).toEqual([accountDesktop]);
   });
 
+  it("keeps manual trust published until durable removal succeeds", async () => {
+    const store = createSessionStore();
+    store.setTrustedDesktops([trustedDesktop]);
+    const persistence = createDeferred<void>();
+    const persistSessionContext = vi.fn(() => persistence.promise);
+    const controller = createMobileController(
+      createClientMock(),
+      store,
+      undefined,
+      { persistSessionContext }
+    );
+
+    const removal = controller.removeManualMachine("desktop-1");
+    await flushMicrotasks();
+
+    expect(store.getState().trustedDesktops).toEqual([trustedDesktop]);
+    expect(persistSessionContext).toHaveBeenCalledWith(
+      expect.objectContaining({ trustedDesktops: [] })
+    );
+
+    persistence.reject(new Error("storage unavailable"));
+    await expect(removal).rejects.toThrow("storage unavailable");
+    expect(store.getState().trustedDesktops).toEqual([trustedDesktop]);
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();

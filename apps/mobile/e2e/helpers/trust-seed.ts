@@ -6,6 +6,17 @@ export interface TrustedDesktopSeed {
   lanBaseUrl?: string;
 }
 
+export async function claimPairingPayloadThroughDeepLink(input: {
+  bundleId: string;
+  driver: Browser;
+  payload: string;
+}): Promise<void> {
+  await input.driver.execute("mobile: deepLink", {
+    bundleId: input.bundleId,
+    url: `kanna://e2e-pair?payload=${encodeURIComponent(input.payload)}`
+  });
+}
+
 export async function seedTrustedDesktopThroughDeepLink(input: {
   bundleId: string;
   driver: Browser;

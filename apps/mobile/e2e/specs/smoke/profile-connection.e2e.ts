@@ -1,14 +1,31 @@
 import type { Browser } from "webdriverio";
-import { selectors } from "../../helpers/selectors";
+import type {
+  HarnessPairingSession,
+  MobileHybridFixture
+} from "../../helpers/relay-harness";
+import { claimPairingPayloadThroughDeepLink } from "../../helpers/trust-seed";
+import {
+  machineRemoveButtonSelector,
+  machineOriginSelector,
+  machineRowSelector,
+  machineRowsXPath,
+  selectors
+} from "../../helpers/selectors";
+import {
+  openPtyFixtureTask,
+  waitForTaskTerminalLive
+} from "./list-detail-back.e2e";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
+const IOS_APP_STATE_NOT_RUNNING = 1;
 
 interface ProfileMachinesElement {
   click(): Promise<unknown>;
   getAttribute(name: string): Promise<string | null>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
+  setValue(value: string): Promise<unknown>;
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
 }
 
@@ -26,6 +43,15 @@ interface ProfileMachinesUi {
   getMachinesScreen(): Promise<ProfileMachinesElement>;
   getMachinesAddButton(): Promise<ProfileMachinesElement>;
   getPairingCodeInput(): Promise<ProfileMachinesElement>;
+  getPairingError(): Promise<ProfileMachinesElement>;
+  getPairingSubmit(): Promise<ProfileMachinesElement>;
+  getMachineRow(desktopId: string): Promise<ProfileMachinesElement>;
+  getMachineRows(desktopId: string): Promise<ProfileMachinesElement[]>;
+  getMachineOrigin(
+    desktopId: string,
+    origin: "account" | "manual"
+  ): Promise<ProfileMachinesElement>;
+  getMachineRemoveButton(desktopId: string): Promise<ProfileMachinesElement>;
   getEmailInput(): Promise<ProfileMachinesElement>;
   getPasswordInput(): Promise<ProfileMachinesElement>;
   getPasswordToggle(): Promise<ProfileMachinesElement>;
@@ -51,6 +77,15 @@ function createProfileMachinesUi(driver: Browser): ProfileMachinesUi {
     getMachinesScreen: async () => driver.$(selectors.machinesScreen),
     getMachinesAddButton: async () => driver.$(selectors.machinesAddButton),
     getPairingCodeInput: async () => driver.$(selectors.machinePairingCodeInput),
+    getPairingError: async () => driver.$(selectors.machinePairingError),
+    getPairingSubmit: async () => driver.$(selectors.machinePairingSubmit),
+    getMachineRow: async (desktopId) => driver.$(machineRowSelector(desktopId)),
+    getMachineRows: async (desktopId) =>
+      Array.from(await driver.$$(machineRowsXPath(desktopId))),
+    getMachineOrigin: async (desktopId, origin) =>
+      driver.$(machineOriginSelector(desktopId, origin)),
+    getMachineRemoveButton: async (desktopId) =>
+      driver.$(machineRemoveButtonSelector(desktopId)),
     getEmailInput: async () => driver.$(selectors.accountEmailInput),
     getPasswordInput: async () => driver.$(selectors.accountPasswordInput),
     getPasswordToggle: async () => driver.$(selectors.accountPasswordToggle),
@@ -119,6 +154,110 @@ export async function assertToolbarActionPathsReachable(
   const createTaskCommand = await ui.getCreateTaskCommand();
   await createTaskCommand.scrollIntoView({ direction: "down", maxScrolls: 5 });
   await openAndCloseComposer(createTaskCommand);
+}
+
+export async function submitPairingCode(
+  ui: Pick<
+    ProfileMachinesUi,
+    "getPairingCodeInput" | "getPairingSubmit" | "getMachineRow"
+  >,
+  code: string,
+  desktopId: string
+): Promise<void> {
+  const input = await ui.getPairingCodeInput();
+  await input.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await input.setValue(code);
+  await (await ui.getPairingSubmit()).click();
+  await (await ui.getMachineRow(desktopId)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+}
+
+export async function assertPairingFailure(
+  ui: Pick<ProfileMachinesUi, "getPairingCodeInput" | "getPairingError">,
+  failure: "invalid" | "expired"
+): Promise<void> {
+  const error = await ui.getPairingError();
+  await error.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const message = await error.getText();
+  const expected = failure === "expired"
+    ? "pairing session expired"
+    : "No matching machine was found";
+  if (!message.includes(expected)) {
+    throw new Error(`Expected ${failure} pairing recovery copy, got ${message}`);
+  }
+  await (await ui.getPairingCodeInput()).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+}
+
+export async function assertMachineOrigins(
+  ui: Pick<
+    ProfileMachinesUi,
+    "getMachineOrigin" | "getMachineRow" | "getMachineRows" | "waitUntil"
+  >,
+  desktopId: string,
+  origins: { account: boolean; manual: boolean }
+): Promise<void> {
+  const row = await ui.getMachineRow(desktopId);
+  await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  let observedOrigins = { account: false, manual: false };
+  let observedRows = 0;
+  await ui.waitUntil(
+    async () => {
+      const rows = await ui.getMachineRows(desktopId);
+      observedRows = rows.length;
+      observedOrigins = {
+        account: await (await ui.getMachineOrigin(desktopId, "account")).isExisting(),
+        manual: await (await ui.getMachineOrigin(desktopId, "manual")).isExisting()
+      };
+      return rows.length === 1 &&
+        observedOrigins.account === origins.account &&
+        observedOrigins.manual === origins.manual;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected one ${desktopId} row with origins ${JSON.stringify(origins)}; ` +
+        `last observed ${observedRows} rows and ${JSON.stringify(observedOrigins)}`
+    }
+  );
+}
+
+export async function removeManualMachine(
+  ui: Pick<
+    ProfileMachinesUi,
+    | "getMachineRemoveButton"
+    | "getMachineOrigin"
+    | "getMachineRow"
+    | "getMachineRows"
+    | "waitUntil"
+  >,
+  desktopId: string,
+  retainAccountRow: boolean,
+  confirmRemoval?: () => Promise<void>
+): Promise<void> {
+  await (await ui.getMachineRemoveButton(desktopId)).click();
+  await confirmRemoval?.();
+  await ui.waitUntil(
+    async () => {
+      const row = await ui.getMachineRow(desktopId);
+      if (!retainAccountRow) return !(await row.isExisting());
+      if (!(await row.isExisting())) return false;
+      const rows = await ui.getMachineRows(desktopId);
+      const account = await (await ui.getMachineOrigin(desktopId, "account")).isExisting();
+      const manual = await (await ui.getMachineOrigin(desktopId, "manual")).isExisting();
+      return rows.length === 1 && account && !manual;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: retainAccountRow
+        ? `Expected ${desktopId} to remain account-only after manual removal`
+        : `Expected manual-only machine ${desktopId} to be removed`
+    }
+  );
 }
 
 export async function assertOtaDiagnosticsHidden(
@@ -280,11 +419,235 @@ export async function runProfileConnectionSmoke(driver: Browser): Promise<void> 
 }
 
 export async function runProfileDisconnectedConnectionSmoke(
-  driver: Browser
+  driver: Browser,
+  options: {
+    bundleId: string;
+    createPairingSession(): Promise<HarnessPairingSession>;
+    credentials: { email: string; password: string };
+    desktopId: string;
+    expirePairingSession(): Promise<void>;
+    hybridFixture: MobileHybridFixture;
+    reopenDevelopmentClient(): Promise<void>;
+    setLanHttpEnabled(enabled: boolean): Promise<void>;
+  }
 ): Promise<void> {
   const ui = createProfileMachinesUi(driver);
+  await (await driver.$(selectors.appShell)).waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await openMachinesFromProfile(ui);
+
+  const codePairing = await options.createPairingSession();
+  await openPairingSheet(ui);
+  await submitPairingCode(ui, codePairing.code, options.desktopId);
+  await assertMachineOrigins(ui, options.desktopId, {
+    account: false,
+    manual: true
+  });
+  await removeManualMachine(
+    ui,
+    options.desktopId,
+    false,
+    () => acceptRemovalAlert(driver)
+  );
+
+  const invalidPairing = await options.createPairingSession();
+  await openPairingSheet(ui);
+  const invalidCode = invalidPairing.code === "FFFFFF" ? "000000" : "FFFFFF";
+  await submitPairingFailure(ui, invalidCode, "invalid");
+
+  const expiredPairing = await options.createPairingSession();
+  await options.expirePairingSession();
+  await submitPairingFailure(ui, expiredPairing.code, "expired");
+
+  const qrPairing = await options.createPairingSession();
+  await claimPairingPayloadThroughDeepLink({
+    bundleId: options.bundleId,
+    driver,
+    payload: qrPairing.pairingPayload
+  });
+  await (await driver.$(selectors.machinePairingClose)).click();
+  await assertMachineOrigins(ui, options.desktopId, {
+    account: false,
+    manual: true
+  });
+
+  await relaunchApp(driver, options.bundleId, options.reopenDevelopmentClient);
+  await (await driver.$(selectors.machinesScreen)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+  await assertMachineOrigins(ui, options.desktopId, {
+    account: false,
+    manual: true
+  });
+
+  await (await driver.$(selectors.machinesBackButton)).click();
+  await signInFromProfile(driver, ui, options.credentials);
+  await openMachinesFromProfile(ui);
+  await assertMachineOrigins(ui, options.desktopId, {
+    account: true,
+    manual: true
+  });
+
+  await (await driver.$(selectors.machinesBackButton)).click();
+  const recentTab = await driver.$(selectors.recentTab);
+  await recentTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await recentTab.click();
+  await waitForTaskRowText(
+    driver,
+    options.hybridFixture.duplicate.displayTaskId,
+    options.hybridFixture.duplicate.lanTitle,
+    "Expected the account machine to prefer its reachable LAN task source"
+  );
+
+  await options.setLanHttpEnabled(false);
+  await relaunchApp(driver, options.bundleId, options.reopenDevelopmentClient);
+  const relaunchedRecentTab = await driver.$(selectors.recentTab);
+  await relaunchedRecentTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await relaunchedRecentTab.click();
+  await waitForTaskRowText(
+    driver,
+    options.hybridFixture.duplicate.displayTaskId,
+    options.hybridFixture.duplicate.cloudTitle,
+    "Expected the account machine to fall back to relay after LAN became unavailable"
+  );
+  await openPtyFixtureTask(
+    {
+      getTaskRowById: async (taskId) =>
+        driver.$(`~mobile.task-row.${taskId}`),
+      waitUntil: (condition, waitOptions) => driver.waitUntil(condition, waitOptions)
+    },
+    options.hybridFixture.duplicate.displayTaskId
+  );
+  await waitForTaskTerminalLive({
+    getAgentMessageView: async () => driver.$(selectors.agentMessageView),
+    getAgentMessageReady: async () => driver.$(selectors.agentMessageReady),
+    getTaskDetailScreen: async () => driver.$(selectors.taskDetailScreen),
+    getTerminalOverlay: async () => driver.$(selectors.terminalOverlay),
+    waitUntil: (condition, waitOptions) => driver.waitUntil(condition, waitOptions)
+  });
+
+  await (await driver.$(selectors.taskBackButton)).click();
+  await openMachinesFromProfile(ui);
+  await removeManualMachine(
+    ui,
+    options.desktopId,
+    true,
+    () => acceptRemovalAlert(driver)
+  );
+}
+
+async function openPairingSheet(
+  ui: Pick<ProfileMachinesUi, "getMachinesAddButton" | "getPairingCodeInput">
+): Promise<void> {
+  await (await ui.getMachinesAddButton()).click();
+  await (await ui.getPairingCodeInput()).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+}
+
+async function submitPairingFailure(
+  ui: Pick<
+    ProfileMachinesUi,
+    "getPairingCodeInput" | "getPairingError" | "getPairingSubmit"
+  >,
+  code: string,
+  failure: "invalid" | "expired"
+): Promise<void> {
+  await (await ui.getPairingCodeInput()).setValue(code);
+  await (await ui.getPairingSubmit()).click();
+  await assertPairingFailure(ui, failure);
+}
+
+async function acceptRemovalAlert(driver: Browser): Promise<void> {
+  const alertAppeared = await driver
+    .waitUntil(
+      async () => driver.getAlertText().then(() => true).catch(() => false),
+      {
+        interval: 100,
+        timeout: 5_000,
+        timeoutMsg: "Expected remove-machine confirmation alert"
+      }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (alertAppeared) await driver.acceptAlert();
+}
+
+async function relaunchApp(
+  driver: Browser,
+  bundleId: string,
+  reopenDevelopmentClient: () => Promise<void>
+): Promise<void> {
+  await driver.terminateApp(undefined, bundleId);
+  await driver.waitUntil(
+    async () =>
+      await driver.queryAppState(undefined, bundleId) === IOS_APP_STATE_NOT_RUNNING,
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected ${bundleId} to terminate before relaunch`
+    }
+  );
+  await driver.activateApp(undefined, bundleId);
+  await reopenDevelopmentClient();
   await (await driver.$(selectors.appShell)).waitForDisplayed({
     timeout: SCREEN_TIMEOUT_MS
   });
-  await assertSignedOutMachineEntryPoints(ui);
+}
+
+async function signInFromProfile(
+  driver: Browser,
+  ui: ProfileMachinesUi,
+  credentials: { email: string; password: string }
+): Promise<void> {
+  await openProfileSheet(ui);
+  await (await ui.getEmailInput()).setValue(credentials.email);
+  await (await ui.getPasswordInput()).setValue(credentials.password);
+  await (await ui.getSignInButton()).click();
+  await driver.waitUntil(
+    async () => {
+      await dismissSavePasswordPrompt(driver);
+      return (await driver.$(selectors.accountSignOutButton)).isExisting();
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected profile machine E2E sign-in to complete"
+    }
+  );
+  await (await driver.$(selectors.accountCloseButton)).click();
+}
+
+async function dismissSavePasswordPrompt(driver: Browser): Promise<void> {
+  for (const selector of [
+    "~Not Now",
+    '-ios predicate string:name == "Not Now" OR label == "Not Now"'
+  ]) {
+    const notNow = await driver.$(selector);
+    if (await notNow.isExisting()) {
+      await notNow.click();
+      return;
+    }
+  }
+}
+
+async function waitForTaskRowText(
+  driver: Browser,
+  taskId: string,
+  expectedText: string,
+  timeoutMsg: string
+): Promise<void> {
+  await driver.waitUntil(
+    async () => {
+      const row = await driver.$(`~mobile.task-row.${taskId}`);
+      if (!(await row.isExisting())) return false;
+      const rowText = await row.getText().catch(() => "");
+      const pageSource = await driver.getPageSource();
+      return `${rowText}\n${pageSource}`.includes(expectedText);
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg
+    }
+  );
 }

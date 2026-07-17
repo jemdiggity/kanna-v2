@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   assertOtaDiagnosticsHidden,
+  assertMachineOrigins,
+  assertPairingFailure,
   assertProfilePasswordCanRevealAndHide,
   assertProfileSignInControlsReachable,
   assertSignedOutMachineEntryPoints,
   assertToolbarActionPathsReachable,
   openMachinesFromProfile,
-  openProfileSheet
+  openProfileSheet,
+  removeManualMachine,
+  submitPairingCode
 } from "./profile-connection.e2e";
 
 interface FakeWaitUntilOptions {
@@ -19,6 +23,7 @@ function createElement(exists = true) {
     getAttribute: vi.fn(async () => null as string | null),
     getText: vi.fn(async () => ""),
     isExisting: vi.fn(async () => exists),
+    setValue: vi.fn(async () => undefined),
     waitForDisplayed: vi.fn(async () => undefined)
   };
 }
@@ -92,6 +97,72 @@ describe("Profile to Machines smoke helpers", () => {
         timeoutMsg: "Expected Profile identity controls and Machines entry point to be reachable"
       })
     );
+  });
+
+  it("submits a pairing code and waits for the claimed machine row", async () => {
+    const codeInput = createElement();
+    const submit = createElement();
+    const machineRow = createElement();
+
+    await submitPairingCode({
+      getPairingCodeInput: async () => codeInput,
+      getPairingSubmit: async () => submit,
+      getMachineRow: async () => machineRow
+    }, "ABC123", "desktop-e2e");
+
+    expect(codeInput.setValue).toHaveBeenCalledWith("ABC123");
+    expect(submit.click).toHaveBeenCalledOnce();
+    expect(machineRow.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("requires invalid and expired pairing copy while keeping recovery controls", async () => {
+    const error = {
+      ...createElement(),
+      getText: vi.fn(async () => "That pairing session expired. Start a new one on the desktop.")
+    };
+    const codeInput = createElement();
+
+    await assertPairingFailure({
+      getPairingCodeInput: async () => codeInput,
+      getPairingError: async () => error
+    }, "expired");
+
+    expect(codeInput.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("asserts a single deduplicated dual-origin machine", async () => {
+    const row = {
+      ...createElement(),
+      getText: vi.fn(async () => "Remote E2E Desktop Account Paired")
+    };
+
+    await assertMachineOrigins({
+      getMachineOrigin: async (_desktopId, origin) => createElement(origin === "account" || origin === "manual"),
+      getMachineRow: async () => row,
+      getMachineRows: async () => [row],
+      waitUntil: createWaitUntil()
+    }, "desktop-e2e", { account: true, manual: true });
+
+    expect(row.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("removes only the manual origin while retaining a dual-origin row", async () => {
+    const remove = createElement();
+    const row = {
+      ...createElement(),
+      getText: vi.fn(async () => "Remote E2E Desktop Account")
+    };
+
+    await removeManualMachine({
+      getMachineOrigin: async (_desktopId, origin) => createElement(origin === "account"),
+      getMachineRemoveButton: async () => remove,
+      getMachineRow: async () => row,
+      getMachineRows: async () => [row],
+      waitUntil: createWaitUntil()
+    }, "desktop-e2e", true);
+
+    expect(remove.click).toHaveBeenCalledOnce();
+    expect(await row.getText()).not.toContain("Paired");
   });
 });
 

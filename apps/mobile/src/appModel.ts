@@ -288,8 +288,9 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let lastEnqueuedContextJson: string | null = null;
   let lastEnqueuedSave: Promise<void> = Promise.resolve();
   let persistenceTail: Promise<void> = Promise.resolve();
-  const persistContext = (): Promise<void> => {
-    const context = sessionStore.getPersistedContext();
+  const persistContext = (
+    context = sessionStore.getPersistedContext()
+  ): Promise<void> => {
     const serializedContext = JSON.stringify(context);
     if (serializedContext === lastEnqueuedContextJson) {
       return lastEnqueuedSave;
@@ -300,6 +301,12 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       .then(async () => {
         const resolvedPersistence = await getPersistence();
         await resolvedPersistence.save(context);
+      })
+      .catch((error) => {
+        if (lastEnqueuedSave === save) {
+          lastEnqueuedContextJson = null;
+        }
+        throw error;
       });
     lastEnqueuedContextJson = serializedContext;
     lastEnqueuedSave = save;
@@ -614,6 +621,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   if (options.enableE2eTrustSeed) {
     installE2eTrustSeedHandler({
       getPersistence,
+      pairPayload: (payload) => controller.pairMachineByPayload(payload),
       async reload() {
         await hydratePersistedContext();
         await controller.bootstrap();

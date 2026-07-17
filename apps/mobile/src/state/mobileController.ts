@@ -24,6 +24,7 @@ import type {
   PendingTaskCreation,
   SessionStore
 } from "./sessionStore";
+import type { PersistedSessionContext } from "./sessionPersistence";
 import {
   buildCreatingTaskUiSlot,
   taskUiSlotForSelection,
@@ -84,7 +85,7 @@ export interface MobileControllerOptions {
   ) => () => void;
   createTaskId?: () => string;
   createTaskSlotId?: () => string;
-  persistSessionContext?: () => Promise<void>;
+  persistSessionContext?: (context?: PersistedSessionContext) => Promise<void>;
   pairingService?: MachinePairingService;
   replaceClientForTrustChange?: () => void;
 }
@@ -1436,14 +1437,15 @@ export function createMobileController(
     },
 
     async removeManualMachine(desktopId) {
-      const previous = store.getState().trustedDesktops;
-      store.removeTrustedDesktop(desktopId);
-      try {
-        await options.persistSessionContext?.();
-      } catch (error) {
-        store.setTrustedDesktops(previous);
-        throw error;
-      }
+      const nextTrustedDesktops = store
+        .getState()
+        .trustedDesktops
+        .filter((desktop) => desktop.desktopId !== desktopId);
+      await options.persistSessionContext?.({
+        ...store.getPersistedContext(),
+        trustedDesktops: nextTrustedDesktops
+      });
+      store.setTrustedDesktops(nextTrustedDesktops);
       options.replaceClientForTrustChange?.();
       await refreshDesktops({ force: true });
     },

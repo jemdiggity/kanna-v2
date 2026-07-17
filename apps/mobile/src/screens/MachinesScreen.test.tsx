@@ -91,6 +91,9 @@ describe("MachinesScreen", () => {
     expect(textContent(tree)).toContain("Paired");
     expect(textContent(tree).match(/Jerome’s MacBook Pro/g)).toHaveLength(1);
     expect(findByTestId(tree, "mobile.machine.desktop-dual.remove")).not.toBeNull();
+    expect(findByTestId(tree, "mobile.machine.desktop-dual.name")).not.toBeNull();
+    expect(findByTestId(tree, "mobile.machine.desktop-dual.origin.account")).not.toBeNull();
+    expect(findByTestId(tree, "mobile.machine.desktop-dual.origin.manual")).not.toBeNull();
     expect(findByTestId(tree, "mobile.machine.desktop-account.remove")).toBeNull();
     expect(findByTestId(tree, "mobile.machines-back")).not.toBeNull();
     expect(findByTestId(tree, "mobile.machines-add")).not.toBeNull();

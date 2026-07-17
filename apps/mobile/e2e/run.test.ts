@@ -9,8 +9,9 @@ import {
 } from "./run";
 
 describe("mobile smoke runner", () => {
-  it("leaves relay alerts manual while preserving other lane policies", () => {
+  it("leaves relay and profile alerts manual while preserving other lane policies", () => {
     expect(resolveSimulatorAlertHandling("relay")).toBe("manual");
+    expect(resolveSimulatorAlertHandling("profile-disconnected")).toBe("manual");
     expect(resolveSimulatorAlertHandling("hybrid")).toBe("accept");
     expect(resolveSimulatorAlertHandling("smoke")).toBe("dismiss");
   });
@@ -34,6 +35,7 @@ describe("mobile smoke runner", () => {
 
   it("supports a disconnected profile smoke mode", () => {
     expect(supportedSmokeModes).toContain("profile-disconnected");
+    expect(requiresExactExpoEnvironment("profile-disconnected")).toBe(true);
   });
 
   it("supports a simulator shell visual mode without the PTY fixture", () => {
