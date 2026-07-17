@@ -858,3 +858,19 @@ Confirm from the final diff that:
 - selection gestures do not also scroll, pinch, double-zoom, or activate file links;
 - ordinary gestures recover after clear;
 - no physical-device automation, xterm private API, generated asset edit, push, PR, stage completion, or implementation commit occurred.
+
+## Review revision: link timing, clipboard lifetime, and integration evidence
+
+- [x] Defer registered xterm Markdown-link activation through the double-tap
+  recognition window, cancel it when selection wins, and retain settled
+  single-tap activation.
+- [x] Cover the complete registered-link sequence in both the generated-document
+  unit test and the real bundled-xterm TUI-fidelity browser journey.
+- [x] Version pending clipboard writes against the active selection/WebView
+  document, ignore stale success and failure after task switches or reloads, and
+  prevent duplicate Copy writes.
+- [x] Add pending-success and pending-failure tests for both lifecycle boundaries.
+- [x] Document the exact controlled-PTY, cross-context gesture, and simulator
+  pasteboard helpers still required for a deterministic Appium selection journey,
+  together with the unit and real-browser substitutes, in
+  `apps/mobile/e2e/terminal-streaming-coverage.md`.

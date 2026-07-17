@@ -101,9 +101,13 @@ export function TerminalWebView({
   const previousTaskIdRef = useRef<string | null>(null);
   const previousOutputRef = useRef("");
   const previousStatusRef = useRef<TaskTerminalStatus>("idle");
+  const activeTaskIdRef = useRef(taskId);
+  activeTaskIdRef.current = taskId;
+  const selectionContextRef = useRef({ copyPending: false, version: 0 });
   const [terminalInspection, setTerminalInspection] = useState<TerminalInspection | null>(null);
   const [terminalSelection, setTerminalSelection] = useState("");
   const [selectionCopyError, setSelectionCopyError] = useState<string | null>(null);
+  const [selectionCopyPending, setSelectionCopyPending] = useState(false);
   const resolvedBottomInset =
     bottomInset ?? (fullscreen ? DEFAULT_TERMINAL_BOTTOM_INSET : 24);
   const [terminalFileLinks, setTerminalFileLinks] = useState<TerminalFileLink[]>([]);
@@ -168,9 +172,12 @@ export function TerminalWebView({
     const taskChanged = previousTaskIdRef.current !== taskId;
 
     if (taskChanged) {
+      selectionContextRef.current.version += 1;
+      selectionContextRef.current.copyPending = false;
       setTerminalFileLinks([]);
       setTerminalSelection("");
       setSelectionCopyError(null);
+      setSelectionCopyPending(false);
       previousTaskIdRef.current = taskId;
       previousOutputRef.current = output;
       previousStatusRef.current = status;
@@ -298,8 +305,11 @@ export function TerminalWebView({
       ) {
         return;
       }
+      selectionContextRef.current.version += 1;
+      selectionContextRef.current.copyPending = false;
       setTerminalSelection(payload.text);
       setSelectionCopyError(null);
+      setSelectionCopyPending(false);
       return;
     }
 
@@ -337,17 +347,37 @@ export function TerminalWebView({
   };
 
   const clearTerminalSelection = () => {
+    selectionContextRef.current.version += 1;
+    selectionContextRef.current.copyPending = false;
     setTerminalSelection("");
     setSelectionCopyError(null);
+    setSelectionCopyPending(false);
     webViewRef.current?.injectJavaScript(clearTerminalSelectionScript());
   };
 
   const copyTerminalSelection = async () => {
-    if (!terminalSelection) return;
+    if (!terminalSelection || selectionContextRef.current.copyPending) return;
+    const selectionContextVersion = selectionContextRef.current.version;
+    selectionContextRef.current.copyPending = true;
+    setSelectionCopyPending(true);
     try {
       await Clipboard.setStringAsync(terminalSelection);
+      if (
+        activeTaskIdRef.current !== taskId ||
+        selectionContextRef.current.version !== selectionContextVersion
+      ) {
+        return;
+      }
       clearTerminalSelection();
     } catch {
+      if (
+        activeTaskIdRef.current !== taskId ||
+        selectionContextRef.current.version !== selectionContextVersion
+      ) {
+        return;
+      }
+      selectionContextRef.current.copyPending = false;
+      setSelectionCopyPending(false);
       setSelectionCopyError("Couldn’t copy. Try again.");
     }
   };
@@ -412,6 +442,7 @@ export function TerminalWebView({
           <Pressable
             accessibilityLabel="Copy selected terminal text"
             accessibilityRole="button"
+            disabled={selectionCopyPending}
             onPress={copyTerminalSelection}
             style={styles.selectionButtonPrimary}
           >
@@ -432,8 +463,11 @@ export function TerminalWebView({
         originWhitelist={["*"]}
         onLoadStart={() => {
           bridgeReadyRef.current = false;
+          selectionContextRef.current.version += 1;
+          selectionContextRef.current.copyPending = false;
           setTerminalSelection("");
           setSelectionCopyError(null);
+          setSelectionCopyPending(false);
           pendingScriptsRef.current = [
             ...(cols && rows ? [buildTerminalResizeScript(cols, rows)] : []),
             bottomInsetScript,

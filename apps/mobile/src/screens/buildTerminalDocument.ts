@@ -240,6 +240,7 @@ export function buildTerminalDocument({
       let pinch = null;
       let touchGestureMoved = false;
       let suppressFileLinkActivationUntil = 0;
+      let pendingFileLinkActivationTimer = null;
       let lastTap = null;
       let selectionAnchor = null;
       let selectionMode = false;
@@ -300,7 +301,16 @@ export function buildTerminalDocument({
         window.ReactNativeWebView.postMessage(JSON.stringify(message));
       }
 
+      function cancelPendingTerminalFileLinkActivation() {
+        if (pendingFileLinkActivationTimer === null) {
+          return;
+        }
+        window.clearTimeout(pendingFileLinkActivationTimer);
+        pendingFileLinkActivationTimer = null;
+      }
+
       function suppressTerminalFileLinkActivation() {
+        cancelPendingTerminalFileLinkActivation();
         suppressFileLinkActivationUntil = Math.max(
           suppressFileLinkActivationUntil,
           Date.now() + FILE_LINK_GESTURE_COOLDOWN_MS
@@ -308,8 +318,23 @@ export function buildTerminalDocument({
       }
 
       function activateTerminalFileLink(path, line) {
-        if (Date.now() < suppressFileLinkActivationUntil) {
+        const now = Date.now();
+        if (now < suppressFileLinkActivationUntil) {
           return false;
+        }
+        const elapsedSinceTap = lastTap ? now - lastTap.at : -1;
+        if (
+          elapsedSinceTap >= 0 &&
+          elapsedSinceTap <= DOUBLE_TAP_MAX_DELAY_MS
+        ) {
+          cancelPendingTerminalFileLinkActivation();
+          pendingFileLinkActivationTimer = window.setTimeout(() => {
+            pendingFileLinkActivationTimer = null;
+            if (Date.now() >= suppressFileLinkActivationUntil) {
+              notifyTerminalFileLink(path, line);
+            }
+          }, DOUBLE_TAP_MAX_DELAY_MS - elapsedSinceTap);
+          return true;
         }
         notifyTerminalFileLink(path, line);
         return true;
@@ -565,6 +590,7 @@ export function buildTerminalDocument({
 
       function clearTerminalSelection() {
         const hadSelection = selectionMode || Boolean(term.getSelection());
+        cancelPendingTerminalFileLinkActivation();
         selectionMode = false;
         selectionAnchor = null;
         lastTap = null;

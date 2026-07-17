@@ -464,6 +464,154 @@ describe("TerminalWebView", () => {
     ).toBeNull();
   });
 
+  it.each(["success", "failure"] as const)(
+    "ignores pending clipboard %s after switching tasks",
+    async (outcome) => {
+      let settleCopy!: () => void;
+      clipboardMocks.setStringAsync.mockReturnValue(
+        new Promise<void>((resolve, reject) => {
+          settleCopy = () => {
+            if (outcome === "success") resolve();
+            else reject(new Error("denied"));
+          };
+        })
+      );
+      const initial = await renderTerminalWebView({ taskId: "task-1" });
+      runEffects();
+      (initial.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "terminal-selection-change",
+            text: "old task selection"
+          })
+        }
+      } as WebViewMessageEvent);
+      await renderTerminalWebView({ taskId: "task-1" });
+      const pending = (findByAccessibilityLabel(
+        lastTree,
+        "Copy selected terminal text"
+      )?.props.onPress as () => Promise<void>)();
+
+      await renderTerminalWebView({ taskId: "task-2" });
+
+      settleCopy();
+      await pending;
+      await renderTerminalWebView({ taskId: "task-2" });
+
+      expect(injectedScripts).not.toContain(
+        "window.__clearTerminalSelection(); true;"
+      );
+      expect(JSON.stringify(lastTree)).not.toContain("Couldn’t copy. Try again.");
+
+      runEffects();
+      const replacement = await renderTerminalWebView({ taskId: "task-2" });
+      (replacement.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "terminal-selection-change",
+            text: "replacement selection"
+          })
+        }
+      } as WebViewMessageEvent);
+      await renderTerminalWebView({ taskId: "task-2" });
+      injectedScripts.length = 0;
+
+      await renderTerminalWebView({ taskId: "task-2" });
+
+      expect(injectedScripts).not.toContain(
+        "window.__clearTerminalSelection(); true;"
+      );
+      expect(JSON.stringify(lastTree)).not.toContain("Couldn’t copy. Try again.");
+      expect(
+        findByAccessibilityLabel(lastTree, "Copy selected terminal text")
+      ).not.toBeNull();
+    }
+  );
+
+  it.each(["success", "failure"] as const)(
+    "ignores pending clipboard %s after the WebView reloads",
+    async (outcome) => {
+      let settleCopy!: () => void;
+      clipboardMocks.setStringAsync.mockReturnValue(
+        new Promise<void>((resolve, reject) => {
+          settleCopy = () => {
+            if (outcome === "success") resolve();
+            else reject(new Error("denied"));
+          };
+        })
+      );
+      const initial = await renderTerminalWebView({ taskId: "task-1" });
+      runEffects();
+      (initial.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "terminal-selection-change",
+            text: "old document selection"
+          })
+        }
+      } as WebViewMessageEvent);
+      const current = await renderTerminalWebView({ taskId: "task-1" });
+      const pending = (findByAccessibilityLabel(
+        lastTree,
+        "Copy selected terminal text"
+      )?.props.onPress as () => Promise<void>)();
+
+      (current.props.onLoadStart as () => void)();
+      const replacement = await renderTerminalWebView({ taskId: "task-1" });
+      (replacement.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "terminal-selection-change",
+            text: "replacement selection"
+          })
+        }
+      } as WebViewMessageEvent);
+      await renderTerminalWebView({ taskId: "task-1" });
+      injectedScripts.length = 0;
+
+      settleCopy();
+      await pending;
+      await renderTerminalWebView({ taskId: "task-1" });
+
+      expect(injectedScripts).not.toContain(
+        "window.__clearTerminalSelection(); true;"
+      );
+      expect(JSON.stringify(lastTree)).not.toContain("Couldn’t copy. Try again.");
+      expect(
+        findByAccessibilityLabel(lastTree, "Copy selected terminal text")
+      ).not.toBeNull();
+    }
+  );
+
+  it("allows only one clipboard write for repeated Copy presses", async () => {
+    let resolveCopy!: () => void;
+    clipboardMocks.setStringAsync.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveCopy = resolve;
+      })
+    );
+    const webView = await renderTerminalWebView({});
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({ type: "terminal-selection-change", text: "copy once" })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({});
+    const copy = findByAccessibilityLabel(lastTree, "Copy selected terminal text");
+
+    const first = (copy?.props.onPress as () => Promise<void>)();
+    const second = (copy?.props.onPress as () => Promise<void>)();
+    await renderTerminalWebView({});
+
+    expect(clipboardMocks.setStringAsync).toHaveBeenCalledTimes(1);
+    expect(
+      findByAccessibilityLabel(lastTree, "Copy selected terminal text")?.props.disabled
+    ).toBe(true);
+
+    resolveCopy();
+    await Promise.all([first, second]);
+  });
+
   it("exposes rendered terminal diagnostics to native E2E automation", async () => {
     vi.stubEnv("EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED", "1");
     const webView = await renderTerminalWebView({});

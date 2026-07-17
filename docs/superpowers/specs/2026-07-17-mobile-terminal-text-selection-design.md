@@ -33,7 +33,7 @@ Kanna could serialize scrollback into a separate native selectable transcript. N
 - A normal tap retains the existing terminal-tap behavior.
 - A single-finger drag continues to pan horizontally or scroll xterm vertically.
 - A two-finger gesture continues to pinch-scale the terminal.
-- Two taps within 300 ms and 24 CSS pixels select the word under the second tap and enter selection mode. The second tap is consumed so WebView double-tap zoom and terminal file-link activation do not also run.
+- Two taps within 300 ms and 24 CSS pixels select the word under the second tap and enter selection mode. Registered xterm Markdown-link activation from the first tap is deferred through that recognition window and cancelled when the second tap settles; a single tap still opens the link after the window closes.
 - The initial range uses xterm's configured word separators. If the tapped cell contains whitespace or a separator, select that single terminal cell so selection mode still has an unambiguous anchor.
 - While selection mode is active, a one-finger drag extends from the original word anchor to the current terminal cell. It may extend forward or backward and across visible rows. Selection drags do not scroll or activate file links.
 - Selection is limited to cells reachable in the current viewport in the first version. Edge-triggered auto-scroll and native-style drag handles are non-goals.
@@ -55,6 +55,7 @@ The generated script will:
 4. Store the ordered word anchor. During selection-mode drags, calculate an ordered start/end pair and call `term.select` with the corresponding linear cell length.
 5. Subscribe to `term.onSelectionChange` and report the current selection through the WebView bridge.
 6. Expose `window.__clearTerminalSelection()` so native Copy/Cancel controls can clear xterm state and exit selection mode.
+7. Queue xterm link-provider activation while a first terminal tap can still become a double tap. Selection, scrolling, pinch, and cancellation clear the queued activation before it can post a file-preview message.
 
 Entering selection mode disables sticky-bottom following so new output cannot move the selected text out from under the gesture. Clearing selection recomputes sticky intent from the current buffer position. Append, replace, resize, bottom-inset, and font-scale paths otherwise remain unchanged.
 
@@ -73,7 +74,7 @@ No xterm private fields or generated dependency assets are patched.
 
 A non-empty validated value becomes the active selection and renders a native Copy/Cancel toolbar above the WebView. An empty value removes the toolbar. Selection state is cleared when the task changes or the WebView reloads.
 
-Copy uses `expo-clipboard`, added as a bundled mobile dependency compatible with the repository's Expo SDK. On success, or when Cancel is pressed, `TerminalWebView` injects `window.__clearTerminalSelection(); true;`. Clipboard failures retain the value and surface an inline error in the toolbar.
+Copy uses `expo-clipboard`, added as a bundled mobile dependency compatible with the repository's Expo SDK. Each request captures the active selection/document version; task changes, WebView reloads, selection changes, and Cancel invalidate that version. Only a still-current completion may inject `window.__clearTerminalSelection(); true;` or surface a clipboard error. A synchronous in-flight guard disables Copy and prevents repeated presses from racing.
 
 The toolbar uses native `Pressable` controls with button roles and descriptive accessibility labels. Clipboard access stays outside the generated document, avoiding WebView origin and permission differences.
 
@@ -106,11 +107,11 @@ Copy
 - A tap outside `.xterm-screen`, on the fallback file-link controls, or before cell geometry is usable does not enter selection mode.
 - Wide and combining characters use buffer-cell widths rather than JavaScript string offsets when determining the selected word.
 - Double-tap detection is reset by multi-touch, cancellation, a moved gesture, task replacement, or selection-mode exit.
-- Existing file-link cooldown applies to double taps and selection drags so a selection gesture cannot open a file preview.
+- Registered xterm file-link activation is deferred for the double-tap window, then cancelled by the existing cooldown when a second tap or moved gesture becomes selection. Persistent native/file-strip buttons remain ordinary immediate controls.
 - Terminal output may continue while text is selected, but sticky-bottom following remains disabled until selection mode exits.
 - Replace operations and WebView reloads clear selection because prior buffer coordinates are no longer valid.
 - Malformed, non-string, or unexpected bridge payloads are ignored. React Native rejects selection values above 2,300,000 UTF-16 code units, a fixed ceiling covering the configured 10,000-row scrollback plus the visible 220-column grid and line breaks without accepting unbounded bridge data.
-- Clipboard failure does not clear the terminal selection.
+- Clipboard failure does not clear the terminal selection. A completion from an invalidated task, WebView document, or replaced selection does not clear or annotate the replacement selection.
 
 ## Testing
 
@@ -127,7 +128,7 @@ Cover:
 - a selection-mode drag expands forward, backward, and across rows;
 - selection drags do not call horizontal or vertical scroll APIs;
 - ordinary one-finger scrolling and two-finger pinch behavior remain unchanged outside selection mode;
-- double taps and selection drags suppress file-link activation;
+- a complete double-tap sequence over a registered Markdown link selects the text and emits no file-link message, while a settled single tap still activates it;
 - clearing, cancellation, replace, and reload paths leave gesture and sticky state consistent;
 - generated code uses public xterm APIs and contains no private-field access.
 
@@ -140,11 +141,13 @@ Extend `apps/mobile/src/screens/TerminalWebView.test.tsx` to verify:
 - Copy writes the exact text, clears selection only after success, and removes stale clipboard errors;
 - clipboard rejection retains the selection and displays a retryable error;
 - Cancel injects the clear-selection script without writing the clipboard;
+- pending clipboard success and failure are ignored after task switches and WebView reloads;
+- repeated Copy presses start only one platform clipboard write;
 - task switches and WebView reloads remove stale native selection state.
 
 ### Real-browser regression
 
-Add focused coverage to the existing TUI-fidelity browser harness using the real bundled xterm renderer. Dispatch touch-like events at known terminal cells and assert that double tap produces `term.getSelection()`, a subsequent drag changes the selected range, and an ordinary drag before selection still scrolls. This guards the geometry and event-propagation boundary that a DOM-only terminal stub cannot prove.
+Add focused coverage to the existing TUI-fidelity browser harness using the real bundled xterm renderer. Dispatch touch-like events at a registered Markdown link and invoke the real provider callback in xterm's first-tap/second-tap order. Assert that a single tap emits one file-link message, the complete double tap emits none and produces `term.getSelection()`, a subsequent drag changes the selected range, and an ordinary drag after clear still scrolls. This guards the geometry, provider timing, and event-propagation boundary that a DOM-only terminal stub cannot prove.
 
 Verify with:
 

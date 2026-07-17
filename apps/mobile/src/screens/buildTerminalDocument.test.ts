@@ -360,6 +360,20 @@ function tapElement(
   }
 }
 
+function activateLinkAt(
+  window: Window,
+  link: StubTerminalLink,
+  at: number
+): void {
+  const windowDate = (window as unknown as { Date: DateConstructor }).Date;
+  const now = vi.spyOn(windowDate, "now").mockReturnValue(at);
+  try {
+    link.activate();
+  } finally {
+    now.mockRestore();
+  }
+}
+
 function extractTerminalScript(html: string): string {
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
     (match) => match[1]
@@ -767,6 +781,53 @@ describe("buildTerminalDocument", () => {
       type: "terminal-selection-change",
       text: "selected"
     });
+  });
+
+  it("opens a registered Markdown link after a settled single tap", async () => {
+    const { messages, terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    const line = "docs/spec.md suffix";
+    const link = provideLinks(terminal, 3, line)?.[0];
+    expect(link).toBeDefined();
+    const point = { clientX: 9 * 3 + 4, clientY: 18 * 2 + 9 };
+
+    tapTerminal(window, viewport, point, 1_000);
+    activateLinkAt(window, link!, 1_010);
+
+    expect(messages.map((value) => JSON.parse(value).type)).not.toContain(
+      "terminal-file-link"
+    );
+
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 320));
+
+    expect(messages.map((value) => JSON.parse(value))).toContainEqual({
+      type: "terminal-file-link",
+      path: "docs/spec.md"
+    });
+  });
+
+  it("selects a registered Markdown link on double tap without opening it", async () => {
+    const { messages, terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    const line = "docs/spec.md suffix";
+    const link = provideLinks(terminal, 3, line)?.[0];
+    expect(link).toBeDefined();
+    const point = { clientX: 9 * 3 + 4, clientY: 18 * 2 + 9 };
+
+    tapTerminal(window, viewport, point, 1_000);
+    activateLinkAt(window, link!, 1_010);
+    tapTerminal(window, viewport, point, 1_180);
+    activateLinkAt(window, link!, 1_190);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 320));
+
+    expect(terminal.getSelection()).toBe("docs/spec.md");
+    expect(messages.map((value) => JSON.parse(value))).toContainEqual({
+      type: "terminal-selection-change",
+      text: "docs/spec.md"
+    });
+    expect(messages.map((value) => JSON.parse(value).type)).not.toContain(
+      "terminal-file-link"
+    );
   });
 
   it("selects one separator cell when double tapping whitespace", () => {

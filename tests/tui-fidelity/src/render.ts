@@ -33,8 +33,10 @@ interface MobileEasedScrollResult {
 }
 
 interface MobileSelectionResult {
+  doubleTapFileLinkMessages: number;
   initialSelection: string;
   extendedSelection: string;
+  singleTapFileLinkMessages: number;
   scrollTargetsDuringSelection: number[];
   viewportYBeforeSelectionDrag: number;
   viewportYAfterSelectionDrag: number;
@@ -305,7 +307,7 @@ export async function verifyMobileTerminalSelection(browser: Browser): Promise<v
 
     const lines = [
       ...Array.from({ length: 60 }, (_, index) => `selection-scroll-${index + 1}`),
-      "alpha selected omega",
+      "alpha docs/selected.md omega",
       ...Array.from({ length: 18 }, (_, index) => `selection-tail-${index + 1}`)
     ].join("\r\n") + "\r\n";
     await callHook(page, "__replaceTerminalState", { text: lines });
@@ -372,7 +374,10 @@ export async function verifyMobileTerminalSelection(browser: Browser): Promise<v
       const buffer = term.buffer.active;
       let targetRow = -1;
       for (let row = 0; row <= buffer.baseY + term.rows; row += 1) {
-        if (buffer.getLine(row)?.translateToString(true) === "alpha selected omega") {
+        if (
+          buffer.getLine(row)?.translateToString(true) ===
+          "alpha docs/selected.md omega"
+        ) {
           targetRow = row;
           break;
         }
@@ -387,14 +392,41 @@ export async function verifyMobileTerminalSelection(browser: Browser): Promise<v
       const cellWidth = rect.width / term.cols;
       const cellHeight = rect.height / term.rows;
       const visibleRow = targetRow - buffer.viewportY;
-      const selectedX = rect.left + cellWidth * 9.5;
-      const omegaX = rect.left + cellWidth * 19.5;
+      const selectedX = rect.left + cellWidth * 10.5;
+      const omegaX = rect.left + cellWidth * 27.5;
       const lineY = rect.top + cellHeight * (visibleRow + 0.5);
 
+      const provider = window.__kannaTerminalLinkProviders[0];
+      if (!provider) {
+        throw new Error("selection fixture terminal link provider was not registered");
+      }
+      const links = await new Promise<Window["__kannaTerminalLinks"]>((resolve) => {
+        provider.provideLinks(targetRow + 1, resolve);
+      });
+      const markdownLink = links?.find((link) => link.text === "docs/selected.md");
+      if (!markdownLink) {
+        throw new Error("selection fixture Markdown link was not registered");
+      }
+
+      window.__kannaBridgeMessages.length = 0;
       await tap(selectedX, lineY);
+      markdownLink.activate();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 320));
+      const singleTapFileLinkMessages = window.__kannaBridgeMessages.filter(
+        (message) => JSON.parse(message).type === "terminal-file-link"
+      ).length;
+
+      window.__kannaBridgeMessages.length = 0;
+      await tap(selectedX, lineY);
+      markdownLink.activate();
       await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
       await tap(selectedX, lineY);
+      markdownLink.activate();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 320));
       const initialSelection = term.getSelection();
+      const doubleTapFileLinkMessages = window.__kannaBridgeMessages.filter(
+        (message) => JSON.parse(message).type === "terminal-file-link"
+      ).length;
 
       const originalScrollToLine = term.scrollToLine.bind(term);
       const scrollTargetsDuringSelection: number[] = [];
@@ -423,8 +455,10 @@ export async function verifyMobileTerminalSelection(browser: Browser): Promise<v
       await new Promise<void>((resolve) => window.setTimeout(resolve, 140));
 
       return {
+        doubleTapFileLinkMessages,
         initialSelection,
         extendedSelection,
+        singleTapFileLinkMessages,
         scrollTargetsDuringSelection: selectionScrollTargets,
         viewportYBeforeSelectionDrag,
         viewportYAfterSelectionDrag,
@@ -433,12 +467,22 @@ export async function verifyMobileTerminalSelection(browser: Browser): Promise<v
       };
     });
 
-    if (result.initialSelection !== "selected") {
+    if (result.singleTapFileLinkMessages !== 1) {
+      throw new Error(
+        `mobile single tap emitted ${result.singleTapFileLinkMessages} terminal file links`
+      );
+    }
+    if (result.doubleTapFileLinkMessages !== 0) {
+      throw new Error(
+        `mobile double tap emitted ${result.doubleTapFileLinkMessages} terminal file links`
+      );
+    }
+    if (result.initialSelection !== "docs/selected.md") {
       throw new Error(
         `mobile selection chose ${JSON.stringify(result.initialSelection)}`
       );
     }
-    if (!result.extendedSelection.includes("selected omega")) {
+    if (!result.extendedSelection.includes("docs/selected.md omega")) {
       throw new Error(
         `mobile selection did not extend (${JSON.stringify(result.extendedSelection)})`
       );
@@ -724,8 +768,15 @@ function formatMobileEasedScrollResult(result: MobileEasedScrollResult): string 
 
 function terminalProbeScript(): string {
   return `
+    window.__kannaBridgeMessages = [];
+    window.__kannaTerminalLinkProviders = [];
     window.__kannaTerminals = [];
     window.__kannaPendingWrites = 0;
+    window.ReactNativeWebView = {
+      postMessage(message) {
+        window.__kannaBridgeMessages.push(message);
+      }
+    };
     (function installTerminalProbe() {
       let actualTerminal = undefined;
       Object.defineProperty(window, "Terminal", {
@@ -748,6 +799,11 @@ function terminalProbeScript(): string {
                   window.__kannaPendingWrites -= 1;
                 }
               });
+            };
+            const originalRegisterLinkProvider = term.registerLinkProvider.bind(term);
+            term.registerLinkProvider = function patchedRegisterLinkProvider(provider) {
+              window.__kannaTerminalLinkProviders.push(provider);
+              return originalRegisterLinkProvider(provider);
             };
             window.__kannaTerminals.push(term);
             return term;
@@ -798,6 +854,17 @@ declare global {
     __setTerminalBottomInset: (state: { bottomInset: number }) => void;
     __setTerminalDims: (dims: { cols: number; rows: number }) => void;
     __kannaPendingWrites: number;
+    __kannaBridgeMessages: string[];
+    __kannaTerminalLinks: Array<{
+      activate: () => void;
+      text: string;
+    }> | undefined;
+    __kannaTerminalLinkProviders: Array<{
+      provideLinks: (
+        bufferLineNumber: number,
+        callback: (links: Window["__kannaTerminalLinks"]) => void
+      ) => void;
+    }>;
     __kannaScrollToLineTarget: number | undefined;
     __kannaSerializeAddon: { serialize: () => string };
     __kannaColorValue: (
