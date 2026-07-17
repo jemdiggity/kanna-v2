@@ -30,8 +30,8 @@ use environment::{
 };
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{
-    resolve_agent_provider, resolve_agent_provider_candidates, resolve_agent_type, AgentProvider,
-    AgentSessionType,
+    normalize_agent_type, resolve_agent_provider, resolve_agent_provider_candidates,
+    resolve_agent_type, AgentProvider, AgentSessionType,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -2066,31 +2066,61 @@ fn prepare_new_task_session(
         &mut spawn_env,
     )?;
     let setup = new_task_setup_cmds(repo_config, &resolved.stage_setup, &resolved.setup_cmds);
-    run_workspace_setup_commands(&setup, worktree_path, &spawn_env)?;
-    let provider = resolved
-        .provider_candidates
-        .iter()
-        .copied()
-        .find(|provider| {
-            resolve_provider_executable(
-                *provider,
-                spawn_env.get("PATH").map(String::as_str),
-                worktree_path,
-            )
-            .is_ok()
-        })
-        .ok_or_else(|| {
-            format!(
-                "None of the configured agent providers are available: {}.",
-                resolved
-                    .provider_candidates
-                    .iter()
-                    .map(|provider| provider.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-    let agent_type = resolve_agent_type(resolved.requested_agent_type.as_deref(), provider)?;
+    let requested_headless = matches!(
+        normalize_agent_type(resolved.requested_agent_type.as_deref()),
+        Some("agent")
+    );
+    let resolve_available_provider = || {
+        resolved
+            .provider_candidates
+            .iter()
+            .copied()
+            .find(|provider| {
+                resolve_provider_executable(
+                    *provider,
+                    spawn_env.get("PATH").map(String::as_str),
+                    worktree_path,
+                )
+                .is_ok()
+            })
+            .ok_or_else(|| {
+                format!(
+                    "None of the configured agent providers are available: {}.",
+                    resolved
+                        .provider_candidates
+                        .iter()
+                        .map(|provider| provider.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    };
+    let (provider, agent_type, session_setup) = if requested_headless {
+        // Headless sessions have no terminal for visible bootstrap output.
+        // Preserve post-setup provider discovery so setup may install any of
+        // the configured fallback candidates before we resolve an absolute
+        // executable for SpawnAgent.
+        run_workspace_setup_commands(&setup, worktree_path, &spawn_env)?;
+        let provider = resolve_available_provider()?;
+        let agent_type = resolve_agent_type(resolved.requested_agent_type.as_deref(), provider)?;
+        (provider, agent_type, &[][..])
+    } else if setup.is_empty() {
+        // With no bootstrap to defer, preserve ordered availability fallback
+        // and keep launching the already-resolved executable directly.
+        let provider = resolve_available_provider()?;
+        let agent_type = resolve_agent_type(resolved.requested_agent_type.as_deref(), provider)?;
+        (provider, agent_type, &[][..])
+    } else {
+        // PTY setup belongs in the daemon shell so users see commands and
+        // output before the agent starts. Bind configured precedence now;
+        // setup may make that provider executable available later on PATH.
+        let provider = *resolved
+            .provider_candidates
+            .first()
+            .ok_or_else(|| "No agent provider configured for this request.".to_string())?;
+        let agent_type = resolve_agent_type(resolved.requested_agent_type.as_deref(), provider)?;
+        (provider, agent_type, setup.as_slice())
+    };
     let (mut session, provider_session_id) = build_prepared_session(
         provider,
         agent_type,
@@ -2108,7 +2138,7 @@ fn prepare_new_task_session(
         mcp_config_path,
         &spawn_env,
         worktree_path,
-        &[],
+        session_setup,
         false,
         resolved.resume_session_id.as_deref(),
     )?;
