@@ -7,6 +7,7 @@ export const selectors = {
   taskDetailTitle: `~${MOBILE_E2E_IDS.taskDetailTitle}`,
   taskTitleButton: `~${MOBILE_E2E_IDS.taskTitleButton}`,
   taskExpandedPrompt: `~${MOBILE_E2E_IDS.taskExpandedPrompt}`,
+  taskExpandedTaskId: `~${MOBILE_E2E_IDS.taskExpandedTaskId}`,
   taskTitleDismissLayer: `~${MOBILE_E2E_IDS.taskTitleDismissLayer}`,
   taskSnapshotMarker: `~${MOBILE_E2E_IDS.taskSnapshotMarker}`,
   taskBackButton: `~${MOBILE_E2E_IDS.taskBackButton}`,

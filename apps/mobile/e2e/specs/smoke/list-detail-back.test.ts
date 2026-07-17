@@ -140,7 +140,8 @@ describe("PTY fixture selection", () => {
       )
     ).resolves.toEqual({
       expectedTitle: "Short renamed task",
-      promptEndSentinel: "MOBILE_PROMPT_END_SENTINEL"
+      promptEndSentinel: "MOBILE_PROMPT_END_SENTINEL",
+      taskId: "task-pty"
     });
   });
 
@@ -169,19 +170,26 @@ describe("PTY fixture selection", () => {
 });
 
 describe("task prompt expansion journey", () => {
-  it("shows the distinct prompt end, collapses outside, and leaves Back usable", async () => {
+  it("copies the complete task ID without collapsing, then preserves both collapse paths", async () => {
     const exerciseTaskPromptExpansion = (
       smokeModule as typeof smokeModule & {
         exerciseTaskPromptExpansion?: (
           ui: Record<string, unknown>,
-          fixture: { expectedTitle: string; promptEndSentinel: string }
+          fixture: {
+            expectedTitle: string;
+            promptEndSentinel: string;
+            taskId: string;
+          }
         ) => Promise<void>;
       }
     ).exerciseTaskPromptExpansion;
     expect(exerciseTaskPromptExpansion).toBeTypeOf("function");
     if (!exerciseTaskPromptExpansion) return;
 
+    const taskId = "019f6c9d6ed40000000120e4307b4591";
     let expanded = false;
+    let copyMenuVisible = false;
+    let clipboard = "preexisting clipboard";
     const titleButton = {
       ...createElement(() => true, () => {
         expanded = !expanded;
@@ -195,6 +203,25 @@ describe("task prompt expansion journey", () => {
           ? "First prompt line\nSecond detailed line\nPROMPT_END_SENTINEL"
           : ""
       )
+    };
+    const expandedTaskId = {
+      ...createElement(() => expanded),
+      getText: vi.fn(async () => (expanded ? taskId : "")),
+      longPress: vi.fn(async ({ duration }: { duration: number }) => {
+        if (duration === 1_500) {
+          copyMenuVisible = true;
+        }
+      })
+    };
+    const copyMenuItem = {
+      ...createElement(
+        () => copyMenuVisible,
+        () => {
+          clipboard = taskId;
+          copyMenuVisible = false;
+        }
+      ),
+      isDisplayed: vi.fn(async () => copyMenuVisible)
     };
     const dismissLayer = createElement(
       () => expanded,
@@ -211,8 +238,16 @@ describe("task prompt expansion journey", () => {
     });
     const ui = {
       getBackButton: vi.fn(async () => backButton),
+      getClipboard: vi.fn(async () =>
+        Buffer.from(clipboard, "utf8").toString("base64")
+      ),
+      setClipboard: vi.fn(async (encodedClipboard: string) => {
+        clipboard = Buffer.from(encodedClipboard, "base64").toString("utf8");
+      }),
       getCollapsedTitle: vi.fn(async () => titleButton),
+      getCopyMenuItem: vi.fn(async () => copyMenuItem),
       getExpandedPrompt: vi.fn(async () => expandedPrompt),
+      getExpandedTaskId: vi.fn(async () => expandedTaskId),
       getTitleButton: vi.fn(async () => titleButton),
       getTitleDismissLayer: vi.fn(async () => dismissLayer),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
@@ -225,15 +260,24 @@ describe("task prompt expansion journey", () => {
 
     await exerciseTaskPromptExpansion(ui, {
       expectedTitle: "Short renamed task",
-      promptEndSentinel: "PROMPT_END_SENTINEL"
+      promptEndSentinel: "PROMPT_END_SENTINEL",
+      taskId
     });
 
-    expect(titleButton.click).toHaveBeenCalledTimes(1);
+    expect(titleButton.click).toHaveBeenCalledTimes(3);
     expect(expandedPrompt.getText).toHaveBeenCalled();
+    expect(expandedTaskId.getText).toHaveBeenCalled();
+    expect(expandedTaskId.longPress).toHaveBeenCalledWith({ duration: 1_500 });
+    expect(copyMenuItem.click).toHaveBeenCalledTimes(1);
+    expect(ui.getClipboard).toHaveBeenCalled();
+    expect(ui.setClipboard).toHaveBeenCalledTimes(2);
+    expect(clipboard).toBe("preexisting clipboard");
     expect(dismissLayer.click).toHaveBeenCalledTimes(1);
     expect(await backButton.isExisting()).toBe(true);
     expect(backDisplayed).toHaveBeenCalledTimes(1);
     expect(backEnabled).toHaveBeenCalledTimes(1);
+    expect(await expandedPrompt.isExisting()).toBe(false);
+    expect(await expandedTaskId.isExisting()).toBe(false);
     expect(expanded).toBe(false);
   });
 });

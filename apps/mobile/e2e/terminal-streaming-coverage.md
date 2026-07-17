@@ -8,6 +8,8 @@ PTY fixture:
 - `KANNA_E2E_PTY_SENTINEL` is visible in that task's terminal snapshot.
 - The same task has a short renamed display title and a distinct multiline prompt
   whose final line contains `PROMPT_END_SENTINEL`.
+- The task ID is the complete durable ID expected in the expanded identity panel
+  and in the clipboard after the native Copy action.
 - `KANNA_E2E_PTY_EXPECTED_COLS` and `KANNA_E2E_PTY_EXPECTED_ROWS` optionally
   override the default fixture size of `80x24`.
 - `KANNA_E2E_PTY_MIN_DECODED_BYTES` optionally overrides the default minimum of
@@ -21,8 +23,25 @@ through `data-kanna-cols` and `data-kanna-rows`. The 16 KiB decoded-byte default
 is intentionally above the old 12,000-character base64 cap failure mode, which
 could only decode to about 9 KiB and could leave the rendered terminal blank.
 The native journey also taps the selected task's title, verifies the canonical
-prompt through its end sentinel, verifies Back remains exposed, dismisses the
-prompt through the outside layer, and then uses Back.
+prompt through its end sentinel, verifies the complete task ID, long-presses the
+ID for 1.5 seconds, requires the native iOS `Copy` action, and compares the
+decoded WebDriverAgent clipboard with the exact ID. Before the gesture it seeds
+and verifies a distinct clipboard sentinel so stale state cannot create a false
+positive, and it restores the original clipboard afterward. It then verifies
+both the prompt and ID remain mounted, exercises ordinary title-tap collapse and
+re-expansion, verifies Back remains exposed, dismisses the panel through the
+outside layer, and finally uses Back.
+
+The pinned WebdriverIO/XCUITest stack exposes both native element long press and
+the WebDriverAgent clipboard endpoint, so the smoke does not treat a dispatched
+gesture as proof of copy behavior. The remaining platform boundary is the edit
+menu itself: iOS owns its accessibility tree and localizes the `Copy` item. The
+current harness selects the English `Copy` accessibility name and therefore
+requires an English simulator/device UI for this assertion. Deterministic
+coverage across other locales would require launching the simulator with a
+fixed English locale or adding a locale-independent XCUITest edit-menu command;
+if the menu item is not exposed, the smoke fails explicitly before reading the
+clipboard.
 
 This is only testable end to end when the mobile dev stack is running with
 `./kd dev up --mobile` and the shell has the generated E2E environment, including
@@ -49,6 +68,22 @@ and terminal sentinel along with `KANNA_E2E_DESKTOP_SERVER_URL`. The narrower
 substitutes are the server route tests for full prompt serialization, cloud/LAN
 mapping tests, focused `TaskScreen` interaction/accessibility tests, and the
 Appium journey contract test using a fake driver.
+
+For the expanded-identity revision, the contract journey models the real
+WebDriver protocol boundaries: `longPress`, a separately discoverable native
+Copy element, and a base64 clipboard read. The focused component test proves
+both text nodes are selectable and carry stable native identifiers. These
+narrower tests do not claim that iOS displayed its selection menu; only a smoke
+run with the live PTY fixture above can establish that native fact.
+
+The expanded-identity revision also attempted
+`pnpm --dir apps/mobile run test:e2e:smoke` in its Kanna worktree. The assigned
+Appium and Metro ports were present, but `KANNA_E2E_DESKTOP_SERVER_URL`,
+`KANNA_E2E_PTY_TASK_ID`, and `KANNA_E2E_PTY_SENTINEL` were unset, so the runner
+stopped at its required desktop-server environment guard before opening an
+Appium session. Consequently this revision does not claim that the native menu
+was observed in that worktree; the live assertion remains encoded in the smoke
+for the next environment with the documented fixture.
 
 The cloud-only full-prompt revision cannot use that smoke as proof of relay
 routing. The smoke resolves `KANNA_E2E_PTY_TASK_ID` metadata directly from
@@ -123,5 +158,6 @@ The simulator-free coverage is:
 - `e2e/specs/smoke/list-detail-back.test.ts` for Appium WebView context
   switching, exact fixture-row selection, live PTY fixture validation, large
   decoded-byte enforcement, sentinel text checks, expected dimension checks, and
-  the prompt expand/end-sentinel/dismiss/Back journey, plus the explicit failure
-  message when WebView inspection is unavailable.
+  the prompt expand/end-sentinel/native-long-press/Copy/clipboard/normal-collapse/
+  outside-dismiss/Back journey, plus the explicit failure message when WebView
+  inspection is unavailable.
