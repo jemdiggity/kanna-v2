@@ -74,4 +74,32 @@ describe("buildTaskWorkspaceModel", () => {
       }).overlayLabel
     ).toBe("Error");
   });
+
+  it.each([
+    ["pending", "Creating task", false],
+    ["recovering", "Recovering task", false],
+    ["uncertain", "Task creation interrupted", true]
+  ] as const)(
+    "maps %s optimistic creation into the task workspace",
+    (taskCreationPhase, overlayLabel, canRecoverTaskCreation) => {
+      expect(
+        buildTaskWorkspaceModel({
+          task: {
+            id: "create:slot-1",
+            repoId: "repo-1",
+            title: "Create this task",
+            stage: "in progress",
+            agentType: "pty"
+          },
+          terminalStatus: "idle",
+          taskCreationPhase
+        })
+      ).toMatchObject({
+        isTerminalHealthy: false,
+        overlayLabel,
+        isComposerDisabled: true,
+        canRecoverTaskCreation
+      });
+    }
+  );
 });

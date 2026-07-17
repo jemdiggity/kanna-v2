@@ -390,8 +390,8 @@ describe("App component wiring", () => {
   });
 });
 
-describe("App task provisioning integration", () => {
-  it("shows frozen provisioning, backgrounds safely, then opens the created task", async () => {
+describe("App task creation integration", () => {
+  it("opens an optimistic task workspace, then attaches the created task in place", async () => {
     const pendingCreate = deferred<Awaited<ReturnType<KannaClient["createTask"]>>>();
     const { client, controller, model } = createModel();
     client.createTask.mockReturnValueOnce(pendingCreate.promise);
@@ -408,7 +408,15 @@ describe("App task provisioning integration", () => {
       await flushMicrotasks();
     });
 
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskProvisioning)).toBe(true);
+    expect(renderer.root.findByType("TaskScreen").props).toMatchObject({
+      taskCreationPhase: "pending",
+      task: {
+        title: "Ship mobile shell"
+      }
+    });
+    expect(renderer.root.findByType("TaskScreen").props.task.id).toMatch(
+      /^create:/
+    );
     expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)).toBe(false);
     expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)).toBe(false);
     expect(hasText(renderer.root, "Cancel")).toBe(false);
@@ -423,14 +431,10 @@ describe("App task provisioning integration", () => {
       terminalRows: 48
     });
 
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskProvisioningBackground)
-        .props.onPress();
-    });
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskProvisioning)).toBe(false);
-
     await act(async () => controller.openComposer());
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskProvisioning)).toBe(true);
+    expect(renderer.root.findByType("TaskScreen").props.taskCreationPhase).toBe(
+      "pending"
+    );
     expect(client.createTask).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -443,12 +447,67 @@ describe("App task provisioning integration", () => {
       await flushMicrotasks();
     });
 
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskProvisioning)).toBe(false);
     const taskScreen = renderer.root.findByType("TaskScreen");
     expect(taskScreen.props.task).toMatchObject({
       id: "0123456789abcdef0123456789abcdef",
       title: "Ship mobile shell"
     });
+  });
+
+  it("keeps the acknowledged workspace mounted through a publication gap and hydrates it in place", async () => {
+    const { controller, model, sessionStore } = createModel();
+    const renderer = await mountModel(model);
+
+    await act(async () => controller.openComposer());
+    await act(async () => {
+      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)
+        .props.onChangeText("Keep this workspace stable");
+    });
+    await act(async () => {
+      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)
+        .props.onPress();
+      await flushMicrotasks();
+    });
+
+    const stableSlotId = sessionStore.getState().taskUiSlots[0]?.slotId;
+    const taskScreenBeforeGap = renderer.root.findByType("TaskScreen");
+    expect(taskScreenBeforeGap.props.task.id).toBe(
+      "0123456789abcdef0123456789abcdef"
+    );
+
+    await act(async () => {
+      sessionStore.setRecentTasks([]);
+      sessionStore.setRepoTasks([]);
+    });
+
+    expect(renderer.root.findByType("TaskScreen")).toBe(taskScreenBeforeGap);
+
+    await act(async () => {
+      const publishedTask = {
+        id: "0123456789abcdef0123456789abcdef",
+        repoId: "repo-1",
+        title: "Published workspace metadata",
+        prompt: "Keep this workspace stable",
+        stage: "in progress"
+      };
+      sessionStore.setRecentTasks([publishedTask]);
+      sessionStore.setRepoTasks([publishedTask]);
+    });
+
+    expect(renderer.root.findByType("TaskScreen")).toBe(taskScreenBeforeGap);
+    expect(taskScreenBeforeGap.props.task).toMatchObject({
+      id: "0123456789abcdef0123456789abcdef",
+      title: "Published workspace metadata"
+    });
+
+    await act(async () => controller.closeTask());
+    expect(renderer.root.findByType("TasksScreen").props.taskSlots).toEqual([
+      expect.objectContaining({
+        slotId: stableSlotId,
+        taskId: "0123456789abcdef0123456789abcdef",
+        task: expect.objectContaining({ title: "Published workspace metadata" })
+      })
+    ]);
   });
 
   it("keeps an ambiguous result non-editable and recovers the same durable identity", async () => {
@@ -479,13 +538,15 @@ describe("App task provisioning integration", () => {
       await flushMicrotasks();
     });
 
-    expect(hasText(renderer.root, "Task result unknown")).toBe(true);
+    expect(renderer.root.findByType("TaskScreen").props).toMatchObject({
+      taskCreationPhase: "uncertain",
+      taskCreationErrorMessage: "Relay response was lost"
+    });
     expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)).toBe(false);
     expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)).toBe(false);
 
     await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskProvisioningRecover)
-        .props.onPress();
+      renderer.root.findByType("TaskScreen").props.onRecoverTaskCreation();
       await flushMicrotasks();
     });
 
@@ -519,7 +580,8 @@ describe("App task provisioning integration", () => {
       await flushMicrotasks();
     });
 
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskProvisioning)).toBe(false);
+    expect(renderer.root.findAllByType("TaskScreen")).toHaveLength(0);
+    await act(async () => controller.openComposer());
     expect(findTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput).props.value)
       .toBe("Fix and retry");
     expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)).toBe(true);

@@ -203,7 +203,7 @@ describe("createAppModel task creation persistence", () => {
     app.controller.updateComposerPrompt("Persist this identity");
 
     const createPromise = app.controller.createTask();
-    app.controller.backgroundTaskCreation();
+    app.controller.closeTask();
     await flushMicrotasks();
 
     expect(persistence.save).toHaveBeenCalledWith(

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createSessionStore } from "./sessionStore";
+import { buildCreatingTaskUiSlot } from "./taskUiSlots";
 
 describe("createSessionStore", () => {
   const pendingTaskCreation = {
+    slotId: "create:slot-a1b2c3d4",
     taskId: "a1b2c3d4",
     repoId: "repo-1",
     prompt: "Add durable mobile task recovery",
@@ -16,8 +18,76 @@ describe("createSessionStore", () => {
     expect(store.getState()).toMatchObject({
       composerRepoId: null,
       pendingTaskCreation: null,
+      taskUiSlots: [],
       taskCreationPhase: "idle"
     });
+  });
+
+  it("owns the local task slot lifecycle independently from task identity", () => {
+    const store = createSessionStore();
+    const slot = buildCreatingTaskUiSlot({
+      slotId: pendingTaskCreation.slotId,
+      repoId: pendingTaskCreation.repoId,
+      prompt: pendingTaskCreation.prompt,
+      desktopId: pendingTaskCreation.desktopId,
+      agentProvider: pendingTaskCreation.agentProvider
+    });
+
+    store.addTaskUiSlot(slot);
+    store.acknowledgeTaskUiSlot(slot.slotId, {
+      id: "cloud:desktop-e2e:repo-1:a1b2c3d4",
+      repoId: pendingTaskCreation.repoId,
+      title: pendingTaskCreation.prompt,
+      stage: "in progress",
+      agentType: "pty"
+    });
+
+    expect(store.getState().taskUiSlots).toEqual([
+      expect.objectContaining({
+        slotId: pendingTaskCreation.slotId,
+        taskId: "cloud:desktop-e2e:repo-1:a1b2c3d4",
+        state: "ready"
+      })
+    ]);
+
+    store.removeTaskUiSlot(slot.slotId);
+    expect(store.getState().taskUiSlots).toEqual([]);
+  });
+
+  it("reconciles acknowledged local slots against authoritative collections", () => {
+    const store = createSessionStore();
+    const slot = buildCreatingTaskUiSlot({
+      slotId: pendingTaskCreation.slotId,
+      repoId: pendingTaskCreation.repoId,
+      prompt: pendingTaskCreation.prompt,
+      desktopId: pendingTaskCreation.desktopId,
+      agentProvider: pendingTaskCreation.agentProvider
+    });
+    const createdTask = {
+      id: "cloud:desktop-e2e:repo-1:a1b2c3d4",
+      repoId: pendingTaskCreation.repoId,
+      title: pendingTaskCreation.prompt,
+      stage: "in progress"
+    };
+
+    store.addTaskUiSlot(slot);
+    store.acknowledgeTaskUiSlot(slot.slotId, createdTask);
+    store.reconcileTaskUiSlots([], { authoritative: true });
+
+    expect(store.getState().taskUiSlots).toEqual([
+      expect.objectContaining({ authoritativeMissGraceRemaining: 0 })
+    ]);
+
+    const publishedTask = { ...createdTask, title: "Published task" };
+    store.reconcileTaskUiSlots([publishedTask], { authoritative: true });
+
+    expect(store.getState().taskUiSlots).toEqual([
+      expect.objectContaining({
+        slotId: slot.slotId,
+        task: publishedTask,
+        authoritativeMissGraceRemaining: 0
+      })
+    ]);
   });
 
   it("sets a pending task creation attempt and phase atomically", () => {
@@ -96,6 +166,13 @@ describe("createSessionStore", () => {
       composerDesktopId: pendingTaskCreation.desktopId,
       composerAgentProvider: pendingTaskCreation.agentProvider,
       pendingTaskCreation,
+      taskUiSlots: [
+        {
+          slotId: pendingTaskCreation.slotId,
+          taskId: null,
+          state: "creating"
+        }
+      ],
       taskCreationPhase: "uncertain"
     });
   });

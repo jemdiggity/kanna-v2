@@ -20,6 +20,7 @@ describe("createSessionPersistence", () => {
     const storage = createMemoryStorage();
     const persistence = createSessionPersistence(storage);
     const pendingTaskCreation = {
+      slotId: "create:slot-a1b2c3d4",
       taskId: "a1b2c3d4",
       repoId: "repo-1",
       prompt: "Add durable mobile task recovery",
@@ -44,6 +45,31 @@ describe("createSessionPersistence", () => {
     });
   });
 
+  it("derives a deterministic UI slot for a legacy pending attempt", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    storage.values.set("kanna.mobile.context.v1", JSON.stringify({
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: "repo-1",
+      selectedTaskId: "a1b2c3d4",
+      activeView: "tasks",
+      pendingTaskCreation: {
+        taskId: "a1b2c3d4",
+        repoId: "repo-1",
+        prompt: "Recover an older attempt",
+        desktopId: "desktop-e2e",
+        agentProvider: "claude"
+      }
+    }));
+
+    await expect(persistence.load()).resolves.toMatchObject({
+      pendingTaskCreation: {
+        slotId: "create:a1b2c3d4",
+        taskId: "a1b2c3d4"
+      }
+    });
+  });
+
   it.each([
     ["missing", undefined],
     ["non-object", "pending"],
@@ -63,6 +89,14 @@ describe("createSessionPersistence", () => {
     }],
     ["overlong task id", {
       taskId: "a".repeat(65),
+      repoId: "repo-1",
+      prompt: "Build it",
+      desktopId: "desktop-e2e",
+      agentProvider: "claude"
+    }],
+    ["non-creation slot id", {
+      slotId: "task-existing",
+      taskId: "abcdef12",
       repoId: "repo-1",
       prompt: "Build it",
       desktopId: "desktop-e2e",

@@ -41,6 +41,11 @@ import { MoreScreen } from "./screens/MoreScreen";
 import { SearchScreen } from "./screens/SearchScreen";
 import { TaskScreen } from "./screens/TaskScreen";
 import { TasksScreen } from "./screens/TasksScreen";
+import {
+  projectTaskUiSlots,
+  taskUiSlotForSelection,
+  taskUiSlotToTaskSummary
+} from "./state/taskUiSlots";
 
 const OTA_FOREGROUND_CHECK_THROTTLE_MS = 5 * 60 * 1000;
 
@@ -71,11 +76,30 @@ export default function App() {
     width: number;
     height: number;
   } | null>(null);
-  const selectedTask =
-    state.repoTasks.find((task) => task.id === state.selectedTaskId) ??
-    state.recentTasks.find((task) => task.id === state.selectedTaskId) ??
-    state.searchResults.find((task) => task.id === state.selectedTaskId) ??
-    null;
+  const authoritativeTasks = [
+    ...new Map(
+      [...state.repoTasks, ...state.recentTasks, ...state.searchResults].map(
+        (task) => [task.id, task] as const
+      )
+    ).values()
+  ];
+  const taskUiSlots = projectTaskUiSlots(
+    authoritativeTasks,
+    state.taskUiSlots
+  );
+  const selectedTaskSlot = taskUiSlotForSelection(
+    taskUiSlots,
+    state.selectedTaskId
+  );
+  const selectedTask = selectedTaskSlot
+    ? taskUiSlotToTaskSummary(selectedTaskSlot)
+    : null;
+  const selectedDurableTaskId = selectedTaskSlot?.taskId ?? null;
+  const selectedTaskCreationPhase =
+    selectedTaskSlot?.state === "creating" &&
+    state.pendingTaskCreation?.slotId === selectedTaskSlot.slotId
+      ? state.taskCreationPhase
+      : "idle";
   const e2eTaskSnapshotMarker =
     process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1"
       ? state.recentTasks
@@ -166,17 +190,43 @@ export default function App() {
           agentErrorMessage={state.taskAgentErrorMessage}
           agentEvents={state.taskAgentEvents}
           agentStatus={state.taskAgentStatus}
+          taskCreationPhase={selectedTaskCreationPhase}
+          taskCreationErrorMessage={
+            selectedTaskCreationPhase === "idle"
+              ? null
+              : state.composerErrorMessage
+          }
           onBack={() => controller.closeTask()}
           onOpenMore={() => controller.showView("more")}
-          onReadTaskFile={(path) =>
-            controller.readTaskFile(selectedTask.id, path)
-          }
-          onSendInput={(input) => {
-            void controller.sendTaskInput(selectedTask.id, input);
+          onReadTaskFile={(path) => {
+            if (!selectedDurableTaskId) {
+              return Promise.reject(
+                new Error("Task creation is still in progress.")
+              );
+            }
+            return controller.readTaskFile(selectedDurableTaskId, path);
           }}
-          onStopAgent={() => controller.interruptTaskAgent(selectedTask.id)}
+          onSendInput={(input) => {
+            if (selectedDurableTaskId) {
+              void controller.sendTaskInput(selectedDurableTaskId, input);
+            }
+          }}
+          onStopAgent={() => {
+            if (selectedDurableTaskId) {
+              controller.interruptTaskAgent(selectedDurableTaskId);
+            }
+          }}
           onResolveAgentPermission={(requestId, decision) => {
-            controller.sendTaskAgentPermission(selectedTask.id, requestId, decision);
+            if (selectedDurableTaskId) {
+              controller.sendTaskAgentPermission(
+                selectedDurableTaskId,
+                requestId,
+                decision
+              );
+            }
+          }}
+          onRecoverTaskCreation={() => {
+            void controller.recoverTaskCreation();
           }}
         />
       );
@@ -189,7 +239,10 @@ export default function App() {
             heading="Recent"
             repos={state.repos}
             selectedRepoId={state.selectedRepoId}
-            tasks={state.recentTasks}
+            taskSlots={projectTaskUiSlots(
+              state.recentTasks,
+              state.taskUiSlots
+            )}
             onSelectRepo={(repoId) => {
               void controller.selectRepo(repoId);
             }}
@@ -220,7 +273,7 @@ export default function App() {
           <MoreScreen
             pairingCode={state.pairingCode}
             refreshStatus={state.refreshStatus}
-            selectedTask={selectedTask}
+            selectedTask={selectedDurableTaskId ? selectedTask : null}
             onRefresh={() => {
               void controller.refresh();
             }}
@@ -246,7 +299,10 @@ export default function App() {
           <TasksScreen
             repos={state.repos}
             selectedRepoId={state.selectedRepoId}
-            tasks={state.repoTasks}
+            taskSlots={projectTaskUiSlots(
+              state.repoTasks,
+              state.taskUiSlots
+            )}
             onSelectRepo={(repoId) => {
               void controller.selectRepo(repoId);
             }}
@@ -328,12 +384,7 @@ export default function App() {
           selectedAgentProvider={state.composerAgentProvider}
           isOptionsExpanded={state.isComposerOptionsExpanded}
           errorMessage={state.composerErrorMessage}
-          taskCreationPhase={state.taskCreationPhase}
           onClose={() => controller.closeComposer()}
-          onContinueInBackground={() => controller.backgroundTaskCreation()}
-          onRecover={() => {
-            void controller.recoverTaskCreation();
-          }}
           onSelectDesktop={(desktopId) => controller.selectComposerDesktop(desktopId)}
           onSelectAgentProvider={(provider) => controller.selectComposerAgentProvider(provider)}
           onToggleOptions={() =>

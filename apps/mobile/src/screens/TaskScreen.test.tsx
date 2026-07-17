@@ -1,5 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TaskTerminalStatus } from "../state/sessionStore";
+import type {
+  TaskCreationPhase,
+  TaskTerminalStatus
+} from "../state/sessionStore";
 import { TASK_QUICK_REPLIES } from "./taskQuickReplies";
 
 const hookHarness = vi.hoisted(() => ({
@@ -139,6 +142,9 @@ interface RenderTaskScreenOptions {
   activity?: "idle" | "working" | "unread";
   draftInput?: string;
   terminalStatus?: TaskTerminalStatus;
+  taskCreationPhase?: TaskCreationPhase;
+  taskCreationErrorMessage?: string | null;
+  onRecoverTaskCreation?: () => void;
   agentStatus?: TaskTerminalStatus;
   onReadTaskFile?: (path: string) => Promise<{ path: string; content: string }>;
   taskId?: string;
@@ -158,6 +164,9 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     activity = "idle",
     draftInput = "",
     terminalStatus = "live",
+    taskCreationPhase = "idle",
+    taskCreationErrorMessage = null,
+    onRecoverTaskCreation = vi.fn(),
     agentStatus = "live",
     onReadTaskFile = vi.fn().mockResolvedValue({
       path: "docs/spec.md",
@@ -187,6 +196,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     terminalCols: terminalDims.cols,
     terminalRows: terminalDims.rows,
     terminalErrorMessage: null,
+    taskCreationPhase,
+    taskCreationErrorMessage,
     agentEvents: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
     agentStatus,
     agentErrorMessage: null,
@@ -196,6 +207,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onSendInput: componentMocks.onSendInput,
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn(),
+    onRecoverTaskCreation,
     onReadTaskFile
   }) as ElementNode;
 }
@@ -327,6 +339,37 @@ function pressByTestId(tree: ElementNode, testID: string): void {
 }
 
 describe("TaskScreen", () => {
+  it("shows uncertain creation inside the task workspace and recovers in place", () => {
+    const onRecoverTaskCreation = vi.fn();
+    const tree = renderTaskScreen({
+      taskCreationPhase: "uncertain",
+      taskCreationErrorMessage: "Desktop response was lost",
+      onRecoverTaskCreation,
+      taskId: "create:slot-1"
+    });
+
+    expect(findByType(tree, "TerminalWebView")).toBeNull();
+    expect(findByTypeAndText(tree, "Text", "Task creation interrupted")).not.toBeNull();
+    expect(findByTypeAndText(tree, "Text", "Desktop response was lost")).not.toBeNull();
+    expect(findByTestId(tree, "mobile.task-creation.recover")).not.toBeNull();
+    expect(findByTestId(tree, "mobile.task-send-button")?.props).toMatchObject({
+      disabled: true
+    });
+
+    pressByTestId(tree, "mobile.task-creation.recover");
+    expect(onRecoverTaskCreation).toHaveBeenCalledOnce();
+  });
+
+  it("shows pending creation without offering recovery", () => {
+    const tree = renderTaskScreen({
+      taskCreationPhase: "pending",
+      taskId: "create:slot-1"
+    });
+
+    expect(findByTypeAndText(tree, "Text", "Creating task")).not.toBeNull();
+    expect(findByTestId(tree, "mobile.task-creation.recover")).toBeNull();
+  });
+
   it("routes agent tasks to the native agent message view", () => {
     const tree = renderTaskScreen({ agentType: "agent" });
 

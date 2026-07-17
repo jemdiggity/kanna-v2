@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSessionStore } from "./sessionStore";
-import { createMobileController } from "./mobileController";
+import {
+  createMobileController,
+  type CloudTaskPublication
+} from "./mobileController";
 import type { MobileAuthSession, MobileAuthState } from "../lib/firebase/auth";
 import type {
   TaskAgentStreamEvent,
@@ -2323,7 +2326,13 @@ describe("createMobileController", () => {
       title: "Ship mobile shell",
       prompt: "Ship mobile shell with the canonical requirements"
     });
-    expect(store.getState().selectedTaskId).toBe("task-3");
+    expect(store.getState().selectedTaskId).toBe(
+      store.getState().taskUiSlots[0]?.slotId
+    );
+    expect(store.getState().taskUiSlots[0]).toMatchObject({
+      taskId: "task-3",
+      state: "ready"
+    });
     expect(store.getState().isComposerOpen).toBe(false);
     expect(store.getState().composerPrompt).toBe("");
   });
@@ -2371,6 +2380,71 @@ describe("createMobileController", () => {
       stage: "in progress"
     });
     await firstCreate;
+  });
+
+  it("selects an optimistic task slot before creation settles", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const pendingCreate = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    client.createTask.mockReturnValue(pendingCreate.promise);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "11111111111111111111111111111111",
+      createTaskSlotId: () => "create:slot-1",
+      persistSessionContext: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship optimistic creation");
+
+    const creation = controller.createTask();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: false,
+      selectedTaskId: "create:slot-1",
+      taskCreationPhase: "pending",
+      pendingTaskCreation: {
+        slotId: "create:slot-1",
+        taskId: "11111111111111111111111111111111"
+      },
+      taskUiSlots: [
+        {
+          slotId: "create:slot-1",
+          taskId: null,
+          state: "creating"
+        }
+      ]
+    });
+    expect(client.observeTaskTerminal).not.toHaveBeenCalled();
+
+    pendingCreate.resolve({
+      taskId: "cloud:desktop-1:repo-2:11111111111111111111111111111111",
+      repoId: "repo-2",
+      title: "Ship optimistic creation",
+      stage: "in progress",
+      agentType: "pty"
+    });
+    await creation;
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "create:slot-1",
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null,
+      taskUiSlots: [
+        {
+          slotId: "create:slot-1",
+          taskId: "cloud:desktop-1:repo-2:11111111111111111111111111111111",
+          state: "ready"
+        }
+      ]
+    });
+    expect(client.observeTaskTerminal).toHaveBeenCalledWith(
+      "cloud:desktop-1:repo-2:11111111111111111111111111111111",
+      expect.any(Function)
+    );
   });
 
   it("falls back to a valid unique-shaped identity when native crypto is unavailable", async () => {
@@ -2430,11 +2504,13 @@ describe("createMobileController", () => {
 
     expect(client.createTask).not.toHaveBeenCalled();
     expect(store.getState()).toMatchObject({
-      isComposerOpen: true,
+      isComposerOpen: false,
       composerPrompt: "Persist before dispatch",
       composerErrorMessage: "Could not save pending task",
       taskCreationPhase: "idle",
-      pendingTaskCreation: null
+      pendingTaskCreation: null,
+      selectedTaskId: null,
+      taskUiSlots: []
     });
   });
 
@@ -2527,15 +2603,17 @@ describe("createMobileController", () => {
 
     expect(client.createTask).not.toHaveBeenCalled();
     expect(store.getState()).toMatchObject({
-      isComposerOpen: true,
+      isComposerOpen: false,
       composerPrompt: "Stay editable when save fails",
       composerErrorMessage: "Pending attempt was not saved",
       taskCreationPhase: "idle",
-      pendingTaskCreation: null
+      pendingTaskCreation: null,
+      selectedTaskId: null,
+      taskUiSlots: []
     });
   });
 
-  it("recovers a backgrounded uncertain create with the exact frozen identity", async () => {
+  it("recovers an uncertain create after leaving its task workspace with the exact frozen identity", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const originalCreate = createDeferred<
@@ -2559,7 +2637,7 @@ describe("createMobileController", () => {
     void controller.createTask({ cols: 120, rows: 70 });
     await flushMicrotasks();
 
-    controller.backgroundTaskCreation();
+    controller.closeTask();
     expect(store.getState()).toMatchObject({
       isComposerOpen: false,
       taskCreationPhase: "pending",
@@ -2614,6 +2692,7 @@ describe("createMobileController", () => {
   it("reopens a restarted uncertain attempt without allowing its identity to drift", async () => {
     const store = createSessionStore();
     const pendingTaskCreation = {
+      slotId: "create:slot-restarted",
       taskId: "33333333333333333333333333333333",
       repoId: "repo-2",
       prompt: "Resume this exact task",
@@ -2623,7 +2702,7 @@ describe("createMobileController", () => {
     store.hydrateContext({
       selectedDesktopId: "desktop-1",
       selectedRepoId: "repo-2",
-      selectedTaskId: null,
+      selectedTaskId: pendingTaskCreation.slotId,
       activeView: "tasks",
       pendingTaskCreation
     });
@@ -2655,7 +2734,8 @@ describe("createMobileController", () => {
     controller.openComposer();
 
     expect(store.getState()).toMatchObject({
-      isComposerOpen: true,
+      isComposerOpen: false,
+      selectedTaskId: pendingTaskCreation.slotId,
       composerPrompt: pendingTaskCreation.prompt,
       composerRepoId: pendingTaskCreation.repoId,
       composerDesktopId: pendingTaskCreation.desktopId,
@@ -2679,7 +2759,7 @@ describe("createMobileController", () => {
     });
     expect(store.getState()).toMatchObject({
       isComposerOpen: false,
-      selectedTaskId: pendingTaskCreation.taskId,
+      selectedTaskId: pendingTaskCreation.slotId,
       taskCreationPhase: "idle",
       pendingTaskCreation: null
     });
@@ -2733,7 +2813,7 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       taskCreationPhase: "idle",
       pendingTaskCreation: null,
-      selectedTaskId: "66666666666666666666666666666666"
+      selectedTaskId: store.getState().taskUiSlots[0]?.slotId
     });
   });
 
@@ -2784,7 +2864,7 @@ describe("createMobileController", () => {
     });
   });
 
-  it("strictly removes a raw create result that is absent from the next live snapshot", async () => {
+  it("keeps a raw create slot through a publication gap, hydrates it, then removes an authoritative deletion", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const auth = createAuthSessionMock();
@@ -2819,7 +2899,10 @@ describe("createMobileController", () => {
       stage: "in progress",
       agentType: "pty"
     });
-    let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    let publishTasks: ((
+      tasks: TaskSummary[],
+      publication?: CloudTaskPublication
+    ) => void) | null = null;
     const controller = createMobileController(client, store, auth, {
       subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
         publishTasks = onUpdate;
@@ -2840,17 +2923,67 @@ describe("createMobileController", () => {
     });
 
     expect(store.getState()).toMatchObject({
-      selectedTaskId: "task-created-raw",
+      selectedTaskId: store.getState().taskUiSlots[0]?.slotId,
       taskTerminalTaskId: "task-created-raw",
       taskTerminalOutput: "cmF3LWNyZWF0ZQ==\n"
     });
+    const stableSlotId = store.getState().taskUiSlots[0]?.slotId;
+
+    publishTasks?.([], { cloudAuthoritative: false });
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: stableSlotId,
+      taskTerminalTaskId: "task-created-raw",
+      taskUiSlots: [
+        {
+          slotId: stableSlotId,
+          taskId: "task-created-raw",
+          authoritativeMissGraceRemaining: 1
+        }
+      ]
+    });
+
+    publishTasks?.([]);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: stableSlotId,
+      taskTerminalTaskId: "task-created-raw",
+      taskTerminalOutput: "cmF3LWNyZWF0ZQ==\n",
+      taskUiSlots: [
+        {
+          slotId: stableSlotId,
+          taskId: "task-created-raw",
+          authoritativeMissGraceRemaining: 0
+        }
+      ]
+    });
+    expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
+
+    const publishedTask: TaskSummary = {
+      id: "task-created-raw",
+      repoId: "repo-cloud",
+      title: "Published raw created task",
+      stage: "in progress",
+      agentType: "pty"
+    };
+    publishTasks?.([publishedTask]);
+
+    expect(store.getState().taskUiSlots).toEqual([
+      expect.objectContaining({
+        slotId: stableSlotId,
+        taskId: publishedTask.id,
+        task: publishedTask,
+        authoritativeMissGraceRemaining: 0
+      })
+    ]);
 
     publishTasks?.([]);
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: null,
       taskTerminalTaskId: null,
-      taskTerminalOutput: ""
+      taskTerminalOutput: "",
+      taskUiSlots: []
     });
     expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
   });
@@ -2999,8 +3132,10 @@ describe("createMobileController", () => {
       controller.updateComposerPrompt("Created task");
       await controller.createTask();
 
+      const stableSlotId = store.getState().taskUiSlots[0]?.slotId;
+
       expect(store.getState()).toMatchObject({
-        selectedTaskId: pendingTaskId,
+        selectedTaskId: stableSlotId,
         taskAgentTaskId: pendingTaskId
       });
       expect(client.observeTaskAgent).toHaveBeenCalledWith(
@@ -3023,8 +3158,12 @@ describe("createMobileController", () => {
       publishTasks?.([canonical]);
 
       expect(store.getState()).toMatchObject({
-        selectedTaskId: canonical.id,
+        selectedTaskId: stableSlotId,
         taskAgentTaskId: canonical.id
+      });
+      expect(store.getState().taskUiSlots[0]).toMatchObject({
+        slotId: stableSlotId,
+        taskId: canonical.id
       });
       expect(pendingSubscription.close).not.toHaveBeenCalled();
       expect(client.observeTaskAgent).toHaveBeenCalledTimes(1);
@@ -3036,7 +3175,7 @@ describe("createMobileController", () => {
     }
   );
 
-  it("prunes a resolved raw create alias when its detail is no longer selected", async () => {
+  it("canonicalizes an acknowledged slot without selecting it", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const auth = createAuthSessionMock();
@@ -3059,7 +3198,10 @@ describe("createMobileController", () => {
       taskId: "task-created",
       repoId: "repo-local",
       title: "Created task",
-      stage: "in progress"
+      stage: "in progress",
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-local",
+      ownerLocalTaskId: "task-created"
     });
     let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
     const controller = createMobileController(client, store, auth, {
@@ -3084,13 +3226,71 @@ describe("createMobileController", () => {
     controller.selectComposerDesktop("desktop-a");
     controller.updateComposerPrompt("Created task");
     await controller.createTask();
+    const stableSlotId = store.getState().taskUiSlots[0]?.slotId;
     controller.closeTask();
 
     publishTasks?.([canonical]);
-    controller.openTask("task-created");
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      taskUiSlots: [
+        {
+          slotId: stableSlotId,
+          taskId: canonical.id,
+          state: "ready"
+        }
+      ]
+    });
+
+    controller.openTask(stableSlotId!);
     publishTasks?.([{ ...canonical, title: "Current canonical task" }]);
 
-    expect(store.getState().selectedTaskId).toBeNull();
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: stableSlotId,
+      taskUiSlots: [
+        {
+          slotId: stableSlotId,
+          taskId: canonical.id
+        }
+      ]
+    });
+    expect(store.getState().recentTasks[0]?.title).toBe(
+      "Current canonical task"
+    );
+  });
+
+  it("removes an optimistic slot when recovery proves the task was not created", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.createTask
+      .mockRejectedValueOnce(new Error("Relay response was lost"))
+      .mockRejectedValueOnce(
+        new TaskCreationError("not-created", "Desktop rejected recovery")
+      );
+    const controller = createMobileController(client, store, undefined, {
+      createTaskSlotId: () => "create:slot-definite-recovery"
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Recover or remove this task");
+    await controller.createTask();
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "create:slot-definite-recovery",
+      taskCreationPhase: "uncertain"
+    });
+
+    await controller.recoverTaskCreation();
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      taskCreationPhase: "idle",
+      pendingTaskCreation: null,
+      taskUiSlots: [],
+      errorMessage: "Desktop rejected recovery",
+      composerErrorMessage: "Desktop rejected recovery"
+    });
   });
 
   it("does not resurrect a raw create alias after explicitly closing that task", async () => {
@@ -3365,7 +3565,7 @@ describe("createMobileController", () => {
     ]);
   });
 
-  it("keeps create task feedback inside the composer while submitting", async () => {
+  it("tracks the pending create attempt until it settles", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     let resolveCreateTask:
@@ -3414,7 +3614,8 @@ describe("createMobileController", () => {
     const client = createClientMock();
     client.createTask.mockRejectedValueOnce(new Error("Desktop unavailable"));
     const controller = createMobileController(client, store, undefined, {
-      createTaskId: () => "44444444444444444444444444444444"
+      createTaskId: () => "44444444444444444444444444444444",
+      createTaskSlotId: () => "create:slot-ambiguous"
     });
 
     await controller.bootstrap();
@@ -3439,13 +3640,15 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
       errorMessage: null,
-      isComposerOpen: true,
+      isComposerOpen: false,
+      selectedTaskId: "create:slot-ambiguous",
       composerPrompt: "Ship mobile shell",
       composerDesktopId: "desktop-2",
       composerAgentProvider: "codex",
       composerErrorMessage: "Desktop unavailable",
       taskCreationPhase: "uncertain",
       pendingTaskCreation: {
+        slotId: "create:slot-ambiguous",
         taskId: "44444444444444444444444444444444",
         repoId: "repo-2",
         prompt: "Ship mobile shell",
@@ -3455,14 +3658,15 @@ describe("createMobileController", () => {
     });
   });
 
-  it("restores the editable draft after a definite pre-creation failure", async () => {
+  it("removes the optimistic slot after a definite pre-creation failure", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     client.createTask.mockRejectedValueOnce(
       new TaskCreationError("not-created", "Prompt was rejected")
     );
     const controller = createMobileController(client, store, undefined, {
-      createTaskId: () => "55555555555555555555555555555555"
+      createTaskId: () => "55555555555555555555555555555555",
+      createTaskSlotId: () => "create:slot-rejected"
     });
 
     await controller.bootstrap();
@@ -3473,11 +3677,14 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(store.getState()).toMatchObject({
-      isComposerOpen: true,
+      isComposerOpen: false,
+      selectedTaskId: null,
       composerPrompt: "Fix the prompt and retry",
       composerErrorMessage: "Prompt was rejected",
+      errorMessage: "Prompt was rejected",
       taskCreationPhase: "idle",
-      pendingTaskCreation: null
+      pendingTaskCreation: null,
+      taskUiSlots: []
     });
   });
 
@@ -3530,7 +3737,7 @@ describe("createMobileController", () => {
     });
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
-      selectedTaskId: "task-3",
+      selectedTaskId: store.getState().taskUiSlots[0]?.slotId,
       taskTerminalTaskId: "task-3",
       taskTerminalStatus: "error",
       taskTerminalErrorMessage: "websocket bootstrap failed",
