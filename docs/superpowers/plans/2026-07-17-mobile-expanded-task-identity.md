@@ -14,7 +14,11 @@
 
 - Modify `apps/mobile/src/screens/TaskScreen.test.tsx` to specify expanded task identity, selection, collapsed-state, and accessibility behavior.
 - Modify `apps/mobile/src/screens/TaskScreen.tsx` to render and style the task ID and enable native selection.
-- Keep `apps/mobile/src/e2eTestIds.ts`, API types, dependencies, native projects, and OTA runtime configuration unchanged.
+- Modify `apps/mobile/src/e2eTestIds.ts` and `apps/mobile/e2e/helpers/selectors.ts` to expose the expanded task ID to Appium.
+- Modify `apps/mobile/e2e/specs/smoke/list-detail-back.test.ts` first to specify the native copy journey.
+- Modify `apps/mobile/e2e/specs/smoke/list-detail-back.e2e.ts` to long-press the ID, invoke iOS Copy, verify the clipboard, preserve the expanded panel, and retain both collapse paths.
+- Modify `apps/mobile/e2e/terminal-streaming-coverage.md` and the task design to record the real-Appium guarantee and the system-menu locale boundary.
+- Keep API types, dependencies, native projects, and OTA runtime configuration unchanged.
 
 ### Task 1: Add selectable expanded task identity
 
@@ -217,3 +221,211 @@ git diff --stat
 ```
 
 Expected: only the `TaskScreen` implementation/test and this task's design/plan documents are changed. Do not commit: this Kanna task's later pipeline stage owns committing.
+
+### Task 3: Prove native task-ID copy in Appium
+
+**Files:**
+- Test: `apps/mobile/e2e/helpers/selectors.test.ts`
+- Test: `apps/mobile/e2e/specs/smoke/list-detail-back.test.ts`
+- Modify: `apps/mobile/src/e2eTestIds.ts`
+- Modify: `apps/mobile/src/screens/TaskScreen.tsx`
+- Modify: `apps/mobile/e2e/helpers/selectors.ts`
+- Modify: `apps/mobile/e2e/specs/smoke/list-detail-back.e2e.ts`
+- Modify: `apps/mobile/e2e/terminal-streaming-coverage.md`
+- Modify: `docs/superpowers/specs/2026-07-17-mobile-expanded-task-identity-design.md`
+
+- [x] **Step 1: Write failing selector and journey contract tests**
+
+Require `selectors.taskExpandedTaskId` to resolve to
+`~mobile.task-expanded-task-id`. Extend the fake prompt-expansion journey with a
+task-ID element, native `longPress({ duration: 1500 })`, a Copy menu action, and
+clipboard access. Assert the exact fixture ID is read, the prompt and ID still
+exist after long press, the ordinary title tap collapses and re-expands the
+panel, and the outside layer performs the final collapse.
+
+The selector contract is:
+
+```ts
+expect(selectorHelpers.selectors.taskExpandedTaskId).toBe(
+  "~mobile.task-expanded-task-id"
+);
+```
+
+The journey contract must expose protocol-shaped methods rather than a
+test-only production hook:
+
+```ts
+const ui = {
+  getExpandedTaskId: vi.fn(async () => expandedTaskId),
+  getCopyMenuItem: vi.fn(async () => copyMenuItem),
+  getClipboard: vi.fn(async () =>
+    Buffer.from(clipboard, "utf8").toString("base64")
+  ),
+  setClipboard: vi.fn(async (encodedClipboard: string) => {
+    clipboard = Buffer.from(encodedClipboard, "base64").toString("utf8");
+  })
+};
+
+expect(expandedTaskId.longPress).toHaveBeenCalledWith({ duration: 1500 });
+expect(copyMenuItem.click).toHaveBeenCalledTimes(1);
+expect(await expandedPrompt.isExisting()).toBe(false);
+expect(await expandedTaskId.isExisting()).toBe(false);
+```
+
+- [x] **Step 2: Run the focused contracts and verify RED**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- e2e/specs/smoke/list-detail-back.test.ts e2e/helpers/selectors.test.ts
+```
+
+Expected: FAIL because `taskExpandedTaskId` and the native-copy UI methods do
+not exist and the current journey never long-presses or reads the clipboard.
+
+- [x] **Step 3: Add the stable task-ID selector**
+
+Add `taskExpandedTaskId: "mobile.task-expanded-task-id"` to
+`MOBILE_E2E_IDS`, apply it to the selectable ID `Text`, and export the matching
+Appium selector.
+
+```tsx
+<Text
+  accessible={false}
+  selectable
+  style={styles.taskId}
+  testID={MOBILE_E2E_IDS.taskExpandedTaskId}
+>
+  {task.id}
+</Text>
+```
+
+```ts
+taskExpandedTaskId: `~${MOBILE_E2E_IDS.taskExpandedTaskId}`,
+```
+
+- [x] **Step 4: Implement the strict native-copy journey**
+
+Extend `SmokeElement` with `longPress`, extend the UI adapter with an English
+iOS Copy-menu lookup and clipboard read, and return `taskId` from
+`assertPtyTerminalFixtureAvailable`. After expansion, assert the full ID text,
+long-press it for 1500 ms, require and click the system Copy action, decode the
+base64 clipboard, and require an exact ID match. Recheck both expanded elements,
+then exercise ordinary header collapse/re-expansion before the existing outside
+dismissal.
+
+Use these interface additions and native adapters:
+
+```ts
+interface SmokeElement {
+  longPress?(options: { duration: number }): Promise<unknown>;
+}
+
+interface TaskPromptExpansionUi {
+  getClipboard(): Promise<string>;
+  getCopyMenuItem(): Promise<SmokeElement>;
+  getExpandedTaskId(): Promise<SmokeElement>;
+  setClipboard(content: string): Promise<unknown>;
+}
+
+async getExpandedTaskId() {
+  return driver.$(selectors.taskExpandedTaskId);
+},
+async getCopyMenuItem() {
+  return driver.$("~Copy");
+},
+async getClipboard() {
+  return driver.getClipboard("plaintext");
+},
+async setClipboard(content) {
+  return driver.setClipboard(content, "plaintext");
+},
+```
+
+The gesture and clipboard assertion are:
+
+```ts
+const expandedTaskId = await ui.getExpandedTaskId();
+if ((await smokeElementText(expandedTaskId)) !== fixture.taskId) {
+  throw new Error(`Expected complete expanded task ID ${fixture.taskId}`);
+}
+if (!expandedTaskId.longPress) {
+  throw new Error("Appium element does not expose native longPress");
+}
+const originalClipboard = await ui.getClipboard();
+const sentinel = Buffer.from(
+  `kanna-e2e-before-native-copy:${fixture.taskId}`,
+  "utf8"
+).toString("base64");
+await ui.setClipboard(sentinel);
+
+try {
+  await expandedTaskId.longPress({ duration: 1500 });
+
+  await ui.waitUntil(
+    async () => {
+      const copyMenuItem = await ui.getCopyMenuItem();
+      return (
+        (await copyMenuItem.isExisting()) &&
+        (copyMenuItem.isDisplayed ? await copyMenuItem.isDisplayed() : true)
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the native iOS Copy action after long-pressing the task ID"
+    }
+  );
+
+  const copyMenuItem = await ui.getCopyMenuItem();
+  await copyMenuItem.click();
+
+  await ui.waitUntil(
+    async () =>
+      Buffer.from(await ui.getClipboard(), "base64").toString("utf8") ===
+      fixture.taskId,
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected native Copy to place complete task ID ${fixture.taskId} on the clipboard`
+    }
+  );
+} finally {
+  await ui.setClipboard(originalClipboard);
+}
+```
+
+- [x] **Step 5: Run the focused contracts and verify GREEN**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- e2e/specs/smoke/list-detail-back.test.ts e2e/helpers/selectors.test.ts
+```
+
+Expected: PASS with the fake journey proving every gesture and clipboard step.
+
+- [x] **Step 6: Document the harness boundary**
+
+Update the terminal coverage note and task design to state that the real smoke
+performs an XCUITest long press, invokes the system Copy item, and reads the
+WebDriverAgent clipboard. Record that the system edit menu is locale- and
+iOS-owned, the harness currently targets English `Copy`, and deterministic
+non-English coverage requires a fixed simulator locale or a locale-independent
+edit-menu command.
+
+- [x] **Step 7: Run complete revision verification**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test -- src/screens/TaskScreen.test.tsx e2e/specs/smoke/list-detail-back.test.ts e2e/helpers/selectors.test.ts
+pnpm --dir apps/mobile typecheck
+pnpm --dir apps/mobile run test:e2e:smoke
+git diff --check
+```
+
+Expected: unit/contract tests and typecheck pass. The Appium smoke either passes
+with a provisioned `KANNA_E2E_PTY_TASK_ID` fixture or stops at the documented
+fixture precondition; report its exact result rather than claiming native-copy
+coverage from contract tests alone.

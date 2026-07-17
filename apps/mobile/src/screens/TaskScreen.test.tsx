@@ -716,7 +716,8 @@ describe("TaskScreen", () => {
     expect(findByTypeAndText(tree, "Text", "Task ID")).not.toBeNull();
     expect(findByTypeAndText(tree, "Text", taskId)?.props).toMatchObject({
       accessible: false,
-      children: taskId
+      children: taskId,
+      testID: "mobile.task-expanded-task-id"
     });
     expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
       accessibilityLabel: `in progress: ${prompt}. Task ID: ${taskId}`,

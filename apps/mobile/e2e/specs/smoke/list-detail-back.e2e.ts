@@ -4,6 +4,7 @@ import { selectors } from "../../helpers/selectors";
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
 const BACK_NAVIGATION_SETTLE_MS = 500;
+const TEXT_SELECTION_LONG_PRESS_MS = 1_500;
 const DEFAULT_PTY_COLS = 80;
 const DEFAULT_PTY_ROWS = 24;
 
@@ -19,6 +20,7 @@ interface SmokeElement {
   isDisplayed?(): Promise<boolean>;
   isEnabled?(): Promise<boolean>;
   isExisting(): Promise<boolean>;
+  longPress?(options: { duration: number }): Promise<unknown>;
   waitForDisplayed?(options: { timeout: number }): Promise<unknown>;
 }
 
@@ -53,8 +55,12 @@ interface TaskListUi {
 
 interface TaskPromptExpansionUi {
   getBackButton(): Promise<SmokeElement>;
+  getClipboard(): Promise<string>;
   getCollapsedTitle(): Promise<SmokeElement>;
+  getCopyMenuItem(): Promise<SmokeElement>;
   getExpandedPrompt(): Promise<SmokeElement>;
+  getExpandedTaskId(): Promise<SmokeElement>;
+  setClipboard(content: string): Promise<unknown>;
   getTitleButton(): Promise<SmokeElement>;
   getTitleDismissLayer(): Promise<SmokeElement>;
   waitUntil(
@@ -70,6 +76,7 @@ interface TaskPromptExpansionUi {
 export interface TaskPromptFixture {
   expectedTitle: string;
   promptEndSentinel: string;
+  taskId: string;
 }
 
 interface RenderedPtyTerminalUi extends TaskTerminalLiveUi {
@@ -152,11 +159,23 @@ function createSmokeUi(driver: Browser): SmokeUi {
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
+    async getClipboard() {
+      return driver.getClipboard("plaintext");
+    },
     async getCollapsedTitle() {
       return driver.$(selectors.taskDetailTitle);
     },
+    async getCopyMenuItem() {
+      return driver.$("~Copy");
+    },
     async getExpandedPrompt() {
       return driver.$(selectors.taskExpandedPrompt);
+    },
+    async getExpandedTaskId() {
+      return driver.$(selectors.taskExpandedTaskId);
+    },
+    async setClipboard(content) {
+      return driver.setClipboard(content, "plaintext");
     },
     async getTitleButton() {
       return driver.$(selectors.taskTitleButton);
@@ -312,7 +331,7 @@ export async function assertPtyTerminalFixtureAvailable(
     );
   }
 
-  return { expectedTitle, promptEndSentinel };
+  return { expectedTitle, promptEndSentinel, taskId: fixture.taskId };
 }
 
 async function smokeElementText(element: SmokeElement): Promise<string> {
@@ -366,6 +385,21 @@ export async function exerciseTaskPromptExpansion(
     }
   );
 
+  await ui.waitUntil(
+    async () => {
+      const expandedTaskId = await ui.getExpandedTaskId();
+      return (
+        (await expandedTaskId.isExisting()) &&
+        (await smokeElementText(expandedTaskId)) === fixture.taskId
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected complete expanded task ID ${JSON.stringify(fixture.taskId)}`
+    }
+  );
+
   const backButton = await ui.getBackButton();
   const backIsUsable =
     (await backButton.isExisting()) &&
@@ -375,17 +409,136 @@ export async function exerciseTaskPromptExpansion(
     throw new Error("Expected Back to remain usable while the task prompt is expanded");
   }
 
+  const expandedTaskId = await ui.getExpandedTaskId();
+  if (!expandedTaskId.longPress) {
+    throw new Error("Appium element does not expose native longPress");
+  }
+  const originalClipboard = await ui.getClipboard();
+  const clipboardSentinel = `kanna-e2e-before-native-copy:${fixture.taskId}`;
+  await ui.setClipboard(
+    Buffer.from(clipboardSentinel, "utf8").toString("base64")
+  );
+
+  try {
+    await ui.waitUntil(
+      async () =>
+        Buffer.from(await ui.getClipboard(), "base64").toString("utf8") ===
+        clipboardSentinel,
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected Appium to seed the pre-copy clipboard sentinel"
+      }
+    );
+
+    await expandedTaskId.longPress({ duration: TEXT_SELECTION_LONG_PRESS_MS });
+
+    await ui.waitUntil(
+      async () => {
+        const copyMenuItem = await ui.getCopyMenuItem();
+        return (
+          (await copyMenuItem.isExisting()) &&
+          (copyMenuItem.isDisplayed ? await copyMenuItem.isDisplayed() : true)
+        );
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg:
+          "Expected the native iOS Copy action after long-pressing the task ID"
+      }
+    );
+
+    const copyMenuItem = await ui.getCopyMenuItem();
+    await copyMenuItem.click();
+    await ui.waitUntil(
+      async () =>
+        Buffer.from(await ui.getClipboard(), "base64").toString("utf8") ===
+        fixture.taskId,
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg:
+          `Expected native Copy to place complete task ID ` +
+          `${JSON.stringify(fixture.taskId)} on the clipboard`
+      }
+    );
+
+    await ui.waitUntil(
+      async () => {
+        const expandedPrompt = await ui.getExpandedPrompt();
+        const selectedTaskId = await ui.getExpandedTaskId();
+        return (
+          (await expandedPrompt.isExisting()) &&
+          (await selectedTaskId.isExisting()) &&
+          (await smokeElementText(expandedPrompt)).includes(
+            fixture.promptEndSentinel
+          ) &&
+          (await smokeElementText(selectedTaskId)) === fixture.taskId
+        );
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg:
+          "Expected the expanded task identity to remain mounted after Copy"
+      }
+    );
+  } finally {
+    await ui.setClipboard(originalClipboard);
+  }
+
+  const expandedTitleButton = await ui.getTitleButton();
+  await expandedTitleButton.click();
+  await ui.waitUntil(
+    async () => {
+      const expandedPrompt = await ui.getExpandedPrompt();
+      const selectedTaskId = await ui.getExpandedTaskId();
+      return (
+        !(await expandedPrompt.isExisting()) &&
+        !(await selectedTaskId.isExisting())
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected a normal title tap to collapse the selected task identity"
+    }
+  );
+
+  const collapsedTitleButton = await ui.getTitleButton();
+  await collapsedTitleButton.click();
+  await ui.waitUntil(
+    async () => {
+      const expandedPrompt = await ui.getExpandedPrompt();
+      const selectedTaskId = await ui.getExpandedTaskId();
+      return (
+        (await expandedPrompt.isExisting()) &&
+        (await selectedTaskId.isExisting())
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the task identity to re-expand after a normal title tap"
+    }
+  );
+
   const dismissLayer = await ui.getTitleDismissLayer();
   await dismissLayer.click();
   await ui.waitUntil(
     async () => {
       const expandedPrompt = await ui.getExpandedPrompt();
-      return !(await expandedPrompt.isExisting());
+      const expandedTaskId = await ui.getExpandedTaskId();
+      return (
+        !(await expandedPrompt.isExisting()) &&
+        !(await expandedTaskId.isExisting())
+      );
     },
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: "Expected the task prompt to collapse after an outside tap"
+      timeoutMsg: "Expected the task identity to collapse after an outside tap"
     }
   );
 }

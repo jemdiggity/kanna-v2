@@ -305,7 +305,12 @@ export function TaskScreen({
                 <Text accessible={false} style={styles.taskIdLabel}>
                   Task ID
                 </Text>
-                <Text accessible={false} selectable style={styles.taskId}>
+                <Text
+                  accessible={false}
+                  selectable
+                  style={styles.taskId}
+                  testID={MOBILE_E2E_IDS.taskExpandedTaskId}
+                >
                   {task.id}
                 </Text>
               </View>

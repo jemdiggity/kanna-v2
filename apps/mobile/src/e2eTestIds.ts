@@ -5,6 +5,7 @@ export const MOBILE_E2E_IDS = {
   taskDetailTitle: "mobile.task-detail-title",
   taskTitleButton: "mobile.task-title-button",
   taskExpandedPrompt: "mobile.task-expanded-prompt",
+  taskExpandedTaskId: "mobile.task-expanded-task-id",
   taskTitleDismissLayer: "mobile.task-title-dismiss-layer",
   taskSnapshotMarker: "mobile.task-snapshot-marker",
   taskBackButton: "mobile.task-back-button",

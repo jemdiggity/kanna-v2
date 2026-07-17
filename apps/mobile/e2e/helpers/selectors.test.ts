@@ -20,6 +20,10 @@ describe("mobile E2E selector helpers", () => {
     expect(selectorHelpers.selectors.taskExpandedPrompt).toBe(
       "~mobile.task-expanded-prompt"
     );
+    expect(
+      (selectorHelpers.selectors as Record<string, string>)
+        .taskExpandedTaskId
+    ).toBe("~mobile.task-expanded-task-id");
     expect(selectorHelpers.selectors.taskTitleDismissLayer).toBe(
       "~mobile.task-title-dismiss-layer"
     );

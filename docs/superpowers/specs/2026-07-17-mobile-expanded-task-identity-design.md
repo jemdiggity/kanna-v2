@@ -30,7 +30,29 @@ Focused `TaskScreen` tests will verify that:
 - the expanded accessibility label contains the task ID; and
 - existing expand, collapse, scroll-bound, task-switch, and outside-dismiss behavior remains intact.
 
-Verification will run the focused `TaskScreen` test suite, the mobile TypeScript check, and `git diff --check`.
+The existing simulator Appium prompt-expansion journey will also identify the
+task ID through a dedicated native selector, assert that the complete ID is
+rendered, long-press that ID, activate the native iOS `Copy` action, and compare
+the clipboard contents with the exact fixture task ID. The expanded prompt and
+task-ID elements must remain mounted after the selection gesture. The journey
+then retains its ordinary header-tap and outside-layer collapse checks so native
+selection cannot silently regress either dismissal path.
+
+To prevent a stale clipboard from satisfying the assertion, the journey first
+stores the original clipboard, seeds and verifies a distinct sentinel, and
+restores the original value in a `finally` block after the copy check.
+
+This native-copy assertion relies on XCUITest exposing the system edit menu and
+WebDriverAgent's clipboard endpoint. The menu item is OS- and locale-owned rather
+than app-owned; the current harness targets the English `Copy` accessibility
+name. Deterministic coverage on non-English simulators would require the harness
+to launch a known locale or expose a locale-independent edit-menu action. If an
+iOS/XCUITest release stops exposing the menu item, the smoke must fail explicitly
+rather than treating a completed long press as proof of copy behavior.
+
+Verification will run the focused `TaskScreen`, smoke-journey contract, and
+selector tests; the mobile TypeScript check; `git diff --check`; and the live
+simulator smoke when its required PTY fixture environment is available.
 
 ## Out of Scope
 
