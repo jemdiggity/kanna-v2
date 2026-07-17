@@ -9,6 +9,7 @@ import { isAgentProvider } from "@kanna/agent-protocol";
 const MOBILE_CONTEXT_STORAGE_KEY = "kanna.mobile.context.v1";
 
 export interface PersistedSessionContext {
+  mobileDeviceId: string | null;
   selectedDesktopId: string | null;
   selectedRepoId: string | null;
   selectedTaskId: string | null;
@@ -82,6 +83,9 @@ function parsePersistedSessionContext(
     }
 
     return {
+      mobileDeviceId: isNonBlankString(parsed.mobileDeviceId)
+        ? parsed.mobileDeviceId.trim()
+        : null,
       selectedDesktopId: normalizeNullableString(parsed.selectedDesktopId),
       selectedRepoId: normalizeNullableString(parsed.selectedRepoId),
       selectedTaskId: normalizeNullableString(parsed.selectedTaskId),

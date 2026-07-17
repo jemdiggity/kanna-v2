@@ -52,7 +52,7 @@ interface ExpoConfig {
   version?: string;
   scheme: string;
   icon: string;
-  plugins: (string | [string, { displayName: string; iosBundleId: string }])[];
+  plugins: Array<string | [string, Record<string, unknown>]>;
   platforms: string[];
   ios: {
     bundleIdentifier: string;
@@ -127,6 +127,14 @@ export function createExpoConfig(
     plugins: [
       "expo-font",
       [
+        "expo-camera",
+        {
+          cameraPermission: "Allow Kanna to scan machine pairing QR codes.",
+          barcodeScannerEnabled: true,
+          recordAudioAndroid: false
+        }
+      ],
+      [
         "./plugins/withKannaNativeIdentity",
         {
           displayName: appEnvironment.displayName,
@@ -182,4 +190,6 @@ function resolveOtaManifestUrl(
   return baseUrl ? `${baseUrl}${OTA_MANIFEST_PATH}` : null;
 }
 
-export default createExpoConfig(process.env);
+export default createExpoConfig(
+  process.env as Parameters<typeof createExpoConfig>[0]
+);

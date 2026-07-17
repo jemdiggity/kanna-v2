@@ -378,7 +378,7 @@ async function rejectCloudRecovery(
 }
 
 describe("createAppModel cloud routing", () => {
-  it("keeps a default-production LAN create canonical through Firestore publication", async () => {
+  it("uses account-known machines over LAN without a manual trust record", async () => {
     const { authSession } = createMutableAuthSession(signedInState());
     let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
     const taskIndex: CloudTaskIndex = {
@@ -487,14 +487,7 @@ describe("createAppModel cloud routing", () => {
           selectedRepoId: "repo-1",
           selectedTaskId: null,
           activeView: "tasks",
-          trustedDesktops: [
-            {
-              desktopId: "desktop-owner",
-              displayName: "Owner Mac",
-              lanEndpoints: [],
-              lastSeenAt: "2026-07-11T00:00:00.000Z"
-            }
-          ],
+          trustedDesktops: [],
           repoCreationProfiles: [
             {
               repoId: "repo-1",
@@ -813,6 +806,10 @@ describe("createAppModel cloud routing", () => {
     });
 
     await app.initialize();
+    expect(app.sessionStore.getState().liveLanDesktops.map(({ id }) => id).sort()).toEqual([
+      "desktop-a",
+      "desktop-b"
+    ]);
     pushCloudTasks?.([]);
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().recentTasks).toEqual([
@@ -832,6 +829,84 @@ describe("createAppModel cloud routing", () => {
         url: `${lan.baseUrls["desktop-a"]}/v1/tasks/task-a/actions/close`
       }
     ]);
+  });
+
+  it("reconnects a signed-out app when a trusted desktop appears on Bonjour", async () => {
+    const mutableBonjour = createMutableBonjourBrowser();
+    const lan = createLanFixture(async () => []);
+    const { authSession } = createMutableAuthSession({ status: "signedOut" });
+    const app = createAppModel({
+      authSession,
+      fetchImpl: lan.fetchImpl,
+      persistence: createTrustedPersistence(),
+      options: {
+        bonjourBrowser: mutableBonjour.browser,
+        forceCloud: false,
+        relayUrl: null
+      }
+    });
+
+    await app.initialize();
+    expect(app.sessionStore.getState().connectionState).toBe("idle");
+
+    mutableBonjour.setServices([{
+      name: "LAN Mac",
+      type: "_kanna-mobile._tcp.",
+      host: "desktop.lan",
+      port: 48120,
+      txt: { desktopId: "desktop-lan" }
+    }]);
+
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().connectionState).toBe("connected");
+      expect(app.sessionStore.getState().liveLanDesktops).toEqual([
+        expect.objectContaining({ id: "desktop-lan", online: true })
+      ]);
+    });
+  });
+
+  it("recovers a signed-in app over trusted LAN when cloud bootstrap fails and Bonjour appears", async () => {
+    const mutableBonjour = createMutableBonjourBrowser();
+    const lan = createLanFixture(async () => []);
+    const { authSession } = createMutableAuthSession(signedInState());
+    const cloudFailure = new Error("cloud unavailable");
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockRejectedValue(cloudFailure),
+      listRecentTasks: vi.fn().mockRejectedValue(cloudFailure),
+      subscribeRecentTasks: vi.fn(() => {
+        throw cloudFailure;
+      })
+    };
+    const app = createAppModel({
+      authSession,
+      fetchImpl: lan.fetchImpl,
+      persistence: createTrustedPersistence(),
+      options: {
+        bonjourBrowser: mutableBonjour.browser,
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        createRelayClient: () => createRelayClientMock()
+      }
+    });
+
+    await app.initialize();
+    expect(app.sessionStore.getState().liveLanDesktops).toEqual([]);
+
+    mutableBonjour.setServices([{
+      name: "LAN Mac",
+      type: "_kanna-mobile._tcp.",
+      host: "desktop.lan",
+      port: 48120,
+      txt: { desktopId: "desktop-lan" }
+    }]);
+
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().liveLanDesktops).toEqual([
+        expect.objectContaining({ id: "desktop-lan", online: true })
+      ]);
+      expect(app.sessionStore.getState().machineSourceWarnings.local).toBeNull();
+    });
   });
 
   it("publishes live tasks without waiting for optional relay presence", async () => {
@@ -3745,6 +3820,17 @@ describe("createAppModel cloud routing", () => {
         lastSeenAt: "2026-07-06T12:30:00.000Z"
       }
     ]);
+    expect(app.sessionStore.getState().accountDesktops).toEqual(
+      app.sessionStore.getState().desktops
+    );
+    expect(app.sessionStore.getState().liveLanDesktops).toEqual([]);
+
+    app.setForceCloud(false);
+
+    expect(app.sessionStore.getState().accountDesktops).toEqual([
+      expect.objectContaining({ id: "desktop-owner", mode: "remote" })
+    ]);
+    expect(app.sessionStore.getState().liveLanDesktops).toEqual([]);
     expect(taskIndex.listDesktops).toHaveBeenCalledWith("user-1");
   });
 });

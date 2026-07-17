@@ -12,18 +12,24 @@ export function isTaskDetailVisible(
   );
 }
 
-export function shouldShowFloatingToolbar(taskDetailVisible: boolean): boolean {
-  return !taskDetailVisible;
+export function shouldShowFloatingToolbar(
+  taskDetailVisible: boolean,
+  activeView: MobileView
+): boolean {
+  return !taskDetailVisible && activeView !== "desktops";
 }
 
-export function shouldShowTopBar(taskDetailVisible: boolean): boolean {
-  return !taskDetailVisible;
+export function shouldShowTopBar(
+  taskDetailVisible: boolean,
+  activeView: MobileView
+): boolean {
+  return !taskDetailVisible && activeView !== "desktops";
 }
 
 export function getShellTitle(activeView: MobileView): string {
   switch (activeView) {
     case "desktops":
-      return "Desktops";
+      return "Machines";
     case "recent":
       return "Activity";
     case "search":

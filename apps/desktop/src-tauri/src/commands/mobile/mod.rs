@@ -38,10 +38,14 @@ pub struct MobileServerStatus {
     pub pairing_code: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-struct PairingSessionPayload {
-    code: String,
+pub struct MobilePairingSession {
+    pub code: String,
+    pub pairing_payload: String,
+    pub desktop_id: String,
+    pub desktop_name: String,
+    pub expires_at_unix_ms: u64,
 }
 
 #[derive(Clone)]
@@ -257,7 +261,7 @@ impl MobileServerManager {
         Ok(status)
     }
 
-    pub async fn create_pairing_session(&self) -> Result<MobileServerStatus, String> {
+    pub async fn create_pairing_session(&self) -> Result<MobilePairingSession, String> {
         let api_base_url = {
             let state = self.inner.lock().await;
             if !state.started {
@@ -276,15 +280,15 @@ impl MobileServerManager {
             .error_for_status()
             .map_err(|e| format!("pairing session request failed: {}", e))?;
         let pairing = response
-            .json::<PairingSessionPayload>()
+            .json::<MobilePairingSession>()
             .await
             .map_err(|e| format!("failed to parse pairing session response: {}", e))?;
 
-        if pairing.code.is_empty() {
-            return Err("kanna-server returned an empty pairing code".to_string());
+        if pairing.code.is_empty() || pairing.pairing_payload.is_empty() {
+            return Err("kanna-server returned an incomplete pairing session".to_string());
         }
 
-        self.snapshot().await
+        Ok(pairing)
     }
 
     async fn wait_for_status(
@@ -344,7 +348,7 @@ pub async fn mobile_server_status(app: tauri::AppHandle) -> Result<MobileServerS
 #[tauri::command]
 pub async fn create_mobile_pairing_session(
     app: tauri::AppHandle,
-) -> Result<MobileServerStatus, String> {
+) -> Result<MobilePairingSession, String> {
     let manager = app.state::<MobileServerManager>();
     manager.create_pairing_session().await
 }
@@ -814,7 +818,8 @@ mod tests {
         app_data_dir_for_server_config, current_server_version, default_desktop_name_from_sources,
         desktop_id, escape_toml_string, generate_uuid_v4_from_reader, is_current_server_status,
         resolved_db_path, server_base_url, server_stderr_log, stop_server_on_port,
-        stopped_snapshot, MobileServerManager, MobileServerState, MobileServerStatus,
+        stopped_snapshot, MobilePairingSession, MobileServerManager, MobileServerState,
+        MobileServerStatus,
     };
     use std::ffi::CString;
     use std::os::unix::fs::PermissionsExt;
@@ -850,6 +855,27 @@ mod tests {
                 Some("kernel-host".to_string()),
             ),
             "Gus MacBook Pro"
+        );
+    }
+
+    #[test]
+    fn mobile_pairing_session_deserializes_privileged_response() {
+        let session: MobilePairingSession = serde_json::from_value(serde_json::json!({
+            "code": "ABC123",
+            "pairingPayload": "{\"type\":\"kanna.machine-pairing\"}",
+            "desktopId": "desktop-1",
+            "desktopName": "Studio Mac",
+            "lanHost": "192.168.1.10",
+            "lanPort": 48120,
+            "expiresAtUnixMs": 1_800_000
+        }))
+        .expect("pairing response should deserialize");
+
+        assert_eq!(session.code, "ABC123");
+        assert_eq!(session.desktop_id, "desktop-1");
+        assert_eq!(
+            session.pairing_payload,
+            "{\"type\":\"kanna.machine-pairing\"}"
         );
     }
 

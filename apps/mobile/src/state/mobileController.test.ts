@@ -17,6 +17,7 @@ import type { TaskSummary } from "../lib/api/types";
 import { createCloudLanClient } from "../lib/sources/cloudLanClient";
 import { createRemoteTransport, type RemoteDesktopInvoker } from "../lib/transports/remoteTransport";
 import { mapCloudTaskSnapshot } from "../lib/firebase/taskIndex";
+import type { MachinePairingService } from "../lib/pairing/machinePairing";
 
 function createDeferred<T>(): {
   promise: Promise<T>;
@@ -168,14 +169,6 @@ function createClientMock(): ClientMock {
       agentStream.subscription.setListener(listener);
       return agentStream.subscription;
     }),
-    createPairingSession: vi.fn().mockResolvedValue({
-      code: "ABC123",
-      desktopId: "desktop-1",
-      desktopName: "Studio Mac",
-      lanHost: "0.0.0.0",
-      lanPort: 48120,
-      expiresAtUnixMs: 1
-    }),
     __terminalStream: terminalStream,
     __agentStream: agentStream
   };
@@ -194,6 +187,102 @@ function createAuthSessionMock(): MobileAuthSession {
 }
 
 describe("createMobileController", () => {
+  const trustedDesktop = {
+    desktopId: "desktop-1",
+    displayName: "Studio Mac",
+    lanEndpoints: [{
+      baseUrl: "http://studio.local:48120",
+      lastSeenAt: "2026-07-17T00:00:00.000Z"
+    }],
+    lastSeenAt: "2026-07-17T00:00:00.000Z"
+  };
+
+  function createPairingServiceMock(): MachinePairingService {
+    return {
+      claimCode: vi.fn().mockResolvedValue(trustedDesktop),
+      claimPayload: vi.fn().mockResolvedValue(trustedDesktop)
+    };
+  }
+
+  it("pairs by code without auth and refreshes machine sources", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const pairingService = createPairingServiceMock();
+    const replaceClientForTrustChange = vi.fn();
+    const controller = createMobileController(client, store, undefined, {
+      pairingService,
+      persistSessionContext: vi.fn().mockResolvedValue(undefined),
+      replaceClientForTrustChange
+    });
+
+    await expect(controller.pairMachineByCode("ABC123")).resolves.toBe("desktop-1");
+
+    expect(pairingService.claimCode).toHaveBeenCalledWith("ABC123");
+    expect(store.getState().trustedDesktops).toContainEqual(trustedDesktop);
+    expect(replaceClientForTrustChange).toHaveBeenCalledTimes(1);
+    expect(client.listDesktops).toHaveBeenCalled();
+  });
+
+  it("merges a QR claim into an existing machine instead of duplicating", async () => {
+    const store = createSessionStore();
+    store.setTrustedDesktops([{
+      ...trustedDesktop,
+      lanEndpoints: [{
+        baseUrl: "http://studio-old.local:48120",
+        lastSeenAt: "2026-07-16T00:00:00.000Z"
+      }],
+      lastSeenAt: "2026-07-16T00:00:00.000Z"
+    }]);
+    const pairingService = createPairingServiceMock();
+    const controller = createMobileController(
+      createClientMock(),
+      store,
+      undefined,
+      {
+        pairingService,
+        persistSessionContext: vi.fn().mockResolvedValue(undefined),
+        replaceClientForTrustChange: vi.fn()
+      }
+    );
+
+    await controller.pairMachineByPayload("pairing-payload");
+
+    expect(store.getState().trustedDesktops).toHaveLength(1);
+    expect(store.getState().trustedDesktops[0].lanEndpoints).toEqual([
+      trustedDesktop.lanEndpoints[0],
+      expect.objectContaining({ baseUrl: "http://studio-old.local:48120" })
+    ]);
+  });
+
+  it("removes manual trust without deleting the account descriptor", async () => {
+    const store = createSessionStore();
+    const accountDesktop = {
+      id: "desktop-1",
+      name: "Studio Mac",
+      online: true,
+      mode: "remote" as const
+    };
+    store.setDesktops([accountDesktop]);
+    store.setTrustedDesktops([trustedDesktop]);
+    const client = createClientMock();
+    vi.mocked(client.listDesktops).mockResolvedValue([accountDesktop]);
+    const controller = createMobileController(
+      client,
+      store,
+      undefined,
+      {
+        pairingService: createPairingServiceMock(),
+        persistSessionContext: vi.fn().mockResolvedValue(undefined),
+        replaceClientForTrustChange: vi.fn()
+      }
+    );
+
+    await controller.removeManualMachine("desktop-1");
+
+    expect(store.getState().trustedDesktops).toEqual([]);
+    expect(store.getState().desktops).toEqual([accountDesktop]);
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -3778,18 +3867,6 @@ describe("createMobileController", () => {
     });
     expect(client.getStatus).toHaveBeenCalledTimes(2);
     expect(client.listDesktops).toHaveBeenCalledTimes(2);
-  });
-
-  it("creates a pairing session and refreshes the desktop state", async () => {
-    const store = createSessionStore();
-    const client = createClientMock();
-    const controller = createMobileController(client, store);
-
-    await controller.connectLocal();
-
-    expect(client.createPairingSession).toHaveBeenCalledTimes(1);
-    expect(store.getState().pairingCode).toBe("ABC123");
-    expect(store.getState().connectionState).toBe("connected");
   });
 
   it("runs the merge agent for the selected task and refreshes recent tasks", async () => {

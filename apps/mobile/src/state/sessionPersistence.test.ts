@@ -16,6 +16,36 @@ function createMemoryStorage(): StorageAdapter & { values: Map<string, string> }
 }
 
 describe("createSessionPersistence", () => {
+  it("loads old contexts without inventing a device id during parsing", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    storage.values.set("kanna.mobile.context.v1", JSON.stringify({
+      selectedDesktopId: null,
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks"
+    }));
+
+    await expect(persistence.load()).resolves.toMatchObject({ mobileDeviceId: null });
+  });
+
+  it("roundtrips the stable mobile device id", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+
+    await persistence.save({
+      selectedDesktopId: null,
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks",
+      mobileDeviceId: "mobile-a1b2"
+    });
+
+    await expect(persistence.load()).resolves.toMatchObject({
+      mobileDeviceId: "mobile-a1b2"
+    });
+  });
+
   it("round-trips a valid pending task creation attempt", async () => {
     const storage = createMemoryStorage();
     const persistence = createSessionPersistence(storage);

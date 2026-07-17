@@ -1,4 +1,3 @@
-import type { TrustedDesktopRecord } from "../../state/sessionPersistence";
 import type { FetchLike } from "../transports/lanTransport";
 import type { BonjourService } from "./bonjour";
 
@@ -11,32 +10,64 @@ export interface TrustedBonjourEndpoint {
 export async function resolveTrustedBonjourEndpoint(input: {
   fetchImpl: FetchLike;
   services: readonly BonjourService[];
-  trustedDesktops: readonly TrustedDesktopRecord[];
-  selectedDesktopId: string | null;
+  trustedDesktopIds: readonly string[];
+  preferredDesktopId: string | null;
+  probeTimeoutMs?: number;
 }): Promise<TrustedBonjourEndpoint | null> {
-  for (const service of orderServices(input.services, input.selectedDesktopId)) {
-    const desktopId = service.txt.desktopId;
-    const trusted = input.trustedDesktops.find(
-      (desktop) => desktop.desktopId === desktopId
+  const trustedDesktopIds = new Set(input.trustedDesktopIds);
+  for (const service of orderServices(input.services, input.preferredDesktopId)) {
+    const endpoint = await validateTrustedService(
+      service,
+      trustedDesktopIds,
+      input.fetchImpl,
+      input.probeTimeoutMs
     );
-    if (!trusted) {
-      continue;
-    }
-
-    const baseUrl = `http://${service.host}:${service.port}`;
-    const status = await fetchStatus(baseUrl, input.fetchImpl);
-    if (status?.desktopId !== trusted.desktopId) {
-      continue;
-    }
-
-    return {
-      baseUrl,
-      desktopId: trusted.desktopId,
-      displayName: trusted.displayName
-    };
+    if (endpoint) return endpoint;
   }
 
   return null;
+}
+
+export async function resolveTrustedBonjourEndpoints(input: {
+  fetchImpl: FetchLike;
+  services: readonly BonjourService[];
+  trustedDesktopIds: readonly string[];
+  preferredDesktopId: string | null;
+  probeTimeoutMs?: number;
+}): Promise<TrustedBonjourEndpoint[]> {
+  const trustedDesktopIds = new Set(input.trustedDesktopIds);
+  const candidates = await Promise.all(
+    orderServices(input.services, input.preferredDesktopId).map((service) =>
+      validateTrustedService(
+        service,
+        trustedDesktopIds,
+        input.fetchImpl,
+        input.probeTimeoutMs
+      )
+    )
+  );
+  const seenDesktopIds = new Set<string>();
+  return candidates.filter((endpoint): endpoint is TrustedBonjourEndpoint => {
+    if (!endpoint || seenDesktopIds.has(endpoint.desktopId)) return false;
+    seenDesktopIds.add(endpoint.desktopId);
+    return true;
+  });
+}
+
+async function validateTrustedService(
+  service: BonjourService,
+  trustedDesktopIds: ReadonlySet<string>,
+  fetchImpl: FetchLike,
+  probeTimeoutMs?: number
+): Promise<TrustedBonjourEndpoint | null> {
+  const desktopId = service.txt.desktopId;
+  if (!trustedDesktopIds.has(desktopId)) return null;
+
+  const baseUrl = `http://${service.host}:${service.port}`;
+  const status = await fetchStatus(baseUrl, fetchImpl, probeTimeoutMs);
+  return status?.desktopId === desktopId
+    ? { baseUrl, desktopId, displayName: service.name }
+    : null;
 }
 
 function orderServices(
@@ -52,10 +83,21 @@ function orderServices(
 
 async function fetchStatus(
   baseUrl: string,
-  fetchImpl: FetchLike
+  fetchImpl: FetchLike,
+  timeoutMs = 5_000
 ): Promise<{ desktopId?: string } | null> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
-    const response = await fetchImpl(`${baseUrl}/v1/status`);
+    const response = await Promise.race([
+      fetchImpl(`${baseUrl}/v1/status`, { signal: controller.signal }),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error("LAN status probe timed out"));
+        }, timeoutMs);
+      })
+    ]);
     if (!response.ok) {
       return null;
     }
@@ -63,5 +105,7 @@ async function fetchStatus(
     return body && typeof body === "object" ? (body as { desktopId?: string }) : null;
   } catch {
     return null;
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }

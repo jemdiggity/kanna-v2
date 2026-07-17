@@ -10,7 +10,6 @@ import type {
   DesktopDescriptor,
   DesktopSummary,
   MobileServerStatus,
-  PairingSession,
   RepoSummary,
   TaskActionResponse,
   TaskActivityResponse,
@@ -31,6 +30,7 @@ export type FetchLike = (
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    signal?: AbortSignal;
   }
 ) => Promise<FetchResponseLike>;
 
@@ -56,6 +56,7 @@ export function createLanTransport(
       method?: string;
       headers?: Record<string, string>;
       body?: string;
+      signal?: AbortSignal;
     }
   ): Promise<T> => {
     const response = await fetchImpl(`${baseUrl}${path}`, init);
@@ -196,9 +197,7 @@ export function createLanTransport(
           client.sendAgentInterrupt(taskId);
         }
       } satisfies TaskAgentSubscription;
-    },
-    createPairingSession: () =>
-      request<PairingSession>("/v1/pairing/sessions", { method: "POST" })
+    }
   };
 }
 

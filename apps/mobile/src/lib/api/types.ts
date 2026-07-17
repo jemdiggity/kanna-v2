@@ -30,13 +30,15 @@ export interface RepoSummary {
   name: string;
 }
 
-export interface PairingSession {
+export interface PairingClaimRequest {
   code: string;
+  deviceId: string;
+  deviceName: string;
+}
+
+export interface PairingClaimResponse {
   desktopId: string;
   desktopName: string;
-  lanHost: string;
-  lanPort: number;
-  expiresAtUnixMs: number;
 }
 
 export interface CreateTaskRequest {

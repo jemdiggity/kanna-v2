@@ -35,9 +35,16 @@ export const selectors = {
   accountButton: `~${MOBILE_E2E_IDS.accountButton}`,
   accountSheet: `~${MOBILE_E2E_IDS.accountSheet}`,
   accountCloseButton: `~${MOBILE_E2E_IDS.accountCloseButton}`,
-  accountConnectionStatus: `~${MOBILE_E2E_IDS.accountConnectionStatus}`,
-  accountConnectionTitle: `~${MOBILE_E2E_IDS.accountConnectionTitle}`,
-  accountConnectLocalButton: `~${MOBILE_E2E_IDS.accountConnectLocalButton}`,
+  accountMachinesButton: `~${MOBILE_E2E_IDS.accountMachinesButton}`,
+  machinesScreen: `~${MOBILE_E2E_IDS.machinesScreen}`,
+  machinesBackButton: `~${MOBILE_E2E_IDS.machinesBackButton}`,
+  machinesAddButton: `~${MOBILE_E2E_IDS.machinesAddButton}`,
+  machinePairingSheet: `~${MOBILE_E2E_IDS.machinePairingSheet}`,
+  machinePairingCodeInput: `~${MOBILE_E2E_IDS.machinePairingCodeInput}`,
+  machinePairingSubmit: `~${MOBILE_E2E_IDS.machinePairingSubmitButton}`,
+  machinePairingCamera: `~${MOBILE_E2E_IDS.machinePairingCamera}`,
+  machinePairingOpenSettings:
+    `~${MOBILE_E2E_IDS.machinePairingOpenSettingsButton}`,
   accountEmailInput: `~${MOBILE_E2E_IDS.accountEmailInput}`,
   accountPasswordInput: `~${MOBILE_E2E_IDS.accountPasswordInput}`,
   accountPasswordToggle: `~${MOBILE_E2E_IDS.accountPasswordToggle}`,
@@ -54,8 +61,17 @@ export const selectors = {
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
   legacyUpdateInfoOtaValue: "~mobile.update-info.ota",
+  developerForceCloudToggle: `~${MOBILE_E2E_IDS.developerForceCloudToggle}`,
   taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]'
 } as const;
+
+export function machineRowSelector(desktopId: string): string {
+  return `~${MOBILE_E2E_IDS.machineRow(desktopId)}`;
+}
+
+export function machineRemoveButtonSelector(desktopId: string): string {
+  return `~${MOBILE_E2E_IDS.machineRemoveButton(desktopId)}`;
+}
 
 const TASK_ROW_PREFIX = "mobile.task-row.";
 

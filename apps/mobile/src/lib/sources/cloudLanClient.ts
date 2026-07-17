@@ -37,6 +37,19 @@ export interface CloudLanClientOptions {
   isLanEnabled(): boolean;
   lanClientForDesktop?(desktopId: string): KannaClient | null;
   optionalLanWaitMs?: number;
+  onDesktopSourceWarnings?(warnings: DesktopSourceWarnings): void;
+  initialDesktopSources?: DesktopSources;
+  onDesktopSourcesChanged?(sources: DesktopSources): void;
+}
+
+export interface DesktopSourceWarnings {
+  account: string | null;
+  local: string | null;
+}
+
+export interface DesktopSources {
+  account: DesktopSummary[];
+  local: DesktopSummary[];
 }
 
 export interface LanTaskSnapshot {
@@ -387,8 +400,27 @@ export function createCloudLanClient(
   let lastLanTaskSnapshot: LanTaskSnapshot | undefined;
   let lastCloudRepos: RepoSummary[] | undefined;
   let lastLanRepos: RepoSummary[] | undefined;
-  let lastCloudDesktops: DesktopSummary[] | undefined;
-  let lastLanDesktops: DesktopSummary[] | undefined;
+  let lastCloudDesktops: DesktopSummary[] | undefined =
+    options.initialDesktopSources?.account;
+  let lastLanDesktops: DesktopSummary[] | undefined =
+    options.initialDesktopSources?.local;
+  let desktopSourceWarnings: DesktopSourceWarnings = {
+    account: null,
+    local: null
+  };
+
+  const reportDesktopSourceWarnings = (
+    updates: Partial<DesktopSourceWarnings>
+  ) => {
+    desktopSourceWarnings = { ...desktopSourceWarnings, ...updates };
+    options.onDesktopSourceWarnings?.(desktopSourceWarnings);
+  };
+  const publishDesktopSources = () => {
+    options.onDesktopSourcesChanged?.({
+      account: lastCloudDesktops ?? [],
+      local: options.isLanEnabled() ? lastLanDesktops ?? [] : []
+    });
+  };
 
   const projectProvisionalTaskIdentities = (
     merged: MergedTaskSnapshot
@@ -886,6 +918,8 @@ export function createCloudLanClient(
               options.isLanEnabled()
             ) {
               lastLanDesktops = lateDesktops;
+              reportDesktopSourceWarnings({ local: null });
+              publishDesktopSources();
             }
           }
         )
@@ -894,6 +928,17 @@ export function createCloudLanClient(
     const lanResult = lanRead ? await lanRead : null;
     const isLatestRead = readEpoch === latestDesktopReadEpoch;
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
+
+    reportDesktopSourceWarnings({
+      account: cloudResult.status === "fulfilled"
+        ? null
+        : readFailureMessage(cloudResult.reason),
+      local: !lanStillEnabled
+        ? null
+        : lanResult?.status === "fulfilled"
+          ? null
+          : readFailureMessage(lanResult?.reason)
+    });
 
     if (isLatestRead && cloudResult.status === "fulfilled") {
       lastCloudDesktops = cloudResult.value;
@@ -905,6 +950,7 @@ export function createCloudLanClient(
     ) {
       lastLanDesktops = lanResult.value;
     }
+    if (isLatestRead) publishDesktopSources();
 
     const cloudDesktops =
       cloudResult.status === "fulfilled"
@@ -1103,8 +1149,7 @@ export function createCloudLanClient(
         };
       }
       return route.client.observeTaskAgent(route.taskId, listener);
-    },
-    createPairingSession: () => lan.createPairingSession()
+    }
   };
 }
 
@@ -1233,6 +1278,10 @@ function normalizeOptionalLanWaitMs(waitMs: number | undefined): number {
     return DEFAULT_OPTIONAL_LAN_WAIT_MS;
   }
   return Math.max(0, waitMs);
+}
+
+function readFailureMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason ?? "Unknown source error");
 }
 
 function firstReadFailure(

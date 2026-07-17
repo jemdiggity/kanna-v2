@@ -11,6 +11,7 @@ import type {
   TaskTerminalSubscription
 } from "../lib/api/client";
 import { TaskCreationError } from "../lib/api/client";
+import type { MachinePairingService } from "../lib/pairing/machinePairing";
 import type { MobileAuthSession } from "../lib/firebase/auth";
 import { isTaskDetailVisible } from "../appShell";
 import {
@@ -31,7 +32,9 @@ import {
 
 export interface MobileController {
   bootstrap(): Promise<void>;
-  connectLocal(): Promise<void>;
+  pairMachineByCode(code: string): Promise<string>;
+  pairMachineByPayload(payload: string): Promise<string>;
+  removeManualMachine(desktopId: string): Promise<void>;
   signInWithEmailPassword(email: string, password: string): Promise<void>;
   signOut(): Promise<void>;
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
@@ -82,6 +85,8 @@ export interface MobileControllerOptions {
   createTaskId?: () => string;
   createTaskSlotId?: () => string;
   persistSessionContext?: () => Promise<void>;
+  pairingService?: MachinePairingService;
+  replaceClientForTrustChange?: () => void;
 }
 
 let fallbackTaskCreationCounter = 0;
@@ -1394,17 +1399,53 @@ export function createMobileController(
   return {
     bootstrap,
 
-    async connectLocal() {
-      store.setConnectionState("connecting");
-      setUnownedErrorMessage(null);
-
-      try {
-        const pairing = await client.createPairingSession();
-        await bootstrap();
-        store.setPairingCode(pairing.code);
-      } catch (error) {
-        fail(error);
+    async pairMachineByCode(code) {
+      if (!options.pairingService) {
+        throw new Error("Machine pairing is not configured.");
       }
+      const trusted = await options.pairingService.claimCode(code);
+      const previous = store.getState().trustedDesktops;
+      store.upsertTrustedDesktop(trusted);
+      try {
+        await options.persistSessionContext?.();
+      } catch (error) {
+        store.setTrustedDesktops(previous);
+        throw error;
+      }
+      options.replaceClientForTrustChange?.();
+      await refreshDesktops({ force: true });
+      return trusted.desktopId;
+    },
+
+    async pairMachineByPayload(payload) {
+      if (!options.pairingService) {
+        throw new Error("Machine pairing is not configured.");
+      }
+      const trusted = await options.pairingService.claimPayload(payload);
+      const previous = store.getState().trustedDesktops;
+      store.upsertTrustedDesktop(trusted);
+      try {
+        await options.persistSessionContext?.();
+      } catch (error) {
+        store.setTrustedDesktops(previous);
+        throw error;
+      }
+      options.replaceClientForTrustChange?.();
+      await refreshDesktops({ force: true });
+      return trusted.desktopId;
+    },
+
+    async removeManualMachine(desktopId) {
+      const previous = store.getState().trustedDesktops;
+      store.removeTrustedDesktop(desktopId);
+      try {
+        await options.persistSessionContext?.();
+      } catch (error) {
+        store.setTrustedDesktops(previous);
+        throw error;
+      }
+      options.replaceClientForTrustChange?.();
+      await refreshDesktops({ force: true });
     },
 
     async signInWithEmailPassword(email, password) {

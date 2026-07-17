@@ -105,14 +105,6 @@ describe("createKannaClient", () => {
       }),
       observeTaskTerminal: vi.fn().mockReturnValue({
         close: vi.fn()
-      }),
-      createPairingSession: vi.fn().mockResolvedValue({
-        code: "ABC123",
-        desktopId: "desktop-1",
-        desktopName: "Studio Mac",
-        lanHost: "0.0.0.0",
-        lanPort: 48120,
-        expiresAtUnixMs: 123
       })
     };
 
@@ -164,6 +156,5 @@ describe("createKannaClient", () => {
       "docs/spec one.md"
     );
     expect(typeof client.observeTaskTerminal("task-1", vi.fn()).close).toBe("function");
-    expect((await client.createPairingSession()).code).toBe("ABC123");
   });
 });

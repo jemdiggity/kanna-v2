@@ -170,10 +170,11 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     pairingCode: null,
   }),
   create_mobile_pairing_session: () => ({
-    state: "running",
     desktopId: "desktop-mock-current",
     desktopName: "Mock Desktop",
-    pairingCode: "123456",
+    code: "ABC123",
+    pairingPayload: '{"type":"kanna.machine-pairing","version":1,"desktopId":"desktop-mock-current","code":"ABC123"}',
+    expiresAtUnixMs: Date.now() + 300_000,
   }),
   // Claude agent SDK commands
   spawn_agent_session: () => ({ session_id: "mock-session" }),

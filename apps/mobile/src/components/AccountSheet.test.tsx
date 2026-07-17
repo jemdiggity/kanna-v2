@@ -47,14 +47,10 @@ vi.mock("react-native", () => ({
 }));
 
 let AccountSheet: typeof import("./AccountSheet").AccountSheet | null = null;
-let getConnectionStatusPresentation:
-  | typeof import("./AccountSheet").getConnectionStatusPresentation
-  | null = null;
 
 beforeAll(async () => {
   const module = await import("./AccountSheet");
   AccountSheet = module.AccountSheet;
-  getConnectionStatusPresentation = module.getConnectionStatusPresentation;
 });
 
 beforeEach(() => {
@@ -140,31 +136,14 @@ function renderSignedOutSheet(): ElementNode {
   reactState.index = 0;
   return AccountSheet({
     auth: { status: "signedOut" },
-    connectionState: "idle",
-    desktopName: null,
-    errorMessage: null,
-    pairingCode: null,
+    machineCount: 3,
+    availableMachineCount: 2,
     visible: true,
-    forceCloudEnabled: false,
-    showDevForceCloudToggle: false,
     onClose: vi.fn(),
-    onConnectLocal: vi.fn(),
-    onForceCloudChange: vi.fn(),
+    onOpenMachines: vi.fn(),
     onSignIn: vi.fn(),
     onSignOut: vi.fn()
   }) as ElementNode;
-}
-
-function connectionText(
-  ...input: Parameters<NonNullable<typeof getConnectionStatusPresentation>>
-): string {
-  if (!getConnectionStatusPresentation) {
-    throw new Error("AccountSheet was not loaded");
-  }
-
-  const presentation = getConnectionStatusPresentation(...input);
-
-  return `${presentation.title} ${presentation.detail}`;
 }
 
 function textContent(
@@ -176,21 +155,6 @@ function textContent(
   return textContent(node.props?.children);
 }
 
-describe("getConnectionStatusPresentation", () => {
-  it("shows disconnected task state as profile drawer connection status", () => {
-    expect(connectionText("idle", null, null, null)).toContain("Not connected");
-    expect(connectionText("error", null, null, "LAN request failed")).toContain(
-      "LAN request failed"
-    );
-  });
-
-  it("shows the connected desktop name", () => {
-    expect(connectionText("connected", "Kanna Cloud", null, null)).toContain(
-      "Kanna Cloud"
-    );
-  });
-});
-
 describe("AccountSheet", () => {
   it("lifts the sign-in drawer above the iOS keyboard", () => {
     const tree = renderSignedOutSheet();
@@ -199,31 +163,59 @@ describe("AccountSheet", () => {
     expect(keyboardAvoider?.props?.behavior).toBe("padding");
   });
 
-  it("renders the force-cloud toggle only when the dev-only flag is enabled", () => {
+  it.each([
+    { status: "signedOut" as const },
+    {
+      status: "signedIn" as const,
+      user: { uid: "user-1", email: "dev@example.com", displayName: "Dev" }
+    }
+  ])("keeps Machines reachable while $status", (auth) => {
     if (!AccountSheet) {
       throw new Error("AccountSheet was not loaded");
     }
 
-    const hiddenTree = renderSignedOutSheet();
-    expect(findNodeByTestId(hiddenTree, "mobile.account-force-cloud")).toBeNull();
-
-    const visibleTree = AccountSheet({
-      auth: { status: "signedOut" },
-      connectionState: "idle",
-      desktopName: null,
-      errorMessage: null,
-      pairingCode: null,
+    reactState.index = 0;
+    const tree = AccountSheet({
+      auth,
+      machineCount: 3,
+      availableMachineCount: 2,
       visible: true,
-      forceCloudEnabled: true,
-      showDevForceCloudToggle: true,
       onClose: vi.fn(),
-      onConnectLocal: vi.fn(),
-      onForceCloudChange: vi.fn(),
+      onOpenMachines: vi.fn(),
       onSignIn: vi.fn(),
       onSignOut: vi.fn()
     }) as ElementNode;
 
-    expect(findNodeByTestId(visibleTree, "mobile.account-force-cloud")).not.toBeNull();
+    expect(findNodeByTestId(tree, "mobile.account-machines")).not.toBeNull();
+    expect(textContent(tree)).toContain("3 machines · 2 available");
+    expect(findNodeByTestId(tree, "mobile.account-connection-status")).toBeNull();
+  });
+
+  it("shows the signed-in account initials beside the identity", () => {
+    if (!AccountSheet) {
+      throw new Error("AccountSheet was not loaded");
+    }
+
+    reactState.index = 0;
+    const tree = AccountSheet({
+      auth: {
+        status: "signedIn",
+        user: {
+          uid: "user-1",
+          email: "jeremy@example.com",
+          displayName: "Jeremy Hale"
+        }
+      },
+      machineCount: 1,
+      availableMachineCount: 1,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onSignIn: vi.fn(),
+      onSignOut: vi.fn()
+    }) as ElementNode;
+
+    expect(findNodeByAccessibilityLabel(tree, "Account initials JH")).not.toBeNull();
   });
 
   it("starts with a hidden password and renders a show-password control", () => {
@@ -300,16 +292,11 @@ describe("AccountSheet", () => {
         status: "signedIn",
         user: { uid: "user-1", email: "dev@example.com", displayName: "Dev" }
       },
-      connectionState: "idle",
-      desktopName: null,
-      errorMessage: null,
-      pairingCode: null,
+      machineCount: 3,
+      availableMachineCount: 2,
       visible: true,
-      forceCloudEnabled: false,
-      showDevForceCloudToggle: false,
       onClose: vi.fn(),
-      onConnectLocal: vi.fn(),
-      onForceCloudChange: vi.fn(),
+      onOpenMachines: vi.fn(),
       onSignIn: vi.fn(),
       onSignOut
     }) as ElementNode;

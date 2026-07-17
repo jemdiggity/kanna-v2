@@ -19,7 +19,7 @@ describe("mobile smoke runner", () => {
     expect(smokeSpecPaths).toContain("specs/smoke/list-detail-back.e2e.ts");
   });
 
-  it("registers the profile connection smoke spec", () => {
+  it("registers the profile and Machines smoke spec", () => {
     expect(smokeSpecPaths).toContain("specs/smoke/profile-connection.e2e.ts");
   });
 

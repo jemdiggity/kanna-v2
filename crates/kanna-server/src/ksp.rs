@@ -1817,6 +1817,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ksp_request_cannot_create_pairing_session() {
+        let url = serve_test_router().await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::Request {
+                id: 8,
+                method: "POST".into(),
+                path: "/v1/pairing/sessions".into(),
+                body: None,
+            },
+        )
+        .await;
+
+        match recv_frame(&mut socket).await {
+            ServerFrame::Response { id, status, body } => {
+                assert_eq!(id, 8);
+                assert_eq!(status, 403);
+                assert!(!body.is_some_and(|body| body.get("pairingPayload").is_some()));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn frames_before_auth_are_rejected() {
         let url = serve_test_router().await;
         let mut socket = ws_connect(&url).await;

@@ -12,6 +12,50 @@ describe("createSessionStore", () => {
     agentProvider: "codex" as const
   };
 
+  it("creates a device id once and persists it", () => {
+    const store = createSessionStore();
+
+    expect(store.ensureMobileDeviceId(() => "mobile-generated")).toBe("mobile-generated");
+    expect(store.ensureMobileDeviceId(() => "mobile-other")).toBe("mobile-generated");
+    expect(store.getPersistedContext().mobileDeviceId).toBe("mobile-generated");
+  });
+
+  it("removes only the requested manual trust record", () => {
+    const store = createSessionStore();
+    const trustedOne = {
+      desktopId: "desktop-1",
+      displayName: "Desk One",
+      lanEndpoints: [],
+      lastSeenAt: "2026-07-17T00:00:00.000Z"
+    };
+    const trustedTwo = {
+      desktopId: "desktop-2",
+      displayName: "Desk Two",
+      lanEndpoints: [],
+      lastSeenAt: "2026-07-17T00:00:00.000Z"
+    };
+    store.setTrustedDesktops([trustedOne, trustedTwo]);
+
+    store.removeTrustedDesktop("desktop-1");
+
+    expect(store.getState().trustedDesktops).toEqual([trustedTwo]);
+  });
+
+  it("stores machine source warnings as runtime-only diagnostics", () => {
+    const store = createSessionStore();
+
+    store.setMachineSourceWarnings({
+      account: "Cloud unavailable",
+      local: null
+    });
+
+    expect(store.getState().machineSourceWarnings).toEqual({
+      account: "Cloud unavailable",
+      local: null
+    });
+    expect(store.getPersistedContext()).not.toHaveProperty("machineSourceWarnings");
+  });
+
   it("starts with an idle task creation state and no composer repo", () => {
     const store = createSessionStore();
 

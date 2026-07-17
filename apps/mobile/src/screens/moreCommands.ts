@@ -2,7 +2,7 @@ import type { TaskSummary } from "../lib/api/types";
 import type { RefreshStatus } from "../state/sessionStore";
 
 export interface MoreCommandAction {
-  id: "refresh" | "pair" | "desktops" | "compose" | "advance-stage" | "merge-agent" | "close-task";
+  id: "refresh" | "compose" | "advance-stage" | "merge-agent" | "close-task";
   title: string;
   copy: string;
   keywords?: string[];
@@ -21,35 +21,21 @@ export interface MoreCommandPaletteEntry extends MoreCommandAction {
 }
 
 interface BuildMoreCommandSectionsOptions {
-  pairingCode: string | null;
   refreshStatus?: RefreshStatus;
   selectedTask: TaskSummary | null;
 }
 
 export function buildMoreCommandSections({
-  pairingCode,
   refreshStatus = "idle",
   selectedTask
 }: BuildMoreCommandSectionsOptions): MoreCommandSection[] {
   const sections: MoreCommandSection[] = [
     {
       title: "Workspace",
-      headline: pairingCode ?? "No pairing session",
-      detail: "Global commands for the paired desktop.",
+      headline: "Commands",
+      detail: "Global workspace commands.",
       actions: [
         getRefreshAction(refreshStatus),
-        {
-          id: "pair",
-          title: "Start Pairing",
-          copy: "Generate a fresh LAN pairing code.",
-          keywords: ["connect", "lan", "code"]
-        },
-        {
-          id: "desktops",
-          title: "Switch Desktop",
-          copy: "Jump to the desktop picker.",
-          keywords: ["desktop", "machine", "host"]
-        },
         {
           id: "compose",
           title: "Create Task",
@@ -97,7 +83,7 @@ function getRefreshAction(refreshStatus: RefreshStatus): MoreCommandAction {
       return {
         id: "refresh",
         title: "Refreshing...",
-        copy: "Reloading desktops, repos, and recent tasks.",
+        copy: "Reloading machines, repos, and recent tasks.",
         keywords: ["reload", "sync", "update"]
       };
     case "updated":
@@ -119,7 +105,7 @@ function getRefreshAction(refreshStatus: RefreshStatus): MoreCommandAction {
       return {
         id: "refresh",
         title: "Refresh Data",
-        copy: "Reload desktops, repos, and recent tasks.",
+        copy: "Reload machines, repos, and recent tasks.",
         keywords: ["reload", "sync", "update"]
       };
   }

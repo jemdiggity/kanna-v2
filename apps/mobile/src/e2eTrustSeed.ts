@@ -56,6 +56,7 @@ export async function seedTrustedDesktopFromUrl(
   const seededAt = new Date().toISOString();
   const lanBaseUrl = parsed.searchParams.get("lanBaseUrl")?.trim() || null;
   await persistence.save({
+    mobileDeviceId: null,
     selectedDesktopId: desktopId,
     selectedRepoId: parsed.searchParams.get("selectedRepoId")?.trim() || null,
     selectedTaskId: parsed.searchParams.get("selectedTaskId")?.trim() || null,

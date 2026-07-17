@@ -1,4 +1,5 @@
 use super::*;
+use axum::extract::ConnectInfo;
 
 #[tokio::test]
 async fn request_revision_route_uses_revision_requester() {
@@ -875,17 +876,18 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
 }
 
 #[tokio::test]
-async fn status_route_reflects_pairing_session() {
+async fn status_route_does_not_expose_pairing_secret() {
     let app = super::test_router("desktop-1", "Studio Mac");
-    let pairing_response = app
-        .clone()
-        .oneshot(
-            Request::post("/v1/pairing/sessions")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    let mut pairing_request = Request::post("/v1/pairing/sessions")
+        .body(Body::empty())
         .unwrap();
+    pairing_request
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let pairing_response = app.clone().oneshot(pairing_request).await.unwrap();
 
     assert_eq!(pairing_response.status(), StatusCode::OK);
 
@@ -902,5 +904,5 @@ async fn status_route_reflects_pairing_session() {
 
     assert_eq!(status.desktop_name, "Studio Mac");
     assert_eq!(status.state, "running");
-    assert!(status.pairing_code.is_some());
+    assert!(status.pairing_code.is_none());
 }

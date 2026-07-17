@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore
@@ -36,16 +37,18 @@ import {
   checkAndFetchUpdate,
   reloadToApplyUpdate
 } from "./lib/updates/otaUpdates";
-import { DesktopsScreen } from "./screens/DesktopsScreen";
+import { MachinesScreen } from "./screens/MachinesScreen";
 import { MoreScreen } from "./screens/MoreScreen";
 import { SearchScreen } from "./screens/SearchScreen";
 import { TaskScreen } from "./screens/TaskScreen";
 import { TasksScreen } from "./screens/TasksScreen";
+import { buildMachineInventory, summarizeMachines } from "./state/machineInventory";
 import {
   projectTaskUiSlots,
   taskUiSlotForSelection,
   taskUiSlotToTaskSummary
 } from "./state/taskUiSlots";
+import type { MobileView } from "./state/sessionStore";
 
 const OTA_FOREGROUND_CHECK_THROTTLE_MS = 5 * 60 * 1000;
 
@@ -68,6 +71,7 @@ export default function App() {
   );
   const { controller, navigator } = model;
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
+  const [machinePairingVisible, setMachinePairingVisible] = useState(false);
   const [forceCloudEnabled, setForceCloudEnabled] = useState(resolveForceCloud());
   const [searchFocusRequestKey, setSearchFocusRequestKey] = useState(0);
   const [updatePromptVisible, setUpdatePromptVisible] = useState(false);
@@ -77,6 +81,33 @@ export default function App() {
     width: number;
     height: number;
   } | null>(null);
+  const machinesReturnViewRef = useRef<MobileView>("tasks");
+  const machines = useMemo(
+    () => buildMachineInventory({
+      accountDesktops: state.accountDesktops,
+      manualDesktops: state.trustedDesktops,
+      liveLanDesktops: state.liveLanDesktops
+    }),
+    [state.accountDesktops, state.liveLanDesktops, state.trustedDesktops]
+  );
+  const composerMachines = useMemo(
+    () => machines.map((machine) => ({
+      id: machine.desktopId,
+      name: machine.displayName,
+      online: machine.availability.lan || machine.availability.cloud,
+      mode: machine.availability.cloud ? "remote" as const : "lan" as const,
+      reachableViaRelay: machine.availability.cloud,
+      connectionMode:
+        machine.availability.lan && machine.availability.cloud
+          ? "both" as const
+          : machine.availability.lan
+            ? "lan" as const
+            : "internet" as const,
+      lastSeenAt: machine.availability.lastSeenAt
+    })),
+    [machines]
+  );
+  const machineSummary = useMemo(() => summarizeMachines(machines), [machines]);
   const authoritativeTasks = [
     ...new Map(
       [...state.repoTasks, ...state.recentTasks, ...state.searchResults].map(
@@ -112,6 +143,14 @@ export default function App() {
     selectedTask !== null,
     state.activeView
   );
+
+  const openMachinesFromProfile = useCallback(() => {
+    if (state.activeView !== "desktops") {
+      machinesReturnViewRef.current = state.activeView;
+    }
+    setAccountSheetVisible(false);
+    controller.showView("desktops");
+  }, [controller, state.activeView]);
 
   const runOtaUpdateCheck = useCallback(async (nowMs = Date.now()) => {
     lastOtaCheckAtRef.current = nowMs;
@@ -263,10 +302,25 @@ export default function App() {
         );
       case "desktops":
         return (
-          <DesktopsScreen
-            desktops={state.desktops}
-            selectedDesktopId={state.selectedDesktopId}
-            onSelectDesktop={(desktopId) => controller.selectDesktop(desktopId)}
+          <MachinesScreen
+            machines={machines}
+            sourceWarnings={state.machineSourceWarnings}
+            pairingVisible={machinePairingVisible}
+            onBack={() => {
+              setMachinePairingVisible(false);
+              controller.showView(machinesReturnViewRef.current);
+            }}
+            onOpenPairing={() => setMachinePairingVisible(true)}
+            onClosePairing={() => setMachinePairingVisible(false)}
+            onPairCode={async (code) => {
+              await controller.pairMachineByCode(code);
+              setMachinePairingVisible(false);
+            }}
+            onPairPayload={async (payload) => {
+              await controller.pairMachineByPayload(payload);
+              setMachinePairingVisible(false);
+            }}
+            onRemoveManual={(desktopId) => controller.removeManualMachine(desktopId)}
           />
         );
       case "search":
@@ -284,15 +338,17 @@ export default function App() {
       case "more":
         return (
           <MoreScreen
-            pairingCode={state.pairingCode}
+            forceCloudEnabled={forceCloudEnabled}
+            showDeveloperDiagnostics={__DEV__ === true}
             refreshStatus={state.refreshStatus}
             selectedTask={selectedDurableTaskId ? selectedTask : null}
             onRefresh={() => {
               void controller.refresh();
             }}
-            onShowDesktops={() => controller.showView("desktops")}
-            onStartPairing={() => {
-              void controller.connectLocal();
+            onForceCloudChange={(enabled) => {
+              setForceCloudEnabled(enabled);
+              model.setForceCloud(enabled);
+              void controller.refresh();
             }}
             onOpenComposer={() => controller.openComposer()}
             onAdvanceTaskStage={(taskId) => {
@@ -356,7 +412,7 @@ export default function App() {
           </View>
         ) : null}
 
-        {shouldShowTopBar(taskDetailVisible) ? (
+        {shouldShowTopBar(taskDetailVisible, state.activeView) ? (
           <View style={styles.topBar}>
             <Text numberOfLines={1} style={styles.topBarTitle}>
               {shellTitle}
@@ -370,7 +426,7 @@ export default function App() {
 
         {mainContent}
 
-        {shouldShowFloatingToolbar(taskDetailVisible) ? (
+        {shouldShowFloatingToolbar(taskDetailVisible, state.activeView) ? (
           <FloatingToolbar
             activeTab={toolbarTab}
             utilityActions={navigator.utilityActions}
@@ -392,7 +448,7 @@ export default function App() {
           isOpen={state.isComposerOpen}
           prompt={state.composerPrompt}
           repos={state.repos}
-          desktops={state.desktops}
+          desktops={composerMachines}
           selectedRepoId={state.composerRepoId}
           selectedDesktopId={state.composerDesktopId}
           selectedAgentProvider={state.composerAgentProvider}
@@ -413,22 +469,11 @@ export default function App() {
         />
         <AccountSheet
           auth={state.auth}
-          connectionState={state.connectionState}
-          desktopName={state.desktopName}
-          errorMessage={state.errorMessage}
-          forceCloudEnabled={forceCloudEnabled}
-          pairingCode={state.pairingCode}
-          showDevForceCloudToggle={__DEV__ === true}
+          machineCount={machineSummary.total}
+          availableMachineCount={machineSummary.available}
           visible={accountSheetVisible}
-          onConnectLocal={() => {
-            void controller.connectLocal();
-          }}
           onClose={() => setAccountSheetVisible(false)}
-          onForceCloudChange={(enabled) => {
-            setForceCloudEnabled(enabled);
-            model.setForceCloud(enabled);
-            void controller.refresh();
-          }}
+          onOpenMachines={openMachinesFromProfile}
           onSignIn={(email, password) => {
             void controller.signInWithEmailPassword(email, password);
           }}

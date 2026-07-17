@@ -33,10 +33,10 @@ interface MobileServerStatusResponse {
 
 interface PairingSessionResponse {
   desktopId?: string
-  pairingCode?: string | null
   code?: string | null
+  pairingPayload?: string | null
   desktopName?: string
-  state?: string
+  expiresAtUnixMs?: number
 }
 
 const props = defineProps<{
@@ -68,6 +68,8 @@ const mobileDesktopName = ref("This desktop")
 const mobileDesktopId = ref("")
 const mobileServerStatus = ref<MobileServerStatus>("stopped")
 const pairingCode = ref<string | null>(null)
+const pairingPayload = ref<string | null>(null)
+const pairingExpiresAtUnixMs = ref<number | null>(null)
 const authSession = ref<DesktopAuthSession | null>(null)
 const authState = ref<DesktopAuthState>({ status: "signedOut" })
 const accountEmail = ref("")
@@ -124,6 +126,8 @@ async function refreshMobileAccess() {
     }
     mobileServerStatus.value = normalizeMobileServerStatus(status.state)
     pairingCode.value = status.pairingCode ?? null
+    pairingPayload.value = null
+    pairingExpiresAtUnixMs.value = null
   } catch (error) {
     console.error("[PreferencesPanel] failed to load mobile access status:", error)
     mobileServerStatus.value = "error"
@@ -137,13 +141,16 @@ async function startPairing() {
     if (session.desktopName) {
       mobileDesktopName.value = session.desktopName
     }
-    mobileServerStatus.value = session.state
-      ? normalizeMobileServerStatus(session.state)
-      : "running"
-    pairingCode.value = session.pairingCode ?? session.code ?? null
+    mobileServerStatus.value = "running"
+    pairingCode.value = session.code ?? null
+    pairingPayload.value = session.pairingPayload ?? null
+    pairingExpiresAtUnixMs.value = session.expiresAtUnixMs ?? null
   } catch (error) {
     console.error("[PreferencesPanel] failed to create pairing session:", error)
     mobileServerStatus.value = "error"
+    pairingCode.value = null
+    pairingPayload.value = null
+    pairingExpiresAtUnixMs.value = null
   }
 }
 
@@ -405,6 +412,8 @@ defineExpose({ cycleTab })
           :desktop-name="mobileDesktopName"
           :server-status="mobileServerStatus"
           :pairing-code="pairingCode"
+          :pairing-payload="pairingPayload"
+          :expires-at-unix-ms="pairingExpiresAtUnixMs"
           @start-pairing="startPairing"
         />
       </div>

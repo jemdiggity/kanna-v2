@@ -10,7 +10,6 @@ import type {
   CreateTaskResponse,
   DesktopSummary,
   MobileServerStatus,
-  PairingSession,
   RepoSummary,
   TaskActionResponse,
   TaskActivityResponse,
@@ -723,12 +722,7 @@ export function createRemoteTransport({
 
       const desktopId = getSelectedDesktopOrThrow(getSelectedDesktopId);
       return observeTaskAgent({ desktopId, taskId }, listener);
-    },
-    async createPairingSession(): Promise<PairingSession> {
-      throw new Error(
-        "Cloud pairing session is not created from the mobile transport"
-      );
-    },
+    }
   };
 }
 
