@@ -5,6 +5,7 @@ import {
   assertOtaDiagnosticsHidden,
   assertMachineOrigins,
   assertPairingFailure,
+  assertPairingSheetFresh,
   assertProfilePasswordCanRevealAndHide,
   assertProfileSignInControlsReachable,
   assertSignedOutMachineEntryPoints,
@@ -41,6 +42,56 @@ function createWaitUntil() {
 }
 
 describe("Profile to Machines smoke helpers", () => {
+  it("requires a successfully consumed pairing sheet to reopen fresh", async () => {
+    const scanMode = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "selected" ? "true" : null)
+    };
+    const codeInput = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "value" ? "" : null),
+      getText: vi.fn(async () => "")
+    };
+    const error = createElement(false);
+    const submit = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "enabled" ? "false" : null)
+    };
+
+    await expect(assertPairingSheetFresh({
+      getPairingScanMode: async () => scanMode,
+      getPairingCodeInput: async () => codeInput,
+      getPairingError: async () => error,
+      getPairingSubmit: async () => submit
+    }, "ABC123")).resolves.toBeUndefined();
+
+    expect(scanMode.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(scanMode.getAttribute).toHaveBeenCalledWith("selected");
+    expect(error.isExisting).toHaveBeenCalledOnce();
+    expect(submit.getAttribute).toHaveBeenCalledWith("enabled");
+  });
+
+  it("rejects a pairing sheet that retains its consumed code", async () => {
+    const staleInput = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "value" ? "abc-123" : null)
+    };
+    const submit = {
+      ...createElement(),
+      getAttribute: vi.fn(async (name: string) => name === "enabled" ? "false" : null)
+    };
+
+    await expect(assertPairingSheetFresh({
+      getPairingScanMode: async () => ({
+        ...createElement(),
+        getAttribute: vi.fn(async (name: string) => name === "selected" ? "true" : null)
+      }),
+      getPairingCodeInput: async () => staleInput,
+      getPairingError: async () => createElement(false),
+      getPairingSubmit: async () => submit
+    }, "ABC123")).rejects.toThrow("consumed pairing code");
+  });
+
   it("dismisses a late Expo dev menu after relaunch before profile interaction", async () => {
     let expoPoll = 0;
     let devMenuDismissed = false;

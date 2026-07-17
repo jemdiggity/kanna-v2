@@ -46,6 +46,7 @@ export const MOBILE_E2E_IDS = {
   machinesAddButton: "mobile.machines-add",
   machinePairingSheet: "mobile.machine-pairing.sheet",
   machinePairingCamera: "mobile.machine-pairing.camera",
+  machinePairingScanModeButton: "mobile.machine-pairing.mode.scan",
   machinePairingCodeInput: "mobile.machine-pairing.code",
   machinePairingSubmitButton: "mobile.machine-pairing.submit",
   machinePairingError: "mobile.machine-pairing.error",

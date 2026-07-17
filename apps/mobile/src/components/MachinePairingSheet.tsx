@@ -47,6 +47,8 @@ export function MachinePairingSheet({
 
   const resetAndClose = () => {
     scanLockRef.current = false;
+    setCode("");
+    setMode("scan");
     setScanLocked(false);
     setSubmitting(false);
     setError(null);
@@ -102,10 +104,21 @@ export function MachinePairingSheet({
           </View>
 
           <View style={styles.modeRow}>
-            <Pressable style={styles.modeButton} onPress={() => setMode("scan")}>
+            <Pressable
+              accessibilityRole="tab"
+              accessibilityState={{ selected: mode === "scan" }}
+              style={styles.modeButton}
+              testID={MOBILE_E2E_IDS.machinePairingScanModeButton}
+              onPress={() => setMode("scan")}
+            >
               <Text style={mode === "scan" ? styles.modeActive : styles.modeLabel}>Scan QR</Text>
             </Pressable>
-            <Pressable style={styles.modeButton} onPress={() => setMode("code")}>
+            <Pressable
+              accessibilityRole="tab"
+              accessibilityState={{ selected: mode === "code" }}
+              style={styles.modeButton}
+              onPress={() => setMode("code")}
+            >
               <Text style={mode === "code" ? styles.modeActive : styles.modeLabel}>Enter code</Text>
             </Pressable>
           </View>

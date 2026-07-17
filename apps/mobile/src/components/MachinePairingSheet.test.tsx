@@ -72,6 +72,15 @@ function findByType(node: Node, type: string) {
   return find(node, (candidate) => candidate.type === type);
 }
 
+function findPressableByText(node: Node, text: string) {
+  return find(node, (candidate) =>
+    candidate.type === "Pressable" &&
+    Boolean(find(candidate.props?.children ?? [], (child) =>
+      child.type === "Text" && child.props?.children === text
+    ))
+  );
+}
+
 let MachinePairingSheet: typeof import("./MachinePairingSheet").MachinePairingSheet;
 
 beforeAll(async () => {
@@ -129,5 +138,36 @@ describe("MachinePairingSheet", () => {
     await findByTestId(tree, "mobile.machine-pairing.submit")?.props?.onPress?.();
 
     expect(onPairCode).toHaveBeenCalledWith("ABC123");
+  });
+
+  it("reopens in a fresh scan state after successful code pairing", async () => {
+    const onClose = vi.fn();
+    const onPairCode = vi.fn(async () => undefined);
+    onPairCode.mockRejectedValueOnce(new Error("That code was already used"));
+    let tree = render({ onClose, onPairCode });
+
+    findPressableByText(tree, "Enter code")?.props?.onPress?.();
+    tree = render({ onClose, onPairCode });
+    findByTestId(tree, "mobile.machine-pairing.code")?.props?.onChangeText?.("ABC123");
+    tree = render({ onClose, onPairCode });
+    await findByTestId(tree, "mobile.machine-pairing.submit")?.props?.onPress?.();
+    tree = render({ onClose, onPairCode });
+    expect(findByTestId(tree, "mobile.machine-pairing.error")).not.toBeNull();
+
+    await findByTestId(tree, "mobile.machine-pairing.submit")?.props?.onPress?.();
+
+    tree = render({ onClose, onPairCode, visible: true });
+
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onPairCode).toHaveBeenCalledTimes(2);
+    expect(findByTestId(tree, "mobile.machine-pairing.code")?.props?.value).toBe("");
+    expect(findByType(tree, "CameraView")).not.toBeNull();
+    expect(findByType(tree, "ActivityIndicator")).toBeNull();
+    expect(findPressableByText(tree, "Scan QR")?.props).toMatchObject({
+      accessibilityState: { selected: true },
+      testID: "mobile.machine-pairing.mode.scan"
+    });
+    expect(findByTestId(tree, "mobile.machine-pairing.submit")?.props?.disabled).toBe(true);
+    expect(findByTestId(tree, "mobile.machine-pairing.error")).toBeNull();
   });
 });

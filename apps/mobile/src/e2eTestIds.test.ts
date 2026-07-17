@@ -37,6 +37,9 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.machinePairingError).toBe("mobile.machine-pairing.error");
     expect(MOBILE_E2E_IDS.machinePairingCloseButton).toBe("mobile.machine-pairing.close");
     expect(MOBILE_E2E_IDS.machinePairingCamera).toBe("mobile.machine-pairing.camera");
+    expect(MOBILE_E2E_IDS.machinePairingScanModeButton).toBe(
+      "mobile.machine-pairing.mode.scan"
+    );
     expect(MOBILE_E2E_IDS.machinePairingOpenSettingsButton).toBe(
       "mobile.machine-pairing.open-settings"
     );

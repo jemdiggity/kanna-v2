@@ -42,6 +42,7 @@ interface ProfileMachinesUi {
   getMachinesButton(): Promise<ProfileMachinesElement>;
   getMachinesScreen(): Promise<ProfileMachinesElement>;
   getMachinesAddButton(): Promise<ProfileMachinesElement>;
+  getPairingScanMode(): Promise<ProfileMachinesElement>;
   getPairingCodeInput(): Promise<ProfileMachinesElement>;
   getPairingError(): Promise<ProfileMachinesElement>;
   getPairingSubmit(): Promise<ProfileMachinesElement>;
@@ -76,6 +77,7 @@ function createProfileMachinesUi(driver: Browser): ProfileMachinesUi {
     getMachinesButton: async () => driver.$(selectors.accountMachinesButton),
     getMachinesScreen: async () => driver.$(selectors.machinesScreen),
     getMachinesAddButton: async () => driver.$(selectors.machinesAddButton),
+    getPairingScanMode: async () => driver.$(selectors.machinePairingScanMode),
     getPairingCodeInput: async () => driver.$(selectors.machinePairingCodeInput),
     getPairingError: async () => driver.$(selectors.machinePairingError),
     getPairingSubmit: async () => driver.$(selectors.machinePairingSubmit),
@@ -189,6 +191,41 @@ export async function assertPairingFailure(
   await (await ui.getPairingCodeInput()).waitForDisplayed({
     timeout: SCREEN_TIMEOUT_MS
   });
+}
+
+export async function assertPairingSheetFresh(
+  ui: Pick<
+    ProfileMachinesUi,
+    | "getPairingScanMode"
+    | "getPairingCodeInput"
+    | "getPairingError"
+    | "getPairingSubmit"
+  >,
+  consumedCode: string
+): Promise<void> {
+  const scanMode = await ui.getPairingScanMode();
+  await scanMode.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  if (await scanMode.getAttribute("selected") !== "true") {
+    throw new Error("Expected the pairing sheet to reopen in Scan QR mode");
+  }
+
+  const input = await ui.getPairingCodeInput();
+  const inputValue = await input.getAttribute("value");
+  if (normalizeNativeInputValue(inputValue) === normalizeNativeInputValue(consumedCode)) {
+    throw new Error("Expected the consumed pairing code to be cleared before reopening");
+  }
+
+  if (await (await ui.getPairingError()).isExisting()) {
+    throw new Error("Expected the pairing error to be cleared before reopening");
+  }
+  const submitEnabled = await (await ui.getPairingSubmit()).getAttribute("enabled");
+  if (submitEnabled !== "false") {
+    throw new Error("Expected pairing submission to be reset and disabled before reopening");
+  }
+}
+
+function normalizeNativeInputValue(value: string | null): string {
+  return (value ?? "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
 }
 
 export async function assertMachineOrigins(
@@ -443,6 +480,9 @@ export async function runProfileDisconnectedConnectionSmoke(
     account: false,
     manual: true
   });
+  await openPairingSheet(ui);
+  await assertPairingSheetFresh(ui, codePairing.code);
+  await (await driver.$(selectors.machinePairingClose)).click();
   await removeManualMachine(
     ui,
     options.desktopId,

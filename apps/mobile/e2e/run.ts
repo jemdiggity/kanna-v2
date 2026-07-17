@@ -118,7 +118,7 @@ async function dismissExpoStartupOverlay(driver: Browser): Promise<void> {
 
 export async function waitForExpoAppReady(
   driver: Browser,
-  readySelector = selectors.appShell
+  readySelector: string = selectors.appShell
 ): Promise<void> {
   let consecutiveReadyPolls = 0;
   await driver.waitUntil(

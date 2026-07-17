@@ -130,8 +130,9 @@ describe("mobile smoke runner", () => {
     expect(devMenuDismissed).toBe(true);
   });
 
-  it("keeps handling Expo overlays until the requested relaunch screen is ready", async () => {
+  it("accepts a dynamic relaunch selector while handling Expo overlays", async () => {
     let poll = 0;
+    const readySelector: string = "~mobile.toolbar.tab.recent";
     const driver = {
       $: async (selector: string) => ({
         click: async () => undefined,
@@ -157,7 +158,7 @@ describe("mobile smoke runner", () => {
       }
     } as unknown as Browser;
 
-    await waitForExpoAppReady(driver, "~mobile.toolbar.tab.recent");
+    await waitForExpoAppReady(driver, readySelector);
 
     expect(poll).toBeGreaterThanOrEqual(4);
   });

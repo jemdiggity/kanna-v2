@@ -50,6 +50,7 @@ describe("mobile E2E selector helpers", () => {
       machinePairingError: "~mobile.machine-pairing.error",
       machinePairingClose: "~mobile.machine-pairing.close",
       machinePairingCamera: "~mobile.machine-pairing.camera",
+      machinePairingScanMode: "~mobile.machine-pairing.mode.scan",
       machinePairingOpenSettings: "~mobile.machine-pairing.open-settings"
     });
     expect(selectorHelpers.machineRowsXPath("desktop-1")).toBe(

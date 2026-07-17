@@ -45,6 +45,7 @@ export const selectors = {
   machinePairingError: `~${MOBILE_E2E_IDS.machinePairingError}`,
   machinePairingClose: `~${MOBILE_E2E_IDS.machinePairingCloseButton}`,
   machinePairingCamera: `~${MOBILE_E2E_IDS.machinePairingCamera}`,
+  machinePairingScanMode: `~${MOBILE_E2E_IDS.machinePairingScanModeButton}`,
   machinePairingOpenSettings:
     `~${MOBILE_E2E_IDS.machinePairingOpenSettingsButton}`,
   accountEmailInput: `~${MOBILE_E2E_IDS.accountEmailInput}`,
