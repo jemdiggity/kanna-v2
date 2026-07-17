@@ -1,6 +1,8 @@
+export type SimulatorAlertHandling = "accept" | "dismiss" | "manual";
+
 export interface SimulatorCapabilityInput {
   appiumPort: number;
-  autoAcceptAlerts?: boolean;
+  alertHandling?: SimulatorAlertHandling;
   bundleId: string;
   deviceName: string;
   platformVersion?: string;
@@ -40,6 +42,8 @@ export function deriveWdaLocalPort(
 }
 
 export function createSimulatorCapabilities(input: SimulatorCapabilityInput) {
+  const alertHandling = input.alertHandling ?? "dismiss";
+
   return {
     platformName: "iOS",
     "appium:automationName": "XCUITest",
@@ -55,9 +59,11 @@ export function createSimulatorCapabilities(input: SimulatorCapabilityInput) {
     "appium:wdaLaunchTimeout": 180_000,
     "appium:newCommandTimeout": 120,
     "appium:noReset": false,
-    ...(input.autoAcceptAlerts
+    ...(alertHandling === "accept"
       ? { "appium:autoAcceptAlerts": true }
-      : { "appium:autoDismissAlerts": true }),
+      : alertHandling === "dismiss"
+        ? { "appium:autoDismissAlerts": true }
+        : {}),
     "appium:includeSafariInWebviews": true,
     "appium:webviewConnectTimeout": 15_000,
     ...(input.platformVersion

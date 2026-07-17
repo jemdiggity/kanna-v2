@@ -1,0 +1,441 @@
+# Mobile Task Action Menu Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [x]`) syntax for tracking.
+
+**Goal:** Make the mobile task detail `+` button open a task-scoped Advance Stage / Close Task menu instead of navigating to More.
+
+**Architecture:** Add a platform-menu adapter beside the existing quick-reply adapter, then have `TaskScreen` translate menu selections into explicit callbacks. `App` binds those callbacks to the selected task id and reuses the existing controller actions; navigation, transport, and the global More palette remain unchanged.
+
+**Tech Stack:** React Native, React 19, TypeScript, Vitest, react-test-renderer, pnpm
+
+---
+
+### Task 1: Platform Task Action Menu
+
+**Files:**
+- Create: `apps/mobile/src/screens/taskActionMenu.ts`
+- Create: `apps/mobile/src/screens/taskActionMenu.test.ts`
+
+- [x] **Step 1: Write the failing iOS tests**
+
+Create `taskActionMenu.test.ts` with hoisted mocks for `ActionSheetIOS`, `Alert`, and mutable `Platform.OS`, following `taskQuickReplyMenu.test.ts`. Import `showTaskActionMenu` and assert:
+
+```ts
+expect(nativeMocks.actionSheet).toHaveBeenCalledWith(
+  {
+    title: "Task Actions",
+    options: ["Advance Stage", "Close Task", "Cancel"],
+    cancelButtonIndex: 2,
+    destructiveButtonIndex: 1
+  },
+  expect.any(Function)
+);
+```
+
+Call the captured callback with indices `0`, `1`, `2`, and `99`. Expect `0` to emit `"advance-stage"`, `1` to emit `"close-task"`, and cancel/invalid indices to emit nothing.
+
+- [x] **Step 2: Verify RED**
+
+Run `pnpm --dir apps/mobile test src/screens/taskActionMenu.test.ts`.
+
+Expected: FAIL because `./taskActionMenu` does not exist.
+
+- [x] **Step 3: Implement the platform adapter**
+
+Create `taskActionMenu.ts`:
+
+```ts
+import { ActionSheetIOS, Alert, Platform } from "react-native";
+
+export type TaskAction = "advance-stage" | "close-task";
+
+const TASK_ACTIONS: ReadonlyArray<{
+  id: TaskAction;
+  label: string;
+  style?: "destructive";
+}> = [
+  { id: "advance-stage", label: "Advance Stage" },
+  { id: "close-task", label: "Close Task", style: "destructive" }
+];
+
+const MENU_TITLE = "Task Actions";
+const CANCEL_LABEL = "Cancel";
+
+export function showTaskActionMenu(
+  onSelect: (action: TaskAction) => void
+): void {
+  if (Platform.OS === "ios") {
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: MENU_TITLE,
+        options: [...TASK_ACTIONS.map((action) => action.label), CANCEL_LABEL],
+        cancelButtonIndex: TASK_ACTIONS.length,
+        destructiveButtonIndex: TASK_ACTIONS.findIndex(
+          (action) => action.style === "destructive"
+        )
+      },
+      (buttonIndex) => {
+        const action = TASK_ACTIONS[buttonIndex];
+        if (action) onSelect(action.id);
+      }
+    );
+    return;
+  }
+
+  Alert.alert(
+    MENU_TITLE,
+    undefined,
+    [
+      ...TASK_ACTIONS.map((action) => ({
+        text: action.label,
+        style: action.style,
+        onPress: () => onSelect(action.id)
+      })),
+      { text: CANCEL_LABEL, style: "cancel" as const }
+    ]
+  );
+}
+```
+
+- [x] **Step 4: Verify GREEN and add the fallback test**
+
+Run the focused test and expect PASS. Then set the mock platform to Android, call `showTaskActionMenu`, and assert the alert contains Advance Stage, destructive Close Task, and Cancel. Invoke both action callbacks and expect the same two action identifiers. Rerun the focused test and expect PASS.
+
+- [x] **Step 5: Check the checkpoint**
+
+Run `git diff --check` and `git status --short`. Do not commit; this Kanna stage leaves commits to the later pipeline step.
+
+### Task 2: TaskScreen Menu Dispatch
+
+**Files:**
+- Modify: `apps/mobile/src/screens/TaskScreen.tsx:1-160,315-325`
+- Modify: `apps/mobile/src/screens/TaskScreen.test.tsx:1-220,315-380`
+
+- [x] **Step 1: Write failing TaskScreen tests**
+
+Extend the hoisted test mocks with `onAdvanceTaskStage`, `onCloseTask`, and `showTaskActionMenu`, then mock the helper:
+
+```ts
+vi.mock("./taskActionMenu", () => ({
+  showTaskActionMenu: componentMocks.showTaskActionMenu
+}));
+```
+
+Reset those mocks in `beforeEach`. In `renderTaskScreen`, pass the two action callbacks and remove `onOpenMore`. Add one test that presses `mobile.task-more-button` and expects `showTaskActionMenu` once. Add a parameterized test that captures the selection callback, emits each action, and expects only its matching callback:
+
+```ts
+it.each([
+  ["advance-stage", "onAdvanceTaskStage"],
+  ["close-task", "onCloseTask"]
+] as const)("routes %s to %s", (action, callbackName) => {
+  const tree = renderTaskScreen({ agentType: "agent" });
+  pressByTestId(tree, "mobile.task-more-button");
+  const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![0] as (
+    selectedAction: "advance-stage" | "close-task"
+  ) => void;
+
+  onSelect(action);
+
+  expect(componentMocks[callbackName]).toHaveBeenCalledOnce();
+});
+```
+
+- [x] **Step 2: Verify RED**
+
+Run `pnpm --dir apps/mobile test src/screens/TaskScreen.test.tsx`.
+
+Expected: FAIL because `TaskScreen` still accepts/calls `onOpenMore` and never invokes the task menu.
+
+- [x] **Step 3: Implement the new TaskScreen contract**
+
+Import `showTaskActionMenu` and `TaskAction`. Replace `onOpenMore(): void` with:
+
+```ts
+onAdvanceTaskStage(): void;
+onCloseTask(): void;
+```
+
+Destructure those props and add:
+
+```ts
+const openTaskActionMenu = () => {
+  showTaskActionMenu((action: TaskAction) => {
+    switch (action) {
+      case "advance-stage":
+        onAdvanceTaskStage();
+        break;
+      case "close-task":
+        onCloseTask();
+        break;
+    }
+  });
+};
+```
+
+Set the `+` button to `onPress={openTaskActionMenu}` and give it `accessibilityLabel="Task actions"` and `accessibilityRole="button"`.
+
+- [x] **Step 4: Verify GREEN**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test src/screens/TaskScreen.test.tsx src/screens/taskActionMenu.test.ts
+```
+
+Expected: PASS, including the existing composer and quick-reply coverage.
+
+- [x] **Step 5: Check the checkpoint**
+
+Run `git diff --check`; inspect only the planned Task 1/2 changes. Do not commit in this manual stage.
+
+### Task 3: Bind Actions to the Selected Task
+
+**Files:**
+- Modify: `apps/mobile/src/App.tsx:155-190`
+- Modify: `apps/mobile/src/App.component.test.tsx:210-340`
+
+- [x] **Step 1: Write the failing App wiring test**
+
+Seed a selected task with id `task-current`. Spy on `advanceDesktopTaskStage`, `closeDesktopTask`, and `showView`; mount the app; invoke the two `TaskScreen` props; and assert:
+
+```ts
+expect(advance).toHaveBeenCalledWith("task-current");
+expect(close).toHaveBeenCalledWith("task-current");
+expect(showView).not.toHaveBeenCalledWith("more");
+```
+
+Mock the first two spies with `mockResolvedValue(undefined)` so the test isolates component wiring.
+
+- [x] **Step 2: Verify RED**
+
+Run `pnpm --dir apps/mobile test src/App.component.test.tsx`.
+
+Expected: FAIL because `TaskScreen` currently exposes `onOpenMore`, not task action callbacks.
+
+- [x] **Step 3: Bind the existing controller methods**
+
+Replace the TaskScreen prop:
+
+```tsx
+onOpenMore={() => controller.showView("more")}
+```
+
+with:
+
+```tsx
+onAdvanceTaskStage={() => {
+  void controller.advanceDesktopTaskStage(selectedTask.id);
+}}
+onCloseTask={() => {
+  void controller.closeDesktopTask(selectedTask.id);
+}}
+```
+
+Do not change the More tab or `case "more"` rendering path.
+
+- [x] **Step 4: Run focused verification**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test src/screens/taskActionMenu.test.ts src/screens/TaskScreen.test.tsx src/App.component.test.tsx
+pnpm --dir apps/mobile typecheck
+```
+
+Expected: all focused tests PASS and TypeScript reports no errors.
+
+- [x] **Step 5: Run the mobile unit suite**
+
+Run `pnpm --dir apps/mobile test`.
+
+Expected: the mobile Vitest suite passes. Preserve the focused green evidence and report the exact output if an unrelated pre-existing failure appears.
+
+- [x] **Step 6: Final hygiene and scope review**
+
+Run `git diff --check`, `git status --short`, and review the diff for the two new helper files, four modified mobile files, the design spec, and this plan. Confirm there is no request-revision UI, merge-agent action, global More change, physical-device action, commit, push, or pipeline transition.
+
+### Task 4: Relay Appium Task-Action Journey
+
+**Files:**
+- Modify: `apps/mobile/e2e/helpers/selectors.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.test.ts`
+
+- [x] **Step 1: Write the failing relay-journey helper test**
+
+Import `verifyRelayTaskActionMenuJourney` into `relay-task-flow.test.ts`. Add a test with a fake plus button, native title, and three native menu options. Track calls and assert this exact journey:
+
+```ts
+expect(calls).toEqual([
+  "more.waitForDisplayed",
+  "more.click",
+  "title.waitForDisplayed",
+  "ui.getTaskActionOption:Advance Stage",
+  "Advance Stage.waitForDisplayed",
+  "ui.getTaskActionOption:Close Task",
+  "Close Task.waitForDisplayed",
+  "ui.getTaskActionOption:Cancel",
+  "Cancel.waitForDisplayed",
+  "Cancel.click",
+  "more.waitForDisplayed",
+]);
+```
+
+- [x] **Step 2: Verify RED**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test e2e/specs/relay/relay-task-flow.test.ts
+```
+
+Expected: FAIL because `verifyRelayTaskActionMenuJourney` has not been exported.
+
+- [x] **Step 3: Implement the minimal Appium journey helper**
+
+Add `taskMoreButton` to the shared selector table. Extend `RelayUi` and `createRelayUi` with accessors for the task actions button, the native `Task Actions` title, and native options by label. Export a helper that waits for the detail-only plus button, taps it, waits for all three entries, clicks Cancel, and waits for the same plus button again to prove the task detail remains active. Invoke it in `runRelayTaskFlow` after the exact relay task has been reopened and before terminal assertions. Keep the activity accessor aligned with the accessible title button that owns `accessibilityValue`.
+
+- [x] **Step 4: Verify GREEN and focused coverage**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test src/screens/taskActionMenu.test.ts src/screens/TaskScreen.test.tsx src/App.component.test.tsx e2e/specs/relay/relay-task-flow.test.ts
+pnpm --dir apps/mobile typecheck
+```
+
+Expected: all selected tests pass and TypeScript reports no errors.
+
+- [x] **Step 5: Run the canonical Appium relay lane**
+
+Run:
+
+```bash
+./kd test remote-e2e --dev --mobile-relay
+```
+
+Expected: the kd-managed mobile relay lane boots its isolated Appium, simulator, Metro, Firebase, relay, and desktop-owner fixtures and completes the relay task journey.
+
+- [x] **Step 6: Run repository regressions**
+
+Run:
+
+```bash
+pnpm test
+cd crates/daemon && cargo test -- --test-threads=1
+```
+
+Expected: both requested repository-level suites pass.
+
+- [x] **Step 7: Review scope and hygiene**
+
+Run `git diff --check`, inspect `git status --short`, and review the diff. Confirm the revision changes only the existing design/plan and relay Appium coverage, preserves focused unit/component tests, does not invoke Advance Stage or Close Task during E2E, and does not commit, push, or transition the task.
+
+### Task 5: Preserve Native Alerts in the Relay Appium Lane
+
+**Files:**
+- Modify: `apps/mobile/e2e/appium.config.ts`
+- Modify: `apps/mobile/e2e/appium.config.test.ts`
+- Modify: `apps/mobile/e2e/run.ts`
+- Modify: `apps/mobile/e2e/run.test.ts`
+- Modify: `apps/mobile/e2e/helpers/relay-harness.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.test.ts`
+- Modify: `docs/superpowers/specs/2026-07-17-mobile-task-action-menu-design.md`
+- Modify: `docs/superpowers/plans/2026-07-17-mobile-task-action-menu.md`
+
+- [x] **Step 1: Remove temporary page-source instrumentation**
+
+Restore `RelayUi`, `createRelayUi`, and `verifyRelayTaskActionMenuJourney` to
+their committed shapes after retaining the captured evidence in the design.
+
+- [x] **Step 2: Write failing alert-policy tests**
+
+Add an `alertHandling` input to the desired simulator capability API and assert
+that manual handling emits neither automatic Appium capability:
+
+```ts
+expect(
+  createSimulatorCapabilities({
+    alertHandling: "manual",
+    appiumPort: 4723,
+    deviceName: "iPhone 17 Pro",
+    bundleId: "build.kanna.app.dev"
+  })
+).not.toHaveProperty("appium:autoDismissAlerts");
+```
+
+Also assert that a runner helper resolves `relay` to `manual`, `hybrid` to
+`accept`, and normal smoke modes to `dismiss`.
+
+- [x] **Step 3: Verify RED**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test e2e/appium.config.test.ts e2e/run.test.ts
+```
+
+Expected: FAIL because `alertHandling` and `resolveSimulatorAlertHandling` do
+not exist and relay still inherits automatic dismissal.
+
+- [x] **Step 4: Implement explicit simulator alert handling**
+
+Define:
+
+```ts
+export type SimulatorAlertHandling = "accept" | "dismiss" | "manual";
+```
+
+Default `createSimulatorCapabilities` to `dismiss`, emit
+`appium:autoAcceptAlerts` only for `accept`, emit `appium:autoDismissAlerts`
+only for `dismiss`, and emit neither for `manual`. Export this runner policy:
+
+```ts
+export function resolveSimulatorAlertHandling(
+  mode: string
+): SimulatorAlertHandling {
+  if (mode === "hybrid") return "accept";
+  if (mode === "relay") return "manual";
+  return "dismiss";
+}
+```
+
+Pass the resolved value into simulator capability creation.
+
+- [x] **Step 5: Verify GREEN**
+
+Run:
+
+```bash
+pnpm --dir apps/mobile test e2e/appium.config.test.ts e2e/run.test.ts
+```
+
+Expected: both focused test files pass.
+
+- [x] **Step 6: Run all reviewer-requested verification**
+
+Before the full commands, preserve the quick-reply regression exposed after
+manual alert handling: when XCUITest returns a null input `value`, read its
+`label` and accept only the exact `Reply…` placeholder as the cleared state.
+Cover that accessibility shape in `relay-task-flow.test.ts`.
+
+Run the focused mobile command, typecheck, canonical relay E2E, repository JS
+suite, and serialized daemon tests exactly as requested in review feedback.
+
+- [x] **Step 7: Commit the revision**
+
+After `git diff --check` and a final diff review, commit all revision changes:
+
+```bash
+git add apps/mobile/e2e/appium.config.ts \
+  apps/mobile/e2e/appium.config.test.ts \
+  apps/mobile/e2e/run.ts \
+  apps/mobile/e2e/run.test.ts \
+  apps/mobile/e2e/helpers/relay-harness.ts \
+  apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts \
+  apps/mobile/e2e/specs/relay/relay-task-flow.test.ts \
+  docs/superpowers/specs/2026-07-17-mobile-task-action-menu-design.md \
+  docs/superpowers/plans/2026-07-17-mobile-task-action-menu.md
+git commit -m "fix(mobile): preserve task action sheet in relay e2e"
+```

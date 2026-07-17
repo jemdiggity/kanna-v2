@@ -198,7 +198,16 @@ export default function App() {
               : state.composerErrorMessage
           }
           onBack={() => controller.closeTask()}
-          onOpenMore={() => controller.showView("more")}
+          onAdvanceTaskStage={() => {
+            if (selectedDurableTaskId) {
+              void controller.advanceDesktopTaskStage(selectedDurableTaskId);
+            }
+          }}
+          onCloseTask={() => {
+            if (selectedDurableTaskId) {
+              void controller.closeDesktopTask(selectedDurableTaskId);
+            }
+          }}
           onReadTaskFile={(path) => {
             if (!selectedDurableTaskId) {
               return Promise.reject(

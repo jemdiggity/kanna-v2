@@ -19,6 +19,7 @@ import type { FrameAgentEvent, PermissionDecision } from "@kanna/agent-protocol"
 import { AgentMessageView } from "./AgentMessageView";
 import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
+import { showTaskActionMenu, type TaskAction } from "./taskActionMenu";
 import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
 import { showTaskQuickReplyMenu } from "./taskQuickReplyMenu";
@@ -40,7 +41,8 @@ interface TaskScreenProps {
   taskCreationPhase?: TaskCreationPhase;
   taskCreationErrorMessage?: string | null;
   onBack(): void;
-  onOpenMore(): void;
+  onAdvanceTaskStage(): void;
+  onCloseTask(): void;
   onReadTaskFile(path: string): Promise<TaskFileContent>;
   onSendInput(input: string): void;
   onStopAgent(): void;
@@ -66,7 +68,8 @@ export function TaskScreen({
   taskCreationPhase = "idle",
   taskCreationErrorMessage = null,
   onBack,
-  onOpenMore,
+  onAdvanceTaskStage,
+  onCloseTask,
   onReadTaskFile,
   onSendInput,
   onStopAgent,
@@ -157,6 +160,18 @@ export function TaskScreen({
     clearDraftInput();
   };
   const sendDraftInput = () => submitInput(composerSnapshotRef.current.draftInput);
+  const openTaskActionMenu = () => {
+    showTaskActionMenu((action: TaskAction) => {
+      switch (action) {
+        case "advance-stage":
+          onAdvanceTaskStage();
+          break;
+        case "close-task":
+          onCloseTask();
+          break;
+      }
+    });
+  };
   const openQuickReplyMenu = () => {
     const openedTaskId = composerSnapshotRef.current.taskId;
     if (composerSnapshotRef.current.isComposerDisabled) {
@@ -373,9 +388,11 @@ export function TaskScreen({
       >
         <View style={styles.composerActions}>
           <Pressable
+            accessibilityLabel="Task actions"
+            accessibilityRole="button"
             style={styles.plusButton}
             testID={MOBILE_E2E_IDS.taskMoreButton}
-            onPress={onOpenMore}
+            onPress={openTaskActionMenu}
           >
             <Text style={styles.plusButtonLabel}>+</Text>
           </Pressable>

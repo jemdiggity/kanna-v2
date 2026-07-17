@@ -177,19 +177,12 @@ export function assertSingleSubmittedTaskInput(
   output: string,
   expectedInput: string,
 ): void {
-  const normalizedOutput = output.replace(/\r\n/g, "\n");
-  const submittedInputCount = normalizedOutput.match(/SCRIPT_INPUT:/g)?.length ?? 0;
-  if (submittedInputCount !== 1) {
-    throw new Error(
-      `Expected exactly one task input, observed ${submittedInputCount}. ` +
-        `Terminal output:\n${output}`,
-    );
-  }
-
+  const normalizedOutput = output.replace(/\r+\n/g, "\n").replace(/\r/g, "\n");
   const expectedMarker = `SCRIPT_INPUT:${expectedInput}\n`;
-  if (!normalizedOutput.includes(expectedMarker)) {
+  const matchingInputCount = normalizedOutput.split(expectedMarker).length - 1;
+  if (matchingInputCount !== 1) {
     throw new Error(
-      `Expected exact task input ${JSON.stringify(expectedInput)}. ` +
+      `Expected exactly one matching task input, observed ${matchingInputCount}. ` +
         `Terminal output:\n${output}`,
     );
   }

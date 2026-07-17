@@ -16,8 +16,11 @@ const hookHarness = vi.hoisted(() => ({
 
 const componentMocks = vi.hoisted(() => ({
   draftSetter: vi.fn(),
+  onAdvanceTaskStage: vi.fn(),
+  onCloseTask: vi.fn(),
   onSendInput: vi.fn(),
-  showQuickReplyMenu: vi.fn()
+  showQuickReplyMenu: vi.fn(),
+  showTaskActionMenu: vi.fn()
 }));
 
 vi.mock("react", async (importActual) => {
@@ -109,6 +112,10 @@ vi.mock("./taskQuickReplyMenu", () => ({
   showTaskQuickReplyMenu: componentMocks.showQuickReplyMenu
 }));
 
+vi.mock("./taskActionMenu", () => ({
+  showTaskActionMenu: componentMocks.showTaskActionMenu
+}));
+
 let TaskScreen: typeof import("./TaskScreen").TaskScreen | null = null;
 
 beforeAll(async () => {
@@ -123,8 +130,11 @@ beforeEach(() => {
   hookHarness.refs.length = 0;
   hookHarness.stateValues.length = 0;
   componentMocks.draftSetter.mockReset();
+  componentMocks.onAdvanceTaskStage.mockReset();
+  componentMocks.onCloseTask.mockReset();
   componentMocks.onSendInput.mockReset();
   componentMocks.showQuickReplyMenu.mockReset();
+  componentMocks.showTaskActionMenu.mockReset();
 });
 interface ElementNode {
   type: unknown;
@@ -203,7 +213,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     agentErrorMessage: null,
     e2eTaskSnapshotMarker,
     onBack: vi.fn(),
-    onOpenMore: vi.fn(),
+    onAdvanceTaskStage: componentMocks.onAdvanceTaskStage,
+    onCloseTask: componentMocks.onCloseTask,
     onSendInput: componentMocks.onSendInput,
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn(),
@@ -368,6 +379,29 @@ describe("TaskScreen", () => {
 
     expect(findByTypeAndText(tree, "Text", "Creating task")).not.toBeNull();
     expect(findByTestId(tree, "mobile.task-creation.recover")).toBeNull();
+  });
+
+  it("opens task actions from the plus button", () => {
+    const tree = renderTaskScreen({ agentType: "agent" });
+
+    pressByTestId(tree, "mobile.task-more-button");
+
+    expect(componentMocks.showTaskActionMenu).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["advance-stage", componentMocks.onAdvanceTaskStage],
+    ["close-task", componentMocks.onCloseTask]
+  ] as const)("routes the %s task action", (action, expectedCallback) => {
+    const tree = renderTaskScreen({ agentType: "agent" });
+    pressByTestId(tree, "mobile.task-more-button");
+    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![0] as (
+      selectedAction: "advance-stage" | "close-task"
+    ) => void;
+
+    onSelect(action);
+
+    expect(expectedCallback).toHaveBeenCalledOnce();
   });
 
   it("routes agent tasks to the native agent message view", () => {

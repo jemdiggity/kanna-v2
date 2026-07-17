@@ -19,6 +19,7 @@ export const selectors = {
   taskTitleDismissLayer: `~${MOBILE_E2E_IDS.taskTitleDismissLayer}`,
   taskSnapshotMarker: `~${MOBILE_E2E_IDS.taskSnapshotMarker}`,
   taskBackButton: `~${MOBILE_E2E_IDS.taskBackButton}`,
+  taskMoreButton: `~${MOBILE_E2E_IDS.taskMoreButton}`,
   taskInput: `~${MOBILE_E2E_IDS.taskInput}`,
   taskSendButton: `~${MOBILE_E2E_IDS.taskSendButton}`,
   agentMessageView: `~${MOBILE_E2E_IDS.agentMessageView}`,
