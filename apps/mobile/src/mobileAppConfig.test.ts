@@ -22,9 +22,9 @@ describe("mobile app config", () => {
         channel: "production",
         manifestUrl: "https://relay.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.0.0"
+      runtimeVersion: "2.0.1"
     });
-    expect(config.runtimeVersion).toBe("2.0.0");
+    expect(config.runtimeVersion).toBe("2.0.1");
     expect(config.updates).toMatchObject({
       url: "https://relay.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "production" },
@@ -75,9 +75,9 @@ describe("mobile app config", () => {
         channel: null,
         manifestUrl: null
       },
-      runtimeVersion: "2.0.0"
+      runtimeVersion: "2.0.1"
     });
-    expect(config.runtimeVersion).toBe("2.0.0");
+    expect(config.runtimeVersion).toBe("2.0.1");
     expect(config.updates).toBeUndefined();
   });
 
@@ -105,9 +105,9 @@ describe("mobile app config", () => {
         channel: "staging",
         manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.0.0"
+      runtimeVersion: "2.0.1"
     });
-    expect(config.runtimeVersion).toBe("2.0.0");
+    expect(config.runtimeVersion).toBe("2.0.1");
     expect(config.updates).toMatchObject({
       url: "https://relay-staging.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "staging" }

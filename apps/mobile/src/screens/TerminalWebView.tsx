@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import * as Clipboard from "expo-clipboard";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import {
   WebView as NativeWebView,
@@ -31,6 +32,11 @@ interface TerminalWebViewProps {
 
 const ENABLE_E2E_TERMINAL_INSPECTION =
   process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1";
+const MAX_TERMINAL_SELECTION_LENGTH = 2_300_000;
+
+function clearTerminalSelectionScript(): string {
+  return "window.__clearTerminalSelection(); true;";
+}
 
 interface TerminalWebViewHandle {
   injectJavaScript(script: string): void;
@@ -96,6 +102,8 @@ export function TerminalWebView({
   const previousOutputRef = useRef("");
   const previousStatusRef = useRef<TaskTerminalStatus>("idle");
   const [terminalInspection, setTerminalInspection] = useState<TerminalInspection | null>(null);
+  const [terminalSelection, setTerminalSelection] = useState("");
+  const [selectionCopyError, setSelectionCopyError] = useState<string | null>(null);
   const resolvedBottomInset =
     bottomInset ?? (fullscreen ? DEFAULT_TERMINAL_BOTTOM_INSET : 24);
   const [terminalFileLinks, setTerminalFileLinks] = useState<TerminalFileLink[]>([]);
@@ -161,6 +169,8 @@ export function TerminalWebView({
 
     if (taskChanged) {
       setTerminalFileLinks([]);
+      setTerminalSelection("");
+      setSelectionCopyError(null);
       previousTaskIdRef.current = taskId;
       previousOutputRef.current = output;
       previousStatusRef.current = status;
@@ -213,6 +223,7 @@ export function TerminalWebView({
       links?: unknown;
       path?: unknown;
       line?: unknown;
+      text?: unknown;
     };
 
     try {
@@ -280,6 +291,18 @@ export function TerminalWebView({
       return;
     }
 
+    if (payload.type === "terminal-selection-change") {
+      if (
+        typeof payload.text !== "string" ||
+        payload.text.length > MAX_TERMINAL_SELECTION_LENGTH
+      ) {
+        return;
+      }
+      setTerminalSelection(payload.text);
+      setSelectionCopyError(null);
+      return;
+    }
+
     if (payload.type === "terminal-tap") {
       onConsolePress?.();
       return;
@@ -310,6 +333,22 @@ export function TerminalWebView({
     pendingScriptsRef.current = [];
     for (const script of pending) {
       webViewRef.current?.injectJavaScript(script);
+    }
+  };
+
+  const clearTerminalSelection = () => {
+    setTerminalSelection("");
+    setSelectionCopyError(null);
+    webViewRef.current?.injectJavaScript(clearTerminalSelectionScript());
+  };
+
+  const copyTerminalSelection = async () => {
+    if (!terminalSelection) return;
+    try {
+      await Clipboard.setStringAsync(terminalSelection);
+      clearTerminalSelection();
+    } catch {
+      setSelectionCopyError("Couldn’t copy. Try again.");
     }
   };
 
@@ -359,11 +398,42 @@ export function TerminalWebView({
           ))}
         </ScrollView>
       ) : null}
+      {terminalSelection ? (
+        <View
+          accessibilityLabel="Terminal text selection controls"
+          style={[
+            styles.selectionToolbar,
+            { top: terminalFileLinks.length ? 55 : 12 }
+          ]}
+        >
+          <Text accessibilityLiveRegion="polite" style={styles.selectionStatus}>
+            {selectionCopyError ?? "Text selected"}
+          </Text>
+          <Pressable
+            accessibilityLabel="Copy selected terminal text"
+            accessibilityRole="button"
+            onPress={copyTerminalSelection}
+            style={styles.selectionButtonPrimary}
+          >
+            <Text style={styles.selectionButtonPrimaryText}>Copy</Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Cancel terminal text selection"
+            accessibilityRole="button"
+            onPress={clearTerminalSelection}
+            style={styles.selectionButton}
+          >
+            <Text style={styles.selectionButtonText}>Cancel</Text>
+          </Pressable>
+        </View>
+      ) : null}
       <WebView
         ref={webViewRef}
         originWhitelist={["*"]}
         onLoadStart={() => {
           bridgeReadyRef.current = false;
+          setTerminalSelection("");
+          setSelectionCopyError(null);
           pendingScriptsRef.current = [
             ...(cols && rows ? [buildTerminalResizeScript(cols, rows)] : []),
             bottomInsetScript,
@@ -420,6 +490,44 @@ const styles = StyleSheet.create({
     fontFamily: "Menlo",
     fontSize: 11,
     textDecorationLine: "underline"
+  },
+  selectionButton: {
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 7
+  },
+  selectionButtonPrimary: {
+    backgroundColor: "#A9D7FF",
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 7
+  },
+  selectionButtonPrimaryText: {
+    color: "#07101D",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  selectionButtonText: {
+    color: "#A9D7FF",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  selectionStatus: {
+    color: "#D8E7F7",
+    fontSize: 12
+  },
+  selectionToolbar: {
+    alignItems: "center",
+    alignSelf: "center",
+    backgroundColor: "#10213A",
+    borderColor: "#365B83",
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    padding: 8,
+    position: "absolute",
+    zIndex: 10
   },
   wrap: {
     backgroundColor: "#050B14",

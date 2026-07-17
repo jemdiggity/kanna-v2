@@ -9,7 +9,8 @@ import {
   renderPathGrid,
   renderReferenceGrid,
   renderSessionStorePathGrid,
-  verifyMobileEasedScrolling
+  verifyMobileEasedScrolling,
+  verifyMobileTerminalSelection
 } from "./render.ts";
 import { verifyTerminalSafeRegion } from "./terminalSafeRegion.ts";
 import type { FixtureResult } from "./types.ts";
@@ -29,6 +30,8 @@ async function main(): Promise<void> {
     process.stdout.write("PASS terminal-safe-region\n");
     await verifyMobileEasedScrolling(browser);
     process.stdout.write("PASS mobile-eased-scrolling\n");
+    await verifyMobileTerminalSelection(browser);
+    process.stdout.write("PASS mobile-terminal-selection\n");
     for (const fixture of fixtures) {
       const fixturePath = path.join(FIXTURE_DIR, `${fixture.name}.ansi`);
       const cols = fixture.cols ?? DEFAULT_COLS;
