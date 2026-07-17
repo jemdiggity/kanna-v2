@@ -342,10 +342,26 @@ Verification notes:
   running. Supplying that URL for a live fixture would make the generic smoke
   path feasible; the reviewer-approved deterministic relay path was used here.
 - The relay harness observed an authoritative 1,085,488-character base64
-  snapshot (814,116 decoded bytes, 80x24) before launching Appium. One relay run
-  completed the initial and reopened `TerminalWebView` assertions, then failed
-  later in the existing task-activity journey. Subsequent reruns exposed the
-  same task-list activity flake earlier (`rendered task row ids were []`) before
-  reaching the terminal step.
+  snapshot (814,116 decoded bytes, 80x24) before launching Appium. The initial
+  run completed both `TerminalWebView` assertions, then exposed an ordering
+  defect introduced by the revisit journey: that journey ended on task detail,
+  and the immediately following marked-read journey polled for a task-list row.
+  Reruns reporting `rendered task row ids were []` confirmed the app was still
+  on detail rather than revealing a pre-existing task-activity flake.
+- The revision runs the marked-read journey while the task list is rendered,
+  then performs the initial-open/reopen snapshot journey. The reopen leaves task
+  detail visible for file preview and quick reply. A unit-level orchestration
+  regression models those list/detail preconditions in addition to the focused
+  revisit helper sequence.
+- After rebasing onto `origin/main`, the relay run again captured the
+  1,085,488-character snapshot and completed the reordered marked-read,
+  initial-open/reopen, and task-action-menu journeys. The remaining failure was
+  in the subsequent file-preview WebView inspection: Appium selected both
+  preview WebViews, but the iOS remote debugger returned `Runtime domain was not
+  found` for both `execute/sync` attempts, so the runner could not inspect the
+  rendered syntax-highlight color. This is separate from the introduced
+  task-list/detail ordering defect; the dev simulator client was regenerated
+  with the `build.kanna.app.dev` identity and the new `ExpoClipboard` native
+  module before this run.
 - Focused mobile and scripted-agent tests, both relevant typechecks, `pnpm test`,
   the serial daemon suite, and `git diff --check` completed successfully.
