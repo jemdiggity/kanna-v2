@@ -26,6 +26,7 @@ The same `TasksScreen` component also renders the Recent view, so sorting will b
 - Preserve the existing Recent test to prove its source order is unchanged.
 - Add mobile cloud-index coverage proving `createdAt` is parsed, normalized, and mapped into a task summary.
 - Add Rust mobile API coverage proving repo task summaries serialize the existing SQLite creation timestamp as `createdAt`.
+- Extend the deterministic relay Appium lane with two cloud-persisted tasks in the same repository. Their activity/update ordering will put the older-created task first at the data-source boundary, while their distinct `createdAt` values require the Tasks screen to render the newer-created task first. The journey explicitly selects the Tasks tab and compares native task-row accessibility IDs in visual order.
 - Run the focused mobile and Rust tests, mobile typechecking, and broader relevant checks where practical.
 
 ## Non-goals

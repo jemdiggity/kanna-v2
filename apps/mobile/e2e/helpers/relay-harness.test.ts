@@ -59,4 +59,17 @@ describe("mobile relay harness helpers", () => {
       EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT: "8080"
     });
   });
+
+  it("defines relay source order opposite the required Tasks-tab creation order", () => {
+    expect(relayHarness.relayTaskOrderingFixture("repo-ordering")).toEqual({
+      sourceOrderTaskIds: [
+        "cloud:mobile-relay-ordering-desktop:repo-ordering:mobile-relay-ordering-older",
+        "cloud:mobile-relay-ordering-desktop:repo-ordering:mobile-relay-ordering-newer",
+      ],
+      expectedVisualOrderTaskIds: [
+        "cloud:mobile-relay-ordering-desktop:repo-ordering:mobile-relay-ordering-newer",
+        "cloud:mobile-relay-ordering-desktop:repo-ordering:mobile-relay-ordering-older",
+      ],
+    });
+  });
 });

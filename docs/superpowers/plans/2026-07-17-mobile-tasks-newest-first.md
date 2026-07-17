@@ -379,7 +379,40 @@ git add apps/mobile/src/screens/TasksScreen.tsx apps/mobile/src/screens/TasksScr
 git commit -m "fix(mobile): order tasks newest first"
 ```
 
-### Task 4: Verify the integrated change
+### Task 4: Cover newest-first ordering across the cloud/Appium boundary
+
+**Files:**
+- Modify: `apps/mobile/e2e/helpers/relay-harness.ts`
+- Test: `apps/mobile/e2e/helpers/relay-harness.test.ts`
+- Modify: `apps/mobile/e2e/specs/relay/relay-task-flow.e2e.ts`
+- Test: `apps/mobile/e2e/specs/relay/relay-task-flow.test.ts`
+- Modify: `apps/mobile/e2e/run.ts`
+
+- [ ] **Step 1: Write the failing relay journey-contract test**
+
+Add a test that supplies task-row elements in source order `[older, newer]`, invokes `verifyTasksTabNewestFirst`, and expects the helper to click the Tasks tab and reject the reversed native order until the production journey helper exists.
+
+- [ ] **Step 2: Run the focused journey-contract test and verify RED**
+
+```bash
+pnpm --dir apps/mobile test -- e2e/specs/relay/relay-task-flow.test.ts
+```
+
+Expected: FAIL because `verifyTasksTabNewestFirst` is not exported.
+
+- [ ] **Step 3: Add deterministic relay fixtures and the native-order assertion**
+
+Publish two same-repo cloud tasks through the relay harness with distinct `createdAt` values and opposing `updatedAt` values. Expose their source and expected visual ID orders from `MobileRelayHarness`. In the relay journey, select `selectors.tasksTab`, wait for both task rows, read each row's native `name`, filter to the fixture IDs, and require `[newer, older]`.
+
+- [ ] **Step 4: Run focused relay tests and verify GREEN**
+
+```bash
+pnpm --dir apps/mobile test -- e2e/helpers/relay-harness.test.ts e2e/specs/relay/relay-task-flow.test.ts
+```
+
+Expected: PASS.
+
+### Task 5: Verify the integrated change
 
 **Files:**
 - Verify only; no planned source changes.
@@ -408,7 +441,23 @@ cargo test -p kanna-server
 
 Expected: PASS.
 
-- [ ] **Step 4: Run repository diff checks**
+- [ ] **Step 4: Run the repository-wide JavaScript/TypeScript suite**
+
+```bash
+pnpm test
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Run daemon tests serially**
+
+```bash
+cd crates/daemon && cargo test -- --test-threads=1
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Run repository diff checks**
 
 ```bash
 git diff --check HEAD~3

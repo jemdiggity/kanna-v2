@@ -17,6 +17,13 @@ const HYBRID_CLOUD_ONLY_DESKTOP_ID = "mobile-hybrid-cloud-only-desktop";
 const HYBRID_CLOUD_ONLY_REPO_ID = "mobile-hybrid-cloud-only-repo";
 const HYBRID_CLOUD_ONLY_LOCAL_TASK_ID = "mobile-hybrid-cloud-only-task";
 const HYBRID_UNRESOLVED_TASK_ID = "mobile-hybrid-unresolved-selection";
+const RELAY_ORDERING_DESKTOP_ID = "mobile-relay-ordering-desktop";
+const RELAY_ORDERING_OLDER_TASK_ID = "mobile-relay-ordering-older";
+const RELAY_ORDERING_NEWER_TASK_ID = "mobile-relay-ordering-newer";
+const RELAY_ORDERING_OLDER_CREATED_AT = "2026-07-15T08:00:00.000Z";
+const RELAY_ORDERING_NEWER_CREATED_AT = "2026-07-16T08:00:00.000Z";
+const RELAY_ORDERING_OLDER_UPDATED_AT = "2026-07-17T12:00:00.000Z";
+const RELAY_ORDERING_NEWER_UPDATED_AT = "2026-07-17T11:00:00.000Z";
 const RELAY_TASK_SENTINEL = "SCRIPT_READY";
 const RELAY_MENU_CURSOR_MARKER = "SCRIPT_MENU_CURSOR:2";
 const RELAY_QUICK_REPLY_DRAFT = "  Preserve the relay fixture.  ";
@@ -163,6 +170,7 @@ export interface MobileRelayHarness {
     title: string;
     waitingPromptSnippet: string;
   };
+  taskOrdering: RelayTaskOrderingFixture;
   terminalEvents: TerminalEventCollector;
   publishHybridCloudRefresh(): Promise<void>;
   stop(): Promise<void>;
@@ -171,6 +179,11 @@ export interface MobileRelayHarness {
     timeoutMs?: number,
   ): Promise<string>;
   waitForLocalTaskActivity(activity: TaskActivity, timeoutMs?: number): Promise<void>;
+}
+
+export interface RelayTaskOrderingFixture {
+  sourceOrderTaskIds: [string, string];
+  expectedVisualOrderTaskIds: [string, string];
 }
 
 export function assertSingleSubmittedTaskInput(
@@ -275,6 +288,7 @@ export async function startMobileRelayHarness(
         harness,
         task: localTask
       }, CLOUD_PUBLICATION_TIMEOUT_MS, 1_000);
+      await seedRelayTaskOrderingSnapshot({ auth, harness, localTask });
     } else {
       await seedHybridCloudSnapshots({ auth, harness, localTask });
     }
@@ -318,6 +332,7 @@ export async function startMobileRelayHarness(
       terminal: terminalFixture,
       unresolvedTaskId: HYBRID_UNRESOLVED_TASK_ID
     };
+    const taskOrdering = relayTaskOrderingFixture(localTask.repoId);
 
     return {
       credentials: {
@@ -376,6 +391,7 @@ export async function startMobileRelayHarness(
         title: RELAY_TASK_TITLE,
         waitingPromptSnippet: RELAY_WAITING_PROMPT,
       },
+      taskOrdering,
       terminalEvents,
       publishHybridCloudRefresh: () =>
         publishHybridCloudRefresh({ harness }),
@@ -775,11 +791,13 @@ async function publishDesktopCredential(input: {
 
 function syntheticCloudTask(input: {
   activity: TaskActivity;
+  createdAt?: string;
   desktopId: string;
   displayName: string;
   repoId: string;
   taskId: string;
   title: string;
+  updatedAt?: string;
 }): Record<string, unknown> {
   const timestamp = new Date().toISOString();
   return {
@@ -812,10 +830,76 @@ function syntheticCloudTask(input: {
       destinationDesktopId: null
     },
     blockedByTaskIds: [],
-    createdAt: timestamp,
-    updatedAt: timestamp,
+    createdAt: input.createdAt ?? timestamp,
+    updatedAt: input.updatedAt ?? timestamp,
     closedAt: null
   };
+}
+
+function relayOrderingDisplayTaskId(repoId: string, taskId: string): string {
+  return `cloud:${RELAY_ORDERING_DESKTOP_ID}:${repoId}:${taskId}`;
+}
+
+export function relayTaskOrderingFixture(
+  repoId: string,
+): RelayTaskOrderingFixture {
+  const olderTaskId = relayOrderingDisplayTaskId(
+    repoId,
+    RELAY_ORDERING_OLDER_TASK_ID,
+  );
+  const newerTaskId = relayOrderingDisplayTaskId(
+    repoId,
+    RELAY_ORDERING_NEWER_TASK_ID,
+  );
+  return {
+    // Cloud indexing orders by updatedAt, so this deliberately conflicts with
+    // the creation-time ordering required by the repo-scoped Tasks tab.
+    sourceOrderTaskIds: [olderTaskId, newerTaskId],
+    expectedVisualOrderTaskIds: [newerTaskId, olderTaskId],
+  };
+}
+
+async function seedRelayTaskOrderingSnapshot(input: {
+  auth: AuthSession;
+  harness: RemoteHarness;
+  localTask: ScriptedTask;
+}): Promise<void> {
+  const desktopSecret = desktopSecretFor(RELAY_ORDERING_DESKTOP_ID);
+  await publishDesktopCredential({
+    auth: input.auth,
+    desktopId: RELAY_ORDERING_DESKTOP_ID,
+    desktopSecret,
+    displayName: "Task ordering E2E Desktop",
+    firestorePort: input.harness.ports.firestore,
+  });
+  await publishRelayTaskSnapshot({
+    desktopId: RELAY_ORDERING_DESKTOP_ID,
+    desktopSecret,
+    displayName: "Task ordering E2E Desktop",
+    relayPort: input.harness.ports.relay,
+    tasks: [
+      syntheticCloudTask({
+        activity: "idle",
+        createdAt: RELAY_ORDERING_OLDER_CREATED_AT,
+        desktopId: RELAY_ORDERING_DESKTOP_ID,
+        displayName: "Older-created ordering fixture",
+        repoId: input.localTask.repoId,
+        taskId: RELAY_ORDERING_OLDER_TASK_ID,
+        title: "Older-created ordering fixture",
+        updatedAt: RELAY_ORDERING_OLDER_UPDATED_AT,
+      }),
+      syntheticCloudTask({
+        activity: "idle",
+        createdAt: RELAY_ORDERING_NEWER_CREATED_AT,
+        desktopId: RELAY_ORDERING_DESKTOP_ID,
+        displayName: "Newer-created ordering fixture",
+        repoId: input.localTask.repoId,
+        taskId: RELAY_ORDERING_NEWER_TASK_ID,
+        title: "Newer-created ordering fixture",
+        updatedAt: RELAY_ORDERING_NEWER_UPDATED_AT,
+      }),
+    ],
+  });
 }
 
 async function publishRelayTaskSnapshot(input: {
