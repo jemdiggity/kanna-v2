@@ -207,6 +207,11 @@ function buildLineTargetScript(mode: TaskFilePreviewMode, initialLine?: number):
       if (anchor) anchor.remove();
       line.scrollIntoView({ block: "center" });
       line.classList.add("line-flash");
+      line.dataset.flashStarted = String(
+        getComputedStyle(line).animationName
+          .split(",")
+          .some((name) => name.trim() === "line-flash")
+      );
       setTimeout(() => line.classList.remove("line-flash"), 1600);
     })();
   </script>`;

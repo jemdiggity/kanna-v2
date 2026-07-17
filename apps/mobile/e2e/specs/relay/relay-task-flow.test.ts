@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { assertSingleSubmittedTaskInput } from "../../helpers/relay-harness";
 import {
   assertRelayTaskRowPresentation,
+  inspectTaskFilePreviewWebView,
   openRelayFixtureTask,
   verifyRelayQuickReplyJourney,
   verifyRelayTaskActivityTransitions,
@@ -127,6 +128,47 @@ describe("terminal file links", () => {
     await expect(
       verifyTerminalMarkdownFileControls(driver as never, ui as never, fixture),
     ).rejects.toThrow(/non-Markdown.*TerminalWebView\.tsx/i);
+  });
+});
+
+describe("task file preview WebView inspection", () => {
+  it("inspects each WebView until it finds the preview and restores native context", async () => {
+    let context = "NATIVE_APP";
+    const switchedContexts: string[] = [];
+    const renderedInspection = {
+      kind: "rendered",
+      path: "docs/mobile-file-preview.md",
+      tokenClass: "hljs-keyword",
+      tokenColor: "rgb(255, 122, 178)",
+      tokenHeight: 19,
+      tokenText: "const",
+      tokenWidth: 39,
+      unhighlightedColor: "rgb(230, 237, 247)"
+    };
+    const driver = {
+      execute: vi.fn(async () =>
+        context === "WEBVIEW_preview" ? renderedInspection : null
+      ),
+      getContext: vi.fn(async () => context),
+      getContexts: vi.fn(async () => [
+        "NATIVE_APP",
+        { id: "WEBVIEW_terminal" },
+        { name: "WEBVIEW_preview" }
+      ]),
+      switchContext: vi.fn(async (nextContext: string) => {
+        switchedContexts.push(nextContext);
+        context = nextContext;
+      })
+    };
+
+    await expect(
+      inspectTaskFilePreviewWebView(driver as never)
+    ).resolves.toEqual(renderedInspection);
+    expect(switchedContexts).toEqual([
+      "WEBVIEW_terminal",
+      "WEBVIEW_preview",
+      "NATIVE_APP"
+    ]);
   });
 });
 

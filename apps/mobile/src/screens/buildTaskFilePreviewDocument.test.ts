@@ -230,6 +230,8 @@ describe("buildTaskFilePreviewDocument", () => {
     expect(html).toContain("document.createTreeWalker");
     expect(html).toContain("document.createRange");
     expect(html).toContain('scrollIntoView({ block: "center" })');
+    expect(html).toContain("line.dataset.flashStarted = String(");
+    expect(html).toContain("getComputedStyle(line).animationName");
     expect(html).toContain('classList.add("line-flash")');
     expect(rawContent(html)).toBe("first\nsecond\nthird");
     expect(html).not.toContain('<span class="raw-line" data-line="2">');

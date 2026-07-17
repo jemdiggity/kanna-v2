@@ -36,6 +36,8 @@ interface RelayTaskFlowOptions {
 
 interface RelayFilePreviewFixture {
   expectedHeading: string;
+  expectedHighlightedToken: string;
+  expectedHighlightedTokenClass: string;
   expectedRawLine: string;
   expectedRenderedText: string;
   line: number;
@@ -113,6 +115,32 @@ interface TaskFilePreviewInspection {
   mode: "raw" | "rendered";
   path: string;
 }
+
+export type TaskFilePreviewWebViewInspection =
+  | {
+      kind: "rendered";
+      path: string;
+      tokenClass: string;
+      tokenColor: string;
+      tokenHeight: number;
+      tokenText: string;
+      tokenWidth: number;
+      unhighlightedColor: string;
+    }
+  | {
+      animationName: string;
+      flashStarted: boolean;
+      kind: "raw";
+      line: number | null;
+      overlayHeight: number;
+      overlayTop: number;
+      overlayWidth: number;
+      path: string;
+    }
+  | {
+      kind: "unavailable";
+      reason: string;
+    };
 
 async function dismissSavePasswordPrompt(driver: Browser): Promise<void> {
   for (const selector of [
@@ -282,6 +310,119 @@ function terminalFileLinkAccessibilityLabel(
   return line === undefined
     ? `Open file ${path}`
     : `Open file ${path} at line ${line}`;
+}
+
+function webViewContextName(context: unknown): string | null {
+  if (typeof context === "string") return context;
+  if (!context || typeof context !== "object") return null;
+
+  const record = context as Record<string, unknown>;
+  for (const key of ["id", "name"]) {
+    if (typeof record[key] === "string") return record[key];
+  }
+  return null;
+}
+
+export async function inspectTaskFilePreviewWebView(
+  driver: RelayWebViewContextDriver
+): Promise<TaskFilePreviewWebViewInspection> {
+  if (!driver.getContexts || !driver.switchContext) {
+    return {
+      kind: "unavailable",
+      reason: "Appium driver does not expose WebView context APIs"
+    };
+  }
+
+  const contexts = await driver.getContexts();
+  const webViewContexts = contexts
+    .map(webViewContextName)
+    .filter(
+      (context): context is string => Boolean(context?.includes("WEBVIEW"))
+    );
+  if (webViewContexts.length === 0) {
+    return {
+      kind: "unavailable",
+      reason: `No WEBVIEW context was available. Contexts: ${contexts
+        .map(webViewContextName)
+        .filter(Boolean)
+        .join(", ") || "<none>"}`
+    };
+  }
+
+  const previousContext = driver.getContext ? await driver.getContext() : null;
+  let inspection: Exclude<
+    TaskFilePreviewWebViewInspection,
+    { kind: "unavailable" }
+  > | null = null;
+  const failures: string[] = [];
+
+  try {
+    for (const context of webViewContexts) {
+      try {
+        await driver.switchContext(context);
+        inspection = await driver.execute(() => {
+          const path = document
+            .querySelector<HTMLElement>(".document-path")
+            ?.textContent?.trim();
+          if (!path) return null;
+
+          const raw = document.querySelector<HTMLElement>(".raw");
+          if (raw) {
+            const overlay = raw.querySelector<HTMLElement>(".raw-line");
+            const bounds = overlay?.getBoundingClientRect();
+            return {
+              animationName: overlay ? getComputedStyle(overlay).animationName : "",
+              flashStarted: overlay?.dataset.flashStarted === "true",
+              kind: "raw" as const,
+              line: overlay
+                ? Number.parseInt(overlay.dataset.line ?? "", 10) || null
+                : null,
+              overlayHeight: bounds?.height ?? 0,
+              overlayTop: bounds?.top ?? 0,
+              overlayWidth: bounds?.width ?? 0,
+              path
+            };
+          }
+
+          const token = document.querySelector<HTMLElement>(
+            '.markdown [class^="hljs-"], .markdown [class*=" hljs-"]'
+          );
+          if (!token) return null;
+          const tokenBounds = token.getBoundingClientRect();
+          const tokenClass = Array.from(token.classList).find((className) =>
+            className.startsWith("hljs-")
+          ) ?? "";
+          const unhighlightedElement = token.closest("code") ?? token.parentElement;
+          return {
+            kind: "rendered" as const,
+            path,
+            tokenClass,
+            tokenColor: getComputedStyle(token).color,
+            tokenHeight: tokenBounds.height,
+            tokenText: token.textContent ?? "",
+            tokenWidth: tokenBounds.width,
+            unhighlightedColor: unhighlightedElement
+              ? getComputedStyle(unhighlightedElement).color
+              : getComputedStyle(document.body).color
+          };
+        });
+        if (inspection) break;
+      } catch (error) {
+        failures.push(
+          `${context}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  } finally {
+    if (previousContext) await driver.switchContext(previousContext);
+  }
+
+  return inspection ?? {
+    kind: "unavailable",
+    reason:
+      "No WebView document contained a rendered task file preview" +
+      (failures.length > 0 ? ` (${failures.join("; ")})` : "")
+  };
 }
 
 async function terminalFileLink(
@@ -464,6 +605,38 @@ async function verifyTerminalFilePreviewFlow(
       `Expected authenticated relay Markdown content in rendered preview; got ${JSON.stringify(inspection)}`
     );
   }
+  let renderedWebView: TaskFilePreviewWebViewInspection = {
+    kind: "unavailable",
+    reason: "WebView inspection has not started"
+  };
+  try {
+    await driver.waitUntil(
+      async () => {
+        renderedWebView = await inspectTaskFilePreviewWebView(
+          createWebViewContextDriver(driver)
+        );
+        return (
+          renderedWebView.kind === "rendered" &&
+          renderedWebView.path === fixture.path &&
+          renderedWebView.tokenClass === fixture.expectedHighlightedTokenClass &&
+          renderedWebView.tokenText === fixture.expectedHighlightedToken &&
+          Boolean(renderedWebView.tokenColor) &&
+          renderedWebView.tokenColor !== renderedWebView.unhighlightedColor &&
+          renderedWebView.tokenWidth > 0 &&
+          renderedWebView.tokenHeight > 0
+        );
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected rendered preview WebView syntax highlighting"
+      }
+    );
+  } catch {
+    throw new Error(
+      `Expected rendered preview WebView syntax highlighting with a non-default computed color; got ${JSON.stringify(renderedWebView)}`
+    );
+  }
   await closeTaskFilePreview(driver);
 
   await (await terminalFileLink(driver, fixture.path, fixture.line)).click();
@@ -479,6 +652,37 @@ async function verifyTerminalFilePreviewFlow(
   ) {
     throw new Error(
       `Expected raw preview to target line ${fixture.line}; got ${JSON.stringify(inspection)}`
+    );
+  }
+  let rawWebView: TaskFilePreviewWebViewInspection = {
+    kind: "unavailable",
+    reason: "WebView inspection has not started"
+  };
+  try {
+    await driver.waitUntil(
+      async () => {
+        rawWebView = await inspectTaskFilePreviewWebView(
+          createWebViewContextDriver(driver)
+        );
+        return (
+          rawWebView.kind === "raw" &&
+          rawWebView.path === fixture.path &&
+          rawWebView.line === fixture.line &&
+          rawWebView.flashStarted &&
+          rawWebView.overlayWidth > 0 &&
+          rawWebView.overlayHeight > 0 &&
+          Number.isFinite(rawWebView.overlayTop)
+        );
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: `Expected raw preview WebView line ${fixture.line}`
+      }
+    );
+  } catch {
+    throw new Error(
+      `Expected raw preview WebView line ${fixture.line} to be laid out and flashed; got ${JSON.stringify(rawWebView)}`
     );
   }
   await closeTaskFilePreview(driver);
