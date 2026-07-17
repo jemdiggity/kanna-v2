@@ -93,7 +93,7 @@ const styles = StyleSheet.create({
     right: 16
   },
   bar: {
-    backgroundColor: "rgba(8, 15, 27, 0.97)",
+    backgroundColor: "#080F1B",
     borderColor: "#1E304C",
     borderRadius: 28,
     borderWidth: 1,
@@ -122,7 +122,7 @@ const styles = StyleSheet.create({
   },
   utilityButton: {
     alignItems: "center",
-    backgroundColor: "rgba(8, 15, 27, 0.97)",
+    backgroundColor: "#080F1B",
     borderColor: "#1E304C",
     borderRadius: 24,
     borderWidth: 1,
