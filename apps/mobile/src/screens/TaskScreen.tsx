@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type TextInputContentSizeChangeEvent,
   useWindowDimensions,
   View
 } from "react-native";
@@ -20,7 +21,12 @@ import { AgentMessageView } from "./AgentMessageView";
 import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
 import { showTaskActionMenu, type TaskAction } from "./taskActionMenu";
-import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
+import {
+  clampTaskComposerHeight,
+  TASK_COMPOSER_MAX_HEIGHT,
+  TASK_COMPOSER_MIN_HEIGHT,
+  TASK_COMPOSER_TEXT_INPUT_PROPS
+} from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
 import { showTaskQuickReplyMenu } from "./taskQuickReplyMenu";
 import { buildTaskQuickReply } from "./taskQuickReplies";
@@ -89,6 +95,9 @@ export function TaskScreen({
     taskCreationPhase
   });
   const [draftInput, setDraftInput] = useState("");
+  const [composerInputHeight, setComposerInputHeight] = useState(
+    TASK_COMPOSER_MIN_HEIGHT
+  );
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [screenHeight, setScreenHeight] = useState(0);
   const [composerTop, setComposerTop] = useState<number | null>(null);
@@ -149,11 +158,24 @@ export function TaskScreen({
   };
   const updateDraftInput = (nextDraftInput: string) => {
     composerSnapshotRef.current.draftInput = nextDraftInput;
+    if (!nextDraftInput) {
+      setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
+    }
     setDraftInput(nextDraftInput);
   };
   const clearDraftInput = () => {
     composerSnapshotRef.current.draftInput = "";
+    setComposerInputHeight(TASK_COMPOSER_MIN_HEIGHT);
     setDraftInput("");
+  };
+  const updateComposerInputHeight = (
+    event: TextInputContentSizeChangeEvent
+  ) => {
+    setComposerInputHeight(
+      composerSnapshotRef.current.draftInput
+        ? clampTaskComposerHeight(event.nativeEvent.contentSize.height)
+        : TASK_COMPOSER_MIN_HEIGHT
+    );
   };
   const submitInput = (input: string) => {
     const snapshot = composerSnapshotRef.current;
@@ -164,6 +186,7 @@ export function TaskScreen({
 
     snapshot.onSendInput(nextInput);
     clearDraftInput();
+    Keyboard.dismiss();
   };
   const sendDraftInput = () => submitInput(composerSnapshotRef.current.draftInput);
   const openTaskActionMenu = () => {
@@ -411,9 +434,14 @@ export function TaskScreen({
             {...TASK_COMPOSER_TEXT_INPUT_PROPS}
             editable={!isComposerDisabled}
             onChangeText={updateDraftInput}
+            onContentSizeChange={updateComposerInputHeight}
             placeholder="Reply…"
             placeholderTextColor="#6F89AE"
-            style={[styles.inputField, isComposerDisabled ? styles.inputFieldDisabled : null]}
+            style={[
+              styles.inputField,
+              { height: composerInputHeight },
+              isComposerDisabled ? styles.inputFieldDisabled : null
+            ]}
             testID={MOBILE_E2E_IDS.taskInput}
             value={draftInput}
           />
@@ -664,8 +692,8 @@ const styles = StyleSheet.create({
     color: "#F5F7FB",
     flex: 1,
     fontSize: 14,
-    maxHeight: 120,
-    minHeight: 40,
+    maxHeight: TASK_COMPOSER_MAX_HEIGHT,
+    minHeight: TASK_COMPOSER_MIN_HEIGHT,
     paddingHorizontal: 8,
     paddingVertical: 10,
     textAlignVertical: "top"

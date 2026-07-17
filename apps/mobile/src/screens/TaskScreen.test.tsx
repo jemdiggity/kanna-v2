@@ -16,6 +16,7 @@ const hookHarness = vi.hoisted(() => ({
 
 const componentMocks = vi.hoisted(() => ({
   draftSetter: vi.fn(),
+  keyboardDismiss: vi.fn(),
   onAdvanceTaskStage: vi.fn(),
   onCloseTask: vi.fn(),
   onSendInput: vi.fn(),
@@ -83,7 +84,7 @@ vi.mock("react", async (importActual) => {
 vi.mock("react-native", () => ({
   Keyboard: {
     addListener: vi.fn(() => ({ remove: vi.fn() })),
-    dismiss: vi.fn()
+    dismiss: componentMocks.keyboardDismiss
   },
   Pressable: "Pressable",
   ScrollView: "ScrollView",
@@ -130,6 +131,7 @@ beforeEach(() => {
   hookHarness.refs.length = 0;
   hookHarness.stateValues.length = 0;
   componentMocks.draftSetter.mockReset();
+  componentMocks.keyboardDismiss.mockReset();
   componentMocks.onAdvanceTaskStage.mockReset();
   componentMocks.onCloseTask.mockReset();
   componentMocks.onSendInput.mockReset();
@@ -611,6 +613,57 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
   });
 
+  it("shrinks an expanded composer and dismisses its keyboard after Send", () => {
+    let tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "First line.\nSecond line."
+    });
+    let input = findByTestId(tree, "mobile.task-input");
+    const resizeComposer = input?.props?.onContentSizeChange as (
+      event: unknown
+    ) => void;
+
+    resizeComposer({
+      nativeEvent: { contentSize: { height: 82, width: 240 } }
+    });
+    tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "First line.\nSecond line."
+    });
+    input = findByTestId(tree, "mobile.task-input");
+    expect(styleEntries(input)).toContainEqual({ height: 82 });
+
+    pressByTestId(tree, "mobile.task-send-button");
+    resizeComposer({
+      nativeEvent: { contentSize: { height: 82, width: 240 } }
+    });
+    tree = renderTaskScreen({ agentType: "agent" });
+
+    expect(styleEntries(findByTestId(tree, "mobile.task-input"))).toContainEqual({
+      height: 40
+    });
+    expect(componentMocks.keyboardDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("shrinks an expanded composer when its draft is deleted", () => {
+    let tree = renderTaskScreen({ draftInput: "First line.\nSecond line." });
+    let input = findByTestId(tree, "mobile.task-input");
+    (input?.props?.onContentSizeChange as (event: unknown) => void)({
+      nativeEvent: { contentSize: { height: 82, width: 240 } }
+    });
+    tree = renderTaskScreen({ draftInput: "First line.\nSecond line." });
+    input = findByTestId(tree, "mobile.task-input");
+
+    (input?.props?.onChangeText as (value: string) => void)("");
+    tree = renderTaskScreen();
+
+    expect(styleEntries(findByTestId(tree, "mobile.task-input"))).toContainEqual({
+      height: 40
+    });
+    expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+    expect(componentMocks.keyboardDismiss).not.toHaveBeenCalled();
+  });
+
   it.each(["", "  \n\t"])(
     "does not send or clear an empty normal draft %#",
     (draftInput) => {
@@ -621,6 +674,7 @@ describe("TaskScreen", () => {
 
       expect(componentMocks.onSendInput).not.toHaveBeenCalled();
       expect(componentMocks.draftSetter).not.toHaveBeenCalled();
+      expect(componentMocks.keyboardDismiss).not.toHaveBeenCalled();
     }
   );
 
@@ -660,6 +714,7 @@ describe("TaskScreen", () => {
       "SGTM. Proceed.\n\nAlso add regression tests."
     );
     expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
+    expect(componentMocks.keyboardDismiss).toHaveBeenCalledOnce();
   });
 
   it("uses the current draft when a pending quick reply is selected", () => {
