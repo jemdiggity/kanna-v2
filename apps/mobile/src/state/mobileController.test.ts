@@ -3509,7 +3509,7 @@ describe("createMobileController", () => {
     ]);
   });
 
-  it("keeps create task feedback inside the composer while submitting", async () => {
+  it("tracks the pending create attempt until it settles", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     let resolveCreateTask:
