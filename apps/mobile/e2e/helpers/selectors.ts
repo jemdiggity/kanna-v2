@@ -5,7 +5,6 @@ export const selectors = {
   tasksScreen: `~${MOBILE_E2E_IDS.tasksScreen}`,
   recentScreen: `~${MOBILE_E2E_IDS.recentScreen}`,
   searchScreen: `~${MOBILE_E2E_IDS.searchScreen}`,
-  moreScreen: `~${MOBILE_E2E_IDS.moreScreen}`,
   toolbarNavigation: `~${MOBILE_E2E_IDS.toolbarNavigation}`,
   toolbarSearch: `~${MOBILE_E2E_IDS.toolbarSearch}`,
   taskDetailScreen: `~${MOBILE_E2E_IDS.taskDetailScreen}`,

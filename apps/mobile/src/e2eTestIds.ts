@@ -4,7 +4,6 @@ export const MOBILE_E2E_IDS = {
   tasksScreen: "mobile.tasks-screen",
   recentScreen: "mobile.recent-screen",
   searchScreen: "mobile.search-screen",
-  moreScreen: "mobile.more-screen",
   toolbarNavigation: "mobile.toolbar.navigation",
   toolbarSearch: "mobile.toolbar.search",
   taskDetailScreen: "mobile.task-detail-screen",
