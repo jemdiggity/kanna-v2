@@ -1068,6 +1068,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             environment: None,
             policy: PipelineStagePolicy {
                 transition: PipelineStageTransition::Manual,
+                revision_transition: None,
             },
             post: None,
         }],
@@ -1159,6 +1160,7 @@ completion with status success so Kanna can run the commit post and close this i
             environment: None,
             policy: PipelineStagePolicy {
                 transition: PipelineStageTransition::Auto,
+                revision_transition: None,
             },
             post: Some(definitions::PipelinePost {
                 name: "commit".to_string(),

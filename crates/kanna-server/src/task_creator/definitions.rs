@@ -98,6 +98,15 @@ pub(super) struct PipelinePost {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct PipelineStagePolicy {
     pub(super) transition: PipelineStageTransition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) revision_transition: Option<PipelineStageTransition>,
+}
+
+impl PipelineStagePolicy {
+    #[allow(dead_code)]
+    pub(super) fn revision_transition(&self) -> PipelineStageTransition {
+        self.revision_transition.unwrap_or(self.transition)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -170,6 +179,7 @@ pub(super) fn post_as_stage(owner: &PipelineStage) -> Option<PipelineStage> {
         environment: owner.environment.clone(),
         policy: PipelineStagePolicy {
             transition: PipelineStageTransition::Auto,
+            revision_transition: None,
         },
         post: None,
     })
@@ -202,6 +212,7 @@ struct RawPipelineStage {
 #[derive(Deserialize)]
 struct RawPipelineStagePolicy {
     transition: PipelineStageTransition,
+    revision_transition: Option<PipelineStageTransition>,
     execution: Option<RawPipelineStageExecution>,
 }
 
@@ -892,13 +903,15 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
             post_action,
         } = stage;
 
-        let (transition, continues) = match policy {
+        let (transition, revision_transition, continues) = match policy {
             Some(policy) => (
                 policy.transition,
+                policy.revision_transition,
                 matches!(policy.execution, Some(RawPipelineStageExecution::Continue)),
             ),
             None => (
                 transition.ok_or_else(|| format!("stage {name:?} is missing policy.transition"))?,
+                None,
                 matches!(mode, Some(RawPipelineStageExecution::Continue)),
             ),
         };
@@ -947,7 +960,10 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
             prompt,
             agent_provider,
             environment,
-            policy: PipelineStagePolicy { transition },
+            policy: PipelineStagePolicy {
+                transition,
+                revision_transition,
+            },
             post,
         });
     }
