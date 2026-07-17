@@ -67,6 +67,25 @@ describe("createLanTransport", () => {
     );
   });
 
+  it("preserves a confirmed task ID collision response", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => null,
+      text: async () =>
+        "taskId already exists with different task data: a1b2c3d4"
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.createTask({
+      taskId: "a1b2c3d4",
+      repoId: "repo-1",
+      prompt: "Ship it"
+    })).rejects.toThrow(
+      "taskId already exists with different task data: a1b2c3d4"
+    );
+  });
+
   it("fails closed instead of requesting task file contents over unauthenticated LAN", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

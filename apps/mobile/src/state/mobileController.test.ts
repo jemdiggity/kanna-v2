@@ -2586,7 +2586,59 @@ describe("createMobileController", () => {
     );
   });
 
-  it("falls back to a valid unique-shaped identity when native crypto is unavailable", async () => {
+  it("uses a readable eight-character identity from native UUID generation", async () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: () => "01234567-89ab-cdef-0123-456789abcdef",
+      getRandomValues: vi.fn()
+    });
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Use readable identity");
+
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "01234567"
+      })
+    );
+  });
+
+  it("uses four random bytes when UUID generation is unavailable", async () => {
+    const getRandomValues = vi.fn((values: Uint8Array) => {
+      values.set([0x89, 0xab, 0xcd, 0xef]);
+      return values;
+    });
+    vi.stubGlobal("crypto", {
+      randomUUID: () => "",
+      getRandomValues
+    });
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Use random byte identity");
+
+    await controller.createTask();
+
+    expect(getRandomValues).toHaveBeenCalledWith(expect.any(Uint8Array));
+    expect(getRandomValues.mock.calls[0]?.[0]).toHaveLength(4);
+    expect(client.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "89abcdef"
+      })
+    );
+  });
+
+  it("falls back to a readable identity when native crypto is unavailable", async () => {
     vi.stubGlobal("crypto", {
       randomUUID: () => {
         throw new Error("randomUUID unavailable");
@@ -2608,7 +2660,7 @@ describe("createMobileController", () => {
 
     expect(client.createTask).toHaveBeenCalledWith(
       expect.objectContaining({
-        taskId: expect.stringMatching(/^[0-9a-f]{32}$/)
+        taskId: expect.stringMatching(/^[0-9a-f]{8}$/)
       })
     );
   });
@@ -3504,7 +3556,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
-      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
@@ -3593,7 +3645,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
-      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",
@@ -3686,7 +3738,7 @@ describe("createMobileController", () => {
     await controller.createTask({ cols: 104, rows: 72 });
 
     expect(client.createTask).toHaveBeenCalledWith({
-      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-2",
@@ -3727,7 +3779,7 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       taskCreationPhase: "pending",
       pendingTaskCreation: {
-        taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+        taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
         repoId: "repo-2",
         prompt: "Ship mobile shell"
       },
@@ -3865,7 +3917,7 @@ describe("createMobileController", () => {
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
-      taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      taskId: expect.stringMatching(/^[0-9a-f]{8}$/),
       repoId: "repo-2",
       prompt: "Ship mobile shell",
       desktopId: "desktop-1",

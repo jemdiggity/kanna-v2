@@ -22,6 +22,7 @@ export interface FetchResponseLike {
   ok: boolean;
   status: number;
   json(): Promise<unknown>;
+  text?(): Promise<string>;
 }
 
 export type FetchLike = (
@@ -61,7 +62,16 @@ export function createLanTransport(
   ): Promise<T> => {
     const response = await fetchImpl(`${baseUrl}${path}`, init);
     if (!response.ok) {
-      throw new Error(`LAN request failed (${response.status}) for ${path}`);
+      let detail = "";
+      try {
+        detail = (await response.text?.())?.trim() ?? "";
+      } catch {
+        // Preserve the status-based error when an error body cannot be read.
+      }
+      const suffix = detail ? `: ${detail}` : "";
+      throw new Error(
+        `LAN request failed (${response.status}) for ${path}${suffix}`
+      );
     }
 
     if (response.status === 204) {
