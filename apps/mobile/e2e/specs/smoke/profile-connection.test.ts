@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  assertOtaDiagnosticsHidden,
   assertProfileConnectionControlsReachable,
   assertProfileConnectionDisconnected,
   assertProfilePasswordCanRevealAndHide,
@@ -74,6 +75,57 @@ describe("openProfileConnectionSheet", () => {
     expect(accountButton.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
     expect(accountButton.click).toHaveBeenCalledTimes(1);
     expect(accountSheet.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+});
+
+describe("assertOtaDiagnosticsHidden", () => {
+  it("waits for More navigation before checking that the legacy OTA element is absent", async () => {
+    const events: string[] = [];
+    const moreTab = {
+      ...createElement(),
+      click: vi.fn(async () => {
+        events.push("click More");
+      })
+    };
+    const moreScreen = {
+      ...createElement(),
+      waitForDisplayed: vi.fn(async () => {
+        events.push("More displayed");
+      })
+    };
+    const otaStatus = {
+      ...createElement(false),
+      isExisting: vi.fn(async () => {
+        events.push("check OTA absent");
+        return false;
+      })
+    };
+    const ui = {
+      getMoreTab: vi.fn(async () => moreTab),
+      getMoreScreen: vi.fn(async () => moreScreen),
+      getOtaStatusValue: vi.fn(async () => otaStatus)
+    };
+
+    await assertOtaDiagnosticsHidden(ui);
+
+    expect(moreTab.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(events).toEqual([
+      "click More",
+      "More displayed",
+      "check OTA absent"
+    ]);
+  });
+
+  it("fails when the legacy OTA element still exists on More", async () => {
+    const ui = {
+      getMoreTab: vi.fn(async () => createElement()),
+      getMoreScreen: vi.fn(async () => createElement()),
+      getOtaStatusValue: vi.fn(async () => createElement())
+    };
+
+    await expect(assertOtaDiagnosticsHidden(ui)).rejects.toThrow(
+      "Expected OTA diagnostics to be absent from More"
+    );
   });
 });
 

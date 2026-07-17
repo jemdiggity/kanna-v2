@@ -4,7 +4,7 @@
 
 **Goal:** Remove OTA diagnostics from the mobile More screen while preserving automatic OTA checks and the update-ready restart prompt.
 
-**Architecture:** Delete the presentation-specific metadata flow from `App` through `MoreScreen`, along with its formatter and E2E selector. Leave the independent update-check, download, and reload flow intact.
+**Architecture:** Delete the presentation-specific metadata flow from `App` through `MoreScreen` and its formatter. Leave the independent update-check, download, and reload flow intact, and preserve integration coverage by navigating to a positively identified More screen before asserting the historical OTA element is absent.
 
 **Tech Stack:** React Native, React 19, TypeScript, Vitest, WebdriverIO/Appium helpers
 
@@ -45,5 +45,21 @@
 - [x] **Step 2: Run `pnpm --dir apps/mobile test` and confirm the complete mobile unit suite passes.**
 - [x] **Step 3: Run `pnpm --dir apps/mobile typecheck` and confirm TypeScript reports no errors.**
 - [x] **Step 4: Inspect `git diff --check` and `git status --short` to confirm the patch is clean and limited to the approved scope.**
+
+### Task 4: Restore Appium coverage for the removed diagnostics card
+
+**Files:**
+- Modify: `apps/mobile/src/e2eTestIds.ts`
+- Modify: `apps/mobile/src/screens/MoreScreen.tsx`
+- Modify: `apps/mobile/e2e/helpers/selectors.ts`
+- Modify: `apps/mobile/e2e/specs/smoke/profile-connection.e2e.ts`
+- Modify: `apps/mobile/e2e/specs/smoke/profile-connection.test.ts`
+
+- [x] **Step 1: Add a failing helper test that requires the More tab to be clicked, the More-screen marker to be displayed, and the legacy `mobile.update-info.ota` element to be absent.**
+- [x] **Step 2: Run `pnpm --dir apps/mobile test -- e2e/specs/smoke/profile-connection.test.ts` and confirm the new test fails because the helper is not implemented.**
+- [x] **Step 3: Add the stable More-screen test id, selectors, Appium helper, and smoke invocation needed to satisfy the test.**
+- [x] **Step 4: Run `pnpm --dir apps/mobile test -- e2e/specs/smoke/profile-connection.test.ts src/screens/MoreScreen.test.tsx` and confirm both regression layers pass.**
+- [x] **Step 5: Run `pnpm --dir apps/mobile typecheck`, evaluate whether the managed Appium environment is available, and run the smoke when available.**
+- [x] **Step 6: Run `git diff --check` and inspect `git status --short` before handoff.**
 
 No commit step is included because this Kanna stage explicitly leaves committing to the later pipeline transition.

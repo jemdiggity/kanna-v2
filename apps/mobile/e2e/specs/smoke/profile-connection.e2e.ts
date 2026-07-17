@@ -20,6 +20,12 @@ interface ProfileSheetOpener {
   getAccountSheet(): Promise<ProfileConnectionElement>;
 }
 
+interface MoreDiagnosticsUi {
+  getMoreTab(): Promise<ProfileConnectionElement>;
+  getMoreScreen(): Promise<ProfileConnectionElement>;
+  getOtaStatusValue(): Promise<ProfileConnectionElement>;
+}
+
 interface ProfileConnectionControlsUi {
   getConnectionTitle(): Promise<ProfileConnectionElement>;
   getConnectionStatus(): Promise<ProfileConnectionElement>;
@@ -40,6 +46,7 @@ interface ProfileConnectionControlsUi {
 
 interface ProfileConnectionUi
   extends ProfileSheetOpener,
+    MoreDiagnosticsUi,
     ProfileConnectionControlsUi {}
 
 function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
@@ -68,6 +75,15 @@ function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
     async getPasswordToggle() {
       return driver.$(selectors.accountPasswordToggle);
     },
+    async getMoreTab() {
+      return driver.$(selectors.moreTab);
+    },
+    async getMoreScreen() {
+      return driver.$(selectors.moreScreen);
+    },
+    async getOtaStatusValue() {
+      return driver.$(selectors.legacyUpdateInfoOtaValue);
+    },
     async getSignInButton() {
       return driver.$(selectors.accountSignInButton);
     },
@@ -75,6 +91,22 @@ function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
       return driver.waitUntil(condition, options);
     }
   };
+}
+
+export async function assertOtaDiagnosticsHidden(
+  ui: MoreDiagnosticsUi
+): Promise<void> {
+  const moreTab = await ui.getMoreTab();
+  await moreTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await moreTab.click();
+
+  const moreScreen = await ui.getMoreScreen();
+  await moreScreen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+
+  const otaStatus = await ui.getOtaStatusValue();
+  if (await otaStatus.isExisting()) {
+    throw new Error("Expected OTA diagnostics to be absent from More");
+  }
 }
 
 export async function openProfileConnectionSheet(
@@ -203,6 +235,7 @@ export async function runProfileConnectionSmoke(driver: Browser): Promise<void> 
   const appShell = await driver.$(selectors.appShell);
   await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 
+  await assertOtaDiagnosticsHidden(ui);
   await openProfileConnectionSheet(ui);
   await assertProfileConnectionControlsReachable(ui);
   await assertProfilePasswordCanRevealAndHide(ui);

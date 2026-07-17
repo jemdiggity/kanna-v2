@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 import type { RefreshStatus } from "../state/sessionStore";
 import {
@@ -75,6 +76,7 @@ export function MoreScreen({
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
+      testID={MOBILE_E2E_IDS.moreScreen}
     >
       <View style={styles.wrap}>
         <Text style={styles.heading}>More</Text>
