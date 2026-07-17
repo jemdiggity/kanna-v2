@@ -22,6 +22,7 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     lines: getTerminalBufferLines,
     sessionIds: () => Array.from(terminals.keys()),
     write: writeTerminalBuffer,
+    input: inputTerminalBuffer,
   };
 
   return () => {
@@ -30,6 +31,14 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
       terminals.delete(sessionId);
     }
   };
+}
+
+function inputTerminalBuffer(sessionId: string, data: string): void {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  terminal.input(data, true);
 }
 
 function writeTerminalBuffer(sessionId: string, data: string, callback?: () => void): void {

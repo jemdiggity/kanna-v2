@@ -160,7 +160,21 @@ pub enum Command {
         session_id: String,
         data: Vec<u8>,
     },
+    /// Latency-sensitive terminal input. Success is deliberately not
+    /// acknowledged, so callers can pipeline ordered bytes without waiting.
+    /// Failures are still emitted as asynchronous `Event::Error` values.
+    InputNoReply {
+        session_id: String,
+        data: Vec<u8>,
+    },
     Resize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Ordered terminal resize paired with `InputNoReply` on persistent
+    /// control connections. Success has no reply; failures remain observable.
+    ResizeNoReply {
         session_id: String,
         cols: u16,
         rows: u16,
@@ -360,6 +374,43 @@ mod tests {
             Command::Input { session_id, data } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(data, b"hello");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_one_way_terminal_commands_roundtrip() {
+        let input = Command::InputNoReply {
+            session_id: "s1".to_string(),
+            data: b"opaque\0bytes".to_vec(),
+        };
+        let decoded: Command =
+            serde_json::from_str(&serde_json::to_string(&input).unwrap()).unwrap();
+        match decoded {
+            Command::InputNoReply { session_id, data } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(data, b"opaque\0bytes");
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let resize = Command::ResizeNoReply {
+            session_id: "s1".to_string(),
+            cols: 132,
+            rows: 48,
+        };
+        let decoded: Command =
+            serde_json::from_str(&serde_json::to_string(&resize).unwrap()).unwrap();
+        match decoded {
+            Command::ResizeNoReply {
+                session_id,
+                cols,
+                rows,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(cols, 132);
+                assert_eq!(rows, 48);
             }
             _ => panic!("wrong variant"),
         }

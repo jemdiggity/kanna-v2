@@ -230,6 +230,41 @@ async fn connection_drop_cleanup_removes_attached_and_observer_writers() {
     assert!(session_observers.lock().await.is_empty());
 }
 
+#[tokio::test]
+async fn connection_drop_cleanup_reports_remaining_effective_terminal_size() {
+    let session_writers: SessionWriters = Arc::new(Mutex::new(HashMap::new()));
+    let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
+    let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
+    let session_observers: SessionObservers = Arc::new(Mutex::new(HashMap::new()));
+
+    let (_large_client, large_server) = UnixStream::pair().expect("large stream pair");
+    let (_large_read, large_write) = large_server.into_split();
+    let large_writer = Arc::new(Mutex::new(large_write));
+    let large_id = Arc::as_ptr(&large_writer) as usize;
+    let (_small_client, small_server) = UnixStream::pair().expect("small stream pair");
+    let (_small_read, small_write) = small_server.into_split();
+    let small_writer = Arc::new(Mutex::new(small_write));
+    let small_id = Arc::as_ptr(&small_writer) as usize;
+    session_sizes.lock().await.insert(
+        "session-resize".to_string(),
+        HashMap::from([(large_id, (120, 43)), (small_id, (80, 24))]),
+    );
+
+    let remaining_sizes = cleanup_client_writer_registries(
+        &small_writer,
+        &session_writers,
+        &terminal_emulator_clients,
+        &session_sizes,
+        &session_observers,
+    )
+    .await;
+
+    assert_eq!(
+        remaining_sizes,
+        vec![("session-resize".to_string(), 120, 43)]
+    );
+}
+
 #[test]
 fn panic_log_path_lives_under_daemon_dir() {
     assert_eq!(

@@ -151,7 +151,7 @@ pub(crate) async fn handle_connection(
 
     // Connection dropped: remove every registry entry that owns or indexes this
     // writer so dead Unix socket fds cannot survive on idle sessions.
-    cleanup_client_writer_registries(
+    let remaining_sizes = cleanup_client_writer_registries(
         &writer,
         &session_writers,
         &terminal_emulator_clients,
@@ -159,6 +159,17 @@ pub(crate) async fn handle_connection(
         &session_observers,
     )
     .await;
+    for (session_id, cols, rows) in remaining_sizes {
+        let resized = match session_handle(&sessions, &session_id).await {
+            Some(session) => session.resize(cols, rows).await.is_ok(),
+            None => false,
+        };
+        if resized {
+            recovery_manager
+                .resize_session(&session_id, cols, rows)
+                .await;
+        }
+    }
     agent_runtime::cleanup_agent_writer(&agent_sessions, &writer).await;
 }
 
@@ -395,6 +406,25 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
+        Command::InputNoReply { session_id, data } => {
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {}", session_id),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+
+            if session.enqueue_input(data).is_err() {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::WriteFailed),
+                    format!("input queue closed for session: {}", session_id),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+            }
+        }
+
         Command::AttachSnapshot {
             session_id,
             emulate_terminal,
@@ -543,6 +573,38 @@ pub(crate) async fn handle_command(
                     .await;
             }
             let _ = write_event(&mut *writer.lock().await, &evt).await;
+        }
+
+        Command::ResizeNoReply {
+            session_id,
+            cols,
+            rows,
+        } => {
+            // One persistent control socket owns one size entry. Commands on
+            // that socket are read in order, preserving resize/input ordering.
+            let writer_id = Arc::as_ptr(&writer) as usize;
+            let (eff_cols, eff_rows) = {
+                let mut sizes = session_sizes.lock().await;
+                let client_sizes = sizes.entry(session_id.clone()).or_default();
+                client_sizes.insert(writer_id, (cols, rows));
+                effective_terminal_size(client_sizes, (cols, rows))
+            };
+
+            let result = match session_handle(&sessions, &session_id).await {
+                Some(session) => session.resize(eff_cols, eff_rows).await,
+                None => Err(format!("session not found: {}", session_id).into()),
+            };
+            match result {
+                Ok(_) => {
+                    recovery_manager
+                        .resize_session(&session_id, eff_cols, eff_rows)
+                        .await;
+                }
+                Err(error) => {
+                    let evt = error_event(None, error.to_string());
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                }
+            }
         }
 
         Command::Signal { session_id, signal } => {

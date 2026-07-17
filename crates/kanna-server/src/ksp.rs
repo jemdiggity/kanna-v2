@@ -12,12 +12,15 @@ use std::sync::Arc;
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use kanna_agent_protocol::{ClientFrame, FrameAgentEvent, ServerFrame, StreamKind};
+use kanna_agent_protocol::{
+    ClientFrame, FrameAgentEvent, PermissionDecision, ServerFrame, StreamKind,
+};
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 
 use crate::daemon_client::DaemonClient;
@@ -158,6 +161,9 @@ async fn handle_stream_channels(
         state,
         frame_tx,
         attachments: HashMap::new(),
+        terminal_controls: HashMap::new(),
+        agent_commands: None,
+        requests: None,
         authed: false,
         auth_mode,
     };
@@ -182,7 +188,7 @@ async fn handle_stream_channels(
     // Abort attachment tasks (each holds a frame_tx clone), then drop our
     // own sender so the writer drains queued frames and exits — aborting it
     // would lose final frames (e.g. the unauthenticated error).
-    conn.shutdown();
+    conn.shutdown().await;
     drop(conn);
     state_change_task.abort();
     let _ = writer_task.await;
@@ -218,8 +224,435 @@ struct StreamConn {
     state: Arc<AppState>,
     frame_tx: mpsc::Sender<ServerFrame>,
     attachments: HashMap<(String, StreamKind), JoinHandle<()>>,
+    terminal_controls: HashMap<String, TerminalControlHandle>,
+    agent_commands: Option<AgentCommandWorker>,
+    requests: Option<RequestWorker>,
     authed: bool,
     auth_mode: AuthMode,
+}
+
+const TERMINAL_CONTROL_QUEUE_CAPACITY: usize = 256;
+const AGENT_COMMAND_QUEUE_CAPACITY: usize = 256;
+const REQUEST_QUEUE_CAPACITY: usize = 32;
+const MAX_REQUEST_CONCURRENCY: usize = 4;
+
+enum AgentControlCommand {
+    Input(String),
+    Permission {
+        request_id: String,
+        decision: PermissionDecision,
+    },
+    Interrupt,
+    SetModel(String),
+}
+
+impl AgentControlCommand {
+    fn into_daemon_command(self, session_id: String) -> DaemonCommand {
+        match self {
+            Self::Input(text) => DaemonCommand::AgentInput { session_id, text },
+            Self::Permission {
+                request_id,
+                decision,
+            } => DaemonCommand::AgentPermission {
+                session_id,
+                request_id,
+                decision,
+            },
+            Self::Interrupt => DaemonCommand::AgentInterrupt { session_id },
+            Self::SetModel(model) => DaemonCommand::AgentSetModel { session_id, model },
+        }
+    }
+}
+
+struct TaskAgentCommand {
+    task_id: String,
+    command: AgentControlCommand,
+}
+
+struct AgentCommandWorker {
+    tx: mpsc::Sender<TaskAgentCommand>,
+    task: JoinHandle<()>,
+}
+
+struct KspRequest {
+    id: u64,
+    method: String,
+    path: String,
+    body: Option<serde_json::Value>,
+}
+
+struct RequestWorker {
+    tx: mpsc::Sender<KspRequest>,
+    task: JoinHandle<()>,
+}
+
+fn request_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| {
+            parallelism
+                .get()
+                .saturating_sub(1)
+                .clamp(1, MAX_REQUEST_CONCURRENCY)
+        })
+        .unwrap_or(1)
+}
+
+enum TerminalControlCommand {
+    Input(Vec<u8>),
+    Resize { cols: u16, rows: u16 },
+}
+
+impl TerminalControlCommand {
+    fn into_daemon_command(self, session_id: String) -> DaemonCommand {
+        match self {
+            Self::Input(data) => DaemonCommand::InputNoReply { session_id, data },
+            Self::Resize { cols, rows } => DaemonCommand::ResizeNoReply {
+                session_id,
+                cols,
+                rows,
+            },
+        }
+    }
+}
+
+struct TerminalControlHandle {
+    session_id: Option<String>,
+    tx: mpsc::Sender<TerminalControlCommand>,
+    cancel_tx: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+async fn terminal_control_cancelled(cancel_rx: &mut watch::Receiver<bool>) {
+    if *cancel_rx.borrow() {
+        return;
+    }
+    let _ = cancel_rx.changed().await;
+}
+
+async fn terminal_control_retry_delay(
+    attempt: usize,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = terminal_control_cancelled(cancel_rx) => false,
+        _ = daemon_stream_retry_delay(attempt) => true,
+    }
+}
+
+async fn send_task_error(
+    frame_tx: &mpsc::Sender<ServerFrame>,
+    task_id: &str,
+    code: &str,
+    message: String,
+) {
+    let _ = frame_tx
+        .send(ServerFrame::Error {
+            task_id: Some(task_id.to_string()),
+            code: code.to_string(),
+            message,
+        })
+        .await;
+}
+
+async fn resolve_task_session_id(db_path: String, task_id: String) -> Result<String, String> {
+    let lookup_task_id = task_id.clone();
+    tokio::task::spawn_blocking(move || {
+        Db::open(db_path.as_str())
+            .and_then(|db| db.resolve_task_terminal_session_id(&lookup_task_id))
+            .map_err(|error| format!("db error: {error}"))?
+            .ok_or_else(|| format!("no session for task {lookup_task_id}"))
+    })
+    .await
+    .map_err(|error| format!("session lookup worker failed: {error}"))?
+}
+
+fn direct_terminal_session_id(task_id: &str) -> Option<String> {
+    task_id.starts_with("shell-").then(|| task_id.to_string())
+}
+
+async fn run_terminal_control(
+    state: Arc<AppState>,
+    task_id: String,
+    initial_session_id: Option<String>,
+    mut command_rx: mpsc::Receiver<TerminalControlCommand>,
+    mut cancel_rx: watch::Receiver<bool>,
+    frame_tx: mpsc::Sender<ServerFrame>,
+) {
+    let session_id = match initial_session_id {
+        Some(session_id) => session_id,
+        None => {
+            let resolved = tokio::select! {
+                biased;
+                _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                resolved = resolve_task_session_id(
+                    state.config().db_path.clone(),
+                    task_id.clone(),
+                ) => resolved,
+            };
+            match resolved {
+                Ok(session_id) => session_id,
+                Err(message) => {
+                    tokio::select! {
+                        biased;
+                        _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                        _ = send_task_error(&frame_tx, &task_id, "no_session", message) => {}
+                    }
+                    return;
+                }
+            }
+        }
+    };
+    let daemon_dir = state.config().daemon_dir.clone();
+    let mut retry_attempt = 0usize;
+    // Do not open an otherwise idle control socket merely because a terminal
+    // attached for output. Keep the first command pending across definite
+    // connect failures; after the first connection, reconnect proactively so
+    // handoff recovery is ready before the next keypress.
+    let mut pending_command = Some(tokio::select! {
+        biased;
+        _ = terminal_control_cancelled(&mut cancel_rx) => return,
+        command = command_rx.recv() => {
+            let Some(command) = command else {
+                return;
+            };
+            command
+        }
+    });
+
+    loop {
+        let connected = tokio::select! {
+            biased;
+            _ = terminal_control_cancelled(&mut cancel_rx) => return,
+            connected = async {
+                DaemonClient::connect(&daemon_dir)
+                    .await
+                    .map_err(|error| error.to_string())
+            } => connected,
+        };
+        let client = match connected {
+            Ok(client) => client,
+            Err(error) => {
+                log::warn!(
+                    "[ksp] terminal control failed to connect (session={session_id}, attempt={retry_attempt}): {error}"
+                );
+                if !terminal_control_retry_delay(retry_attempt, &mut cancel_rx).await {
+                    return;
+                }
+                retry_attempt += 1;
+                continue;
+            }
+        };
+        let (mut daemon_reader, mut daemon_writer) = client.into_split();
+        retry_attempt = 0;
+
+        if let Some(command) = pending_command.take() {
+            let daemon_command = command.into_daemon_command(session_id.clone());
+            let write_result = tokio::select! {
+                biased;
+                _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                result = async {
+                    daemon_writer
+                        .send_one_way(&daemon_command)
+                        .await
+                        .map_err(|error| error.to_string())
+                } => result,
+            };
+            if let Err(error) = write_result {
+                let message = format!(
+                    "terminal command write was ambiguous and will not be retried: {error}"
+                );
+                log::warn!("[ksp] {message} (session={session_id})");
+                tokio::select! {
+                    biased;
+                    _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                    _ = send_task_error(&frame_tx, &task_id, "daemon", message) => {}
+                }
+                if !terminal_control_retry_delay(retry_attempt, &mut cancel_rx).await {
+                    return;
+                }
+                retry_attempt += 1;
+                continue;
+            }
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                event = async {
+                    daemon_reader
+                        .read_event()
+                        .await
+                        .map_err(|error| error.to_string())
+                } => {
+                    match event {
+                        Ok(DaemonEvent::Error { message, .. }) => {
+                            tokio::select! {
+                                biased;
+                                _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                                _ = send_task_error(&frame_tx, &task_id, "daemon", message) => {}
+                            }
+                        }
+                        Ok(DaemonEvent::ShuttingDown) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                command = command_rx.recv() => {
+                    let Some(command) = command else {
+                        return;
+                    };
+                    let daemon_command = command.into_daemon_command(session_id.clone());
+                    let write_result = tokio::select! {
+                        biased;
+                        _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                        result = async {
+                            daemon_writer
+                                .send_one_way(&daemon_command)
+                                .await
+                                .map_err(|error| error.to_string())
+                        } => result,
+                    };
+                    if let Err(error) = write_result {
+                        let message = format!(
+                            "terminal command write was ambiguous and will not be retried: {error}"
+                        );
+                        log::warn!("[ksp] {message} (session={session_id})");
+                        tokio::select! {
+                            biased;
+                            _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                            _ = send_task_error(&frame_tx, &task_id, "daemon", message) => {}
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !terminal_control_retry_delay(retry_attempt, &mut cancel_rx).await {
+            return;
+        }
+        retry_attempt += 1;
+    }
+}
+
+async fn run_agent_commands(
+    state: Arc<AppState>,
+    mut command_rx: mpsc::Receiver<TaskAgentCommand>,
+    frame_tx: mpsc::Sender<ServerFrame>,
+) {
+    while let Some(TaskAgentCommand { task_id, command }) = command_rx.recv().await {
+        let session_id =
+            match resolve_task_session_id(state.config().db_path.clone(), task_id.clone()).await {
+                Ok(session_id) => session_id,
+                Err(message) => {
+                    send_task_error(&frame_tx, &task_id, "no_session", message).await;
+                    continue;
+                }
+            };
+        let daemon_command = command.into_daemon_command(session_id);
+        let result = async {
+            let mut client = DaemonClient::connect(&state.config().daemon_dir)
+                .await
+                .map_err(|error| format!("daemon error: {error}"))?;
+            client
+                .send_command(&daemon_command)
+                .await
+                .map_err(|error| format!("daemon error: {error}"))
+        }
+        .await;
+        match result {
+            Ok(DaemonEvent::Ok) => {}
+            Ok(DaemonEvent::Error { message, .. }) => {
+                send_task_error(&frame_tx, &task_id, "daemon", message).await;
+            }
+            Ok(other) => {
+                send_task_error(
+                    &frame_tx,
+                    &task_id,
+                    "daemon",
+                    format!("unexpected daemon reply: {other:?}"),
+                )
+                .await;
+            }
+            Err(message) => {
+                send_task_error(&frame_tx, &task_id, "daemon", message).await;
+            }
+        }
+    }
+}
+
+async fn dispatch_ksp_request(
+    state: Arc<AppState>,
+    frame_tx: mpsc::Sender<ServerFrame>,
+    request: KspRequest,
+) {
+    let KspRequest {
+        id,
+        method,
+        path,
+        body,
+    } = request;
+    let runtime = tokio::runtime::Handle::current();
+    let result = tokio::task::spawn_blocking(move || {
+        runtime.block_on(dispatch_http_invoke(
+            state,
+            &method,
+            &path,
+            body.unwrap_or(serde_json::Value::Null),
+        ))
+    })
+    .await;
+    let (status, body) = match result {
+        Ok(result) => {
+            let body = match result.error {
+                Some(error) => Some(serde_json::json!({ "error": error })),
+                None => result.body,
+            };
+            (result.status, body)
+        }
+        Err(error) => (
+            500,
+            Some(serde_json::json!({
+                "error": format!("KSP request worker failed: {error}")
+            })),
+        ),
+    };
+    let _ = frame_tx
+        .send(ServerFrame::Response { id, status, body })
+        .await;
+}
+
+async fn run_request_worker(
+    state: Arc<AppState>,
+    frame_tx: mpsc::Sender<ServerFrame>,
+    mut request_rx: mpsc::Receiver<KspRequest>,
+) {
+    let concurrency = request_concurrency();
+    let mut active = tokio::task::JoinSet::new();
+
+    loop {
+        if active.len() >= concurrency {
+            let _ = active.join_next().await;
+            continue;
+        }
+
+        tokio::select! {
+            request = request_rx.recv() => {
+                let Some(request) = request else {
+                    break;
+                };
+                active.spawn(dispatch_ksp_request(
+                    state.clone(),
+                    frame_tx.clone(),
+                    request,
+                ));
+            }
+            completed = active.join_next(), if !active.is_empty() => {
+                let _ = completed;
+            }
+        }
+    }
 }
 
 impl StreamConn {
@@ -236,56 +669,209 @@ impl StreamConn {
         .await;
     }
 
-    fn shutdown(&mut self) {
+    async fn shutdown(&mut self) {
         for (_, task) in self.attachments.drain() {
             task.abort();
         }
-    }
-
-    fn resolve_session_id(&self, task_id: &str) -> Result<String, String> {
-        Db::open(self.state.config().db_path.as_str())
-            .and_then(|db| db.resolve_task_terminal_session_id(task_id))
-            .map_err(|error| format!("db error: {error}"))?
-            .ok_or_else(|| format!("no session for task {task_id}"))
-    }
-
-    fn resolve_terminal_session_id(&self, task_id: &str) -> Result<String, String> {
-        if task_id.starts_with("shell-") {
-            return Ok(task_id.to_string());
+        let controls = self
+            .terminal_controls
+            .drain()
+            .map(|(_, control)| control)
+            .collect::<Vec<_>>();
+        for control in &controls {
+            let _ = control.cancel_tx.send(true);
         }
-        self.resolve_session_id(task_id)
+        for control in controls {
+            let _ = control.task.await;
+        }
+        if let Some(worker) = self.agent_commands.take() {
+            worker.task.abort();
+        }
+        if let Some(worker) = self.requests.take() {
+            worker.task.abort();
+        }
     }
 
-    /// One-shot daemon command over a fresh connection (unix-socket connects
-    /// are cheap and this avoids interleaving with attach streams).
-    async fn daemon_command(&self, cmd: DaemonCommand) -> Result<DaemonEvent, String> {
-        let mut client = DaemonClient::connect(&self.state.config().daemon_dir)
-            .await
-            .map_err(|error| format!("daemon error: {error}"))?;
-        client
-            .send_command(&cmd)
-            .await
-            .map_err(|error| format!("daemon error: {error}"))
+    async fn retire_terminal_control(control: TerminalControlHandle) {
+        let _ = control.cancel_tx.send(true);
+        let _ = control.task.await;
     }
 
-    async fn expect_ok(&self, task_id: &str, cmd: DaemonCommand) {
-        match self.daemon_command(cmd).await {
-            Ok(DaemonEvent::Ok) => {}
-            Ok(DaemonEvent::Error { message, .. }) => {
-                self.error(Some(task_id.to_string()), "daemon", message)
+    fn create_terminal_control(
+        &self,
+        task_id: String,
+        session_id: Option<String>,
+    ) -> TerminalControlHandle {
+        let (tx, command_rx) = mpsc::channel(TERMINAL_CONTROL_QUEUE_CAPACITY);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(run_terminal_control(
+            self.state.clone(),
+            task_id,
+            session_id.clone(),
+            command_rx,
+            cancel_rx,
+            self.frame_tx.clone(),
+        ));
+        TerminalControlHandle {
+            session_id,
+            tx,
+            cancel_tx,
+            task,
+        }
+    }
+
+    async fn replace_terminal_control_route(&mut self, task_id: &str, session_id: String) {
+        let route_matches = self
+            .terminal_controls
+            .get(task_id)
+            .is_some_and(|control| control.session_id.as_deref() == Some(session_id.as_str()));
+        if route_matches {
+            return;
+        }
+        if let Some(existing) = self.terminal_controls.remove(task_id) {
+            Self::retire_terminal_control(existing).await;
+        }
+        let control = self.create_terminal_control(task_id.to_string(), Some(session_id));
+        self.terminal_controls.insert(task_id.to_string(), control);
+    }
+
+    fn enqueue_terminal_control(&mut self, task_id: String, command: TerminalControlCommand) {
+        if !self.terminal_controls.contains_key(&task_id) {
+            let session_id = task_id.starts_with("shell-").then(|| task_id.to_string());
+            let control = self.create_terminal_control(task_id.clone(), session_id);
+            self.terminal_controls.insert(task_id.clone(), control);
+        }
+
+        let send_result = self
+            .terminal_controls
+            .get(&task_id)
+            .expect("terminal control inserted")
+            .tx
+            .try_send(command);
+        match send_result {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                let frame_tx = self.frame_tx.clone();
+                tokio::spawn(async move {
+                    send_task_error(
+                        &frame_tx,
+                        &task_id,
+                        "terminal_busy",
+                        "terminal input queue is full".to_string(),
+                    )
                     .await;
+                });
             }
-            Ok(other) => {
-                self.error(
-                    Some(task_id.to_string()),
-                    "daemon",
-                    format!("unexpected daemon reply: {other:?}"),
-                )
-                .await;
-            }
-            Err(message) => {
-                self.error(Some(task_id.to_string()), "daemon", message)
+            Err(TrySendError::Closed(_)) => {
+                if let Some(control) = self.terminal_controls.remove(&task_id) {
+                    let _ = control.cancel_tx.send(true);
+                    control.task.abort();
+                }
+                let frame_tx = self.frame_tx.clone();
+                tokio::spawn(async move {
+                    send_task_error(
+                        &frame_tx,
+                        &task_id,
+                        "daemon",
+                        "terminal control channel closed".to_string(),
+                    )
                     .await;
+                });
+            }
+        }
+    }
+
+    fn enqueue_agent_command(&mut self, task_id: String, command: AgentControlCommand) {
+        if self.agent_commands.is_none() {
+            let (tx, command_rx) = mpsc::channel(AGENT_COMMAND_QUEUE_CAPACITY);
+            let task = tokio::spawn(run_agent_commands(
+                self.state.clone(),
+                command_rx,
+                self.frame_tx.clone(),
+            ));
+            self.agent_commands = Some(AgentCommandWorker { tx, task });
+        }
+
+        let send_result = self
+            .agent_commands
+            .as_ref()
+            .expect("agent command worker initialized")
+            .tx
+            .try_send(TaskAgentCommand {
+                task_id: task_id.clone(),
+                command,
+            });
+        match send_result {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                let frame_tx = self.frame_tx.clone();
+                tokio::spawn(async move {
+                    send_task_error(
+                        &frame_tx,
+                        &task_id,
+                        "agent_busy",
+                        "agent command queue is full".to_string(),
+                    )
+                    .await;
+                });
+            }
+            Err(TrySendError::Closed(_)) => {
+                if let Some(worker) = self.agent_commands.take() {
+                    worker.task.abort();
+                }
+                let frame_tx = self.frame_tx.clone();
+                tokio::spawn(async move {
+                    send_task_error(
+                        &frame_tx,
+                        &task_id,
+                        "daemon",
+                        "agent command channel closed".to_string(),
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+
+    fn enqueue_request(&mut self, request: KspRequest) {
+        if self.requests.is_none() {
+            let (tx, request_rx) = mpsc::channel(REQUEST_QUEUE_CAPACITY);
+            let task = tokio::spawn(run_request_worker(
+                self.state.clone(),
+                self.frame_tx.clone(),
+                request_rx,
+            ));
+            self.requests = Some(RequestWorker { tx, task });
+        }
+
+        let send_result = self
+            .requests
+            .as_ref()
+            .expect("request worker initialized")
+            .tx
+            .try_send(request);
+        match send_result {
+            Ok(()) => {}
+            Err(TrySendError::Full(request)) => {
+                let _ = self.frame_tx.try_send(ServerFrame::Response {
+                    id: request.id,
+                    status: 503,
+                    body: Some(serde_json::json!({
+                        "error": "KSP request queue is full"
+                    })),
+                });
+            }
+            Err(TrySendError::Closed(request)) => {
+                if let Some(worker) = self.requests.take() {
+                    worker.task.abort();
+                }
+                let _ = self.frame_tx.try_send(ServerFrame::Response {
+                    id: request.id,
+                    status: 500,
+                    body: Some(serde_json::json!({
+                        "error": "KSP request worker is unavailable"
+                    })),
+                });
             }
         }
     }
@@ -315,53 +901,36 @@ impl StreamConn {
                 self.attach(task_id, kind, from_seq).await;
             }
             ClientFrame::Detach { task_id, kind } => {
-                if let Some(task) = self.attachments.remove(&(task_id, kind)) {
+                if let Some(task) = self.attachments.remove(&(task_id.clone(), kind)) {
                     task.abort();
                 }
-            }
-            ClientFrame::AgentInput { task_id, text } => match self.resolve_session_id(&task_id) {
-                Ok(session_id) => {
-                    self.expect_ok(&task_id, DaemonCommand::AgentInput { session_id, text })
-                        .await;
+                if kind == StreamKind::Terminal {
+                    if let Some(control) = self.terminal_controls.remove(&task_id) {
+                        Self::retire_terminal_control(control).await;
+                    }
                 }
-                Err(message) => self.error(Some(task_id), "no_session", message).await,
-            },
+            }
+            ClientFrame::AgentInput { task_id, text } => {
+                self.enqueue_agent_command(task_id, AgentControlCommand::Input(text));
+            }
             ClientFrame::AgentPermission {
                 task_id,
                 request_id,
                 decision,
-            } => match self.resolve_session_id(&task_id) {
-                Ok(session_id) => {
-                    self.expect_ok(
-                        &task_id,
-                        DaemonCommand::AgentPermission {
-                            session_id,
-                            request_id,
-                            decision,
-                        },
-                    )
-                    .await;
-                }
-                Err(message) => self.error(Some(task_id), "no_session", message).await,
-            },
-            ClientFrame::AgentInterrupt { task_id } => match self.resolve_session_id(&task_id) {
-                Ok(session_id) => {
-                    self.expect_ok(&task_id, DaemonCommand::AgentInterrupt { session_id })
-                        .await;
-                }
-                Err(message) => self.error(Some(task_id), "no_session", message).await,
-            },
+            } => {
+                self.enqueue_agent_command(
+                    task_id,
+                    AgentControlCommand::Permission {
+                        request_id,
+                        decision,
+                    },
+                );
+            }
+            ClientFrame::AgentInterrupt { task_id } => {
+                self.enqueue_agent_command(task_id, AgentControlCommand::Interrupt);
+            }
             ClientFrame::AgentSetModel { task_id, model } => {
-                match self.resolve_session_id(&task_id) {
-                    Ok(session_id) => {
-                        self.expect_ok(
-                            &task_id,
-                            DaemonCommand::AgentSetModel { session_id, model },
-                        )
-                        .await;
-                    }
-                    Err(message) => self.error(Some(task_id), "no_session", message).await,
-                }
+                self.enqueue_agent_command(task_id, AgentControlCommand::SetModel(model));
             }
             ClientFrame::TermInput { task_id, data_b64 } => {
                 let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
@@ -372,55 +941,26 @@ impl StreamConn {
                         return true;
                     }
                 };
-                match self.resolve_terminal_session_id(&task_id) {
-                    Ok(session_id) => {
-                        self.expect_ok(&task_id, DaemonCommand::Input { session_id, data })
-                            .await;
-                    }
-                    Err(message) => self.error(Some(task_id), "no_session", message).await,
-                }
+                self.enqueue_terminal_control(task_id, TerminalControlCommand::Input(data));
             }
             ClientFrame::TermResize {
                 task_id,
                 cols,
                 rows,
-            } => match self.resolve_terminal_session_id(&task_id) {
-                Ok(session_id) => {
-                    self.expect_ok(
-                        &task_id,
-                        DaemonCommand::Resize {
-                            session_id,
-                            cols,
-                            rows,
-                        },
-                    )
-                    .await;
-                }
-                Err(message) => self.error(Some(task_id), "no_session", message).await,
-            },
+            } => self
+                .enqueue_terminal_control(task_id, TerminalControlCommand::Resize { cols, rows }),
             ClientFrame::Request {
                 id,
                 method,
                 path,
                 body,
             } => {
-                let result = dispatch_http_invoke(
-                    self.state.clone(),
-                    &method,
-                    &path,
-                    body.unwrap_or(serde_json::Value::Null),
-                )
-                .await;
-                let body = match result.error {
-                    Some(error) => Some(serde_json::json!({ "error": error })),
-                    None => result.body,
-                };
-                self.send(ServerFrame::Response {
+                self.enqueue_request(KspRequest {
                     id,
-                    status: result.status,
+                    method,
+                    path,
                     body,
-                })
-                .await;
+                });
             }
         }
         true
@@ -474,16 +1014,24 @@ impl StreamConn {
     }
 
     async fn attach(&mut self, task_id: String, kind: StreamKind, from_seq: u64) {
-        let session_id = match match kind {
-            StreamKind::Agent => self.resolve_session_id(&task_id),
-            StreamKind::Terminal => self.resolve_terminal_session_id(&task_id),
-        } {
+        let session_id = match (kind, direct_terminal_session_id(&task_id)) {
+            (StreamKind::Terminal, Some(session_id)) => Ok(session_id),
+            _ => {
+                resolve_task_session_id(self.state.config().db_path.clone(), task_id.clone()).await
+            }
+        };
+        let session_id = match session_id {
             Ok(session_id) => session_id,
             Err(message) => {
                 self.error(Some(task_id), "no_session", message).await;
                 return;
             }
         };
+
+        if kind == StreamKind::Terminal {
+            self.replace_terminal_control_route(&task_id, session_id.clone())
+                .await;
+        }
 
         // Replace any existing attachment for this (task, kind).
         if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
@@ -959,6 +1507,245 @@ mod tests {
         })
     }
 
+    async fn spawn_fake_control_daemon(
+        daemon_dir: String,
+        command_count: usize,
+    ) -> (
+        tokio::task::JoinHandle<usize>,
+        mpsc::Receiver<DaemonCommand>,
+    ) {
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake control daemon socket");
+        let (command_tx, command_rx) = mpsc::channel(command_count);
+
+        let task = tokio::spawn(async move {
+            let mut accepted_connections = 0usize;
+            let mut received_commands = 0usize;
+            while received_commands < command_count {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept fake control daemon connection");
+                accepted_connections += 1;
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                loop {
+                    let mut line = String::new();
+                    let read = reader
+                        .read_line(&mut line)
+                        .await
+                        .expect("read fake control daemon command");
+                    if read == 0 {
+                        break;
+                    }
+                    let command: DaemonCommand = serde_json::from_str(line.trim())
+                        .expect("parse fake control daemon command");
+                    let expects_reply = !matches!(
+                        &command,
+                        DaemonCommand::InputNoReply { .. } | DaemonCommand::ResizeNoReply { .. }
+                    );
+                    command_tx
+                        .send(command)
+                        .await
+                        .expect("publish fake control daemon command");
+                    if expects_reply {
+                        write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .expect("write fake control daemon response");
+                    }
+                    received_commands += 1;
+                    if received_commands == command_count {
+                        return accepted_connections;
+                    }
+                }
+            }
+            accepted_connections
+        });
+
+        (task, command_rx)
+    }
+
+    async fn spawn_fake_control_daemon_with_disconnect(
+        daemon_dir: String,
+        command_count: usize,
+    ) -> (
+        tokio::task::JoinHandle<usize>,
+        mpsc::Receiver<DaemonCommand>,
+    ) {
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind reconnect daemon socket");
+        let (command_tx, command_rx) = mpsc::channel(command_count);
+
+        let task = tokio::spawn(async move {
+            for accepted in 1..=command_count {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept reconnect daemon connection");
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("read reconnect daemon command");
+                let command: DaemonCommand =
+                    serde_json::from_str(line.trim()).expect("parse reconnect daemon command");
+                let expects_reply = !matches!(
+                    &command,
+                    DaemonCommand::InputNoReply { .. } | DaemonCommand::ResizeNoReply { .. }
+                );
+                command_tx
+                    .send(command)
+                    .await
+                    .expect("publish reconnect daemon command");
+                if expects_reply {
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .expect("write reconnect daemon response");
+                }
+                if accepted == command_count {
+                    return accepted;
+                }
+                // Drop both halves so the persistent KSP control worker must
+                // reconnect before its next command.
+            }
+            command_count
+        });
+
+        (task, command_rx)
+    }
+
+    async fn spawn_fake_control_daemon_close_after_first_command(
+        daemon_dir: String,
+    ) -> (tokio::task::JoinHandle<()>, mpsc::Receiver<DaemonCommand>) {
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind close-after-input daemon");
+        let (command_tx, command_rx) = mpsc::channel(2);
+
+        let task = tokio::spawn(async move {
+            for connection_index in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept control connection");
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("read terminal input");
+                if line.is_empty() {
+                    return;
+                }
+                let command = serde_json::from_str(line.trim()).expect("parse terminal input");
+                command_tx
+                    .send(command)
+                    .await
+                    .expect("publish terminal input");
+                if connection_index == 1 {
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .expect("ack replayed command");
+                }
+                // The first connection deliberately closes after consuming
+                // input, before a success acknowledgement can be observed.
+            }
+        });
+
+        (task, command_rx)
+    }
+
+    async fn spawn_fake_control_daemon_without_success_replies(
+        daemon_dir: String,
+        command_count: usize,
+    ) -> (tokio::task::JoinHandle<()>, mpsc::Receiver<DaemonCommand>) {
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind no-ack control daemon");
+        let (command_tx, command_rx) = mpsc::channel(command_count);
+
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept control connection");
+            let mut reader = BufReader::new(stream);
+            for _ in 0..command_count {
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("read one-way terminal command");
+                if line.is_empty() {
+                    return;
+                }
+                let command = serde_json::from_str(line.trim()).expect("parse terminal command");
+                command_tx
+                    .send(command)
+                    .await
+                    .expect("publish terminal command");
+            }
+        });
+
+        (task, command_rx)
+    }
+
+    async fn spawn_fake_control_daemon_across_connections(
+        daemon_dir: String,
+    ) -> (tokio::task::JoinHandle<()>, mpsc::Receiver<DaemonCommand>) {
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind multi-control daemon");
+        let (command_tx, command_rx) = mpsc::channel(8);
+
+        let task = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept control connection");
+                let command_tx = command_tx.clone();
+                handlers.spawn(async move {
+                    let mut reader = BufReader::new(stream);
+                    loop {
+                        let mut line = String::new();
+                        let read = reader
+                            .read_line(&mut line)
+                            .await
+                            .expect("read terminal command");
+                        if read == 0 {
+                            return;
+                        }
+                        let command =
+                            serde_json::from_str(line.trim()).expect("parse terminal command");
+                        if command_tx.send(command).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        (task, command_rx)
+    }
+
+    fn assert_command(actual: Option<DaemonCommand>, expected: DaemonCommand) {
+        let actual = actual.expect("expected daemon command");
+        assert_eq!(
+            serde_json::to_value(actual).expect("serialize actual daemon command"),
+            serde_json::to_value(expected).expect("serialize expected daemon command"),
+        );
+    }
+
     async fn ws_connect(
         url: &str,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
@@ -1075,27 +1862,740 @@ mod tests {
 
     #[test]
     fn shell_terminal_ids_resolve_directly_to_daemon_sessions() {
-        let state = Arc::new(crate::http_api::AppState::new(test_config(
-            "ksp-shell-terminal",
-            "KSP Shell Terminal",
-        )));
-        let (frame_tx, _frame_rx) = mpsc::channel(1);
-        let conn = StreamConn {
+        assert_eq!(
+            direct_terminal_session_id("shell-wt-task-1"),
+            Some("shell-wt-task-1".to_string()),
+        );
+        assert_eq!(
+            direct_terminal_session_id("shell-repo-repo-1"),
+            Some("shell-repo-repo-1".to_string()),
+        );
+        assert_eq!(direct_terminal_session_id("task-1"), None);
+    }
+
+    #[tokio::test]
+    async fn terminal_control_reuses_one_connection_and_preserves_command_order() {
+        let unique = format!(
+            "ksp-terminal-control-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-terminal-control", "KSP Terminal Control");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 3).await;
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        let kitty_and_paste = b"\x1b[13;2u\x1b[200~paste\nbody\x1b[201~".to_vec();
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-control-test".into(),
+                data_b64: b64(&kitty_and_paste),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermResize {
+                task_id: "shell-control-test".into(),
+                cols: 137,
+                rows: 43,
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-control-test".into(),
+                data_b64: b64(b"tail"),
+            },
+        )
+        .await;
+
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "shell-control-test".into(),
+                data: kitty_and_paste,
+            },
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::ResizeNoReply {
+                session_id: "shell-control-test".into(),
+                cols: 137,
+                rows: 43,
+            },
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "shell-control-test".into(),
+                data: b"tail".to_vec(),
+            },
+        );
+        assert_eq!(daemon.await.expect("fake control daemon failed"), 1);
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_input_consumed_before_socket_close_is_not_replayed() {
+        let unique = format!(
+            "ksp-terminal-at-most-once-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-terminal-at-most-once", "KSP At Most Once");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) =
+            spawn_fake_control_daemon_close_after_first_command(config.daemon_dir.clone()).await;
+        let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-at-most-once".into(),
+                data_b64: b64(b"run-once\n"),
+            },
+        )
+        .await;
+
+        let first = commands.recv().await.expect("daemon did not consume input");
+        assert_eq!(
+            serde_json::to_value(first).unwrap()["data"],
+            serde_json::json!([114, 117, 110, 45, 111, 110, 99, 101, 10])
+        );
+        let replay =
+            tokio::time::timeout(std::time::Duration::from_millis(700), commands.recv()).await;
+        assert!(replay.is_err(), "ambiguous terminal input was replayed");
+
+        daemon.abort();
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn missing_input_ack_does_not_stall_later_terminal_commands() {
+        let unique = format!(
+            "ksp-terminal-no-ack-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-terminal-no-ack", "KSP No ACK");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) =
+            spawn_fake_control_daemon_without_success_replies(config.daemon_dir.clone(), 3).await;
+        let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        for frame in [
+            ClientFrame::TermInput {
+                task_id: "shell-no-ack".into(),
+                data_b64: b64(b"first"),
+            },
+            ClientFrame::TermResize {
+                task_id: "shell-no-ack".into(),
+                cols: 120,
+                rows: 40,
+            },
+            ClientFrame::TermInput {
+                task_id: "shell-no-ack".into(),
+                data_b64: b64(b"second"),
+            },
+        ] {
+            send_frame(&mut socket, &frame).await;
+        }
+
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            received.push(
+                tokio::time::timeout(std::time::Duration::from_millis(300), commands.recv())
+                    .await
+                    .expect("missing ACK stalled a later terminal command")
+                    .expect("fake daemon command channel closed"),
+            );
+        }
+        let received = received
+            .into_iter()
+            .map(|command| serde_json::to_value(command).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            received[0]["data"],
+            serde_json::json!([102, 105, 114, 115, 116])
+        );
+        assert_eq!(received[1]["cols"], 120);
+        assert_eq!(received[1]["rows"], 40);
+        assert_eq!(
+            received[2]["data"],
+            serde_json::json!([115, 101, 99, 111, 110, 100])
+        );
+
+        daemon.await.expect("no-ack daemon failed");
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_input_bypasses_blocked_ksp_request() {
+        let unique = format!(
+            "ksp-terminal-request-hol-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-terminal-request-hol", "KSP Request HOL");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 2).await;
+        let router = crate::http_api::router(Arc::new(AppState::new(config.clone())));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-request-hol".into(),
+                data_b64: b64(b"warm"),
+            },
+        )
+        .await;
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "shell-request-hol".into(),
+                data: b"warm".to_vec(),
+            },
+        );
+
+        let lock = rusqlite::Connection::open(&config.db_path).expect("open lock connection");
+        lock.execute_batch("BEGIN IMMEDIATE; UPDATE settings SET value = value;")
+            .expect("hold sqlite write lock");
+        send_frame(
+            &mut socket,
+            &ClientFrame::Request {
+                id: 71,
+                method: "PUT".into(),
+                path: "/v1/settings/terminalLatencyTest".into(),
+                body: Some(serde_json::json!({ "value": "busy" })),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-request-hol".into(),
+                data_b64: b64(b"responsive"),
+            },
+        )
+        .await;
+
+        let command_while_locked =
+            tokio::time::timeout(std::time::Duration::from_millis(300), commands.recv()).await;
+        lock.execute_batch("ROLLBACK")
+            .expect("release sqlite write lock");
+
+        assert_command(
+            command_while_locked.expect("terminal input was blocked behind KSP request"),
+            DaemonCommand::InputNoReply {
+                session_id: "shell-request-hol".into(),
+                data: b"responsive".to_vec(),
+            },
+        );
+        assert_eq!(daemon.await.expect("fake control daemon failed"), 1);
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_request_saturation_keeps_terminal_input_responsive() {
+        let unique = format!(
+            "ksp-request-saturation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-request-saturation", "KSP Request Saturation");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) =
+            spawn_fake_control_daemon_without_success_replies(config.daemon_dir.clone(), 1).await;
+        let url = serve_router(crate::http_api::router(Arc::new(AppState::new(
+            config.clone(),
+        ))))
+        .await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        let lock = rusqlite::Connection::open(&config.db_path).expect("open lock connection");
+        lock.execute_batch("BEGIN IMMEDIATE; UPDATE settings SET value = value;")
+            .expect("hold sqlite write lock");
+        for offset in 0..40u64 {
+            send_frame(
+                &mut socket,
+                &ClientFrame::Request {
+                    id: 10_000 + offset,
+                    method: "PUT".into(),
+                    path: format!("/v1/settings/requestSaturation{offset}"),
+                    body: Some(serde_json::json!({ "value": "busy" })),
+                },
+            )
+            .await;
+        }
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-request-saturation".into(),
+                data_b64: b64(b"responsive"),
+            },
+        )
+        .await;
+
+        let terminal_command =
+            tokio::time::timeout(std::time::Duration::from_millis(300), commands.recv()).await;
+        let overflow_response = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            recv_frame(&mut socket),
+        )
+        .await;
+        lock.execute_batch("ROLLBACK")
+            .expect("release sqlite write lock");
+
+        assert_command(
+            terminal_command.expect("request saturation delayed terminal input"),
+            DaemonCommand::InputNoReply {
+                session_id: "shell-request-saturation".into(),
+                data: b"responsive".to_vec(),
+            },
+        );
+        match overflow_response.expect("unbounded request dispatcher accepted every request") {
+            ServerFrame::Response { id, status, .. } => {
+                assert!((10_000..10_040).contains(&id));
+                assert_eq!(status, 503);
+            }
+            other => panic!("expected saturated request response, got {other:?}"),
+        }
+
+        daemon.await.expect("saturation daemon failed");
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_input_bypasses_agent_command_waiting_for_daemon_reply() {
+        let unique = format!(
+            "ksp-terminal-agent-hol-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-terminal-agent-hol", "KSP Agent HOL");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One")
+            .expect("insert repo");
+        db.insert_test_pipeline_item(
+            "task-agent-hol",
+            "repo-1",
+            "Agent command HOL",
+            None,
+            "in progress",
+            "2026-07-17T00:00:00Z",
+        )
+        .expect("insert task");
+        db.insert_test_terminal_session(
+            "terminal-agent-hol",
+            "repo-1",
+            "task-agent-hol",
+            "agent",
+            "daemon-agent-hol",
+        )
+        .expect("insert terminal session");
+        drop(db);
+
+        let socket_path = daemon_socket_path_for_dir(&config.daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind agent HOL daemon socket");
+        let (command_tx, mut command_rx) = mpsc::channel(2);
+        let release_agent = Arc::new(tokio::sync::Notify::new());
+        let daemon_release = release_agent.clone();
+        let daemon = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept daemon connection");
+                let command_tx = command_tx.clone();
+                let release_agent = daemon_release.clone();
+                handlers.spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let mut line = String::new();
+                    reader
+                        .read_line(&mut line)
+                        .await
+                        .expect("read daemon command");
+                    let command: DaemonCommand =
+                        serde_json::from_str(line.trim()).expect("parse daemon command");
+                    let hold_reply = matches!(command, DaemonCommand::AgentInterrupt { .. });
+                    command_tx
+                        .send(command)
+                        .await
+                        .expect("publish daemon command");
+                    if hold_reply {
+                        release_agent.notified().await;
+                    }
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .expect("write daemon response");
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentInterrupt {
+                task_id: "task-agent-hol".into(),
+            },
+        )
+        .await;
+        assert_command(
+            command_rx.recv().await,
+            DaemonCommand::AgentInterrupt {
+                session_id: "daemon-agent-hol".into(),
+            },
+        );
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-agent-hol".into(),
+                data_b64: b64(b"responsive"),
+            },
+        )
+        .await;
+        let input_while_agent_waited =
+            tokio::time::timeout(std::time::Duration::from_millis(300), command_rx.recv()).await;
+        release_agent.notify_waiters();
+
+        assert_command(
+            input_while_agent_waited.expect("terminal input waited for agent command reply"),
+            DaemonCommand::InputNoReply {
+                session_id: "shell-agent-hol".into(),
+                data: b"responsive".to_vec(),
+            },
+        );
+        daemon.await.expect("agent HOL daemon failed");
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_control_reconnects_after_daemon_socket_replacement() {
+        let unique = format!(
+            "ksp-terminal-control-reconnect-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config(
+            "ksp-terminal-control-reconnect",
+            "KSP Terminal Control Reconnect",
+        );
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) =
+            spawn_fake_control_daemon_with_disconnect(config.daemon_dir.clone(), 2).await;
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-control-reconnect".into(),
+                data_b64: b64(b"before"),
+            },
+        )
+        .await;
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "shell-control-reconnect".into(),
+                data: b"before".to_vec(),
+            },
+        );
+        // The first fake connection closes after consuming the command. Wait
+        // beyond the first reconnect delay, matching a real handoff where the
+        // replacement daemon is ready before the next keypress arrives.
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-control-reconnect".into(),
+                data_b64: b64(b"after"),
+            },
+        )
+        .await;
+        assert_command(
+            tokio::time::timeout(std::time::Duration::from_secs(2), commands.recv())
+                .await
+                .expect("control worker did not reconnect"),
+            DaemonCommand::InputNoReply {
+                session_id: "shell-control-reconnect".into(),
+                data: b"after".to_vec(),
+            },
+        );
+        assert_eq!(daemon.await.expect("reconnect daemon failed"), 2);
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_control_route_replacement_uses_the_new_session() {
+        let unique = format!(
+            "ksp-terminal-route-replacement-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config(
+            "ksp-terminal-route-replacement",
+            "KSP Terminal Route Replacement",
+        );
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 2).await;
+        let state = Arc::new(AppState::new(config));
+        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let mut conn = StreamConn {
             state,
             frame_tx,
             attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
             authed: true,
             auth_mode: AuthMode::AllowEmpty,
         };
 
-        assert_eq!(
-            conn.resolve_terminal_session_id("shell-wt-task-1"),
-            Ok("shell-wt-task-1".to_string()),
+        conn.replace_terminal_control_route("task-route", "daemon-session-old".into())
+            .await;
+        conn.enqueue_terminal_control(
+            "task-route".into(),
+            TerminalControlCommand::Input(b"old".to_vec()),
         );
-        assert_eq!(
-            conn.resolve_terminal_session_id("shell-repo-repo-1"),
-            Ok("shell-repo-repo-1".to_string()),
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "daemon-session-old".into(),
+                data: b"old".to_vec(),
+            },
         );
+
+        conn.replace_terminal_control_route("task-route", "daemon-session-new".into())
+            .await;
+        conn.enqueue_terminal_control(
+            "task-route".into(),
+            TerminalControlCommand::Input(b"new".to_vec()),
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "daemon-session-new".into(),
+                data: b"new".to_vec(),
+            },
+        );
+        assert_eq!(daemon.await.expect("route daemon failed"), 2);
+        conn.shutdown().await;
+
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn route_replacement_cancels_old_worker_during_reconnect_backoff() {
+        let unique = format!(
+            "ksp-terminal-cancel-backoff-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-terminal-cancel-backoff", "KSP Cancel Backoff");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let state = Arc::new(AppState::new(config.clone()));
+        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let mut conn = StreamConn {
+            state,
+            frame_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            authed: true,
+            auth_mode: AuthMode::AllowEmpty,
+        };
+
+        conn.replace_terminal_control_route("task-route", "daemon-session-old".into())
+            .await;
+        conn.enqueue_terminal_control(
+            "task-route".into(),
+            TerminalControlCommand::Input(b"stale".to_vec()),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        conn.replace_terminal_control_route("task-route", "daemon-session-new".into())
+            .await;
+        conn.enqueue_terminal_control(
+            "task-route".into(),
+            TerminalControlCommand::Input(b"fresh".to_vec()),
+        );
+        let (daemon, mut commands) =
+            spawn_fake_control_daemon_across_connections(config.daemon_dir.clone()).await;
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), commands.recv())
+            .await
+            .expect("replacement worker did not reconnect")
+            .expect("fake daemon closed before replacement input");
+        let first = serde_json::to_value(first).unwrap();
+        assert_eq!(first["session_id"], "daemon-session-new");
+        assert_eq!(first["data"], serde_json::json!([102, 114, 101, 115, 104]));
+
+        let stale =
+            tokio::time::timeout(std::time::Duration::from_millis(700), commands.recv()).await;
+        assert!(stale.is_err(), "cancelled worker delivered stale input");
+
+        daemon.abort();
+        conn.shutdown().await;
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_detach_drops_control_socket_resize_ownership() {
+        let state = Arc::new(AppState::new(test_config(
+            "ksp-terminal-detach-control",
+            "KSP Terminal Detach Control",
+        )));
+        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let mut conn = StreamConn {
+            state,
+            frame_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            authed: true,
+            auth_mode: AuthMode::AllowEmpty,
+        };
+        conn.replace_terminal_control_route("task-detach", "daemon-session-detach".into())
+            .await;
+        assert!(conn.terminal_controls.contains_key("task-detach"));
+
+        assert!(
+            conn.handle(ClientFrame::Detach {
+                task_id: "task-detach".into(),
+                kind: StreamKind::Terminal,
+            })
+            .await
+        );
+
+        assert!(!conn.terminal_controls.contains_key("task-detach"));
+        conn.shutdown().await;
     }
 
     #[tokio::test]
