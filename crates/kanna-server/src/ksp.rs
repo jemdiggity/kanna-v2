@@ -6,8 +6,9 @@
 //! Frame schema: `crates/kanna-agent-protocol/src/frames.rs` (TS mirrors in
 //! `packages/agent-protocol`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
@@ -19,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use kanna_agent_protocol::{
-    ClientFrame, FrameAgentEvent, PermissionDecision, ServerFrame, StreamKind,
+    ClientFrame, CompanionEvent, FrameAgentEvent, PermissionDecision, ServerFrame, StreamKind,
 };
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 
@@ -164,6 +165,7 @@ async fn handle_stream_channels(
         terminal_controls: HashMap::new(),
         agent_commands: None,
         requests: None,
+        companion_event_times: HashMap::new(),
         authed: false,
         auth_mode,
     };
@@ -227,6 +229,7 @@ struct StreamConn {
     terminal_controls: HashMap<String, TerminalControlHandle>,
     agent_commands: Option<AgentCommandWorker>,
     requests: Option<RequestWorker>,
+    companion_event_times: HashMap<(String, String), VecDeque<Instant>>,
     authed: bool,
     auth_mode: AuthMode,
 }
@@ -876,6 +879,101 @@ impl StreamConn {
         }
     }
 
+    async fn handle_companion_event(
+        &mut self,
+        task_id: String,
+        session_id: String,
+        revision: String,
+        event: CompanionEvent,
+    ) {
+        const EVENT_WINDOW: Duration = Duration::from_secs(10);
+        const MAX_EVENTS_PER_WINDOW: usize = 30;
+
+        let event_id = event.event_id.clone();
+        let key = (task_id.clone(), session_id.clone());
+        let now = Instant::now();
+        let recent = self.companion_event_times.entry(key.clone()).or_default();
+        while recent
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) >= EVENT_WINDOW)
+        {
+            recent.pop_front();
+        }
+        if recent.len() >= MAX_EVENTS_PER_WINDOW {
+            self.send(ServerFrame::CompanionEventResult {
+                task_id,
+                event_id,
+                accepted: false,
+                code: Some("companion_rate_limited".into()),
+                message: Some("Too many visual companion selections were sent.".into()),
+            })
+            .await;
+            return;
+        }
+
+        let db_path = self.state.config().db_path.clone();
+        let append_result = tokio::task::spawn_blocking(move || {
+            crate::visual_companion::append_event(
+                &db_path,
+                &task_id,
+                &session_id,
+                &revision,
+                &event,
+            )
+        })
+        .await;
+
+        let (task_id, result) = match append_result {
+            Ok(result) => (key.0.clone(), result),
+            Err(_) => (
+                key.0.clone(),
+                Err(crate::visual_companion::CompanionError::Internal(
+                    "visual companion event worker failed".into(),
+                )),
+            ),
+        };
+        match result {
+            Ok(()) => {
+                self.companion_event_times
+                    .entry(key)
+                    .or_default()
+                    .push_back(Instant::now());
+                self.send(ServerFrame::CompanionEventResult {
+                    task_id,
+                    event_id,
+                    accepted: true,
+                    code: None,
+                    message: None,
+                })
+                .await;
+            }
+            Err(error) => {
+                let (code, message) = match error {
+                    crate::visual_companion::CompanionError::StaleRevision => (
+                        "companion_stale_revision",
+                        "The visual companion changed before the selection arrived.",
+                    ),
+                    crate::visual_companion::CompanionError::InvalidEvent => (
+                        "companion_invalid_event",
+                        "The visual companion selection was invalid.",
+                    ),
+                    _ => (
+                        "companion_event_failed",
+                        "The visual companion selection could not be recorded.",
+                    ),
+                };
+                self.send(ServerFrame::CompanionEventResult {
+                    task_id,
+                    event_id,
+                    accepted: false,
+                    code: Some(code.into()),
+                    message: Some(message.into()),
+                })
+                .await;
+            }
+        }
+    }
+
     /// Returns false when the connection should close.
     async fn handle(&mut self, frame: ClientFrame) -> bool {
         if !self.authed {
@@ -949,6 +1047,15 @@ impl StreamConn {
                 rows,
             } => self
                 .enqueue_terminal_control(task_id, TerminalControlCommand::Resize { cols, rows }),
+            ClientFrame::CompanionEvent {
+                task_id,
+                session_id,
+                revision,
+                event,
+            } => {
+                self.handle_companion_event(task_id, session_id, revision, event)
+                    .await;
+            }
             ClientFrame::Request {
                 id,
                 method,
@@ -1014,6 +1121,22 @@ impl StreamConn {
     }
 
     async fn attach(&mut self, task_id: String, kind: StreamKind, from_seq: u64) {
+        // Replace any existing attachment for this (task, kind).
+        if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
+            existing.abort();
+        }
+
+        if kind == StreamKind::Companion {
+            let key = (task_id.clone(), kind);
+            let task = tokio::spawn(stream_companion(
+                self.state.config().db_path.clone(),
+                task_id,
+                self.frame_tx.clone(),
+            ));
+            self.attachments.insert(key, task);
+            return;
+        }
+
         let session_id = match (kind, direct_terminal_session_id(&task_id)) {
             (StreamKind::Terminal, Some(session_id)) => Ok(session_id),
             _ => {
@@ -1048,8 +1171,71 @@ impl StreamConn {
             StreamKind::Terminal => {
                 tokio::spawn(stream_terminal(daemon_dir, task_id, session_id, frame_tx))
             }
+            StreamKind::Companion => unreachable!("companion attach handled above"),
         };
         self.attachments.insert(key, task);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SentCompanionState {
+    Never,
+    Unavailable,
+    Snapshot {
+        session_id: String,
+        revision: String,
+    },
+    SourceError,
+}
+
+async fn stream_companion(db_path: String, task_id: String, frame_tx: mpsc::Sender<ServerFrame>) {
+    let mut sent = SentCompanionState::Never;
+    loop {
+        let scan_db_path = db_path.clone();
+        let scan_task_id = task_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::visual_companion::current_document(&scan_db_path, &scan_task_id)
+        })
+        .await;
+
+        let (next_state, frame) = match result {
+            Ok(Ok(Some(document))) => (
+                SentCompanionState::Snapshot {
+                    session_id: document.session_id.clone(),
+                    revision: document.revision.clone(),
+                },
+                ServerFrame::CompanionSnapshot {
+                    task_id: task_id.clone(),
+                    session_id: document.session_id,
+                    revision: document.revision,
+                    document_kind: document.document_kind,
+                    html: document.html,
+                },
+            ),
+            Ok(Ok(None)) => (
+                SentCompanionState::Unavailable,
+                ServerFrame::CompanionUnavailable {
+                    task_id: task_id.clone(),
+                },
+            ),
+            Ok(Err(_)) | Err(_) => (
+                SentCompanionState::SourceError,
+                ServerFrame::CompanionError {
+                    task_id: task_id.clone(),
+                    code: "companion_source_failed".into(),
+                    message: "The visual companion could not be read.".into(),
+                },
+            ),
+        };
+
+        if next_state != sent {
+            match frame_tx.try_send(frame) {
+                Ok(()) => sent = next_state,
+                Err(mpsc::error::TrySendError::Full(_)) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -1429,8 +1615,9 @@ async fn stream_terminal_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kanna_agent_protocol::{CompanionDocumentKind, CompanionEvent};
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
@@ -1784,6 +1971,457 @@ mod tests {
                 return serde_json::from_str(&text).expect("parse server frame");
             }
         }
+    }
+
+    async fn recv_frame_with_timeout(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        timeout: Duration,
+    ) -> Option<ServerFrame> {
+        let message = tokio::time::timeout(timeout, socket.next())
+            .await
+            .ok()??
+            .ok()?;
+        match message {
+            TungsteniteMessage::Text(text) => serde_json::from_str(&text).ok(),
+            _ => None,
+        }
+    }
+
+    struct KspCompanionFixture {
+        config: crate::config::Config,
+        db_path: PathBuf,
+        worktree: PathBuf,
+        temp_dir: tempfile::TempDir,
+    }
+
+    impl KspCompanionFixture {
+        fn new(label: &str) -> Self {
+            let temp_dir = tempfile::tempdir().expect("create KSP companion fixture");
+            let db_path = temp_dir.path().join("kanna.sqlite");
+            let worktree = temp_dir.path().join("worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            let unique = format!(
+                "ksp-companion-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let mut config = test_config(&unique, "KSP Companion");
+            config.db_path = db_path.to_string_lossy().to_string();
+            config.pairing_store_path = temp_dir
+                .path()
+                .join("pairings.json")
+                .to_string_lossy()
+                .to_string();
+            let db = Db::open_for_tests(&config.db_path).unwrap();
+            db.insert_test_repo_with_path("repo-1", temp_dir.path().to_str().unwrap(), "Repo One")
+                .unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Visual companion",
+                None,
+                "in progress",
+                "2026-07-17T00:00:00Z",
+            )
+            .unwrap();
+            db.upsert_worktree("wt-task-1", "task-1", worktree.to_str().unwrap(), "task-1")
+                .unwrap();
+            Self {
+                config,
+                db_path,
+                worktree,
+                temp_dir,
+            }
+        }
+
+        fn write(&self, relative: &str, bytes: &[u8]) {
+            let target = self.worktree.join(relative);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(target, bytes).unwrap();
+        }
+
+        fn activate(&self, session_id: &str, file_name: &str, html: &[u8]) {
+            self.write(
+                &format!(".superpowers/brainstorm/{session_id}/state/server-info"),
+                b"{}",
+            );
+            self.write(
+                &format!(".superpowers/brainstorm/{session_id}/content/{file_name}"),
+                html,
+            );
+        }
+
+        async fn serve(&self) -> String {
+            serve_router(crate::http_api::router(Arc::new(AppState::new(
+                self.config.clone(),
+            ))))
+            .await
+        }
+
+        fn event(event_id: &str) -> CompanionEvent {
+            CompanionEvent {
+                event_id: event_id.into(),
+                event_type: "click".into(),
+                choice: "a".into(),
+                text: "Option A".into(),
+                element_id: None,
+                timestamp: 1_784_268_000_000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_attach_streams_latest_transitions_and_detaches() {
+        let fixture = KspCompanionFixture::new("attach");
+        fixture.activate("123-456", "first.html", b"<h2>First</h2>");
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        let first_revision = match recv_frame(&mut socket).await {
+            ServerFrame::CompanionSnapshot {
+                task_id,
+                session_id,
+                revision,
+                document_kind,
+                html,
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(session_id, "123-456");
+                assert_eq!(document_kind, CompanionDocumentKind::Fragment);
+                assert_eq!(html, "<h2>First</h2>");
+                revision
+            }
+            other => panic!("expected companion snapshot, got {other:?}"),
+        };
+
+        std::thread::sleep(Duration::from_millis(15));
+        fixture.activate("123-456", "second.html", b"<h2>Second</h2>");
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionSnapshot { revision, html, .. } => {
+                assert_ne!(revision, first_revision);
+                assert_eq!(html, "<h2>Second</h2>");
+            }
+            other => panic!("expected updated companion snapshot, got {other:?}"),
+        }
+        assert_eq!(
+            recv_frame_with_timeout(&mut socket, Duration::from_millis(650)).await,
+            None,
+            "unchanged content must not produce duplicate snapshots"
+        );
+
+        let replacement = fixture.temp_dir.path().join("replacement");
+        std::fs::create_dir_all(&replacement).unwrap();
+        Db::open(fixture.db_path.to_str().unwrap())
+            .unwrap()
+            .upsert_worktree(
+                "wt-task-1",
+                "task-1",
+                replacement.to_str().unwrap(),
+                "replacement",
+            )
+            .unwrap();
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionUnavailable {
+                task_id: "task-1".into()
+            }
+        );
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::Detach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+            },
+        )
+        .await;
+        Db::open(fixture.db_path.to_str().unwrap())
+            .unwrap()
+            .upsert_worktree(
+                "wt-task-1",
+                "task-1",
+                fixture.worktree.to_str().unwrap(),
+                "task-1",
+            )
+            .unwrap();
+        assert_eq!(
+            recv_frame_with_timeout(&mut socket, Duration::from_millis(650)).await,
+            None,
+            "detached companions must stop sending updates"
+        );
+    }
+
+    #[tokio::test]
+    async fn companion_attach_reports_unavailable_and_source_errors_specifically() {
+        let fixture = KspCompanionFixture::new("unavailable");
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+            },
+        )
+        .await;
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionUnavailable {
+                task_id: "task-1".into()
+            }
+        );
+
+        fixture.activate("invalid", "layout.html", &[0xff, 0xfe]);
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionError { task_id, code, .. } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(code, "companion_source_failed");
+            }
+            other => panic!("expected task-scoped companion error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_events_acknowledge_append_validation_and_connection_rate_limit() {
+        let fixture = KspCompanionFixture::new("events");
+        fixture.activate(
+            "123-456",
+            "layout.html",
+            b"<button data-choice='a'>A</button>",
+        );
+        let document =
+            crate::visual_companion::current_document(fixture.db_path.to_str().unwrap(), "task-1")
+                .unwrap()
+                .unwrap();
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        let send_event = |event: CompanionEvent, session_id: String, revision: String| {
+            ClientFrame::CompanionEvent {
+                task_id: "task-1".into(),
+                session_id,
+                revision,
+                event,
+            }
+        };
+        send_frame(
+            &mut socket,
+            &send_event(
+                KspCompanionFixture::event("accepted"),
+                document.session_id.clone(),
+                document.revision.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionEventResult {
+                task_id: "task-1".into(),
+                event_id: "accepted".into(),
+                accepted: true,
+                code: None,
+                message: None,
+            }
+        );
+
+        send_frame(
+            &mut socket,
+            &send_event(
+                KspCompanionFixture::event("stale"),
+                document.session_id.clone(),
+                "old-revision".into(),
+            ),
+        )
+        .await;
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionEventResult {
+                event_id,
+                accepted,
+                code,
+                ..
+            } => {
+                assert_eq!(event_id, "stale");
+                assert!(!accepted);
+                assert_eq!(code.as_deref(), Some("companion_stale_revision"));
+            }
+            other => panic!("expected stale event result, got {other:?}"),
+        }
+
+        let mut invalid = KspCompanionFixture::event("invalid");
+        invalid.choice.clear();
+        send_frame(
+            &mut socket,
+            &send_event(
+                invalid,
+                document.session_id.clone(),
+                document.revision.clone(),
+            ),
+        )
+        .await;
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionEventResult { code, .. } => {
+                assert_eq!(code.as_deref(), Some("companion_invalid_event"));
+            }
+            other => panic!("expected invalid event result, got {other:?}"),
+        }
+
+        let mut rate_socket = ws_connect(&url).await;
+        send_frame(&mut rate_socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut rate_socket).await, ServerFrame::AuthOk);
+        for index in 0..30 {
+            let event_id = format!("rate-{index}");
+            send_frame(
+                &mut rate_socket,
+                &send_event(
+                    KspCompanionFixture::event(&event_id),
+                    document.session_id.clone(),
+                    document.revision.clone(),
+                ),
+            )
+            .await;
+            match recv_frame(&mut rate_socket).await {
+                ServerFrame::CompanionEventResult { accepted, .. } => assert!(accepted),
+                other => panic!("expected accepted rate event, got {other:?}"),
+            }
+        }
+        send_frame(
+            &mut rate_socket,
+            &send_event(
+                KspCompanionFixture::event("rate-limited"),
+                document.session_id,
+                document.revision,
+            ),
+        )
+        .await;
+        match recv_frame(&mut rate_socket).await {
+            ServerFrame::CompanionEventResult { accepted, code, .. } => {
+                assert!(!accepted);
+                assert_eq!(code.as_deref(), Some("companion_rate_limited"));
+            }
+            other => panic!("expected rate-limited result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn maximum_companion_scan_does_not_block_terminal_output_for_a_poll_interval() {
+        let mut fixture = KspCompanionFixture::new("terminal-responsive");
+        let mut html = vec![b'x'; crate::visual_companion::MAX_COMPANION_HTML_BYTES as usize];
+        html[..11].copy_from_slice(b"<h2>Busy</h");
+        fixture.activate("123-456", "layout.html", &html);
+
+        let daemon_dir = fixture.temp_dir.path().join("daemon");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        fixture.config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        let socket_path = daemon_socket_path_for_dir(&fixture.config.daemon_dir);
+        let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = daemon_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            assert!(matches!(command, DaemonCommand::AttachSnapshot { .. }));
+            let snapshot = DaemonEvent::Snapshot {
+                session_id: "daemon-terminal-1".into(),
+                snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                    version: 1,
+                    rows: 24,
+                    cols: 80,
+                    cursor_row: 0,
+                    cursor_col: 0,
+                    cursor_visible: true,
+                    saved_at: 0,
+                    sequence: 0,
+                    vt: String::new(),
+                },
+            };
+            let output = DaemonEvent::Output {
+                session_id: "daemon-terminal-1".into(),
+                data: b"responsive".to_vec(),
+            };
+            for event in [snapshot, output] {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        Db::open(fixture.db_path.to_str().unwrap())
+            .unwrap()
+            .insert_test_terminal_session(
+                "terminal-1",
+                "repo-1",
+                "task-1",
+                "agent",
+                "daemon-terminal-1",
+            )
+            .unwrap();
+
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Terminal,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(490);
+        let mut saw_output = false;
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let Some(frame) = recv_frame_with_timeout(&mut socket, remaining).await else {
+                break;
+            };
+            if matches!(frame, ServerFrame::TermOutput { .. }) {
+                saw_output = true;
+                break;
+            }
+        }
+        assert!(
+            saw_output,
+            "terminal output waited for a full companion polling interval"
+        );
+        daemon.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
     }
 
     #[tokio::test]
@@ -2492,6 +3130,7 @@ mod tests {
             terminal_controls: HashMap::new(),
             agent_commands: None,
             requests: None,
+            companion_event_times: HashMap::new(),
             authed: true,
             auth_mode: AuthMode::AllowEmpty,
         };
