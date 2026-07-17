@@ -161,3 +161,55 @@ The simulator-free coverage is:
   the prompt expand/end-sentinel/native-long-press/Copy/clipboard/normal-collapse/
   outside-dismiss/Back journey, plus the explicit failure message when WebView
   inspection is unavailable.
+
+## Terminal text selection coverage and Appium gap
+
+The terminal text-selection revision cannot currently drive the complete native
+gesture and OS clipboard journey deterministically in the simulator Appium lane.
+The lane can open a known live PTY task, inspect a WebView, and click native
+accessibility controls, but it has no controlled PTY fixture that guarantees a
+specific selectable line at a known buffer row. It also has no cross-context
+gesture helper: the current driver wrapper does not map an xterm buffer cell to
+native screen coordinates, switch back to `NATIVE_APP`, issue W3C double-tap and
+drag actions against the WKWebView, then return to the same WebView context to
+assert `term.getSelection()`. Without those two pieces, an Appium double tap can
+land on arbitrary changing TUI output and does not prove the selection gesture.
+
+The Copy/Cancel toolbar is native and therefore Appium-clickable once a selection
+exists, but the harness has no E2E-only controlled-selection fixture to make that
+toolbar appear without bypassing the gesture under test. It also has no verified
+iOS simulator clipboard helper. A complete boundary assertion needs a WebDriver
+or WDA clipboard adapter that reads and UTF-8-decodes the simulator pasteboard,
+handles platform permission/reset behavior, and compares the exact selected text
+after Copy. Inferring clipboard success only because the toolbar disappeared
+would not prove its contents.
+
+Making the journey deterministic requires all of the following:
+
+- a desktop/mobile-server fixture endpoint that publishes a synthetic PTY task
+  with fixed output, dimensions, and a unique selectable sentinel;
+- a cross-context Appium helper that locates that sentinel through xterm's public
+  buffer APIs, converts its cells through `.xterm-screen` geometry to native
+  coordinates, performs double-tap/drag actions, and re-inspects the selection;
+- a simulator pasteboard adapter for exact Copy assertions, plus native toolbar
+  checks that Cancel clears without changing the pasteboard and Copy clears only
+  after the clipboard write succeeds.
+
+The automated substitutes cover each narrower boundary without pretending to be
+that missing Appium journey:
+
+- `src/screens/buildTerminalDocument.test.ts` executes the full first-tap xterm
+  link activation, second tap, selection, and cooldown order. It proves a settled
+  single tap still opens Markdown while a double tap selects it and emits no
+  `terminal-file-link` message.
+- `tests/tui-fidelity/src/render.ts` repeats that sequence in Chromium with the
+  repository's real bundled xterm/link provider, then extends the range and
+  verifies ordinary scrolling returns after clear.
+- `src/screens/TerminalWebView.test.tsx` covers WebView `postMessage` to native
+  Copy/Cancel controls, exact `expo-clipboard` input, success/failure behavior,
+  duplicate Copy suppression, and stale success/failure across both task changes
+  and WebView reloads.
+
+Physical-device automation remains prohibited for this lane; human on-device
+review can supplement these checks but is not a substitute for the missing
+deterministic simulator fixture and helpers above.

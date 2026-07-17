@@ -182,6 +182,9 @@ importers:
       expo:
         specifier: ~57.0.6
         version: 57.0.6(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.3(react@19.2.3))(react-native-webview@13.16.1(react-native@0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3))(react@19.2.3))(react-native@0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3))(react@19.2.3)(typescript@5.8.3)
+      expo-clipboard:
+        specifier: ~57.0.1
+        version: 57.0.1(expo@57.0.6)(react-native@0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3))(react@19.2.3)
       expo-constants:
         specifier: 57.0.5
         version: 57.0.5(expo@57.0.6)(react-native@0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3))
@@ -4012,6 +4015,13 @@ packages:
 
   expo-asset@57.0.5:
     resolution: {integrity: sha512-vRwG+QvoW1u1vd6yY1oQ4f5doNGGpuCQHvzSY25eCNlQjNJtHJyjWcllzn1KdQ8aQc9TMMYedxeLoYZshSI7MA==}
+    peerDependencies:
+      expo: '*'
+      react: '*'
+      react-native: '*'
+
+  expo-clipboard@57.0.1:
+    resolution: {integrity: sha512-HWICri4+1ao7S6QEfcorxVumXDiDnx1guGGewjZgGJWLGxFYs0RgH8ujBs+lkTzBkMmlwADaWSlaesR+nDJt5Q==}
     peerDependencies:
       expo: '*'
       react: '*'
@@ -11809,6 +11819,12 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
       - typescript
+
+  expo-clipboard@57.0.1(expo@57.0.6)(react-native@0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3))(react@19.2.3):
+    dependencies:
+      expo: 57.0.6(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.3(react@19.2.3))(react-native-webview@13.16.1(react-native@0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3))(react@19.2.3))(react-native@0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3))(react@19.2.3)(typescript@5.8.3)
+      react: 19.2.3
+      react-native: 0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3)
 
   expo-constants@57.0.5(expo@57.0.6)(react-native@0.86.0(@babel/core@7.29.0)(@types/react@19.2.17)(react@19.2.3)):
     dependencies:

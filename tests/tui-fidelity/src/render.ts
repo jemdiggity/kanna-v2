@@ -32,6 +32,18 @@ interface MobileEasedScrollResult {
   samples: MobileScrollSample[];
 }
 
+interface MobileSelectionResult {
+  doubleTapFileLinkMessages: number;
+  initialSelection: string;
+  extendedSelection: string;
+  singleTapFileLinkMessages: number;
+  scrollTargetsDuringSelection: number[];
+  viewportYBeforeSelectionDrag: number;
+  viewportYAfterSelectionDrag: number;
+  viewportYBeforeOrdinaryDrag: number;
+  viewportYAfterOrdinaryDrag: number;
+}
+
 interface TerminalHookState {
   text?: string;
   chunksB64?: string[];
@@ -268,6 +280,223 @@ export async function verifyMobileEasedScrolling(browser: Browser): Promise<void
     }
     if (result.samples.some(({ terminalViewportScrollTop }) => terminalViewportScrollTop !== 0)) {
       throw new Error(`mobile eased scrolling mutated inert .xterm-viewport.scrollTop (${trace})`);
+    }
+  } finally {
+    try {
+      await page?.close();
+    } finally {
+      await context.close();
+    }
+  }
+}
+
+export async function verifyMobileTerminalSelection(browser: Browser): Promise<void> {
+  const context = await browser.newContext({
+    viewport: VIEWPORT,
+    hasTouch: true
+  });
+  let page: Page | null = null;
+  try {
+    page = await context.newPage();
+    await page.setContent(await buildInstrumentedMobileDocument(), { waitUntil: "load" });
+    await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
+    await page.evaluate((dims) => window.__setTerminalDims(dims), {
+      cols: MOBILE_SCROLL_COLS,
+      rows: MOBILE_SCROLL_ROWS
+    });
+
+    const lines = [
+      ...Array.from({ length: 60 }, (_, index) => `selection-scroll-${index + 1}`),
+      "alpha docs/selected.md omega",
+      ...Array.from({ length: 18 }, (_, index) => `selection-tail-${index + 1}`)
+    ].join("\r\n") + "\r\n";
+    await callHook(page, "__replaceTerminalState", { text: lines });
+    await page.waitForTimeout(120);
+    await page.addScriptTag({
+      content: "globalThis.__name = (target) => target;"
+    });
+
+    const result = await page.evaluate(async (): Promise<MobileSelectionResult> => {
+      const term = window.__kannaTerminals[0];
+      const screen = document.querySelector<HTMLElement>(".xterm-screen");
+      if (!term || !screen) {
+        throw new Error("mobile terminal selection elements were not available");
+      }
+      const terminalScreen = screen;
+
+      function touchAt(clientX: number, clientY: number) {
+        return {
+          identifier: 1,
+          target: terminalScreen,
+          clientX,
+          clientY,
+          pageX: clientX,
+          pageY: clientY,
+          screenX: clientX,
+          screenY: clientY,
+          radiusX: 1,
+          radiusY: 1,
+          rotationAngle: 0,
+          force: 1
+        };
+      }
+
+      function dispatchTouch(
+        type: "touchstart" | "touchmove" | "touchend",
+        touches: ReturnType<typeof touchAt>[],
+        changedTouches: ReturnType<typeof touchAt>[] = touches
+      ) {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        Object.defineProperties(event, {
+          touches: {
+            configurable: true,
+            value: Object.assign(touches, { item: Array.prototype.at })
+          },
+          targetTouches: {
+            configurable: true,
+            value: Object.assign(touches, { item: Array.prototype.at })
+          },
+          changedTouches: {
+            configurable: true,
+            value: Object.assign(changedTouches, { item: Array.prototype.at })
+          }
+        });
+        terminalScreen.dispatchEvent(event);
+      }
+
+      async function tap(clientX: number, clientY: number) {
+        const touch = touchAt(clientX, clientY);
+        dispatchTouch("touchstart", [touch]);
+        dispatchTouch("touchend", [], [touch]);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 20));
+      }
+
+      const buffer = term.buffer.active;
+      let targetRow = -1;
+      for (let row = 0; row <= buffer.baseY + term.rows; row += 1) {
+        if (
+          buffer.getLine(row)?.translateToString(true) ===
+          "alpha docs/selected.md omega"
+        ) {
+          targetRow = row;
+          break;
+        }
+      }
+      if (targetRow < 0) {
+        throw new Error("selection fixture row was not rendered");
+      }
+      term.scrollToLine(Math.max(0, targetRow - 8));
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
+
+      const rect = terminalScreen.getBoundingClientRect();
+      const cellWidth = rect.width / term.cols;
+      const cellHeight = rect.height / term.rows;
+      const visibleRow = targetRow - buffer.viewportY;
+      const selectedX = rect.left + cellWidth * 10.5;
+      const omegaX = rect.left + cellWidth * 27.5;
+      const lineY = rect.top + cellHeight * (visibleRow + 0.5);
+
+      const provider = window.__kannaTerminalLinkProviders[0];
+      if (!provider) {
+        throw new Error("selection fixture terminal link provider was not registered");
+      }
+      const links = await new Promise<Window["__kannaTerminalLinks"]>((resolve) => {
+        provider.provideLinks(targetRow + 1, resolve);
+      });
+      const markdownLink = links?.find((link) => link.text === "docs/selected.md");
+      if (!markdownLink) {
+        throw new Error("selection fixture Markdown link was not registered");
+      }
+
+      window.__kannaBridgeMessages.length = 0;
+      await tap(selectedX, lineY);
+      markdownLink.activate();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 320));
+      const singleTapFileLinkMessages = window.__kannaBridgeMessages.filter(
+        (message) => JSON.parse(message).type === "terminal-file-link"
+      ).length;
+
+      window.__kannaBridgeMessages.length = 0;
+      await tap(selectedX, lineY);
+      markdownLink.activate();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
+      await tap(selectedX, lineY);
+      markdownLink.activate();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 320));
+      const initialSelection = term.getSelection();
+      const doubleTapFileLinkMessages = window.__kannaBridgeMessages.filter(
+        (message) => JSON.parse(message).type === "terminal-file-link"
+      ).length;
+
+      const originalScrollToLine = term.scrollToLine.bind(term);
+      const scrollTargetsDuringSelection: number[] = [];
+      term.scrollToLine = (line: number) => {
+        scrollTargetsDuringSelection.push(line);
+        originalScrollToLine(line);
+      };
+      const viewportYBeforeSelectionDrag = buffer.viewportY;
+      const selectionStart = touchAt(selectedX, lineY);
+      const selectionEnd = touchAt(omegaX, lineY);
+      dispatchTouch("touchstart", [selectionStart]);
+      dispatchTouch("touchmove", [selectionEnd]);
+      dispatchTouch("touchend", [], [selectionEnd]);
+      const extendedSelection = term.getSelection();
+      const viewportYAfterSelectionDrag = buffer.viewportY;
+      const selectionScrollTargets = [...scrollTargetsDuringSelection];
+      term.scrollToLine = originalScrollToLine;
+
+      window.__clearTerminalSelection();
+      const viewportYBeforeOrdinaryDrag = buffer.viewportY;
+      const ordinaryStart = touchAt(rect.left + 220, rect.top + 160);
+      const ordinaryEnd = touchAt(rect.left + 224, rect.top + 340);
+      dispatchTouch("touchstart", [ordinaryStart]);
+      dispatchTouch("touchmove", [ordinaryEnd]);
+      dispatchTouch("touchend", [], [ordinaryEnd]);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 140));
+
+      return {
+        doubleTapFileLinkMessages,
+        initialSelection,
+        extendedSelection,
+        singleTapFileLinkMessages,
+        scrollTargetsDuringSelection: selectionScrollTargets,
+        viewportYBeforeSelectionDrag,
+        viewportYAfterSelectionDrag,
+        viewportYBeforeOrdinaryDrag,
+        viewportYAfterOrdinaryDrag: buffer.viewportY
+      };
+    });
+
+    if (result.singleTapFileLinkMessages !== 1) {
+      throw new Error(
+        `mobile single tap emitted ${result.singleTapFileLinkMessages} terminal file links`
+      );
+    }
+    if (result.doubleTapFileLinkMessages !== 0) {
+      throw new Error(
+        `mobile double tap emitted ${result.doubleTapFileLinkMessages} terminal file links`
+      );
+    }
+    if (result.initialSelection !== "docs/selected.md") {
+      throw new Error(
+        `mobile selection chose ${JSON.stringify(result.initialSelection)}`
+      );
+    }
+    if (!result.extendedSelection.includes("docs/selected.md omega")) {
+      throw new Error(
+        `mobile selection did not extend (${JSON.stringify(result.extendedSelection)})`
+      );
+    }
+    if (result.scrollTargetsDuringSelection.length !== 0) {
+      throw new Error(
+        `mobile selection drag requested scroll targets ` +
+        `${JSON.stringify(result.scrollTargetsDuringSelection)} ` +
+        `(viewport ${result.viewportYBeforeSelectionDrag} -> ` +
+        `${result.viewportYAfterSelectionDrag})`
+      );
+    }
+    if (result.viewportYAfterOrdinaryDrag === result.viewportYBeforeOrdinaryDrag) {
+      throw new Error("ordinary terminal drag stopped scrolling after selection clear");
     }
   } finally {
     try {
@@ -539,8 +768,15 @@ function formatMobileEasedScrollResult(result: MobileEasedScrollResult): string 
 
 function terminalProbeScript(): string {
   return `
+    window.__kannaBridgeMessages = [];
+    window.__kannaTerminalLinkProviders = [];
     window.__kannaTerminals = [];
     window.__kannaPendingWrites = 0;
+    window.ReactNativeWebView = {
+      postMessage(message) {
+        window.__kannaBridgeMessages.push(message);
+      }
+    };
     (function installTerminalProbe() {
       let actualTerminal = undefined;
       Object.defineProperty(window, "Terminal", {
@@ -563,6 +799,11 @@ function terminalProbeScript(): string {
                   window.__kannaPendingWrites -= 1;
                 }
               });
+            };
+            const originalRegisterLinkProvider = term.registerLinkProvider.bind(term);
+            term.registerLinkProvider = function patchedRegisterLinkProvider(provider) {
+              window.__kannaTerminalLinkProviders.push(provider);
+              return originalRegisterLinkProvider(provider);
             };
             window.__kannaTerminals.push(term);
             return term;
@@ -608,10 +849,22 @@ declare global {
       SerializeAddon: new () => { serialize: () => string };
     };
     __appendTerminalChunk: (state: TerminalHookState) => void;
+    __clearTerminalSelection: () => void;
     __replaceTerminalState: (state: TerminalHookState) => void;
     __setTerminalBottomInset: (state: { bottomInset: number }) => void;
     __setTerminalDims: (dims: { cols: number; rows: number }) => void;
     __kannaPendingWrites: number;
+    __kannaBridgeMessages: string[];
+    __kannaTerminalLinks: Array<{
+      activate: () => void;
+      text: string;
+    }> | undefined;
+    __kannaTerminalLinkProviders: Array<{
+      provideLinks: (
+        bufferLineNumber: number,
+        callback: (links: Window["__kannaTerminalLinks"]) => void
+      ) => void;
+    }>;
     __kannaScrollToLineTarget: number | undefined;
     __kannaSerializeAddon: { serialize: () => string };
     __kannaColorValue: (
@@ -674,6 +927,9 @@ declare global {
         };
       };
       loadAddon: (addon: { serialize: () => string }) => void;
+      clearSelection: () => void;
+      getSelection: () => string;
+      select: (column: number, row: number, length: number) => void;
       scrollToLine: (line: number) => void;
       write: (text: string | Uint8Array, callback?: () => void) => void;
     }>;

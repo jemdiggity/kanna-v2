@@ -195,6 +195,8 @@ export function buildTerminalDocument({
       const MAX_DISCOVERABLE_FILE_LINKS = 6;
       const MAX_FILE_LINK_SCAN_ROWS = 200;
       const FILE_LINK_GESTURE_COOLDOWN_MS = 450;
+      const DOUBLE_TAP_MAX_DELAY_MS = 300;
+      const DOUBLE_TAP_MAX_DISTANCE_PX = 24;
       const term = new TerminalCtor({
         cols: TERMINAL_COLS,
         fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
@@ -238,11 +240,26 @@ export function buildTerminalDocument({
       let pinch = null;
       let touchGestureMoved = false;
       let suppressFileLinkActivationUntil = 0;
+      let pendingFileLinkActivationTimer = null;
+      let lastTap = null;
+      let selectionAnchor = null;
+      let selectionMode = false;
 
       term.loadAddon(fitAddon);
       term.open(root);
       term.onScroll(() => {
-        stickyToBottom = isNearBottom();
+        if (!selectionMode) {
+          stickyToBottom = isNearBottom();
+        }
+      });
+      term.onSelectionChange(() => {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: "terminal-selection-change",
+          text: term.getSelection()
+        }));
       });
 
       const terminalFilePathRegex = new RegExp(
@@ -284,7 +301,16 @@ export function buildTerminalDocument({
         window.ReactNativeWebView.postMessage(JSON.stringify(message));
       }
 
+      function cancelPendingTerminalFileLinkActivation() {
+        if (pendingFileLinkActivationTimer === null) {
+          return;
+        }
+        window.clearTimeout(pendingFileLinkActivationTimer);
+        pendingFileLinkActivationTimer = null;
+      }
+
       function suppressTerminalFileLinkActivation() {
+        cancelPendingTerminalFileLinkActivation();
         suppressFileLinkActivationUntil = Math.max(
           suppressFileLinkActivationUntil,
           Date.now() + FILE_LINK_GESTURE_COOLDOWN_MS
@@ -292,8 +318,23 @@ export function buildTerminalDocument({
       }
 
       function activateTerminalFileLink(path, line) {
-        if (Date.now() < suppressFileLinkActivationUntil) {
+        const now = Date.now();
+        if (now < suppressFileLinkActivationUntil) {
           return false;
+        }
+        const elapsedSinceTap = lastTap ? now - lastTap.at : -1;
+        if (
+          elapsedSinceTap >= 0 &&
+          elapsedSinceTap <= DOUBLE_TAP_MAX_DELAY_MS
+        ) {
+          cancelPendingTerminalFileLinkActivation();
+          pendingFileLinkActivationTimer = window.setTimeout(() => {
+            pendingFileLinkActivationTimer = null;
+            if (Date.now() >= suppressFileLinkActivationUntil) {
+              notifyTerminalFileLink(path, line);
+            }
+          }, DOUBLE_TAP_MAX_DELAY_MS - elapsedSinceTap);
+          return true;
         }
         notifyTerminalFileLink(path, line);
         return true;
@@ -440,6 +481,174 @@ export function buildTerminalDocument({
         return { width: 8, height: 17 };
       }
 
+      function terminalPoint(touch) {
+        const screen = root.querySelector(".xterm-screen");
+        if (!screen || !touch) {
+          return null;
+        }
+        const rect = screen.getBoundingClientRect();
+        const { width, height } = cellDimensions();
+        if (
+          width <= 0 ||
+          height <= 0 ||
+          touch.clientX < rect.left ||
+          touch.clientX >= rect.right ||
+          touch.clientY < rect.top ||
+          touch.clientY >= rect.bottom
+        ) {
+          return null;
+        }
+        const column = Math.floor(clamp(
+          (touch.clientX - rect.left) / width,
+          0,
+          term.cols - 1
+        ));
+        const viewportRow = Math.floor(clamp(
+          (touch.clientY - rect.top) / height,
+          0,
+          term.rows - 1
+        ));
+        const row = Math.floor(clamp(
+          term.buffer.active.viewportY + viewportRow,
+          0,
+          Math.max(0, term.buffer.active.length - 1)
+        ));
+        return { column, row };
+      }
+
+      function terminalCellSegments(line) {
+        const segments = [];
+        for (let column = 0; column < line.length; column += 1) {
+          const cell = line.getCell(column);
+          if (!cell || cell.getWidth() === 0) {
+            continue;
+          }
+          segments.push({
+            start: column,
+            end: column + Math.max(1, cell.getWidth()),
+            text: cell.getChars() || " "
+          });
+        }
+        return segments;
+      }
+
+      function isWordSegment(segment) {
+        const separators =
+          term.options.wordSeparator || " ()[]{}',\\\"" + String.fromCharCode(96);
+        return Array.from(segment.text).some(
+          (character) => !/\\s/u.test(character) && !separators.includes(character)
+        );
+      }
+
+      function terminalWordRange(point) {
+        const line = term.buffer.active.getLine(point.row);
+        if (!line) {
+          return null;
+        }
+        const segments = terminalCellSegments(line);
+        const tappedIndex = segments.findIndex(
+          (segment) => point.column >= segment.start && point.column < segment.end
+        );
+        if (tappedIndex < 0) {
+          return null;
+        }
+
+        let first = tappedIndex;
+        let last = tappedIndex;
+        if (isWordSegment(segments[tappedIndex])) {
+          while (first > 0 && isWordSegment(segments[first - 1])) {
+            first -= 1;
+          }
+          while (last + 1 < segments.length && isWordSegment(segments[last + 1])) {
+            last += 1;
+          }
+        }
+        return {
+          start: { row: point.row, column: segments[first].start },
+          end: { row: point.row, column: segments[last].end }
+        };
+      }
+
+      function compareTerminalPoints(left, right) {
+        return left.row === right.row
+          ? left.column - right.column
+          : left.row - right.row;
+      }
+
+      function selectTerminalRange(start, end) {
+        const orderedStart = compareTerminalPoints(start, end) <= 0 ? start : end;
+        const orderedEnd = compareTerminalPoints(start, end) <= 0 ? end : start;
+        const length =
+          (orderedEnd.row - orderedStart.row) * term.cols +
+          orderedEnd.column - orderedStart.column;
+        term.select(
+          orderedStart.column,
+          orderedStart.row,
+          Math.max(1, length)
+        );
+      }
+
+      function clearTerminalSelection() {
+        const hadSelection = selectionMode || Boolean(term.getSelection());
+        cancelPendingTerminalFileLinkActivation();
+        selectionMode = false;
+        selectionAnchor = null;
+        lastTap = null;
+        if (hadSelection) {
+          term.clearSelection();
+        }
+        stickyToBottom = isNearBottom();
+      }
+
+      window.__clearTerminalSelection = clearTerminalSelection;
+
+      function isTerminalControlTarget(target) {
+        return Boolean(
+          target &&
+          typeof target.closest === "function" &&
+          target.closest(".terminal-file-links")
+        );
+      }
+
+      function registerSettledTap(touch) {
+        const point = terminalPoint(touch);
+        if (!point) {
+          lastTap = null;
+          return false;
+        }
+        const now = Date.now();
+        if (lastTap) {
+          const elapsed = now - lastTap.at;
+          const distance = Math.hypot(
+            touch.clientX - lastTap.x,
+            touch.clientY - lastTap.y
+          );
+          if (
+            elapsed >= 0 &&
+            elapsed <= DOUBLE_TAP_MAX_DELAY_MS &&
+            distance <= DOUBLE_TAP_MAX_DISTANCE_PX
+          ) {
+            const range = terminalWordRange(point);
+            lastTap = null;
+            if (!range) {
+              return false;
+            }
+            selectionAnchor = range;
+            selectionMode = true;
+            stickyToBottom = false;
+            suppressTerminalFileLinkActivation();
+            selectTerminalRange(range.start, range.end);
+            return true;
+          }
+        }
+        lastTap = {
+          at: now,
+          x: touch.clientX,
+          y: touch.clientY
+        };
+        return false;
+      }
+
       function alignViewportToSafeRegion() {
         viewport.scrollTop = Math.max(
           0,
@@ -474,7 +683,7 @@ export function buildTerminalDocument({
         if (!dims || !dims.cols || !dims.rows) {
           return;
         }
-        const shouldStick = stickyToBottom || isNearBottom();
+        const shouldStick = shouldFollowTerminalBottom();
         pinnedCols = dims.cols;
         pinnedRows = dims.rows;
         try {
@@ -495,7 +704,7 @@ export function buildTerminalDocument({
         if (!Number.isFinite(nextBottomInset)) {
           return;
         }
-        const shouldStick = stickyToBottom || isNearBottom();
+        const shouldStick = shouldFollowTerminalBottom();
         bottomInset = Math.max(0, Math.ceil(nextBottomInset));
         applyBottomInset();
         fitTerminal();
@@ -555,7 +764,7 @@ export function buildTerminalDocument({
       }
 
       function applyFontScale(nextScale) {
-        const shouldStick = stickyToBottom || isNearBottom();
+        const shouldStick = shouldFollowTerminalBottom();
         fontScale = clamp(nextScale, MIN_FONT_SCALE, MAX_FONT_SCALE);
         term.options.fontSize = Math.round(BASE_FONT_SIZE * fontScale);
         root.dataset.kannaFontScale = fontScale.toFixed(2);
@@ -568,7 +777,19 @@ export function buildTerminalDocument({
 
       function installPinchZoomFallback() {
         viewport.addEventListener("touchstart", (event) => {
+          if (selectionMode) {
+            lastTap = null;
+            pinch = null;
+            touchScroll = null;
+            touchGestureMoved = event.touches.length !== 1;
+            if (touchGestureMoved) {
+              suppressTerminalFileLinkActivation();
+            }
+            return;
+          }
+
           if (event.touches.length === 2) {
+            lastTap = null;
             touchGestureMoved = true;
             suppressTerminalFileLinkActivation();
             pinch = {
@@ -580,6 +801,7 @@ export function buildTerminalDocument({
           }
 
           if (event.touches.length !== 1) {
+            lastTap = null;
             touchScroll = null;
             pinch = null;
             touchGestureMoved = true;
@@ -599,7 +821,38 @@ export function buildTerminalDocument({
         }, { passive: true, capture: true });
 
         viewport.addEventListener("touchmove", (event) => {
+          if (selectionMode) {
+            if (event.touches.length === 1 && selectionAnchor) {
+              const point = terminalPoint(event.touches[0]);
+              if (!point) {
+                return;
+              }
+              let start = selectionAnchor.start;
+              let end = selectionAnchor.end;
+              if (compareTerminalPoints(point, selectionAnchor.start) < 0) {
+                start = point;
+              } else if (compareTerminalPoints(point, selectionAnchor.end) >= 0) {
+                end = {
+                  row: point.row,
+                  column: Math.min(term.cols, point.column + 1)
+                };
+              }
+              selectTerminalRange(start, end);
+              touchGestureMoved = true;
+              suppressTerminalFileLinkActivation();
+            } else {
+              touchGestureMoved = true;
+              suppressTerminalFileLinkActivation();
+            }
+            if (event.cancelable) {
+              event.preventDefault();
+            }
+            event.stopPropagation();
+            return;
+          }
+
           if (event.touches.length === 2 && pinch) {
+            lastTap = null;
             touchGestureMoved = true;
             suppressTerminalFileLinkActivation();
             const distance = touchDistance(event.touches);
@@ -627,6 +880,7 @@ export function buildTerminalDocument({
           }
 
           touchGestureMoved = true;
+          lastTap = null;
           suppressTerminalFileLinkActivation();
 
           if (touchScroll.axis === null) {
@@ -652,6 +906,9 @@ export function buildTerminalDocument({
         }, { passive: false, capture: true });
 
         viewport.addEventListener("touchend", (event) => {
+          const completedPinch = Boolean(pinch);
+          const completedMove = touchGestureMoved;
+          const endingTouch = event.changedTouches && event.changedTouches[0];
           if (pinch || touchGestureMoved) {
             suppressTerminalFileLinkActivation();
           }
@@ -662,12 +919,27 @@ export function buildTerminalDocument({
             touchScroll = null;
             touchGestureMoved = false;
           }
-        }, { passive: true, capture: true });
+          if (
+            event.touches.length === 0 &&
+            !selectionMode &&
+            !completedPinch &&
+            !completedMove &&
+            !isTerminalControlTarget(event.target) &&
+            endingTouch &&
+            registerSettledTap(endingTouch)
+          ) {
+            if (event.cancelable) {
+              event.preventDefault();
+            }
+            event.stopPropagation();
+          }
+        }, { passive: false, capture: true });
 
         viewport.addEventListener("touchcancel", () => {
           touchScroll = null;
           pinch = null;
           touchGestureMoved = false;
+          lastTap = null;
           suppressTerminalFileLinkActivation();
         }, { passive: true, capture: true });
       }
@@ -681,6 +953,10 @@ export function buildTerminalDocument({
         return distanceInRows * cellDimensions().height <= 24;
       }
 
+      function shouldFollowTerminalBottom() {
+        return !selectionMode && (stickyToBottom || isNearBottom());
+      }
+
       applyBottomInset();
 
       requestAnimationFrame(() => {
@@ -692,7 +968,7 @@ export function buildTerminalDocument({
       });
 
       window.addEventListener("resize", () => {
-        const shouldStick = stickyToBottom || isNearBottom();
+        const shouldStick = shouldFollowTerminalBottom();
         fitTerminal();
         stickyToBottom = shouldStick;
         if (shouldStick) {
@@ -702,9 +978,9 @@ export function buildTerminalDocument({
       });
 
       function finalizeRender(shouldStick) {
-        stickyToBottom = shouldStick;
+        stickyToBottom = selectionMode ? false : shouldStick;
 
-        if (shouldStick) {
+        if (stickyToBottom) {
           scrollToBottomImmediately();
         }
         scheduleViewportAlignment();
@@ -879,7 +1155,8 @@ export function buildTerminalDocument({
       }
 
       window.__replaceTerminalState = function replaceTerminalState(state) {
-        const shouldStick = stickyToBottom || isNearBottom();
+        clearTerminalSelection();
+        const shouldStick = shouldFollowTerminalBottom();
         term.reset();
         ${enableE2EInspection ? "resetTerminalFrameDiagnostics();" : ""}
         fitTerminal();
@@ -899,7 +1176,7 @@ export function buildTerminalDocument({
           return;
         }
 
-        const shouldStick = stickyToBottom || isNearBottom();
+        const shouldStick = shouldFollowTerminalBottom();
         writeTerminalChunks(state.chunksB64, () => {
           fitTerminal();
           finalizeRender(shouldStick);

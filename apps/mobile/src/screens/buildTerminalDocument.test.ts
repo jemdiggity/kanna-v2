@@ -1,5 +1,5 @@
 import { Window } from "happy-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildTerminalAppendScript,
   buildTerminalDocument,
@@ -97,6 +97,9 @@ class StubTerminal {
   scrollToLineCalls: number[] = [];
   writes: unknown[] = [];
   resets = 0;
+  selection = "";
+  selectionCalls: Array<{ column: number; row: number; length: number }> = [];
+  clearSelectionCalls = 0;
   dimensions = {
     css: {
       canvas: { width: 1980, height: 774 },
@@ -109,6 +112,7 @@ class StubTerminal {
     }
   };
   private scrollListeners: Array<(viewportY: number) => void> = [];
+  private selectionListeners: Array<() => void> = [];
 
   constructor(options: {
     cols: number;
@@ -167,6 +171,43 @@ class StubTerminal {
         );
       }
     };
+  }
+
+  onSelectionChange(listener: () => void): { dispose(): void } {
+    this.selectionListeners.push(listener);
+    return {
+      dispose: () => {
+        this.selectionListeners = this.selectionListeners.filter(
+          (candidate) => candidate !== listener
+        );
+      }
+    };
+  }
+
+  select(column: number, row: number, length: number): void {
+    this.selectionCalls.push({ column, row, length });
+    const endOffset = column + length;
+    const endRow = row + Math.floor(endOffset / this.cols);
+    const endColumn = endOffset % this.cols;
+    const selectedLines: string[] = [];
+    for (let lineIndex = row; lineIndex <= endRow; lineIndex += 1) {
+      const line = this.bufferLines.get(lineIndex) ?? "";
+      const start = lineIndex === row ? column : 0;
+      const end = lineIndex === endRow ? endColumn : line.length;
+      selectedLines.push(line.slice(start, end).trimEnd());
+    }
+    this.selection = selectedLines.join("\n");
+    for (const listener of this.selectionListeners) listener();
+  }
+
+  getSelection(): string {
+    return this.selection;
+  }
+
+  clearSelection(): void {
+    this.clearSelectionCalls += 1;
+    this.selection = "";
+    for (const listener of this.selectionListeners) listener();
   }
 
   resize(cols: number, rows: number): void {
@@ -275,14 +316,62 @@ function createTouchEvent(
   window: Window,
   type: string,
   touches: TouchPoint[],
-  options: EventInit = { bubbles: true, cancelable: true }
+  options: EventInit = { bubbles: true, cancelable: true },
+  changedTouches: TouchPoint[] = touches
 ): Event {
   const event = new window.Event(type, options);
-  Object.defineProperty(event, "touches", {
-    configurable: true,
-    value: touches
+  Object.defineProperties(event, {
+    touches: {
+      configurable: true,
+      value: touches
+    },
+    changedTouches: {
+      configurable: true,
+      value: changedTouches
+    }
   });
   return event;
+}
+
+function tapTerminal(
+  window: Window,
+  viewport: HTMLElement,
+  point: TouchPoint,
+  at: number
+): void {
+  tapElement(window, viewport, point, at);
+}
+
+function tapElement(
+  window: Window,
+  target: HTMLElement,
+  point: TouchPoint,
+  at: number
+): void {
+  const windowDate = (window as unknown as { Date: DateConstructor }).Date;
+  const now = vi.spyOn(windowDate, "now").mockReturnValue(at);
+  try {
+    target.dispatchEvent(createTouchEvent(window, "touchstart", [point]));
+    target.dispatchEvent(
+      createTouchEvent(window, "touchend", [], undefined, [point])
+    );
+  } finally {
+    now.mockRestore();
+  }
+}
+
+function activateLinkAt(
+  window: Window,
+  link: StubTerminalLink,
+  at: number
+): void {
+  const windowDate = (window as unknown as { Date: DateConstructor }).Date;
+  const now = vi.spyOn(windowDate, "now").mockReturnValue(at);
+  try {
+    link.activate();
+  } finally {
+    now.mockRestore();
+  }
 }
 
 function extractTerminalScript(html: string): string {
@@ -666,6 +755,252 @@ describe("buildTerminalDocument", () => {
     const { terminal } = createExecutedTerminalDocument();
 
     expect(terminal.options.smoothScrollDuration).toBe(80);
+  });
+
+  it("does not select terminal text after only one tap", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, "alpha selected omega");
+
+    tapTerminal(window, viewport, { clientX: 9 * 9, clientY: 18 * 2 + 9 }, 1_000);
+
+    expect(terminal.selectionCalls).toEqual([]);
+  });
+
+  it("selects the terminal word under a qualifying double tap", () => {
+    const { messages, terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, "alpha selected omega");
+
+    tapTerminal(window, viewport, { clientX: 9 * 7, clientY: 18 * 2 + 9 }, 1_000);
+    tapTerminal(window, viewport, { clientX: 9 * 9, clientY: 18 * 2 + 9 }, 1_200);
+
+    expect(terminal.selectionCalls.at(-1)).toEqual({ column: 6, row: 2, length: 8 });
+    expect(terminal.getSelection()).toBe("selected");
+    expect(messages.map((value) => JSON.parse(value))).toContainEqual({
+      type: "terminal-selection-change",
+      text: "selected"
+    });
+  });
+
+  it("opens a registered Markdown link after a settled single tap", async () => {
+    const { messages, terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    const line = "docs/spec.md suffix";
+    const link = provideLinks(terminal, 3, line)?.[0];
+    expect(link).toBeDefined();
+    const point = { clientX: 9 * 3 + 4, clientY: 18 * 2 + 9 };
+
+    tapTerminal(window, viewport, point, 1_000);
+    activateLinkAt(window, link!, 1_010);
+
+    expect(messages.map((value) => JSON.parse(value).type)).not.toContain(
+      "terminal-file-link"
+    );
+
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 320));
+
+    expect(messages.map((value) => JSON.parse(value))).toContainEqual({
+      type: "terminal-file-link",
+      path: "docs/spec.md"
+    });
+  });
+
+  it("selects a registered Markdown link on double tap without opening it", async () => {
+    const { messages, terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    const line = "docs/spec.md suffix";
+    const link = provideLinks(terminal, 3, line)?.[0];
+    expect(link).toBeDefined();
+    const point = { clientX: 9 * 3 + 4, clientY: 18 * 2 + 9 };
+
+    tapTerminal(window, viewport, point, 1_000);
+    activateLinkAt(window, link!, 1_010);
+    tapTerminal(window, viewport, point, 1_180);
+    activateLinkAt(window, link!, 1_190);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 320));
+
+    expect(terminal.getSelection()).toBe("docs/spec.md");
+    expect(messages.map((value) => JSON.parse(value))).toContainEqual({
+      type: "terminal-selection-change",
+      text: "docs/spec.md"
+    });
+    expect(messages.map((value) => JSON.parse(value).type)).not.toContain(
+      "terminal-file-link"
+    );
+  });
+
+  it("selects one separator cell when double tapping whitespace", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, "alpha selected");
+    const point = { clientX: 9 * 5 + 4, clientY: 18 * 2 + 9 };
+
+    tapTerminal(window, viewport, point, 1_000);
+    tapTerminal(window, viewport, point, 1_150);
+
+    expect(terminal.selectionCalls.at(-1)).toEqual({ column: 5, row: 2, length: 1 });
+  });
+
+  it("does not select terminal text when double tapping a fallback file control", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    window.__replaceTerminalState({ text: "docs/spec.md\n" });
+    terminal.buffer.active.viewportY = 0;
+    terminal.buffer.active.length = 3;
+    terminal.bufferLines.set(2, "docs/spec.md");
+    const button = window.document.querySelector<HTMLButtonElement>(
+      "#terminal-file-links button"
+    );
+    expect(button).not.toBeNull();
+    const point = { clientX: 9 * 3 + 4, clientY: 18 * 2 + 9 };
+
+    tapElement(window, button!, point, 1_000);
+    tapElement(window, button!, point, 1_180);
+
+    expect(terminal.selectionCalls).toEqual([]);
+    expect(viewport.contains(button)).toBe(true);
+  });
+
+  it.each([
+    ["too slowly", { secondAt: 1_301, secondX: 9 * 9 + 4 }],
+    ["too far apart", { secondAt: 1_200, secondX: 9 * 9 + 4 + 25 }]
+  ])("does not select terminal text when taps land %s", (_label, second) => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, "alpha selected omega");
+    const first = { clientX: 9 * 9 + 4, clientY: 18 * 2 + 9 };
+
+    tapTerminal(window, viewport, first, 1_000);
+    tapTerminal(
+      window,
+      viewport,
+      { clientX: second.secondX, clientY: first.clientY },
+      second.secondAt
+    );
+
+    expect(terminal.selectionCalls).toEqual([]);
+  });
+
+  it.each([
+    ["wide", "界 selected", 3],
+    ["combining", "e\u0301 selected", 2]
+  ])("maps a word after a %s character to terminal cells", (_label, line, startColumn) => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, line);
+    const point = { clientX: 9 * (startColumn + 2), clientY: 18 * 2 + 9 };
+
+    tapTerminal(window, viewport, point, 1_000);
+    tapTerminal(window, viewport, point, 1_180);
+
+    expect(terminal.selectionCalls.at(-1)).toEqual({
+      column: startColumn,
+      row: 2,
+      length: 8
+    });
+  });
+
+  it("extends a selected word forward without scrolling the terminal", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, "alpha selected omega");
+    const selectedPoint = { clientX: 9 * 9 + 4, clientY: 18 * 2 + 9 };
+    tapTerminal(window, viewport, selectedPoint, 1_000);
+    tapTerminal(window, viewport, selectedPoint, 1_180);
+    terminal.scrollToLineCalls = [];
+    viewport.scrollLeft = 12;
+
+    viewport.dispatchEvent(createTouchEvent(window, "touchstart", [selectedPoint]));
+    const move = createTouchEvent(window, "touchmove", [
+      { clientX: 9 * 19 + 4, clientY: 18 * 2 + 9 }
+    ]);
+    viewport.dispatchEvent(move);
+
+    expect(terminal.selectionCalls.at(-1)).toEqual({ column: 6, row: 2, length: 14 });
+    expect(terminal.getSelection()).toBe("selected omega");
+    expect(terminal.scrollToLineCalls).toEqual([]);
+    expect(viewport.scrollLeft).toBe(12);
+    expect(move.defaultPrevented).toBe(true);
+  });
+
+  it("extends a selected word backward from its original anchor", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, "alpha selected omega");
+    const selectedPoint = { clientX: 9 * 9 + 4, clientY: 18 * 2 + 9 };
+    tapTerminal(window, viewport, selectedPoint, 1_000);
+    tapTerminal(window, viewport, selectedPoint, 1_180);
+    terminal.scrollToLineCalls = [];
+
+    viewport.dispatchEvent(createTouchEvent(window, "touchstart", [selectedPoint]));
+    const move = createTouchEvent(window, "touchmove", [
+      { clientX: 9 * 1 + 4, clientY: 18 * 2 + 9 }
+    ]);
+    viewport.dispatchEvent(move);
+
+    expect(terminal.selectionCalls.at(-1)).toEqual({ column: 1, row: 2, length: 13 });
+    expect(terminal.getSelection()).toBe("lpha selected");
+    expect(terminal.scrollToLineCalls).toEqual([]);
+  });
+
+  it("extends a selected word across visible terminal rows", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, "alpha selected omega");
+    terminal.bufferLines.set(3, "later row");
+    const selectedPoint = { clientX: 9 * 9 + 4, clientY: 18 * 2 + 9 };
+    tapTerminal(window, viewport, selectedPoint, 1_000);
+    tapTerminal(window, viewport, selectedPoint, 1_180);
+    terminal.scrollToLineCalls = [];
+
+    viewport.dispatchEvent(createTouchEvent(window, "touchstart", [selectedPoint]));
+    const move = createTouchEvent(window, "touchmove", [
+      { clientX: 9 * 4 + 4, clientY: 18 * 3 + 9 }
+    ]);
+    viewport.dispatchEvent(move);
+
+    expect(terminal.selectionCalls.at(-1)).toEqual({ column: 6, row: 2, length: 219 });
+    expect(terminal.getSelection()).toBe("selected omega\nlater");
+    expect(terminal.scrollToLineCalls).toEqual([]);
+  });
+
+  it("does not resume sticky-bottom following while selection mode is active", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = terminal.buffer.active.baseY - 1;
+    terminal.bufferLines.set(terminal.buffer.active.viewportY, "selected output");
+    const point = { clientX: 9 * 3 + 4, clientY: 9 };
+    tapTerminal(window, viewport, point, 1_000);
+    tapTerminal(window, viewport, point, 1_180);
+    const initialScrollToBottomCalls = terminal.scrollToBottomCalls;
+
+    window.__appendTerminalChunk({ chunksB64: [b64("new output\n")] });
+
+    expect(terminal.scrollToBottomCalls).toBe(initialScrollToBottomCalls);
+  });
+
+  it("clears selection on replace and restores ordinary drag scrolling after cancel", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.buffer.active.viewportY = 0;
+    terminal.bufferLines.set(2, "alpha selected omega");
+    const point = { clientX: 9 * 9 + 4, clientY: 18 * 2 + 9 };
+    tapTerminal(window, viewport, point, 1_000);
+    tapTerminal(window, viewport, point, 1_180);
+
+    window.__replaceTerminalState({ text: "replacement" });
+    expect(terminal.getSelection()).toBe("");
+    expect(terminal.clearSelectionCalls).toBe(1);
+
+    terminal.buffer.active.baseY = 100;
+    terminal.buffer.active.viewportY = 76;
+    terminal.buffer.active.length = 101;
+    terminal.scrollToLineCalls = [];
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 195 }])
+    );
+    expect(terminal.scrollToLineCalls).toEqual([79]);
   });
 
   it("executes one-finger fallback horizontal scrolling across the viewport", () => {
