@@ -159,6 +159,7 @@ interface RenderTaskScreenOptions {
   onRecoverTaskCreation?: () => void;
   agentStatus?: TaskTerminalStatus;
   onReadTaskFile?: (path: string) => Promise<{ path: string; content: string }>;
+  onOpenTaskActions?: () => void;
   taskId?: string;
   title?: string;
   prompt?: string;
@@ -186,6 +187,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       path: "docs/spec.md",
       content: "# Spec"
     }),
+    onOpenTaskActions,
     taskId = "task-1",
     title = "Task",
     prompt
@@ -221,6 +223,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onBack: vi.fn(),
     onAdvanceTaskStage: componentMocks.onAdvanceTaskStage,
     onCloseTask: componentMocks.onCloseTask,
+    onOpenTaskActions,
     onSendInput: componentMocks.onSendInput,
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn(),
@@ -393,6 +396,16 @@ describe("TaskScreen", () => {
     pressByTestId(tree, "mobile.task-more-button");
 
     expect(componentMocks.showTaskActionMenu).toHaveBeenCalledOnce();
+  });
+
+  it("delegates task actions to the navigation route when provided", () => {
+    const onOpenTaskActions = vi.fn();
+    const tree = renderTaskScreen({ agentType: "agent", onOpenTaskActions });
+
+    pressByTestId(tree, "mobile.task-more-button");
+
+    expect(onOpenTaskActions).toHaveBeenCalledOnce();
+    expect(componentMocks.showTaskActionMenu).not.toHaveBeenCalled();
   });
 
   it.each([

@@ -13,7 +13,6 @@ import type {
 import { TaskCreationError } from "../lib/api/client";
 import type { MachinePairingService } from "../lib/pairing/machinePairing";
 import type { MobileAuthSession } from "../lib/firebase/auth";
-import { isTaskDetailVisible } from "../appShell";
 import {
   DEFAULT_MOBILE_TERMINAL_GEOMETRY,
   type MobileTerminalGeometry
@@ -40,11 +39,12 @@ export interface MobileController {
   signOut(): Promise<void>;
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
   refresh(): Promise<void>;
-  showView(view: MobileView): void;
+  setNavigationView(view: MobileView): void;
+  setTaskDetailVisible(visible: boolean): void;
   selectDesktop(desktopId: string): Promise<void>;
   selectRepo(repoId: string): Promise<void>;
   openTask(taskId: string): void;
-  closeTask(): void;
+  closeTask(taskId?: string): void;
   openComposer(): void;
   closeComposer(): void;
   updateComposerPrompt(prompt: string): void;
@@ -52,10 +52,10 @@ export interface MobileController {
   setComposerOptionsExpanded(isExpanded: boolean): void;
   selectComposerAgentProvider(provider: ComposerAgentProvider): void;
   searchTasks(query: string): Promise<void>;
-  createTask(terminalGeometry?: MobileTerminalGeometry): Promise<void>;
-  recoverTaskCreation(): Promise<void>;
-  runMergeAgent(taskId: string): Promise<void>;
-  advanceDesktopTaskStage(taskId: string): Promise<void>;
+  createTask(terminalGeometry?: MobileTerminalGeometry): Promise<string | null>;
+  recoverTaskCreation(): Promise<string | null>;
+  runMergeAgent(taskId: string): Promise<string | null>;
+  advanceDesktopTaskStage(taskId: string): Promise<string | null>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
@@ -178,15 +178,16 @@ export function createMobileController(
     | null = null;
   let unownedErrorMessage: string | null = null;
   let taskCollectionsRevision = 0;
+  let taskDetailVisible = false;
   let liveRepositoryRevision = 0;
   let lastExplicitRepos: RepoSummary[] = [];
   let desktopCollectionsRevision = 0;
   let refreshDesktopsInFlight: Promise<void> | null = null;
   let ordinaryTaskCreationFlight:
-    | { taskId: string; promise: Promise<void> }
+    | { taskId: string; promise: Promise<string | null> }
     | null = null;
   let recoveryTaskCreationFlight:
-    | { taskId: string; promise: Promise<void> }
+    | { taskId: string; promise: Promise<string | null> }
     | null = null;
   let taskCreationPersistenceFlight:
     | { taskId: string; promise: Promise<void> }
@@ -452,11 +453,10 @@ export function createMobileController(
 
     return {
       taskId: selectedTaskId,
-      visible: isTaskDetailVisible(
-        state.connectionState,
+      visible:
+        taskDetailVisible &&
+        state.connectionState === "connected" &&
         selectedTaskId !== null,
-        state.activeView
-      ),
       activities,
       activity
     };
@@ -1324,10 +1324,10 @@ export function createMobileController(
   const completeTaskCreation = (
     attempt: PendingTaskCreation,
     created: CreateTaskResponse
-  ) => {
+  ): string | null => {
     const currentState = store.getState();
     if (currentState.pendingTaskCreation?.taskId !== attempt.taskId) {
-      return;
+      return null;
     }
 
     const shouldOpenCreatedTask =
@@ -1370,7 +1370,9 @@ export function createMobileController(
     if (shouldOpenCreatedTask) {
       taskCollectionsRevision += 1;
       startTaskView(createdTask.id);
+      return attempt.slotId;
     }
+    return null;
   };
 
   const failTaskCreationDefinitely = (
@@ -1493,8 +1495,13 @@ export function createMobileController(
       );
     },
 
-    showView(view) {
+    setNavigationView(view) {
       store.setActiveView(view);
+    },
+
+    setTaskDetailVisible(visible) {
+      if (taskDetailVisible === visible) return;
+      taskDetailVisible = visible;
       reconcileSelectedTaskRead();
     },
 
@@ -1506,7 +1513,6 @@ export function createMobileController(
       store.clearTaskTerminal();
       store.clearTaskAgent();
       await this.bootstrap();
-      store.setActiveView("tasks");
     },
 
     async selectRepo(repoId) {
@@ -1528,15 +1534,18 @@ export function createMobileController(
       const selectionId = slot?.slotId ?? taskId;
       const durableTaskId = slot?.taskId ?? findCollectionTask(taskId)?.id ?? null;
       store.setSelectedTask(selectionId);
-      store.setActiveView("tasks");
       reconcileSelectedTaskRead();
       if (durableTaskId) {
         startTaskView(durableTaskId);
       }
     },
 
-    closeTask() {
+    closeTask(taskId) {
+      if (taskId && store.getState().selectedTaskId !== taskId) {
+        return;
+      }
       taskCollectionsRevision += 1;
+      taskDetailVisible = false;
       taskDetailGeneration += 1;
       activeTaskDetailIdentity = null;
       loadedTaskPrompt = null;
@@ -1552,7 +1561,6 @@ export function createMobileController(
       const pendingTaskCreation = state.pendingTaskCreation;
       if (pendingTaskCreation) {
         store.setSelectedTask(pendingTaskCreation.slotId);
-        store.setActiveView("tasks");
         return;
       }
       const selectedRepoId = state.selectedRepoId;
@@ -1615,7 +1623,6 @@ export function createMobileController(
       const searchRevision = ++taskCollectionsRevision;
       if (!query.trim()) {
         store.setSearchResults("", []);
-        store.setActiveView("tasks");
         reconcileSelectedTaskRead();
         return;
       }
@@ -1627,7 +1634,6 @@ export function createMobileController(
         }
         taskCollectionsRevision += 1;
         store.setSearchResults(query, results);
-        store.setActiveView("search");
         reconcileSelectedTaskRead();
       } catch (error) {
         if (taskCollectionsRevision === searchRevision) {
@@ -1645,11 +1651,11 @@ export function createMobileController(
         ) {
           return ordinaryTaskCreationFlight.promise;
         }
-        return Promise.resolve();
+        return Promise.resolve(null);
       }
       if (!state.composerRepoId || !state.composerPrompt.trim()) {
         store.setComposerErrorMessage("Choose a repo and enter a task prompt first.");
-        return Promise.resolve();
+        return Promise.resolve(null);
       }
 
       const composerDesktopId = resolveKnownDesktopId(state.composerDesktopId);
@@ -1657,7 +1663,7 @@ export function createMobileController(
         store.setComposerDesktop(null);
         store.setComposerErrorMessage("Choose a machine for this repo first.");
         store.setComposerOptionsExpanded(true);
-        return Promise.resolve();
+        return Promise.resolve(null);
       }
 
       const { cols, rows } =
@@ -1682,7 +1688,6 @@ export function createMobileController(
       });
       store.addTaskUiSlot(buildCreatingTaskUiSlot(attempt));
       store.setSelectedTask(attempt.slotId);
-      store.setActiveView("tasks");
       store.setComposerState(false, attempt.prompt);
       store.setComposerErrorMessage(null);
       let persistenceReady: Promise<void>;
@@ -1696,21 +1701,21 @@ export function createMobileController(
         taskId: attempt.taskId,
         promise: persistenceReady
       };
-      let taskCreationPromise!: Promise<void>;
+      let taskCreationPromise!: Promise<string | null>;
       taskCreationPromise = (async () => {
         let requestDispatched = false;
         try {
           await persistenceReady;
           requestDispatched = true;
           const created = await submitFrozenTaskCreation(attempt);
-          completeTaskCreation(attempt, created);
+          return completeTaskCreation(attempt, created);
         } catch (error) {
           const currentAttempt = store.getState().pendingTaskCreation;
           if (currentAttempt?.taskId !== attempt.taskId) {
-            return;
+            return null;
           }
           if (recoveryStartedTaskId === attempt.taskId) {
-            return;
+            return null;
           }
           const message =
             error instanceof Error ? error.message : "Task creation failed";
@@ -1726,6 +1731,7 @@ export function createMobileController(
             });
           }
           store.setComposerErrorMessage(message);
+          return null;
         }
       })().finally(() => {
         if (ordinaryTaskCreationFlight?.promise === taskCreationPromise) {
@@ -1742,7 +1748,7 @@ export function createMobileController(
     recoverTaskCreation() {
       const attempt = store.getState().pendingTaskCreation;
       if (!attempt) {
-        return Promise.resolve();
+        return Promise.resolve(null);
       }
       if (recoveryTaskCreationFlight?.taskId === attempt.taskId) {
         return recoveryTaskCreationFlight.promise;
@@ -1757,7 +1763,7 @@ export function createMobileController(
         pendingTaskCreation: attempt
       });
       store.setComposerErrorMessage(null);
-      let recoveryPromise!: Promise<void>;
+      let recoveryPromise!: Promise<string | null>;
       recoveryPromise = (async () => {
         let requestDispatched = false;
         try {
@@ -1765,20 +1771,20 @@ export function createMobileController(
           if (
             store.getState().pendingTaskCreation?.taskId !== attempt.taskId
           ) {
-            return;
+            return null;
           }
           recoveryStartedTaskId = attempt.taskId;
           requestDispatched = true;
           const created = await submitFrozenTaskCreation(attempt);
-          completeTaskCreation(attempt, created);
+          return completeTaskCreation(attempt, created);
         } catch (error) {
           if (
             store.getState().pendingTaskCreation?.taskId !== attempt.taskId
           ) {
-            return;
+            return null;
           }
           if (!requestDispatched) {
-            return;
+            return null;
           }
           const message =
             error instanceof Error ? error.message : "Task recovery failed";
@@ -1788,13 +1794,14 @@ export function createMobileController(
           ) {
             failTaskCreationDefinitely(attempt, message);
             store.setComposerErrorMessage(message);
-            return;
+            return null;
           }
           store.setTaskCreationState({
             phase: "uncertain",
             pendingTaskCreation: attempt
           });
           store.setComposerErrorMessage(message);
+          return null;
         }
       })().finally(() => {
         if (recoveryTaskCreationFlight?.promise === recoveryPromise) {
@@ -1846,8 +1853,10 @@ export function createMobileController(
         const taskIdToOpen = displayTaskId ?? response.taskId;
         clearTaskSessionIfMissing(taskIdToOpen);
         this.openTask(taskIdToOpen);
+        return store.getState().selectedTaskId;
       } catch (error) {
         fail(error);
+        return null;
       }
     },
 
@@ -1889,8 +1898,10 @@ export function createMobileController(
         const taskIdToOpen = displayTaskId ?? response.taskId;
         clearTaskSessionIfMissing(taskIdToOpen);
         this.openTask(taskIdToOpen);
+        return store.getState().selectedTaskId;
       } catch (error) {
         fail(error);
+        return null;
       }
     },
 
@@ -1941,7 +1952,6 @@ export function createMobileController(
         store.setSelectedTask(null);
         store.clearTaskTerminal();
         store.clearTaskAgent();
-        store.setActiveView("tasks");
         setUnownedErrorMessage(null);
         reconcileSelectedTaskRead();
       } catch (error) {

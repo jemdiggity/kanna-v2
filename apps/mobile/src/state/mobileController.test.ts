@@ -430,6 +430,21 @@ describe("createMobileController", () => {
     expect(client.observeTaskAgent).not.toHaveBeenCalled();
   });
 
+  it("opens a task without rewriting the navigation projection", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.setNavigationView("recent");
+    controller.openTask("task-1");
+
+    expect(store.getState()).toMatchObject({
+      activeView: "recent",
+      selectedTaskId: "task-1"
+    });
+  });
+
   it("replaces a bounded cloud prompt with full owner detail while its terminal is open", async () => {
     const fullPrompt = `${"p".repeat(520)}END-OF-CANONICAL-PROMPT`;
     const promptSnippet = fullPrompt.slice(0, 500);
@@ -1733,6 +1748,7 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(999);
 
     expect(client.markTaskRead).not.toHaveBeenCalled();
@@ -1767,6 +1783,7 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(3_000);
 
     expect(store.getState().repoTasks[0]?.activity).toBe("unread");
@@ -1799,6 +1816,7 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(client.markTaskRead).toHaveBeenCalledTimes(1);
 
@@ -1855,6 +1873,7 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(client.markTaskRead).toHaveBeenCalledTimes(1);
 
@@ -1883,13 +1902,14 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(999);
-    controller.showView("more");
+    controller.setTaskDetailVisible(false);
     await vi.advanceTimersByTimeAsync(2_000);
 
     expect(client.markTaskRead).not.toHaveBeenCalled();
 
-    controller.showView("tasks");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(999);
     expect(client.markTaskRead).not.toHaveBeenCalled();
 
@@ -1915,13 +1935,14 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(999);
-    controller.showView("more");
+    controller.setTaskDetailVisible(false);
     await vi.advanceTimersByTimeAsync(2_000);
 
     expect(client.markTaskRead).not.toHaveBeenCalled();
 
-    controller.showView("recent");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(999);
     expect(client.markTaskRead).not.toHaveBeenCalled();
 
@@ -1975,6 +1996,7 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(client.markTaskRead).toHaveBeenCalledTimes(1);
@@ -2007,6 +2029,7 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
+    controller.setTaskDetailVisible(true);
     await vi.advanceTimersByTimeAsync(4_000);
 
     expect(client.markTaskRead).toHaveBeenCalledTimes(3);
@@ -2413,13 +2436,13 @@ describe("createMobileController", () => {
     expect(client.getStatus).toHaveBeenCalledTimes(3);
   });
 
-  it("searches tasks and switches to the search surface", async () => {
+  it("searches tasks without choosing a navigation surface", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);
 
     await controller.searchTasks("search");
 
-    expect(store.getState().activeView).toBe("search");
+    expect(store.getState().activeView).toBe("tasks");
     expect(store.getState().searchQuery).toBe("search");
     expect(store.getState().searchResults.map((task) => task.id)).toEqual(["task-2"]);
   });
@@ -2433,7 +2456,7 @@ describe("createMobileController", () => {
     controller.openComposer();
     controller.updateComposerPrompt("Ship mobile shell");
 
-    await controller.createTask();
+    const selectionId = await controller.createTask();
 
     expect(store.getState().recentTasks[0]).toMatchObject({
       id: "task-3",
@@ -2444,6 +2467,7 @@ describe("createMobileController", () => {
     expect(store.getState().selectedTaskId).toBe(
       store.getState().taskUiSlots[0]?.slotId
     );
+    expect(selectionId).toBe(store.getState().selectedTaskId);
     expect(store.getState().taskUiSlots[0]).toMatchObject({
       taskId: "task-3",
       state: "ready"
@@ -3876,17 +3900,17 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-repo-2"]);
   });
 
-  it("selects a desktop and returns to the task list", async () => {
+  it("selects a desktop without choosing a navigation destination", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
 
     await controller.bootstrap();
-    controller.showView("desktops");
+    controller.setNavigationView("desktops");
     await controller.selectDesktop("desktop-2");
 
     expect(store.getState()).toMatchObject({
-      activeView: "tasks",
+      activeView: "desktops",
       selectedDesktopId: "desktop-2",
       selectedTaskId: null
     });
@@ -4443,6 +4467,7 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("cloud-task-1");
+    controller.setTaskDetailVisible(true);
     liveUpdate?.([{ ...workingTask, activity: "unread" }]);
     await vi.advanceTimersByTimeAsync(999);
 

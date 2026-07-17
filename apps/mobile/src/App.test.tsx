@@ -303,7 +303,7 @@ describe("createAppModel", () => {
     expect(resolveForceCloud({ EXPO_PUBLIC_KANNA_FORCE_CLOUD: "false" })).toBe(false);
   });
 
-  it("creates an app model with desktop navigation and a LAN client", async () => {
+  it("creates an app model with business state and a LAN client", async () => {
     const model = createAppModel({
       fetchImpl: createFetchMock(),
       persistence: {
@@ -314,15 +314,7 @@ describe("createAppModel", () => {
       options: { bonjourBrowser: createBonjourForDesktop() }
     });
 
-    expect(model.navigator.tabs.map((tab) => tab.label)).toEqual([
-      "Tasks",
-      "Activity",
-      "More"
-    ]);
-    expect(model.navigator.utilityActions.map((action) => action.label)).toEqual([
-      "Search",
-      "Add task"
-    ]);
+    expect("navigator" in model).toBe(false);
     expect(typeof model.controller.bootstrap).toBe("function");
     await model.initialize();
     expect((await model.client.getStatus()).desktopName).toBe("Studio Mac");
@@ -1007,7 +999,7 @@ describe("createAppModel", () => {
       activeView: "tasks"
     });
 
-    model.controller.showView("more");
+    model.controller.setNavigationView("more");
 
     expect(model.sessionStore.getState()).toMatchObject({
       selectedTaskId: "task-1",
@@ -1031,7 +1023,7 @@ describe("createAppModel", () => {
     await model.controller.selectDesktop("desktop-2");
     await model.controller.selectRepo("repo-2");
     model.controller.openTask("task-2");
-    model.controller.showView("more");
+    model.controller.setNavigationView("more");
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(persistence.save).toHaveBeenLastCalledWith(

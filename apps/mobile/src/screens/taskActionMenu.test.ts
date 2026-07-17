@@ -57,7 +57,8 @@ describe("showTaskActionMenu", () => {
 
   it.each([2, 99])("ignores cancel or invalid iOS index %s", (index) => {
     const onSelect = vi.fn();
-    showTaskActionMenu(onSelect);
+    const onDismiss = vi.fn();
+    showTaskActionMenu(onSelect, onDismiss);
     const callback = nativeMocks.actionSheet.mock.calls[0]![1] as (
       buttonIndex: number
     ) => void;
@@ -65,6 +66,7 @@ describe("showTaskActionMenu", () => {
     callback(index);
 
     expect(onSelect).not.toHaveBeenCalled();
+    expect(onDismiss).toHaveBeenCalledOnce();
   });
 
   it("shows equivalent task actions off iOS", () => {
@@ -79,8 +81,9 @@ describe("showTaskActionMenu", () => {
       [
         expect.objectContaining({ text: "Advance Stage" }),
         expect.objectContaining({ text: "Close Task", style: "destructive" }),
-        { text: "Cancel", style: "cancel" }
-      ]
+        expect.objectContaining({ text: "Cancel", style: "cancel" })
+      ],
+      expect.objectContaining({ cancelable: true })
     );
 
     const actions = nativeMocks.alert.mock.calls[0]![2]!;
@@ -90,5 +93,16 @@ describe("showTaskActionMenu", () => {
       ["advance-stage"],
       ["close-task"]
     ]);
+  });
+
+  it("routes Android cancellation through the dismiss callback", () => {
+    nativeMocks.platform.OS = "android";
+    const onDismiss = vi.fn();
+
+    showTaskActionMenu(vi.fn(), onDismiss);
+
+    const actions = nativeMocks.alert.mock.calls[0]![2]!;
+    actions[2]!.onPress?.();
+    expect(onDismiss).toHaveBeenCalledOnce();
   });
 });

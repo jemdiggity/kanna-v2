@@ -51,25 +51,71 @@ afterEach(async () => {
 });
 
 describe("FloatingToolbar", () => {
+  const createNavigatorProps = (activeIndex = 0) => ({
+    state: {
+      index: activeIndex,
+      key: "tabs",
+      routeNames: ["Tasks", "Activity", "More"],
+      routes: [
+        { key: "tasks", name: "Tasks", params: undefined },
+        { key: "activity", name: "Activity", params: undefined },
+        { key: "more", name: "More", params: undefined }
+      ],
+      stale: false,
+      type: "tab",
+      history: [],
+      preloadedRouteKeys: []
+    },
+    descriptors: {},
+    insets: { top: 0, right: 0, bottom: 0, left: 0 },
+    navigation: {
+      emit: vi.fn(() => ({ defaultPrevented: false })),
+      navigate: vi.fn()
+    }
+  });
+
+  it("derives Activity from navigator state and navigates through the tab router", async () => {
+    if (!FloatingToolbar) throw new Error("FloatingToolbar was not loaded");
+    const navigatorProps = createNavigatorProps(1);
+
+    await act(async () => {
+      rendered = create(
+        React.createElement(FloatingToolbar, {
+          ...navigatorProps,
+          onSelectUtilityAction: vi.fn()
+        } as never)
+      );
+    });
+
+    const activity = rendered.root.find(
+      (node) => node.type === "Pressable" && node.props.testID?.endsWith("recent")
+    );
+    const tasks = rendered.root.find(
+      (node) => node.type === "Pressable" && node.props.testID?.endsWith("tasks")
+    );
+
+    expect(flattenStyle(activity.props.style).backgroundColor).toBe("#E8F1FF");
+    await act(async () => tasks.props.onPress());
+    expect(navigatorProps.navigation.emit).toHaveBeenCalledWith({
+      type: "tabPress",
+      target: "tasks",
+      canPreventDefault: true
+    });
+    expect(navigatorProps.navigation.navigate).toHaveBeenCalledWith(
+      "Tasks",
+      undefined
+    );
+  });
+
   it("uses opaque dark surfaces for secondary floating chrome", async () => {
     if (!FloatingToolbar) throw new Error("FloatingToolbar was not loaded");
 
     await act(async () => {
       rendered = create(
         React.createElement(FloatingToolbar, {
-          activeTab: "tasks",
-          tabs: [
-            { name: "tasks", label: "Tasks", icon: "home-outline" },
-            { name: "recent", label: "Activity", icon: "notifications-outline" },
-            { name: "more", label: "More", icon: "ellipsis-horizontal" }
-          ],
-          utilityActions: [
-            { name: "search", label: "Search", icon: "search-outline" },
-            { name: "create", label: "Add task", icon: "add" }
-          ],
-          onSelectTab: vi.fn(),
+          ...createNavigatorProps(),
           onSelectUtilityAction: vi.fn()
-        })
+        } as never)
       );
     });
 
@@ -95,18 +141,9 @@ describe("FloatingToolbar", () => {
     await act(async () => {
       rendered = create(
         React.createElement(FloatingToolbar, {
-          activeTab: "tasks",
-          tabs: [
-            { name: "tasks", label: "Tasks", icon: "home-outline" },
-            { name: "more", label: "More", icon: "ellipsis-horizontal" }
-          ],
-          utilityActions: [
-            { name: "search", label: "Search", icon: "search-outline" },
-            { name: "create", label: "Add task", icon: "add" }
-          ],
-          onSelectTab: vi.fn(),
+          ...createNavigatorProps(),
           onSelectUtilityAction: vi.fn()
-        })
+        } as never)
       );
     });
 

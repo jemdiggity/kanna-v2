@@ -1,38 +1,807 @@
-export type TabName = "tasks" | "desktops" | "recent" | "more";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
+import {
+  NavigationContainer,
+  StackActions,
+  useFocusEffect,
+  useIsFocused,
+  useNavigationContainerRef,
+  type InitialState,
+  type NavigationState
+} from "@react-navigation/native";
+import {
+  createBottomTabNavigator,
+  type BottomTabBarProps
+} from "@react-navigation/bottom-tabs";
+import {
+  createNativeStackNavigator,
+  type NativeStackScreenProps
+} from "@react-navigation/native-stack";
+import {
+  type LayoutChangeEvent,
+  StyleSheet,
+  Text,
+  View
+} from "react-native";
+import { AccountBadge } from "../components/AccountBadge";
+import { CreateTaskComposer } from "../components/CreateTaskComposer";
+import { FloatingToolbar } from "../components/FloatingToolbar";
+import { resolveMobileTerminalGeometry } from "../mobileTerminalGeometry";
+import { MachinesScreen } from "../screens/MachinesScreen";
+import { MoreScreen } from "../screens/MoreScreen";
+import { SearchScreen } from "../screens/SearchScreen";
+import { TaskScreen } from "../screens/TaskScreen";
+import { showTaskActionMenu } from "../screens/taskActionMenu";
+import { TasksScreen } from "../screens/TasksScreen";
+import type { MobileController } from "../state/mobileController";
+import { buildMachineInventory } from "../state/machineInventory";
+import type { SessionState } from "../state/sessionStore";
+import {
+  projectTaskUiSlots,
+  taskUiSlotForSelection,
+  taskUiSlotToTaskSummary
+} from "../state/taskUiSlots";
+import {
+  createRootNavigator,
+  MAIN_TAB_ROUTES,
+  ROOT_STACK_ROUTES,
+  UTILITY_ACTIONS
+} from "./navigationConfig";
+import {
+  projectActiveView,
+  type MainTabParamList,
+  type RootStackParamList
+} from "./navigationState";
+import {
+  planTaskDetailNavigation,
+  resolveFocusedTaskRouteIdentity,
+  resolvePendingTaskCreationRoute,
+  resolveTaskCleanupIdentity
+} from "./taskNavigation";
 
-export interface TabRoute {
-  name: TabName;
-  label: string;
-  icon: string;
+export type {
+  RootNavigatorModel,
+  TabName,
+  TabRoute,
+  UtilityAction
+} from "./navigationConfig";
+export {
+  createRootNavigator,
+  MAIN_TAB_ROUTES,
+  ROOT_STACK_ROUTES,
+  UTILITY_ACTIONS
+};
+
+const RootStack = createNativeStackNavigator<RootStackParamList>();
+const MainTabs = createBottomTabNavigator<MainTabParamList>();
+
+interface RootNavigatorProps {
+  controller: MobileController;
+  e2eTaskSnapshotMarker?: string;
+  forceCloudEnabled: boolean;
+  initialState: InitialState;
+  openMachinesRequestKey: number;
+  onForceCloudChange(enabled: boolean): void;
+  onOpenAccount(): void;
+  state: SessionState;
 }
 
-export interface UtilityAction {
-  name: "search" | "create";
-  label: string;
-  icon: string;
+interface NavigationContent {
+  controller: MobileController;
+  e2eTaskSnapshotMarker?: string;
+  forceCloudEnabled: boolean;
+  onForceCloudChange(enabled: boolean): void;
+  onOpenAccount(): void;
+  openComposer(): void;
+  pushDesktops(): void;
+  pushPreparedTask(taskId: string): void;
+  pushSearch(): void;
+  pushTask(taskId: string): void;
+  pushTaskMore(): void;
+  state: SessionState;
+  taskDetailViewportRef: React.MutableRefObject<{
+    width: number;
+    height: number;
+  } | null>;
 }
 
-export interface RootNavigatorModel {
-  initialRouteName: TabName;
-  tabs: TabRoute[];
-  utilityActions: UtilityAction[];
+const NavigationContentContext = createContext<NavigationContent | null>(null);
+
+export default function RootNavigator({
+  controller,
+  e2eTaskSnapshotMarker,
+  forceCloudEnabled,
+  initialState,
+  openMachinesRequestKey,
+  onForceCloudChange,
+  onOpenAccount,
+  state
+}: RootNavigatorProps) {
+  const navigationRef = useNavigationContainerRef<RootStackParamList>();
+  const taskDetailViewportRef = useRef<{
+    width: number;
+    height: number;
+  } | null>(null);
+  const pendingTaskRouteRef = useRef<string | null>(null);
+  const previousOpenMachinesRequestKeyRef = useRef(openMachinesRequestKey);
+
+  const pushPreparedTask = useCallback((taskId: string) => {
+    if (!navigationRef.isReady()) return;
+    const rootState = navigationRef.getRootState();
+    const plan = planTaskDetailNavigation({
+      index: rootState.index,
+      pendingTaskId: pendingTaskRouteRef.current,
+      routes: rootState.routes,
+      taskId
+    });
+    if (plan.type === "none") return;
+
+    pendingTaskRouteRef.current = taskId;
+    navigationRef.dispatch(
+      plan.type === "push"
+        ? StackActions.push("TaskDetail", { taskId })
+        : plan.type === "replace"
+          ? StackActions.replace("TaskDetail", { taskId })
+          : StackActions.popTo("TaskDetail", { taskId })
+    );
+  }, [navigationRef]);
+  const pushTask = useCallback((taskId: string) => {
+    controller.openTask(taskId);
+    pushPreparedTask(taskId);
+  }, [controller, pushPreparedTask]);
+  const pushSearch = useCallback(() => {
+    if (navigationRef.isReady()) {
+      navigationRef.dispatch(StackActions.push("Search"));
+    }
+  }, [navigationRef]);
+  const pushDesktops = useCallback(() => {
+    if (navigationRef.isReady()) {
+      navigationRef.dispatch(StackActions.push("Desktops"));
+    }
+  }, [navigationRef]);
+  const pushTaskMore = useCallback(() => {
+    if (navigationRef.isReady()) {
+      navigationRef.dispatch(StackActions.push("TaskMore"));
+    }
+  }, [navigationRef]);
+
+  useEffect(() => {
+    if (previousOpenMachinesRequestKeyRef.current === openMachinesRequestKey) return;
+    previousOpenMachinesRequestKeyRef.current = openMachinesRequestKey;
+    pushDesktops();
+  }, [openMachinesRequestKey, pushDesktops]);
+
+  const content = useMemo<NavigationContent>(() => ({
+    controller,
+    e2eTaskSnapshotMarker,
+    forceCloudEnabled,
+    onForceCloudChange,
+    onOpenAccount,
+    openComposer: () => controller.openComposer(),
+    pushDesktops,
+    pushPreparedTask,
+    pushSearch,
+    pushTask,
+    pushTaskMore,
+    state,
+    taskDetailViewportRef
+  }), [
+    controller,
+    e2eTaskSnapshotMarker,
+    forceCloudEnabled,
+    onForceCloudChange,
+    onOpenAccount,
+    pushDesktops,
+    pushPreparedTask,
+    pushSearch,
+    pushTask,
+    pushTaskMore,
+    state
+  ]);
+
+  return (
+    <NavigationContentContext.Provider value={content}>
+      <View
+        style={styles.navigatorHost}
+        onLayout={(event: LayoutChangeEvent) => {
+          const { width, height } = event.nativeEvent.layout;
+          taskDetailViewportRef.current = { width, height };
+        }}
+      >
+        <NavigationContainer
+          initialState={initialState}
+          ref={navigationRef}
+          onStateChange={(navigationState?: NavigationState) => {
+            pendingTaskRouteRef.current = null;
+            controller.setNavigationView(projectActiveView(navigationState));
+          }}
+        >
+          <RootStack.Navigator
+            screenOptions={{
+              contentStyle: styles.stackContent,
+              headerBackTitle: "Back",
+              headerStyle: styles.header,
+              headerTintColor: "#F5F7FB",
+              headerTitleStyle: styles.headerTitle
+            }}
+          >
+            <RootStack.Screen
+              component={MainTabsRoute}
+              name="MainTabs"
+              options={{ headerShown: false }}
+            />
+            <RootStack.Screen
+              component={TaskDetailRoute}
+              name="TaskDetail"
+              options={{ headerShown: false }}
+            />
+            <RootStack.Screen
+              component={TaskMoreRoute}
+              name="TaskMore"
+              options={{
+                contentStyle: styles.transparentStackContent,
+                headerShown: false,
+                presentation: "transparentModal"
+              }}
+            />
+            <RootStack.Screen
+              component={SearchRoute}
+              name="Search"
+              options={{ title: "" }}
+            />
+            <RootStack.Screen
+              component={DesktopsRoute}
+              name="Desktops"
+              options={{ headerShown: false }}
+            />
+          </RootStack.Navigator>
+        </NavigationContainer>
+        <ComposerOverlay />
+      </View>
+    </NavigationContentContext.Provider>
+  );
 }
 
-export function createRootNavigator(): RootNavigatorModel {
-  return {
-    initialRouteName: "tasks",
-    tabs: [
-      { name: "tasks", label: "Tasks", icon: "home-outline" },
-      { name: "recent", label: "Activity", icon: "notifications-outline" },
-      { name: "more", label: "More", icon: "ellipsis-horizontal" }
-    ],
-    utilityActions: [
-      { name: "search", label: "Search", icon: "search-outline" },
-      { name: "create", label: "Add task", icon: "add" }
-    ]
+function MainTabsRoute() {
+  return (
+    <MainTabs.Navigator
+      screenOptions={{ headerShown: false }}
+      tabBar={(props: BottomTabBarProps) => <NavigatorTabBar {...props} />}
+    >
+      <MainTabs.Screen component={TasksTabRoute} name="Tasks" />
+      <MainTabs.Screen component={ActivityTabRoute} name="Activity" />
+      <MainTabs.Screen component={MoreTabRoute} name="More" />
+    </MainTabs.Navigator>
+  );
+}
+
+function NavigatorTabBar(props: BottomTabBarProps) {
+  const { openComposer, pushSearch } = useNavigationContent();
+
+  return (
+    <FloatingToolbar
+      {...props}
+      onSelectUtilityAction={(action) => {
+        if (action === "search") {
+          pushSearch();
+        } else {
+          openComposer();
+        }
+      }}
+    />
+  );
+}
+
+function TasksTabRoute() {
+  const { controller, pushTask, state } = useNavigationContent();
+  return (
+    <StandardScreen title="Tasks">
+      <TasksScreen
+        repos={state.repos}
+        selectedRepoId={state.selectedRepoId}
+        taskSlots={projectTaskUiSlots(state.repoTasks, state.taskUiSlots)}
+        onSelectRepo={(repoId) => {
+          void controller.selectRepo(repoId);
+        }}
+        onOpenTask={pushTask}
+      />
+    </StandardScreen>
+  );
+}
+
+function ActivityTabRoute() {
+  const { controller, pushTask, state } = useNavigationContent();
+  return (
+    <StandardScreen title="Activity">
+      <TasksScreen
+        heading="Recent"
+        repos={state.repos}
+        selectedRepoId={state.selectedRepoId}
+        taskSlots={projectTaskUiSlots(state.recentTasks, state.taskUiSlots)}
+        onSelectRepo={(repoId) => {
+          void controller.selectRepo(repoId);
+        }}
+        onOpenTask={pushTask}
+      />
+    </StandardScreen>
+  );
+}
+
+function MoreTabRoute() {
+  return (
+    <StandardScreen title="More">
+      <MoreRouteContent />
+    </StandardScreen>
+  );
+}
+
+function SearchRoute() {
+  const { controller, pushTask, state } = useNavigationContent();
+  return (
+    <UtilityScreen>
+      <SearchScreen
+        focusRequestKey={1}
+        query={state.searchQuery}
+        results={state.searchResults}
+        onChangeQuery={(query) => {
+          void controller.searchTasks(query);
+        }}
+        onOpenTask={pushTask}
+      />
+    </UtilityScreen>
+  );
+}
+
+function DesktopsRoute({ navigation }: NativeStackScreenProps<RootStackParamList, "Desktops">) {
+  const { controller, state } = useNavigationContent();
+  const [pairingVisible, setPairingVisible] = useState(false);
+  const machines = useMemo(
+    () => buildMachineInventory({
+      accountDesktops: state.accountDesktops,
+      manualDesktops: state.trustedDesktops,
+      liveLanDesktops: state.liveLanDesktops
+    }),
+    [state.accountDesktops, state.liveLanDesktops, state.trustedDesktops]
+  );
+  return (
+    <UtilityScreen>
+      <MachinesScreen
+        machines={machines}
+        sourceWarnings={state.machineSourceWarnings}
+        pairingVisible={pairingVisible}
+        onBack={() => navigation.goBack()}
+        onOpenPairing={() => setPairingVisible(true)}
+        onClosePairing={() => setPairingVisible(false)}
+        onPairCode={async (code) => {
+          await controller.pairMachineByCode(code);
+          setPairingVisible(false);
+        }}
+        onPairPayload={async (payload) => {
+          await controller.pairMachineByPayload(payload);
+          setPairingVisible(false);
+        }}
+        onRemoveManual={(desktopId) => controller.removeManualMachine(desktopId)}
+      />
+    </UtilityScreen>
+  );
+}
+
+function TaskMoreRoute({
+  navigation
+}: NativeStackScreenProps<RootStackParamList, "TaskMore">) {
+  const {
+    controller,
+    pushPreparedTask,
+    state
+  } = useNavigationContent();
+  const selectedTask = resolveSelectedTask(state);
+  const selectedTaskId = selectedTask
+    ? resolveDurableTaskId(state, selectedTask.id)
+    : null;
+
+  useFocusEffect(
+    useCallback(() => {
+      let dismissed = false;
+      const dismiss = () => {
+        if (dismissed) return;
+        dismissed = true;
+        if (navigation.canGoBack()) navigation.goBack();
+      };
+      showTaskActionMenu((action) => {
+        dismiss();
+        if (!selectedTaskId) return;
+        if (action === "advance-stage") {
+          void controller.advanceDesktopTaskStage(selectedTaskId).then((taskId) => {
+            if (taskId) pushPreparedTask(taskId);
+          });
+        } else {
+          void controller.closeDesktopTask(selectedTaskId);
+        }
+      }, dismiss);
+    }, [controller, navigation, pushPreparedTask, selectedTaskId])
+  );
+
+  return <View style={styles.transparentTaskActions} />;
+}
+
+function MoreRouteContent() {
+  const {
+    controller,
+    forceCloudEnabled,
+    onForceCloudChange,
+    openComposer,
+    pushPreparedTask,
+    state
+  } = useNavigationContent();
+  const selectedTask = resolveSelectedTask(state);
+  const routeTaskResult = (taskId: string | null) => {
+    if (!taskId) return;
+    pushPreparedTask(taskId);
   };
+
+  return (
+    <MoreScreen
+      forceCloudEnabled={forceCloudEnabled}
+      showDeveloperDiagnostics={__DEV__ === true}
+      refreshStatus={state.refreshStatus}
+      selectedTask={selectedTask}
+      onRefresh={() => {
+        void controller.refresh();
+      }}
+      onForceCloudChange={(enabled) => {
+        onForceCloudChange(enabled);
+      }}
+      onOpenComposer={openComposer}
+      onAdvanceTaskStage={(taskId) => {
+        void controller.advanceDesktopTaskStage(taskId).then(routeTaskResult);
+      }}
+      onRunMergeAgent={(taskId) => {
+        void controller.runMergeAgent(taskId).then(routeTaskResult);
+      }}
+      onCloseTask={(taskId) => {
+        void controller.closeDesktopTask(taskId);
+      }}
+    />
+  );
 }
 
-export default function RootNavigator(): RootNavigatorModel {
-  return createRootNavigator();
+function TaskDetailRoute({
+  navigation,
+  route
+}: NativeStackScreenProps<RootStackParamList, "TaskDetail">) {
+  const {
+    controller,
+    e2eTaskSnapshotMarker,
+    pushTaskMore,
+    state
+  } = useNavigationContent();
+  const routeTaskId = route.params.taskId;
+  const routeTask = resolveTask(state, routeTaskId);
+  const selectedTask = state.selectedTaskId
+    ? resolveTask(state, state.selectedTaskId)
+    : null;
+  const isFocused = useIsFocused();
+  const taskId = resolveFocusedTaskRouteIdentity({
+    focused: isFocused,
+    routeTaskExists: routeTask !== null,
+    routeTaskId,
+    selectedTaskExists: selectedTask !== null,
+    selectedTaskId: state.selectedTaskId
+  });
+  const task = taskId === routeTaskId ? routeTask : selectedTask;
+  const cleanupTaskId = resolveTaskCleanupIdentity({
+    routeTaskExists: routeTask !== null,
+    routeTaskId,
+    selectedTaskExists: selectedTask !== null,
+    selectedTaskId: state.selectedTaskId
+  });
+  const selectedTaskIdRef = useRef(state.selectedTaskId);
+  const cleanupTaskIdRef = useRef(cleanupTaskId);
+  selectedTaskIdRef.current = state.selectedTaskId;
+  cleanupTaskIdRef.current = cleanupTaskId;
+
+  useFocusEffect(
+    useCallback(() => {
+      if (selectedTaskIdRef.current !== taskId) {
+        controller.openTask(taskId);
+      }
+      controller.setTaskDetailVisible(true);
+      return () => controller.setTaskDetailVisible(false);
+    }, [controller, taskId])
+  );
+
+  useEffect(
+    () => () => controller.closeTask(cleanupTaskIdRef.current),
+    [controller]
+  );
+
+  useEffect(() => {
+    if (taskId !== routeTaskId) {
+      navigation.setParams({ taskId });
+    }
+  }, [navigation, routeTaskId, taskId]);
+
+  useEffect(() => {
+    if (
+      state.connectionState === "connected" &&
+      state.selectedTaskId === null &&
+      navigation.canGoBack()
+    ) {
+      navigation.goBack();
+    }
+  }, [navigation, state.connectionState, state.selectedTaskId]);
+
+  if (!task) {
+    return <View style={styles.taskPlaceholder} />;
+  }
+
+  return (
+    <TaskScreen
+      e2eTaskSnapshotMarker={e2eTaskSnapshotMarker}
+      task={task}
+      terminalErrorMessage={state.taskTerminalErrorMessage}
+      terminalOutput={state.taskTerminalOutput}
+      terminalOutputEpoch={state.taskTerminalOutputEpoch}
+      terminalOutputStart={state.taskTerminalOutputStart}
+      terminalStatus={state.taskTerminalStatus}
+      terminalCols={state.taskTerminalCols}
+      terminalRows={state.taskTerminalRows}
+      agentErrorMessage={state.taskAgentErrorMessage}
+      agentEvents={state.taskAgentEvents}
+      agentStatus={state.taskAgentStatus}
+      taskCreationPhase={resolveTaskCreationPhase(state, routeTaskId)}
+      taskCreationErrorMessage={state.composerErrorMessage}
+      onBack={() => navigation.goBack()}
+      onAdvanceTaskStage={() => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) {
+          void controller.advanceDesktopTaskStage(durableTaskId);
+        }
+      }}
+      onCloseTask={() => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) {
+          void controller.closeDesktopTask(durableTaskId);
+        }
+      }}
+      onOpenTaskActions={pushTaskMore}
+      onReadTaskFile={(path) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        return durableTaskId
+          ? controller.readTaskFile(durableTaskId, path)
+          : Promise.reject(new Error("Task creation is still in progress."));
+      }}
+      onSendInput={(input) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) {
+          void controller.sendTaskInput(durableTaskId, input);
+        }
+      }}
+      onStopAgent={() => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) controller.interruptTaskAgent(durableTaskId);
+      }}
+      onResolveAgentPermission={(requestId, decision) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) {
+          controller.sendTaskAgentPermission(durableTaskId, requestId, decision);
+        }
+      }}
+      onRecoverTaskCreation={() => {
+        void controller.recoverTaskCreation();
+      }}
+    />
+  );
 }
+
+function ComposerOverlay() {
+  const {
+    controller,
+    pushPreparedTask,
+    state,
+    taskDetailViewportRef
+  } = useNavigationContent();
+  const pendingTaskRoute = resolvePendingTaskCreationRoute({
+    composerOpen: state.isComposerOpen,
+    pendingSlotId: state.pendingTaskCreation?.slotId ?? null,
+    selectedTaskId: state.selectedTaskId
+  });
+  const machines = useMemo(
+    () => buildMachineInventory({
+      accountDesktops: state.accountDesktops,
+      manualDesktops: state.trustedDesktops,
+      liveLanDesktops: state.liveLanDesktops
+    }),
+    [state.accountDesktops, state.liveLanDesktops, state.trustedDesktops]
+  );
+  const composerMachines = useMemo(
+    () => machines.map((machine) => ({
+      id: machine.desktopId,
+      name: machine.displayName,
+      online: machine.availability.lan || machine.availability.cloud,
+      mode: machine.availability.cloud ? "remote" as const : "lan" as const,
+      reachableViaRelay: machine.availability.cloud,
+      connectionMode:
+        machine.availability.lan && machine.availability.cloud
+          ? "both" as const
+          : machine.availability.lan
+            ? "lan" as const
+            : "internet" as const,
+      lastSeenAt: machine.availability.lastSeenAt
+    })),
+    [machines]
+  );
+
+  useEffect(() => {
+    if (pendingTaskRoute) pushPreparedTask(pendingTaskRoute);
+  }, [pendingTaskRoute, pushPreparedTask]);
+
+  return (
+    <CreateTaskComposer
+      isOpen={state.isComposerOpen}
+      prompt={state.composerPrompt}
+      repos={state.repos}
+      desktops={composerMachines}
+      selectedRepoId={state.composerRepoId}
+      selectedDesktopId={state.composerDesktopId}
+      selectedAgentProvider={state.composerAgentProvider}
+      isOptionsExpanded={state.isComposerOptionsExpanded}
+      errorMessage={state.composerErrorMessage}
+      onClose={() => controller.closeComposer()}
+      onSelectDesktop={(desktopId) => controller.selectComposerDesktop(desktopId)}
+      onSelectAgentProvider={(provider) => controller.selectComposerAgentProvider(provider)}
+      onToggleOptions={() =>
+        controller.setComposerOptionsExpanded(!state.isComposerOptionsExpanded)
+      }
+      onChangePrompt={(prompt) => controller.updateComposerPrompt(prompt)}
+      onSubmit={() => {
+        void controller.createTask(
+          resolveMobileTerminalGeometry(taskDetailViewportRef.current)
+        ).then((taskId) => {
+          if (taskId) pushPreparedTask(taskId);
+        });
+      }}
+    />
+  );
+}
+
+function StandardScreen({
+  children,
+  title
+}: {
+  children: React.ReactNode;
+  title: string;
+}) {
+  const { onOpenAccount, state } = useNavigationContent();
+  return (
+    <View style={styles.standardScreen}>
+      {state.errorMessage && state.connectionState === "connected" ? (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorText}>{state.errorMessage}</Text>
+        </View>
+      ) : null}
+      <View style={styles.topBar}>
+        <Text numberOfLines={1} style={styles.topBarTitle}>
+          {title}
+        </Text>
+        <AccountBadge auth={state.auth} onPress={onOpenAccount} />
+      </View>
+      {children}
+    </View>
+  );
+}
+
+function UtilityScreen({ children }: { children: React.ReactNode }) {
+  return <View style={styles.utilityScreen}>{children}</View>;
+}
+
+function resolveSelectedTask(state: SessionState) {
+  return state.selectedTaskId
+    ? resolveTask(state, state.selectedTaskId)
+    : null;
+}
+
+function resolveTask(state: SessionState, taskId: string) {
+  const tasks = [
+    ...new Map(
+      [...state.repoTasks, ...state.recentTasks, ...state.searchResults].map(
+        (task) => [task.id, task] as const
+      )
+    ).values()
+  ];
+  const slot = taskUiSlotForSelection(
+    projectTaskUiSlots(tasks, state.taskUiSlots),
+    taskId
+  );
+  return slot ? taskUiSlotToTaskSummary(slot) : null;
+}
+
+function resolveDurableTaskId(state: SessionState, taskId: string) {
+  return taskUiSlotForSelection(state.taskUiSlots, taskId)?.taskId ??
+    resolveTask(state, taskId)?.id ??
+    null;
+}
+
+function resolveTaskCreationPhase(state: SessionState, taskId: string) {
+  const slot = taskUiSlotForSelection(state.taskUiSlots, taskId);
+  return slot?.state === "creating" &&
+    state.pendingTaskCreation?.slotId === slot.slotId
+    ? state.taskCreationPhase
+    : "idle";
+}
+
+function useNavigationContent(): NavigationContent {
+  const content = useContext(NavigationContentContext);
+  if (!content) {
+    throw new Error("RootNavigator content is unavailable");
+  }
+  return content;
+}
+
+const styles = StyleSheet.create({
+  navigatorHost: {
+    flex: 1
+  },
+  stackContent: {
+    backgroundColor: "#08111E"
+  },
+  transparentStackContent: {
+    backgroundColor: "transparent"
+  },
+  header: {
+    backgroundColor: "#08111E"
+  },
+  headerTitle: {
+    fontWeight: "800"
+  },
+  standardScreen: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 18
+  },
+  utilityScreen: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 18
+  },
+  taskPlaceholder: {
+    backgroundColor: "#08111E",
+    flex: 1
+  },
+  transparentTaskActions: {
+    flex: 1
+  },
+  topBar: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 14,
+    justifyContent: "space-between",
+    marginBottom: 18
+  },
+  topBarTitle: {
+    color: "#F5F7FB",
+    flex: 1,
+    fontSize: 30,
+    fontWeight: "800"
+  },
+  errorBanner: {
+    backgroundColor: "rgba(97, 33, 36, 0.38)",
+    borderColor: "rgba(214, 102, 114, 0.34)",
+    borderRadius: 16,
+    borderWidth: 1,
+    marginBottom: 12,
+    padding: 14
+  },
+  errorText: {
+    color: "#FFC7CE",
+    fontSize: 14,
+    lineHeight: 20
+  }
+});
