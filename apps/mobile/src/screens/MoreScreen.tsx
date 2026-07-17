@@ -120,6 +120,7 @@ export function MoreScreen({
                           ? styles.actionPressed
                           : null
                     ]}
+                    testID={MOBILE_E2E_IDS.moreCommand(action.id)}
                     onPress={() => handleAction(action)}
                   >
                     <Text style={styles.commandLabel}>{action.sectionTitle}</Text>

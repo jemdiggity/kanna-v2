@@ -15,6 +15,13 @@ interface ProfilePasswordToggleElement extends ProfileConnectionElement {
   getAttribute(name: string): Promise<string | null>;
 }
 
+interface ScrollableProfileConnectionElement extends ProfileConnectionElement {
+  scrollIntoView(options: {
+    direction: "down";
+    maxScrolls: number;
+  }): Promise<unknown>;
+}
+
 interface ProfileSheetOpener {
   getAccountButton(): Promise<ProfileConnectionElement>;
   getAccountSheet(): Promise<ProfileConnectionElement>;
@@ -24,6 +31,23 @@ interface MoreDiagnosticsUi {
   getMoreTab(): Promise<ProfileConnectionElement>;
   getMoreScreen(): Promise<ProfileConnectionElement>;
   getOtaStatusValue(): Promise<ProfileConnectionElement>;
+}
+
+interface ToolbarActionPathsUi {
+  getAddTaskButton(): Promise<ProfileConnectionElement>;
+  getCreateTaskCancelButton(): Promise<ProfileConnectionElement>;
+  getCreateTaskCommand(): Promise<ScrollableProfileConnectionElement>;
+  getCreateTaskPromptInput(): Promise<ProfileConnectionElement>;
+  getMoreTab(): Promise<ProfileConnectionElement>;
+  getMoreScreen(): Promise<ProfileConnectionElement>;
+  waitUntil(
+    condition: () => Promise<boolean>,
+    options: {
+      interval: number;
+      timeout: number;
+      timeoutMsg: string;
+    }
+  ): Promise<unknown>;
 }
 
 interface ProfileConnectionControlsUi {
@@ -47,6 +71,7 @@ interface ProfileConnectionControlsUi {
 interface ProfileConnectionUi
   extends ProfileSheetOpener,
     MoreDiagnosticsUi,
+    ToolbarActionPathsUi,
     ProfileConnectionControlsUi {}
 
 function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
@@ -57,6 +82,9 @@ function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
     async getAccountSheet() {
       return driver.$(selectors.accountSheet);
     },
+    async getAddTaskButton() {
+      return driver.$(selectors.addTaskButton);
+    },
     async getConnectionStatus() {
       return driver.$(selectors.accountConnectionStatus);
     },
@@ -65,6 +93,15 @@ function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
     },
     async getConnectLocalButton() {
       return driver.$(selectors.accountConnectLocalButton);
+    },
+    async getCreateTaskCancelButton() {
+      return driver.$(selectors.createTaskCancelButton);
+    },
+    async getCreateTaskCommand() {
+      return driver.$(selectors.createTaskCommand);
+    },
+    async getCreateTaskPromptInput() {
+      return driver.$(selectors.createTaskPromptInput);
     },
     async getEmailInput() {
       return driver.$(selectors.accountEmailInput);
@@ -91,6 +128,53 @@ function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
       return driver.waitUntil(condition, options);
     }
   };
+}
+
+// XCUITest's native accessibility snapshot exposes control names, roles, and
+// states, but not React Native's resolved backgroundColor, opacity, or transform.
+// A WebDriver click also releases the pointer before the next command can capture
+// a screenshot. Reliable end-to-end visual checking would require a harness API
+// that holds pointer-down while atomically capturing and comparing the control's
+// pixel region (or a test-only native resolved-style probe). Until then, this
+// smoke covers the real Add task and More action paths; FloatingToolbar.test.tsx
+// and MoreScreen.test.tsx assert the transient pressed styles themselves.
+export async function assertToolbarActionPathsReachable(
+  ui: ToolbarActionPathsUi
+): Promise<void> {
+  const openAndCloseComposer = async (
+    opener: ProfileConnectionElement
+  ): Promise<void> => {
+    await opener.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    await opener.click();
+
+    const promptInput = await ui.getCreateTaskPromptInput();
+    await promptInput.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+
+    const cancelButton = await ui.getCreateTaskCancelButton();
+    await cancelButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    await cancelButton.click();
+    await ui.waitUntil(
+      async () =>
+        !(await (await ui.getCreateTaskPromptInput()).isExisting()),
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected task composer to close after Cancel"
+      }
+    );
+  };
+
+  await openAndCloseComposer(await ui.getAddTaskButton());
+
+  const moreTab = await ui.getMoreTab();
+  await moreTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await moreTab.click();
+
+  const moreScreen = await ui.getMoreScreen();
+  await moreScreen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const createTaskCommand = await ui.getCreateTaskCommand();
+  await createTaskCommand.scrollIntoView({ direction: "down", maxScrolls: 5 });
+  await openAndCloseComposer(createTaskCommand);
 }
 
 export async function assertOtaDiagnosticsHidden(
@@ -235,6 +319,7 @@ export async function runProfileConnectionSmoke(driver: Browser): Promise<void> 
   const appShell = await driver.$(selectors.appShell);
   await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 
+  await assertToolbarActionPathsReachable(ui);
   await assertOtaDiagnosticsHidden(ui);
   await openProfileConnectionSheet(ui);
   await assertProfileConnectionControlsReachable(ui);

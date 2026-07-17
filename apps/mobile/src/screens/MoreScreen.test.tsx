@@ -34,7 +34,7 @@ afterEach(async () => {
 });
 
 describe("MoreScreen", () => {
-  it("visibly responds while the advance-stage command is pressed", async () => {
+  it("shares visible pressed feedback across global and task commands", async () => {
     if (!MoreScreen) throw new Error("MoreScreen was not loaded");
 
     const props = {
@@ -59,26 +59,36 @@ describe("MoreScreen", () => {
       rendered = create(React.createElement(MoreScreen, props));
     });
 
-    const advanceStageButton = rendered.root
-      .findAll((node) => node.type === "Pressable")
-      .find((node) =>
+    const buttons = rendered.root.findAll((node) => node.type === "Pressable");
+    const findCommandButton = (title: string) =>
+      buttons.find((node) =>
         node
           .findAll((child) => child.type === "Text")
-          .some((child) => child.children.join("") === "Advance Stage")
+          .some((child) => child.children.join("") === title)
       );
-    const resolveStyle = advanceStageButton?.props.style;
+    const createTaskStyle = findCommandButton("Create Task")?.props.style;
+    const advanceStageStyle = findCommandButton("Advance Stage")?.props.style;
 
-    expect(resolveStyle).toBeTypeOf("function");
-    expect(resolveStyle({ pressed: true })).toEqual(
+    expect(createTaskStyle).toBeTypeOf("function");
+    expect(advanceStageStyle).toBeTypeOf("function");
+    expect(createTaskStyle({ pressed: true })).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          opacity: expect.any(Number),
-          transform: [{ scale: expect.any(Number) }]
+          backgroundColor: "#182842",
+          borderColor: "#3A5F91",
+          opacity: 0.82,
+          transform: [{ scale: 0.98 }]
         })
       ])
     );
-    expect(resolveStyle({ pressed: true })).not.toEqual(
-      resolveStyle({ pressed: false })
+    expect(createTaskStyle({ pressed: true })).toEqual(
+      advanceStageStyle({ pressed: true })
+    );
+    expect(createTaskStyle({ pressed: true })).not.toEqual(
+      createTaskStyle({ pressed: false })
+    );
+    expect(advanceStageStyle({ pressed: true })).not.toEqual(
+      advanceStageStyle({ pressed: false })
     );
   });
 

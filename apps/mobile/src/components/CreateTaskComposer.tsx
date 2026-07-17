@@ -205,7 +205,11 @@ export function CreateTaskComposer({
           ) : null}
 
           <View style={styles.actions}>
-            <Pressable style={styles.secondaryButton} onPress={onClose}>
+            <Pressable
+              style={styles.secondaryButton}
+              testID={MOBILE_E2E_IDS.createTaskCancelButton}
+              onPress={onClose}
+            >
               <Text style={styles.secondaryLabel}>Cancel</Text>
             </Pressable>
             <Pressable
