@@ -183,6 +183,7 @@ describe("task lifecycle", () => {
   const client = new WebDriverClient();
   let repoId = "";
   let fixtureRepoRoot = "";
+  let secondaryFixtureRepoRoot = "";
   let testRepoPath = "";
 
   beforeAll(async () => {
@@ -197,7 +198,9 @@ describe("task lifecycle", () => {
     if (testRepoPath) {
       await cleanupWorktrees(client, testRepoPath);
     }
-    await cleanupFixtureRepos(fixtureRepoRoot ? [fixtureRepoRoot] : []);
+    await cleanupFixtureRepos(
+      [fixtureRepoRoot, secondaryFixtureRepoRoot].filter((path) => path.length > 0),
+    );
     await client.deleteSession();
   });
 
@@ -780,5 +783,131 @@ describe("task lifecycle", () => {
       || JSON.stringify(call).includes(closedBranch)
     );
     expect(callsForClosedTask).toEqual([]);
+  });
+
+  it("keeps the current repo selected when closing its only task while another repo has a task", async () => {
+    await resetDatabase(client);
+    secondaryFixtureRepoRoot = await createFixtureRepo("lifecycle-secondary-test");
+
+    const importRepo = async (path: string, name: string): Promise<string> => {
+      const result = await callVueMethod(client, "store.importRepo", path, name, "main");
+      if (typeof result !== "string" || result.length === 0) {
+        throw new Error(`failed to import ${name}: ${JSON.stringify(result)}`);
+      }
+      return result;
+    };
+
+    const repoAId = await importRepo(testRepoPath, "close-empty-repo-a");
+    const repoBId = await importRepo(secondaryFixtureRepoRoot, "close-empty-repo-b");
+    let repoATaskId = "";
+    let repoBTaskId = "";
+
+    const createAgentTask = async (
+      targetRepoId: string,
+      repoPath: string,
+      prompt: string,
+    ): Promise<string> => {
+      const result = await callVueMethod(
+        client,
+        "createItem",
+        targetRepoId,
+        repoPath,
+        prompt,
+        "agent",
+      );
+      if (typeof result !== "string" || result.length === 0) {
+        throw new Error(`failed to create task ${prompt}: ${JSON.stringify(result)}`);
+      }
+      return result;
+    };
+
+    const assertEmptyRepoASelection = async (repoBTaskId: string): Promise<void> => {
+      const state = await client.executeSync<{
+        selectedRepoId: string | null;
+        selectedItemId: string | null;
+        repoASelected: boolean;
+        repoAEmptyText: string;
+        repoATaskCount: number;
+        repoBTaskSelected: boolean;
+        mainPanelText: string;
+      }>(
+        `const ctx = window.__KANNA_E2E__.setupState;
+         const read = (value) => value && value.__v_isRef ? value.value : value;
+         const repoA = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoAId}"]`)});
+         const repoBTask = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoBId}"] .pipeline-item[data-task-id="${repoBTaskId}"]`)});
+         return {
+           selectedRepoId: read(ctx.store.selectedRepoId) ?? null,
+           selectedItemId: read(ctx.store.selectedItemId) ?? null,
+           repoASelected: repoA?.querySelector(".repo-header")?.classList.contains("selected") ?? false,
+           repoAEmptyText: repoA?.querySelector(".no-items")?.textContent?.trim() ?? "",
+           repoATaskCount: repoA?.querySelectorAll(".pipeline-item").length ?? -1,
+           repoBTaskSelected: repoBTask?.classList.contains("selected") ?? false,
+           mainPanelText: document.querySelector(".main-panel .empty-state")?.textContent?.trim() ?? "",
+         };`,
+      );
+
+      expect(state).toEqual({
+        selectedRepoId: repoAId,
+        selectedItemId: null,
+        repoASelected: true,
+        repoAEmptyText: "No tasks",
+        repoATaskCount: 0,
+        repoBTaskSelected: false,
+        mainPanelText: expect.stringContaining("No task selected"),
+      });
+    };
+
+    try {
+      repoATaskId = await createAgentTask(
+        repoAId,
+        testRepoPath,
+        "Only task in repository A",
+      );
+      repoBTaskId = await createAgentTask(
+        repoBId,
+        secondaryFixtureRepoRoot,
+        "Open task in repository B",
+      );
+
+      await callVueMethod(client, "store.selectRepo", repoAId);
+      await callVueMethod(client, "store.selectItem", repoATaskId);
+      await persistWindowSelection(client, { repoId: repoAId, itemId: repoATaskId });
+
+      const closeResult = await callVueMethod(client, "closeSelectedWorkspaceTask");
+      if (closeResult && typeof closeResult === "object" && "__error" in closeResult) {
+        throw new Error(String((closeResult as { __error: unknown }).__error));
+      }
+
+      await waitForCondition(async () => {
+        const rows = await queryDb(
+          client,
+          "SELECT closed_at FROM pipeline_item WHERE id = ?",
+          [repoATaskId],
+        ) as Array<{ closed_at: string | null }>;
+        const selectedRepoId = await getVueState(client, "selectedRepoId");
+        const selectedItemId = await getVueState(client, "selectedItemId");
+        return Boolean(rows[0]?.closed_at)
+          && selectedRepoId === repoAId
+          && selectedItemId === null;
+      }, "repository A to remain selected after its only task closes", 15_000);
+
+      await assertEmptyRepoASelection(repoBTaskId);
+
+      await client.executeSync("window.__KANNA_E2E__.ready = false; location.reload();");
+      await client.waitForAppReady();
+      await waitForCondition(async () => {
+        const selectedRepoId = await getVueState(client, "selectedRepoId");
+        const selectedItemId = await getVueState(client, "selectedItemId");
+        return selectedRepoId === repoAId && selectedItemId === null;
+      }, "persisted empty repository A selection after reload", 10_000);
+
+      await assertEmptyRepoASelection(repoBTaskId);
+    } finally {
+      for (const taskId of [repoATaskId, repoBTaskId]) {
+        if (!taskId) continue;
+        await callVueMethod(client, "store.closeTask", taskId, { selectNext: false })
+          .catch(() => undefined);
+      }
+    }
   });
 });

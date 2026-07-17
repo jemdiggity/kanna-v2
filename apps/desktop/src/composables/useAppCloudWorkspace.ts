@@ -365,10 +365,10 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     const workspaceTask = selectedWorkspaceTask.value;
     const closingPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
     if (!workspaceTask || workspaceTask.terminal.kind === "local") {
-      if (workspaceTask) {
+      await store.closeTask();
+      if (workspaceTask && !store.items.some((item) => item.id === workspaceTask.item.id)) {
         markWorkspaceTaskLocallyClosed(workspaceTask);
       }
-      await store.closeTask();
       return;
     }
 

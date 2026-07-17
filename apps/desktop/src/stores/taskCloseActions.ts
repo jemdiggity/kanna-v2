@@ -21,7 +21,6 @@ export function createTaskCloseActions(
   };
 
   async function selectReplacementAfterTaskRemoval(item: PipelineItem): Promise<void> {
-    if (requireService(context.services.selectedTaskId, "selectedTaskId").value !== item.id) return;
     await requireService(
       context.services.selectReplacementAfterItemRemoval,
       "selectReplacementAfterItemRemoval",
@@ -40,10 +39,16 @@ export function createTaskCloseActions(
       context.toast.warning(context.tt("toasts.closeTaskHasOpenSubtasks"));
       return;
     }
+    const itemWasSelected = requireService(
+      context.services.selectedTaskId,
+      "selectedTaskId",
+    ).value === item.id;
 
     try {
       await closeDesktopTask(item.id);
-      if (opts?.selectNext !== false) await selectReplacementAfterTaskRemoval(item);
+      if (opts?.selectNext !== false && itemWasSelected) {
+        await selectReplacementAfterTaskRemoval(item);
+      }
       await reloadSnapshot();
       await invalidateWindowWorkspace("closeTask");
     } catch (error) {
