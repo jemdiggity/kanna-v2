@@ -1,13 +1,44 @@
 import { chmod, writeFile } from "node:fs/promises";
 
-export async function writeScriptedAgentBinary(path: string): Promise<void> {
-  await writeFile(path, scriptedAgentSource());
+export interface ScriptedAgentOptions {
+  snapshotHistory?: {
+    sentinel: string;
+  };
+}
+
+export const SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL =
+  "MOBILE_PTY_SNAPSHOT_SENTINEL";
+
+export async function writeScriptedAgentBinary(
+  path: string,
+  options: ScriptedAgentOptions = {},
+): Promise<void> {
+  await writeFile(path, scriptedAgentSource(options));
   await chmod(path, 0o755);
 }
 
-export function scriptedAgentSource(): string {
+export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string {
+  const snapshotHistorySentinel =
+    options.snapshotHistory?.sentinel ?? SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL;
+  const snapshotHistoryTrigger = options.snapshotHistory
+    ? "snapshot_history_enabled=1"
+    : `snapshot_history_enabled=0
+case "$*" in
+  *${SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL}*) snapshot_history_enabled=1 ;;
+esac`;
+  const snapshotHistory = `${snapshotHistoryTrigger}
+if [ "$snapshot_history_enabled" -eq 1 ]; then
+  history_line=1
+  while [ $history_line -le 10050 ]; do
+    printf 'MOBILE_PTY_HISTORY_%05d_%s\\r\\n' "$history_line" '${"X".repeat(54)}'
+    history_line=$((history_line + 1))
+  done
+  printf '%s\\r\\n' ${shellSingleQuote(snapshotHistorySentinel)}
+fi
+`;
+
   return `#!/bin/sh
-printf 'SCRIPT_READY\\n'
+${snapshotHistory}printf 'SCRIPT_READY\\n'
 
 heartbeat=0
 (
@@ -15,6 +46,9 @@ heartbeat=0
     sleep 0.25
     heartbeat=$((heartbeat + 1))
     if [ $((heartbeat % 4)) -eq 0 ]; then
+      if [ "$snapshot_history_enabled" -eq 1 ]; then
+        printf '%s\\n' ${shellSingleQuote(snapshotHistorySentinel)}
+      fi
       printf 'SCRIPT_READY\\n'
     fi
     printf 'SCRIPT_HEARTBEAT %s\\n' "$heartbeat"
@@ -81,4 +115,8 @@ done
 
 wait "$heartbeat_pid"
 `;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }

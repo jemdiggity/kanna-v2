@@ -382,13 +382,11 @@ describe("createSessionStore", () => {
     });
   });
 
-  it("keeps a large base64 snapshot frame intact instead of slicing mid-token", () => {
+  it("keeps a snapshot larger than the live-output cap", () => {
     const store = createSessionStore();
     store.beginTaskTerminal("task-1", "");
 
-    // A real TUI snapshot is a single base64 frame far larger than the old
-    // 12000-char cap. Char-slicing it corrupted base64 -> blank terminal.
-    const snapshot = "A".repeat(1_050_000);
+    const snapshot = "A".repeat(1_100_000);
     store.appendTaskTerminal("task-1", `${snapshot}\n`);
 
     expect(store.getState().taskTerminalOutput).toBe(`${snapshot}\n`);
@@ -418,21 +416,37 @@ describe("createSessionStore", () => {
     expect(publishes).toBe(1);
   });
 
-  it("drops whole oldest base64 frames (never a partial token) when over the cap", () => {
+  it("evicts only whole oldest live frames while retaining the snapshot", () => {
     const store = createSessionStore();
     store.beginTaskTerminal("task-1", "");
 
-    const frame = "B".repeat(300_000);
-    for (let i = 0; i < 5; i += 1) {
+    const snapshot = "A".repeat(300_000);
+    const liveFrames = ["B", "C", "D", "E"].map((value) =>
+      value.repeat(300_000)
+    );
+    store.appendTaskTerminal("task-1", `${snapshot}\n`);
+    for (const frame of liveFrames) {
       store.appendTaskTerminal("task-1", `${frame}\n`);
     }
 
-    const output = store.getState().taskTerminalOutput;
-    const frames = output.split("\n").filter((segment) => segment.length > 0);
-    // Every retained frame is intact; none truncated mid-base64.
-    expect(frames.every((segment) => segment === frame)).toBe(true);
-    expect(output.length).toBeLessThanOrEqual(1_000_001);
-    expect(store.getState().taskTerminalOutputStart).toBe(600_002);
+    const state = store.getState();
+    const frames = state.taskTerminalOutput.split("\n").filter(Boolean);
+    expect(frames).toEqual([snapshot, ...liveFrames.slice(-3)]);
+    expect(state.taskTerminalOutputStart).toBe(300_001);
+  });
+
+  it("keeps one oversized live frame whole after the snapshot", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+
+    const snapshot = "c25hcHNob3Q=";
+    const liveFrame = "B".repeat(1_100_000);
+    store.appendTaskTerminal("task-1", `${snapshot}\n`);
+    store.appendTaskTerminal("task-1", `${liveFrame}\n`);
+
+    expect(store.getState().taskTerminalOutput).toBe(
+      `${snapshot}\n${liveFrame}\n`
+    );
   });
 
   it("keeps a large snapshot plus live frames decodable through the accumulation cap", () => {
@@ -440,11 +454,10 @@ describe("createSessionStore", () => {
     store.beginTaskTerminal("task-1", "");
     store.setTaskTerminalDims("task-1", 220, 72);
 
-    const snapshotText = Array.from({ length: 72 }, (_value, index) =>
-      `row ${String(index + 1).padStart(2, "0")} ${"snapshot ".repeat(22)}`
-    ).join("\r\n");
+    const snapshotText = "snapshot scrollback row\r\n".repeat(40_000);
     const snapshotFrame = Buffer.from(snapshotText, "utf8").toString("base64");
     const liveFrame = Buffer.from("LIVE-APPEND-CORRECT", "utf8").toString("base64");
+    expect(snapshotFrame.length).toBeGreaterThan(1_000_000);
 
     store.appendTaskTerminal("task-1", `${snapshotFrame}\n`);
     store.appendTaskTerminal("task-1", `${liveFrame}\n`);
@@ -456,7 +469,7 @@ describe("createSessionStore", () => {
     expect(state.taskTerminalCols).toBe(220);
     expect(state.taskTerminalRows).toBe(72);
     expect(frames).toEqual([snapshotFrame, liveFrame]);
-    expect(decoded).toContain("row 72");
+    expect(decoded).toContain("snapshot scrollback row");
     expect(decoded).toContain("LIVE-APPEND-CORRECT");
   });
 

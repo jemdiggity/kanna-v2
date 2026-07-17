@@ -53,6 +53,23 @@ async function observeSubmittedInput(input: string): Promise<string> {
 }
 
 describe("scripted remote E2E agent", () => {
+  it("can prime a retained terminal snapshot with a unique final sentinel", () => {
+    const configurableSource = scriptedAgentSource as unknown as (options: {
+      snapshotHistory: { sentinel: string };
+    }) => string;
+    const source = configurableSource({
+      snapshotHistory: { sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL" },
+    });
+
+    expect(source).toContain('history_line -le 10050');
+    expect(source).toContain("MOBILE_PTY_HISTORY_%05d_");
+    expect(source).toContain("MOBILE_PTY_SNAPSHOT_SENTINEL");
+    expect(source).toContain(
+      'if [ "$snapshot_history_enabled" -eq 1 ]; then\n' +
+        "        printf '%s\\n' 'MOBILE_PTY_SNAPSHOT_SENTINEL'",
+    );
+  });
+
   it("uses a POSIX shell shebang so task shells do not need to resolve node", () => {
     expect(scriptedAgentSource().startsWith("#!/bin/sh\n")).toBe(true);
   });

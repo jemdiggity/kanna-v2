@@ -148,6 +148,40 @@ export type TaskFilePreviewWebViewInspection =
       reason: string;
     };
 
+interface RelayPtySnapshotRevisitJourney {
+  closeTask(): Promise<void>;
+  openTask(): Promise<void>;
+  waitForRenderedTerminal(): Promise<void>;
+}
+
+interface RelayTaskJourneys {
+  verifyFilePreview(): Promise<void>;
+  verifyMarkedRead(): Promise<void>;
+  verifyPtySnapshotRevisit(): Promise<void>;
+  verifyQuickReply(): Promise<void>;
+  verifyTaskActionMenu(): Promise<void>;
+}
+
+export async function runRelayTaskJourneys(
+  journeys: RelayTaskJourneys,
+): Promise<void> {
+  await journeys.verifyMarkedRead();
+  await journeys.verifyPtySnapshotRevisit();
+  await journeys.verifyTaskActionMenu();
+  await journeys.verifyFilePreview();
+  await journeys.verifyQuickReply();
+}
+
+export async function verifyRelayPtySnapshotRevisit(
+  journey: RelayPtySnapshotRevisitJourney,
+): Promise<void> {
+  await journey.openTask();
+  await journey.waitForRenderedTerminal();
+  await journey.closeTask();
+  await journey.openTask();
+  await journey.waitForRenderedTerminal();
+}
+
 async function dismissSavePasswordPrompt(driver: Browser): Promise<void> {
   for (const selector of [
     "~Not Now",
@@ -1018,23 +1052,31 @@ export async function runRelayTaskFlow(
     options.fixture.taskId,
     options.setTaskActivity,
   );
-  await verifyRelayTaskMarkedRead(ui, options.fixture.taskId, {
-    prepareUnread: options.prepareTaskUnreadForMarkRead,
-    async openTask() {
-      await openRelayFixtureTask(ui, options.fixture.taskId);
-      const backButton = await ui.getBackButton();
-      await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await runRelayTaskJourneys({
+    verifyMarkedRead: () => verifyRelayTaskMarkedRead(ui, options.fixture.taskId, {
+      prepareUnread: options.prepareTaskUnreadForMarkRead,
+      async openTask() {
+        await openRelayFixtureTask(ui, options.fixture.taskId);
+        const backButton = await ui.getBackButton();
+        await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      },
+      waitForOwnerIdle: () => options.waitForLocalTaskActivity("idle"),
+      waitForSelectedDetailIdle: () => waitForSelectedTaskDetailActivity(ui, "idle"),
+      closeTask: () => returnToTaskListShell(ui),
+    }),
+    verifyPtySnapshotRevisit: () => verifyRelayPtySnapshotRevisit({
+      openTask: () => openRelayFixtureTask(ui, options.fixture.taskId),
+      async waitForRenderedTerminal() {
+        await waitForTaskTerminalLive(ui);
+        await waitForRenderedPtyTerminal(ui, options.fixture);
+      },
+      closeTask: () => returnToTaskListShell(ui),
+    }),
+    verifyTaskActionMenu: () => verifyRelayTaskActionMenuJourney(ui),
+    async verifyFilePreview() {
+      await options.emitFilePreviewLinks();
+      await verifyTerminalFilePreviewFlow(driver, ui, options.filePreview);
     },
-    waitForOwnerIdle: () => options.waitForLocalTaskActivity("idle"),
-    waitForSelectedDetailIdle: () => waitForSelectedTaskDetailActivity(ui, "idle"),
-    closeTask: () => returnToTaskListShell(ui),
+    verifyQuickReply: () => verifyRelayQuickReplyJourney(ui, options.draft),
   });
-  await openRelayFixtureTask(ui, options.fixture.taskId);
-  await verifyRelayTaskActionMenuJourney(ui);
-  await waitForTaskTerminalLive(ui);
-  await waitForRenderedPtyTerminal(ui, options.fixture);
-  await options.emitFilePreviewLinks();
-  await verifyTerminalFilePreviewFlow(driver, ui, options.filePreview);
-
-  await verifyRelayQuickReplyJourney(ui, options.draft);
 }

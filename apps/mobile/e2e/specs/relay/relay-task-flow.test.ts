@@ -11,6 +11,107 @@ import {
   verifyTerminalMarkdownFileControls,
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
+import * as relayTaskFlow from "./relay-task-flow.e2e";
+
+describe("relay task flow orchestration", () => {
+  it("marks the task read from the list before revisiting its terminal and continuing on detail", async () => {
+    const calls: string[] = [];
+    let screen: "detail" | "list" = "list";
+    const runRelayTaskJourneys = (
+      relayTaskFlow as typeof relayTaskFlow & {
+        runRelayTaskJourneys?: (journeys: {
+          verifyFilePreview(): Promise<void>;
+          verifyMarkedRead(): Promise<void>;
+          verifyPtySnapshotRevisit(): Promise<void>;
+          verifyQuickReply(): Promise<void>;
+          verifyTaskActionMenu(): Promise<void>;
+        }) => Promise<void>;
+      }
+    ).runRelayTaskJourneys;
+
+    expect(runRelayTaskJourneys).toBeTypeOf("function");
+    if (!runRelayTaskJourneys) return;
+
+    await runRelayTaskJourneys({
+      async verifyMarkedRead() {
+        expect(screen).toBe("list");
+        calls.push("marked-read");
+      },
+      async verifyPtySnapshotRevisit() {
+        expect(screen).toBe("list");
+        screen = "detail";
+        calls.push("open", "rendered");
+        screen = "list";
+        calls.push("close");
+        screen = "detail";
+        calls.push("open", "rendered");
+      },
+      async verifyTaskActionMenu() {
+        expect(screen).toBe("detail");
+        calls.push("task-actions");
+      },
+      async verifyFilePreview() {
+        expect(screen).toBe("detail");
+        calls.push("file-preview");
+      },
+      async verifyQuickReply() {
+        expect(screen).toBe("detail");
+        calls.push("quick-reply");
+      },
+    });
+
+    expect(calls).toEqual([
+      "marked-read",
+      "open",
+      "rendered",
+      "close",
+      "open",
+      "rendered",
+      "task-actions",
+      "file-preview",
+      "quick-reply",
+    ]);
+    expect(screen).toBe("detail");
+  });
+});
+
+describe("oversized PTY snapshot revisit", () => {
+  it("renders the authoritative snapshot before and after reopening the task", async () => {
+    const calls: string[] = [];
+    const verifyRelayPtySnapshotRevisit = (
+      relayTaskFlow as typeof relayTaskFlow & {
+        verifyRelayPtySnapshotRevisit?: (journey: {
+          closeTask(): Promise<void>;
+          openTask(): Promise<void>;
+          waitForRenderedTerminal(): Promise<void>;
+        }) => Promise<void>;
+      }
+    ).verifyRelayPtySnapshotRevisit;
+
+    expect(verifyRelayPtySnapshotRevisit).toBeTypeOf("function");
+    if (!verifyRelayPtySnapshotRevisit) return;
+
+    await verifyRelayPtySnapshotRevisit({
+      async openTask() {
+        calls.push("open");
+      },
+      async waitForRenderedTerminal() {
+        calls.push("rendered");
+      },
+      async closeTask() {
+        calls.push("close");
+      },
+    });
+
+    expect(calls).toEqual([
+      "open",
+      "rendered",
+      "close",
+      "open",
+      "rendered",
+    ]);
+  });
+});
 
 describe("Tasks-tab creation ordering journey", () => {
   it("selects Tasks and accepts native task rows only in newest-first order", async () => {

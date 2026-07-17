@@ -22,11 +22,12 @@ import {
 } from "./taskUiSlots";
 
 // Terminal output is accumulated as newline-delimited base64 frames and replayed
-// into xterm.js on WebView (re)mount. Cap the buffer by dropping whole oldest
-// frames — never slice mid-base64, which corrupts decoding. Retained stream
-// offsets let an already-mounted xterm keep appending after old frames are
-// removed. A single oversized frame remains intact rather than being dropped.
-const MAX_TERMINAL_OUTPUT_CHARS = 1_000_000;
+// into xterm.js on WebView (re)mount. The first frame is the full attachment
+// snapshot and must survive intact; only subsequent live frames are bounded.
+// Always evict at frame boundaries so replay never receives partial base64.
+// droppedChars tracks only evicted live-output characters, allowing an already
+// mounted xterm to append from the logical stream end without replaying history.
+const MAX_TERMINAL_LIVE_OUTPUT_CHARS = 1_000_000;
 
 interface CappedTerminalOutput {
   output: string;
@@ -34,19 +35,35 @@ interface CappedTerminalOutput {
 }
 
 function capTerminalOutput(output: string): CappedTerminalOutput {
-  if (output.length <= MAX_TERMINAL_OUTPUT_CHARS) {
+  const snapshotEnd = output.indexOf("\n") + 1;
+  if (snapshotEnd === 0) {
     return { output, droppedChars: 0 };
   }
-  const cut = output.length - MAX_TERMINAL_OUTPUT_CHARS;
-  const newlineIndex = output.indexOf("\n", cut);
-  // Keep whole frames only; if a single frame exceeds the cap, keep it rather
-  // than emit a corrupt base64 fragment.
-  return newlineIndex === -1 || newlineIndex === output.length - 1
-    ? { output, droppedChars: 0 }
-    : {
-        output: output.slice(newlineIndex + 1),
-        droppedChars: newlineIndex + 1
-      };
+
+  const liveOutput = output.slice(snapshotEnd);
+  if (liveOutput.length <= MAX_TERMINAL_LIVE_OUTPUT_CHARS) {
+    return { output, droppedChars: 0 };
+  }
+
+  const cut = liveOutput.length - MAX_TERMINAL_LIVE_OUTPUT_CHARS;
+  let retainedLiveStart: number;
+  if (cut === 0 || liveOutput[cut - 1] === "\n") {
+    retainedLiveStart = cut;
+  } else {
+    const nextFrameEnd = liveOutput.indexOf("\n", cut);
+    if (nextFrameEnd >= 0 && nextFrameEnd + 1 < liveOutput.length) {
+      retainedLiveStart = nextFrameEnd + 1;
+    } else {
+      // The newest frame alone crosses the soft limit (or is incomplete).
+      // Keep it whole, starting after the preceding complete frame.
+      retainedLiveStart = liveOutput.lastIndexOf("\n", cut - 1) + 1;
+    }
+  }
+
+  return {
+    output: `${output.slice(0, snapshotEnd)}${liveOutput.slice(retainedLiveStart)}`,
+    droppedChars: retainedLiveStart
+  };
 }
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
