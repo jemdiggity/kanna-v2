@@ -31,7 +31,6 @@ import {
 } from "./lib/transports/remoteTransport";
 import { createCloudLanClient } from "./lib/sources/cloudLanClient";
 import { readExpoConfig } from "./lib/expoConfig";
-import { createRootNavigator } from "./navigation/RootNavigator";
 import { installE2eTrustSeedHandler } from "./e2eTrustSeed";
 import {
   createMobileController,
@@ -64,7 +63,6 @@ export interface AppModel {
   client: KannaClient;
   controller: MobileController;
   initialize(): Promise<void>;
-  navigator: ReturnType<typeof createRootNavigator>;
   sessionStore: SessionStore;
   setForceCloud(enabled: boolean): void;
 }
@@ -642,7 +640,6 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       }
       await controller.bootstrap();
     },
-    navigator: createRootNavigator(),
     sessionStore,
     setForceCloud(enabled) {
       forceCloud = enabled;

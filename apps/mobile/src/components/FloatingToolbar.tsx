@@ -1,30 +1,24 @@
 import React from "react";
 import { Ionicons } from "@expo/vector-icons";
+import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import type { TabName, TabRoute } from "../navigation/RootNavigator";
+import {
+  MAIN_TAB_ROUTES,
+  UTILITY_ACTIONS
+} from "../navigation/navigationConfig";
 
-interface FloatingToolbarProps {
-  activeTab: TabName;
-  tabs: TabRoute[];
-  utilityActions: {
-    name: "search" | "create";
-    label: string;
-    icon: string;
-  }[];
-  onSelectTab(tab: TabName): void;
+interface FloatingToolbarProps extends BottomTabBarProps {
   onSelectUtilityAction(action: "search" | "create"): void;
 }
 
 export function FloatingToolbar({
-  activeTab,
-  tabs,
-  utilityActions,
-  onSelectTab,
+  state,
+  navigation,
   onSelectUtilityAction
 }: FloatingToolbarProps) {
-  const searchAction = utilityActions.find((action) => action.name === "search");
-  const createAction = utilityActions.find((action) => action.name === "create");
+  const searchAction = UTILITY_ACTIONS.find((action) => action.name === "search");
+  const createAction = UTILITY_ACTIONS.find((action) => action.name === "create");
 
   return (
     <View style={styles.wrap}>
@@ -44,14 +38,27 @@ export function FloatingToolbar({
       ) : null}
 
       <View style={styles.bar} testID={MOBILE_E2E_IDS.toolbarNavigation}>
-        {tabs.map((tab) => {
-          const active = tab.name === activeTab;
+        {state.routes.map((route, index) => {
+          const tab = MAIN_TAB_ROUTES.find(
+            (candidate) => candidate.routeName === route.name
+          );
+          if (!tab) return null;
+          const active = state.index === index;
           return (
             <Pressable
               key={tab.name}
               style={[styles.item, active ? styles.itemActive : null]}
               testID={MOBILE_E2E_IDS.toolbarTab(tab.name)}
-              onPress={() => onSelectTab(tab.name)}
+              onPress={() => {
+                const event = navigation.emit({
+                  type: "tabPress",
+                  target: route.key,
+                  canPreventDefault: true
+                });
+                if (!active && !event.defaultPrevented) {
+                  navigation.navigate(route.name, route.params);
+                }
+              }}
             >
               <Ionicons
                 color={active ? "#0B1220" : "#D5DEEC"}

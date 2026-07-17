@@ -3,6 +3,7 @@ import * as smokeModule from "./list-detail-back.e2e";
 import {
   assertPtyTerminalFixtureAvailable,
   ensureTaskListVisible,
+  exerciseListDetailBackFromOrigin,
   inspectTerminalWebView,
   openPtyFixtureTask,
   PTY_SNAPSHOT_MIN_DECODED_BYTES,
@@ -10,6 +11,35 @@ import {
   waitForRenderedPtyTerminal,
   waitForTaskTerminalLive
 } from "./list-detail-back.e2e";
+
+describe("origin-preserving list/detail/back", () => {
+  it("returns to Activity after opening a task from Activity", async () => {
+    const calls: string[] = [];
+    const ui = {
+      selectOrigin: vi.fn(async (origin: string) => {
+        calls.push(`select:${origin}`);
+      }),
+      openTask: vi.fn(async (taskId: string) => {
+        calls.push(`open:${taskId}`);
+      }),
+      goBack: vi.fn(async () => {
+        calls.push("back");
+      }),
+      assertOrigin: vi.fn(async (origin: string) => {
+        calls.push(`assert:${origin}`);
+      })
+    };
+
+    await exerciseListDetailBackFromOrigin(ui, "recent", "task-1");
+
+    expect(calls).toEqual([
+      "select:recent",
+      "open:task-1",
+      "back",
+      "assert:recent"
+    ]);
+  });
+});
 
 interface FakeElement {
   click: ReturnType<typeof vi.fn>;

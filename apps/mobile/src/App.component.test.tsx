@@ -1,17 +1,8 @@
 import React from "react";
-import {
-  act,
-  create,
-  type ReactTestInstance,
-  type ReactTestRenderer
-} from "react-test-renderer";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppModel } from "./appModel";
-import { MOBILE_E2E_IDS } from "./e2eTestIds";
-import {
-  TaskCreationError,
-  type KannaClient
-} from "./lib/api/client";
+import type { KannaClient } from "./lib/api/client";
 import { createMobileController } from "./state/mobileController";
 import { createSessionStore } from "./state/sessionStore";
 
@@ -28,7 +19,6 @@ const harness = vi.hoisted(() => ({
 vi.mock("react-native", async () => {
   const ReactModule = await import("react");
   return {
-    ActivityIndicator: "ActivityIndicator",
     AppState: {
       get currentState() {
         return harness.currentAppState;
@@ -40,7 +30,6 @@ vi.mock("react-native", async () => {
         }
       )
     },
-    KeyboardAvoidingView: "KeyboardAvoidingView",
     Modal: ({
       visible,
       children,
@@ -49,10 +38,7 @@ vi.mock("react-native", async () => {
       visible: boolean;
       children?: import("react").ReactNode;
       [key: string]: unknown;
-    }) => visible
-      ? ReactModule.createElement("Modal", props, children)
-      : null,
-    Platform: { OS: "ios" },
+    }) => visible ? ReactModule.createElement("Modal", props, children) : null,
     Pressable: "Pressable",
     SafeAreaView: "SafeAreaView",
     StyleSheet: {
@@ -60,7 +46,6 @@ vi.mock("react-native", async () => {
       create: <T extends Record<string, unknown>>(styles: T) => styles
     },
     Text: "Text",
-    TextInput: "TextInput",
     View: "View"
   };
 });
@@ -78,15 +63,21 @@ vi.mock("./lib/updates/otaUpdates", () => ({
   reloadToApplyUpdate: (...args: unknown[]) => harness.reloadToApplyUpdate(...args)
 }));
 
+vi.mock("./navigation/RootNavigator", () => ({
+  default: "RootNavigator"
+}));
 vi.mock("./components/AccountBadge", () => ({ AccountBadge: "AccountBadge" }));
 vi.mock("./components/AccountSheet", () => ({ AccountSheet: "AccountSheet" }));
+vi.mock("./components/CreateTaskComposer", () => ({
+  CreateTaskComposer: "CreateTaskComposer"
+}));
 vi.mock("./components/FloatingToolbar", () => ({
   FloatingToolbar: "FloatingToolbar"
 }));
 vi.mock("./components/UpdateReadyBanner", () => ({
   UpdateReadyBanner: "UpdateReadyBanner"
 }));
-vi.mock("./screens/MachinesScreen", () => ({ MachinesScreen: "MachinesScreen" }));
+vi.mock("./screens/DesktopsScreen", () => ({ DesktopsScreen: "DesktopsScreen" }));
 vi.mock("./screens/MoreScreen", () => ({ MoreScreen: "MoreScreen" }));
 vi.mock("./screens/SearchScreen", () => ({ SearchScreen: "SearchScreen" }));
 vi.mock("./screens/TaskScreen", () => ({ TaskScreen: "TaskScreen" }));
@@ -129,9 +120,9 @@ async function flushMicrotasks(iterations = 6): Promise<void> {
   }
 }
 
-function createClientMock() {
+function createClientMock(): KannaClient {
   return {
-    getStatus: vi.fn<KannaClient["getStatus"]>().mockResolvedValue({
+    getStatus: vi.fn().mockResolvedValue({
       state: "running",
       desktopId: "desktop-1",
       desktopName: "Studio Mac",
@@ -139,77 +130,42 @@ function createClientMock() {
       lanPort: 48120,
       pairingCode: null
     }),
-    listDesktops: vi.fn<KannaClient["listDesktops"]>().mockResolvedValue([
-      { id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }
-    ]),
-    listRepos: vi.fn<KannaClient["listRepos"]>().mockResolvedValue([
-      { id: "repo-1", name: "Repo One" }
-    ]),
-    listRepoTasks: vi.fn<KannaClient["listRepoTasks"]>().mockResolvedValue([]),
-    listRecentTasks: vi.fn<KannaClient["listRecentTasks"]>().mockResolvedValue([]),
-    searchTasks: vi.fn<KannaClient["searchTasks"]>().mockResolvedValue([]),
-    createTask: vi.fn<KannaClient["createTask"]>().mockResolvedValue({
-      taskId: "0123456789abcdef0123456789abcdef",
-      repoId: "repo-1",
-      title: "Ship mobile shell",
-      stage: "in progress"
-    }),
-    runMergeAgent: vi.fn<KannaClient["runMergeAgent"]>().mockResolvedValue({
-      taskId: "merge-task"
-    }),
-    advanceTaskStage: vi.fn<KannaClient["advanceTaskStage"]>().mockResolvedValue({
-      taskId: "advanced-task"
-    }),
-    markTaskRead: vi.fn<KannaClient["markTaskRead"]>().mockResolvedValue({
-      taskId: "task-1",
-      activity: "idle"
-    }),
-    closeTask: vi.fn<KannaClient["closeTask"]>().mockResolvedValue(undefined),
-    sendTaskInput: vi.fn<KannaClient["sendTaskInput"]>().mockResolvedValue(undefined),
-    readTaskFile: vi.fn<KannaClient["readTaskFile"]>().mockResolvedValue({
-      path: "docs/spec.md",
-      content: "# Spec"
-    }),
-    observeTaskTerminal: vi.fn<KannaClient["observeTaskTerminal"]>(() => ({
-      close: vi.fn()
-    })),
-    observeTaskAgent: vi.fn<KannaClient["observeTaskAgent"]>(() => ({
+    listDesktops: vi.fn().mockResolvedValue([]),
+    listRepos: vi.fn().mockResolvedValue([]),
+    listRepoTasks: vi.fn().mockResolvedValue([]),
+    listRecentTasks: vi.fn().mockResolvedValue([]),
+    searchTasks: vi.fn().mockResolvedValue([]),
+    createTask: vi.fn(),
+    runMergeAgent: vi.fn(),
+    advanceTaskStage: vi.fn(),
+    markTaskRead: vi.fn(),
+    closeTask: vi.fn(),
+    sendTaskInput: vi.fn(),
+    readTaskFile: vi.fn(),
+    observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+    observeTaskAgent: vi.fn(() => ({
       close: vi.fn(),
       interrupt: vi.fn(),
       sendInput: vi.fn(),
       sendPermission: vi.fn()
-    }))
-  } satisfies KannaClient;
+    })),
+    createPairingSession: vi.fn()
+  } as KannaClient;
 }
 
-function createModel(connectionState: "connected" | "idle" | "error" = "connected") {
+function createModel() {
   const sessionStore = createSessionStore();
-  sessionStore.setConnectionState(connectionState);
-  sessionStore.setDesktops([
-    { id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }
-  ]);
-  sessionStore.setMachineSourceDesktops({
-    account: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "remote" }],
-    local: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }]
-  });
-  sessionStore.setRepos([{ id: "repo-1", name: "Repo One" }]);
-  sessionStore.selectDesktop("desktop-1");
-  sessionStore.selectRepo("repo-1");
-  const client = createClientMock();
-  const controller = createMobileController(client, sessionStore, undefined, {
-    createTaskId: () => "0123456789abcdef0123456789abcdef",
-    persistSessionContext: vi.fn().mockResolvedValue(undefined)
-  });
+  const controller = createMobileController(createClientMock(), sessionStore);
   const model = {
-    client,
+    client: createClientMock(),
     controller,
     initialize: vi.fn().mockResolvedValue(undefined),
-    navigator: { tabs: [], utilityActions: [] } as AppModel["navigator"],
+    navigator: { tabs: [], utilityActions: [] },
     sessionStore,
     setForceCloud: vi.fn()
-  } satisfies AppModel;
+  } as unknown as AppModel;
   harness.currentModel = model;
-  return { client, controller, model, sessionStore };
+  return { controller, model, sessionStore };
 }
 
 async function mountModel(model: AppModel): Promise<ReactTestRenderer> {
@@ -221,239 +177,76 @@ async function mountModel(model: AppModel): Promise<ReactTestRenderer> {
   return mounted!;
 }
 
-function hasTestId(root: ReactTestInstance, testID: string): boolean {
-  return root.findAll((node) => node.props.testID === testID).length > 0;
-}
-
-function findTestId(root: ReactTestInstance, testID: string): ReactTestInstance {
-  return root.find((node) => node.props.testID === testID);
-}
-
-function textContent(node: ReactTestInstance | string): string {
-  if (typeof node === "string") return node;
-  return node.children.map((child) => textContent(child)).join("");
-}
-
-function hasText(root: ReactTestInstance, text: string): boolean {
-  return root.findAll(
-    (node) => node.type === "Text" && textContent(node) === text
-  ).length > 0;
-}
-
-function runEffects(): void {
-  const effects = [...harness.effects];
-  harness.effects.length = 0;
-  for (const effect of effects) effect();
-}
-
 describe("App component wiring", () => {
-  it("renders the root shell without ambient decoration layers", async () => {
-    const { model } = createModel("connected");
-    const renderer = await mountModel(model);
-    const safeArea = findTestId(renderer.root, MOBILE_E2E_IDS.appShell);
-
-    expect(safeArea.findAllByType("View", { deep: false })).toHaveLength(1);
-  });
-
-  it("requests search input focus for every magnifier tap", async () => {
-    const { model } = createModel("connected");
-    const renderer = await mountModel(model);
-    const toolbar = renderer.root.findByType("FloatingToolbar");
-
-    await act(async () => {
-      toolbar.props.onSelectUtilityAction("search");
-    });
-
-    expect(renderer.root.findByType("SearchScreen").props.focusRequestKey).toBe(1);
-
-    await act(async () => {
-      renderer.root
-        .findByType("FloatingToolbar")
-        .props.onSelectUtilityAction("search");
-    });
-
-    expect(renderer.root.findByType("SearchScreen").props.focusRequestKey).toBe(2);
-  });
-
-  it("opens Machines from the profile and returns to the originating root", async () => {
-    const { model, sessionStore } = createModel("connected");
+  it("mounts navigation only after hydration and restores Activity beneath task detail", async () => {
+    const initialized = deferred<void>();
+    const { model, sessionStore } = createModel();
     sessionStore.setActiveView("recent");
+    sessionStore.setSelectedTask("task-activity");
+    model.initialize.mockReturnValueOnce(initialized.promise);
+
     const renderer = await mountModel(model);
+    expect(renderer.root.findAllByType("RootNavigator")).toHaveLength(0);
 
     await act(async () => {
-      renderer.root.findByType("AccountSheet").props.onOpenMachines();
+      initialized.resolve();
+      await flushMicrotasks();
     });
 
-    expect(renderer.root.findAllByType("MachinesScreen")).toHaveLength(1);
-    expect(renderer.root.findAllByType("AccountBadge")).toHaveLength(0);
-    expect(renderer.root.findAllByType("FloatingToolbar")).toHaveLength(0);
-
-    await act(async () => {
-      renderer.root.findByType("MachinesScreen").props.onBack();
-    });
-
-    expect(renderer.root.findByType("TasksScreen").props.heading).toBe("Recent");
+    const navigator = renderer.root.findByType("RootNavigator");
+    expect(navigator.props.initialState.routes.map((route: { name: string }) => route.name))
+      .toEqual(["MainTabs", "TaskDetail"]);
+    expect(navigator.props.initialState.routes[0].state.routes[1].name)
+      .toBe("Activity");
+    expect(navigator.props.initialState.routes[0].state.index).toBe(1);
   });
 
-  it("deduplicates account and manually paired machines in profile and inventory", async () => {
-    const { model, sessionStore } = createModel("connected");
-    sessionStore.setTrustedDesktops([
-      {
-        desktopId: "desktop-1",
-        displayName: "Studio Mac",
-        lanEndpoints: [
-          {
-            baseUrl: "http://studio.local:48120",
-            lastSeenAt: "2026-07-17T00:00:00.000Z"
+  it("mounts safe navigation state when initialization rejects", async () => {
+    const initialized = deferred<void>();
+    const { model } = createModel();
+    model.initialize.mockReturnValueOnce(initialized.promise);
+
+    const renderer = await mountModel(model);
+    expect(renderer.root.findAllByType("RootNavigator")).toHaveLength(0);
+
+    await act(async () => {
+      initialized.reject(new Error("storage unavailable"));
+      await flushMicrotasks();
+    });
+
+    expect(renderer.root.findByType("RootNavigator").props.initialState.routes)
+      .toEqual([
+        {
+          name: "MainTabs",
+          state: {
+            index: 0,
+            routes: [
+              { name: "Tasks" },
+              { name: "Activity" },
+              { name: "More" }
+            ]
           }
-        ],
-        lastSeenAt: "2026-07-17T00:00:00.000Z"
-      }
-    ]);
-    const renderer = await mountModel(model);
-
-    expect(renderer.root.findByType("AccountSheet").props.machineCount).toBe(1);
-    expect(renderer.root.findByType("AccountSheet").props.availableMachineCount).toBe(1);
-
-    await act(async () => {
-      renderer.root.findByType("AccountSheet").props.onOpenMachines();
-    });
-
-    const machines = renderer.root.findByType("MachinesScreen").props.machines;
-    expect(machines).toHaveLength(1);
-    expect(machines[0].origins).toEqual({ account: true, manual: true });
-  });
-
-  it("keeps a signed-out manual-only machine distinct from account inventory", async () => {
-    const { model, sessionStore } = createModel("connected");
-    sessionStore.setMachineSourceDesktops({
-      account: [],
-      local: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }]
-    });
-    sessionStore.setTrustedDesktops([{
-      desktopId: "desktop-1",
-      displayName: "Studio Mac",
-      lanEndpoints: [],
-      lastSeenAt: "2026-07-17T00:00:00.000Z"
-    }]);
-    const renderer = await mountModel(model);
-
-    await act(async () => {
-      renderer.root.findByType("AccountSheet").props.onOpenMachines();
-    });
-
-    expect(renderer.root.findByType("MachinesScreen").props.machines[0].origins)
-      .toEqual({ account: false, manual: true });
-  });
-
-  it("creates tasks with geometry derived from the measured task-detail surface", async () => {
-    const { controller, model } = createModel("connected");
-    controller.openComposer();
-    controller.updateComposerPrompt("Measure the initial terminal");
-    const createTask = vi.spyOn(controller, "createTask");
-    const renderer = await mountModel(model);
-    const shell = renderer.root.find(
-      (node) => typeof node.props.onLayout === "function"
-    );
-
-    await act(async () => {
-      shell.props.onLayout({
-        nativeEvent: {
-          layout: { width: 1024, height: 1366, x: 0, y: 0 }
         }
-      });
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)
-        .props.onPress();
-    });
-
-    expect(createTask).toHaveBeenCalledWith({ cols: 128, rows: 72 });
+      ]);
   });
 
-  it("reads a file for the currently selected task", async () => {
-    const { client, model, sessionStore } = createModel("connected");
-    sessionStore.setRecentTasks([
-      {
-        id: "task-current",
-        repoId: "repo-1",
-        title: "Current task",
-        stage: "in progress",
-        agentType: "pty"
-      }
-    ]);
-    sessionStore.setSelectedTask("task-current");
-
-    const renderer = await mountModel(model);
-    const taskScreen = renderer.root.findByType("TaskScreen");
-    await expect(taskScreen.props.onReadTaskFile("docs/spec.md")).resolves.toEqual({
-      path: "docs/spec.md",
-      content: "# Spec"
-    });
-    expect(client.readTaskFile).toHaveBeenCalledWith(
-      "task-current",
-      "docs/spec.md"
-    );
-  });
-
-  it("binds task detail actions to the selected task without opening More", async () => {
-    const { controller, model, sessionStore } = createModel("connected");
-    sessionStore.setRecentTasks([
-      {
-        id: "task-current",
-        repoId: "repo-1",
-        title: "Current task",
-        stage: "review",
-        agentType: "agent"
-      }
-    ]);
-    sessionStore.setSelectedTask("task-current");
-    const advance = vi
-      .spyOn(controller, "advanceDesktopTaskStage")
-      .mockResolvedValue(undefined);
-    const close = vi
-      .spyOn(controller, "closeDesktopTask")
-      .mockResolvedValue(undefined);
-    const showView = vi.spyOn(controller, "showView");
-
-    const renderer = await mountModel(model);
-    const taskScreen = renderer.root.findByType("TaskScreen");
-
-    expect(taskScreen.props.onAdvanceTaskStage).toBeTypeOf("function");
-    expect(taskScreen.props.onCloseTask).toBeTypeOf("function");
-    taskScreen.props.onAdvanceTaskStage();
-    taskScreen.props.onCloseTask();
-
-    expect(advance).toHaveBeenCalledWith("task-current");
-    expect(close).toHaveBeenCalledWith("task-current");
-    expect(showView).not.toHaveBeenCalledWith("more");
-  });
-
-  it("exposes the accepted task snapshot to detail-only E2E synchronization", async () => {
+  it("forwards accepted task snapshots for detail synchronization", async () => {
     const previous = process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED;
     process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED = "1";
     try {
       const { model, sessionStore } = createModel();
       sessionStore.setRecentTasks([
         {
-          id: "cloud-only",
-          repoId: "repo-cloud",
-          title: "Cloud task refreshed",
-          stage: "in progress"
-        },
-        {
-          id: "lan-only",
-          repoId: "repo-lan",
-          title: "LAN-only task",
+          id: "task-1",
+          repoId: "repo-1",
+          title: "Accepted task",
           stage: "review"
         }
       ]);
-      sessionStore.setSelectedTask("lan-only");
 
       const renderer = await mountModel(model);
-      const taskScreen = renderer.root.findByType("TaskScreen");
-
-      expect(taskScreen.props.e2eTaskSnapshotMarker).toContain(
-        "cloud-only:Cloud task refreshed"
-      );
+      expect(renderer.root.findByType("RootNavigator").props.e2eTaskSnapshotMarker)
+        .toContain("task-1:Accepted task");
     } finally {
       if (previous === undefined) {
         delete process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED;
@@ -463,25 +256,50 @@ describe("App component wiring", () => {
     }
   });
 
-  it.each(["connected", "idle", "error"] as const)(
-    "keeps shell controls visible for an unresolved selection while %s",
-    async (connectionState) => {
-      const { model, sessionStore } = createModel(connectionState);
-      sessionStore.setSelectedTask("missing-persisted-task");
+  it("opens the canonical Machines route from the deduplicated profile summary", async () => {
+    const { model, sessionStore } = createModel();
+    sessionStore.setMachineSourceDesktops({
+      account: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "remote" }],
+      local: [{ id: "desktop-1", name: "Studio Mac", online: true, mode: "lan" }]
+    });
+    sessionStore.setTrustedDesktops([{
+      desktopId: "desktop-1",
+      displayName: "Studio Mac",
+      sharedSecret: "secret",
+      lanEndpoints: [],
+      lastSeenAt: "2026-07-17T00:00:00.000Z"
+    }]);
 
-      const renderer = await mountModel(model);
+    const renderer = await mountModel(model);
+    const accountSheet = renderer.root.findByType("AccountSheet");
+    expect(accountSheet.props.machineCount).toBe(1);
+    expect(accountSheet.props.availableMachineCount).toBe(1);
 
-      expect(renderer.root.findAllByType("TasksScreen")).toHaveLength(1);
-      expect(renderer.root.findAllByType("AccountBadge")).toHaveLength(1);
-      expect(renderer.root.findAllByType("FloatingToolbar")).toHaveLength(1);
-      expect(renderer.root.findAllByType("TaskScreen")).toHaveLength(0);
-    }
-  );
+    await act(async () => accountSheet.props.onOpenMachines());
+
+    expect(renderer.root.findByType("RootNavigator").props.openMachinesRequestKey)
+      .toBe(1);
+  });
+
+  it("routes the canonical More diagnostics toggle through the app model", async () => {
+    const { controller, model } = createModel();
+    const refresh = vi.spyOn(controller, "refresh").mockResolvedValue(undefined);
+    const renderer = await mountModel(model);
+
+    await act(async () => {
+      renderer.root.findByType("RootNavigator").props.onForceCloudChange(true);
+      await flushMicrotasks();
+    });
+
+    expect(model.setForceCloud).toHaveBeenCalledWith(true);
+    expect(refresh).toHaveBeenCalledOnce();
+  });
 
   it.each(["idle", "error"] as const)(
     "refreshes from %s when the app returns to the foreground",
     async (connectionState) => {
-      const { controller, model } = createModel(connectionState);
+      const { controller, model, sessionStore } = createModel();
+      sessionStore.setConnectionState(connectionState);
       const refresh = vi.spyOn(controller, "refresh").mockResolvedValue(undefined);
       await mountModel(model);
 
@@ -495,7 +313,8 @@ describe("App component wiring", () => {
   );
 
   it("reloads a downloaded OTA on foreground without starting recovery", async () => {
-    const { controller, model } = createModel("error");
+    const { controller, model, sessionStore } = createModel();
+    sessionStore.setConnectionState("error");
     const refresh = vi.spyOn(controller, "refresh").mockResolvedValue(undefined);
     harness.checkAndFetchUpdate.mockResolvedValue({ state: "downloaded" });
     await mountModel(model);
@@ -507,205 +326,5 @@ describe("App component wiring", () => {
 
     expect(harness.reloadToApplyUpdate).toHaveBeenCalledOnce();
     expect(refresh).not.toHaveBeenCalled();
-  });
-});
-
-describe("App task creation integration", () => {
-  it("opens an optimistic task workspace, then attaches the created task in place", async () => {
-    const pendingCreate = deferred<Awaited<ReturnType<KannaClient["createTask"]>>>();
-    const { client, controller, model } = createModel();
-    client.createTask.mockReturnValueOnce(pendingCreate.promise);
-    const renderer = await mountModel(model);
-
-    await act(async () => controller.openComposer());
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)
-        .props.onChangeText("Ship mobile shell");
-    });
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)
-        .props.onPress();
-      await flushMicrotasks();
-    });
-
-    expect(renderer.root.findByType("TaskScreen").props).toMatchObject({
-      taskCreationPhase: "pending",
-      task: {
-        title: "Ship mobile shell"
-      }
-    });
-    expect(renderer.root.findByType("TaskScreen").props.task.id).toMatch(
-      /^create:/
-    );
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)).toBe(false);
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)).toBe(false);
-    expect(hasText(renderer.root, "Cancel")).toBe(false);
-    expect(client.createTask).toHaveBeenCalledWith({
-      taskId: "0123456789abcdef0123456789abcdef",
-      repoId: "repo-1",
-      prompt: "Ship mobile shell",
-      desktopId: "desktop-1",
-      agentProvider: "claude",
-      agentType: "pty",
-      terminalCols: 80,
-      terminalRows: 48
-    });
-
-    await act(async () => controller.openComposer());
-    expect(renderer.root.findByType("TaskScreen").props.taskCreationPhase).toBe(
-      "pending"
-    );
-    expect(client.createTask).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      pendingCreate.resolve({
-        taskId: "0123456789abcdef0123456789abcdef",
-        repoId: "repo-1",
-        title: "Ship mobile shell",
-        stage: "in progress"
-      });
-      await flushMicrotasks();
-    });
-
-    const taskScreen = renderer.root.findByType("TaskScreen");
-    expect(taskScreen.props.task).toMatchObject({
-      id: "0123456789abcdef0123456789abcdef",
-      title: "Ship mobile shell"
-    });
-  });
-
-  it("keeps the acknowledged workspace mounted through a publication gap and hydrates it in place", async () => {
-    const { controller, model, sessionStore } = createModel();
-    const renderer = await mountModel(model);
-
-    await act(async () => controller.openComposer());
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)
-        .props.onChangeText("Keep this workspace stable");
-    });
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)
-        .props.onPress();
-      await flushMicrotasks();
-    });
-
-    const stableSlotId = sessionStore.getState().taskUiSlots[0]?.slotId;
-    const taskScreenBeforeGap = renderer.root.findByType("TaskScreen");
-    expect(taskScreenBeforeGap.props.task.id).toBe(
-      "0123456789abcdef0123456789abcdef"
-    );
-
-    await act(async () => {
-      sessionStore.setRecentTasks([]);
-      sessionStore.setRepoTasks([]);
-    });
-
-    expect(renderer.root.findByType("TaskScreen")).toBe(taskScreenBeforeGap);
-
-    await act(async () => {
-      const publishedTask = {
-        id: "0123456789abcdef0123456789abcdef",
-        repoId: "repo-1",
-        title: "Published workspace metadata",
-        prompt: "Keep this workspace stable",
-        stage: "in progress"
-      };
-      sessionStore.setRecentTasks([publishedTask]);
-      sessionStore.setRepoTasks([publishedTask]);
-    });
-
-    expect(renderer.root.findByType("TaskScreen")).toBe(taskScreenBeforeGap);
-    expect(taskScreenBeforeGap.props.task).toMatchObject({
-      id: "0123456789abcdef0123456789abcdef",
-      title: "Published workspace metadata"
-    });
-
-    await act(async () => controller.closeTask());
-    expect(renderer.root.findByType("TasksScreen").props.taskSlots).toEqual([
-      expect.objectContaining({
-        slotId: stableSlotId,
-        taskId: "0123456789abcdef0123456789abcdef",
-        task: expect.objectContaining({ title: "Published workspace metadata" })
-      })
-    ]);
-  });
-
-  it("keeps an ambiguous result non-editable and recovers the same durable identity", async () => {
-    const firstCreate = deferred<Awaited<ReturnType<KannaClient["createTask"]>>>();
-    const { client, controller, model } = createModel();
-    client.createTask
-      .mockReturnValueOnce(firstCreate.promise)
-      .mockResolvedValueOnce({
-        taskId: "0123456789abcdef0123456789abcdef",
-        repoId: "repo-1",
-        title: "Recovered task",
-        stage: "in progress"
-      });
-    const renderer = await mountModel(model);
-
-    await act(async () => controller.openComposer());
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)
-        .props.onChangeText("Recover this task");
-    });
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)
-        .props.onPress();
-      await flushMicrotasks();
-    });
-    await act(async () => {
-      firstCreate.reject(new Error("Relay response was lost"));
-      await flushMicrotasks();
-    });
-
-    expect(renderer.root.findByType("TaskScreen").props).toMatchObject({
-      taskCreationPhase: "uncertain",
-      taskCreationErrorMessage: "Relay response was lost"
-    });
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)).toBe(false);
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)).toBe(false);
-
-    await act(async () => {
-      renderer.root.findByType("TaskScreen").props.onRecoverTaskCreation();
-      await flushMicrotasks();
-    });
-
-    expect(client.createTask).toHaveBeenCalledTimes(2);
-    const taskIds = client.createTask.mock.calls.map(([request]) => request.taskId);
-    expect(taskIds).toEqual([
-      "0123456789abcdef0123456789abcdef",
-      "0123456789abcdef0123456789abcdef"
-    ]);
-    expect(renderer.root.findByType("TaskScreen").props.task).toMatchObject({
-      id: "0123456789abcdef0123456789abcdef",
-      title: "Recovered task"
-    });
-  });
-
-  it("restores the exact editable draft after a definite pre-creation failure", async () => {
-    const { client, controller, model } = createModel();
-    client.createTask.mockRejectedValueOnce(
-      new TaskCreationError("not-created", "Desktop rejected the request")
-    );
-    const renderer = await mountModel(model);
-
-    await act(async () => controller.openComposer());
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)
-        .props.onChangeText("Fix and retry");
-    });
-    await act(async () => {
-      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)
-        .props.onPress();
-      await flushMicrotasks();
-    });
-
-    expect(renderer.root.findAllByType("TaskScreen")).toHaveLength(0);
-    await act(async () => controller.openComposer());
-    expect(findTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput).props.value)
-      .toBe("Fix and retry");
-    expect(hasTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)).toBe(true);
-    expect(hasText(renderer.root, "Desktop rejected the request")).toBe(true);
-    expect(client.createTask).toHaveBeenCalledTimes(1);
   });
 });

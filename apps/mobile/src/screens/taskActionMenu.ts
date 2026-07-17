@@ -15,7 +15,8 @@ const MENU_TITLE = "Task Actions";
 const CANCEL_LABEL = "Cancel";
 
 export function showTaskActionMenu(
-  onSelect: (action: TaskAction) => void
+  onSelect: (action: TaskAction) => void,
+  onDismiss: () => void = () => undefined
 ): void {
   if (Platform.OS === "ios") {
     ActionSheetIOS.showActionSheetWithOptions(
@@ -31,6 +32,8 @@ export function showTaskActionMenu(
         const action = TASK_ACTIONS[buttonIndex];
         if (action) {
           onSelect(action.id);
+        } else {
+          onDismiss();
         }
       }
     );
@@ -46,7 +49,8 @@ export function showTaskActionMenu(
         style: action.style,
         onPress: () => onSelect(action.id)
       })),
-      { text: CANCEL_LABEL, style: "cancel" as const }
-    ]
+      { text: CANCEL_LABEL, style: "cancel" as const, onPress: onDismiss }
+    ],
+    { cancelable: true, onDismiss }
   );
 }

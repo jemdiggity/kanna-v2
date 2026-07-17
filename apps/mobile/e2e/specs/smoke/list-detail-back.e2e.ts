@@ -53,6 +53,13 @@ interface TaskListUi {
   ): Promise<unknown>;
 }
 
+interface ListDetailBackOriginUi {
+  selectOrigin(origin: "tasks" | "recent"): Promise<void>;
+  openTask(taskId: string): Promise<void>;
+  goBack(): Promise<void>;
+  assertOrigin(origin: "tasks" | "recent"): Promise<void>;
+}
+
 interface TaskPromptExpansionUi {
   getBackButton(): Promise<SmokeElement>;
   getClipboard(): Promise<string>;
@@ -794,6 +801,17 @@ export async function ensureTaskListVisible(ui: TaskListUi): Promise<void> {
   await waitForTaskRows(ui);
 }
 
+export async function exerciseListDetailBackFromOrigin(
+  ui: ListDetailBackOriginUi,
+  origin: "tasks" | "recent",
+  taskId: string
+): Promise<void> {
+  await ui.selectOrigin(origin);
+  await ui.openTask(taskId);
+  await ui.goBack();
+  await ui.assertOrigin(origin);
+}
+
 export async function runListDetailBackSmoke(
   driver: Browser,
   options: RunListDetailBackSmokeOptions = {}
@@ -842,4 +860,46 @@ export async function runListDetailBackSmoke(
 
   await driver.pause(BACK_NAVIGATION_SETTLE_MS);
   await waitForTaskRows(ui);
+
+  await exerciseListDetailBackFromOrigin(
+    {
+      async selectOrigin(origin) {
+        const tab = await driver.$(
+          origin === "recent" ? selectors.recentTab : selectors.tasksTab
+        );
+        await tab.click();
+        const screen = await driver.$(
+          origin === "recent" ? selectors.recentScreen : selectors.tasksScreen
+        );
+        await screen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      },
+      async openTask(taskId) {
+        await openPtyFixtureTask(ui, taskId);
+        const detail = await driver.$(selectors.taskDetailScreen);
+        await detail.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      },
+      async goBack() {
+        const taskBackButton = await driver.$(selectors.taskBackButton);
+        await taskBackButton.click();
+        await driver.pause(BACK_NAVIGATION_SETTLE_MS);
+      },
+      async assertOrigin(origin) {
+        const screen = await driver.$(
+          origin === "recent" ? selectors.recentScreen : selectors.tasksScreen
+        );
+        await driver.waitUntil(
+          async () =>
+            (await screen.isExisting()) &&
+            (await screen.isDisplayed?.().catch(() => false)) === true,
+          {
+            interval: POLL_INTERVAL_MS,
+            timeout: SCREEN_TIMEOUT_MS,
+            timeoutMsg: `Expected Back to restore the ${origin} task list`
+          }
+        );
+      }
+    },
+    "recent",
+    fixture.taskId
+  );
 }
