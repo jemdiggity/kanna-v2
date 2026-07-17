@@ -87,12 +87,17 @@ pub(crate) async fn cleanup_client_writer_registries(
     terminal_emulator_clients: &TerminalEmulatorClients,
     session_sizes: &SessionSizes,
     session_observers: &SessionObservers,
-) {
+) -> Vec<(String, u16, u16)> {
     let writer_id = Arc::as_ptr(writer) as usize;
 
     let mut sizes = session_sizes.lock().await;
-    for client_sizes in sizes.values_mut() {
-        client_sizes.remove(&writer_id);
+    let mut remaining_sizes = Vec::new();
+    for (session_id, client_sizes) in sizes.iter_mut() {
+        let removed = client_sizes.remove(&writer_id).is_some();
+        if removed && !client_sizes.is_empty() {
+            let (cols, rows) = effective_terminal_size(client_sizes, (80, 24));
+            remaining_sizes.push((session_id.clone(), cols, rows));
+        }
     }
     sizes.retain(|_, client_sizes| !client_sizes.is_empty());
     drop(sizes);
@@ -115,6 +120,8 @@ pub(crate) async fn cleanup_client_writer_registries(
         observer_writers.retain(|registered| Arc::as_ptr(registered) as usize != writer_id);
     }
     observers.retain(|_, observer_writers| !observer_writers.is_empty());
+
+    remaining_sizes
 }
 
 pub(crate) async fn finish_attach_cutover(

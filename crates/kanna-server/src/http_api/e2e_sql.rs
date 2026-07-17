@@ -25,6 +25,45 @@ pub(super) struct E2eSqlResponse {
     rows_affected: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct E2eServerWorkRequest {
+    duration_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct E2eServerWorkResponse {
+    duration_ms: u64,
+}
+
+fn bounded_server_work_duration_ms(duration_ms: u64) -> u64 {
+    duration_ms.clamp(1, 2_000)
+}
+
+pub(super) async fn execute_e2e_server_work(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(request): Json<E2eServerWorkRequest>,
+) -> Result<Json<E2eServerWorkResponse>, (axum::http::StatusCode, String)> {
+    if std::env::var("KANNA_E2E_TEST_SQL").ok().as_deref() != Some("1") {
+        return Err((axum::http::StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    if !is_loopback_peer(Some(peer)) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "E2E server work is only available from loopback clients".to_string(),
+        ));
+    }
+
+    let duration_ms = bounded_server_work_duration_ms(request.duration_ms);
+    tokio::task::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+    })
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(E2eServerWorkResponse { duration_ms }))
+}
+
 pub(super) async fn execute_e2e_sql(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
@@ -147,5 +186,12 @@ mod tests {
             48120,
         ))));
         assert!(!super::is_loopback_peer(None));
+    }
+
+    #[test]
+    fn e2e_server_work_duration_is_bounded() {
+        assert_eq!(super::bounded_server_work_duration_ms(0), 1);
+        assert_eq!(super::bounded_server_work_duration_ms(750), 750);
+        assert_eq!(super::bounded_server_work_duration_ms(5_000), 2_000);
     }
 }

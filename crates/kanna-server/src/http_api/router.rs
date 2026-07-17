@@ -2,7 +2,7 @@ use super::analytics::get_repo_analytics;
 use super::backup::create_backup;
 use super::desktop::list_desktops;
 #[cfg(debug_assertions)]
-use super::e2e_sql::execute_e2e_sql;
+use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
 use super::pairing::create_pairing_session;
@@ -191,7 +191,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/pairing/sessions", post(create_pairing_session));
 
     #[cfg(debug_assertions)]
-    let router = router.route("/v1/e2e/sql", post(execute_e2e_sql));
+    let router = router
+        .route("/v1/e2e/sql", post(execute_e2e_sql))
+        .route("/v1/e2e/server-work", post(execute_e2e_server_work));
 
     router
         .layer(CorsLayer::permissive())

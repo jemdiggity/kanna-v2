@@ -100,10 +100,9 @@ async function waitForFocusedTerminalReady(
   sessionId: string,
   timeoutMs = 10_000,
 ): Promise<void> {
-  await client.executeAsync(
-    `const cb = arguments[arguments.length - 1];
-     window.dispatchEvent(new Event("focus"));
-     requestAnimationFrame(() => setTimeout(() => cb("ok"), 0));`,
+  await client.executeSync(
+    `window.dispatchEvent(new Event("focus"));
+     return true;`,
   );
 
   const deadline = Date.now() + timeoutMs;
@@ -119,7 +118,12 @@ async function waitForFocusedTerminalReady(
       sessionIds?: string[];
     } | null;
     if ((state?.sessionIds ?? []).includes(sessionId)) {
-      return;
+      const focused = await client.executeSync<boolean>(
+        `const el = document.querySelector(".main-panel .xterm-helper-textarea");
+         if (el instanceof HTMLElement) el.focus();
+         return el instanceof HTMLElement && document.activeElement === el;`,
+      );
+      if (focused) return;
     }
     await sleep(200);
   }
@@ -335,6 +339,7 @@ async function waitForTerminalBufferText(
   sessionId: string,
   text: string,
   timeoutMs = 10_000,
+  pollIntervalMs = 200,
 ): Promise<TerminalBufferStats> {
   const deadline = Date.now() + timeoutMs;
   const pattern = escapeRegExp(text);
@@ -353,12 +358,60 @@ async function waitForTerminalBufferText(
     } catch (error) {
       lastError = error;
     }
-    await sleep(200);
+    await sleep(pollIntervalMs);
   }
 
   throw new Error(
     `Timed out waiting for terminal buffer text "${text}" in ${sessionId}: ${String(lastError)}`,
   );
+}
+
+async function startConcurrentServerWork(
+  client: WebDriverClient,
+  durationMs: number,
+): Promise<void> {
+  const result = await client.executeAsync(
+    `const cb = arguments[arguments.length - 1];
+     const work = window.__KANNA_E2E__?.serverWork;
+     if (!work) return cb({ __error: "server work hook unavailable" });
+     work.start(${durationMs})
+       .then(() => cb("started"))
+       .catch((error) => cb({ __error: error?.message ?? String(error) }));`,
+  );
+  if (typeof result === "object" && result !== null && "__error" in result) {
+    throw new Error(String((result as { __error: unknown }).__error));
+  }
+}
+
+async function waitForConcurrentServerWork(client: WebDriverClient): Promise<void> {
+  const result = await client.executeAsync(
+    `const cb = arguments[arguments.length - 1];
+     const work = window.__KANNA_E2E__?.serverWork;
+     if (!work) return cb({ __error: "server work hook unavailable" });
+     work.wait()
+       .then(() => cb("complete"))
+       .catch((error) => cb({ __error: error?.message ?? String(error) }));`,
+  );
+  if (typeof result === "object" && result !== null && "__error" in result) {
+    throw new Error(String((result as { __error: unknown }).__error));
+  }
+}
+
+async function detachTerminalStream(
+  client: WebDriverClient,
+  taskId: string,
+): Promise<void> {
+  const result = await client.executeAsync(
+    `const cb = arguments[arguments.length - 1];
+     const terminalStreams = window.__KANNA_E2E__?.terminalStreams;
+     if (!terminalStreams) return cb({ __error: "terminal stream hook unavailable" });
+     terminalStreams.detach(${JSON.stringify(taskId)})
+       .then(() => cb("detached"))
+       .catch((error) => cb({ __error: error?.message ?? String(error) }));`,
+  );
+  if (typeof result === "object" && result !== null && "__error" in result) {
+    throw new Error(String((result as { __error: unknown }).__error));
+  }
 }
 
 async function getTerminalBufferTextStats(
@@ -559,15 +612,11 @@ describe("pty session (real CLI)", () => {
     expect(container).toBeTruthy();
   });
 
-  it("renders typed input promptly while terminal recovery persistence remains enabled", async () => {
-    // The desktop harness exercises the real app -> Tauri -> daemon -> PTY -> xterm path,
-    // but it cannot currently slow only the daemon's recovery persistence worker without
-    // restarting the app under a special daemon env. The paired daemon reconnect regression
-    // uses that testability hook to force slow recovery bookkeeping.
+  it("renders PTY echo within 500ms while same-WebSocket server work is active", async () => {
     const sessionId = `pty-latency-${randomUUID()}`;
     deterministicSessionIds.push(sessionId);
     const readyMarker = `KREADY_${randomUUID().replaceAll("-", "")}`;
-    const inputMarker = `KINPUT_${randomUUID().replaceAll("-", "")}`;
+    const inputMarker = `ki${randomUUID().replaceAll("-", "").slice(0, 10)}`;
     const script = [
       `printf '${readyMarker}\\n'`,
       "while IFS= read -r line; do printf 'ECHO:%s\\n' \"$line\"; done",
@@ -593,6 +642,8 @@ describe("pty session (real CLI)", () => {
     await waitForTerminalBufferText(client, sessionId, readyMarker, 15_000);
     await waitForSessionRecoveryText(client, sessionId, readyMarker, 10_000);
 
+    await startConcurrentServerWork(client, 750);
+
     const startedAt = Date.now();
     await sendKeysToActiveTerminal(client, inputMarker);
     await client.pressKey("\uE007");
@@ -601,12 +652,18 @@ describe("pty session (real CLI)", () => {
       client,
       sessionId,
       `ECHO:${inputMarker}`,
-      2_000,
+      500,
+      20,
     );
     const renderMs = Date.now() - startedAt;
 
     expect(echoStats.lastMatchingLine).toContain(inputMarker);
-    expect(renderMs).toBeLessThan(2_000);
+    expect(renderMs).toBeLessThan(500);
+    const serverWorkActive = await client.executeSync<boolean>(
+      "return window.__KANNA_E2E__?.serverWork?.isActive() ?? false;",
+    );
+    expect(serverWorkActive).toBe(true);
+    await waitForConcurrentServerWork(client);
     await waitForSessionRecoveryText(client, sessionId, `ECHO:${inputMarker}`, 10_000);
   });
 
@@ -814,7 +871,7 @@ describe("pty session (real CLI)", () => {
     await waitForFocusedTerminalReady(client, deterministicSessionId);
     await waitForTerminalBufferText(client, deterministicSessionId, `ECHO:${liveMarker}`, 10_000);
 
-    await invokeOrThrow(client, "detach_session", { sessionId: deterministicSessionId });
+    await detachTerminalStream(client, deterministicSessionId);
 
     await switchToWindow(client, sourceHandle);
     await client.waitForAppReady();

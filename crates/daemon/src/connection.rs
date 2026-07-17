@@ -151,7 +151,7 @@ pub(crate) async fn handle_connection(
 
     // Connection dropped: remove every registry entry that owns or indexes this
     // writer so dead Unix socket fds cannot survive on idle sessions.
-    cleanup_client_writer_registries(
+    let remaining_sizes = cleanup_client_writer_registries(
         &writer,
         &session_writers,
         &terminal_emulator_clients,
@@ -159,6 +159,17 @@ pub(crate) async fn handle_connection(
         &session_observers,
     )
     .await;
+    for (session_id, cols, rows) in remaining_sizes {
+        let resized = match session_handle(&sessions, &session_id).await {
+            Some(session) => session.resize(cols, rows).await.is_ok(),
+            None => false,
+        };
+        if resized {
+            recovery_manager
+                .resize_session(&session_id, cols, rows)
+                .await;
+        }
+    }
     agent_runtime::cleanup_agent_writer(&agent_sessions, &writer).await;
 }
 

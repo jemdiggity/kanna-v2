@@ -24,11 +24,11 @@ independent attach connection so a control acknowledgement can never delay PTY
 output forwarding.
 
 Successful terminal attachment supplies the authoritative route to the
-control map. A route change aborts and replaces the old worker, which preserves
-task-stage session replacement. A command received before attachment creates a
-worker that resolves its route once on a blocking worker. Detach stops only the
-output attachment; the inexpensive control worker stays cached until route
-replacement or WebSocket shutdown.
+control map. A route change gracefully detaches and replaces the old worker,
+which preserves task-stage session replacement and releases its daemon-side
+resize ownership. A command received before attachment creates a worker that
+resolves its route once on a blocking worker. Terminal detach and WebSocket
+shutdown retire both the output attachment and the control worker.
 
 The WebSocket reader validates and decodes terminal frames, then enqueues them
 without waiting for SQLite, a socket connection, or a daemon reply. Queue
@@ -40,7 +40,9 @@ KSP API request dispatch runs concurrently with frame reading. The request's
 Axum dispatch is driven from `spawn_blocking`, because the current handlers
 contain synchronous SQLite, filesystem, and process work. Responses retain
 their request ids and may complete out of order, as the protocol already
-supports. Task/session route resolution also runs through `spawn_blocking`.
+supports. Agent commands use a separate bounded FIFO worker, preserving their
+wire order without blocking terminal frames. Task/session route resolution also
+runs through `spawn_blocking`.
 
 ## Protocol Correctness
 
@@ -54,7 +56,9 @@ Output attachment reconnect remains independent and unchanged. On terminal
 reattach, the route is re-resolved; if a task stage now points to a replacement
 daemon session, both the output task and control worker are replaced. On daemon
 socket loss, output reattaches from a fresh snapshot while control reconnects
-before processing subsequent commands.
+before processing subsequent commands. If a control socket disappears without
+an explicit detach, daemon connection cleanup reapplies the remaining clients'
+effective terminal size so another window is not left at the stale dimensions.
 
 ## Failure Handling
 
@@ -73,7 +77,9 @@ Focused Rust KSP tests use a fake daemon and a locked SQLite write to prove:
 - input reaches the daemon while an earlier same-WebSocket request is blocked;
 - repeated input and resize frames reuse one control socket and preserve order;
 - the worker reconnects after its daemon connection is replaced;
-- reattachment replaces a cached route when the task's daemon session changes.
+- reattachment replaces a cached route when the task's daemon session changes;
+- detach releases control-socket resize ownership and daemon cleanup restores
+  the remaining client's effective size after an abrupt disconnect.
 
 Focused TypeScript tests exercise the 8 ms queue directly, including rapid
 keypress coalescing, opaque Kitty/paste bytes, immediate-flush ordering, and

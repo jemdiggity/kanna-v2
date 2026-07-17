@@ -15,7 +15,10 @@ import App from "./App.vue";
 import { createWindowWorkspace, parseWindowBootstrap, resolveWindowBootstrap } from "./windowWorkspace";
 import { e2eAppMetrics } from "./e2eAppMetrics";
 import { e2eInvokeHistory } from "./e2eInvokeHistory";
-import { resetSharedStreamClientForTests } from "./composables/desktopStreamClient";
+import {
+  getSharedStreamClient,
+  resetSharedStreamClientForTests,
+} from "./composables/desktopStreamClient";
 
 interface AppWithSetupState {
   _instance?: {
@@ -24,6 +27,50 @@ interface AppWithSetupState {
 }
 
 const FIREBASE_AUTH_DB_NAME = "firebaseLocalStorageDb";
+
+let activeE2EServerWork: Promise<void> | null = null;
+let isE2EServerWorkActive = false;
+
+const e2eServerWork = {
+  async start(durationMs: number): Promise<void> {
+    if (activeE2EServerWork) {
+      throw new Error("E2E server work is already active");
+    }
+    const client = await getSharedStreamClient();
+    isE2EServerWorkActive = true;
+    activeE2EServerWork = client
+      .request("POST", "/v1/e2e/server-work", { durationMs })
+      .then(({ status, body }) => {
+        if (status !== 200) {
+          throw new Error(`E2E server work failed (${status}): ${JSON.stringify(body)}`);
+        }
+      })
+      .finally(() => {
+        isE2EServerWorkActive = false;
+      });
+  },
+  async wait(): Promise<void> {
+    const work = activeE2EServerWork;
+    if (!work) return;
+    try {
+      await work;
+    } finally {
+      if (activeE2EServerWork === work) {
+        activeE2EServerWork = null;
+      }
+    }
+  },
+  isActive(): boolean {
+    return isE2EServerWorkActive;
+  },
+};
+
+const e2eTerminalStreams = {
+  async detach(taskId: string): Promise<void> {
+    const client = await getSharedStreamClient();
+    client.detach(taskId, "terminal");
+  },
+};
 
 async function resolveRootComponent() {
   if (shouldMountBaseBranchDropdownPreview(window.location.search, {
@@ -222,6 +269,8 @@ try {
       appMetrics: e2eAppMetrics,
       invokes: e2eInvokeHistory,
       resetStreamClient: resetSharedStreamClientForTests,
+      serverWork: e2eServerWork,
+      terminalStreams: e2eTerminalStreams,
     };
   }
 

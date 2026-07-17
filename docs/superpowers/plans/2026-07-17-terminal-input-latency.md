@@ -14,6 +14,9 @@
 
 **Files:**
 - Modify: `crates/kanna-server/src/ksp.rs`
+- Modify: `crates/daemon/src/client.rs`
+- Modify: `crates/daemon/src/connection.rs`
+- Modify: `crates/daemon/src/tests.rs`
 
 - [ ] **Step 1: Write a failing same-WebSocket concurrency test**
 
@@ -67,10 +70,10 @@ terminal attach, replace a handle whose cached session route differs.
 
 - [ ] **Step 4: Dispatch request and agent commands concurrently**
 
-Spawn task-addressed agent command work instead of awaiting it in the reader.
-For KSP API requests, call `dispatch_http_invoke` from a `spawn_blocking`
-closure driven by the current Tokio handle, then send the id-addressed response
-from the spawned task.
+Queue task-addressed agent commands on a separate bounded FIFO worker instead
+of awaiting them in the reader. For KSP API requests, call
+`dispatch_http_invoke` from a `spawn_blocking` closure driven by the current
+Tokio handle, then send the id-addressed response from the spawned task.
 
 - [ ] **Step 5: Run the Rust tests and verify GREEN**
 
@@ -78,6 +81,13 @@ Run: `cargo test -p kanna-server ksp -- --nocapture`
 
 Expected: all KSP tests pass, including the new latency, ordering, reconnect,
 and route replacement cases.
+
+- [ ] **Step 6: Preserve resize ownership across control disconnects**
+
+Gracefully detach retired control workers. When a daemon client socket closes
+without detaching, remove its resize registration and reapply the effective
+size from any remaining client. Cover the cleanup result with a daemon unit
+test.
 
 ### Task 3: Lock frontend byte batching behavior
 
@@ -178,6 +188,9 @@ git add docs/superpowers/specs/2026-07-17-terminal-input-latency-design.md \
   crates/kanna-server/src/ksp.rs \
   crates/kanna-server/src/http_api/e2e_sql.rs \
   crates/kanna-server/src/http_api/router.rs \
+  crates/daemon/src/client.rs \
+  crates/daemon/src/connection.rs \
+  crates/daemon/src/tests.rs \
   apps/desktop/src/env.d.ts \
   apps/desktop/src/main.ts \
   apps/desktop/src/composables/terminalInputQueue.test.ts \

@@ -41,6 +41,16 @@ interface KannaAuthIndexedDbFaultE2EApi {
   openFailures: number;
 }
 
+interface KannaServerWorkE2EApi {
+  start: (durationMs: number) => Promise<void>;
+  wait: () => Promise<void>;
+  isActive: () => boolean;
+}
+
+interface KannaTerminalStreamsE2EApi {
+  detach: (taskId: string) => Promise<void>;
+}
+
 interface KannaE2EHook {
   ready: boolean;
   setupState: object | null;
@@ -48,6 +58,8 @@ interface KannaE2EHook {
   taskSwitchPerf: KannaTaskSwitchPerfE2EApi;
   appMetrics: KannaAppMetricsE2EApi;
   resetStreamClient?: () => void;
+  serverWork?: KannaServerWorkE2EApi;
+  terminalStreams?: KannaTerminalStreamsE2EApi;
   invokes?: {
     clear(): void;
     getAll(): Array<{ cmd: string; args?: unknown }>;
