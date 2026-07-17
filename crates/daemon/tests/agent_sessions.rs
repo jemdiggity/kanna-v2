@@ -294,13 +294,14 @@ done
 
 /// Fake codex agent: starts a turn, then blocks until signaled. Codex has no
 /// stdin protocol, so the daemon interrupts it with SIGINT (the path that used
-/// to be misreported as a crash).
+/// to be misreported as a crash). Keep the blocker in shell builtins because
+/// `/bin/sh` can defer traps while waiting for an external foreground process.
 const CODEX_SLEEPER_AGENT: &str = r#"#!/bin/sh
 trap 'exit 130' INT TERM
 echo '{"type":"thread.started","thread_id":"fake-thread"}'
 echo '{"type":"turn.started"}'
 echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"interim answer"}}'
-sleep 30
+while :; do :; done
 "#;
 
 /// Fake persistent agent that emits an interim answer, then crashes before a
