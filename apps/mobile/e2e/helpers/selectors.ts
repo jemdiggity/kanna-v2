@@ -5,6 +5,10 @@ export const selectors = {
   tasksScreen: `~${MOBILE_E2E_IDS.tasksScreen}`,
   recentScreen: `~${MOBILE_E2E_IDS.recentScreen}`,
   searchScreen: `~${MOBILE_E2E_IDS.searchScreen}`,
+  searchInput: `~${MOBILE_E2E_IDS.searchInput}`,
+  searchKeyboardDismissTarget:
+    `~${MOBILE_E2E_IDS.searchKeyboardDismissTarget}`,
+  searchToolbarButton: `~${MOBILE_E2E_IDS.toolbarSearch}`,
   toolbarNavigation: `~${MOBILE_E2E_IDS.toolbarNavigation}`,
   toolbarSearch: `~${MOBILE_E2E_IDS.toolbarSearch}`,
   taskDetailScreen: `~${MOBILE_E2E_IDS.taskDetailScreen}`,

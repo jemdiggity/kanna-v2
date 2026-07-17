@@ -36,7 +36,12 @@ export function SearchScreen({
       testID={MOBILE_E2E_IDS.searchScreen}
     >
       <View style={styles.wrap}>
-        <Text style={styles.heading}>Search</Text>
+        <Text
+          style={styles.heading}
+          testID={MOBILE_E2E_IDS.searchKeyboardDismissTarget}
+        >
+          Search
+        </Text>
         <Text style={styles.subheading}>
           Search tasks by title or prompt content across the paired desktop.
         </Text>
@@ -47,6 +52,7 @@ export function SearchScreen({
           placeholder="Search tasks"
           placeholderTextColor="#6A7E9D"
           style={styles.input}
+          testID={MOBILE_E2E_IDS.searchInput}
           value={query}
         />
         <TaskList

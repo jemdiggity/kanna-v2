@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import * as selectorHelpers from "./selectors";
 
 describe("mobile E2E selector helpers", () => {
+  it("exposes the native Search journey controls", () => {
+    expect(selectorHelpers.selectors).toMatchObject({
+      searchInput: "~mobile.search-input",
+      searchKeyboardDismissTarget: "~mobile.search-keyboard-dismiss-target",
+      searchScreen: "~mobile.search-screen",
+      searchToolbarButton: "~mobile.toolbar.search"
+    });
+  });
+
   it("exposes native file-preview controls for the relay smoke", () => {
     expect(selectorHelpers.selectors).toMatchObject({
       taskFilePreviewClose: "~mobile.task-file-preview.close",
