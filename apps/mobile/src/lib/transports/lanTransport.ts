@@ -11,6 +11,8 @@ import type {
   DesktopSummary,
   MobileServerStatus,
   RepoSummary,
+  RepoCommandCatalog,
+  RunRepoCommandResponse,
   TaskActionResponse,
   TaskActivityResponse,
   TaskFileContent,
@@ -80,6 +82,23 @@ export function createLanTransport(
     listRepos: () => request<RepoSummary[]>("/v1/repos"),
     listRepoTasks: (repoId: string) =>
       request<TaskSummary[]>(`/v1/repos/${encodeURIComponent(repoId)}/tasks`),
+    listRepoCommands: (repoId: string) =>
+      request<RepoCommandCatalog>(
+        `/v1/repos/${encodeURIComponent(repoId)}/commands`
+      ),
+    runRepoCommand: (
+      repoId: string,
+      commandId: string,
+      catalogRevision: string
+    ) =>
+      request<RunRepoCommandResponse>(
+        `/v1/repos/${encodeURIComponent(repoId)}/commands/${encodeURIComponent(commandId)}/run`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ catalogRevision })
+        }
+      ),
     listRecentTasks: () => request<TaskSummary[]>("/v1/tasks/recent"),
     getTask: (taskId: string) =>
       request<TaskDetail>(`/v1/tasks/${encodeURIComponent(taskId)}`),

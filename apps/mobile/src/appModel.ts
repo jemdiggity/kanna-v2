@@ -871,6 +871,8 @@ function createDisconnectedClient(): KannaClient {
     listDesktops: async () => [],
     listRepos: async () => [],
     listRepoTasks: async () => [],
+    listRepoCommands: unavailable,
+    runRepoCommand: unavailable,
     listRecentTasks: async () => [],
     searchTasks: async () => [],
     createTask: createUnavailable,
@@ -957,6 +959,14 @@ function createTrustedLanFallbackClient({
     listRepos: async () => (await resolveClient(desktopId)).listRepos(),
     listRepoTasks: async (repoId) =>
       (await resolveClient(desktopId)).listRepoTasks(repoId),
+    listRepoCommands: async (repoId) =>
+      (await resolveClient(desktopId)).listRepoCommands(repoId),
+    runRepoCommand: async (repoId, commandId, catalogRevision) =>
+      (await resolveClient(desktopId)).runRepoCommand(
+        repoId,
+        commandId,
+        catalogRevision
+      ),
     listRecentTasks: async () => (await resolveClient(desktopId)).listRecentTasks(),
     getTask: async (taskId) => {
       const resolvedClient = await resolveClient(desktopId);
@@ -1132,6 +1142,9 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     listDesktops: () => getClient().listDesktops(),
     listRepos: () => getClient().listRepos(),
     listRepoTasks: (repoId) => getClient().listRepoTasks(repoId),
+    listRepoCommands: (repoId) => getClient().listRepoCommands(repoId),
+    runRepoCommand: (repoId, commandId, catalogRevision) =>
+      getClient().runRepoCommand(repoId, commandId, catalogRevision),
     listRecentTasks: () => getClient().listRecentTasks(),
     getTask: (taskId) => {
       const client = getClient();

@@ -84,7 +84,7 @@ interface UseAppKeyboardActionsOptions {
   closeFilePicker: () => void;
   closeFileFlow: () => void;
   onShellClose: () => void;
-  scanCustomTasks: (repoPath: string) => void;
+  scanRepoCommands: (repoId: string) => void;
   handleBlockTask: () => void;
   handleEditBlockedTask: () => void;
 }
@@ -147,7 +147,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     closeFilePicker,
     closeFileFlow,
     onShellClose,
-    scanCustomTasks,
+    scanRepoCommands,
     handleBlockTask,
     handleEditBlockedTask,
   } = options;
@@ -400,7 +400,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       showCommandPalette.value = !showCommandPalette.value;
       if (showCommandPalette.value) {
         const repo = store.selectedRepo;
-        if (repo) scanCustomTasks(repo.path);
+        if (repo) scanRepoCommands(repo.id);
       }
     },
     showAnalytics: () => { showAnalyticsModal.value = !showAnalyticsModal.value; },

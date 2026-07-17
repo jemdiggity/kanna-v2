@@ -194,7 +194,7 @@ pub(super) async fn put_task(
     create_task_with_requested_id(state, payload, Some(task_id)).await
 }
 
-async fn create_task_with_requested_id(
+pub(super) async fn create_task_with_requested_id(
     state: Arc<AppState>,
     payload: crate::mobile_api::CreateTaskRequest,
     requested_task_id: Option<String>,

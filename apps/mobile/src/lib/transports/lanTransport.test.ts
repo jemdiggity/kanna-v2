@@ -7,6 +7,52 @@ import {
 } from "./lanTransport";
 
 describe("createLanTransport", () => {
+  it("lists and runs encoded repository commands over LAN", async () => {
+    const fetchImpl = vi.fn<FetchLike>()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          repoId: "repo/one",
+          revision: "catalog-v1",
+          commands: [{
+            id: "custom:ship/release",
+            label: "Ship",
+            description: "Release this repository",
+            group: "automation"
+          }]
+        })
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ taskId: "task-1", reused: false })
+      });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.listRepoCommands("repo/one")).resolves.toEqual(
+      expect.objectContaining({ revision: "catalog-v1" })
+    );
+    await expect(
+      transport.runRepoCommand("repo/one", "custom:ship/release", "catalog-v1")
+    ).resolves.toEqual({ taskId: "task-1", reused: false });
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:48120/v1/repos/repo%2Fone/commands",
+      undefined
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:48120/v1/repos/repo%2Fone/commands/custom%3Aship%2Frelease/run",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ catalogRevision: "catalog-v1" })
+      }
+    );
+  });
+
   it("puts an identified task at its encoded route without routing fields in the body", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

@@ -4,6 +4,7 @@ import type {
   TaskActivity,
   TaskSummary,
   RepoSummary,
+  RepoCommandCatalog,
 } from "../lib/api/types";
 import type { AgentProvider, FrameAgentEvent } from "@kanna/agent-protocol";
 import type { MobileAuthState } from "../lib/firebase/auth";
@@ -73,6 +74,7 @@ export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type AuthState = MobileAuthState;
 export type ComposerAgentProvider = AgentProvider;
 export type TaskCreationPhase = "idle" | "pending" | "recovering" | "uncertain";
+export type RepoCommandStatus = "idle" | "loading" | "ready" | "error";
 
 export interface PendingTaskCreation {
   slotId: string;
@@ -112,6 +114,10 @@ export interface SessionState {
   repos: RepoSummary[];
   selectedRepoId: string | null;
   repoTasks: TaskSummary[];
+  repoCommandCatalog: RepoCommandCatalog | null;
+  repoCommandStatus: RepoCommandStatus;
+  repoCommandErrorMessage: string | null;
+  runningRepoCommandId: string | null;
   recentTasks: TaskSummary[];
   searchQuery: string;
   searchResults: TaskSummary[];
@@ -171,6 +177,11 @@ export interface SessionStore {
   setRepos(repos: RepoSummary[]): void;
   selectRepo(repoId: string): void;
   setRepoTasks(tasks: TaskSummary[]): void;
+  setRepoCommandLoading(repoId: string): void;
+  setRepoCommandCatalog(catalog: RepoCommandCatalog): void;
+  setRepoCommandError(repoId: string, message: string): void;
+  beginRepoCommandRun(commandId: string): boolean;
+  finishRepoCommandRun(commandId: string): void;
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
   setTaskActivity(taskId: string, activity: TaskActivity): void;
@@ -231,6 +242,10 @@ export function createSessionStore(): SessionStore {
     repos: [],
     selectedRepoId: null,
     repoTasks: [],
+    repoCommandCatalog: null,
+    repoCommandStatus: "idle",
+    repoCommandErrorMessage: null,
+    runningRepoCommandId: null,
     recentTasks: [],
     searchQuery: "",
     searchResults: [],
@@ -504,17 +519,34 @@ export function createSessionStore(): SessionStore {
     },
     setRepos(repos) {
       const hasSelectedRepo = repos.some((repo) => repo.id === state.selectedRepoId);
+      const selectedRepoId = hasSelectedRepo ? state.selectedRepoId : repos[0]?.id ?? null;
+      const repoChanged = selectedRepoId !== state.selectedRepoId;
       state = {
         ...state,
         repos,
-        selectedRepoId: hasSelectedRepo ? state.selectedRepoId : repos[0]?.id ?? null
+        selectedRepoId,
+        ...(repoChanged
+          ? {
+              repoCommandCatalog: null,
+              repoCommandStatus: "idle" as const,
+              repoCommandErrorMessage: null,
+              runningRepoCommandId: null
+            }
+          : {})
       };
       publish();
     },
     selectRepo(repoId) {
+      if (repoId === state.selectedRepoId) {
+        return;
+      }
       state = {
         ...state,
-        selectedRepoId: repoId
+        selectedRepoId: repoId,
+        repoCommandCatalog: null,
+        repoCommandStatus: "idle",
+        repoCommandErrorMessage: null,
+        runningRepoCommandId: null
       };
       publish();
     },
@@ -528,6 +560,47 @@ export function createSessionStore(): SessionStore {
         ...state,
         repoTasks: uniqueTasks
       };
+      publish();
+    },
+    setRepoCommandLoading(repoId) {
+      if (state.selectedRepoId !== repoId) return;
+      state = {
+        ...state,
+        repoCommandCatalog: null,
+        repoCommandStatus: "loading",
+        repoCommandErrorMessage: null
+      };
+      publish();
+    },
+    setRepoCommandCatalog(repoCommandCatalog) {
+      if (state.selectedRepoId !== repoCommandCatalog.repoId) return;
+      state = {
+        ...state,
+        repoCommandCatalog,
+        repoCommandStatus: "ready",
+        repoCommandErrorMessage: null
+      };
+      publish();
+    },
+    setRepoCommandError(repoId, repoCommandErrorMessage) {
+      if (state.selectedRepoId !== repoId) return;
+      state = {
+        ...state,
+        repoCommandCatalog: null,
+        repoCommandStatus: "error",
+        repoCommandErrorMessage
+      };
+      publish();
+    },
+    beginRepoCommandRun(runningRepoCommandId) {
+      if (state.runningRepoCommandId) return false;
+      state = { ...state, runningRepoCommandId };
+      publish();
+      return true;
+    },
+    finishRepoCommandRun(commandId) {
+      if (state.runningRepoCommandId !== commandId) return;
+      state = { ...state, runningRepoCommandId: null };
       publish();
     },
     setRecentTasks(tasks) {

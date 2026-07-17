@@ -2,12 +2,13 @@ use super::analytics::get_repo_analytics;
 use super::backup::create_backup;
 use super::desktop::list_desktops;
 #[cfg(debug_assertions)]
-use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
-#[cfg(debug_assertions)]
 use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine_controls};
+#[cfg(debug_assertions)]
+use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
 use super::pairing::{claim_pairing_session, create_pairing_session};
+use super::repo_commands::{list_repo_commands, run_repo_command};
 use super::repos::{
     add_repo, dependent_tasks_exist, get_repo_agent_definition, get_repo_by_path,
     get_repo_kanna_definitions, get_repo_pipeline_definition, list_available_agent_providers,
@@ -71,6 +72,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/repos/actions/reorder", post(reorder_repos))
         .route("/v1/repos/{repo_id}", axum::routing::patch(patch_repo))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
+        .route("/v1/repos/{repo_id}/commands", get(list_repo_commands))
+        .route(
+            "/v1/repos/{repo_id}/commands/{command_id}/run",
+            post(run_repo_command),
+        )
         .route(
             "/v1/repos/{repo_id}/kanna-definitions",
             get(get_repo_kanna_definitions),

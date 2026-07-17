@@ -157,6 +157,7 @@ Use this branch as the default when the user does not specify a target branch. B
     getStageOrder: selection.getStageOrder,
 
     init: initApi.init,
+    reloadSnapshot: queries.reloadSnapshot,
     attachWindowWorkspace,
     recordSelectionIntent,
     selectRepo: selection.selectRepo,

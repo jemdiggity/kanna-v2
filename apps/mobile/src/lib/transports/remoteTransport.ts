@@ -11,6 +11,8 @@ import type {
   DesktopSummary,
   MobileServerStatus,
   RepoSummary,
+  RepoCommandCatalog,
+  RunRepoCommandResponse,
   TaskActionResponse,
   TaskActivityResponse,
   TaskFileContent,
@@ -407,6 +409,62 @@ export function createRemoteTransport({
         `/v1/repos/${encodeURIComponent(repoId)}/tasks`,
         null
       );
+    },
+    listRepoCommands: async (repoId: string) => {
+      const repoRoute = await resolveCloudRepoRoute(repoId);
+      if (!repoRoute) {
+        return request<RepoCommandCatalog>(
+          "GET",
+          `/v1/repos/${encodeURIComponent(repoId)}/commands`,
+          null
+        );
+      }
+      const catalog = await requestDesktop<RepoCommandCatalog>(
+        repoRoute.desktopId,
+        "GET",
+        `/v1/repos/${encodeURIComponent(repoRoute.localRepoId)}/commands`,
+        null
+      );
+      return { ...catalog, repoId };
+    },
+    runRepoCommand: async (repoId, commandId, catalogRevision) => {
+      const repoRoute = await resolveCloudRepoRoute(repoId);
+      const path = (localRepoId: string) =>
+        `/v1/repos/${encodeURIComponent(localRepoId)}/commands/${encodeURIComponent(commandId)}/run`;
+      if (!repoRoute) {
+        return request<RunRepoCommandResponse>(
+          "POST",
+          path(repoId),
+          { catalogRevision }
+        );
+      }
+      const response = await requestDesktop<RunRepoCommandResponse>(
+        repoRoute.desktopId,
+        "POST",
+        path(repoRoute.localRepoId),
+        { catalogRevision }
+      );
+      if (!listCloudTasks) {
+        return response;
+      }
+      const canonicalTaskId = buildCloudTaskId({
+        ownerDesktopId: repoRoute.desktopId,
+        localRepoId: repoRoute.localRepoId,
+        ownerLocalTaskId: response.taskId
+      });
+      provisionalTaskRoutes.set(canonicalTaskId, {
+        desktopId: repoRoute.desktopId,
+        repoId,
+        localRepoId: repoRoute.localRepoId,
+        taskId: response.taskId
+      });
+      return {
+        ...response,
+        taskId: canonicalTaskId,
+        ownerDesktopId: repoRoute.desktopId,
+        ownerLocalRepoId: repoRoute.localRepoId,
+        ownerLocalTaskId: response.taskId
+      };
     },
     listRecentTasks: () =>
       listCloudTasks

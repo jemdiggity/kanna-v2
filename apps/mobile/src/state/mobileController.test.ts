@@ -122,6 +122,20 @@ function createClientMock(): ClientMock {
         }
       ];
     }),
+    listRepoCommands: vi.fn().mockResolvedValue({
+      repoId: "repo-1",
+      revision: "catalog-v1",
+      commands: [{
+        id: "factory:create-agent",
+        label: "Create Agent",
+        description: "Create a new agent definition",
+        group: "configure"
+      }]
+    }),
+    runRepoCommand: vi.fn().mockResolvedValue({
+      taskId: "task-command",
+      reused: false
+    }),
     listRecentTasks: vi.fn().mockResolvedValue([
       {
         id: "task-1",
@@ -311,6 +325,40 @@ describe("createMobileController", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("loads the selected repository palette and opens a command task single-flight", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const run = createDeferred<{ taskId: string; reused: boolean }>();
+    client.runRepoCommand.mockReturnValue(run.promise);
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    controller.showView("more");
+    await flushMicrotasks();
+    expect(client.listRepoCommands).toHaveBeenCalledWith("repo-1");
+    expect(store.getState()).toMatchObject({
+      repoCommandStatus: "ready",
+      repoCommandCatalog: { revision: "catalog-v1" }
+    });
+
+    const first = controller.runRepoCommand("factory:create-agent");
+    const duplicate = controller.runRepoCommand("factory:create-agent");
+    expect(client.runRepoCommand).toHaveBeenCalledTimes(1);
+    expect(store.getState().runningRepoCommandId).toBe("factory:create-agent");
+    run.resolve({ taskId: "task-command", reused: false });
+    await Promise.all([first, duplicate]);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-command",
+      activeView: "tasks",
+      runningRepoCommandId: null
+    });
+    expect(store.getState().recentTasks).toEqual([
+      expect.objectContaining({ id: "task-command", title: "Create Agent" }),
+      expect.objectContaining({ id: "task-1" })
+    ]);
   });
 
   it("bootstraps connection, desktops, repos, and recent tasks", async () => {

@@ -139,6 +139,7 @@ const store = {
   agentMessageAppearance: "chat",
   markdownPreviewMode: "rendered" as "raw" | "rendered",
   init: vi.fn(async () => {}),
+  reloadSnapshot: vi.fn(async () => {}),
   createItem: vi.fn(async () => {}),
   recordIncomingTransfer: vi.fn(async () => {}),
   approveIncomingTransfer: vi.fn(async () => "task-imported"),
@@ -353,13 +354,6 @@ vi.mock("./composables/useOperatorEvents", () => ({
 vi.mock("./composables/useKeyboardShortcuts", () => ({
   useKeyboardShortcuts: vi.fn((actions: KeyboardActions) => {
     capturedKeyboardActions = actions;
-  }),
-}));
-
-vi.mock("./composables/useCustomTasks", () => ({
-  useCustomTasks: () => ({
-    tasks: ref([]),
-    scan: vi.fn(async () => []),
   }),
 }));
 
@@ -703,6 +697,7 @@ describe("App", () => {
     store.pushTaskToPeer.mockClear();
     store.loadAgent.mockClear();
     store.selectRepo.mockClear();
+    store.reloadSnapshot.mockClear();
     store.selectItem.mockClear();
     store.recordNavigation.mockClear();
     store.recordSelectionIntent.mockClear();
@@ -770,6 +765,17 @@ describe("App", () => {
         defaultPipeline: "default",
         pipelines: ["default"],
       }),
+      fetchRepoCommands: async (repoId) => ({
+        repoId,
+        revision: "catalog-v1",
+        commands: [
+          { id: "factory:create-agent", label: "Create Agent", description: "Create a new agent definition", group: "configure" },
+          { id: "factory:create-pipeline", label: "Create Pipeline", description: "Create a new pipeline definition", group: "configure" },
+          { id: "factory:setup-repo", label: "Set Up Repository", description: "Configure .kanna pipeline and agent flavors", group: "configure" },
+          { id: "factory:create-config", label: "Create Config", description: "Create or update .kanna/config.json", group: "configure" },
+        ],
+      }),
+      runRepoCommand: async () => ({ taskId: "repo-command-task", reused: false }),
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
       claimPendingIncomingTransfer: async (transferId) => {
         const result = await dbMock.execute(
@@ -4018,7 +4024,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="command-palette"]').text()).toContain("taskTransfer.pairPeer");
   });
 
-  it("localizes factory command palette commands and launches setup/config factory tasks", async () => {
+  it("uses the server repo catalog and launches factory commands through it", async () => {
     store.currentItem = null;
 
     const CommandPaletteModalStub = defineComponent({
@@ -4056,53 +4062,22 @@ describe("App", () => {
     await flushPromises();
 
     const createConfigButton = wrapper.get('[data-command-id="create-config"]');
-    expect(wrapper.get('[data-command-id="create-agent"]').text()).toBe("エージェントを作成");
-    expect(wrapper.get('[data-command-id="create-pipeline"]').text()).toBe("パイプラインを作成");
-    expect(wrapper.get('[data-command-id="setup-repo"]').text()).toBe("リポジトリをセットアップ");
-    expect(wrapper.get('[data-command-id="setup-repo"]').attributes("data-command-description")).toBe(".kanna のパイプラインとエージェントフレーバーを構成");
-    expect(createConfigButton.text()).toBe("設定を作成");
-    expect(createConfigButton.attributes("data-command-description")).toBe(".kanna/config.json を作成または更新");
+    expect(wrapper.get('[data-command-id="create-agent"]').text()).toBe("Create Agent");
+    expect(wrapper.get('[data-command-id="create-pipeline"]').text()).toBe("Create Pipeline");
+    expect(wrapper.get('[data-command-id="setup-repo"]').text()).toBe("Set Up Repository");
+    expect(wrapper.get('[data-command-id="setup-repo"]').attributes("data-command-description")).toBe("Configure .kanna pipeline and agent flavors");
+    expect(createConfigButton.text()).toBe("Create Config");
+    expect(createConfigButton.attributes("data-command-description")).toBe("Create or update .kanna/config.json");
 
     await wrapper.get('[data-command-id="setup-repo"]').trigger("click");
     await flushPromises();
 
-    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "setup");
-    expect(store.createItem).toHaveBeenCalledWith(
-      "repo-1",
-      "/tmp/repo",
-      "Set up Kanna for this repository.",
-      "pty",
-      expect.objectContaining({
-        customTask: expect.objectContaining({
-          agent: "setup",
-          name: "Set Up Repository",
-          prompt: "Set up Kanna for this repository.",
-        }),
-      }),
-    );
-    expect(store.createItem.mock.calls.at(-1)?.[4]).not.toHaveProperty("agentProvider");
-
-    store.loadAgent.mockClear();
-    store.createItem.mockClear();
+    expect(store.selectItem).toHaveBeenCalledWith("repo-command-task");
+    store.selectItem.mockClear();
 
     await createConfigButton.trigger("click");
     await flushPromises();
-
-    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "config-factory");
-    expect(store.createItem).toHaveBeenCalledWith(
-      "repo-1",
-      "/tmp/repo",
-      "Help me create or update the .kanna/config.json for this repository.",
-      "pty",
-      expect.objectContaining({
-        customTask: expect.objectContaining({
-          agent: "config-factory",
-          name: "Create Config",
-          prompt: "Help me create or update the .kanna/config.json for this repository.",
-        }),
-      }),
-    );
-    expect(store.createItem.mock.calls.at(-1)?.[4]).not.toHaveProperty("agentProvider");
+    expect(store.selectItem).toHaveBeenCalledWith("repo-command-task");
   });
 
   it("launches the setup agent after importing a repository from AddRepoModal", async () => {

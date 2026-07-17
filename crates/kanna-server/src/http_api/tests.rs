@@ -4,7 +4,8 @@ pub(super) use super::test_support::{
     test_router, test_router_with_merge_agent_runner, test_router_with_revision_requester,
     test_router_with_seed, test_router_with_stage_advancer, test_router_with_stage_completer,
     test_router_with_stage_rerunner, test_router_with_task_closer, test_router_with_task_creator,
-    test_router_with_task_input_sender, test_state_with_seed, test_state_with_task_input_sender,
+    test_router_with_seed_and_task_creator, test_router_with_task_input_sender,
+    test_state_with_seed, test_state_with_task_input_sender,
 };
 pub(super) use super::{dispatch_http_invoke, handle_task_terminal_state, router, AppState};
 use crate::config::Config;
@@ -143,5 +144,6 @@ mod core_routes;
 mod create_task;
 mod e2e_sql_routes;
 mod input;
+mod repo_commands;
 mod repo_definitions;
 mod revision_status;

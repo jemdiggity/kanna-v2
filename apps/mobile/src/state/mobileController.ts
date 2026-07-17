@@ -43,6 +43,8 @@ export interface MobileController {
   setTaskDetailVisible(visible: boolean): void;
   selectDesktop(desktopId: string): Promise<void>;
   selectRepo(repoId: string): Promise<void>;
+  loadRepoCommands(): Promise<void>;
+  runRepoCommand(commandId: string): Promise<void>;
   openTask(taskId: string): void;
   closeTask(taskId?: string): void;
   openComposer(): void;
@@ -133,6 +135,11 @@ function generateTaskCreationId(): string {
   return `${timestamp}${counter}${entropy.slice(0, 12)}`;
 }
 
+function isStaleRepoCommandError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b409\b|catalog changed|stale/i.test(message);
+}
+
 export function createMobileController(
   client: KannaClient,
   store: SessionStore,
@@ -193,6 +200,7 @@ export function createMobileController(
     | { taskId: string; promise: Promise<void> }
     | null = null;
   let recoveryStartedTaskId: string | null = null;
+  let repoCommandLoadGeneration = 0;
   const pendingTaskIdentities = new Map<
     string,
     {
@@ -717,6 +725,36 @@ export function createMobileController(
     store.setRepoTasks(repoTasks);
     reconcileSelectedTaskRead();
     return true;
+  };
+
+  const loadRepoCommands = async (): Promise<void> => {
+    const repoId = store.getState().selectedRepoId;
+    const generation = ++repoCommandLoadGeneration;
+    if (!repoId) {
+      return;
+    }
+    store.setRepoCommandLoading(repoId);
+    try {
+      const catalog = await client.listRepoCommands(repoId);
+      if (
+        generation !== repoCommandLoadGeneration ||
+        store.getState().selectedRepoId !== repoId
+      ) {
+        return;
+      }
+      store.setRepoCommandCatalog({ ...catalog, repoId });
+    } catch (error) {
+      if (
+        generation !== repoCommandLoadGeneration ||
+        store.getState().selectedRepoId !== repoId
+      ) {
+        return;
+      }
+      store.setRepoCommandError(
+        repoId,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
   };
 
   const startTaskTerminal = (taskId: string) => {
@@ -1503,6 +1541,9 @@ export function createMobileController(
       if (taskDetailVisible === visible) return;
       taskDetailVisible = visible;
       reconcileSelectedTaskRead();
+      if (view === "more") {
+        void loadRepoCommands();
+      }
     },
 
     async selectDesktop(desktopId) {
@@ -1525,6 +1566,68 @@ export function createMobileController(
         }
       } catch (error) {
         fail(error);
+      }
+      if (store.getState().activeView === "more") {
+        await loadRepoCommands();
+      }
+    },
+
+    loadRepoCommands,
+
+    async runRepoCommand(commandId) {
+      const state = store.getState();
+      const repoId = state.selectedRepoId;
+      const catalog = state.repoCommandCatalog;
+      const command = catalog?.commands.find(
+        (candidate) => candidate.id === commandId
+      );
+      if (!repoId || !catalog || catalog.repoId !== repoId || !command) {
+        return;
+      }
+      if (!store.beginRepoCommandRun(commandId)) {
+        return;
+      }
+
+      try {
+        const response = await client.runRepoCommand(
+          repoId,
+          commandId,
+          catalog.revision
+        );
+        const responseRoute = getClientResolvedTaskRoute(response);
+        if (responseRoute) {
+          pendingTaskIdentities.set(response.taskId, responseRoute);
+        }
+        const current = store.getState();
+        const existingTask = [
+          ...current.repoTasks,
+          ...current.recentTasks,
+          ...current.searchResults
+        ].find((task) => task.id === response.taskId);
+        if (!existingTask) {
+          const commandTask: TaskSummary = {
+            id: response.taskId,
+            repoId,
+            title: command.label,
+            prompt: command.description,
+            stage: "in progress",
+            agentType: "pty",
+            ownerDesktopId: response.ownerDesktopId,
+            ownerLocalRepoId: response.ownerLocalRepoId,
+            ownerLocalTaskId: response.ownerLocalTaskId
+          };
+          store.setRepoTasks([commandTask, ...current.repoTasks]);
+          store.setRecentTasks([commandTask, ...current.recentTasks]);
+        }
+        setUnownedErrorMessage(null);
+        this.openTask(response.taskId);
+      } catch (error) {
+        fail(error);
+        if (isStaleRepoCommandError(error)) {
+          await loadRepoCommands();
+        }
+      } finally {
+        store.finishRepoCommandRun(commandId);
       }
     },
 

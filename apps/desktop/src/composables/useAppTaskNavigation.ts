@@ -1,8 +1,11 @@
 import { computed, watch, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
 import type { PipelineItem } from "../types/kanna";
-import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
-import type { CustomTaskConfig } from "@kanna/core";
+import {
+  fetchDesktopRepoCommands,
+  runDesktopRepoCommand,
+  type DesktopRepoCommandCatalog,
+} from "../services/desktopServerClient";
 
 import Sidebar from "../components/Sidebar.vue";
 import { isBlockerResolved } from "../utils/blockerResolution";
@@ -83,7 +86,7 @@ interface UseAppTaskNavigationOptions {
   selectedCloudItemId: Ref<string | null>;
   showBlockerSelect: Ref<boolean>;
   blockerSelectMode: Ref<"block" | "edit">;
-  customTasks: Ref<CustomTaskConfig[]>;
+  repoCommandCatalog: Ref<DesktopRepoCommandCatalog | null>;
   openPeerPicker: (taskId: string) => void;
   openPairPeerPicker: () => void;
 }
@@ -110,7 +113,7 @@ export function useAppTaskNavigation({
   selectedCloudItemId,
   showBlockerSelect,
   blockerSelectMode,
-  customTasks,
+  repoCommandCatalog,
   openPeerPicker,
   openPairPeerPicker,
 }: UseAppTaskNavigationOptions) {
@@ -470,172 +473,6 @@ export function useAppTaskNavigation({
     return cmds;
   });
 
-  // Custom tasks
-  async function handleLaunchCustomTask(task: CustomTaskConfig) {
-    if (!store.selectedRepoId) {
-      if (store.repos.length === 1) {
-        store.selectedRepoId = store.repos[0].id;
-      } else {
-        alert(t('app.selectRepoFirst'));
-        return;
-      }
-    }
-    const repo = store.repos.find((r) => r.id === store.selectedRepoId);
-    if (!repo) return;
-    try {
-      let resolvedTask = task;
-
-      if (task.agent) {
-        const agent = await store.loadAgent(repo.id, task.agent);
-
-        resolvedTask = {
-          ...task,
-          model: task.model ?? agent.model,
-          permissionMode: task.permissionMode ?? agent.permission_mode,
-          allowedTools: task.allowedTools ?? agent.allowed_tools,
-        };
-      }
-
-      await store.createItem(store.selectedRepoId, repo.path, resolvedTask.prompt, "pty", {
-        customTask: resolvedTask,
-        stage: task.stage,
-      });
-    } catch (e: unknown) {
-      console.error("[App] custom task launch failed:", e);
-      const message = typeof e === "object" && e !== null && "message" in e
-        ? (e as { message?: unknown }).message || e
-        : e;
-      alert(`${t('app.customTaskLaunchFailed')}: ${String(message)}`);
-    }
-  }
-
-  async function handleCreateCustomTask() {
-    if (!store.selectedRepoId) {
-      if (store.repos.length === 1) {
-        store.selectedRepoId = store.repos[0].id;
-      } else {
-        alert(t('app.selectRepoFirst'));
-        return;
-      }
-    }
-    const repo = store.repos.find((r) => r.id === store.selectedRepoId);
-    if (!repo) return;
-    try {
-      await store.createItem(store.selectedRepoId, repo.path, NEW_CUSTOM_TASK_PROMPT);
-    } catch (e: unknown) {
-      console.error("[App] custom task creation failed:", e);
-      alert(`${t('app.customTaskCreationFailed')}: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
-  async function handleCreateAgent() {
-    if (!store.selectedRepoId) {
-      if (store.repos.length === 1) {
-        store.selectedRepoId = store.repos[0].id;
-      } else {
-        alert(t('app.selectRepoFirst'));
-        return;
-      }
-    }
-    const repo = store.repos.find((r) => r.id === store.selectedRepoId);
-    if (!repo) return;
-    try {
-      await store.createItem(store.selectedRepoId, repo.path, "Help me create a new agent definition for this repository.");
-    } catch (e: unknown) {
-      console.error("[App] create agent task failed:", e);
-      alert(`Failed to create agent task: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
-  async function handleCreatePipeline() {
-    if (!store.selectedRepoId) {
-      if (store.repos.length === 1) {
-        store.selectedRepoId = store.repos[0].id;
-      } else {
-        alert(t('app.selectRepoFirst'));
-        return;
-      }
-    }
-    const repo = store.repos.find((r) => r.id === store.selectedRepoId);
-    if (!repo) return;
-    try {
-      await store.createItem(store.selectedRepoId, repo.path, "Help me create a new pipeline definition for this repository.");
-    } catch (e: unknown) {
-      console.error("[App] create pipeline task failed:", e);
-      alert(`Failed to create pipeline task: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
-  async function handleCreateConfig() {
-    if (!store.selectedRepoId) {
-      if (store.repos.length === 1) {
-        store.selectedRepoId = store.repos[0].id;
-      } else {
-        alert(t('app.selectRepoFirst'));
-        return;
-      }
-    }
-    const repo = store.repos.find((r) => r.id === store.selectedRepoId);
-    if (!repo) return;
-    try {
-      const agent = await store.loadAgent(repo.id, "config-factory");
-      await store.createItem(
-        store.selectedRepoId,
-        repo.path,
-        "Help me create or update the .kanna/config.json for this repository.",
-        "pty",
-        {
-          customTask: {
-            name: "Create Config",
-            agent: "config-factory",
-            prompt: "Help me create or update the .kanna/config.json for this repository.",
-            model: agent.model,
-            permissionMode: agent.permission_mode,
-            allowedTools: agent.allowed_tools,
-          },
-        },
-      );
-    } catch (e: unknown) {
-      console.error("[App] create config task failed:", e);
-      alert(`Failed to create config task: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
-  async function handleSetupRepo() {
-    if (!store.selectedRepoId) {
-      if (store.repos.length === 1) {
-        store.selectedRepoId = store.repos[0].id;
-      } else {
-        alert(t('app.selectRepoFirst'));
-        return;
-      }
-    }
-    const repo = store.repos.find((r) => r.id === store.selectedRepoId);
-    if (!repo) return;
-    try {
-      const agent = await store.loadAgent(repo.id, "setup");
-      await store.createItem(
-        store.selectedRepoId,
-        repo.path,
-        "Set up Kanna for this repository.",
-        "pty",
-        {
-          customTask: {
-            name: "Set Up Repository",
-            agent: "setup",
-            prompt: "Set up Kanna for this repository.",
-            model: agent.model,
-            permissionMode: agent.permission_mode,
-            allowedTools: agent.allowed_tools,
-          },
-        },
-      );
-    } catch (e: unknown) {
-      console.error("[App] setup repo task failed:", e);
-      alert(`Failed to create setup task: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
   const paletteDynamicCommands = computed<DynamicCommand[]>(() => {
     const cmds: DynamicCommand[] = [];
     // Rename task (only when a task is selected)
@@ -658,45 +495,33 @@ export function useAppTaskNavigation({
       label: t('taskTransfer.pairPeer'),
       execute: () => openPairPeerPicker(),
     });
-    // Factory commands
-    cmds.push({
-      id: "create-agent",
-      label: t('commandPalette.createAgent'),
-      description: t('commandPalette.createAgentDesc'),
-      execute: () => { handleCreateAgent().catch((e) => console.error("[App] create agent failed:", e)); },
-    });
-    cmds.push({
-      id: "create-pipeline",
-      label: t('commandPalette.createPipeline'),
-      description: t('commandPalette.createPipelineDesc'),
-      execute: () => { handleCreatePipeline().catch((e) => console.error("[App] create pipeline failed:", e)); },
-    });
-    cmds.push({
-      id: "setup-repo",
-      label: t('commandPalette.setupRepo'),
-      description: t('commandPalette.setupRepoDesc'),
-      execute: () => { handleSetupRepo().catch((e) => console.error("[App] setup repo failed:", e)); },
-    });
-    cmds.push({
-      id: "create-config",
-      label: t('commandPalette.createConfig'),
-      description: t('commandPalette.createConfigDesc'),
-      execute: () => { handleCreateConfig().catch((e) => console.error("[App] create config failed:", e)); },
-    });
-    // Always include "New Custom Task" option
-    cmds.push({
-      id: "custom-task-new",
-      label: t('app.newCustomTask'),
-      description: t('app.newCustomTaskDesc'),
-      execute: () => handleCreateCustomTask(),
-    });
-    // Add discovered custom tasks
-    for (const task of customTasks.value) {
+    for (const command of repoCommandCatalog.value?.commands ?? []) {
       cmds.push({
-        id: `custom-task-${task.name}`,
-        label: task.name,
-        description: task.description,
-        execute: () => handleLaunchCustomTask(task),
+        id: command.id.startsWith("factory:")
+          ? command.id.slice("factory:".length)
+          : `custom-task-${command.label}`,
+        label: command.label,
+        description: command.description,
+        execute: () => {
+          const catalog = repoCommandCatalog.value;
+          if (!catalog) return;
+          void runDesktopRepoCommand(catalog.repoId, command.id, catalog.revision)
+            .then(async ({ taskId }) => {
+              await store.reloadSnapshot();
+              await store.selectItem(taskId);
+            })
+            .catch(async (error) => {
+              console.error("[App] repository command failed:", error);
+              if (error instanceof Error && error.message.includes("failed: 409")) {
+                try {
+                  repoCommandCatalog.value = await fetchDesktopRepoCommands(catalog.repoId);
+                } catch (refreshError) {
+                  console.error("[App] repository command catalog refresh failed:", refreshError);
+                }
+              }
+              toast.error(error instanceof Error ? error.message : String(error));
+            });
+        },
       });
     }
     return cmds;

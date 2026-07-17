@@ -1,14 +1,11 @@
 import React from "react";
-import {
-  act,
-  create,
-  type ReactTestRenderer
-} from "react-test-renderer";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock("react-native", () => ({
+  ActivityIndicator: "ActivityIndicator",
   Pressable: "Pressable",
   ScrollView: "ScrollView",
   StyleSheet: {
@@ -33,45 +30,80 @@ afterEach(async () => {
   }
 });
 
-describe("MoreScreen", () => {
-  it("shares visible pressed feedback across global and task commands", async () => {
-    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+function props() {
+  return {
+    repos: [{ id: "repo-1", name: "Kanna" }],
+    selectedRepoId: "repo-1",
+    catalog: {
+      repoId: "repo-1",
+      revision: "v1",
+      commands: [
+        {
+          id: "custom:merge-master",
+          label: "Merge Master",
+          description: "Merge ready pull requests",
+          group: "automation" as const
+        }
+      ]
+    },
+    status: "ready" as const,
+    errorMessage: null,
+    runningCommandId: null,
+    onSelectRepo: vi.fn(),
+    onRunCommand: vi.fn(),
+    onRetry: vi.fn()
+  };
+}
 
-    const props = {
-      pairingCode: null,
-      refreshStatus: "idle",
-      selectedTask: {
-        id: "task-1",
-        repoId: "repo-1",
-        title: "Review mobile shell",
-        stage: "review"
-      },
-      onRefresh: vi.fn(),
-      onShowDesktops: vi.fn(),
-      onStartPairing: vi.fn(),
-      onOpenComposer: vi.fn(),
-      onAdvanceTaskStage: vi.fn(),
-      onRunMergeAgent: vi.fn(),
-      onCloseTask: vi.fn()
-    } as Parameters<typeof MoreScreen>[0];
+describe("MoreScreen", () => {
+  it("renders only grouped repository commands and runs the selected entry", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+    const input = props();
 
     await act(async () => {
-      rendered = create(React.createElement(MoreScreen, props));
+      rendered = create(React.createElement(MoreScreen!, input));
     });
 
-    const buttons = rendered.root.findAll((node) => node.type === "Pressable");
-    const findCommandButton = (title: string) =>
-      buttons.find((node) =>
-        node
-          .findAll((child) => child.type === "Text")
-          .some((child) => child.children.join("") === title)
-      );
-    const createTaskStyle = findCommandButton("Create Task")?.props.style;
-    const advanceStageStyle = findCommandButton("Advance Stage")?.props.style;
+    const copy = rendered.root
+      .findAll((node) => node.type === "Text")
+      .flatMap((node) => node.children)
+      .join(" ");
+    expect(copy).toContain("Automations");
+    expect(copy).toContain("Merge Master");
+    expect(copy).not.toContain("Refresh Data");
+    expect(copy).not.toContain("Create Task");
 
-    expect(createTaskStyle).toBeTypeOf("function");
-    expect(advanceStageStyle).toBeTypeOf("function");
-    expect(createTaskStyle({ pressed: true })).toEqual(
+    expect(
+      rendered.root.find(
+        (node) => node.props.testID === "mobile.more.repo.repo-1"
+      )
+    ).toBeDefined();
+    expect(
+      rendered.root.find(
+        (node) =>
+          node.props.testID === "mobile.more.command-group.automation"
+      )
+    ).toBeDefined();
+
+    const command = rendered.root.find(
+      (node) => node.props.testID === "mobile.more.command.custom:merge-master"
+    );
+    command.props.onPress();
+    expect(input.onRunCommand).toHaveBeenCalledWith("custom:merge-master");
+  });
+
+  it("shows visible pressed feedback for repository commands", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+
+    await act(async () => {
+      rendered = create(React.createElement(MoreScreen!, props()));
+    });
+
+    const command = rendered.root.find(
+      (node) => node.props.testID === "mobile.more.command.custom:merge-master"
+    );
+    expect(command.props.style).toBeTypeOf("function");
+    expect(command.props.style({ pressed: true })).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           backgroundColor: "#182842",
@@ -81,41 +113,76 @@ describe("MoreScreen", () => {
         })
       ])
     );
-    expect(createTaskStyle({ pressed: true })).toEqual(
-      advanceStageStyle({ pressed: true })
+    expect(command.props.style({ pressed: true })).not.toEqual(
+      command.props.style({ pressed: false })
     );
-    expect(createTaskStyle({ pressed: true })).not.toEqual(
-      createTaskStyle({ pressed: false })
+  });
+
+  it("keeps repository selection disabled while a command is running", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+    const input = {
+      ...props(),
+      repos: [
+        { id: "repo-1", name: "Kanna" },
+        { id: "repo-2", name: "Kanna Docs" }
+      ],
+      runningCommandId: "custom:merge-master"
+    };
+
+    await act(async () => {
+      rendered = create(React.createElement(MoreScreen!, input));
+    });
+
+    const repo = rendered.root.find(
+      (node) => node.props.testID === "mobile.more.repo.repo-2"
     );
-    expect(advanceStageStyle({ pressed: true })).not.toEqual(
-      advanceStageStyle({ pressed: false })
+    expect(repo.props.disabled).toBe(true);
+    repo.props.onPress();
+    expect(input.onSelectRepo).not.toHaveBeenCalled();
+  });
+
+  it("shows command task loading failures with a retry action", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+    const input = {
+      ...props(),
+      status: "error" as const,
+      errorMessage:
+        "The command launched successfully, but its task could not be loaded. Check your connection and try again."
+    };
+
+    await act(async () => {
+      rendered = create(React.createElement(MoreScreen!, input));
+    });
+
+    const copy = rendered.root
+      .findAll((node) => node.type === "Text")
+      .flatMap((node) => node.children)
+      .join(" ");
+    expect(copy).toContain("command launched successfully");
+    expect(copy).toContain("Check your connection and try again");
+
+    const retry = rendered.root.find(
+      (node) => node.type === "Pressable" && node.props.onPress === input.onRetry
     );
+    retry.props.onPress();
+    expect(input.onRetry).toHaveBeenCalledOnce();
   });
 
   it("does not expose OTA diagnostics", async () => {
     if (!MoreScreen) throw new Error("MoreScreen was not loaded");
 
-    const props = {
-      pairingCode: null,
-      refreshStatus: "idle",
-      selectedTask: null,
-      updateInfo: {
-        enabled: true,
-        updateId: "0123456789abcdef",
-        runtimeVersion: "2.0.0",
-        channel: "staging"
-      },
-      onRefresh: vi.fn(),
-      onShowDesktops: vi.fn(),
-      onStartPairing: vi.fn(),
-      onOpenComposer: vi.fn(),
-      onAdvanceTaskStage: vi.fn(),
-      onRunMergeAgent: vi.fn(),
-      onCloseTask: vi.fn()
-    } as Parameters<typeof MoreScreen>[0];
-
     await act(async () => {
-      rendered = create(React.createElement(MoreScreen, props));
+      rendered = create(
+        React.createElement(MoreScreen!, {
+          ...props(),
+          updateInfo: {
+            enabled: true,
+            updateId: "0123456789abcdef",
+            runtimeVersion: "2.0.0",
+            channel: "staging"
+          }
+        } as Parameters<typeof MoreScreen>[0])
+      );
     });
 
     const copy = rendered.root

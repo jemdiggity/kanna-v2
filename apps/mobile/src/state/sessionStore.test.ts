@@ -12,6 +12,68 @@ describe("createSessionStore", () => {
     agentProvider: "codex" as const
   };
 
+  it("preserves repository command ownership until the run settles", () => {
+    const store = createSessionStore();
+    store.selectRepo("repo-1");
+    store.setRepoCommandLoading("repo-1");
+    store.setRepoCommandCatalog({
+      repoId: "repo-1",
+      revision: "catalog-v1",
+      commands: [{
+        id: "custom:ship",
+        label: "Ship",
+        description: "Release this repository",
+        group: "automation"
+      }]
+    });
+
+    expect(store.beginRepoCommandRun("custom:ship")).toBe(true);
+    expect(store.beginRepoCommandRun("factory:create-agent")).toBe(false);
+    store.selectRepo("repo-2");
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-1",
+      repoCommandStatus: "ready",
+      runningRepoCommandId: "custom:ship"
+    });
+
+    store.finishRepoCommandRun("custom:ship");
+    store.selectRepo("repo-2");
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-2",
+      repoCommandStatus: "idle",
+      repoCommandCatalog: null,
+      runningRepoCommandId: null
+    });
+  });
+
+  it("retains a created command task until its collection refresh succeeds", () => {
+    const store = createSessionStore();
+    store.selectRepo("repo-1");
+    store.setRepoCommandCatalog({
+      repoId: "repo-1",
+      revision: "catalog-v1",
+      commands: []
+    });
+    store.setRepoCommandTaskLoadError({
+      commandId: "factory:create-agent",
+      taskId: "task-command"
+    }, "The command launched successfully, but its task could not be loaded.");
+
+    expect(store.beginRepoCommandTaskRefresh()).toEqual({
+      commandId: "factory:create-agent",
+      taskId: "task-command"
+    });
+    expect(store.getState().runningRepoCommandId).toBe("factory:create-agent");
+    store.resolveRepoCommandTask("task-command");
+    store.finishRepoCommandRun("factory:create-agent");
+    expect(store.getState()).toMatchObject({
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      pendingRepoCommandTask: null,
+      runningRepoCommandId: null
+    });
+  });
+
   it("creates a device id once and persists it", () => {
     const store = createSessionStore();
 
