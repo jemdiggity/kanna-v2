@@ -1,4 +1,5 @@
 load("@daemon_crates//:defs.bzl", all_crate_deps_for_daemon = "all_crate_deps")
+load("@desktop_crates//:defs.bzl", all_crate_deps_for_desktop = "all_crate_deps")
 load("@kanna_server_crates//:defs.bzl", all_crate_deps_for_server = "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 load("@task_transfer_crates//:defs.bzl", all_crate_deps_for_task_transfer = "all_crate_deps")
@@ -10,6 +11,19 @@ filegroup(
     srcs = [
         "Cargo.toml",
     ] + glob(["src/**/*.rs", "src/**/*.json"]),
+)
+
+rust_library(
+    name = "kanna_agent_protocol",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = ["src/provider_resolution_cases.json"],
+    crate_root = "src/lib.rs",
+    crate_name = "kanna_agent_protocol",
+    edition = "2021",
+    deps = all_crate_deps_for_desktop(normal = True, package_name = "crates/kanna-agent-protocol") + [
+        "//crates/claude-agent-sdk:claude_agent_sdk",
+    ],
+    proc_macro_deps = all_crate_deps_for_desktop(proc_macro = True, package_name = "crates/kanna-agent-protocol"),
 )
 
 rust_library(
