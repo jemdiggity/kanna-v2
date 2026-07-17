@@ -3584,14 +3584,16 @@ mod tests {
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let state = Arc::new(AppState::new(config.clone()));
-        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
         let mut conn = StreamConn {
             state,
             frame_tx,
+            companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
             agent_commands: None,
             requests: None,
+            companion_event_times: HashMap::new(),
             authed: true,
             auth_mode: AuthMode::AllowEmpty,
         };
@@ -3636,14 +3638,16 @@ mod tests {
             "ksp-terminal-detach-control",
             "KSP Terminal Detach Control",
         )));
-        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
         let mut conn = StreamConn {
             state,
             frame_tx,
+            companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
             agent_commands: None,
             requests: None,
+            companion_event_times: HashMap::new(),
             authed: true,
             auth_mode: AuthMode::AllowEmpty,
         };
