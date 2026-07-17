@@ -997,3 +997,45 @@ fn ui_snapshot_treats_null_pinned_as_unpinned() {
 
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn find_open_agent_task_ignores_closed_singleton() {
+    let path = Db::test_db_path("closed-singleton-agent");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-merge",
+        "repo-1",
+        "Merge master",
+        Some("Merge Master"),
+        "in progress",
+        "2026-07-01T00:00:00Z",
+    )
+    .expect("task");
+    db.insert_stage_run(NewStageRun {
+        id: "run-merge",
+        task_id: "task-merge",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("merge"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("merge-session"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .expect("run");
+    db.set_test_pipeline_item_closed_at("task-merge", "2026-07-01T01:00:00Z")
+        .expect("close task");
+
+    assert!(db
+        .find_open_agent_task("repo-1", "merge")
+        .expect("lookup")
+        .is_none());
+
+    let _ = std::fs::remove_file(path);
+}

@@ -1,4 +1,4 @@
-use super::{Db, NewPipelineItem, PipelineItem, RunningAgentTask, TaskStageSource};
+use super::{Db, NewPipelineItem, OpenAgentTask, PipelineItem, TaskStageSource};
 use rusqlite::{params, OptionalExtension};
 
 impl Db {
@@ -267,11 +267,11 @@ impl Db {
         Ok(Some(pipeline_item_id))
     }
 
-    pub fn find_open_running_agent_task(
+    pub fn find_open_agent_task(
         &self,
         repo_id: &str,
         agent: &str,
-    ) -> Result<Option<RunningAgentTask>, rusqlite::Error> {
+    ) -> Result<Option<OpenAgentTask>, rusqlite::Error> {
         self.conn
             .query_row(
                 "SELECT p.id, COALESCE(NULLIF(sr.session_id, ''), p.id)
@@ -279,13 +279,12 @@ impl Db {
                  JOIN stage_run sr ON sr.task_id = p.id
                  WHERE p.repo_id = ?
                    AND p.closed_at IS NULL
-                   AND sr.status = 'running'
                    AND sr.agent = ?
                  ORDER BY datetime(sr.started_at) DESC, sr.id DESC
                  LIMIT 1",
                 (repo_id, agent),
                 |row| {
-                    Ok(RunningAgentTask {
+                    Ok(OpenAgentTask {
                         task_id: row.get(0)?,
                         session_id: row.get(1)?,
                     })
