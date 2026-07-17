@@ -62,6 +62,7 @@ describe("useAppTaskNavigation", () => {
     const firstRepoSelection = deferred();
     const items = [sidebarTask("task-one", "repo-1"), sidebarTask("task-two", "repo-2")];
     const store = reactive({
+      recordSelectionIntent: vi.fn(),
       selectedRepoId: "repo-1",
       selectedItemId: "task-one" as string | null,
       lastSelectedItemByRepo: {
@@ -132,6 +133,7 @@ describe("useAppTaskNavigation", () => {
       firstRepoSelection.resolve();
       await olderNavigation;
 
+      expect(store.recordSelectionIntent).toHaveBeenCalledTimes(2);
       expect(selectItem).toHaveBeenCalledTimes(2);
       expect(selectItem).toHaveBeenNthCalledWith(1, "task-two", {
         previousItemId: "task-one",
@@ -168,6 +170,7 @@ describe("useAppTaskNavigation", () => {
     } as WorkspaceTask);
     const persistSelection = vi.fn(async () => {});
     const store = reactive({
+      recordSelectionIntent: vi.fn(),
       selectedRepoId: null as string | null,
       selectedItemId: presentationSlotId as string | null,
       lastSelectedItemByRepo: { [oldRepoKey]: presentationSlotId } as Record<string, string>,
@@ -244,6 +247,7 @@ describe("useAppTaskNavigation", () => {
     const takeForwardTarget = vi.fn(() => remoteItem.slot_id);
     const items = [localItem, remoteItem];
     const store = reactive({
+      recordSelectionIntent: vi.fn(),
       selectedRepoId: localItem.repo_id,
       selectedItemId: localItem.slot_id as string | null,
       lastSelectedItemByRepo: {
@@ -347,6 +351,7 @@ describe("useAppTaskNavigation", () => {
     };
     const persistSelection = vi.fn(async () => {});
     const store = reactive({
+      recordSelectionIntent: vi.fn(),
       selectedRepoId: localItem.repo_id,
       selectedItemId: localItem.slot_id as string | null,
       lastSelectedItemByRepo: {
@@ -442,6 +447,7 @@ describe("useAppTaskNavigation", () => {
     const items = [sidebarTask("task-one", "repo-1"), sidebarTask("task-two", "repo-2")];
     const history = createNavigationHistory();
     const store = reactive({
+      recordSelectionIntent: vi.fn(),
       selectedRepoId: "repo-1",
       selectedItemId: "task-one" as string | null,
       lastSelectedItemByRepo: {
@@ -528,6 +534,7 @@ describe("useAppTaskNavigation", () => {
     const items = [sidebarTask("task-one", "repo-1"), sidebarTask("task-two", "repo-2")];
     const history = createNavigationHistory();
     const store = reactive({
+      recordSelectionIntent: vi.fn(),
       selectedRepoId: "repo-1",
       selectedItemId: "task-one" as string | null,
       lastSelectedItemByRepo: {
@@ -623,6 +630,7 @@ describe("useAppTaskNavigation", () => {
     const items = [sidebarTask("task-one", "repo-1"), sidebarTask("task-two", "repo-2")];
     const history = createNavigationHistory();
     const store = reactive({
+      recordSelectionIntent: vi.fn(),
       selectedRepoId: "repo-2",
       selectedItemId: "task-two" as string | null,
       lastSelectedItemByRepo: {

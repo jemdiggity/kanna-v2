@@ -4,6 +4,7 @@ import { createStoreContext, createStoreState, type StoreServices } from "./stat
 import { createPortsStore } from "./ports";
 import { createQueriesApi } from "./queries";
 import { createSelectionApi } from "./selection";
+import { recordSelectionIntent as recordStoreSelectionIntent } from "./selectionIntent";
 import { createSessionsApi } from "./sessions";
 import { createPipelineApi } from "./pipeline";
 import { createTasksApi } from "./tasks";
@@ -123,6 +124,10 @@ Use this branch as the default when the user does not specify a target branch. B
     state.initialWindowBootstrap.value = windowWorkspace.bootstrap;
   }
 
+  function recordSelectionIntent(): void {
+    recordStoreSelectionIntent(state);
+  }
+
   return {
     repos: state.repos,
     items: state.items,
@@ -153,6 +158,7 @@ Use this branch as the default when the user does not specify a target branch. B
 
     init: initApi.init,
     attachWindowWorkspace,
+    recordSelectionIntent,
     selectRepo: selection.selectRepo,
     selectItem: selection.selectItem,
     recordNavigation: selection.recordNavigation,

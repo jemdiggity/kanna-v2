@@ -14,6 +14,7 @@ import {
   removeTaskUiSlot,
 } from "./taskUiSlots";
 import type { TasksApi } from "./tasks";
+import { recordSelectionIntent } from "./selectionIntent";
 
 export function createTaskItemActions(
   context: StoreContext,
@@ -85,6 +86,7 @@ export function createTaskItemActions(
     context.state.pendingCreateVisibility.set(slotId, { bumpAt: performance.now() });
 
     if (opts?.selectOnCreate !== false) {
+      recordSelectionIntent(context.state);
       context.state.selectedRepoId.value = repoId;
       context.state.selectedItemId.value = slotId;
       context.state.lastSelectedItemByRepo.value = {

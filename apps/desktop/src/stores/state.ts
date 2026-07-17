@@ -121,6 +121,7 @@ export interface StoreState {
   initialWindowBootstrap: Ref<WindowBootstrap | null>;
   selectedRepoId: Ref<string | null>;
   selectedItemId: Ref<string | null>;
+  selectionIntentVersion: Ref<number>;
   lastSelectedItemByRepo: Ref<Record<string, string>>;
   suspendAfterMinutes: Ref<number>;
   killAfterMinutes: Ref<number>;
@@ -226,7 +227,7 @@ export interface StoreServices {
     agentType?: AgentExecutionType,
     opts?: CreateItemOptions,
   ) => Promise<string>;
-  closeTask?: (targetItemId?: string, opts?: { selectNext?: boolean }) => Promise<void>;
+  closeTask?: (targetItemId?: string, opts?: { selectNext?: boolean }) => Promise<boolean>;
   undoClose?: () => Promise<void>;
   checkUnblocked?: (blockerItemId: string) => Promise<void>;
   startBlockedTask?: (item: PipelineItem) => Promise<void>;
@@ -267,6 +268,7 @@ export function createStoreState(): StoreState {
   const initialWindowBootstrap = ref<WindowBootstrap | null>(null);
   const selectedRepoId = ref<string | null>(null);
   const selectedItemId = ref<string | null>(null);
+  const selectionIntentVersion = ref(0);
   const lastSelectedItemByRepo = ref<Record<string, string>>({});
   const suspendAfterMinutes = ref(30);
   const killAfterMinutes = ref(60);
@@ -294,6 +296,7 @@ export function createStoreState(): StoreState {
     initialWindowBootstrap,
     selectedRepoId,
     selectedItemId,
+    selectionIntentVersion,
     lastSelectedItemByRepo,
     suspendAfterMinutes,
     killAfterMinutes,

@@ -73,7 +73,7 @@ interface UseAppKeyboardActionsOptions {
   ) => void;
   closeTreeExplorer: () => void;
   advanceSelectedRemoteWorkspaceTask: (workspaceTask: WorkspaceTask) => Promise<void>;
-  closeSelectedWorkspaceTask: () => Promise<void>;
+  closeSelectedWorkspaceTask: () => Promise<boolean>;
   navigateItems: (direction: -1 | 1) => Promise<void>;
   navigateBack: () => Promise<void>;
   navigateForward: () => Promise<void>;
@@ -251,7 +251,9 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     requestChanges: () => {
       diffModalRef.value?.requestChanges();
     },
-    closeTask: () => closeSelectedWorkspaceTask(),
+    closeTask: async () => {
+      await closeSelectedWorkspaceTask();
+    },
     undoClose: () => store.undoClose(),
     navigateUp: () => navigateItems(-1),
     navigateDown: () => navigateItems(1),

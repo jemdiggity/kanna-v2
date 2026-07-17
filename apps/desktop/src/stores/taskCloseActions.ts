@@ -21,35 +21,73 @@ export function createTaskCloseActions(
   };
 
   async function selectReplacementAfterTaskRemoval(item: PipelineItem): Promise<void> {
-    if (requireService(context.services.selectedTaskId, "selectedTaskId").value !== item.id) return;
     await requireService(
       context.services.selectReplacementAfterItemRemoval,
       "selectReplacementAfterItemRemoval",
     )(item);
   }
 
-  async function closeTask(targetItemId?: string, opts?: { selectNext?: boolean }) {
+  async function taskCloseWasCommitted(taskId: string): Promise<boolean> {
+    const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
+    return snapshot.entries.every((entry) =>
+      entry.items.every((candidate) => candidate.id !== taskId || candidate.closed_at !== null),
+    );
+  }
+
+  async function closeTask(
+    targetItemId?: string,
+    opts?: { selectNext?: boolean },
+  ): Promise<boolean> {
     const item = targetItemId
       ? context.state.items.value.find((candidate) => candidate.id === targetItemId)
       : requireService(context.services.currentItem, "currentItem").value;
     const repo = item
       ? context.state.repos.value.find((candidate) => candidate.id === item.repo_id)
       : requireService(context.services.selectedRepo, "selectedRepo").value;
-    if (!item || !repo) return;
+    if (!item || !repo) return false;
     if (hasOpenSubtasks(context.state.items.value, item.id)) {
       context.toast.warning(context.tt("toasts.closeTaskHasOpenSubtasks"));
-      return;
+      return false;
     }
+    const itemWasSelected = requireService(
+      context.services.selectedTaskId,
+      "selectedTaskId",
+    ).value === item.id;
+    const selectionIntentAtStart = context.state.selectionIntentVersion.value;
 
     try {
       await closeDesktopTask(item.id);
-      if (opts?.selectNext !== false) await selectReplacementAfterTaskRemoval(item);
+    } catch (error) {
+      let closeWasCommitted = false;
+      try {
+        closeWasCommitted = await taskCloseWasCommitted(item.id);
+      } catch (verificationError) {
+        console.error("[store] failed to verify task state after close error:", verificationError);
+      }
+
+      if (!closeWasCommitted) {
+        console.error("[store] close failed:", error);
+        context.toast.error(context.tt("toasts.closeTaskFailed"));
+        return false;
+      }
+
+      console.warn("[store] close response failed after the task was committed:", error);
+    }
+
+    try {
+      const selectionIntentIsCurrent = context.state.selectionIntentVersion.value
+        === selectionIntentAtStart;
+      if (opts?.selectNext !== false && itemWasSelected && selectionIntentIsCurrent) {
+        await selectReplacementAfterTaskRemoval(item);
+      }
       await reloadSnapshot();
       await invalidateWindowWorkspace("closeTask");
     } catch (error) {
-      console.error("[store] close failed:", error);
+      console.error("[store] post-close reconciliation failed:", error);
       context.toast.error(context.tt("toasts.closeTaskFailed"));
     }
+
+    return true;
   }
 
   async function undoClose() {

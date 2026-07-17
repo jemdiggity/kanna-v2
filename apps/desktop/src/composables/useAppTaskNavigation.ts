@@ -116,6 +116,12 @@ export function useAppTaskNavigation({
 }: UseAppTaskNavigationOptions) {
   let selectionIntentVersion = 0;
 
+  function beginSelectionIntent(): number {
+    store.recordSelectionIntent();
+    selectionIntentVersion += 1;
+    return selectionIntentVersion;
+  }
+
   function visibleSidebarItemsForRepo(
     repoId: string,
     options: { currentRepoScope?: boolean } = {},
@@ -206,7 +212,7 @@ export function useAppTaskNavigation({
   async function selectSidebarItem(
     item: Pick<SidebarTaskItem, "slot_id" | "task_id" | "repo_id">,
     previousItemId?: string | null,
-    selectionIntent = ++selectionIntentVersion,
+    selectionIntent = beginSelectionIntent(),
     recordNavigation = true,
   ) {
     if (selectionIntent !== selectionIntentVersion) return;
@@ -265,7 +271,7 @@ export function useAppTaskNavigation({
   }
 
   async function navigateRepos(direction: -1 | 1) {
-    const selectionIntent = ++selectionIntentVersion;
+    const selectionIntent = beginSelectionIntent();
     const visibleRepos = sidebarRepos.value;
     if (visibleRepos.length === 0) return;
     const currentIndex = visibleRepos.findIndex((r) => r.id === store.selectedRepoId);
@@ -340,7 +346,7 @@ export function useAppTaskNavigation({
   }
 
   async function navigateHistory(direction: "back" | "forward") {
-    const selectionIntent = ++selectionIntentVersion;
+    const selectionIntent = beginSelectionIntent();
     const items = navigationHistoryItems();
     if (items.length === 0) return;
     const currentItemId = presentationSlotIdForSelection(items);
@@ -698,7 +704,7 @@ export function useAppTaskNavigation({
 
   async function handleSelectRepo(
     repoId: string,
-    selectionIntent = ++selectionIntentVersion,
+    selectionIntent = beginSelectionIntent(),
     persistWindowSelection = true,
   ) {
     if (selectionIntent !== selectionIntentVersion) return;
@@ -730,7 +736,7 @@ export function useAppTaskNavigation({
   async function handleSelectItem(
     presentationSlotId: string,
     previousItemId?: string | null,
-    selectionIntent = ++selectionIntentVersion,
+    selectionIntent = beginSelectionIntent(),
     recordNavigation = true,
   ) {
     if (selectionIntent !== selectionIntentVersion) return;

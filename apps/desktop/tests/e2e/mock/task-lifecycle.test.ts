@@ -29,6 +29,7 @@ async function waitForCondition(
   predicate: () => Promise<boolean>,
   description: string,
   timeoutMs = 5_000,
+  diagnostics?: () => Promise<unknown>,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
@@ -41,7 +42,17 @@ async function waitForCondition(
     await sleep(100);
   }
 
-  throw new Error(`Timed out waiting for ${description}`);
+  let lastDiagnostics: unknown = null;
+  try {
+    lastDiagnostics = await diagnostics?.();
+  } catch (error) {
+    lastDiagnostics = { diagnosticError: error instanceof Error ? error.message : String(error) };
+  }
+
+  const diagnosticSuffix = diagnostics
+    ? `; last observed state: ${JSON.stringify(lastDiagnostics)}`
+    : "";
+  throw new Error(`Timed out waiting for ${description}${diagnosticSuffix}`);
 }
 
 async function seedPtyTask(
@@ -183,6 +194,7 @@ describe("task lifecycle", () => {
   const client = new WebDriverClient();
   let repoId = "";
   let fixtureRepoRoot = "";
+  let secondaryFixtureRepoRoot = "";
   let testRepoPath = "";
 
   beforeAll(async () => {
@@ -197,7 +209,9 @@ describe("task lifecycle", () => {
     if (testRepoPath) {
       await cleanupWorktrees(client, testRepoPath);
     }
-    await cleanupFixtureRepos(fixtureRepoRoot ? [fixtureRepoRoot] : []);
+    await cleanupFixtureRepos(
+      [fixtureRepoRoot, secondaryFixtureRepoRoot].filter((path) => path.length > 0),
+    );
     await client.deleteSession();
   });
 
@@ -780,5 +794,330 @@ describe("task lifecycle", () => {
       || JSON.stringify(call).includes(closedBranch)
     );
     expect(callsForClosedTask).toEqual([]);
+  });
+
+  it("keeps the current repo selected when closing its only task while another repo has a task", async () => {
+    await resetDatabase(client);
+    secondaryFixtureRepoRoot = await createFixtureRepo("lifecycle-secondary-test");
+
+    const importRepo = async (path: string, name: string): Promise<string> => {
+      const result = await callVueMethod(client, "store.importRepo", path, name, "main");
+      if (typeof result !== "string" || result.length === 0) {
+        throw new Error(`failed to import ${name}: ${JSON.stringify(result)}`);
+      }
+      return result;
+    };
+
+    const repoAId = await importRepo(testRepoPath, "close-empty-repo-a");
+    const repoBId = await importRepo(secondaryFixtureRepoRoot, "close-empty-repo-b");
+    let repoATaskId = "";
+    let repoBTaskId = "";
+    let delayedRepoATaskId = "";
+    let createdDuringCloseTaskId = "";
+
+    const createAgentTask = async (
+      targetRepoId: string,
+      repoPath: string,
+      prompt: string,
+    ): Promise<string> => {
+      const result = await callVueMethod(
+        client,
+        "createItem",
+        targetRepoId,
+        repoPath,
+        prompt,
+        "agent",
+      );
+      if (typeof result !== "string" || result.length === 0) {
+        throw new Error(`failed to create task ${prompt}: ${JSON.stringify(result)}`);
+      }
+      return result;
+    };
+
+    const assertEmptyRepoASelection = async (repoBTaskId: string): Promise<void> => {
+      const state = await client.executeSync<{
+        selectedRepoId: string | null;
+        selectedItemId: string | null;
+        repoASelected: boolean;
+        repoAEmptyText: string;
+        repoATaskCount: number;
+        repoBTaskSelected: boolean;
+        mainPanelText: string;
+      }>(
+        `const ctx = window.__KANNA_E2E__.setupState;
+         const read = (value) => value && value.__v_isRef ? value.value : value;
+         const repoA = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoAId}"]`)});
+         const repoBTask = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoBId}"] .pipeline-item[data-task-id="${repoBTaskId}"]`)});
+         return {
+           selectedRepoId: read(ctx.store.selectedRepoId) ?? null,
+           selectedItemId: read(ctx.store.selectedItemId) ?? null,
+           repoASelected: repoA?.querySelector(".repo-header")?.classList.contains("selected") ?? false,
+           repoAEmptyText: repoA?.querySelector(".no-items")?.textContent?.trim() ?? "",
+           repoATaskCount: repoA?.querySelectorAll(".pipeline-item").length ?? -1,
+           repoBTaskSelected: repoBTask?.classList.contains("selected") ?? false,
+           mainPanelText: document.querySelector(".main-panel .empty-state")?.textContent?.trim() ?? "",
+         };`,
+      );
+
+      expect(state).toEqual({
+        selectedRepoId: repoAId,
+        selectedItemId: null,
+        repoASelected: true,
+        repoAEmptyText: "No tasks",
+        repoATaskCount: 0,
+        repoBTaskSelected: false,
+        mainPanelText: expect.stringContaining("No task selected"),
+      });
+    };
+
+    try {
+      repoATaskId = await createAgentTask(
+        repoAId,
+        testRepoPath,
+        "Only task in repository A",
+      );
+      repoBTaskId = await createAgentTask(
+        repoBId,
+        secondaryFixtureRepoRoot,
+        "Open task in repository B",
+      );
+
+      await callVueMethod(client, "store.selectRepo", repoAId);
+      await callVueMethod(client, "store.selectItem", repoATaskId);
+      await persistWindowSelection(client, { repoId: repoAId, itemId: repoATaskId });
+
+      await client.executeSync(
+        `const originalFetch = globalThis.fetch;
+         window.__KANNA_FIRST_CLOSE_FETCH__ = originalFetch;
+         globalThis.fetch = async (input, init) => {
+           const url = typeof input === "string"
+             ? input
+             : input instanceof URL
+               ? input.href
+               : input.url;
+           const method = String(
+             init?.method ?? (input instanceof Request ? input.method : "GET")
+           ).toUpperCase();
+           const response = await originalFetch(input, init);
+           const path = new URL(url, window.location.href).pathname;
+           if (
+             method === "POST"
+             && path === ${JSON.stringify(`/v1/tasks/${encodeURIComponent(repoATaskId)}/actions/close`)}
+           ) {
+             return new Response("simulated lost close response", {
+               status: 503,
+               statusText: "Service Unavailable",
+             });
+           }
+           return response;
+         };
+         return true;`,
+      );
+
+      let closeResult: unknown;
+      try {
+        closeResult = await callVueMethod(client, "closeSelectedWorkspaceTask");
+      } finally {
+        await client.executeSync(
+          `globalThis.fetch = window.__KANNA_FIRST_CLOSE_FETCH__;
+           delete window.__KANNA_FIRST_CLOSE_FETCH__;
+           return true;`,
+        );
+      }
+      expect(closeResult).toBe(true);
+
+      const closeState = await client.executeAsync<{
+        closedAt: string | null;
+        selectedRepoId: string | null;
+        selectedItemId: string | null;
+      }>(
+        `const cb = arguments[arguments.length - 1];
+         const ctx = window.__KANNA_E2E__.setupState;
+         const read = (value) => value && value.__v_isRef ? value.value : value;
+         const db = ctx.db.value || ctx.db;
+         db.select(
+           "SELECT closed_at FROM pipeline_item WHERE id = ?",
+           [${JSON.stringify(repoATaskId)}],
+         ).then((rows) => cb({
+           closedAt: rows[0]?.closed_at ?? null,
+           selectedRepoId: read(ctx.store.selectedRepoId) ?? null,
+           selectedItemId: read(ctx.store.selectedItemId) ?? null,
+         })).catch((error) => cb({ __error: error?.message || String(error) }));`,
+      );
+      expect(closeState).toEqual({
+        closedAt: expect.any(String),
+        selectedRepoId: repoAId,
+        selectedItemId: null,
+      });
+
+      await assertEmptyRepoASelection(repoBTaskId);
+
+      await client.executeSync("window.__KANNA_E2E__.ready = false; location.reload();");
+      await client.waitForAppReady();
+      await waitForCondition(async () => {
+        const selectedRepoId = await getVueState(client, "selectedRepoId");
+        const selectedItemId = await getVueState(client, "selectedItemId");
+        return selectedRepoId === repoAId && selectedItemId === null;
+      }, "persisted empty repository A selection after reload", 10_000, async () => ({
+        selectedRepoId: await getVueState(client, "selectedRepoId"),
+        selectedItemId: await getVueState(client, "selectedItemId"),
+      }));
+
+      await assertEmptyRepoASelection(repoBTaskId);
+
+      delayedRepoATaskId = await createAgentTask(
+        repoAId,
+        testRepoPath,
+        "Close response delayed in repository A",
+      );
+      await callVueMethod(client, "handleSelectItem", delayedRepoATaskId);
+      await persistWindowSelection(client, { repoId: repoAId, itemId: delayedRepoATaskId });
+
+      try {
+        await client.executeSync(
+          `const originalFetch = globalThis.fetch;
+           const callOriginalFetch = originalFetch.bind(globalThis);
+           let releaseCloseResponse;
+           const closeResponseGate = new Promise((resolve) => { releaseCloseResponse = resolve; });
+           const gate = {
+             originalFetch,
+             responseHeld: false,
+             responseReleased: false,
+             closeStatus: "pending",
+             closeError: null,
+             closePromise: null,
+             release() {
+               if (this.responseReleased) return;
+               this.responseReleased = true;
+               releaseCloseResponse();
+             },
+           };
+           window.__KANNA_TASK_CLOSE_GATE__ = gate;
+           globalThis.fetch = async (input, init) => {
+             const url = typeof input === "string"
+               ? input
+               : input instanceof URL
+                 ? input.href
+                 : input.url;
+             const method = String(
+               init?.method ?? (input instanceof Request ? input.method : "GET")
+             ).toUpperCase();
+             const path = new URL(url, window.location.href).pathname;
+             const response = await callOriginalFetch(input, init);
+             if (
+               method === "POST"
+               && path === ${JSON.stringify(`/v1/tasks/${encodeURIComponent(delayedRepoATaskId)}/actions/close`)}
+             ) {
+               gate.responseHeld = true;
+               await closeResponseGate;
+             }
+             return response;
+           };
+           return true;`,
+        );
+
+        await client.executeSync(
+          `const gate = window.__KANNA_TASK_CLOSE_GATE__;
+           const ctx = window.__KANNA_E2E__.setupState;
+           gate.closePromise = Promise.resolve(ctx.closeSelectedWorkspaceTask())
+             .then(() => { gate.closeStatus = "fulfilled"; })
+             .catch((error) => {
+               gate.closeStatus = "rejected";
+               gate.closeError = error?.message || String(error);
+             });
+           return true;`,
+        );
+
+        await waitForCondition(
+          async () => client.executeSync<boolean>(
+            `return window.__KANNA_TASK_CLOSE_GATE__?.responseHeld === true;`,
+          ),
+          "server close response to be held after task close",
+          15_000,
+        );
+
+        createdDuringCloseTaskId = await createAgentTask(
+          repoBId,
+          secondaryFixtureRepoRoot,
+          "Created while repository A close response is pending",
+        );
+        await waitForCondition(async () => {
+          const selectedRepoId = await getVueState(client, "selectedRepoId");
+          const selectedTaskId = await getVueState(client, "selectedTaskId");
+          return selectedRepoId === repoBId && selectedTaskId === createdDuringCloseTaskId;
+        }, "new repository B task auto-selection while close response is pending", 10_000);
+
+        await client.executeSync(
+          `window.__KANNA_TASK_CLOSE_GATE__.release(); return true;`,
+        );
+        await waitForCondition(
+          async () => client.executeSync<boolean>(
+            `return window.__KANNA_TASK_CLOSE_GATE__?.closeStatus !== "pending";`,
+          ),
+          "delayed close completion",
+          15_000,
+        );
+
+        const selectionAfterClose = await client.executeSync<{
+          closeStatus: string;
+          closeError: string | null;
+          selectedRepoId: string | null;
+          selectedTaskId: string | null;
+        }>(
+          `const ctx = window.__KANNA_E2E__.setupState;
+           const read = (value) => value && value.__v_isRef ? value.value : value;
+           const gate = window.__KANNA_TASK_CLOSE_GATE__;
+           return {
+             closeStatus: gate.closeStatus,
+             closeError: gate.closeError,
+             selectedRepoId: read(ctx.store.selectedRepoId) ?? null,
+             selectedTaskId: read(ctx.store.selectedTaskId) ?? null,
+           };`,
+        );
+        expect(selectionAfterClose).toEqual({
+          closeStatus: "fulfilled",
+          closeError: null,
+          selectedRepoId: repoBId,
+          selectedTaskId: createdDuringCloseTaskId,
+        });
+
+        await client.executeSync("window.__KANNA_E2E__.ready = false; location.reload();");
+        await client.waitForAppReady();
+        await waitForCondition(async () => {
+          const selectedRepoId = await getVueState(client, "selectedRepoId");
+          const selectedTaskId = await getVueState(client, "selectedTaskId");
+          return selectedRepoId === repoBId && selectedTaskId === createdDuringCloseTaskId;
+        }, "persisted newly created repository B task selection after delayed close and reload", 10_000);
+      } finally {
+        await client.executeSync(
+          `const gate = window.__KANNA_TASK_CLOSE_GATE__;
+           if (gate) {
+             gate.release?.();
+             globalThis.fetch = gate.originalFetch;
+           }
+           return true;`,
+        ).catch(() => undefined);
+        await client.executeAsync<string>(
+          `const cb = arguments[arguments.length - 1];
+           Promise.resolve(window.__KANNA_TASK_CLOSE_GATE__?.closePromise)
+             .catch(() => undefined)
+             .then(() => cb("settled"));`,
+        ).catch(() => undefined);
+        await client.executeSync(
+          `delete window.__KANNA_TASK_CLOSE_GATE__; return true;`,
+        ).catch(() => undefined);
+      }
+    } finally {
+      for (const taskId of [
+        repoATaskId,
+        repoBTaskId,
+        delayedRepoATaskId,
+        createdDuringCloseTaskId,
+      ]) {
+        if (!taskId) continue;
+        await callVueMethod(client, "store.closeTask", taskId, { selectNext: false })
+          .catch(() => undefined);
+      }
+    }
   });
 });

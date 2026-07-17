@@ -361,21 +361,21 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     }, 1000);
   }
 
-  async function closeSelectedWorkspaceTask(): Promise<void> {
+  async function closeSelectedWorkspaceTask(): Promise<boolean> {
     const workspaceTask = selectedWorkspaceTask.value;
     const closingPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
     if (!workspaceTask || workspaceTask.terminal.kind === "local") {
-      if (workspaceTask) {
+      const closed = await store.closeTask();
+      if (closed && workspaceTask && !store.items.some((item) => item.id === workspaceTask.item.id)) {
         markWorkspaceTaskLocallyClosed(workspaceTask);
       }
-      await store.closeTask();
-      return;
+      return closed;
     }
 
     const remoteRef = workspaceTask.terminal.remoteRef;
     if (!remoteRef || !workspaceTask.capabilities.canClose) {
       toast.error("Remote task is not reachable.");
-      return;
+      return false;
     }
 
     const client = workspaceTask.terminal.kind === "lan"
@@ -383,7 +383,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       : await createConfiguredDesktopRelayTerminalClient();
     if (!client) {
       toast.error("Remote task owner is unavailable.");
-      return;
+      return false;
     }
 
     try {
@@ -405,8 +405,10 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           selectedItemId: null,
         });
       }
+      return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       client.close();
     }

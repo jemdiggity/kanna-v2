@@ -186,11 +186,12 @@ const store = {
   attachWindowWorkspace: vi.fn(),
   selectRepo: vi.fn(),
   selectItem: vi.fn(),
+  recordSelectionIntent: vi.fn(),
   recordNavigation: vi.fn(),
   takeBackTarget: vi.fn(),
   takeForwardTarget: vi.fn(),
   advanceStage: vi.fn(async () => {}),
-  closeTask: vi.fn(async () => {}),
+  closeTask: vi.fn(async () => true),
   bump: vi.fn(async () => {}),
   pinItem: vi.fn(async () => {}),
   unpinItem: vi.fn(async () => {}),
@@ -704,6 +705,7 @@ describe("App", () => {
     store.selectRepo.mockClear();
     store.selectItem.mockClear();
     store.recordNavigation.mockClear();
+    store.recordSelectionIntent.mockClear();
     store.takeBackTarget.mockReset();
     store.takeForwardTarget.mockReset();
     store.advanceStage.mockClear();
@@ -1888,6 +1890,7 @@ describe("App", () => {
       localItems.splice(0);
       store.currentItem = null;
       store.selectedItemId = null;
+      return true;
     });
     cloudTasksMock.mockResolvedValue({
       repos: [],
