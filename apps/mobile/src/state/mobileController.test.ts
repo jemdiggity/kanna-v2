@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSessionStore } from "./sessionStore";
-import { createMobileController } from "./mobileController";
+import {
+  createMobileController,
+  type CloudTaskPublication
+} from "./mobileController";
 import type { MobileAuthSession, MobileAuthState } from "../lib/firebase/auth";
 import type {
   TaskAgentStreamEvent,
@@ -2861,7 +2864,7 @@ describe("createMobileController", () => {
     });
   });
 
-  it("strictly removes a raw create result that is absent from the next live snapshot", async () => {
+  it("keeps a raw create slot through a publication gap, hydrates it, then removes an authoritative deletion", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const auth = createAuthSessionMock();
@@ -2896,7 +2899,10 @@ describe("createMobileController", () => {
       stage: "in progress",
       agentType: "pty"
     });
-    let publishTasks: ((tasks: TaskSummary[]) => void) | null = null;
+    let publishTasks: ((
+      tasks: TaskSummary[],
+      publication?: CloudTaskPublication
+    ) => void) | null = null;
     const controller = createMobileController(client, store, auth, {
       subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
         publishTasks = onUpdate;
@@ -2921,13 +2927,63 @@ describe("createMobileController", () => {
       taskTerminalTaskId: "task-created-raw",
       taskTerminalOutput: "cmF3LWNyZWF0ZQ==\n"
     });
+    const stableSlotId = store.getState().taskUiSlots[0]?.slotId;
+
+    publishTasks?.([], { cloudAuthoritative: false });
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: stableSlotId,
+      taskTerminalTaskId: "task-created-raw",
+      taskUiSlots: [
+        {
+          slotId: stableSlotId,
+          taskId: "task-created-raw",
+          authoritativeMissGraceRemaining: 1
+        }
+      ]
+    });
+
+    publishTasks?.([]);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: stableSlotId,
+      taskTerminalTaskId: "task-created-raw",
+      taskTerminalOutput: "cmF3LWNyZWF0ZQ==\n",
+      taskUiSlots: [
+        {
+          slotId: stableSlotId,
+          taskId: "task-created-raw",
+          authoritativeMissGraceRemaining: 0
+        }
+      ]
+    });
+    expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
+
+    const publishedTask: TaskSummary = {
+      id: "task-created-raw",
+      repoId: "repo-cloud",
+      title: "Published raw created task",
+      stage: "in progress",
+      agentType: "pty"
+    };
+    publishTasks?.([publishedTask]);
+
+    expect(store.getState().taskUiSlots).toEqual([
+      expect.objectContaining({
+        slotId: stableSlotId,
+        taskId: publishedTask.id,
+        task: publishedTask,
+        authoritativeMissGraceRemaining: 0
+      })
+    ]);
 
     publishTasks?.([]);
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: null,
       taskTerminalTaskId: null,
-      taskTerminalOutput: ""
+      taskTerminalOutput: "",
+      taskUiSlots: []
     });
     expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
   });

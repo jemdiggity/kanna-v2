@@ -253,7 +253,7 @@ export function createMobileController(
       return taskUiSlotToTaskSummary(slot);
     }
     if (slot?.state === "ready") {
-      return findCollectionTask(slot.taskId);
+      return findCollectionTask(slot.taskId) ?? slot.task;
     }
     return findCollectionTask(selectionOrTaskId);
   };
@@ -866,6 +866,14 @@ export function createMobileController(
     if (!(await refreshSearchResults())) {
       return;
     }
+    store.reconcileTaskUiSlots(
+      uniqueTasksById([
+        ...store.getState().repoTasks,
+        ...store.getState().recentTasks,
+        ...store.getState().searchResults
+      ]),
+      { authoritative: true }
+    );
     reconcileSelectedTask(true);
   };
 
@@ -940,6 +948,14 @@ export function createMobileController(
     if (!(await refreshSearchResults())) {
       return;
     }
+    store.reconcileTaskUiSlots(
+      uniqueTasksById([
+        ...store.getState().repoTasks,
+        ...store.getState().recentTasks,
+        ...store.getState().searchResults
+      ]),
+      { authoritative: true }
+    );
     reconcileSelectedTask(true);
   };
 
@@ -979,6 +995,8 @@ export function createMobileController(
     );
     const searchQuery = store.getState().searchQuery;
     store.setSearchResults(searchQuery, filterTasksForQuery(tasks, searchQuery));
+    reconcileSelectedTask(true);
+    store.reconcileTaskUiSlots(tasks, { authoritative: cloudAuthoritative });
     reconcileSelectedTask(true);
     const ownedError = cloudSubscriptionError;
     if (cloudAuthoritative && ownedError?.epoch === subscriptionEpoch) {

@@ -303,7 +303,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
             source.listRecentTasksWithSupplement
               ? source.listRecentTasksWithSupplement((supplement) => {
                   if (isCurrent(revision, generation)) {
-                    onUpdate(supplement, { cloudAuthoritative });
+                    onUpdate(supplement, { cloudAuthoritative: false });
                   }
                 })
               : source.client.listRecentTasks()

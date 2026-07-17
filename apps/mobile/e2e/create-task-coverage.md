@@ -41,9 +41,10 @@ The narrower automated coverage is:
 
 - `src/App.component.test.tsx` mounts `App` with the real controller/store and a
   deferred client. It covers the immediate optimistic workspace, in-place
-  durable-task acknowledgement, unavailable creation controls during ambiguity,
-  exact-id recovery, and exact draft restoration after a definite pre-creation
-  failure.
+  durable-task acknowledgement, an empty collection publication followed by
+  authoritative hydration without replacing the selected `TaskScreen` or its
+  stable list slot, unavailable creation controls during ambiguity, exact-id
+  recovery, and exact draft restoration after a definite pre-creation failure.
 - `src/screens/TaskScreen.test.tsx` covers pending and uncertain creation inside
   the task workspace, including a disabled task action and recovery being
   offered only for an uncertain result. `src/screens/TasksScreen.test.tsx`
@@ -52,20 +53,28 @@ The narrower automated coverage is:
 - `src/state/mobileController.test.ts` covers persist-before-dispatch and
   single-flight creation, optimistic slot selection, exact-id recovery and
   response fencing, definite-failure slot removal, authoritative
-  canonicalization, and keeping the acknowledged task visible when terminal
-  startup fails.
+  canonicalization, non-authoritative and first-authoritative publication gaps,
+  in-place authoritative hydration, eventual removal after authoritative
+  deletion, and keeping the acknowledged task visible when terminal startup
+  fails.
 - `src/state/sessionPersistence.test.ts` and `src/state/sessionStore.test.ts`
   cover durable attempt validation and round-tripping, legacy slot migration,
   restart hydration as a closed uncertain workspace, draft restoration, and a
-  slot lifecycle independent from durable task identity.
+  slot lifecycle independent from durable task identity, including collection
+  reconciliation owned by the store.
 - `src/state/taskUiSlots.test.ts` covers normal task-shaped projection while
   creating, stable presentation identity during acknowledgement, survival
-  across empty authoritative snapshots, and targeted slot removal.
+  across non-authoritative and first-authoritative publication gaps, hydration
+  into the same slot, bounded miss grace, authoritative deletion, and targeted
+  slot removal.
+- `src/appModel.cloudFallback.test.ts` verifies that a late LAN supplement is
+  part of its primary cloud read rather than a second authoritative miss, so a
+  single logical refresh cannot exhaust the acknowledged slot's grace window.
 
 The focused command also retains the editable drawer coverage in
 `src/components/CreateTaskComposer.test.tsx` and the stable recovery selector in
 `src/e2eTestIds.test.ts`:
 
 ```bash
-pnpm --dir apps/mobile test -- src/App.component.test.tsx src/components/CreateTaskComposer.test.tsx src/screens/TaskScreen.test.tsx src/screens/TasksScreen.test.tsx src/state/mobileController.test.ts src/state/sessionPersistence.test.ts src/state/sessionStore.test.ts src/state/taskUiSlots.test.ts src/e2eTestIds.test.ts
+pnpm --dir apps/mobile test -- src/App.component.test.tsx src/appModel.cloudFallback.test.ts src/components/CreateTaskComposer.test.tsx src/screens/TaskScreen.test.tsx src/screens/TasksScreen.test.tsx src/state/mobileController.test.ts src/state/sessionPersistence.test.ts src/state/sessionStore.test.ts src/state/taskUiSlots.test.ts src/e2eTestIds.test.ts
 ```

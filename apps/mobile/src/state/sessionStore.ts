@@ -15,6 +15,7 @@ import type {
 import {
   acknowledgeTaskUiSlot as acknowledgeTaskUiSlotState,
   buildCreatingTaskUiSlot,
+  reconcileTaskUiSlots as reconcileTaskUiSlotsState,
   removeTaskUiSlot as removeTaskUiSlotState,
   taskUiSlotForSelection,
   type TaskUiSlot
@@ -148,6 +149,10 @@ export interface SessionStore {
   setTaskCreationState(taskCreationState: TaskCreationState): void;
   addTaskUiSlot(slot: TaskUiSlot): void;
   acknowledgeTaskUiSlot(slotId: string, task: TaskSummary): void;
+  reconcileTaskUiSlots(
+    tasks: readonly TaskSummary[],
+    options?: { authoritative?: boolean }
+  ): void;
   removeTaskUiSlot(slotId: string): void;
   beginTaskTerminal(taskId: string, initialOutput: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
@@ -610,6 +615,17 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         taskUiSlots: acknowledgeTaskUiSlotState(state.taskUiSlots, slotId, task)
+      };
+      publish();
+    },
+    reconcileTaskUiSlots(tasks, options) {
+      state = {
+        ...state,
+        taskUiSlots: reconcileTaskUiSlotsState(
+          state.taskUiSlots,
+          tasks,
+          options
+        )
       };
       publish();
     },

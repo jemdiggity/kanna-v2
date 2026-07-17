@@ -454,6 +454,62 @@ describe("App task creation integration", () => {
     });
   });
 
+  it("keeps the acknowledged workspace mounted through a publication gap and hydrates it in place", async () => {
+    const { controller, model, sessionStore } = createModel();
+    const renderer = await mountModel(model);
+
+    await act(async () => controller.openComposer());
+    await act(async () => {
+      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskPromptInput)
+        .props.onChangeText("Keep this workspace stable");
+    });
+    await act(async () => {
+      findTestId(renderer.root, MOBILE_E2E_IDS.createTaskSubmitButton)
+        .props.onPress();
+      await flushMicrotasks();
+    });
+
+    const stableSlotId = sessionStore.getState().taskUiSlots[0]?.slotId;
+    const taskScreenBeforeGap = renderer.root.findByType("TaskScreen");
+    expect(taskScreenBeforeGap.props.task.id).toBe(
+      "0123456789abcdef0123456789abcdef"
+    );
+
+    await act(async () => {
+      sessionStore.setRecentTasks([]);
+      sessionStore.setRepoTasks([]);
+    });
+
+    expect(renderer.root.findByType("TaskScreen")).toBe(taskScreenBeforeGap);
+
+    await act(async () => {
+      const publishedTask = {
+        id: "0123456789abcdef0123456789abcdef",
+        repoId: "repo-1",
+        title: "Published workspace metadata",
+        prompt: "Keep this workspace stable",
+        stage: "in progress"
+      };
+      sessionStore.setRecentTasks([publishedTask]);
+      sessionStore.setRepoTasks([publishedTask]);
+    });
+
+    expect(renderer.root.findByType("TaskScreen")).toBe(taskScreenBeforeGap);
+    expect(taskScreenBeforeGap.props.task).toMatchObject({
+      id: "0123456789abcdef0123456789abcdef",
+      title: "Published workspace metadata"
+    });
+
+    await act(async () => controller.closeTask());
+    expect(renderer.root.findByType("TasksScreen").props.taskSlots).toEqual([
+      expect.objectContaining({
+        slotId: stableSlotId,
+        taskId: "0123456789abcdef0123456789abcdef",
+        task: expect.objectContaining({ title: "Published workspace metadata" })
+      })
+    ]);
+  });
+
   it("keeps an ambiguous result non-editable and recovers the same durable identity", async () => {
     const firstCreate = deferred<Awaited<ReturnType<KannaClient["createTask"]>>>();
     const { client, controller, model } = createModel();

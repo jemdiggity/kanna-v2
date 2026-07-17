@@ -4,6 +4,7 @@ import {
   acknowledgeTaskUiSlot,
   buildCreatingTaskUiSlot,
   projectTaskUiSlots,
+  reconcileTaskUiSlots,
   removeTaskUiSlot,
   taskUiSlotForSelection,
   taskUiSlotToTaskSummary
@@ -50,7 +51,8 @@ describe("task UI slots", () => {
       slotId: "create:slot-1",
       taskId: createdTask.id,
       state: "ready",
-      task: createdTask
+      task: createdTask,
+      authoritativeMissGraceRemaining: 1
     });
   });
 
@@ -91,6 +93,81 @@ describe("task UI slots", () => {
     expect(projected).toEqual([ready]);
     expect(projected[0]?.slotId).toBe("create:slot-1");
     expect(taskUiSlotToTaskSummary(projected[0]!)).toBe(createdTask);
+  });
+
+  it("keeps an acknowledged ready slot visible across an empty publication", () => {
+    const [ready] = acknowledgeTaskUiSlot(
+      [creatingSlot()],
+      "create:slot-1",
+      createdTask
+    );
+
+    expect(projectTaskUiSlots([], [ready])).toEqual([ready]);
+  });
+
+  it("expires an unhydrated acknowledged slot after two authoritative misses", () => {
+    const acknowledged = acknowledgeTaskUiSlot(
+      [creatingSlot()],
+      "create:slot-1",
+      createdTask
+    );
+
+    const afterNonAuthoritativeMiss = reconcileTaskUiSlots(
+      acknowledged,
+      [],
+      { authoritative: false }
+    );
+    expect(afterNonAuthoritativeMiss).toEqual(acknowledged);
+
+    const afterFirstAuthoritativeMiss = reconcileTaskUiSlots(
+      afterNonAuthoritativeMiss,
+      [],
+      { authoritative: true }
+    );
+    expect(afterFirstAuthoritativeMiss).toEqual([
+      expect.objectContaining({
+        slotId: "create:slot-1",
+        authoritativeMissGraceRemaining: 0
+      })
+    ]);
+
+    expect(reconcileTaskUiSlots(
+      afterFirstAuthoritativeMiss,
+      [],
+      { authoritative: true }
+    )).toEqual([]);
+  });
+
+  it("hydrates an acknowledged slot in place and removes it after authoritative deletion", () => {
+    const acknowledged = acknowledgeTaskUiSlot(
+      [creatingSlot()],
+      "create:slot-1",
+      createdTask
+    );
+    const publishedTask = {
+      ...createdTask,
+      title: "Published workspace metadata"
+    };
+
+    const hydrated = reconcileTaskUiSlots(
+      acknowledged,
+      [publishedTask],
+      { authoritative: true }
+    );
+
+    expect(hydrated).toEqual([
+      expect.objectContaining({
+        slotId: "create:slot-1",
+        taskId: createdTask.id,
+        task: publishedTask,
+        authoritativeMissGraceRemaining: 0
+      })
+    ]);
+    expect(reconcileTaskUiSlots(
+      hydrated,
+      [],
+      { authoritative: true }
+    )).toEqual([]);
   });
 
   it("keeps an unacknowledged creating slot visible across empty snapshots", () => {

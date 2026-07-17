@@ -15,6 +15,7 @@ import type {
 } from "./lib/firebase/taskIndex";
 import type { FetchLike } from "./lib/transports/lanTransport";
 import type { RelayDesktopClient } from "./lib/transports/relayClient";
+import { buildCreatingTaskUiSlot } from "./state/taskUiSlots";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -1731,6 +1732,20 @@ describe("createAppModel cloud routing", () => {
         }
       });
       await app.initialize();
+      const createdSlot = buildCreatingTaskUiSlot({
+        slotId: "create:late-supplement",
+        repoId: "repo-lan",
+        prompt: "Created during publication gap",
+        desktopId: "desktop-lan",
+        agentProvider: "claude"
+      });
+      app.sessionStore.addTaskUiSlot(createdSlot);
+      app.sessionStore.acknowledgeTaskUiSlot(createdSlot.slotId, {
+        id: "created-during-gap",
+        repoId: "repo-lan",
+        title: "Created during publication gap",
+        stage: "in progress"
+      });
       const duplicate = cloudTask({
         id: "cloud:duplicate",
         title: "Cloud duplicate",
@@ -1748,6 +1763,12 @@ describe("createAppModel cloud routing", () => {
         expect.objectContaining({
           id: duplicate.id,
           title: "Cloud duplicate"
+        })
+      ]);
+      expect(app.sessionStore.getState().taskUiSlots).toEqual([
+        expect.objectContaining({
+          slotId: createdSlot.slotId,
+          authoritativeMissGraceRemaining: 0
         })
       ]);
       lateLanRead.resolve([
@@ -1775,6 +1796,12 @@ describe("createAppModel cloud routing", () => {
         expect.objectContaining({
           id: "lan-only",
           title: "Late LAN-only task"
+        })
+      ]);
+      expect(app.sessionStore.getState().taskUiSlots).toEqual([
+        expect.objectContaining({
+          slotId: createdSlot.slotId,
+          authoritativeMissGraceRemaining: 0
         })
       ]);
     } finally {

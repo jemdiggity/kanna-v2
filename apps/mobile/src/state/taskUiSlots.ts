@@ -24,6 +24,7 @@ export interface ReadyTaskUiSlot {
   state: "ready";
   task: TaskSummary;
   draft: TaskUiSlotDraft;
+  authoritativeMissGraceRemaining?: 0 | 1;
 }
 
 export type TaskUiSlot = CreatingTaskUiSlot | ReadyTaskUiSlot;
@@ -74,7 +75,11 @@ export function acknowledgeTaskUiSlot(
     taskId: task.id,
     state: "ready",
     task,
-    draft: target.draft
+    draft: target.draft,
+    authoritativeMissGraceRemaining:
+      target.state === "creating"
+        ? 1
+        : target.authoritativeMissGraceRemaining ?? 0
   };
 
   return slots.flatMap((slot) => {
@@ -121,26 +126,56 @@ export function taskUiSlotToTaskSummary(slot: TaskUiSlot): TaskSummary {
   };
 }
 
+export function reconcileTaskUiSlots(
+  localSlots: readonly TaskUiSlot[],
+  tasks: readonly TaskSummary[],
+  options: { authoritative?: boolean } = {}
+): TaskUiSlot[] {
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+
+  return localSlots.flatMap((slot): TaskUiSlot[] => {
+    const task = slot.taskId ? tasksById.get(slot.taskId) : undefined;
+    if (task) {
+      return [{
+        ...slot,
+        state: "ready",
+        taskId: task.id,
+        task,
+        authoritativeMissGraceRemaining: 0
+      }];
+    }
+
+    if (slot.state === "creating" || options.authoritative !== true) {
+      return [slot];
+    }
+    if (slot.authoritativeMissGraceRemaining === 1) {
+      return [{ ...slot, authoritativeMissGraceRemaining: 0 }];
+    }
+    return [];
+  });
+}
+
 export function projectTaskUiSlots(
   tasks: readonly TaskSummary[],
   localSlots: readonly TaskUiSlot[]
 ): TaskUiSlot[] {
-  const localSlotsByTaskId = new Map(
-    localSlots.flatMap((slot) => slot.taskId ? [[slot.taskId, slot] as const] : [])
-  );
-  const projected: TaskUiSlot[] = localSlots.filter(
-    (slot): slot is CreatingTaskUiSlot => slot.state === "creating"
+  const projected: TaskUiSlot[] = [...localSlots];
+  const localSlotIndexesByTaskId = new Map(
+    localSlots.flatMap((slot, index) =>
+      slot.taskId ? [[slot.taskId, index] as const] : []
+    )
   );
 
   for (const task of tasks) {
-    const existing = localSlotsByTaskId.get(task.id);
-    if (existing) {
-      projected.push({
+    const existingIndex = localSlotIndexesByTaskId.get(task.id);
+    if (existingIndex !== undefined) {
+      const existing = projected[existingIndex]!;
+      projected[existingIndex] = {
         ...existing,
         state: "ready",
         taskId: task.id,
         task
-      });
+      };
       continue;
     }
 
