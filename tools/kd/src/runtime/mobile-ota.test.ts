@@ -74,6 +74,10 @@ describe("kd mobile OTA", () => {
       taskId: "mobile.ota.status",
       input: { staging: false, production: true },
     });
+    expect(parseCliArgs(["mobile", "ota", "provision", "--staging"])).toEqual({
+      taskId: "mobile.ota.provision",
+      input: { staging: true, production: false },
+    });
     expect(parseCliArgs(["mobile", "ota", "provision-secret", "--staging", "--key-path", "/tmp/key.pem"])).toEqual({
       taskId: "mobile.ota.provision-secret",
       input: { staging: true, production: false, keyPath: "/tmp/key.pem" },
