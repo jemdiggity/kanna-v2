@@ -126,6 +126,9 @@ describe("kd CLI", () => {
     await expect(runCli(["mobile", "ota", "publish", "--staging", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile ota publish"));
 
+    await expect(runCli(["mobile", "ota", "provision", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile ota provision"));
+
     await expect(runCli(["emulators", "exec", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd emulators exec -- <command...>"));
 

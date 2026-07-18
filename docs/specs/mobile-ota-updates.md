@@ -22,7 +22,7 @@ by the relay and stored in the per-environment Firebase/GCS bucket.
 - Origins: `https://relay-staging.kanna.build` for staging and `https://relay.kanna.build` for production.
 - Dev: disabled.
 - Channels: `staging` and `production`, passed by `expo-channel-name`.
-- Runtime version: `2.0.0` currently, sourced from `apps/mobile/src/mobileEnvironments.json` as `runtimeVersion`.
+- Runtime version: sourced from the selected environment in `apps/mobile/src/mobileEnvironments.json` as `runtimeVersion`.
 - Code signing: RSA SHA-256, Expo alg `rsa-v1_5-sha256`.
 - Code signing key id: `kanna-mobile-ota-v1`.
 - Public cert: `apps/mobile/certs/ota-codesign.pem`.
@@ -63,7 +63,14 @@ onto the VM and mounts it read-only into the relay container at
 
 ## Operations
 
-Provision the private key secret after key generation or rotation:
+Provision the environment bucket, required API, and relay bucket-read IAM before the first deploy. This command is idempotent and requires an explicit environment:
+
+```bash
+./kd mobile ota provision --staging
+./kd mobile ota provision --production
+```
+
+Provision the private key secret after key generation or rotation. This command idempotently enables Secret Manager, creates the secret when absent, adds a version, and grants the relay service account access:
 
 ```bash
 ./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
@@ -109,6 +116,19 @@ requires Google Cloud credentials for the target project and verifies:
 - Secret Manager private-key secret existence
 - relay VM service account resolution
 - relay service account IAM for Secret Manager and OTA GCS reads
+
+The canonical staging setup and verification sequence is:
+
+```bash
+./kd mobile ota provision --staging
+./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
+./kd cloud deploy --staging --relay
+./kd mobile ota doctor --staging
+./kd mobile ota status --staging
+```
+
+The last two commands are read-only. Publishing is a separate operation and is
+not implied by provisioning or deployment.
 
 Rollback by repointing the channel to a prior update id:
 

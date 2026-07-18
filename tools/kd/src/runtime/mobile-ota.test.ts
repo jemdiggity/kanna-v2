@@ -452,6 +452,25 @@ describe("kd mobile OTA", () => {
     expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
   });
 
+  it("requires exactly one environment for OTA infrastructure provisioning", async () => {
+    const repoRoot = await makeRepoFixture();
+    const runner: CommandRunner = {
+      async run() {
+        throw new Error("cloud command must not run");
+      },
+    };
+    const executeProvision = getMobileOtaProvisionExecutor();
+
+    await expect(executeProvision(
+      { staging: false, production: false },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("mobile ota provision requires --staging or --production");
+    await expect(executeProvision(
+      { staging: true, production: true },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("mobile ota provision accepts only one of --staging or --production");
+  });
+
   it("provisions the private key through kd-managed gcloud commands", async () => {
     const repoRoot = await makeRepoFixture();
     const keyPath = join(repoRoot, "ota-private-key.pem");
