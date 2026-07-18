@@ -53,6 +53,17 @@ async function makeRepoFixture(): Promise<string> {
   return repoRoot;
 }
 
+async function writeMinimalSdk57Export(repoRoot: string): Promise<void> {
+  await mkdir(join(repoRoot, "apps/mobile/dist/bundles"), { recursive: true });
+  await writeFile(
+    join(repoRoot, "apps/mobile/dist/metadata.json"),
+    JSON.stringify({
+      fileMetadata: { ios: { bundle: "bundles/main.hbc", assets: [] } },
+    })
+  );
+  await writeFile(join(repoRoot, "apps/mobile/dist/bundles/main.hbc"), "bundle");
+}
+
 describe("kd mobile OTA", () => {
   it("parses publish, status, doctor, and preflight commands under mobile ota", () => {
     expect(parseCliArgs(["mobile", "ota", "publish", "--staging", "--dry-run"])).toEqual({
@@ -206,6 +217,60 @@ describe("kd mobile OTA", () => {
     expect(calls.some((call) => call.command === "gcloud")).toBe(false);
     expect(result.message).toContain("Dry run: mobile OTA update");
     expect(result.message).toContain("curl -H 'expo-protocol-version: 1'");
+  });
+
+  it("surfaces Expo public config command failures before cloud access", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "pnpm" && args.includes("export")) {
+          await writeMinimalSdk57Export(repoRoot);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "pnpm" && args.includes("config")) {
+          return { exitCode: 1, stdout: "", stderr: "config failed" };
+        }
+        return { exitCode: 1, stdout: "", stderr: "unexpected cloud access" };
+      },
+    };
+
+    await expect(
+      executeMobileOtaPublishWithContext(
+        { staging: true, production: false, dryRun: true },
+        { repoRoot, env: {}, runner }
+      )
+    ).rejects.toThrow("config failed");
+    expect(calls.some((call) => call.command === "gcloud")).toBe(false);
+  });
+
+  it("rejects malformed Expo public config before cloud access", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "pnpm" && args.includes("export")) {
+          await writeMinimalSdk57Export(repoRoot);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "pnpm" && args.includes("config")) {
+          return { exitCode: 0, stdout: "not-json", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: "unexpected cloud access" };
+      },
+    };
+
+    await expect(
+      executeMobileOtaPublishWithContext(
+        { staging: true, production: false, dryRun: true },
+        { repoRoot, env: {}, runner }
+      )
+    ).rejects.toThrow("Expo public config command did not return valid JSON.");
+    expect(calls.some((call) => call.command === "gcloud")).toBe(false);
   });
 
   it("publishes the update ID derived from the staged metadata uploaded to GCS", async () => {

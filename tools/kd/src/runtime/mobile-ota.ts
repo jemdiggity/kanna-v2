@@ -727,6 +727,16 @@ async function readExpoPublicConfig(
     cwd: command.cwd,
     env: { ...env, ...command.env },
   });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      result.stderr || result.stdout || `${command.command} ${command.args.join(" ")} failed.`
+    );
+  }
+  try {
+    JSON.parse(result.stdout);
+  } catch {
+    throw new Error("Expo public config command did not return valid JSON.");
+  }
   return Buffer.from(result.stdout);
 }
 
