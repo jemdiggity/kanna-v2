@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { cloudEnvironmentToKdEnvironment, resolveKdEnvironment, type CloudEnvironmentName } from "./environment";
@@ -155,6 +155,7 @@ export async function buildMobileOtaPublishPlan(input: {
     dryRun: input.dryRun === true,
     commands: [
       buildExpoExportCommand(input.repoRoot, input.environment, distDir),
+      buildExpoPublicConfigCommand(input.repoRoot, input.environment),
       {
         command: "gcloud",
         args: [
@@ -236,7 +237,13 @@ export async function executeMobileOtaPublishWithContext(
     { ...context.env, ...exportCommand.env }
   );
 
-  const staged = await stageOtaUpdate({ distDir });
+  const expoConfigBytes = await readExpoPublicConfig(
+    context.repoRoot,
+    environment,
+    context.runner,
+    context.env
+  );
+  const staged = await stageOtaUpdate({ distDir, expoConfigBytes });
   const plan = await buildMobileOtaPublishPlan({
     repoRoot: context.repoRoot,
     environment,
@@ -695,7 +702,48 @@ function buildExpoExportCommand(repoRoot: string, environment: CloudEnvironmentN
   };
 }
 
-async function stageOtaUpdate(input: { distDir: string }): Promise<{ path: string; updateId: string }> {
+function buildExpoPublicConfigCommand(
+  repoRoot: string,
+  environment: CloudEnvironmentName
+): MobileOtaCommandPlan {
+  return {
+    command: "pnpm",
+    args: ["exec", "expo", "config", "--type", "public", "--json"],
+    cwd: join(repoRoot, "apps/mobile"),
+    env: {
+      KANNA_APP_ENV: environment === "staging" ? "staging" : "prod",
+    },
+  };
+}
+
+async function readExpoPublicConfig(
+  repoRoot: string,
+  environment: CloudEnvironmentName,
+  runner: CommandRunner,
+  env: NodeJS.ProcessEnv
+): Promise<Buffer> {
+  const command = buildExpoPublicConfigCommand(repoRoot, environment);
+  const result = await runner.run(command.command, command.args, {
+    cwd: command.cwd,
+    env: { ...env, ...command.env },
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      result.stderr || result.stdout || `${command.command} ${command.args.join(" ")} failed.`
+    );
+  }
+  try {
+    JSON.parse(result.stdout);
+  } catch {
+    throw new Error("Expo public config command did not return valid JSON.");
+  }
+  return Buffer.from(result.stdout);
+}
+
+async function stageOtaUpdate(input: {
+  distDir: string;
+  expoConfigBytes: Buffer;
+}): Promise<{ path: string; updateId: string }> {
   const stagedMetadata = await buildStagedExpoMetadata(input.distDir);
   const stageRoot = await mkdtemp(join(tmpdir(), "kanna-ota-stage-"));
   const output = join(stageRoot, stagedMetadata.updateId);
@@ -707,7 +755,7 @@ async function stageOtaUpdate(input: { distDir: string }): Promise<{ path: strin
     await writeFile(join(output, asset.targetPath), asset.bytes);
   }
   await writeFile(join(output, "metadata.json"), stagedMetadata.metadataBytes);
-  await cp(join(input.distDir, "expoConfig.json"), join(output, "expoConfig.json"));
+  await writeFile(join(output, "expoConfig.json"), input.expoConfigBytes);
   return { path: output, updateId: stagedMetadata.updateId };
 }
 
