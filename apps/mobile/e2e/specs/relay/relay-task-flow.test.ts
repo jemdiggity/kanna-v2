@@ -4,6 +4,7 @@ import {
   assertRelayTaskRowPresentation,
   inspectTaskFilePreviewWebView,
   openRelayFixtureTask,
+  verifyRelayComposerResetJourney,
   verifyRelayTaskActionMenuJourney,
   verifyRelayQuickReplyJourney,
   verifyRelayTaskActivityTransitions,
@@ -20,6 +21,7 @@ describe("relay task flow orchestration", () => {
     const runRelayTaskJourneys = (
       relayTaskFlow as typeof relayTaskFlow & {
         runRelayTaskJourneys?: (journeys: {
+          verifyComposerReset(): Promise<void>;
           verifyFilePreview(): Promise<void>;
           verifyMarkedRead(): Promise<void>;
           verifyPtySnapshotRevisit(): Promise<void>;
@@ -54,6 +56,10 @@ describe("relay task flow orchestration", () => {
         expect(screen).toBe("detail");
         calls.push("file-preview");
       },
+      async verifyComposerReset() {
+        expect(screen).toBe("detail");
+        calls.push("composer-reset");
+      },
       async verifyQuickReply() {
         expect(screen).toBe("detail");
         calls.push("quick-reply");
@@ -69,6 +75,7 @@ describe("relay task flow orchestration", () => {
       "rendered",
       "task-actions",
       "file-preview",
+      "composer-reset",
       "quick-reply",
     ]);
     expect(screen).toBe("detail");
@@ -398,6 +405,85 @@ describe("relay task action menu journey", () => {
       "Cancel.click",
       "more.waitForDisplayed",
     ]);
+  });
+});
+
+describe("relay composer reset journey", () => {
+  const multilineDraft =
+    "First relay line.\nSecond relay line.\nThird relay line.";
+
+  function createComposerResetUi({
+    dismissKeyboard = true,
+    resetHeight = true,
+  }: {
+    dismissKeyboard?: boolean;
+    resetHeight?: boolean;
+  } = {}) {
+    let composerHeight = 40;
+    let composerValue: string | null = "";
+    let keyboardShown = false;
+    const input = {
+      click: vi.fn(async () => {
+        keyboardShown = true;
+      }),
+      getAttribute: vi.fn(async (name: string) => {
+        if (name === "value") return composerValue;
+        return name === "label" && composerValue === null ? "Reply…" : null;
+      }),
+      getSize: vi.fn(async () => ({ height: composerHeight, width: 240 })),
+      setValue: vi.fn(async (value: string) => {
+        composerValue = value;
+        composerHeight = 82;
+      }),
+      waitForDisplayed: vi.fn(async () => undefined),
+    };
+    const send = {
+      click: vi.fn(async () => {
+        composerValue = "";
+        if (resetHeight) composerHeight = 40;
+        if (dismissKeyboard) keyboardShown = false;
+      }),
+      waitForDisplayed: vi.fn(async () => undefined),
+    };
+    const ui = {
+      getTaskInput: vi.fn(async () => input),
+      getTaskSendButton: vi.fn(async () => send),
+      isKeyboardShown: vi.fn(async () => keyboardShown),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+
+    return { input, send, ui };
+  }
+
+  it("observes multiline native growth, then Send resets height and hides the keyboard", async () => {
+    const { input, send, ui } = createComposerResetUi();
+
+    await verifyRelayComposerResetJourney(ui as never);
+
+    expect(input.click).toHaveBeenCalledOnce();
+    expect(input.setValue).toHaveBeenCalledWith(multilineDraft);
+    expect(input.getSize).toHaveBeenCalled();
+    expect(send.click).toHaveBeenCalledOnce();
+    expect(ui.isKeyboardShown).toHaveBeenCalled();
+  });
+
+  it("fails when Send leaves the cleared native input expanded", async () => {
+    const { ui } = createComposerResetUi({ resetHeight: false });
+
+    await expect(
+      verifyRelayComposerResetJourney(ui as never),
+    ).rejects.toThrow(/clear, return to one-line height, and hide the keyboard/i);
+  });
+
+  it("fails when Send leaves the software keyboard shown", async () => {
+    const { ui } = createComposerResetUi({ dismissKeyboard: false });
+
+    await expect(
+      verifyRelayComposerResetJourney(ui as never),
+    ).rejects.toThrow(/clear, return to one-line height, and hide the keyboard/i);
   });
 });
 
