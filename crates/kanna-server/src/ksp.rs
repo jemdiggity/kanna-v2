@@ -65,6 +65,16 @@ fn status_str(status: SessionStatus) -> &'static str {
     }
 }
 
+fn auth_ok_frame() -> ServerFrame {
+    ServerFrame::AuthOk {
+        stream_kinds: vec![
+            StreamKind::Agent,
+            StreamKind::Terminal,
+            StreamKind::Companion,
+        ],
+    }
+}
+
 #[derive(Clone)]
 struct CompanionFrameSender {
     state: Arc<Mutex<CompanionFrameState>>,
@@ -1157,7 +1167,7 @@ impl StreamConn {
 
         match frame {
             ClientFrame::Auth { .. } => {
-                self.send(ServerFrame::AuthOk).await;
+                self.send(auth_ok_frame()).await;
             }
             ClientFrame::Attach {
                 task_id,
@@ -1260,7 +1270,7 @@ impl StreamConn {
         }
 
         self.authed = true;
-        self.send(ServerFrame::AuthOk).await;
+        self.send(auth_ok_frame()).await;
         true
     }
 
@@ -2421,7 +2431,7 @@ mod tests {
         let url = fixture.serve().await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -2512,7 +2522,7 @@ mod tests {
         let url = fixture.serve().await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -2558,7 +2568,7 @@ mod tests {
         let url = fixture.serve().await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -2613,7 +2623,7 @@ mod tests {
         let url = fixture.serve().await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         let send_event = |event: CompanionEvent, session_id: String, revision: String| {
             ClientFrame::CompanionEvent {
@@ -2686,7 +2696,7 @@ mod tests {
 
         let mut rate_socket = ws_connect(&url).await;
         send_frame(&mut rate_socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut rate_socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut rate_socket).await, auth_ok_frame());
         for index in 0..30 {
             let event_id = format!("rate-{index}");
             send_frame(
@@ -2780,7 +2790,7 @@ mod tests {
         let url = fixture.serve().await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -2826,7 +2836,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         // Request frames route into the same task API the REST endpoints use.
         send_frame(
@@ -2856,7 +2866,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         send_frame(
             &mut socket,
@@ -2903,7 +2913,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         send_frame(
             &mut socket,
@@ -2960,7 +2970,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         let kitty_and_paste = b"\x1b[13;2u\x1b[200~paste\nbody\x1b[201~".to_vec();
         send_frame(
@@ -3040,7 +3050,7 @@ mod tests {
         let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         send_frame(
             &mut socket,
@@ -3088,7 +3098,7 @@ mod tests {
         let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         for frame in [
             ClientFrame::TermInput {
@@ -3160,7 +3170,7 @@ mod tests {
         let url = serve_router(router).await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         send_frame(
             &mut socket,
@@ -3244,7 +3254,7 @@ mod tests {
         .await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         let lock = rusqlite::Connection::open(&config.db_path).expect("open lock connection");
         lock.execute_batch("BEGIN IMMEDIATE; UPDATE settings SET value = value;")
@@ -3384,7 +3394,7 @@ mod tests {
         let url = serve_router(router).await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::AgentInterrupt {
@@ -3451,7 +3461,7 @@ mod tests {
         let url = serve_router(router).await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
 
         send_frame(
             &mut socket,
@@ -3776,7 +3786,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -3931,7 +3941,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -4112,7 +4122,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -4188,7 +4198,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -4280,7 +4290,7 @@ mod tests {
         let mut socket = ws_connect(&url).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         send_frame(
             &mut socket,
             &ClientFrame::AgentSetModel {
@@ -4370,7 +4380,7 @@ mod tests {
             .await
             .unwrap();
         let frame = outbound_rx.recv().await.expect("auth ok frame");
-        assert_eq!(frame, ServerFrame::AuthOk);
+        assert_eq!(frame, auth_ok_frame());
         drop(incoming_tx);
         let _ = task.await;
     }

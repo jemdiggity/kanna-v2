@@ -152,7 +152,10 @@ pub enum ClientFrame {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub enum ServerFrame {
-    AuthOk,
+    AuthOk {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stream_kinds: Vec<StreamKind>,
+    },
     /// Agent attach reply: the replayed journal tail plus the seq the live
     /// stream continues from. A reconnecting client passes `next_seq` back
     /// as `from_seq`.
@@ -295,6 +298,35 @@ mod tests {
 
         let back: ServerFrame = serde_json::from_value(json).unwrap();
         assert_eq!(frame, back);
+    }
+
+    #[test]
+    fn auth_ok_stream_kinds_are_backward_compatible() {
+        let old: ServerFrame = serde_json::from_value(serde_json::json!({
+            "type": "auth_ok"
+        }))
+        .unwrap();
+        assert_eq!(
+            old,
+            ServerFrame::AuthOk {
+                stream_kinds: Vec::new(),
+            }
+        );
+
+        let current = ServerFrame::AuthOk {
+            stream_kinds: vec![
+                StreamKind::Agent,
+                StreamKind::Terminal,
+                StreamKind::Companion,
+            ],
+        };
+        assert_eq!(
+            serde_json::to_value(current).unwrap(),
+            serde_json::json!({
+                "type": "auth_ok",
+                "stream_kinds": ["agent", "terminal", "companion"]
+            })
+        );
     }
 
     #[test]
