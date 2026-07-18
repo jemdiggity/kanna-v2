@@ -156,6 +156,7 @@ export class StreamClient {
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly attachments = new Map<string, Attachment>();
   private readonly stateChangedListeners = new Set<StateChangedListener>();
+  private supportedStreamKinds = new Set<StreamKind>();
   /** Frames queued until the auth handshake completes. */
   private sendQueue: ClientFrame[] = [];
 
@@ -198,11 +199,16 @@ export class StreamClient {
       kind: "companion",
       handlers,
     });
+    if (this.authed && !this.supports("companion")) {
+      handlers.onUnavailable();
+      return;
+    }
     this.sendFrame({ type: "attach", task_id: taskId, kind: "companion", from_seq: 0 });
   }
 
   detach(taskId: string, kind: StreamKind): void {
     this.attachments.delete(attachmentKey(taskId, kind));
+    if (kind === "companion" && !this.supports("companion")) return;
     this.sendFrame({ type: "detach", task_id: taskId, kind });
   }
 
@@ -241,7 +247,7 @@ export class StreamClient {
     revision: string,
     event: CompanionEvent,
   ): boolean {
-    if (!this.authed || !this.socket) return false;
+    if (!this.authed || !this.socket || !this.supports("companion")) return false;
     return this.rawSend({
       type: "companion_event",
       task_id: taskId,
@@ -279,6 +285,7 @@ export class StreamClient {
   private connect(): void {
     if (this.closed) return;
     this.authed = false;
+    this.supportedStreamKinds.clear();
     const socket = this.factory(this.options.url, {
       forceRefreshCredential: this.forceRefreshNextAuth,
     });
@@ -309,6 +316,7 @@ export class StreamClient {
     this.socket = null;
     const wasAuthed = this.authed;
     this.authed = false;
+    this.supportedStreamKinds.clear();
     this.options.onConnectionChange?.(false);
     for (const attachment of this.attachments.values()) {
       if (attachment.kind === "companion") {
@@ -389,6 +397,9 @@ export class StreamClient {
     switch (frame.type) {
       case "auth_ok": {
         this.authed = true;
+        this.supportedStreamKinds = new Set(
+          frame.stream_kinds ?? ["agent", "terminal"],
+        );
         this.reconnectAttempt = 0;
         this.forceRefreshNextAuth = false;
         this.authRetryConsumed = false;
@@ -402,6 +413,10 @@ export class StreamClient {
         // last seen seq, then flush queued frames.
         for (const [key, attachment] of this.attachments) {
           const { taskId, kind } = parseAttachmentKey(key);
+          if (attachment.kind === "companion" && !this.supports("companion")) {
+            attachment.handlers.onUnavailable();
+            continue;
+          }
           this.rawSend({
             type: "attach",
             task_id: taskId,
@@ -519,6 +534,10 @@ export class StreamClient {
   private companionAttachment(taskId: string): CompanionAttachment | undefined {
     const attachment = this.attachments.get(attachmentKey(taskId, "companion"));
     return attachment?.kind === "companion" ? attachment : undefined;
+  }
+
+  private supports(kind: StreamKind): boolean {
+    return this.supportedStreamKinds.has(kind);
   }
 
   private sendFrame(frame: ClientFrame): void {

@@ -40,7 +40,12 @@ describe("createRelayDesktopClient", () => {
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
     await flushPromises();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        stream_kinds: ["agent", "terminal", "companion"]
+      })
+    });
     socket.onmessage?.({
       data: JSON.stringify({
         type: "companion_snapshot",
