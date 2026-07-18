@@ -8,6 +8,7 @@ import React, {
   useState
 } from "react";
 import {
+  DefaultTheme,
   NavigationContainer,
   StackActions,
   useFocusEffect,
@@ -81,6 +82,13 @@ export {
 
 const RootStack = createNativeStackNavigator<RootStackParamList>();
 const MainTabs = createBottomTabNavigator<MainTabParamList>();
+const KANNA_NAVIGATION_THEME = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    background: "#08111E"
+  }
+};
 
 interface RootNavigatorProps {
   controller: MobileController;
@@ -218,6 +226,7 @@ export default function RootNavigator({
         <NavigationContainer
           initialState={initialState}
           ref={navigationRef}
+          theme={KANNA_NAVIGATION_THEME}
           onStateChange={(navigationState?: NavigationState) => {
             pendingTaskRouteRef.current = null;
             controller.setNavigationView(projectActiveView(navigationState));
