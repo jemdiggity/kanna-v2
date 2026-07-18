@@ -633,6 +633,14 @@ export async function executeMobileOtaProvisionSecretWithContext(
 
   const secretName = OTA_SECRET_NAME;
   const projectId = identity.firebaseProjectId;
+  await mustRun(context.runner, "gcloud", [
+    "services",
+    "enable",
+    "secretmanager.googleapis.com",
+    "--project",
+    projectId,
+  ], context.repoRoot, context.env);
+
   const describe = await context.runner.run("gcloud", [
     "secrets",
     "describe",
@@ -641,6 +649,9 @@ export async function executeMobileOtaProvisionSecretWithContext(
     projectId,
   ], { cwd: context.repoRoot, env: context.env });
   if (describe.exitCode !== 0) {
+    if (!isNotFoundFailure(describe)) {
+      throw new Error(summarizeCommandFailure(describe));
+    }
     await mustRun(context.runner, "gcloud", [
       "secrets",
       "create",

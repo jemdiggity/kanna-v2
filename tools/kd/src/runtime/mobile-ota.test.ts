@@ -461,7 +461,7 @@ describe("kd mobile OTA", () => {
       async run(command, args) {
         calls.push({ command, args });
         if (args.includes("describe") && args.includes("kanna-mobile-ota-private-key-pem")) {
-          return { exitCode: 1, stdout: "", stderr: "missing" };
+          return { exitCode: 1, stdout: "", stderr: "not found: 404" };
         }
         if (args.includes("instances") && args.includes("describe")) {
           return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
@@ -476,9 +476,35 @@ describe("kd mobile OTA", () => {
     );
 
     expect(result.ok).toBe(true);
+    expect(calls.map((call) => call.args)).toContainEqual([
+      "services", "enable", "secretmanager.googleapis.com", "--project", "kanna-staging",
+    ]);
     expect(calls.map((call) => call.args.slice(0, 3).join(" "))).toContain("secrets create kanna-mobile-ota-private-key-pem");
     expect(calls.map((call) => call.args.slice(0, 4).join(" "))).toContain("secrets versions add kanna-mobile-ota-private-key-pem");
     expect(calls.at(-1)?.args).toContain("roles/secretmanager.secretAccessor");
+  });
+
+  it("does not create or version an OTA secret when secret inspection is forbidden", async () => {
+    const repoRoot = await makeRepoFixture();
+    const keyPath = join(repoRoot, "ota-private-key.pem");
+    await writeFile(keyPath, "private key");
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (args.includes("describe") && args.includes("kanna-mobile-ota-private-key-pem")) {
+          return { exitCode: 1, stdout: "", stderr: "PERMISSION_DENIED" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(executeMobileOtaProvisionSecretWithContext(
+      { staging: true, production: false, keyPath },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("PERMISSION_DENIED");
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("versions"))).toBe(false);
   });
 
   it("runs a read-only staging OTA doctor against GCS, relay, and Secret Manager wiring", async () => {
