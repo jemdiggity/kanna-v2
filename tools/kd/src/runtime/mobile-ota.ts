@@ -24,7 +24,19 @@ export interface MobileOtaContext {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
+  request?: MobileOtaHttpRequest;
 }
+
+export interface MobileOtaHttpRequestInput {
+  url: string;
+  method: "POST";
+  headers: Record<string, string>;
+  body: unknown;
+}
+
+export type MobileOtaHttpRequest = (
+  input: MobileOtaHttpRequestInput
+) => Promise<{ ok: boolean; status: number; body: string }>;
 
 export interface MobileOtaCommandPlan {
   command: string;
@@ -359,6 +371,7 @@ export async function executeMobileOtaProvisionWithContext(
     "services",
     "enable",
     "storage.googleapis.com",
+    "firebasestorage.googleapis.com",
     "--project",
     projectId,
   ], context.repoRoot, context.env);
@@ -377,17 +390,31 @@ export async function executeMobileOtaProvisionWithContext(
     if (!isNotFoundFailure(describe)) {
       throw new Error(summarizeCommandFailure(describe));
     }
-    await mustRun(context.runner, "gcloud", [
-      "storage",
-      "buckets",
-      "create",
-      bucketUrl,
-      "--project",
-      projectId,
-      "--location",
-      "us-central1",
-      "--uniform-bucket-level-access",
-    ], context.repoRoot, context.env);
+    const accessTokenResult = await context.runner.run("gcloud", [
+      "auth",
+      "print-access-token",
+    ], { cwd: context.repoRoot, env: context.env });
+    const accessToken = accessTokenResult.stdout.trim();
+    if (accessTokenResult.exitCode !== 0 || accessToken.length === 0) {
+      throw new Error(summarizeCommandFailure(accessTokenResult));
+    }
+
+    const request = context.request ?? executeMobileOtaHttpRequest;
+    const response = await request({
+      url: `https://firebasestorage.googleapis.com/v1alpha/projects/${projectId}/defaultBucket`,
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: { location: "US-CENTRAL1" },
+    });
+    if (!response.ok) {
+      const sanitizedBody = response.body.replaceAll(accessToken, "[redacted]").trim();
+      throw new Error(
+        `Firebase default-bucket provisioning failed (HTTP ${response.status}): ${sanitizedBody || "request failed"}`
+      );
+    }
   }
 
   const serviceAccountResult = await context.runner.run("gcloud", [
@@ -813,6 +840,21 @@ function summarizeCommandFailure(result: { stdout: string; stderr: string }): st
 function isNotFoundFailure(result: { stdout: string; stderr: string }): boolean {
   const message = `${result.stderr}\n${result.stdout}`.toLowerCase();
   return message.includes("not found") || message.includes("not_found") || message.includes("404");
+}
+
+async function executeMobileOtaHttpRequest(
+  input: MobileOtaHttpRequestInput
+): Promise<{ ok: boolean; status: number; body: string }> {
+  const response = await fetch(input.url, {
+    method: input.method,
+    headers: input.headers,
+    body: JSON.stringify(input.body),
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: await response.text(),
+  };
 }
 
 function buildExpoExportCommand(repoRoot: string, environment: CloudEnvironmentName, distDir: string): MobileOtaCommandPlan {

@@ -20,7 +20,17 @@ const tempDirs: string[] = [];
 
 type MobileOtaProvisionExecutor = (
   input: { staging: boolean; production: boolean },
-  context: { repoRoot: string; env: NodeJS.ProcessEnv; runner: CommandRunner }
+  context: {
+    repoRoot: string;
+    env: NodeJS.ProcessEnv;
+    runner: CommandRunner;
+    request?: (input: {
+      url: string;
+      method: "POST";
+      headers: Record<string, string>;
+      body: unknown;
+    }) => Promise<{ ok: boolean; status: number; body: string }>;
+  }
 ) => Promise<{ ok: boolean; message: string; data?: unknown }>;
 
 function getMobileOtaProvisionExecutor(): MobileOtaProvisionExecutor {
@@ -364,6 +374,12 @@ describe("kd mobile OTA", () => {
   it("provisions a missing staging OTA bucket and relay storage access", async () => {
     const repoRoot = await makeRepoFixture();
     const calls: Array<{ command: string; args: string[] }> = [];
+    const requests: Array<{
+      url: string;
+      method: "POST";
+      headers: Record<string, string>;
+      body: unknown;
+    }> = [];
     const serviceAccount = "kanna-relay-staging@kanna-staging.iam.gserviceaccount.com";
     const runner: CommandRunner = {
       async run(command, args) {
@@ -371,6 +387,9 @@ describe("kd mobile OTA", () => {
         const joined = args.join(" ");
         if (joined.includes("storage buckets describe")) {
           return { exitCode: 1, stdout: "", stderr: "not found: 404" };
+        }
+        if (joined.includes("auth print-access-token")) {
+          return { exitCode: 0, stdout: "test-access-token\n", stderr: "" };
         }
         if (joined.includes("compute instances describe")) {
           return { exitCode: 0, stdout: `${serviceAccount}\n`, stderr: "" };
@@ -381,18 +400,35 @@ describe("kd mobile OTA", () => {
 
     const result = await getMobileOtaProvisionExecutor()(
       { staging: true, production: false },
-      { repoRoot, env: {}, runner }
+      {
+        repoRoot,
+        env: {},
+        runner,
+        async request(input) {
+          requests.push(input);
+          return { ok: true, status: 200, body: "{}" };
+        },
+      }
     );
 
     expect(result.ok).toBe(true);
     expect(calls.map(({ args }) => args)).toContainEqual([
-      "services", "enable", "storage.googleapis.com", "--project", "kanna-staging",
+      "services", "enable", "storage.googleapis.com", "firebasestorage.googleapis.com",
+      "--project", "kanna-staging",
     ]);
     expect(calls.map(({ args }) => args)).toContainEqual([
-      "storage", "buckets", "create", "gs://kanna-staging.firebasestorage.app",
-      "--project", "kanna-staging", "--location", "us-central1",
-      "--uniform-bucket-level-access",
+      "auth", "print-access-token",
     ]);
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(requests).toEqual([{
+      url: "https://firebasestorage.googleapis.com/v1alpha/projects/kanna-staging/defaultBucket",
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-access-token",
+        "content-type": "application/json",
+      },
+      body: { location: "US-CENTRAL1" },
+    }]);
     expect(calls.map(({ args }) => args)).toContainEqual([
       "storage", "buckets", "add-iam-policy-binding",
       "gs://kanna-staging.firebasestorage.app", "--project", "kanna-staging",
@@ -406,6 +442,7 @@ describe("kd mobile OTA", () => {
   it("reuses an existing staging OTA bucket", async () => {
     const repoRoot = await makeRepoFixture();
     const calls: Array<{ command: string; args: string[] }> = [];
+    let requested = false;
     const runner: CommandRunner = {
       async run(command, args) {
         calls.push({ command, args });
@@ -426,10 +463,20 @@ describe("kd mobile OTA", () => {
 
     await getMobileOtaProvisionExecutor()(
       { staging: true, production: false },
-      { repoRoot, env: {}, runner }
+      {
+        repoRoot,
+        env: {},
+        runner,
+        async request() {
+          requested = true;
+          return { ok: true, status: 200, body: "{}" };
+        },
+      }
     );
 
     expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("print-access-token"))).toBe(false);
+    expect(requested).toBe(false);
   });
 
   it("does not create an OTA bucket when bucket inspection is forbidden", async () => {
@@ -450,6 +497,47 @@ describe("kd mobile OTA", () => {
       { repoRoot, env: {}, runner }
     )).rejects.toThrow("PERMISSION_DENIED");
     expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("print-access-token"))).toBe(false);
+  });
+
+  it("stops before IAM and hides the access token when Firebase bucket provisioning fails", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (joined.includes("storage buckets describe")) {
+          return { exitCode: 1, stdout: "", stderr: "not found: 404" };
+        }
+        if (joined.includes("auth print-access-token")) {
+          return { exitCode: 0, stdout: "test-access-token\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const result = getMobileOtaProvisionExecutor()(
+      { staging: true, production: false },
+      {
+        repoRoot,
+        env: {},
+        runner,
+        async request() {
+          return {
+            ok: false,
+            status: 400,
+            body: "Blaze plan required; token=test-access-token",
+          };
+        },
+      }
+    );
+
+    await expect(result).rejects.toThrow(
+      "Firebase default-bucket provisioning failed (HTTP 400): Blaze plan required; token=[redacted]"
+    );
+    await expect(result).rejects.not.toThrow("test-access-token");
+    expect(calls.some(({ args }) => args.includes("add-iam-policy-binding"))).toBe(false);
   });
 
   it("requires exactly one environment for OTA infrastructure provisioning", async () => {
