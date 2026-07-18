@@ -201,7 +201,7 @@ pnpm --dir services/firebase-functions exec node scripts/provision-staging-buffy
 KANNA_E2E_DEVICE_TOKEN=staging-buffy-device-token ./kd mobile up --staging
 ```
 
-The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icloud.com` / `password123` with display name `Buffy the Bug Slayer`, stores the committed avatar reference `file://services/firebase/emulator-seed/assets/buffy-avatar.jpg`, and merges `devices/staging-buffy-device-token` in `kanna-staging` Firestore so the staging relay can authenticate the desktop when that token is supplied. Use `--dry-run` on the script to print the planned Auth user and Firestore document without writing staging data. Do not run physical-device Appium or install/launch the attached device from agent automation; humans verify on-device after merge.
+The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icloud.com` / `password123` with display name `Buffy the Bug Slayer`, stores the committed avatar reference `file://services/firebase/emulator-seed/assets/buffy-avatar.jpg`, and merges `devices/staging-buffy-device-token` in `kanna-staging` Firestore so the staging relay can authenticate the desktop when that token is supplied. Use `--dry-run` on the script to print the planned Auth user and Firestore document without writing staging data.
 
 ```bash
 # Development (from repo root or worktree root)
@@ -293,7 +293,7 @@ Always use `./kd cloud deploy --staging` or `./kd cloud deploy --production` for
 
 Self-hosted mobile OTA updates are served by the relay at `/ota/manifest` and `/ota/assets`, stored in the environment Firebase/GCS bucket under `ota/ios/<runtimeVersion>/`, and code-signed with key id `kanna-mobile-ota-v1`. The public certificate is committed at `apps/mobile/certs/ota-codesign.pem`; the private key is provisioned through `./kd mobile ota provision-secret --staging|--production --key-path <path>` into Secret Manager as `kanna-mobile-ota-private-key-pem`.
 
-Publish only through `./kd mobile ota publish --staging|--production`. Check pointers with `./kd mobile ota status --staging|--production`. Run read-only cloud and relay preflight with `./kd mobile ota doctor --staging|--production` or the `preflight` alias; this requires Google Cloud credentials for the target project and performs no writes. Roll back by repointing the channel with `./kd mobile ota publish --staging|--production --rollback-to <updateId>`. Human device apply verification remains separate: do not install, launch, or run physical-device Appium from agent automation.
+Publish only through `./kd mobile ota publish --staging|--production`. Check pointers with `./kd mobile ota status --staging|--production`. Run read-only cloud and relay preflight with `./kd mobile ota doctor --staging|--production` or the `preflight` alias; this requires Google Cloud credentials for the target project and performs no writes. Roll back by repointing the channel with `./kd mobile ota publish --staging|--production --rollback-to <updateId>`.
 
 ## Architecture
 

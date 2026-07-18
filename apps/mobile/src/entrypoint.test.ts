@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -18,5 +19,21 @@ describe("mobile Expo entrypoint", () => {
 
     expect(entrySource).toContain("registerRootComponent");
     expect(entrySource).toContain('./App');
+  });
+
+  it("provides the screen factory required by native-stack", () => {
+    const mobileRequire = createRequire(path.join(mobileRoot, "package.json"));
+    const nativePackagePath = mobileRequire.resolve("@react-navigation/native/package.json");
+    const nativeRequire = createRequire(nativePackagePath);
+    const corePackagePath = nativeRequire.resolve("@react-navigation/core/package.json");
+    const corePackage = JSON.parse(readFileSync(corePackagePath, "utf8")) as {
+      main: string;
+    };
+    const coreEntry = readFileSync(
+      path.resolve(path.dirname(corePackagePath), corePackage.main),
+      "utf8"
+    );
+
+    expect(coreEntry).toContain("createScreenFactory");
   });
 });
