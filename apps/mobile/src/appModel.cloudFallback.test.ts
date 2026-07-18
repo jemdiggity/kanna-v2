@@ -545,10 +545,17 @@ describe("createAppModel cloud routing", () => {
       taskTerminalTaskId: canonicalTaskId,
       activeView: "tasks"
     });
-    expect(sockets).toHaveLength(1);
-    const terminalSocket = sockets[0];
-    terminalSocket.onopen?.();
-    terminalSocket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    expect(sockets).toHaveLength(2);
+    for (const socket of sockets) {
+      socket.onopen?.();
+      socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    }
+    const terminalSocket = sockets.find((socket) =>
+      socket.send.mock.calls.some(([frame]) =>
+        JSON.parse(frame).kind === "terminal"
+      )
+    );
+    expect(terminalSocket).toBeDefined();
 
     pushCloudTasks?.([]);
     await vi.waitFor(() => {
@@ -2229,10 +2236,16 @@ describe("createAppModel cloud routing", () => {
       });
 
       app.controller.openTask(lanOnlyTask.id);
-      expect(sockets).toHaveLength(1);
-      sockets[0]!.onopen?.();
-      sockets[0]!.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
-      sockets[0]!.onmessage?.({
+      expect(sockets).toHaveLength(2);
+      for (const socket of sockets) {
+        socket.onopen?.();
+        socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+      }
+      const agentSocket = sockets.find((socket) =>
+        socket.send.mock.calls.some(([frame]) => JSON.parse(frame).kind === "agent")
+      );
+      expect(agentSocket).toBeDefined();
+      agentSocket!.onmessage?.({
         data: JSON.stringify({
           type: "agent_snapshot",
           task_id: lanOnlyTask.id,
@@ -2268,7 +2281,7 @@ describe("createAppModel cloud routing", () => {
         taskAgentTaskId: lanOnlyTask.id,
         taskAgentStatus: "live"
       });
-      expect(sockets[0]!.close).not.toHaveBeenCalled();
+      expect(sockets.every((socket) => socket.close.mock.calls.length === 0)).toBe(true);
 
       await app.client.sendTaskInput(duplicateCloudTask.id, "keep using LAN");
       expect(lan.fetchImpl).toHaveBeenCalledWith(
@@ -2297,7 +2310,7 @@ describe("createAppModel cloud routing", () => {
         taskAgentTaskId: lanOnlyTask.id,
         taskAgentStatus: "live"
       });
-      expect(sockets[0]!.close).not.toHaveBeenCalled();
+      expect(sockets.every((socket) => socket.close.mock.calls.length === 0)).toBe(true);
 
       await app.client.sendTaskInput(
         duplicateCloudTask.id,
@@ -2331,10 +2344,10 @@ describe("createAppModel cloud routing", () => {
         taskAgentTaskId: lanOnlyTask.id,
         taskAgentStatus: "live"
       });
-      expect(sockets[0]!.close).not.toHaveBeenCalled();
+      expect(sockets.every((socket) => socket.close.mock.calls.length === 0)).toBe(true);
 
       auth.setState({ status: "signedOut" });
-      expect(sockets[0]!.close).toHaveBeenCalledOnce();
+      expect(sockets.every((socket) => socket.close.mock.calls.length === 1)).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }

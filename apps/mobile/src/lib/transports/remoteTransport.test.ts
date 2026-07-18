@@ -4,6 +4,7 @@ import {
   RemoteTransportError,
   type RemoteDesktopInvoker,
   type RemoteTaskAgentObserver,
+  type RemoteTaskCompanionObserver,
   type RemoteTaskTerminalObserver
 } from "./remoteTransport";
 
@@ -71,6 +72,57 @@ describe("remote transport", () => {
       path: "/v1/repos/local-repo-1/commands/factory%3Acreate-agent/run",
       body: { catalogRevision: "catalog-v1" }
     });
+  });
+
+  it("resolves an uncached cloud companion route without queueing selections", async () => {
+    const subscription = { close: vi.fn(), sendEvent: vi.fn(() => true) };
+    let remoteListener: ((event: any) => void) | undefined;
+    const observeTaskCompanion = vi.fn<RemoteTaskCompanionObserver>((_route, listener) => {
+      remoteListener = listener;
+      return subscription;
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop: async () => null,
+      observeTaskCompanion,
+      listCloudTasks: async () => [{
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-1"
+      }]
+    });
+    const listener = vi.fn();
+    const returned = transport.observeTaskCompanion("cloud-task-1", listener);
+    const event = {
+      event_id: "event-1",
+      type: "click" as const,
+      choice: "a",
+      text: "A",
+      id: null,
+      timestamp: 1
+    };
+    expect(returned.sendEvent("123-456", "rev-1", event)).toBe(false);
+
+    await vi.waitFor(() =>
+      expect(observeTaskCompanion).toHaveBeenCalledWith(
+        { desktopId: "desktop-owner", taskId: "local-task-1" },
+        expect.any(Function)
+      )
+    );
+    expect(subscription.sendEvent).not.toHaveBeenCalled();
+    expect(returned.sendEvent("123-456", "rev-1", event)).toBe(true);
+    expect(subscription.sendEvent).toHaveBeenCalledWith("123-456", "rev-1", event);
+    remoteListener?.({ type: "unavailable", taskId: "local-task-1" });
+    expect(listener).toHaveBeenCalledWith({
+      type: "unavailable",
+      taskId: "cloud-task-1"
+    });
+    returned.close();
+    expect(subscription.close).toHaveBeenCalled();
   });
 
   it("routes cloud task file reads to the owner desktop and encoded local task id", async () => {

@@ -6,6 +6,7 @@ import type {
 import { TASK_QUICK_REPLIES } from "./taskQuickReplies";
 
 const hookHarness = vi.hoisted(() => ({
+  effectCleanups: [] as Array<(() => void) | undefined>,
   effectDependencies: [] as Array<readonly unknown[] | undefined>,
   effectIndex: 0,
   hookIndex: 0,
@@ -49,7 +50,10 @@ vi.mock("react", async (importActual) => {
 
         hookHarness.effectDependencies[effectIndex] = dependencies;
         if (dependenciesChanged) {
-          callback();
+          hookHarness.effectCleanups[effectIndex]?.();
+          const cleanup = callback();
+          hookHarness.effectCleanups[effectIndex] =
+            typeof cleanup === "function" ? cleanup : undefined;
         }
       }
     ),
@@ -109,6 +113,10 @@ vi.mock("./TaskFilePreview", () => ({
   TaskFilePreview: "TaskFilePreview"
 }));
 
+vi.mock("./VisualCompanionModal", () => ({
+  VisualCompanionModal: "VisualCompanionModal"
+}));
+
 vi.mock("./taskQuickReplyMenu", () => ({
   showTaskQuickReplyMenu: componentMocks.showQuickReplyMenu
 }));
@@ -125,6 +133,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   hookHarness.effectDependencies = [];
+  hookHarness.effectCleanups = [];
   hookHarness.effectIndex = 0;
   hookHarness.hookIndex = 0;
   hookHarness.refIndex = 0;
@@ -165,6 +174,18 @@ interface RenderTaskScreenOptions {
   taskId?: string;
   title?: string;
   prompt?: string;
+  companionStatus?: "idle" | "connecting" | "reconnecting" | "available" | "unavailable" | "error";
+  companionSnapshot?: {
+    sessionId: string;
+    revision: string;
+    documentKind: "fragment";
+    html: string;
+  } | null;
+  companionUnread?: boolean;
+  companionErrorMessage?: string | null;
+  companionEventStatus?: "idle" | "sending" | "sent" | "error";
+  onCompanionOpenChange?: (isOpen: boolean) => void;
+  onSendCompanionEvent?: (...args: unknown[]) => void;
 }
 
 function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
@@ -192,7 +213,14 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onOpenTaskActions,
     taskId = "task-1",
     title = "Task",
-    prompt
+    prompt,
+    companionStatus = "idle",
+    companionSnapshot = null,
+    companionUnread = false,
+    companionErrorMessage = null,
+    companionEventStatus = "idle",
+    onCompanionOpenChange = vi.fn(),
+    onSendCompanionEvent = vi.fn()
   } = options;
 
   hookHarness.effectIndex = 0;
@@ -221,6 +249,11 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     agentEvents: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
     agentStatus,
     agentErrorMessage: null,
+    companionStatus,
+    companionSnapshot,
+    companionUnread,
+    companionErrorMessage,
+    companionEventStatus,
     e2eTaskSnapshotMarker,
     onBack: vi.fn(),
     onAdvanceTaskStage: componentMocks.onAdvanceTaskStage,
@@ -230,8 +263,16 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn(),
     onRecoverTaskCreation,
-    onReadTaskFile
+    onReadTaskFile,
+    onCompanionOpenChange,
+    onSendCompanionEvent
   }) as ElementNode;
+}
+
+function unmountTaskScreen(): void {
+  for (const cleanup of hookHarness.effectCleanups.splice(0)) {
+    cleanup?.();
+  }
 }
 
 function invokeLayout(
@@ -423,6 +464,229 @@ describe("TaskScreen", () => {
     onSelect(action);
 
     expect(expectedCallback).toHaveBeenCalledOnce();
+  });
+
+  it("offers an unread visual companion action and opens its full-screen view", () => {
+    const onCompanionOpenChange = vi.fn();
+    const companionSnapshot = {
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment" as const,
+      html: '<button data-choice="ship">Ship</button>'
+    };
+    let tree = renderTaskScreen({
+      companionStatus: "available",
+      companionSnapshot,
+      companionUnread: true,
+      onCompanionOpenChange
+    });
+
+    expect(findByTestId(tree, "mobile.visual-companion.button")?.props)
+      .toMatchObject({
+        accessibilityLabel: "Visual companion ready",
+        accessibilityRole: "button"
+      });
+    expect(findByTestId(tree, "mobile.visual-companion.unread")).not.toBeNull();
+    expect(findByType(tree, "VisualCompanionModal")).toBeNull();
+
+    pressByTestId(tree, "mobile.visual-companion.button");
+    tree = renderTaskScreen({
+      companionStatus: "available",
+      companionSnapshot,
+      companionUnread: false,
+      onCompanionOpenChange
+    });
+
+    expect(onCompanionOpenChange).toHaveBeenCalledWith(true);
+    expect(findByType(tree, "VisualCompanionModal")?.props).toMatchObject({
+      status: "available",
+      snapshot: companionSnapshot
+    });
+  });
+
+  it("keeps an ended companion modal visible until close and restores task focus", () => {
+    const onCompanionOpenChange = vi.fn();
+    const companionSnapshot = {
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment" as const,
+      html: "<h1>Ready</h1>"
+    };
+    let tree = renderTaskScreen({
+      companionStatus: "available",
+      companionSnapshot,
+      onCompanionOpenChange
+    });
+    pressByTestId(tree, "mobile.visual-companion.button");
+
+    tree = renderTaskScreen({
+      companionStatus: "unavailable",
+      companionSnapshot: null,
+      onCompanionOpenChange
+    });
+    const modal = findByType(tree, "VisualCompanionModal");
+    expect(modal?.props).toMatchObject({
+      status: "unavailable",
+      snapshot: null
+    });
+
+    (modal?.props?.onClose as () => void)();
+    tree = renderTaskScreen({
+      companionStatus: "unavailable",
+      companionSnapshot: null,
+      onCompanionOpenChange
+    });
+    expect(onCompanionOpenChange).toHaveBeenLastCalledWith(false);
+    expect(findByType(tree, "VisualCompanionModal")).toBeNull();
+  });
+
+  it("surfaces a task-scoped source error without exposing a stale snapshot", () => {
+    const message =
+      "The visual companion is too large. Ask the agent to simplify the screen.";
+    const staleSnapshot = {
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment" as const,
+      html: '<button data-choice="ship">Ship</button>'
+    };
+    let tree = renderTaskScreen({
+      companionStatus: "error",
+      companionSnapshot: staleSnapshot,
+      companionErrorMessage: message
+    });
+
+    expect(findByTestId(tree, "mobile.visual-companion.button")?.props)
+      .toMatchObject({ accessibilityLabel: "Visual companion unavailable" });
+    pressByTestId(tree, "mobile.visual-companion.button");
+    tree = renderTaskScreen({
+      companionStatus: "error",
+      companionSnapshot: staleSnapshot,
+      companionErrorMessage: message
+    });
+
+    expect(findByType(tree, "VisualCompanionModal")?.props).toMatchObject({
+      status: "error",
+      snapshot: null,
+      errorMessage: message
+    });
+  });
+
+  it("surfaces a task-scoped source error before any snapshot exists", () => {
+    const message =
+      "The visual companion is not valid UTF-8 HTML. Ask the agent to recreate the screen.";
+    let tree = renderTaskScreen({
+      companionStatus: "error",
+      companionSnapshot: null,
+      companionErrorMessage: message
+    });
+
+    expect(findByTestId(tree, "mobile.visual-companion.button")?.props)
+      .toMatchObject({ accessibilityLabel: "Visual companion unavailable" });
+    pressByTestId(tree, "mobile.visual-companion.button");
+    tree = renderTaskScreen({
+      companionStatus: "error",
+      companionSnapshot: null,
+      companionErrorMessage: message
+    });
+
+    expect(findByType(tree, "VisualCompanionModal")?.props).toMatchObject({
+      status: "error",
+      snapshot: null,
+      errorMessage: message
+    });
+  });
+
+  it("notifies that an open companion closed when the task id changes", () => {
+    const onCompanionOpenChange = vi.fn();
+    const companionSnapshot = {
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment" as const,
+      html: "<h1>Ready</h1>"
+    };
+    let tree = renderTaskScreen({
+      taskId: "task-pending",
+      companionStatus: "available",
+      companionSnapshot,
+      onCompanionOpenChange
+    });
+    pressByTestId(tree, "mobile.visual-companion.button");
+    tree = renderTaskScreen({
+      taskId: "task-pending",
+      companionStatus: "available",
+      companionSnapshot,
+      onCompanionOpenChange
+    });
+    expect(findByType(tree, "VisualCompanionModal")).not.toBeNull();
+
+    tree = renderTaskScreen({
+      taskId: "task-canonical",
+      companionStatus: "available",
+      companionSnapshot,
+      onCompanionOpenChange
+    });
+
+    expect(onCompanionOpenChange.mock.calls).toEqual([[true], [false]]);
+    expect(findByType(tree, "VisualCompanionModal")).toBeNull();
+  });
+
+  it("notifies that an open companion closed when the task screen unmounts", () => {
+    const onCompanionOpenChange = vi.fn();
+    const companionSnapshot = {
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment" as const,
+      html: "<h1>Ready</h1>"
+    };
+    const tree = renderTaskScreen({
+      companionStatus: "available",
+      companionSnapshot,
+      onCompanionOpenChange
+    });
+    pressByTestId(tree, "mobile.visual-companion.button");
+
+    unmountTaskScreen();
+
+    expect(onCompanionOpenChange.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it("forwards companion bridge events through the active task callback", () => {
+    const onSendCompanionEvent = vi.fn();
+    const companionSnapshot = {
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment" as const,
+      html: "<h1>Ready</h1>"
+    };
+    let tree = renderTaskScreen({
+      companionStatus: "available",
+      companionSnapshot,
+      onSendCompanionEvent
+    });
+    pressByTestId(tree, "mobile.visual-companion.button");
+    tree = renderTaskScreen({
+      companionStatus: "available",
+      companionSnapshot,
+      onSendCompanionEvent
+    });
+    const event = {
+      event_id: "mobile-1",
+      type: "click",
+      choice: "ship",
+      text: "Ship",
+      id: null,
+      timestamp: 1
+    };
+
+    (findByType(tree, "VisualCompanionModal")?.props?.onSendEvent as (
+      ...args: unknown[]
+    ) => void)("123-456", "rev-1", event);
+
+    expect(onSendCompanionEvent).toHaveBeenCalledWith(
+      "123-456",
+      "rev-1",
+      event
+    );
   });
 
   it("routes agent tasks to the native agent message view", () => {

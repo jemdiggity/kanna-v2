@@ -29,7 +29,10 @@ pub use events::{
     truncate_text, truncate_text_to, AgentEvent, PermissionDecision, SessionEndReason, TurnStats,
     TurnStatus, MAX_TEXT_BYTES,
 };
-pub use frames::{ClientFrame, FrameAgentEvent, ServerFrame, StateChangeScope, StreamKind};
+pub use frames::{
+    ClientFrame, CompanionDocumentKind, CompanionEvent, FrameAgentEvent, ServerFrame,
+    StateChangeScope, StreamKind,
+};
 pub use opencode::OpencodeAdapter;
 pub use providers::{
     agent_provider_specs, AgentProvider, AgentProviderSpec, AgentSessionType,

@@ -8,8 +8,10 @@ import type {
 import type {
   KannaClient,
   TaskAgentSubscription,
+  TaskCompanionSubscription,
   TaskTerminalSubscription
 } from "../lib/api/client";
+import type { CompanionEvent } from "@kanna/agent-protocol";
 import { TaskCreationError } from "../lib/api/client";
 import type { MachinePairingService } from "../lib/pairing/machinePairing";
 import type { MobileAuthSession } from "../lib/firebase/auth";
@@ -64,7 +66,15 @@ export interface MobileController {
   sendTaskInput(taskId: string, input: string): Promise<void>;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
   interruptTaskAgent(taskId: string): void;
+  setTaskCompanionOpen(taskId: string, isOpen: boolean): void;
+  sendTaskCompanionEvent(
+    taskId: string,
+    sessionId: string,
+    revision: string,
+    event: CompanionEvent
+  ): void;
   closeDesktopTask(taskId: string): Promise<void>;
+  dispose(): void;
 }
 
 const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
@@ -166,8 +176,18 @@ export function createMobileController(
         retagTaskId(taskId: string): void;
       }
     | null = null;
+  let activeTaskCompanion:
+    | {
+        taskId: string;
+        routeIdentity: string;
+        subscription: TaskCompanionSubscription;
+        setOpen(isOpen: boolean): void;
+        retagTaskId(taskId: string): void;
+      }
+    | null = null;
   let taskTerminalGeneration = 0;
   let taskAgentGeneration = 0;
+  let taskCompanionGeneration = 0;
   let taskDetailGeneration = 0;
   let activeTaskDetailIdentity: string | null = null;
   let loadedTaskPrompt:
@@ -561,9 +581,17 @@ export function createMobileController(
     subscription?.close();
   };
 
+  const stopTaskCompanion = () => {
+    const subscription = activeTaskCompanion?.subscription;
+    activeTaskCompanion = null;
+    taskCompanionGeneration += 1;
+    subscription?.close();
+  };
+
   const stopTaskSession = () => {
     stopTaskTerminal();
     stopTaskAgent();
+    stopTaskCompanion();
   };
 
   const clearTaskSessionIfMissing = (taskId: string) => {
@@ -573,6 +601,7 @@ export function createMobileController(
     stopTaskSession();
     store.clearTaskTerminal();
     store.clearTaskAgent();
+    store.clearTaskCompanion();
   };
 
   const selectMigratedTaskIdentity = (
@@ -596,6 +625,14 @@ export function createMobileController(
     ) {
       activeTaskTerminal.taskId = nextTaskId;
       activeTaskTerminal.retagTaskId(nextTaskId);
+      retainedSession = true;
+    }
+    if (
+      activeTaskCompanion?.taskId === previousTaskId &&
+      activeTaskCompanion.routeIdentity === nextRouteIdentity
+    ) {
+      activeTaskCompanion.taskId = nextTaskId;
+      activeTaskCompanion.retagTaskId(nextTaskId);
       retainedSession = true;
     }
     if (
@@ -875,6 +912,59 @@ export function createMobileController(
     }
   };
 
+  const startTaskCompanion = (taskId: string) => {
+    const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
+    if (
+      activeTaskCompanion?.taskId === taskId &&
+      activeTaskCompanion.routeIdentity === routeIdentity
+    ) {
+      return;
+    }
+
+    stopTaskCompanion();
+    const generation = taskCompanionGeneration;
+    store.beginTaskCompanion(taskId);
+    try {
+      let streamTaskId = taskId;
+      let isOpen = false;
+      const subscription = client.observeTaskCompanion(taskId, (event) => {
+        if (generation !== taskCompanionGeneration) return;
+        store.applyTaskCompanionStreamEvent(streamTaskId, event, isOpen);
+      });
+      if (generation !== taskCompanionGeneration) {
+        subscription.close();
+        return;
+      }
+      activeTaskCompanion = {
+        taskId,
+        routeIdentity,
+        subscription,
+        setOpen(nextIsOpen) {
+          isOpen = nextIsOpen;
+        },
+        retagTaskId(nextTaskId) {
+          streamTaskId = nextTaskId;
+        }
+      };
+    } catch (error) {
+      if (generation !== taskCompanionGeneration) return;
+      taskCompanionGeneration += 1;
+      store.applyTaskCompanionStreamEvent(
+        taskId,
+        {
+          type: "error",
+          taskId,
+          code: "companion_start_failed",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Visual companion stream failed to start"
+        },
+        false
+      );
+    }
+  };
+
   const startTaskView = (taskId: string) => {
     const task = findTask(taskId);
     if (!task) {
@@ -888,6 +978,7 @@ export function createMobileController(
       store.clearTaskAgent();
       startTaskTerminal(taskId);
     }
+    startTaskCompanion(taskId);
   };
 
   const loadCollections = async () => {
@@ -1593,6 +1684,7 @@ export function createMobileController(
       store.setSelectedTask(null);
       store.clearTaskTerminal();
       store.clearTaskAgent();
+      store.clearTaskCompanion();
       await this.bootstrap();
     },
 
@@ -1709,6 +1801,7 @@ export function createMobileController(
       store.setSelectedTask(null);
       store.clearTaskTerminal();
       store.clearTaskAgent();
+      store.clearTaskCompanion();
       reconcileSelectedTaskRead();
     },
 
@@ -2098,6 +2191,34 @@ export function createMobileController(
       activeTaskAgent.subscription.interrupt();
     },
 
+    setTaskCompanionOpen(taskId, isOpen) {
+      if (activeTaskCompanion?.taskId !== taskId) return;
+      activeTaskCompanion.setOpen(isOpen);
+      if (isOpen) store.markTaskCompanionViewed(taskId);
+    },
+
+    sendTaskCompanionEvent(taskId, sessionId, revision, event) {
+      if (activeTaskCompanion?.taskId !== taskId) return;
+      const companionState = store.getState();
+      if (
+        companionState.taskCompanionStatus !== "available" ||
+        companionState.taskCompanionSnapshot?.sessionId !== sessionId ||
+        companionState.taskCompanionSnapshot.revision !== revision
+      ) {
+        return;
+      }
+      store.beginTaskCompanionEvent(taskId, event.event_id);
+      if (
+        !activeTaskCompanion.subscription.sendEvent(sessionId, revision, event)
+      ) {
+        store.applyTaskCompanionStreamEvent(
+          taskId,
+          { type: "connection", taskId, connected: false },
+          false
+        );
+      }
+    },
+
     async closeDesktopTask(taskId) {
       try {
         await client.closeTask(taskId);
@@ -2108,11 +2229,23 @@ export function createMobileController(
         store.setSelectedTask(null);
         store.clearTaskTerminal();
         store.clearTaskAgent();
+        store.clearTaskCompanion();
         setUnownedErrorMessage(null);
         reconcileSelectedTaskRead();
       } catch (error) {
         fail(error);
       }
+    },
+
+    dispose() {
+      stopTaskSession();
+      stopCloudTaskSubscription();
+      if (backgroundRefreshTimer) {
+        clearInterval(backgroundRefreshTimer);
+        backgroundRefreshTimer = null;
+      }
+      authUnsubscribe?.();
+      authUnsubscribe = null;
     }
   };
 }

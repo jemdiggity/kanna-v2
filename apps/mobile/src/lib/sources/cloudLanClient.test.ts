@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   KannaClient,
   TaskAgentSubscription,
+  TaskCompanionSubscription,
   TaskTerminalSubscription
 } from "../api/client";
 import type {
@@ -44,6 +45,10 @@ function agentSubscription(): TaskAgentSubscription {
   };
 }
 
+function companionSubscription(): TaskCompanionSubscription {
+  return { close: vi.fn(), sendEvent: vi.fn() };
+}
+
 function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
   return {
     getStatus: vi.fn().mockResolvedValue(runningStatus()),
@@ -82,6 +87,7 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     }),
     observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
     observeTaskAgent: vi.fn(() => agentSubscription()),
+    observeTaskCompanion: vi.fn(() => companionSubscription()),
     ...overrides
   };
 }
@@ -1091,21 +1097,26 @@ describe("createCloudLanClient", () => {
     const lanTerminalSubscription: TaskTerminalSubscription = { close: vi.fn() };
     const cloudAgentSubscription = agentSubscription();
     const lanAgentSubscription = agentSubscription();
+    const cloudCompanionSubscription = companionSubscription();
+    const lanCompanionSubscription = companionSubscription();
     const cloud = createClientMock({
       listRecentTasks: vi.fn().mockResolvedValue([duplicate, cloudOnly]),
       observeTaskTerminal: vi.fn(() => cloudTerminalSubscription),
-      observeTaskAgent: vi.fn(() => cloudAgentSubscription)
+      observeTaskAgent: vi.fn(() => cloudAgentSubscription),
+      observeTaskCompanion: vi.fn(() => cloudCompanionSubscription)
     });
     const lan = createClientMock({
       listRecentTasks: vi.fn().mockResolvedValue([localDuplicate, lanOnly]),
       observeTaskTerminal: vi.fn(() => lanTerminalSubscription),
-      observeTaskAgent: vi.fn(() => lanAgentSubscription)
+      observeTaskAgent: vi.fn(() => lanAgentSubscription),
+      observeTaskCompanion: vi.fn(() => lanCompanionSubscription)
     });
     const client = createCloudLanClient(cloud, lan, {
       isLanEnabled: () => true
     });
     const agentListener = vi.fn();
     const terminalListener = vi.fn();
+    const companionListener = vi.fn();
 
     await client.listRecentTasks();
 
@@ -1120,6 +1131,12 @@ describe("createCloudLanClient", () => {
     );
     expect(client.observeTaskTerminal("cloud-only", terminalListener)).toBe(
       cloudTerminalSubscription
+    );
+    expect(client.observeTaskCompanion("cloud-duplicate", companionListener)).toBe(
+      lanCompanionSubscription
+    );
+    expect(client.observeTaskCompanion("cloud-only", companionListener)).toBe(
+      cloudCompanionSubscription
     );
     await client.sendTaskInput("cloud-duplicate", "continue");
     await client.closeTask("lan-only");
@@ -1144,6 +1161,14 @@ describe("createCloudLanClient", () => {
     expect(cloud.observeTaskTerminal).toHaveBeenCalledWith(
       "cloud-only",
       terminalListener
+    );
+    expect(lan.observeTaskCompanion).toHaveBeenCalledWith(
+      "local-duplicate",
+      expect.any(Function)
+    );
+    expect(cloud.observeTaskCompanion).toHaveBeenCalledWith(
+      "cloud-only",
+      expect.any(Function)
     );
     expect(lan.sendTaskInput).toHaveBeenCalledWith(
       "local-duplicate",

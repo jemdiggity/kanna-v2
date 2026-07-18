@@ -22,6 +22,32 @@ use crate::events::{AgentEvent, PermissionDecision};
 pub enum StreamKind {
     Agent,
     Terminal,
+    Companion,
+}
+
+/// Whether the companion content is an HTML fragment that Kanna must frame
+/// or a complete HTML document that Kanna can render as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub enum CompanionDocumentKind {
+    Fragment,
+    FullDocument,
+}
+
+/// A structured selection made in a visual companion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub struct CompanionEvent {
+    pub event_id: String,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub choice: String,
+    pub text: String,
+    #[serde(rename = "id")]
+    pub element_id: Option<String>,
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
+    pub timestamp: u64,
 }
 
 /// Coarse data-model invalidation scopes. Clients should re-fetch the
@@ -99,6 +125,15 @@ pub enum ClientFrame {
         cols: u16,
         rows: u16,
     },
+    /// Send a structured selection back to the currently displayed visual
+    /// companion. The server validates both session and revision before
+    /// appending it to the companion event stream.
+    CompanionEvent {
+        task_id: String,
+        session_id: String,
+        revision: String,
+        event: CompanionEvent,
+    },
     /// Request/response escape hatch for the task API (list/create/actions).
     /// Replaces both REST calls and the legacy relay Invoke vocabulary.
     Request {
@@ -144,9 +179,38 @@ pub enum ServerFrame {
         task_id: String,
         data_b64: String,
     },
+    /// Latest visual companion document for a task.
+    CompanionSnapshot {
+        task_id: String,
+        session_id: String,
+        revision: String,
+        document_kind: CompanionDocumentKind,
+        html: String,
+    },
+    /// The task currently has no active visual companion.
+    CompanionUnavailable {
+        task_id: String,
+    },
+    /// Acknowledgement for one structured companion event.
+    CompanionEventResult {
+        task_id: String,
+        event_id: String,
+        accepted: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    /// A task-scoped companion source failure, kept separate from generic KSP
+    /// errors so other task stream handlers are unaffected.
+    CompanionError {
+        task_id: String,
+        code: String,
+        message: String,
+    },
     StatusChanged {
         task_id: String,
-        /// `busy` | `waiting` | `idle` (mirrors daemon SessionStatus).
+        // `busy` | `waiting` | `idle` (mirrors daemon SessionStatus).
         status: String,
     },
     StateChanged {
@@ -257,6 +321,84 @@ mod tests {
                 kind: StreamKind::Agent,
                 from_seq: 0,
             }
+        );
+    }
+
+    #[test]
+    fn companion_frames_round_trip_and_preserve_wire_names() {
+        let event = CompanionEvent {
+            event_id: "event-1".into(),
+            event_type: "click".into(),
+            choice: "a".into(),
+            text: "Option A".into(),
+            element_id: None,
+            timestamp: 1_784_268_000_000,
+        };
+        let client = ClientFrame::CompanionEvent {
+            task_id: "task-1".into(),
+            session_id: "123-456".into(),
+            revision: "sha256:abc".into(),
+            event: event.clone(),
+        };
+        let client_json = serde_json::to_value(&client).unwrap();
+        assert_eq!(client_json["type"], "companion_event");
+        assert_eq!(client_json["event"]["type"], "click");
+        assert_eq!(client_json["event"]["id"], serde_json::Value::Null);
+        assert_eq!(
+            serde_json::from_value::<ClientFrame>(client_json).unwrap(),
+            client
+        );
+
+        let snapshot = ServerFrame::CompanionSnapshot {
+            task_id: "task-1".into(),
+            session_id: "123-456".into(),
+            revision: "sha256:abc".into(),
+            document_kind: CompanionDocumentKind::Fragment,
+            html: "<h2>Choose</h2>".into(),
+        };
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(serde_json::to_value(&snapshot).unwrap())
+                .unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            serde_json::to_value(StreamKind::Companion).unwrap(),
+            "companion"
+        );
+
+        let unavailable = serde_json::to_value(ServerFrame::CompanionUnavailable {
+            task_id: "task-1".into(),
+        })
+        .unwrap();
+        assert_eq!(unavailable["type"], "companion_unavailable");
+
+        let result = ServerFrame::CompanionEventResult {
+            task_id: "task-1".into(),
+            event_id: "event-1".into(),
+            accepted: false,
+            code: Some("companion_stale_revision".into()),
+            message: Some("The companion changed before the selection arrived.".into()),
+        };
+        let result_json = serde_json::to_value(&result).unwrap();
+        assert_eq!(result_json["type"], "companion_event_result");
+        assert_eq!(result_json["event_id"], "event-1");
+        assert_eq!(result_json["accepted"], false);
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(result_json).unwrap(),
+            result
+        );
+
+        let error = ServerFrame::CompanionError {
+            task_id: "task-1".into(),
+            code: "companion_source_failed".into(),
+            message: "The visual companion could not be read.".into(),
+        };
+        let error_json = serde_json::to_value(&error).unwrap();
+        assert_eq!(error_json["type"], "companion_error");
+        assert_eq!(error_json["task_id"], "task-1");
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(error_json).unwrap(),
+            error
         );
     }
 }

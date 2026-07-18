@@ -543,6 +543,11 @@ function TaskDetailRoute({
       agentErrorMessage={state.taskAgentErrorMessage}
       agentEvents={state.taskAgentEvents}
       agentStatus={state.taskAgentStatus}
+      companionStatus={state.taskCompanionStatus}
+      companionSnapshot={state.taskCompanionSnapshot}
+      companionUnread={state.taskCompanionUnread}
+      companionErrorMessage={state.taskCompanionErrorMessage}
+      companionEventStatus={state.taskCompanionEventStatus}
       taskCreationPhase={resolveTaskCreationPhase(state, routeTaskId)}
       taskCreationErrorMessage={state.composerErrorMessage}
       onBack={() => navigation.goBack()}
@@ -583,6 +588,23 @@ function TaskDetailRoute({
       }}
       onRecoverTaskCreation={() => {
         void controller.recoverTaskCreation();
+      }}
+      onCompanionOpenChange={(isOpen) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) {
+          controller.setTaskCompanionOpen(durableTaskId, isOpen);
+        }
+      }}
+      onSendCompanionEvent={(sessionId, revision, event) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) {
+          controller.sendTaskCompanionEvent(
+            durableTaskId,
+            sessionId,
+            revision,
+            event
+          );
+        }
       }}
     />
   );

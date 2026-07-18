@@ -2,6 +2,8 @@ import type {
   KannaTransport,
   TaskAgentStreamEvent,
   TaskAgentSubscription,
+  TaskCompanionStreamEvent,
+  TaskCompanionSubscription,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription,
 } from "../api/client";
@@ -54,6 +56,11 @@ export type RemoteTaskAgentObserver = (
   listener: (event: TaskAgentStreamEvent) => void
 ) => TaskAgentSubscription;
 
+export type RemoteTaskCompanionObserver = (
+  request: { desktopId: string; taskId: string },
+  listener: (event: TaskCompanionStreamEvent) => void
+) => TaskCompanionSubscription;
+
 export type RemoteTransportErrorCode =
   | "no_selected_desktop"
   | "remote_invocation_failed"
@@ -81,6 +88,7 @@ export interface RemoteTransportDependencies {
   invokeDesktop: RemoteDesktopInvoker;
   observeTaskTerminal?: RemoteTaskTerminalObserver;
   observeTaskAgent?: RemoteTaskAgentObserver;
+  observeTaskCompanion?: RemoteTaskCompanionObserver;
   listCloudTasks?: () => Promise<CloudIndexedTaskSummary[]>;
 }
 
@@ -106,6 +114,7 @@ export function createRemoteTransport({
   invokeDesktop,
   observeTaskTerminal,
   observeTaskAgent,
+  observeTaskCompanion,
   listCloudTasks
 }: RemoteTransportDependencies): KannaTransport {
   let cloudTaskRoutes = new Map<string, CloudTaskRoute>();
@@ -780,6 +789,73 @@ export function createRemoteTransport({
 
       const desktopId = getSelectedDesktopOrThrow(getSelectedDesktopId);
       return observeTaskAgent({ desktopId, taskId }, listener);
+    },
+    observeTaskCompanion(
+      taskId: string,
+      listener: (event: TaskCompanionStreamEvent) => void
+    ): TaskCompanionSubscription {
+      if (!observeTaskCompanion) {
+        throw new RemoteTransportError(
+          "remote_invocation_failed",
+          "Remote visual companion transport is not available."
+        );
+      }
+
+      const translate = (event: TaskCompanionStreamEvent) =>
+        listener({ ...event, taskId });
+      const route = taskRouteForId(taskId);
+      if (route) {
+        return observeTaskCompanion(
+          { desktopId: route.desktopId, taskId: route.taskId },
+          translate
+        );
+      }
+
+      if (listCloudTasks) {
+        let closed = false;
+        let activeSubscription: TaskCompanionSubscription | null = null;
+
+        void resolveCloudTaskRoute(taskId)
+          .then((resolvedRoute) => {
+            if (closed) return;
+            const targetRoute =
+              resolvedRoute ?? {
+                desktopId: getSelectedDesktopOrThrow(getSelectedDesktopId),
+                taskId
+              };
+            activeSubscription = observeTaskCompanion(
+              { desktopId: targetRoute.desktopId, taskId: targetRoute.taskId },
+              translate
+            );
+            if (closed) activeSubscription.close();
+          })
+          .catch((error) => {
+            if (closed) return;
+            listener({
+              type: "error",
+              taskId,
+              code: "desktop_unavailable",
+              message: formatErrorMessage(error)
+            });
+          });
+
+        return {
+          close() {
+            closed = true;
+            activeSubscription?.close();
+          },
+          sendEvent(sessionId, revision, event) {
+            if (closed) return false;
+            if (activeSubscription) {
+              return activeSubscription.sendEvent(sessionId, revision, event);
+            }
+            return false;
+          }
+        };
+      }
+
+      const desktopId = getSelectedDesktopOrThrow(getSelectedDesktopId);
+      return observeTaskCompanion({ desktopId, taskId }, translate);
     }
   };
 }

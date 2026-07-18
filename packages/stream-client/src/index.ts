@@ -9,6 +9,8 @@
 import type {
   AgentEvent,
   ClientFrame,
+  CompanionDocumentKind,
+  CompanionEvent,
   FrameAgentEvent,
   PermissionDecision,
   ServerFrame,
@@ -64,6 +66,28 @@ export interface TerminalStreamHandlers {
   onError?(code: string, message: string): void;
 }
 
+export interface CompanionSnapshot {
+  sessionId: string;
+  revision: string;
+  documentKind: CompanionDocumentKind;
+  html: string;
+}
+
+export interface CompanionEventResult {
+  eventId: string;
+  accepted: boolean;
+  code?: string;
+  message?: string;
+}
+
+export interface CompanionStreamHandlers {
+  onSnapshot(snapshot: CompanionSnapshot): void;
+  onUnavailable(): void;
+  onEventResult(result: CompanionEventResult): void;
+  onConnectionChange?(connected: boolean): void;
+  onError?(code: string, message: string): void;
+}
+
 export interface StreamClientOptions {
   /** e.g. ws://127.0.0.1:48120/v1/stream */
   url: string;
@@ -91,7 +115,12 @@ interface TerminalAttachment {
   handlers: TerminalStreamHandlers;
 }
 
-type Attachment = AgentAttachment | TerminalAttachment;
+interface CompanionAttachment {
+  kind: "companion";
+  handlers: CompanionStreamHandlers;
+}
+
+type Attachment = AgentAttachment | TerminalAttachment | CompanionAttachment;
 type StateChangedListener = (scope: StateChangeScope) => void;
 
 interface PendingRequest {
@@ -164,6 +193,14 @@ export class StreamClient {
     this.sendFrame({ type: "attach", task_id: taskId, kind: "terminal", from_seq: 0 });
   }
 
+  attachCompanion(taskId: string, handlers: CompanionStreamHandlers): void {
+    this.attachments.set(attachmentKey(taskId, "companion"), {
+      kind: "companion",
+      handlers,
+    });
+    this.sendFrame({ type: "attach", task_id: taskId, kind: "companion", from_seq: 0 });
+  }
+
   detach(taskId: string, kind: StreamKind): void {
     this.attachments.delete(attachmentKey(taskId, kind));
     this.sendFrame({ type: "detach", task_id: taskId, kind });
@@ -196,6 +233,22 @@ export class StreamClient {
 
   sendTermResize(taskId: string, cols: number, rows: number): void {
     this.sendFrame({ type: "term_resize", task_id: taskId, cols, rows });
+  }
+
+  sendCompanionEvent(
+    taskId: string,
+    sessionId: string,
+    revision: string,
+    event: CompanionEvent,
+  ): boolean {
+    if (!this.authed || !this.socket) return false;
+    return this.rawSend({
+      type: "companion_event",
+      task_id: taskId,
+      session_id: sessionId,
+      revision,
+      event,
+    });
   }
 
   onStateChanged(listener: StateChangedListener): () => void {
@@ -257,6 +310,11 @@ export class StreamClient {
     const wasAuthed = this.authed;
     this.authed = false;
     this.options.onConnectionChange?.(false);
+    for (const attachment of this.attachments.values()) {
+      if (attachment.kind === "companion") {
+        attachment.handlers.onConnectionChange?.(false);
+      }
+    }
     this.failPendingRequests(new Error("stream disconnected"));
 
     // An auth-failure close (or a local credential fetch failure) before we
@@ -335,6 +393,11 @@ export class StreamClient {
         this.forceRefreshNextAuth = false;
         this.authRetryConsumed = false;
         this.options.onConnectionChange?.(true);
+        for (const attachment of this.attachments.values()) {
+          if (attachment.kind === "companion") {
+            attachment.handlers.onConnectionChange?.(true);
+          }
+        }
         // Re-attach everything we track, resuming agent streams from the
         // last seen seq, then flush queued frames.
         for (const [key, attachment] of this.attachments) {
@@ -394,6 +457,32 @@ export class StreamClient {
         this.terminalAttachment(frame.task_id)?.handlers.onOutput(frame.data_b64);
         return;
       }
+      case "companion_snapshot": {
+        this.companionAttachment(frame.task_id)?.handlers.onSnapshot({
+          sessionId: frame.session_id,
+          revision: frame.revision,
+          documentKind: frame.document_kind,
+          html: frame.html,
+        });
+        return;
+      }
+      case "companion_unavailable": {
+        this.companionAttachment(frame.task_id)?.handlers.onUnavailable();
+        return;
+      }
+      case "companion_event_result": {
+        this.companionAttachment(frame.task_id)?.handlers.onEventResult({
+          eventId: frame.event_id,
+          accepted: frame.accepted,
+          ...(frame.code == null ? {} : { code: frame.code }),
+          ...(frame.message == null ? {} : { message: frame.message }),
+        });
+        return;
+      }
+      case "companion_error": {
+        this.companionAttachment(frame.task_id)?.handlers.onError?.(frame.code, frame.message);
+        return;
+      }
       case "response": {
         const pending = this.pendingRequests.get(Number(frame.id));
         if (pending) {
@@ -406,6 +495,7 @@ export class StreamClient {
         if (frame.task_id) {
           this.agentAttachment(frame.task_id)?.handlers.onError?.(frame.code, frame.message);
           this.terminalAttachment(frame.task_id)?.handlers.onError?.(frame.code, frame.message);
+          this.companionAttachment(frame.task_id)?.handlers.onError?.(frame.code, frame.message);
         } else {
           for (const attachment of this.attachments.values()) {
             attachment.handlers.onError?.(frame.code, frame.message);
@@ -426,6 +516,11 @@ export class StreamClient {
     return attachment?.kind === "terminal" ? attachment : undefined;
   }
 
+  private companionAttachment(taskId: string): CompanionAttachment | undefined {
+    const attachment = this.attachments.get(attachmentKey(taskId, "companion"));
+    return attachment?.kind === "companion" ? attachment : undefined;
+  }
+
   private sendFrame(frame: ClientFrame): void {
     if (!this.authed || !this.socket) {
       // Attaches are re-sent from the attachment registry on auth; queue
@@ -438,12 +533,14 @@ export class StreamClient {
     this.rawSend(frame);
   }
 
-  private rawSend(frame: ClientFrame, socket = this.socket): void {
+  private rawSend(frame: ClientFrame, socket = this.socket): boolean {
     try {
-      if (socket !== this.socket) return;
-      socket?.send(JSON.stringify(frame));
+      if (socket !== this.socket || !socket) return false;
+      socket.send(JSON.stringify(frame));
+      return true;
     } catch {
       // Socket died between checks; the close handler reconnects.
+      return false;
     }
   }
 }

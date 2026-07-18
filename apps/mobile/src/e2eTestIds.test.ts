@@ -24,6 +24,24 @@ describe("MOBILE_E2E_IDS", () => {
       "mobile.task-title-dismiss-layer"
     );
     expect(MOBILE_E2E_IDS.taskBackButton).toBe("mobile.task-back-button");
+    expect(MOBILE_E2E_IDS.visualCompanionButton).toBe(
+      "mobile.visual-companion.button"
+    );
+    expect(MOBILE_E2E_IDS.visualCompanionUnread).toBe(
+      "mobile.visual-companion.unread"
+    );
+    expect(MOBILE_E2E_IDS.visualCompanionModal).toBe(
+      "mobile.visual-companion.modal"
+    );
+    expect(MOBILE_E2E_IDS.visualCompanionClose).toBe(
+      "mobile.visual-companion.close"
+    );
+    expect(MOBILE_E2E_IDS.visualCompanionStatus).toBe(
+      "mobile.visual-companion.status"
+    );
+    expect(MOBILE_E2E_IDS.visualCompanionWebView).toBe(
+      "mobile.visual-companion.webview"
+    );
     expect(MOBILE_E2E_IDS.accountButton).toBe("mobile.account-button");
     expect(MOBILE_E2E_IDS.accountSheet).toBe("mobile.account-sheet");
     expect(MOBILE_E2E_IDS.accountCloseButton).toBe("mobile.account-close");

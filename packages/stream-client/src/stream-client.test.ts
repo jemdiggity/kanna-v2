@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentEvent, ClientFrame, ServerFrame } from "@kanna/agent-protocol";
+import type {
+  AgentEvent,
+  ClientFrame,
+  CompanionEvent,
+  ServerFrame,
+} from "@kanna/agent-protocol";
 import {
   createRelayTunnelWebSocketFactory,
   StreamClient,
@@ -256,6 +261,162 @@ describe("StreamClient", () => {
       { type: "auth" },
       { type: "attach", task_id: "task-pty", kind: "terminal", from_seq: 0 },
     ]);
+    client.close();
+  });
+
+  it("attaches, dispatches, sends, detaches, and reconnects visual companions", () => {
+    const { client, socket } = connectedClient();
+    const snapshots: string[] = [];
+    const unavailable: string[] = [];
+    const results: string[] = [];
+    const errors: string[] = [];
+    const terminalErrors: string[] = [];
+
+    client.attachTerminal("task-1", {
+      onOutput: () => {},
+      onError: (code) => terminalErrors.push(code),
+    });
+    client.attachCompanion("task-1", {
+      onSnapshot: (snapshot) =>
+        snapshots.push(
+          `${snapshot.sessionId}:${snapshot.revision}:${snapshot.documentKind}:${snapshot.html}`,
+        ),
+      onUnavailable: () => unavailable.push("unavailable"),
+      onEventResult: (result) =>
+        results.push(
+          `${result.eventId}:${result.accepted}:${result.code ?? ""}:${result.message ?? ""}`,
+        ),
+      onError: (code, message) => errors.push(`${code}:${message}`),
+    });
+    expect(socket.sent.at(-1)).toEqual({
+      type: "attach",
+      task_id: "task-1",
+      kind: "companion",
+      from_seq: 0,
+    });
+
+    socket.receive({
+      type: "companion_snapshot",
+      task_id: "task-1",
+      session_id: "123-456",
+      revision: "rev-1",
+      document_kind: "fragment",
+      html: "<h2>Choose</h2>",
+    });
+    socket.receive({ type: "companion_unavailable", task_id: "task-1" });
+    socket.receive({
+      type: "companion_event_result",
+      task_id: "task-1",
+      event_id: "event-1",
+      accepted: true,
+    });
+    socket.receive({
+      type: "companion_event_result",
+      task_id: "task-1",
+      event_id: "event-2",
+      accepted: false,
+      code: "companion_stale_revision",
+      message: "changed",
+    });
+    socket.receive({
+      type: "companion_error",
+      task_id: "task-1",
+      code: "companion_source_failed",
+      message: "unreadable",
+    });
+
+    expect(snapshots).toEqual(["123-456:rev-1:fragment:<h2>Choose</h2>"]);
+    expect(unavailable).toEqual(["unavailable"]);
+    expect(results).toEqual([
+      "event-1:true::",
+      "event-2:false:companion_stale_revision:changed",
+    ]);
+    expect(errors).toEqual(["companion_source_failed:unreadable"]);
+    expect(terminalErrors).toEqual([]);
+
+    const event: CompanionEvent = {
+      event_id: "event-3",
+      type: "click",
+      choice: "a",
+      text: "Option A",
+      id: null,
+      timestamp: 1_784_268_000_000,
+    };
+    client.sendCompanionEvent("task-1", "123-456", "rev-1", event);
+    expect(socket.sent.at(-1)).toEqual({
+      type: "companion_event",
+      task_id: "task-1",
+      session_id: "123-456",
+      revision: "rev-1",
+      event,
+    });
+
+    socket.drop();
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    socket2.open();
+    socket2.receive({ type: "auth_ok" });
+    expect(socket2.sent).toContainEqual({
+      type: "attach",
+      task_id: "task-1",
+      kind: "companion",
+      from_seq: 0,
+    });
+
+    client.detach("task-1", "companion");
+    expect(socket2.sent.at(-1)).toEqual({
+      type: "detach",
+      task_id: "task-1",
+      kind: "companion",
+    });
+    client.close();
+  });
+
+  it("drops companion selections across disconnect and requires a fresh explicit send", () => {
+    const { client, socket } = connectedClient();
+    const connectionChanges: boolean[] = [];
+    client.attachCompanion("task-1", {
+      onSnapshot: () => {},
+      onUnavailable: () => {},
+      onEventResult: () => {},
+      onConnectionChange: (connected) => connectionChanges.push(connected),
+    });
+    const event: CompanionEvent = {
+      event_id: "event-offline",
+      type: "click",
+      choice: "a",
+      text: "Option A",
+      id: null,
+      timestamp: 1_784_268_000_000,
+    };
+
+    socket.drop();
+    expect(connectionChanges).toEqual([false]);
+    expect(
+      client.sendCompanionEvent("task-1", "session-1", "rev-1", event),
+    ).toBe(false);
+
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    socket2.open();
+    socket2.receive({ type: "auth_ok" });
+
+    expect(connectionChanges).toEqual([false, true]);
+    expect(socket2.sent).toEqual([
+      { type: "auth" },
+      { type: "attach", task_id: "task-1", kind: "companion", from_seq: 0 },
+    ]);
+    expect(
+      client.sendCompanionEvent("task-1", "session-1", "rev-2", {
+        ...event,
+        event_id: "event-retry",
+      }),
+    ).toBe(true);
+    expect(socket2.sent.at(-1)).toMatchObject({
+      type: "companion_event",
+      revision: "rev-2",
+      event: { event_id: "event-retry" },
+    });
     client.close();
   });
 

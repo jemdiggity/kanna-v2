@@ -1,5 +1,7 @@
 import type {
   AgentEvent,
+  CompanionDocumentKind,
+  CompanionEvent,
   FrameAgentEvent,
   PermissionDecision,
 } from "@kanna/agent-protocol";
@@ -48,6 +50,32 @@ export interface TaskAgentSubscription {
   interrupt(): void;
 }
 
+export type TaskCompanionStreamEvent =
+  | { type: "connection"; taskId: string; connected: boolean }
+  | {
+      type: "snapshot";
+      taskId: string;
+      sessionId: string;
+      revision: string;
+      documentKind: CompanionDocumentKind;
+      html: string;
+    }
+  | { type: "unavailable"; taskId: string }
+  | {
+      type: "event_result";
+      taskId: string;
+      eventId: string;
+      accepted: boolean;
+      code?: string;
+      message?: string;
+    }
+  | { type: "error"; taskId: string; code: string; message: string };
+
+export interface TaskCompanionSubscription {
+  close(): void;
+  sendEvent(sessionId: string, revision: string, event: CompanionEvent): boolean;
+}
+
 export interface KannaTransport {
   getTaskRouteIdentity?(taskId: string): string;
   getStatus(): Promise<MobileServerStatus>;
@@ -78,6 +106,10 @@ export interface KannaTransport {
     taskId: string,
     listener: (event: TaskAgentStreamEvent) => void
   ): TaskAgentSubscription;
+  observeTaskCompanion(
+    taskId: string,
+    listener: (event: TaskCompanionStreamEvent) => void
+  ): TaskCompanionSubscription;
 }
 
 export interface KannaClient {
@@ -110,6 +142,10 @@ export interface KannaClient {
     taskId: string,
     listener: (event: TaskAgentStreamEvent) => void
   ): TaskAgentSubscription;
+  observeTaskCompanion(
+    taskId: string,
+    listener: (event: TaskCompanionStreamEvent) => void
+  ): TaskCompanionSubscription;
 }
 
 export type TaskCreationOutcome = "not-created" | "unknown";
@@ -173,6 +209,8 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     observeTaskTerminal: (taskId, listener) =>
       transport.observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>
-      transport.observeTaskAgent(taskId, listener)
+      transport.observeTaskAgent(taskId, listener),
+    observeTaskCompanion: (taskId, listener) =>
+      transport.observeTaskCompanion(taskId, listener)
   };
 }

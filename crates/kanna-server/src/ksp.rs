@@ -6,8 +6,9 @@
 //! Frame schema: `crates/kanna-agent-protocol/src/frames.rs` (TS mirrors in
 //! `packages/agent-protocol`).
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
@@ -19,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use kanna_agent_protocol::{
-    ClientFrame, FrameAgentEvent, PermissionDecision, ServerFrame, StreamKind,
+    ClientFrame, CompanionEvent, FrameAgentEvent, PermissionDecision, ServerFrame, StreamKind,
 };
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 
@@ -64,10 +65,177 @@ fn status_str(status: SessionStatus) -> &'static str {
     }
 }
 
+#[derive(Clone)]
+struct CompanionFrameSender {
+    state: Arc<Mutex<CompanionFrameState>>,
+    notify_tx: mpsc::Sender<()>,
+}
+
+impl CompanionFrameSender {
+    fn attachment(&self, task_id: String) -> CompanionAttachmentSender {
+        let generation = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .invalidate(&task_id);
+        CompanionAttachmentSender {
+            task_id,
+            generation,
+            state: self.state.clone(),
+            notify_tx: self.notify_tx.clone(),
+        }
+    }
+
+    fn invalidate(&self, task_id: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .invalidate(task_id);
+    }
+}
+
+#[derive(Default)]
+struct CompanionFrameState {
+    pending: HashMap<String, ServerFrame>,
+    ready: VecDeque<String>,
+    generations: HashMap<String, u64>,
+}
+
+impl CompanionFrameState {
+    fn invalidate(&mut self, task_id: &str) -> u64 {
+        let generation = {
+            let current = self.generations.entry(task_id.to_string()).or_default();
+            *current = current.wrapping_add(1);
+            if *current == 0 {
+                *current = 1;
+            }
+            *current
+        };
+        self.pending.remove(task_id);
+        self.ready.retain(|queued_task| queued_task != task_id);
+        generation
+    }
+}
+
+#[derive(Clone)]
+struct CompanionAttachmentSender {
+    task_id: String,
+    generation: u64,
+    state: Arc<Mutex<CompanionFrameState>>,
+    notify_tx: mpsc::Sender<()>,
+}
+
+impl CompanionAttachmentSender {
+    fn publish(&self, frame: ServerFrame) -> bool {
+        if self.notify_tx.is_closed() {
+            return false;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.generations.get(&self.task_id) != Some(&self.generation) {
+            return false;
+        }
+        if !state.pending.contains_key(&self.task_id) {
+            state.ready.push_back(self.task_id.clone());
+        }
+        state.pending.insert(self.task_id.clone(), frame);
+        drop(state);
+
+        match self.notify_tx.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => true,
+            Err(mpsc::error::TrySendError::Closed(())) => false,
+        }
+    }
+}
+
+struct OutboundFrameReceiver {
+    frame_rx: mpsc::Receiver<ServerFrame>,
+    companion_state: Arc<Mutex<CompanionFrameState>>,
+    companion_notify_rx: mpsc::Receiver<()>,
+    frame_closed: bool,
+    companion_closed: bool,
+}
+
+fn outbound_frame_channel(
+    capacity: usize,
+) -> (
+    mpsc::Sender<ServerFrame>,
+    CompanionFrameSender,
+    OutboundFrameReceiver,
+) {
+    let (frame_tx, frame_rx) = mpsc::channel(capacity);
+    let (notify_tx, companion_notify_rx) = mpsc::channel(1);
+    let companion_state = Arc::new(Mutex::new(CompanionFrameState::default()));
+    (
+        frame_tx,
+        CompanionFrameSender {
+            state: companion_state.clone(),
+            notify_tx,
+        },
+        OutboundFrameReceiver {
+            frame_rx,
+            companion_state,
+            companion_notify_rx,
+            frame_closed: false,
+            companion_closed: false,
+        },
+    )
+}
+
+impl OutboundFrameReceiver {
+    fn take_companion(&self) -> Option<ServerFrame> {
+        let mut state = self
+            .companion_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(task_id) = state.ready.pop_front() {
+            if let Some(frame) = state.pending.remove(&task_id) {
+                return Some(frame);
+            }
+        }
+        None
+    }
+
+    async fn recv(&mut self) -> Option<ServerFrame> {
+        loop {
+            if !self.frame_closed {
+                match self.frame_rx.try_recv() {
+                    Ok(frame) => return Some(frame),
+                    Err(mpsc::error::TryRecvError::Disconnected) => self.frame_closed = true,
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
+            if let Some(frame) = self.take_companion() {
+                return Some(frame);
+            }
+            if self.frame_closed && self.companion_closed {
+                return None;
+            }
+
+            tokio::select! {
+                biased;
+                frame = self.frame_rx.recv(), if !self.frame_closed => {
+                    match frame {
+                        Some(frame) => return Some(frame),
+                        None => self.frame_closed = true,
+                    }
+                }
+                notification = self.companion_notify_rx.recv(), if !self.companion_closed => {
+                    if notification.is_none() {
+                        self.companion_closed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (incoming_tx, incoming_rx) = mpsc::channel::<String>(256);
-    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(256);
+    let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
 
     let reader_task = tokio::spawn(async move {
         while let Some(Ok(message)) = ws_rx.next().await {
@@ -83,14 +251,24 @@ pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     });
     let writer_task = tokio::spawn(async move {
-        while let Some(json) = outgoing_rx.recv().await {
+        while let Some(frame) = outbound_rx.recv().await {
+            let Ok(json) = serde_json::to_string(&frame) else {
+                continue;
+            };
             if ws_tx.send(WsMessage::Text(json.into())).await.is_err() {
                 return;
             }
         }
     });
 
-    handle_stream_channels(incoming_rx, outgoing_tx, state, AuthMode::AllowEmpty).await;
+    handle_stream_channels(
+        incoming_rx,
+        frame_tx,
+        companion_tx,
+        state,
+        AuthMode::AllowEmpty,
+    )
+    .await;
     reader_task.abort();
     let _ = writer_task.await;
 }
@@ -102,7 +280,7 @@ pub async fn handle_tungstenite_stream(
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (incoming_tx, incoming_rx) = mpsc::channel::<String>(256);
-    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(256);
+    let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
 
     let reader_task = tokio::spawn(async move {
         while let Some(Ok(message)) = ws_rx.next().await {
@@ -118,7 +296,10 @@ pub async fn handle_tungstenite_stream(
         }
     });
     let writer_task = tokio::spawn(async move {
-        while let Some(json) = outgoing_rx.recv().await {
+        while let Some(frame) = outbound_rx.recv().await {
+            let Ok(json) = serde_json::to_string(&frame) else {
+                continue;
+            };
             if ws_tx
                 .send(TungsteniteMessage::Text(json.into()))
                 .await
@@ -129,19 +310,18 @@ pub async fn handle_tungstenite_stream(
         }
     });
 
-    handle_stream_channels(incoming_rx, outgoing_tx, state, auth_mode).await;
+    handle_stream_channels(incoming_rx, frame_tx, companion_tx, state, auth_mode).await;
     reader_task.abort();
     let _ = writer_task.await;
 }
 
 async fn handle_stream_channels(
     mut incoming_rx: mpsc::Receiver<String>,
-    outgoing_tx: mpsc::Sender<String>,
+    frame_tx: mpsc::Sender<ServerFrame>,
+    companion_tx: CompanionFrameSender,
     state: Arc<AppState>,
     auth_mode: AuthMode,
 ) {
-    let (frame_tx, frame_rx) = mpsc::channel::<ServerFrame>(256);
-    let writer_task = tokio::spawn(write_frames(outgoing_tx, frame_rx));
     let mut state_change_rx = state.subscribe_state_changes();
     let state_change_tx = frame_tx.clone();
     let state_change_task = tokio::spawn(async move {
@@ -160,10 +340,12 @@ async fn handle_stream_channels(
     let mut conn = StreamConn {
         state,
         frame_tx,
+        companion_tx,
         attachments: HashMap::new(),
         terminal_controls: HashMap::new(),
         agent_commands: None,
         requests: None,
+        companion_event_times: HashMap::new(),
         authed: false,
         auth_mode,
     };
@@ -185,13 +367,11 @@ async fn handle_stream_channels(
         }
     }
 
-    // Abort attachment tasks (each holds a frame_tx clone), then drop our
-    // own sender so the writer drains queued frames and exits — aborting it
-    // would lose final frames (e.g. the unauthenticated error).
+    // Abort attachment tasks, then drop our senders so the socket writer
+    // drains queued ordinary frames and latest companion values before exit.
     conn.shutdown().await;
     drop(conn);
     state_change_task.abort();
-    let _ = writer_task.await;
 }
 
 fn is_relay_tunnel_control_message(message: &str) -> bool {
@@ -206,27 +386,15 @@ fn is_relay_tunnel_control_message(message: &str) -> bool {
         .is_some_and(|kind| kind == "tunnel_ready")
 }
 
-async fn write_frames(
-    outgoing_tx: mpsc::Sender<String>,
-    mut frame_rx: mpsc::Receiver<ServerFrame>,
-) {
-    while let Some(frame) = frame_rx.recv().await {
-        let Ok(json) = serde_json::to_string(&frame) else {
-            continue;
-        };
-        if outgoing_tx.send(json).await.is_err() {
-            return;
-        }
-    }
-}
-
 struct StreamConn {
     state: Arc<AppState>,
     frame_tx: mpsc::Sender<ServerFrame>,
+    companion_tx: CompanionFrameSender,
     attachments: HashMap<(String, StreamKind), JoinHandle<()>>,
     terminal_controls: HashMap<String, TerminalControlHandle>,
     agent_commands: Option<AgentCommandWorker>,
     requests: Option<RequestWorker>,
+    companion_event_times: HashMap<(String, String), VecDeque<Instant>>,
     authed: bool,
     auth_mode: AuthMode,
 }
@@ -670,8 +838,11 @@ impl StreamConn {
     }
 
     async fn shutdown(&mut self) {
-        for (_, task) in self.attachments.drain() {
+        for ((task_id, kind), task) in self.attachments.drain() {
             task.abort();
+            if kind == StreamKind::Companion {
+                self.companion_tx.invalidate(&task_id);
+            }
         }
         let controls = self
             .terminal_controls
@@ -876,6 +1047,101 @@ impl StreamConn {
         }
     }
 
+    async fn handle_companion_event(
+        &mut self,
+        task_id: String,
+        session_id: String,
+        revision: String,
+        event: CompanionEvent,
+    ) {
+        const EVENT_WINDOW: Duration = Duration::from_secs(10);
+        const MAX_EVENTS_PER_WINDOW: usize = 30;
+
+        let event_id = event.event_id.clone();
+        let key = (task_id.clone(), session_id.clone());
+        let now = Instant::now();
+        let recent = self.companion_event_times.entry(key.clone()).or_default();
+        while recent
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) >= EVENT_WINDOW)
+        {
+            recent.pop_front();
+        }
+        if recent.len() >= MAX_EVENTS_PER_WINDOW {
+            self.send(ServerFrame::CompanionEventResult {
+                task_id,
+                event_id,
+                accepted: false,
+                code: Some("companion_rate_limited".into()),
+                message: Some("Too many visual companion selections were sent.".into()),
+            })
+            .await;
+            return;
+        }
+
+        let db_path = self.state.config().db_path.clone();
+        let append_result = tokio::task::spawn_blocking(move || {
+            crate::visual_companion::append_event(
+                &db_path,
+                &task_id,
+                &session_id,
+                &revision,
+                &event,
+            )
+        })
+        .await;
+
+        let (task_id, result) = match append_result {
+            Ok(result) => (key.0.clone(), result),
+            Err(_) => (
+                key.0.clone(),
+                Err(crate::visual_companion::CompanionError::Internal(
+                    "visual companion event worker failed".into(),
+                )),
+            ),
+        };
+        match result {
+            Ok(()) => {
+                self.companion_event_times
+                    .entry(key)
+                    .or_default()
+                    .push_back(Instant::now());
+                self.send(ServerFrame::CompanionEventResult {
+                    task_id,
+                    event_id,
+                    accepted: true,
+                    code: None,
+                    message: None,
+                })
+                .await;
+            }
+            Err(error) => {
+                let (code, message) = match error {
+                    crate::visual_companion::CompanionError::StaleRevision => (
+                        "companion_stale_revision",
+                        "The visual companion changed before the selection arrived.",
+                    ),
+                    crate::visual_companion::CompanionError::InvalidEvent => (
+                        "companion_invalid_event",
+                        "The visual companion selection was invalid.",
+                    ),
+                    _ => (
+                        "companion_event_failed",
+                        "The visual companion selection could not be recorded.",
+                    ),
+                };
+                self.send(ServerFrame::CompanionEventResult {
+                    task_id,
+                    event_id,
+                    accepted: false,
+                    code: Some(code.into()),
+                    message: Some(message.into()),
+                })
+                .await;
+            }
+        }
+    }
+
     /// Returns false when the connection should close.
     async fn handle(&mut self, frame: ClientFrame) -> bool {
         if !self.authed {
@@ -908,6 +1174,9 @@ impl StreamConn {
                     if let Some(control) = self.terminal_controls.remove(&task_id) {
                         Self::retire_terminal_control(control).await;
                     }
+                }
+                if kind == StreamKind::Companion {
+                    self.companion_tx.invalidate(&task_id);
                 }
             }
             ClientFrame::AgentInput { task_id, text } => {
@@ -949,6 +1218,15 @@ impl StreamConn {
                 rows,
             } => self
                 .enqueue_terminal_control(task_id, TerminalControlCommand::Resize { cols, rows }),
+            ClientFrame::CompanionEvent {
+                task_id,
+                session_id,
+                revision,
+                event,
+            } => {
+                self.handle_companion_event(task_id, session_id, revision, event)
+                    .await;
+            }
             ClientFrame::Request {
                 id,
                 method,
@@ -1014,6 +1292,22 @@ impl StreamConn {
     }
 
     async fn attach(&mut self, task_id: String, kind: StreamKind, from_seq: u64) {
+        // Replace any existing attachment for this (task, kind).
+        if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
+            existing.abort();
+        }
+        if kind == StreamKind::Companion {
+            let key = (task_id.clone(), kind);
+            let companion_tx = self.companion_tx.attachment(task_id.clone());
+            let task = tokio::spawn(stream_companion(
+                self.state.config().db_path.clone(),
+                task_id,
+                companion_tx,
+            ));
+            self.attachments.insert(key, task);
+            return;
+        }
+
         let session_id = match (kind, direct_terminal_session_id(&task_id)) {
             (StreamKind::Terminal, Some(session_id)) => Ok(session_id),
             _ => {
@@ -1048,8 +1342,110 @@ impl StreamConn {
             StreamKind::Terminal => {
                 tokio::spawn(stream_terminal(daemon_dir, task_id, session_id, frame_tx))
             }
+            StreamKind::Companion => unreachable!("companion attach handled above"),
         };
         self.attachments.insert(key, task);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PublishedCompanionState {
+    Never,
+    Unavailable,
+    Snapshot {
+        session_id: String,
+        revision: String,
+    },
+    SourceError,
+}
+
+fn companion_source_error(
+    error: &crate::visual_companion::CompanionError,
+) -> (&'static str, &'static str) {
+    use crate::visual_companion::CompanionError;
+
+    match error {
+        CompanionError::TooLarge => (
+            "companion_too_large",
+            "The visual companion is too large. Ask the agent to simplify the screen.",
+        ),
+        CompanionError::UnsupportedContent => (
+            "companion_invalid_document",
+            "The visual companion is not valid UTF-8 HTML. Ask the agent to recreate the screen.",
+        ),
+        CompanionError::TaskNotFound
+        | CompanionError::WorkspaceUnavailable
+        | CompanionError::StaleRevision
+        | CompanionError::InvalidEvent
+        | CompanionError::Internal(_) => (
+            "companion_source_failed",
+            "The visual companion could not be read.",
+        ),
+    }
+}
+
+async fn stream_companion(
+    db_path: String,
+    task_id: String,
+    companion_tx: CompanionAttachmentSender,
+) {
+    let mut published = PublishedCompanionState::Never;
+    loop {
+        let scan_db_path = db_path.clone();
+        let scan_task_id = task_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::visual_companion::current_document(&scan_db_path, &scan_task_id)
+        })
+        .await;
+
+        let (next_state, frame) = match result {
+            Ok(Ok(Some(document))) => (
+                PublishedCompanionState::Snapshot {
+                    session_id: document.session_id.clone(),
+                    revision: document.revision.clone(),
+                },
+                ServerFrame::CompanionSnapshot {
+                    task_id: task_id.clone(),
+                    session_id: document.session_id,
+                    revision: document.revision,
+                    document_kind: document.document_kind,
+                    html: document.html,
+                },
+            ),
+            Ok(Ok(None)) => (
+                PublishedCompanionState::Unavailable,
+                ServerFrame::CompanionUnavailable {
+                    task_id: task_id.clone(),
+                },
+            ),
+            Ok(Err(error)) => {
+                let (code, message) = companion_source_error(&error);
+                (
+                    PublishedCompanionState::SourceError,
+                    ServerFrame::CompanionError {
+                        task_id: task_id.clone(),
+                        code: code.into(),
+                        message: message.into(),
+                    },
+                )
+            }
+            Err(_) => (
+                PublishedCompanionState::SourceError,
+                ServerFrame::CompanionError {
+                    task_id: task_id.clone(),
+                    code: "companion_source_failed".into(),
+                    message: "The visual companion could not be read.".into(),
+                },
+            ),
+        };
+
+        if next_state != published {
+            if !companion_tx.publish(frame) {
+                return;
+            }
+            published = next_state;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -1429,8 +1825,9 @@ async fn stream_terminal_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kanna_agent_protocol::{CompanionDocumentKind, CompanionEvent};
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
@@ -1784,6 +2181,643 @@ mod tests {
                 return serde_json::from_str(&text).expect("parse server frame");
             }
         }
+    }
+
+    async fn recv_frame_with_timeout(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        timeout: Duration,
+    ) -> Option<ServerFrame> {
+        let message = tokio::time::timeout(timeout, socket.next())
+            .await
+            .ok()??
+            .ok()?;
+        match message {
+            TungsteniteMessage::Text(text) => serde_json::from_str(&text).ok(),
+            _ => None,
+        }
+    }
+
+    struct KspCompanionFixture {
+        config: crate::config::Config,
+        db_path: PathBuf,
+        worktree: PathBuf,
+        temp_dir: tempfile::TempDir,
+    }
+
+    impl KspCompanionFixture {
+        fn new(label: &str) -> Self {
+            let temp_dir = tempfile::tempdir().expect("create KSP companion fixture");
+            let db_path = temp_dir.path().join("kanna.sqlite");
+            let worktree = temp_dir.path().join("worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            let unique = format!(
+                "ksp-companion-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let mut config = test_config(&unique, "KSP Companion");
+            config.db_path = db_path.to_string_lossy().to_string();
+            config.pairing_store_path = temp_dir
+                .path()
+                .join("pairings.json")
+                .to_string_lossy()
+                .to_string();
+            let db = Db::open_for_tests(&config.db_path).unwrap();
+            db.insert_test_repo_with_path("repo-1", temp_dir.path().to_str().unwrap(), "Repo One")
+                .unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Visual companion",
+                None,
+                "in progress",
+                "2026-07-17T00:00:00Z",
+            )
+            .unwrap();
+            db.upsert_worktree("wt-task-1", "task-1", worktree.to_str().unwrap(), "task-1")
+                .unwrap();
+            Self {
+                config,
+                db_path,
+                worktree,
+                temp_dir,
+            }
+        }
+
+        fn write(&self, relative: &str, bytes: &[u8]) {
+            let target = self.worktree.join(relative);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(target, bytes).unwrap();
+        }
+
+        fn activate(&self, session_id: &str, file_name: &str, html: &[u8]) {
+            self.write(
+                &format!(".superpowers/brainstorm/{session_id}/state/server-info"),
+                b"{}",
+            );
+            self.write(
+                &format!(".superpowers/brainstorm/{session_id}/content/{file_name}"),
+                html,
+            );
+        }
+
+        async fn serve(&self) -> String {
+            serve_router(crate::http_api::router(Arc::new(AppState::new(
+                self.config.clone(),
+            ))))
+            .await
+        }
+
+        fn event(event_id: &str) -> CompanionEvent {
+            CompanionEvent {
+                event_id: event_id.into(),
+                event_type: "click".into(),
+                choice: "a".into(),
+                text: "Option A".into(),
+                element_id: None,
+                timestamp: 1_784_268_000_000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_outbound_coalesces_backpressured_revisions_without_starving_terminal() {
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
+        let companion_attachment = companion_tx.attachment("task-1".into());
+        let snapshot = |revision: &str| ServerFrame::CompanionSnapshot {
+            task_id: "task-1".into(),
+            session_id: "session-1".into(),
+            revision: revision.into(),
+            document_kind: CompanionDocumentKind::Fragment,
+            html: format!("<p>{revision}</p>"),
+        };
+
+        for revision in ["revision-1", "revision-2", "revision-3"] {
+            assert!(companion_attachment.publish(snapshot(revision)));
+        }
+        frame_tx
+            .send(ServerFrame::TermOutput {
+                task_id: "task-1".into(),
+                data_b64: b64(b"responsive"),
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::TermOutput { .. })
+        ));
+        match outbound_rx.recv().await {
+            Some(ServerFrame::CompanionSnapshot { revision, .. }) => {
+                assert_eq!(revision, "revision-3")
+            }
+            other => panic!("expected newest companion snapshot, got {other:?}"),
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), outbound_rx.recv())
+                .await
+                .is_err(),
+            "intermediate companion snapshots must be discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn companion_outbound_serves_each_pending_task_before_repeated_updates() {
+        let (_frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
+        let task_a_tx = companion_tx.attachment("task-a".into());
+        let task_b_tx = companion_tx.attachment("task-b".into());
+        let snapshot = |task_id: &str, revision: &str| ServerFrame::CompanionSnapshot {
+            task_id: task_id.into(),
+            session_id: format!("session-{task_id}"),
+            revision: revision.into(),
+            document_kind: CompanionDocumentKind::Fragment,
+            html: format!("<p>{task_id}-{revision}</p>"),
+        };
+
+        assert!(task_a_tx.publish(snapshot("task-a", "revision-a1")));
+        assert!(task_b_tx.publish(snapshot("task-b", "revision-b1")));
+
+        let first_task = match outbound_rx.recv().await {
+            Some(ServerFrame::CompanionSnapshot { task_id, .. }) => task_id,
+            other => panic!("expected first companion snapshot, got {other:?}"),
+        };
+        let other_task = if first_task == "task-a" {
+            "task-b"
+        } else {
+            "task-a"
+        };
+        let noisy_tx = if first_task == "task-a" {
+            &task_a_tx
+        } else {
+            &task_b_tx
+        };
+        assert!(noisy_tx.publish(snapshot(&first_task, "revision-2")));
+        assert!(noisy_tx.publish(snapshot(&first_task, "revision-3")));
+
+        match outbound_rx.recv().await {
+            Some(ServerFrame::CompanionSnapshot { task_id, .. }) => {
+                assert_eq!(task_id, other_task, "a noisy task must not starve its peer")
+            }
+            other => panic!("expected peer companion snapshot, got {other:?}"),
+        }
+        match outbound_rx.recv().await {
+            Some(ServerFrame::CompanionSnapshot {
+                task_id, revision, ..
+            }) => {
+                assert_eq!(task_id, first_task);
+                assert_eq!(revision, "revision-3");
+            }
+            other => panic!("expected coalesced repeated update, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_outbound_rejects_a_publisher_invalidated_by_reattach() {
+        let (_frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
+        let snapshot = |revision: &str| ServerFrame::CompanionSnapshot {
+            task_id: "task-1".into(),
+            session_id: "session-1".into(),
+            revision: revision.into(),
+            document_kind: CompanionDocumentKind::Fragment,
+            html: format!("<p>{revision}</p>"),
+        };
+
+        let old_attachment = companion_tx.attachment("task-1".into());
+        assert!(old_attachment.publish(snapshot("revision-1")));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::CompanionSnapshot { revision, .. }) if revision == "revision-1"
+        ));
+
+        let current_attachment = companion_tx.attachment("task-1".into());
+        assert!(
+            !old_attachment.publish(snapshot("stale-revision")),
+            "a publisher resumed after re-attach must be rejected"
+        );
+        assert!(current_attachment.publish(snapshot("current-revision")));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::CompanionSnapshot { revision, .. }) if revision == "current-revision"
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), outbound_rx.recv())
+                .await
+                .is_err(),
+            "the invalidated attachment must not repopulate the pending slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn companion_attach_streams_latest_transitions_and_detaches() {
+        let fixture = KspCompanionFixture::new("attach");
+        fixture.activate("123-456", "first.html", b"<h2>First</h2>");
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        let first_revision = match recv_frame(&mut socket).await {
+            ServerFrame::CompanionSnapshot {
+                task_id,
+                session_id,
+                revision,
+                document_kind,
+                html,
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(session_id, "123-456");
+                assert_eq!(document_kind, CompanionDocumentKind::Fragment);
+                assert_eq!(html, "<h2>First</h2>");
+                revision
+            }
+            other => panic!("expected companion snapshot, got {other:?}"),
+        };
+
+        std::thread::sleep(Duration::from_millis(15));
+        fixture.activate("123-456", "second.html", b"<h2>Second</h2>");
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionSnapshot { revision, html, .. } => {
+                assert_ne!(revision, first_revision);
+                assert_eq!(html, "<h2>Second</h2>");
+            }
+            other => panic!("expected updated companion snapshot, got {other:?}"),
+        }
+        assert_eq!(
+            recv_frame_with_timeout(&mut socket, Duration::from_millis(650)).await,
+            None,
+            "unchanged content must not produce duplicate snapshots"
+        );
+
+        let replacement = fixture.temp_dir.path().join("replacement");
+        std::fs::create_dir_all(&replacement).unwrap();
+        Db::open(fixture.db_path.to_str().unwrap())
+            .unwrap()
+            .upsert_worktree(
+                "wt-task-1",
+                "task-1",
+                replacement.to_str().unwrap(),
+                "replacement",
+            )
+            .unwrap();
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionUnavailable {
+                task_id: "task-1".into()
+            }
+        );
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::Detach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+            },
+        )
+        .await;
+        Db::open(fixture.db_path.to_str().unwrap())
+            .unwrap()
+            .upsert_worktree(
+                "wt-task-1",
+                "task-1",
+                fixture.worktree.to_str().unwrap(),
+                "task-1",
+            )
+            .unwrap();
+        assert_eq!(
+            recv_frame_with_timeout(&mut socket, Duration::from_millis(650)).await,
+            None,
+            "detached companions must stop sending updates"
+        );
+    }
+
+    #[tokio::test]
+    async fn companion_attach_reports_unavailable_and_invalid_source_specifically() {
+        let fixture = KspCompanionFixture::new("unavailable");
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+            },
+        )
+        .await;
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionUnavailable {
+                task_id: "task-1".into()
+            }
+        );
+
+        fixture.activate("invalid", "layout.html", &[0xff, 0xfe]);
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionError {
+                task_id,
+                code,
+                message,
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(code, "companion_invalid_document");
+                assert_eq!(
+                    message,
+                    "The visual companion is not valid UTF-8 HTML. Ask the agent to recreate the screen."
+                );
+            }
+            other => panic!("expected task-scoped companion error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_attach_reports_oversized_source_specifically() {
+        let fixture = KspCompanionFixture::new("oversized");
+        fixture.activate(
+            "large",
+            "layout.html",
+            &vec![b'x'; crate::visual_companion::MAX_COMPANION_HTML_BYTES as usize + 1],
+        );
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionError {
+                task_id: "task-1".into(),
+                code: "companion_too_large".into(),
+                message: "The visual companion is too large. Ask the agent to simplify the screen."
+                    .into(),
+            }
+        );
+    }
+
+    #[test]
+    fn companion_source_errors_keep_internal_details_private() {
+        for error in [
+            crate::visual_companion::CompanionError::WorkspaceUnavailable,
+            crate::visual_companion::CompanionError::Internal(
+                "failed to read /private/worktree/secret.html".into(),
+            ),
+        ] {
+            assert_eq!(
+                companion_source_error(&error),
+                (
+                    "companion_source_failed",
+                    "The visual companion could not be read."
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_events_acknowledge_append_validation_and_connection_rate_limit() {
+        let fixture = KspCompanionFixture::new("events");
+        fixture.activate(
+            "123-456",
+            "layout.html",
+            b"<button data-choice='a'>A</button>",
+        );
+        let document =
+            crate::visual_companion::current_document(fixture.db_path.to_str().unwrap(), "task-1")
+                .unwrap()
+                .unwrap();
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+
+        let send_event = |event: CompanionEvent, session_id: String, revision: String| {
+            ClientFrame::CompanionEvent {
+                task_id: "task-1".into(),
+                session_id,
+                revision,
+                event,
+            }
+        };
+        send_frame(
+            &mut socket,
+            &send_event(
+                KspCompanionFixture::event("accepted"),
+                document.session_id.clone(),
+                document.revision.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionEventResult {
+                task_id: "task-1".into(),
+                event_id: "accepted".into(),
+                accepted: true,
+                code: None,
+                message: None,
+            }
+        );
+
+        send_frame(
+            &mut socket,
+            &send_event(
+                KspCompanionFixture::event("stale"),
+                document.session_id.clone(),
+                "old-revision".into(),
+            ),
+        )
+        .await;
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionEventResult {
+                event_id,
+                accepted,
+                code,
+                ..
+            } => {
+                assert_eq!(event_id, "stale");
+                assert!(!accepted);
+                assert_eq!(code.as_deref(), Some("companion_stale_revision"));
+            }
+            other => panic!("expected stale event result, got {other:?}"),
+        }
+
+        let mut invalid = KspCompanionFixture::event("invalid");
+        invalid.choice.clear();
+        send_frame(
+            &mut socket,
+            &send_event(
+                invalid,
+                document.session_id.clone(),
+                document.revision.clone(),
+            ),
+        )
+        .await;
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionEventResult { code, .. } => {
+                assert_eq!(code.as_deref(), Some("companion_invalid_event"));
+            }
+            other => panic!("expected invalid event result, got {other:?}"),
+        }
+
+        let mut rate_socket = ws_connect(&url).await;
+        send_frame(&mut rate_socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut rate_socket).await, ServerFrame::AuthOk);
+        for index in 0..30 {
+            let event_id = format!("rate-{index}");
+            send_frame(
+                &mut rate_socket,
+                &send_event(
+                    KspCompanionFixture::event(&event_id),
+                    document.session_id.clone(),
+                    document.revision.clone(),
+                ),
+            )
+            .await;
+            match recv_frame(&mut rate_socket).await {
+                ServerFrame::CompanionEventResult { accepted, .. } => assert!(accepted),
+                other => panic!("expected accepted rate event, got {other:?}"),
+            }
+        }
+        send_frame(
+            &mut rate_socket,
+            &send_event(
+                KspCompanionFixture::event("rate-limited"),
+                document.session_id,
+                document.revision,
+            ),
+        )
+        .await;
+        match recv_frame(&mut rate_socket).await {
+            ServerFrame::CompanionEventResult { accepted, code, .. } => {
+                assert!(!accepted);
+                assert_eq!(code.as_deref(), Some("companion_rate_limited"));
+            }
+            other => panic!("expected rate-limited result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn maximum_companion_scan_does_not_block_terminal_output_for_a_poll_interval() {
+        let mut fixture = KspCompanionFixture::new("terminal-responsive");
+        let mut html = vec![b'x'; crate::visual_companion::MAX_COMPANION_HTML_BYTES as usize];
+        html[..11].copy_from_slice(b"<h2>Busy</h");
+        fixture.activate("123-456", "layout.html", &html);
+
+        let daemon_dir = fixture.temp_dir.path().join("daemon");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        fixture.config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        let socket_path = daemon_socket_path_for_dir(&fixture.config.daemon_dir);
+        let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = daemon_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            assert!(matches!(command, DaemonCommand::AttachSnapshot { .. }));
+            let snapshot = DaemonEvent::Snapshot {
+                session_id: "daemon-terminal-1".into(),
+                snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                    version: 1,
+                    rows: 24,
+                    cols: 80,
+                    cursor_row: 0,
+                    cursor_col: 0,
+                    cursor_visible: true,
+                    saved_at: 0,
+                    sequence: 0,
+                    vt: String::new(),
+                },
+            };
+            let output = DaemonEvent::Output {
+                session_id: "daemon-terminal-1".into(),
+                data: b"responsive".to_vec(),
+            };
+            for event in [snapshot, output] {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        Db::open(fixture.db_path.to_str().unwrap())
+            .unwrap()
+            .insert_test_terminal_session(
+                "terminal-1",
+                "repo-1",
+                "task-1",
+                "agent",
+                "daemon-terminal-1",
+            )
+            .unwrap();
+
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Terminal,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(490);
+        let mut saw_output = false;
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let Some(frame) = recv_frame_with_timeout(&mut socket, remaining).await else {
+                break;
+            };
+            if matches!(frame, ServerFrame::TermOutput { .. }) {
+                saw_output = true;
+                break;
+            }
+        }
+        assert!(
+            saw_output,
+            "terminal output waited for a full companion polling interval"
+        );
+        daemon.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
     }
 
     #[tokio::test]
@@ -2484,14 +3518,16 @@ mod tests {
 
         let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 2).await;
         let state = Arc::new(AppState::new(config));
-        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
         let mut conn = StreamConn {
             state,
             frame_tx,
+            companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
             agent_commands: None,
             requests: None,
+            companion_event_times: HashMap::new(),
             authed: true,
             auth_mode: AuthMode::AllowEmpty,
         };
@@ -2548,14 +3584,16 @@ mod tests {
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let state = Arc::new(AppState::new(config.clone()));
-        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
         let mut conn = StreamConn {
             state,
             frame_tx,
+            companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
             agent_commands: None,
             requests: None,
+            companion_event_times: HashMap::new(),
             authed: true,
             auth_mode: AuthMode::AllowEmpty,
         };
@@ -2600,14 +3638,16 @@ mod tests {
             "ksp-terminal-detach-control",
             "KSP Terminal Detach Control",
         )));
-        let (frame_tx, _frame_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
         let mut conn = StreamConn {
             state,
             frame_tx,
+            companion_tx,
             attachments: HashMap::new(),
             terminal_controls: HashMap::new(),
             agent_commands: None,
             requests: None,
+            companion_event_times: HashMap::new(),
             authed: true,
             auth_mode: AuthMode::AllowEmpty,
         };
@@ -3283,10 +4323,11 @@ mod tests {
             "KSP Auth Test",
         )));
         let (incoming_tx, incoming_rx) = mpsc::channel(8);
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
         let task = tokio::spawn(handle_stream_channels(
             incoming_rx,
-            outgoing_tx,
+            frame_tx,
+            companion_tx,
             state,
             AuthMode::RequireCredential,
         ));
@@ -3295,8 +4336,7 @@ mod tests {
             .send(serde_json::to_string(&ClientFrame::Auth { credential: None }).unwrap())
             .await
             .unwrap();
-        let frame: ServerFrame =
-            serde_json::from_str(&outgoing_rx.recv().await.expect("error frame")).unwrap();
+        let frame = outbound_rx.recv().await.expect("error frame");
         match frame {
             ServerFrame::Error { code, .. } => assert_eq!(code, "unauthorized"),
             other => panic!("expected unauthorized error, got {other:?}"),
@@ -3311,10 +4351,11 @@ mod tests {
         config.desktop_secret = Some("desktop-secret".to_string());
         let state = Arc::new(crate::http_api::AppState::new(config));
         let (incoming_tx, incoming_rx) = mpsc::channel(8);
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
         let task = tokio::spawn(handle_stream_channels(
             incoming_rx,
-            outgoing_tx,
+            frame_tx,
+            companion_tx,
             state,
             AuthMode::RequireCredential,
         ));
@@ -3328,8 +4369,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let frame: ServerFrame =
-            serde_json::from_str(&outgoing_rx.recv().await.expect("auth ok frame")).unwrap();
+        let frame = outbound_rx.recv().await.expect("auth ok frame");
         assert_eq!(frame, ServerFrame::AuthOk);
         drop(incoming_tx);
         let _ = task.await;
@@ -3343,10 +4383,11 @@ mod tests {
         config.desktop_secret = Some("desktop-secret".to_string());
         let state = Arc::new(crate::http_api::AppState::new(config));
         let (incoming_tx, incoming_rx) = mpsc::channel(8);
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
         let task = tokio::spawn(handle_stream_channels(
             incoming_rx,
-            outgoing_tx,
+            frame_tx,
+            companion_tx,
             state,
             AuthMode::RequireCredential,
         ));
@@ -3360,8 +4401,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let frame: ServerFrame =
-            serde_json::from_str(&outgoing_rx.recv().await.expect("error frame")).unwrap();
+        let frame = outbound_rx.recv().await.expect("error frame");
         match frame {
             ServerFrame::Error { code, .. } => assert_eq!(code, "unauthorized"),
             other => panic!("expected unauthorized error, got {other:?}"),

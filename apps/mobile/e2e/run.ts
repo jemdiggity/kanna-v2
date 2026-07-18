@@ -320,6 +320,7 @@ async function main(): Promise<void> {
       });
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {
+        companion: relayHarness.companion,
         credentials: relayHarness.credentials,
         emitFilePreviewLinks: relayHarness.emitFilePreviewLinks,
         filePreview: relayHarness.filePreview,

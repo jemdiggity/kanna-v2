@@ -1,5 +1,6 @@
 import type {
   TaskAgentSubscription,
+  TaskCompanionSubscription,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../api/client";
@@ -7,6 +8,7 @@ import type {
   RemoteDesktopInvocationRequest,
   RemoteDesktopInvoker,
   RemoteTaskAgentObserver,
+  RemoteTaskCompanionObserver,
   RemoteTaskTerminalObserver
 } from "./remoteTransport";
 import { createRelayTunnelWebSocketFactory, StreamClient } from "@kanna/stream-client";
@@ -29,6 +31,7 @@ export interface RelayDesktopClient {
   listActiveDesktopIds(): Promise<Set<string>>;
   observeTaskTerminal: RemoteTaskTerminalObserver;
   observeTaskAgent: RemoteTaskAgentObserver;
+  observeTaskCompanion: RemoteTaskCompanionObserver;
 }
 
 export interface RelayDesktopClientDependencies {
@@ -417,6 +420,35 @@ export function createRelayDesktopClient({
           client.sendAgentInterrupt(taskId);
         },
       } satisfies TaskAgentSubscription;
+    },
+    observeTaskCompanion({ desktopId, taskId }, listener) {
+      const client = streamClientForDesktop(desktopId);
+      client.attachCompanion(taskId, {
+        onSnapshot(snapshot) {
+          listener({ type: "snapshot", taskId, ...snapshot });
+        },
+        onUnavailable() {
+          listener({ type: "unavailable", taskId });
+        },
+        onEventResult(result) {
+          listener({ type: "event_result", taskId, ...result });
+        },
+        onConnectionChange(connected) {
+          listener({ type: "connection", taskId, connected });
+        },
+        onError(code, message) {
+          listener({ type: "error", taskId, code, message });
+        }
+      });
+
+      return {
+        close() {
+          client.detach(taskId, "companion");
+        },
+        sendEvent(sessionId, revision, event) {
+          return client.sendCompanionEvent(taskId, sessionId, revision, event);
+        }
+      } satisfies TaskCompanionSubscription;
     }
   };
 }

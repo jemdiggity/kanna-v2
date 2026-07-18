@@ -13,14 +13,22 @@ import {
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskFileContent, TaskSummary } from "../lib/api/types";
 import type {
+  TaskCompanionEventStatus,
+  TaskCompanionStatus,
   TaskCreationPhase,
   TaskTerminalStatus
 } from "../state/sessionStore";
-import type { FrameAgentEvent, PermissionDecision } from "@kanna/agent-protocol";
+import type {
+  CompanionDocumentKind,
+  CompanionEvent,
+  FrameAgentEvent,
+  PermissionDecision
+} from "@kanna/agent-protocol";
 import { AgentMessageView } from "./AgentMessageView";
 import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
 import { showTaskActionMenu, type TaskAction } from "./taskActionMenu";
+import { VisualCompanionModal } from "./VisualCompanionModal";
 import {
   clampTaskComposerHeight,
   TASK_COMPOSER_MAX_HEIGHT,
@@ -48,6 +56,16 @@ interface TaskScreenProps {
   agentErrorMessage: string | null;
   taskCreationPhase?: TaskCreationPhase;
   taskCreationErrorMessage?: string | null;
+  companionStatus?: TaskCompanionStatus;
+  companionSnapshot?: {
+    sessionId: string;
+    revision: string;
+    documentKind: CompanionDocumentKind;
+    html: string;
+  } | null;
+  companionUnread?: boolean;
+  companionErrorMessage?: string | null;
+  companionEventStatus?: TaskCompanionEventStatus;
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
@@ -57,6 +75,12 @@ interface TaskScreenProps {
   onStopAgent(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
   onRecoverTaskCreation(): void;
+  onCompanionOpenChange?(isOpen: boolean): void;
+  onSendCompanionEvent?(
+    sessionId: string,
+    revision: string,
+    event: CompanionEvent
+  ): void;
 }
 
 function preserveExpandedTextSelection(): void {
@@ -78,6 +102,11 @@ export function TaskScreen({
   agentErrorMessage,
   taskCreationPhase = "idle",
   taskCreationErrorMessage = null,
+  companionStatus = "idle",
+  companionSnapshot = null,
+  companionUnread = false,
+  companionErrorMessage = null,
+  companionEventStatus = "idle",
   onBack,
   onAdvanceTaskStage,
   onCloseTask,
@@ -86,7 +115,9 @@ export function TaskScreen({
   onSendInput,
   onStopAgent,
   onResolveAgentPermission,
-  onRecoverTaskCreation
+  onRecoverTaskCreation,
+  onCompanionOpenChange,
+  onSendCompanionEvent
 }: TaskScreenProps) {
   const model = buildTaskWorkspaceModel({
     task,
@@ -109,6 +140,21 @@ export function TaskScreen({
   const [expandedTitleTaskId, setExpandedTitleTaskId] = useState<string | null>(
     null
   );
+  const [companionModalTaskId, setCompanionModalTaskId] = useState<string | null>(
+    null
+  );
+  const companionLifecycleRef = useRef<{
+    isOpen: boolean;
+    onOpenChange: ((isOpen: boolean) => void) | undefined;
+    taskId: string;
+  }>({
+    isOpen: false,
+    onOpenChange: onCompanionOpenChange,
+    taskId: task.id
+  });
+  if (companionLifecycleRef.current.taskId === task.id) {
+    companionLifecycleRef.current.onOpenChange = onCompanionOpenChange;
+  }
   const { height: windowHeight } = useWindowDimensions();
   const isAgentTask = task.agentType === "agent";
   const previewScopeRef = useRef({
@@ -220,10 +266,34 @@ export function TaskScreen({
   };
 
   useEffect(() => {
+    const lifecycle = companionLifecycleRef.current;
+    lifecycle.taskId = task.id;
+    lifecycle.onOpenChange = onCompanionOpenChange;
     setExpandedTitleTaskId((currentTaskId) =>
       currentTaskId === task.id ? currentTaskId : null
     );
+    setCompanionModalTaskId(null);
+    return () => {
+      if (!lifecycle.isOpen) return;
+      lifecycle.isOpen = false;
+      lifecycle.onOpenChange?.(false);
+    };
   }, [task.id]);
+
+  const openCompanion = () => {
+    setCompanionModalTaskId(task.id);
+    const lifecycle = companionLifecycleRef.current;
+    if (lifecycle.isOpen) return;
+    lifecycle.isOpen = true;
+    lifecycle.onOpenChange?.(true);
+  };
+  const closeCompanion = () => {
+    setCompanionModalTaskId(null);
+    const lifecycle = companionLifecycleRef.current;
+    if (!lifecycle.isOpen) return;
+    lifecycle.isOpen = false;
+    lifecycle.onOpenChange?.(false);
+  };
 
   useEffect(() => {
     const showSubscription = Keyboard.addListener("keyboardWillShow", (event) => {
@@ -418,6 +488,33 @@ export function TaskScreen({
         ]}
       >
         <View style={styles.composerActions}>
+          {companionSnapshot ||
+          (companionStatus === "error" && companionErrorMessage) ? (
+            <Pressable
+              accessibilityLabel={
+                companionStatus === "error"
+                  ? "Visual companion unavailable"
+                  : "Visual companion ready"
+              }
+              accessibilityRole="button"
+              onPress={openCompanion}
+              style={styles.companionButton}
+              testID={MOBILE_E2E_IDS.visualCompanionButton}
+            >
+              {companionStatus === "available" && companionUnread ? (
+                <View
+                  accessibilityLabel="New visual companion update"
+                  style={styles.companionUnread}
+                  testID={MOBILE_E2E_IDS.visualCompanionUnread}
+                />
+              ) : null}
+              <Text style={styles.companionButtonLabel}>
+                {companionStatus === "error"
+                  ? "Visual companion unavailable"
+                  : "Visual companion ready"}
+              </Text>
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityLabel="Task actions"
             accessibilityRole="button"
@@ -470,6 +567,20 @@ export function TaskScreen({
           path={activeSelectedFile.path}
           readFile={() => onReadTaskFile(activeSelectedFile.path)}
           onClose={() => setSelectedFile(null)}
+        />
+      ) : null}
+      {companionModalTaskId === task.id ? (
+        <VisualCompanionModal
+          errorMessage={companionErrorMessage}
+          eventStatus={companionEventStatus}
+          snapshot={
+            companionStatus === "available" ? companionSnapshot : null
+          }
+          status={companionStatus}
+          onClose={closeCompanion}
+          onSendEvent={(sessionId, revision, event) =>
+            onSendCompanionEvent?.(sessionId, revision, event)
+          }
         />
       ) : null}
     </View>
@@ -659,8 +770,33 @@ const styles = StyleSheet.create({
     zIndex: 3
   },
   composerActions: {
-    alignItems: "flex-end",
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+    justifyContent: "flex-end",
     marginBottom: 8
+  },
+  companionButton: {
+    alignItems: "center",
+    backgroundColor: "rgba(25, 55, 91, 0.92)",
+    borderColor: "#3B6A9F",
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 7,
+    minHeight: 40,
+    paddingHorizontal: 13
+  },
+  companionButtonLabel: {
+    color: "#E8F1FF",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  companionUnread: {
+    backgroundColor: "#73B7FF",
+    borderRadius: 999,
+    height: 8,
+    width: 8
   },
   plusButton: {
     alignItems: "center",

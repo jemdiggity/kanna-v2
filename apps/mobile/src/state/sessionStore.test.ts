@@ -394,6 +394,240 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("tracks visual companion availability, unread revisions, retagging, and cleanup", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-pending");
+    expect(store.getState()).toMatchObject({
+      taskCompanionTaskId: "task-pending",
+      taskCompanionStatus: "connecting",
+      taskCompanionSnapshot: null,
+      taskCompanionUnread: false
+    });
+
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "snapshot",
+      taskId: "task-pending",
+      sessionId: "123-456",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: "<h2>First</h2>"
+    }, false);
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionUnread: true,
+      taskCompanionSnapshot: { revision: "rev-1" }
+    });
+    store.markTaskCompanionViewed("task-pending");
+    expect(store.getState().taskCompanionUnread).toBe(false);
+
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "snapshot",
+      taskId: "task-pending",
+      sessionId: "123-456",
+      revision: "rev-2",
+      documentKind: "full_document",
+      html: "<html><body>Second</body></html>"
+    }, true);
+    expect(store.getState()).toMatchObject({
+      taskCompanionUnread: false,
+      taskCompanionSnapshot: { revision: "rev-2" }
+    });
+    store.beginTaskCompanionEvent("task-pending", "mobile-1");
+    expect(store.getState().taskCompanionEventStatus).toBe("sending");
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "event_result",
+      taskId: "task-pending",
+      eventId: "mobile-1",
+      accepted: false,
+      code: "stale_revision",
+      message: "The companion changed before the selection arrived."
+    }, true);
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionSnapshot: { revision: "rev-2" },
+      taskCompanionErrorMessage:
+        "The companion changed before the selection arrived.",
+      taskCompanionEventStatus: "error"
+    });
+    store.beginTaskCompanionEvent("task-pending", "mobile-2");
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "event_result",
+      taskId: "task-pending",
+      eventId: "mobile-1",
+      accepted: true
+    }, true);
+    expect(store.getState().taskCompanionEventStatus).toBe("sending");
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "event_result",
+      taskId: "task-pending",
+      eventId: "mobile-2",
+      accepted: true
+    }, true);
+    expect(store.getState()).toMatchObject({
+      taskCompanionErrorMessage: null,
+      taskCompanionEventStatus: "sent"
+    });
+
+    store.retagTaskIdentity("task-pending", "task-published");
+    expect(store.getState().taskCompanionTaskId).toBe("task-published");
+    store.applyTaskCompanionStreamEvent("task-pending", {
+      type: "unavailable",
+      taskId: "task-pending"
+    }, false);
+    expect(store.getState().taskCompanionStatus).toBe("available");
+    store.applyTaskCompanionStreamEvent("task-published", {
+      type: "unavailable",
+      taskId: "task-published"
+    }, false);
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "unavailable",
+      taskCompanionSnapshot: null,
+      taskCompanionUnread: false
+    });
+    store.applyTaskCompanionStreamEvent("task-published", {
+      type: "error",
+      taskId: "task-published",
+      code: "companion_source_failed",
+      message: "Unreadable"
+    }, false);
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "error",
+      taskCompanionErrorMessage: "Unreadable"
+    });
+    store.clearTaskCompanion();
+    expect(store.getState()).toMatchObject({
+      taskCompanionTaskId: null,
+      taskCompanionStatus: "idle",
+      taskCompanionSnapshot: null,
+      taskCompanionUnread: false,
+      taskCompanionErrorMessage: null
+    });
+  });
+
+  it("invalidates companion content across reconnect until a fresh snapshot arrives", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-1");
+    store.applyTaskCompanionStreamEvent(
+      "task-1",
+      {
+        type: "snapshot",
+        taskId: "task-1",
+        sessionId: "session-1",
+        revision: "rev-1",
+        documentKind: "fragment",
+        html: '<button data-choice="a">A</button>'
+      },
+      true
+    );
+    store.beginTaskCompanionEvent("task-1", "event-1");
+
+    store.applyTaskCompanionStreamEvent(
+      "task-1",
+      { type: "connection", taskId: "task-1", connected: false },
+      true
+    );
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "reconnecting",
+      taskCompanionSnapshot: null,
+      taskCompanionEventId: null,
+      taskCompanionEventStatus: "error",
+      taskCompanionErrorMessage:
+        "Connection lost before the selection was confirmed. Retry after reconnecting."
+    });
+
+    store.applyTaskCompanionStreamEvent(
+      "task-1",
+      { type: "connection", taskId: "task-1", connected: true },
+      true
+    );
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "reconnecting",
+      taskCompanionSnapshot: null
+    });
+
+    store.applyTaskCompanionStreamEvent(
+      "task-1",
+      {
+        type: "snapshot",
+        taskId: "task-1",
+        sessionId: "session-1",
+        revision: "rev-2",
+        documentKind: "fragment",
+        html: '<button data-choice="a">A again</button>'
+      },
+      true
+    );
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionSnapshot: { revision: "rev-2" },
+      taskCompanionEventStatus: "idle",
+      taskCompanionErrorMessage: null
+    });
+  });
+
+  it("invalidates stale companion content and pending events on a source error", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-1");
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "session-1",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: '<button data-choice="a">A</button>'
+    }, false);
+    store.beginTaskCompanionEvent("task-1", "event-1");
+
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "error",
+      taskId: "task-1",
+      code: "companion_too_large",
+      message:
+        "The visual companion is too large. Ask the agent to simplify the screen."
+    }, false);
+
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "error",
+      taskCompanionSnapshot: null,
+      taskCompanionUnread: false,
+      taskCompanionErrorMessage:
+        "The visual companion is too large. Ask the agent to simplify the screen.",
+      taskCompanionEventId: null,
+      taskCompanionEventStatus: "idle"
+    });
+  });
+
+  it("keeps the current document visible for a rejected companion event retry", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-1");
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "session-1",
+      revision: "rev-1",
+      documentKind: "fragment",
+      html: '<button data-choice="a">A</button>'
+    }, true);
+    store.beginTaskCompanionEvent("task-1", "event-1");
+
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "event_result",
+      taskId: "task-1",
+      eventId: "event-1",
+      accepted: false,
+      code: "companion_event_failed",
+      message: "The selection could not be recorded."
+    }, true);
+
+    expect(store.getState()).toMatchObject({
+      taskCompanionStatus: "available",
+      taskCompanionSnapshot: { revision: "rev-1" },
+      taskCompanionErrorMessage: "The selection could not be recorded.",
+      taskCompanionEventId: "event-1",
+      taskCompanionEventStatus: "error"
+    });
+  });
+
   it("clears the selected task when reconciliation finds no remaining collection match", () => {
     const store = createSessionStore();
 
