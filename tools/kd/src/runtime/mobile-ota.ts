@@ -18,6 +18,8 @@ export interface MobileOtaProvisionSecretInput {
   keyPath: string;
 }
 
+export type MobileOtaProvisionInput = Pick<MobileOtaInput, "staging" | "production">;
+
 export interface MobileOtaContext {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
@@ -331,6 +333,95 @@ export async function executeMobileOtaStatusWithContext(
       runtimeVersion,
       pointerObject,
     },
+  };
+}
+
+export async function executeMobileOtaProvisionWithContext(
+  input: MobileOtaProvisionInput,
+  context: MobileOtaContext
+): Promise<{ ok: boolean; message: string; data?: unknown }> {
+  const environment = resolveMobileOtaEnvironment(input, "provision");
+  const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(environment));
+  const projectId = identity.firebaseProjectId;
+  const bucket = identity.otaBucket;
+  if (!bucket || !identity.gceVmName) {
+    throw new Error(`Mobile OTA provisioning is not configured for ${environment}.`);
+  }
+
+  await mustRun(context.runner, "gcloud", [
+    "services",
+    "enable",
+    "storage.googleapis.com",
+    "--project",
+    projectId,
+  ], context.repoRoot, context.env);
+
+  const bucketUrl = `gs://${bucket}`;
+  const describe = await context.runner.run("gcloud", [
+    "storage",
+    "buckets",
+    "describe",
+    bucketUrl,
+    "--project",
+    projectId,
+    "--format=json",
+  ], { cwd: context.repoRoot, env: context.env });
+  if (describe.exitCode !== 0) {
+    if (!isNotFoundFailure(describe)) {
+      throw new Error(summarizeCommandFailure(describe));
+    }
+    await mustRun(context.runner, "gcloud", [
+      "storage",
+      "buckets",
+      "create",
+      bucketUrl,
+      "--project",
+      projectId,
+      "--location",
+      "us-central1",
+      "--uniform-bucket-level-access",
+    ], context.repoRoot, context.env);
+  }
+
+  const serviceAccountResult = await context.runner.run("gcloud", [
+    "compute",
+    "instances",
+    "describe",
+    identity.gceVmName,
+    "--project",
+    projectId,
+    "--zone",
+    "us-central1-a",
+    "--format",
+    "value(serviceAccounts[0].email)",
+  ], { cwd: context.repoRoot, env: context.env });
+  const serviceAccount = serviceAccountResult.stdout.trim();
+  if (serviceAccountResult.exitCode !== 0 || serviceAccount.length === 0) {
+    throw new Error(summarizeCommandFailure(serviceAccountResult));
+  }
+
+  await mustRun(context.runner, "gcloud", [
+    "storage",
+    "buckets",
+    "add-iam-policy-binding",
+    bucketUrl,
+    "--project",
+    projectId,
+    "--member",
+    `serviceAccount:${serviceAccount}`,
+    "--role",
+    "roles/storage.objectViewer",
+  ], context.repoRoot, context.env);
+
+  return {
+    ok: true,
+    message: [
+      `Provisioned mobile OTA infrastructure for ${environment}.`,
+      `project: ${projectId}`,
+      `bucket: ${bucket}`,
+      `relay service account: ${serviceAccount}`,
+    ].join("\n"),
+    data: { environment, projectId, bucket, serviceAccount },
   };
 }
 
@@ -688,6 +779,11 @@ function parsePointer(stdout: string): OtaChannelPointer | null {
 
 function summarizeCommandFailure(result: { stdout: string; stderr: string }): string {
   return (result.stderr || result.stdout || "command failed").trim();
+}
+
+function isNotFoundFailure(result: { stdout: string; stderr: string }): boolean {
+  const message = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  return message.includes("not found") || message.includes("not_found") || message.includes("404");
 }
 
 function buildExpoExportCommand(repoRoot: string, environment: CloudEnvironmentName, distDir: string): MobileOtaCommandPlan {

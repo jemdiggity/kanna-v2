@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseCliArgs } from "../cli.js";
 import { resolveKdEnvironment } from "./environment.js";
+import * as mobileOtaRuntime from "./mobile-ota.js";
 import {
   buildMobileOtaPublishPlan,
   computeExpoUpdateId,
@@ -16,6 +17,17 @@ import {
 import type { CommandRunner } from "./process.js";
 
 const tempDirs: string[] = [];
+
+type MobileOtaProvisionExecutor = (
+  input: { staging: boolean; production: boolean },
+  context: { repoRoot: string; env: NodeJS.ProcessEnv; runner: CommandRunner }
+) => Promise<{ ok: boolean; message: string; data?: unknown }>;
+
+function getMobileOtaProvisionExecutor(): MobileOtaProvisionExecutor {
+  const executor = Reflect.get(mobileOtaRuntime, "executeMobileOtaProvisionWithContext") as unknown;
+  expect(executor).toBeTypeOf("function");
+  return executor as MobileOtaProvisionExecutor;
+}
 
 afterEach(async () => {
   await Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true })));
@@ -347,6 +359,97 @@ describe("kd mobile OTA", () => {
       channel: "staging",
     });
     expect(result.message).toContain(`Dry run: mobile OTA update ${expectedUpdateId}`);
+  });
+
+  it("provisions a missing staging OTA bucket and relay storage access", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const serviceAccount = "kanna-relay-staging@kanna-staging.iam.gserviceaccount.com";
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (joined.includes("storage buckets describe")) {
+          return { exitCode: 1, stdout: "", stderr: "not found: 404" };
+        }
+        if (joined.includes("compute instances describe")) {
+          return { exitCode: 0, stdout: `${serviceAccount}\n`, stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const result = await getMobileOtaProvisionExecutor()(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls.map(({ args }) => args)).toContainEqual([
+      "services", "enable", "storage.googleapis.com", "--project", "kanna-staging",
+    ]);
+    expect(calls.map(({ args }) => args)).toContainEqual([
+      "storage", "buckets", "create", "gs://kanna-staging.firebasestorage.app",
+      "--project", "kanna-staging", "--location", "us-central1",
+      "--uniform-bucket-level-access",
+    ]);
+    expect(calls.map(({ args }) => args)).toContainEqual([
+      "storage", "buckets", "add-iam-policy-binding",
+      "gs://kanna-staging.firebasestorage.app", "--project", "kanna-staging",
+      "--member", `serviceAccount:${serviceAccount}`,
+      "--role", "roles/storage.objectViewer",
+    ]);
+    expect(result.message).toContain("kanna-staging.firebasestorage.app");
+    expect(result.message).toContain(serviceAccount);
+  });
+
+  it("reuses an existing staging OTA bucket", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (joined.includes("storage buckets describe")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (joined.includes("compute instances describe")) {
+          return {
+            exitCode: 0,
+            stdout: "kanna-relay-staging@kanna-staging.iam.gserviceaccount.com\n",
+            stderr: "",
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await getMobileOtaProvisionExecutor()(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+  });
+
+  it("does not create an OTA bucket when bucket inspection is forbidden", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (args.join(" ").includes("storage buckets describe")) {
+          return { exitCode: 1, stdout: "", stderr: "PERMISSION_DENIED" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(getMobileOtaProvisionExecutor()(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("PERMISSION_DENIED");
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
   });
 
   it("provisions the private key through kd-managed gcloud commands", async () => {
