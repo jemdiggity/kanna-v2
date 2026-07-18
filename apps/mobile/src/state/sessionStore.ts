@@ -141,6 +141,7 @@ export interface SessionState {
   repoCommandErrorMessage: string | null;
   runningRepoCommandId: string | null;
   pendingRepoCommandTask: PendingRepoCommandTask | null;
+  unavailableRepoCommandIds: string[];
   recentTasks: TaskSummary[];
   searchQuery: string;
   searchResults: TaskSummary[];
@@ -223,6 +224,8 @@ export interface SessionStore {
   beginRepoCommandTaskRefresh(): PendingRepoCommandTask | null;
   resolveRepoCommandTask(taskId: string): void;
   finishRepoCommandRun(commandId: string): void;
+  markRepoCommandsUnavailable(repoId: string): void;
+  resetRepoCommandAvailability(): void;
   setRecentTasks(tasks: TaskSummary[]): void;
   setSearchResults(query: string, results: TaskSummary[]): void;
   setTaskActivity(taskId: string, activity: TaskActivity): void;
@@ -297,6 +300,7 @@ export function createSessionStore(): SessionStore {
     repoCommandErrorMessage: null,
     runningRepoCommandId: null,
     pendingRepoCommandTask: null,
+    unavailableRepoCommandIds: [],
     recentTasks: [],
     searchQuery: "",
     searchResults: [],
@@ -649,11 +653,15 @@ export function createSessionStore(): SessionStore {
         state.runningRepoCommandId !== null ||
         state.pendingRepoCommandTask !== null
       ) return;
+      const unavailableRepoCommandIds = state.unavailableRepoCommandIds.filter(
+        (repoId) => repoId !== repoCommandCatalog.repoId
+      );
       state = {
         ...state,
         repoCommandCatalog,
         repoCommandStatus: "ready",
-        repoCommandErrorMessage: null
+        repoCommandErrorMessage: null,
+        unavailableRepoCommandIds
       };
       publish();
     },
@@ -710,6 +718,19 @@ export function createSessionStore(): SessionStore {
     finishRepoCommandRun(commandId) {
       if (state.runningRepoCommandId !== commandId) return;
       state = { ...state, runningRepoCommandId: null };
+      publish();
+    },
+    markRepoCommandsUnavailable(repoId) {
+      if (state.unavailableRepoCommandIds.includes(repoId)) return;
+      state = {
+        ...state,
+        unavailableRepoCommandIds: [...state.unavailableRepoCommandIds, repoId]
+      };
+      publish();
+    },
+    resetRepoCommandAvailability() {
+      if (state.unavailableRepoCommandIds.length === 0) return;
+      state = { ...state, unavailableRepoCommandIds: [] };
       publish();
     },
     setRecentTasks(tasks) {

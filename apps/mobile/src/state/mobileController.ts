@@ -770,7 +770,7 @@ export function createMobileController(
 
   const loadRepoCommands = async (): Promise<void> => {
     const commandState = store.getState();
-    const repoId = commandState.selectedRepoId;
+    let repoId = commandState.selectedRepoId;
     if (
       !repoId ||
       commandState.runningRepoCommandId !== null ||
@@ -779,27 +779,44 @@ export function createMobileController(
       return;
     }
     const generation = ++repoCommandLoadGeneration;
-    store.setRepoCommandLoading(repoId);
-    try {
-      const catalog = await client.listRepoCommands(repoId);
-      if (
-        generation !== repoCommandLoadGeneration ||
-        store.getState().selectedRepoId !== repoId
-      ) {
+    while (repoId) {
+      store.setRepoCommandLoading(repoId);
+      try {
+        const catalog = await client.listRepoCommands(repoId);
+        if (
+          generation !== repoCommandLoadGeneration ||
+          store.getState().selectedRepoId !== repoId
+        ) {
+          return;
+        }
+        store.setRepoCommandCatalog({ ...catalog, repoId });
         return;
+      } catch (error) {
+        if (
+          generation !== repoCommandLoadGeneration ||
+          store.getState().selectedRepoId !== repoId
+        ) {
+          return;
+        }
+
+        store.markRepoCommandsUnavailable(repoId);
+        const nextRepo = store.getState().repos.find(
+          (candidate) =>
+            !store.getState().unavailableRepoCommandIds.includes(candidate.id)
+        );
+        if (!nextRepo) {
+          store.setRepoCommandError(
+            repoId,
+            error instanceof Error ? error.message : String(error)
+          );
+          return;
+        }
+
+        taskCollectionsRevision += 1;
+        store.selectRepo(nextRepo.id);
+        void loadRepoTasks(nextRepo.id).catch(() => undefined);
+        repoId = nextRepo.id;
       }
-      store.setRepoCommandCatalog({ ...catalog, repoId });
-    } catch (error) {
-      if (
-        generation !== repoCommandLoadGeneration ||
-        store.getState().selectedRepoId !== repoId
-      ) {
-        return;
-      }
-      store.setRepoCommandError(
-        repoId,
-        error instanceof Error ? error.message : String(error)
-      );
     }
   };
 
@@ -1759,6 +1776,7 @@ export function createMobileController(
       const pendingTask = store.beginRepoCommandTaskRefresh();
       if (!pendingTask) {
         if (!store.getState().pendingRepoCommandTask) {
+          store.resetRepoCommandAvailability();
           await loadRepoCommands();
         }
         return null;

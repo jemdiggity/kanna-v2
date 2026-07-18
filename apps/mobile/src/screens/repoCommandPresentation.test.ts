@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { RepoCommandCatalog } from "../lib/api/types";
-import { buildRepoCommandSections } from "./repoCommandPresentation";
+import {
+  buildRepoCommandSections,
+  filterCommandAvailableRepos
+} from "./repoCommandPresentation";
 
 const catalog: RepoCommandCatalog = {
   repoId: "repo-1",
@@ -28,6 +31,18 @@ const catalog: RepoCommandCatalog = {
 };
 
 describe("buildRepoCommandSections", () => {
+  it("excludes command-unavailable repos without mutating the shared list", () => {
+    const repos = [
+      { id: "repo-stale", name: "Stale" },
+      { id: "repo-live", name: "Live" }
+    ];
+
+    expect(filterCommandAvailableRepos(repos, ["repo-stale"])).toEqual([
+      { id: "repo-live", name: "Live" }
+    ]);
+    expect(repos).toHaveLength(2);
+  });
+
   it("groups repository automations before configuration commands", () => {
     const sections = buildRepoCommandSections(catalog, "");
 

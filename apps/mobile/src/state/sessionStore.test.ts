@@ -74,6 +74,40 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("tracks repository command failures without removing task repositories", () => {
+    const store = createSessionStore();
+    store.setRepos([
+      { id: "repo-stale", name: "Stale" },
+      { id: "repo-live", name: "Live" }
+    ]);
+
+    store.markRepoCommandsUnavailable("repo-stale");
+
+    expect(store.getState()).toMatchObject({
+      repos: [
+        { id: "repo-stale", name: "Stale" },
+        { id: "repo-live", name: "Live" }
+      ],
+      unavailableRepoCommandIds: ["repo-stale"]
+    });
+  });
+
+  it("clears repository command failures for retry and successful catalogs", () => {
+    const store = createSessionStore();
+    store.setRepos([{ id: "repo-1", name: "Repo One" }]);
+    store.markRepoCommandsUnavailable("repo-1");
+    store.setRepoCommandCatalog({
+      repoId: "repo-1",
+      revision: "catalog-v1",
+      commands: []
+    });
+    expect(store.getState().unavailableRepoCommandIds).toEqual([]);
+
+    store.markRepoCommandsUnavailable("repo-1");
+    store.resetRepoCommandAvailability();
+    expect(store.getState().unavailableRepoCommandIds).toEqual([]);
+  });
+
   it("creates a device id once and persists it", () => {
     const store = createSessionStore();
 

@@ -37,6 +37,7 @@ import { FloatingToolbar } from "../components/FloatingToolbar";
 import { resolveMobileTerminalGeometry } from "../mobileTerminalGeometry";
 import { MachinesScreen } from "../screens/MachinesScreen";
 import { MoreScreen } from "../screens/MoreScreen";
+import { filterCommandAvailableRepos } from "../screens/repoCommandPresentation";
 import { SearchScreen } from "../screens/SearchScreen";
 import { TaskScreen } from "../screens/TaskScreen";
 import { showTaskActionMenu } from "../screens/taskActionMenu";
@@ -442,6 +443,10 @@ function TaskMoreRoute({
 
 function MoreRouteContent() {
   const { controller, pushPreparedTask, state } = useNavigationContent();
+  const commandRepos = filterCommandAvailableRepos(
+    state.repos,
+    state.unavailableRepoCommandIds
+  );
 
   return (
     <MoreScreen
@@ -460,7 +465,7 @@ function MoreRouteContent() {
       onSelectRepo={(repoId) => {
         void controller.selectRepo(repoId);
       }}
-      repos={state.repos}
+      repos={commandRepos}
       runningCommandId={state.runningRepoCommandId}
       selectedRepoId={state.selectedRepoId}
       status={state.repoCommandStatus}
