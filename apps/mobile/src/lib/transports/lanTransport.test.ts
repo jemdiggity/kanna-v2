@@ -534,7 +534,12 @@ describe("createLanTransport", () => {
       events.push(event)
     );
     socket.onopen?.();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" } satisfies ServerFrame) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        stream_kinds: ["agent", "terminal", "companion"]
+      } satisfies ServerFrame)
+    });
     socket.onmessage?.({
       data: JSON.stringify({
         type: "companion_snapshot",

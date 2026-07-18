@@ -4,6 +4,7 @@ import type {
   ClientFrame,
   CompanionEvent,
   ServerFrame,
+  StreamKind,
 } from "@kanna/agent-protocol";
 import {
   createRelayTunnelWebSocketFactory,
@@ -58,7 +59,9 @@ describe("StreamClient", () => {
     vi.useRealTimers();
   });
 
-  function connectedClient(): { client: StreamClient; socket: MockSocket } {
+  function connectedClient(
+    streamKinds?: StreamKind[],
+  ): { client: StreamClient; socket: MockSocket } {
     const client = new StreamClient({
       url: "ws://test/v1/stream",
       webSocketFactory: factory,
@@ -66,7 +69,10 @@ describe("StreamClient", () => {
     const socket = sockets[0];
     socket.open();
     expect(socket.sent[0]).toEqual({ type: "auth" });
-    socket.receive({ type: "auth_ok" });
+    socket.receive({
+      type: "auth_ok",
+      ...(streamKinds ? { stream_kinds: streamKinds } : {}),
+    });
     return { client, socket };
   }
 
@@ -264,8 +270,81 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("keeps terminal streams healthy when an old server does not support companions", () => {
+    const terminalErrors: string[] = [];
+    const unavailable: string[] = [];
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+    });
+    client.attachTerminal("task-1", {
+      onOutput: () => {},
+      onError: (_code, message) => terminalErrors.push(message),
+    });
+    client.attachCompanion("task-1", {
+      onSnapshot: () => {},
+      onUnavailable: () => unavailable.push("unavailable"),
+      onEventResult: () => {},
+    });
+
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok" });
+
+    expect(socket.sent).toEqual([
+      { type: "auth" },
+      { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
+    ]);
+    expect(unavailable).toEqual(["unavailable"]);
+    expect(terminalErrors).toEqual([]);
+
+    const event: CompanionEvent = {
+      event_id: "unsupported-event",
+      type: "click",
+      choice: "a",
+      text: "Option A",
+      id: null,
+      timestamp: 1_784_268_000_000,
+    };
+    expect(
+      client.sendCompanionEvent("task-1", "session-1", "revision-1", event),
+    ).toBe(false);
+    client.detach("task-1", "companion");
+    expect(socket.sent).toHaveLength(2);
+
+    client.attachCompanion("task-1", {
+      onSnapshot: () => {},
+      onUnavailable: () => unavailable.push("unavailable"),
+      onEventResult: () => {},
+    });
+    expect(unavailable).toEqual(["unavailable", "unavailable"]);
+    socket.drop();
+    vi.advanceTimersByTime(250);
+    const upgradedSocket = sockets[1];
+    upgradedSocket.open();
+    upgradedSocket.receive({
+      type: "auth_ok",
+      stream_kinds: ["agent", "terminal", "companion"],
+    });
+    expect(upgradedSocket.sent).toEqual([
+      { type: "auth" },
+      { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
+      { type: "attach", task_id: "task-1", kind: "companion", from_seq: 0 },
+    ]);
+    expect(
+      client.sendCompanionEvent("task-1", "session-1", "revision-2", event),
+    ).toBe(true);
+    client.detach("task-1", "companion");
+    expect(upgradedSocket.sent.at(-1)).toEqual({
+      type: "detach",
+      task_id: "task-1",
+      kind: "companion",
+    });
+    client.close();
+  });
+
   it("attaches, dispatches, sends, detaches, and reconnects visual companions", () => {
-    const { client, socket } = connectedClient();
+    const { client, socket } = connectedClient(["agent", "terminal", "companion"]);
     const snapshots: string[] = [];
     const unavailable: string[] = [];
     const results: string[] = [];
@@ -355,7 +434,10 @@ describe("StreamClient", () => {
     vi.advanceTimersByTime(250);
     const socket2 = sockets[1];
     socket2.open();
-    socket2.receive({ type: "auth_ok" });
+    socket2.receive({
+      type: "auth_ok",
+      stream_kinds: ["agent", "terminal", "companion"],
+    });
     expect(socket2.sent).toContainEqual({
       type: "attach",
       task_id: "task-1",
@@ -373,7 +455,7 @@ describe("StreamClient", () => {
   });
 
   it("drops companion selections across disconnect and requires a fresh explicit send", () => {
-    const { client, socket } = connectedClient();
+    const { client, socket } = connectedClient(["agent", "terminal", "companion"]);
     const connectionChanges: boolean[] = [];
     client.attachCompanion("task-1", {
       onSnapshot: () => {},
@@ -399,7 +481,10 @@ describe("StreamClient", () => {
     vi.advanceTimersByTime(250);
     const socket2 = sockets[1];
     socket2.open();
-    socket2.receive({ type: "auth_ok" });
+    socket2.receive({
+      type: "auth_ok",
+      stream_kinds: ["agent", "terminal", "companion"],
+    });
 
     expect(connectionChanges).toEqual([false, true]);
     expect(socket2.sent).toEqual([
