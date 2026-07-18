@@ -574,6 +574,100 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-1"]);
   });
 
+  it("skips a stale selected repository when More opens", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRepoCommands
+      .mockRejectedValueOnce(new Error("404 repo not found: repo-1"))
+      .mockResolvedValueOnce({
+        repoId: "repo-2",
+        revision: "catalog-repo-2",
+        commands: []
+      });
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    controller.setNavigationView("more");
+    await vi.waitFor(() => {
+      expect(store.getState()).toMatchObject({
+        selectedRepoId: "repo-2",
+        repoCommandStatus: "ready",
+        unavailableRepoCommandIds: ["repo-1"]
+      });
+    });
+
+    expect(store.getState().repos.map((repo) => repo.id)).toEqual([
+      "repo-1",
+      "repo-2"
+    ]);
+    expect(client.listRepoCommands.mock.calls).toEqual([
+      ["repo-1"],
+      ["repo-2"]
+    ]);
+  });
+
+  it("reports an error only after every repository command catalog fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRepoCommands.mockRejectedValue(new Error("repo unavailable"));
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    await controller.loadRepoCommands();
+
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(2);
+    expect(store.getState()).toMatchObject({
+      repoCommandStatus: "error",
+      repoCommandErrorMessage: "repo unavailable",
+      unavailableRepoCommandIds: ["repo-1", "repo-2"]
+    });
+  });
+
+  it("keeps an empty successful catalog instead of falling through", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRepoCommands.mockResolvedValue({
+      repoId: "repo-1",
+      revision: "empty-catalog",
+      commands: []
+    });
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    await controller.loadRepoCommands();
+
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(1);
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-1",
+      repoCommandStatus: "ready",
+      unavailableRepoCommandIds: []
+    });
+  });
+
+  it("retries repositories previously marked command-unavailable", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRepoCommands.mockRejectedValue(new Error("repo unavailable"));
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    await controller.loadRepoCommands();
+    store.markRepoCommandsUnavailable("repo-1");
+    store.markRepoCommandsUnavailable("repo-2");
+    client.listRepoCommands.mockReset().mockResolvedValue({
+      repoId: store.getState().selectedRepoId!,
+      revision: "recovered",
+      commands: []
+    });
+
+    await controller.retryRepoCommand();
+
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(1);
+    expect(store.getState()).toMatchObject({
+      repoCommandStatus: "ready",
+      unavailableRepoCommandIds: []
+    });
+  });
+
   it("reads a task file through the client without mutating global errors", async () => {
     const store = createSessionStore();
     const client = createClientMock();
