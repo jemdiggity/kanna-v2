@@ -70,16 +70,26 @@ git commit -m "feat(kd): add mobile OTA provision command"
 
 - [ ] **Step 1: Write failing tests for missing and existing buckets**
 
-Add tests that call `executeMobileOtaProvisionWithContext` with staging flags. The missing-bucket runner must return a 404 from `storage buckets describe`, return the staging relay service account from `compute instances describe`, and capture all other calls. Assert this exact mutation sequence:
+Add tests that call `executeMobileOtaProvisionWithContext` with staging flags. The missing-bucket runner must return a 404 from `storage buckets describe`, return a sentinel access token from `gcloud auth print-access-token`, return the staging relay service account from `compute instances describe`, and capture all other calls. Inject a test HTTP client and assert it receives:
+
+```ts
+expect(request).toMatchObject({
+  url: "https://firebasestorage.googleapis.com/v1alpha/projects/kanna-staging/defaultBucket",
+  method: "POST",
+  headers: { authorization: "Bearer test-access-token" },
+  body: { location: "US-CENTRAL1" },
+});
+```
+
+Assert this exact command sequence:
 
 ```ts
 expect(calls.map(({ args }) => args)).toContainEqual([
-  "services", "enable", "storage.googleapis.com", "--project", "kanna-staging",
+  "services", "enable", "storage.googleapis.com", "firebasestorage.googleapis.com",
+  "--project", "kanna-staging",
 ]);
 expect(calls.map(({ args }) => args)).toContainEqual([
-  "storage", "buckets", "create", "gs://kanna-staging.firebasestorage.app",
-  "--project", "kanna-staging", "--location", "us-central1",
-  "--uniform-bucket-level-access",
+  "auth", "print-access-token",
 ]);
 expect(calls.map(({ args }) => args)).toContainEqual([
   "storage", "buckets", "add-iam-policy-binding",
@@ -89,7 +99,7 @@ expect(calls.map(({ args }) => args)).toContainEqual([
 ]);
 ```
 
-For the existing-bucket runner, return exit code 0 from describe and assert no bucket-create call occurs. Add a third test returning `PERMISSION_DENIED` from describe and assert the workflow rejects without creating the bucket.
+For the existing-bucket runner, return exit code 0 from describe and assert neither token acquisition nor the Firebase request occurs. Add a third test returning `PERMISSION_DENIED` from describe and assert the workflow rejects without requesting a token. Add a fourth test where Firebase returns a non-2xx response and assert the workflow stops before IAM, reports the Firebase error, and never includes the sentinel access token in the error or result message.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -105,7 +115,7 @@ Add the public input type:
 export type MobileOtaProvisionInput = Pick<MobileOtaInput, "staging" | "production">;
 ```
 
-Implement `executeMobileOtaProvisionWithContext` with this order:
+Extend `MobileOtaContext` with an optional injected HTTP request function so tests never access the network. Implement `executeMobileOtaProvisionWithContext` with this order:
 
 ```ts
 const environment = resolveMobileOtaEnvironment(input, "provision");
@@ -115,11 +125,12 @@ const bucket = identity.otaBucket;
 if (!bucket || !identity.gceVmName) throw new Error(`Mobile OTA provisioning is not configured for ${environment}.`);
 
 await mustRun(context.runner, "gcloud", [
-  "services", "enable", "storage.googleapis.com", "--project", projectId,
+  "services", "enable", "storage.googleapis.com", "firebasestorage.googleapis.com",
+  "--project", projectId,
 ], context.repoRoot, context.env);
 ```
 
-Describe `gs://${bucket}`. Create it only when `isNotFoundFailure(result)` returns true; throw the summarized command failure for all other nonzero results. Resolve the relay VM service account using the same compute command as doctor and bind `roles/storage.objectViewer` on the bucket. Return a message containing environment, project, bucket, and service-account email only.
+Describe `gs://${bucket}`. When `isNotFoundFailure(result)` returns true, run `gcloud auth print-access-token`, keep the token only in memory, and POST `{ "location": "US-CENTRAL1" }` to `https://firebasestorage.googleapis.com/v1alpha/projects/${projectId}/defaultBucket` using the injected request function or global `fetch`. Throw a sanitized error containing only HTTP status and response body for non-2xx responses. Throw the summarized command failure for all other nonzero describe results. Resolve the relay VM service account using the same compute command as doctor and bind `roles/storage.objectViewer` on the bucket. Return a message containing environment, project, bucket, and service-account email only.
 
 Implement `isNotFoundFailure` by inspecting normalized stderr/stdout for `not found`, `not_found`, or `404`; do not classify permission or API-disabled errors as absence.
 

@@ -10,7 +10,9 @@ The configured staging bucket, `kanna-staging.firebasestorage.app`, does not exi
 
 ## Architecture
 
-Add a dedicated, idempotent `./kd mobile ota provision --staging` workflow for non-secret OTA infrastructure. It will resolve the environment exclusively through the existing environment registry, enable the required Google APIs, create the configured bucket only when it is absent, resolve the existing relay VM service account, and grant that identity object-read access to the OTA bucket.
+Add a dedicated, idempotent `./kd mobile ota provision --staging` workflow for non-secret OTA infrastructure. It will resolve the environment exclusively through the existing environment registry, enable the Cloud Storage and Cloud Storage for Firebase APIs, provision the configured Firebase default bucket only when it is absent, resolve the existing relay VM service account, and grant that identity object-read access to the OTA bucket.
+
+The configured `kanna-staging.firebasestorage.app` name is reserved for a Firebase-managed default bucket. Generic `gcloud storage buckets create` fails domain-ownership validation and must not be used. When the bucket is absent, `kd` will obtain a short-lived access token through the authenticated `gcloud` session and call `POST https://firebasestorage.googleapis.com/v1alpha/projects/kanna-staging/defaultBucket` with location `US-CENTRAL1`, the supported Firebase provisioning API. The token remains in memory, is never logged, and is never included in task output.
 
 Keep private-key handling in `./kd mobile ota provision-secret --staging --key-path <path>`. Harden that workflow so it enables Secret Manager before describing or creating the secret, adds a new secret version from the supplied file without reading its contents into output, and grants the relay service account secret accessor rights.
 
@@ -38,7 +40,7 @@ No `mobile ota publish` or rollback command will run. No physical iPhone install
 
 ## Error Handling and Idempotency
 
-API enablement and IAM-binding commands are safe to repeat. Bucket creation first performs an explicit describe operation: an existing bucket is retained, a confirmed missing bucket is created with the repository-defined location and uniform bucket-level access, and an unexpected inspection error aborts instead of being mistaken for absence. Secret creation follows the same distinction between an existing resource, a confirmed not-found response, and other failures.
+API enablement and IAM-binding commands are safe to repeat. Bucket creation first performs an explicit describe operation: an existing bucket is retained, a confirmed missing bucket is provisioned through the Firebase default-bucket API, and an unexpected inspection error aborts instead of being mistaken for absence. Firebase API errors stop the workflow and report the response status/body without exposing the access token. A Blaze billing requirement reported by Firebase is a precise human-only blocker rather than a reason to fall back to a custom or incorrectly named bucket. Secret creation follows the same distinction between an existing resource, a confirmed not-found response, and other failures.
 
 Every failed cloud command stops the workflow with its stderr or stdout. The command reports only resource names, project, bucket, service account, and key id; it never prints private-key bytes or secret payloads.
 
@@ -47,8 +49,9 @@ Every failed cloud command stops the workflow with its stderr or stdout. The com
 Focused `kd` tests will cover:
 
 - CLI parsing for `mobile ota provision`.
-- Staging environment resolution and exact API, bucket, and IAM commands.
+- Staging environment resolution, exact API enablement, authenticated Firebase default-bucket request, and IAM commands.
 - Existing-bucket idempotency and missing-bucket creation.
+- Firebase API failure handling and access-token secrecy.
 - Aborting on non-not-found bucket and secret inspection failures.
 - Secret Manager enablement before secret operations.
 - Doctor IAM parsing from policy JSON and the absence of write commands.
