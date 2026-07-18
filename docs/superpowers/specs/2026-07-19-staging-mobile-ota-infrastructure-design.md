@@ -8,6 +8,8 @@ Provision and harden Kanna's staging mobile OTA infrastructure through reproduci
 
 The configured staging bucket, `kanna-staging.firebasestorage.app`, does not exist, so OTA status and pointer checks return 404. Secret Manager is disabled and the signing-key secret and relay access binding do not exist. The existing secret-provisioning command assumes Secret Manager is already enabled, while no canonical OTA command creates the bucket. The doctor also passes filter flags unsupported by the installed `gcloud storage buckets get-iam-policy` command, preventing it from accurately checking bucket IAM.
 
+The first staging relay deploy exposed a separate reproducibility gap introduced by the SDK 57 workspace patch: `pnpm-workspace.yaml` and `pnpm-lock.yaml` reference `patches/expo-modules-jsi@57.0.3.patch`, but the relay Dockerfile copies the workspace manifests without copying `patches/`. Cloud Build therefore fails during frozen install before building or deploying the relay image.
+
 ## Architecture
 
 Add a dedicated, idempotent `./kd mobile ota provision --staging` workflow for non-secret OTA infrastructure. It will resolve the environment exclusively through the existing environment registry, enable the Cloud Storage and Cloud Storage for Firebase APIs, provision the configured Firebase default bucket only when it is absent, resolve the existing relay VM service account, and grant that identity object-read access to the OTA bucket.
@@ -17,6 +19,8 @@ The configured `kanna-staging.firebasestorage.app` name is reserved for a Fireba
 Keep private-key handling in `./kd mobile ota provision-secret --staging --key-path <path>`. Harden that workflow so it enables Secret Manager before describing or creating the secret, adds a new secret version from the supplied file without reading its contents into output, and grants the relay service account secret accessor rights.
 
 Keep `./kd mobile ota doctor --staging` read-only. Replace server-side `gcloud` IAM filtering with a JSON policy read followed by local parsing so the check is compatible with the installed CLI and verifies the exact role/member pair. Doctor must continue to report that it performs no writes.
+
+Preserve the shared workspace lockfile as the relay image's dependency source of truth. The relay Docker build stage will copy the repository `patches/` directory alongside the workspace manifests before `pnpm install --frozen-lockfile`, ensuring every patched-dependency input named by the lockfile is present without introducing a relay-specific lockfile or bypassing patch validation.
 
 ## Command Boundaries
 
@@ -55,6 +59,7 @@ Focused `kd` tests will cover:
 - Aborting on non-not-found bucket and secret inspection failures.
 - Secret Manager enablement before secret operations.
 - Doctor IAM parsing from policy JSON and the absence of write commands.
+- Relay Docker build-context coverage for workspace patched dependencies.
 - Explicit rejection of missing or conflicting environment flags.
 
 The existing cloud-deploy tests will continue to verify staging relay environment wiring. Final verification will include the focused `kd` test suite, broader relevant checks, a clean git diff review, and fresh staging doctor/status output.

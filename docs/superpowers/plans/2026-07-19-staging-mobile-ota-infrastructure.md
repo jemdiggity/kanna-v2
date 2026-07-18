@@ -330,7 +330,8 @@ git commit -m "docs: document staging OTA provisioning"
 ### Task 6: Provision, Deploy, and Capture Staging Evidence
 
 **Files:**
-- No source files expected; staging cloud resources only.
+- Modify: `services/relay/Dockerfile`
+- Modify: `tools/kd/tests/cloud-deploy.test.ts`
 
 - [ ] **Step 1: Confirm the worktree is clean and production commands are absent**
 
@@ -355,13 +356,31 @@ Run: `./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secret
 
 Expected: exit 0; output names the secret and key id but contains no PEM payload.
 
-- [ ] **Step 4: Deploy Firebase and the staging relay through the canonical workflow**
+- [ ] **Step 4: Write a failing relay Docker-context test**
+
+Read the real `services/relay/Dockerfile` and assert that `COPY patches/ ./patches/` appears after the workspace manifest copy and before `RUN pnpm install --frozen-lockfile --filter kanna-relay...`.
+
+Run: `pnpm --dir tools/kd exec vitest run tests/cloud-deploy.test.ts --maxWorkers=2`
+
+Expected: FAIL because the Dockerfile does not include workspace patch inputs.
+
+- [ ] **Step 5: Copy patched-dependency inputs into the relay build stage**
+
+Add:
+
+```dockerfile
+COPY patches/ ./patches/
+```
+
+immediately after the workspace manifest copy. Rerun the focused test, `pnpm --dir tools/kd typecheck`, and `pnpm --dir tools/kd test`; all must pass before committing.
+
+- [ ] **Step 6: Deploy Firebase and the staging relay through the canonical workflow**
 
 Run: `./kd cloud deploy --staging --relay`
 
 Expected: exit 0; Firebase services deploy and the staging relay container restarts with the staging bucket and mounted signing key.
 
-- [ ] **Step 5: Run fresh read-only evidence commands**
+- [ ] **Step 7: Run fresh read-only evidence commands**
 
 Run:
 
@@ -372,6 +391,6 @@ Run:
 
 Expected: infrastructure, secret, relay service account, secret IAM, and GCS IAM checks pass. If there is no existing SDK 57-compatible update, pointer/manifest remain failed and status remains nonzero; record that precisely as the publisher-task/human-only blocker rather than publishing an OTA.
 
-- [ ] **Step 6: Complete repository review and PR pipeline without publishing**
+- [ ] **Step 8: Complete repository review and PR pipeline without publishing**
 
 Inspect the final diff and use Kanna's task workflow to advance through review and PR as explicitly requested. Do not run `mobile ota publish`, do not invoke any production flag, and do not install or launch a physical device. The PR summary must distinguish repository verification from the remaining no-published-update blocker.
