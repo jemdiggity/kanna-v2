@@ -115,7 +115,7 @@ describe("useAppTaskNavigation", () => {
       selectedCloudItemId: ref(null),
       showBlockerSelect: ref(false),
       blockerSelectMode: ref("block"),
-      customTasks: ref([]),
+      repoCommandCatalog: ref(null),
       openPeerPicker: vi.fn(),
       openPairPeerPicker: vi.fn(),
     }));
@@ -207,7 +207,7 @@ describe("useAppTaskNavigation", () => {
       selectedCloudItemId,
       showBlockerSelect: ref(false),
       blockerSelectMode: ref("block"),
-      customTasks: ref([]),
+      repoCommandCatalog: ref(null),
       openPeerPicker: vi.fn(),
       openPairPeerPicker: vi.fn(),
     }));
@@ -305,7 +305,7 @@ describe("useAppTaskNavigation", () => {
       selectedCloudItemId,
       showBlockerSelect: ref(false),
       blockerSelectMode: ref("block"),
-      customTasks: ref([]),
+      repoCommandCatalog: ref(null),
       openPeerPicker: vi.fn(),
       openPairPeerPicker: vi.fn(),
     }));
@@ -416,7 +416,7 @@ describe("useAppTaskNavigation", () => {
       selectedCloudItemId: ref(null),
       showBlockerSelect: ref(false),
       blockerSelectMode: ref("block"),
-      customTasks: ref([]),
+      repoCommandCatalog: ref(null),
       openPeerPicker: vi.fn(),
       openPairPeerPicker: vi.fn(),
     }));
@@ -504,7 +504,7 @@ describe("useAppTaskNavigation", () => {
       selectedCloudItemId: ref(null),
       showBlockerSelect: ref(false),
       blockerSelectMode: ref("block"),
-      customTasks: ref([]),
+      repoCommandCatalog: ref(null),
       openPeerPicker: vi.fn(),
       openPairPeerPicker: vi.fn(),
     }));
@@ -590,7 +590,7 @@ describe("useAppTaskNavigation", () => {
       selectedCloudItemId: ref(null),
       showBlockerSelect: ref(false),
       blockerSelectMode: ref("block"),
-      customTasks: ref([]),
+      repoCommandCatalog: ref(null),
       openPeerPicker: vi.fn(),
       openPairPeerPicker: vi.fn(),
     }));
@@ -686,7 +686,7 @@ describe("useAppTaskNavigation", () => {
       selectedCloudItemId: ref(null),
       showBlockerSelect: ref(false),
       blockerSelectMode: ref("block"),
-      customTasks: ref([]),
+      repoCommandCatalog: ref(null),
       openPeerPicker: vi.fn(),
       openPairPeerPicker: vi.fn(),
     }));
@@ -716,6 +716,82 @@ describe("useAppTaskNavigation", () => {
       backRepoPersistence.resolve();
       scope.stop();
       vi.useRealTimers();
+    }
+  });
+
+  it("preserves distinct server command IDs when custom commands share a label", () => {
+    const store = reactive({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+      lastSelectedItemByRepo: {},
+      items: [],
+      sortedItemsForCurrentRepo: [],
+      sortedItemsAllRepos: [],
+      taskBlockers: [],
+      currentItem: null,
+      getStageOrder: () => 0,
+      listBlockedByItem: vi.fn(async () => []),
+      listBlockersForItem: vi.fn(async () => []),
+      blockTask: vi.fn(async () => {}),
+      editBlockedTask: vi.fn(async () => {}),
+      loadAgent: vi.fn(),
+      createItem: vi.fn(),
+      selectRepo: vi.fn(async () => {}),
+      selectItem: vi.fn(async () => {}),
+      reloadSnapshot: vi.fn(async () => {}),
+      recordNavigation: vi.fn(),
+      takeBackTarget: vi.fn(),
+      takeForwardTarget: vi.fn(),
+    });
+    const repoCommandCatalog = ref({
+      repoId: "repo-1",
+      revision: "catalog-v1",
+      commands: [
+        {
+          id: "custom:deploy-staging:stable-a1",
+          label: "Deploy",
+          description: "Deploy staging",
+          group: "automation" as const,
+        },
+        {
+          id: "custom:deploy-production:stable-b2",
+          label: "Deploy",
+          description: "Deploy production",
+          group: "automation" as const,
+        },
+      ],
+    });
+    const scope = effectScope();
+    const navigation = scope.run(() => useAppTaskNavigation({
+      store: store as never,
+      toast: { error: vi.fn() } as never,
+      t: (key) => key,
+      windowWorkspace: { persistSelection: vi.fn(async () => {}) } as never,
+      sidebarRef: ref(null),
+      sidebarRepos: computed(() => []),
+      sidebarItems: computed(() => []),
+      workspaceTasksByItemId: computed(() => new Map()),
+      selectedCloudRepoId: ref(null),
+      selectedCloudItemId: ref(null),
+      showBlockerSelect: ref(false),
+      blockerSelectMode: ref("block"),
+      repoCommandCatalog,
+      openPeerPicker: vi.fn(),
+      openPairPeerPicker: vi.fn(),
+    }));
+    if (!navigation) throw new Error("navigation composable did not initialize");
+
+    try {
+      expect(
+        navigation.paletteDynamicCommands.value
+          .filter((command) => command.label === "Deploy")
+          .map((command) => command.id),
+      ).toEqual([
+        "custom:deploy-staging:stable-a1",
+        "custom:deploy-production:stable-b2",
+      ]);
+    } finally {
+      scope.stop();
     }
   });
 });

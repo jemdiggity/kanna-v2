@@ -62,6 +62,15 @@ describe("createKannaClient", () => {
           stage: "in progress"
         }
       ]),
+      listRepoCommands: vi.fn().mockResolvedValue({
+        repoId: "repo-1",
+        revision: "catalog-v1",
+        commands: []
+      }),
+      runRepoCommand: vi.fn().mockResolvedValue({
+        taskId: "task-command",
+        reused: false
+      }),
       listRecentTasks: vi.fn().mockResolvedValue([
         {
           id: "task-1",
@@ -115,6 +124,12 @@ describe("createKannaClient", () => {
       { id: "repo-1", name: "Repo One" }
     ]);
     expect(await client.listRepoTasks("repo-1")).toHaveLength(1);
+    await expect(client.listRepoCommands("repo-1")).resolves.toMatchObject({
+      revision: "catalog-v1"
+    });
+    await expect(
+      client.runRepoCommand("repo-1", "custom:ship", "catalog-v1")
+    ).resolves.toEqual({ taskId: "task-command", reused: false });
     expect(await client.listRecentTasks()).toHaveLength(1);
     expect((await client.listRecentTasks())[0]?.waitingPromptSnippet).toBe(
       "Latest agent output preview"

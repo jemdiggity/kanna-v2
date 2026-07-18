@@ -96,6 +96,13 @@ pub struct AddRepoRequest {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskTemplateLaunch {
+    pub id: String,
+    pub teardown: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskRequest {
@@ -118,6 +125,8 @@ pub struct CreateTaskRequest {
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
     pub setup_cmds: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_template: Option<TaskTemplateLaunch>,
     pub resume_session_id: Option<String>,
     pub blocker_task_ids: Option<Vec<String>>,
     pub notify_task_id: Option<String>,

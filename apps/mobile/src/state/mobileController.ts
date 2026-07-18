@@ -20,6 +20,7 @@ import {
 import type {
   ComposerAgentProvider,
   MobileView,
+  PendingRepoCommandTask,
   PendingTaskCreation,
   SessionStore
 } from "./sessionStore";
@@ -43,6 +44,9 @@ export interface MobileController {
   setTaskDetailVisible(visible: boolean): void;
   selectDesktop(desktopId: string): Promise<void>;
   selectRepo(repoId: string): Promise<void>;
+  loadRepoCommands(): Promise<void>;
+  runRepoCommand(commandId: string): Promise<string | null>;
+  retryRepoCommand(): Promise<string | null>;
   openTask(taskId: string): void;
   closeTask(taskId?: string): void;
   openComposer(): void;
@@ -67,6 +71,8 @@ const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
 const MARK_READ_DEBOUNCE_MS = 1_000;
 const MARK_READ_MAX_ATTEMPTS = 3;
 const MARK_READ_RETRY_BASE_MS = 1_000;
+const REPO_COMMAND_TASK_LOAD_ERROR =
+  "The command launched successfully, but its task could not be loaded. Check your connection and try again.";
 
 export interface CloudTaskPublication {
   cloudAuthoritative: boolean;
@@ -133,6 +139,11 @@ function generateTaskCreationId(): string {
   return `${timestamp}${counter}${entropy.slice(0, 12)}`;
 }
 
+function isStaleRepoCommandError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b409\b|catalog changed|stale/i.test(message);
+}
+
 export function createMobileController(
   client: KannaClient,
   store: SessionStore,
@@ -193,6 +204,7 @@ export function createMobileController(
     | { taskId: string; promise: Promise<void> }
     | null = null;
   let recoveryStartedTaskId: string | null = null;
+  let repoCommandLoadGeneration = 0;
   const pendingTaskIdentities = new Map<
     string,
     {
@@ -719,6 +731,41 @@ export function createMobileController(
     return true;
   };
 
+  const loadRepoCommands = async (): Promise<void> => {
+    const commandState = store.getState();
+    const repoId = commandState.selectedRepoId;
+    if (
+      !repoId ||
+      commandState.runningRepoCommandId !== null ||
+      commandState.pendingRepoCommandTask !== null
+    ) {
+      return;
+    }
+    const generation = ++repoCommandLoadGeneration;
+    store.setRepoCommandLoading(repoId);
+    try {
+      const catalog = await client.listRepoCommands(repoId);
+      if (
+        generation !== repoCommandLoadGeneration ||
+        store.getState().selectedRepoId !== repoId
+      ) {
+        return;
+      }
+      store.setRepoCommandCatalog({ ...catalog, repoId });
+    } catch (error) {
+      if (
+        generation !== repoCommandLoadGeneration ||
+        store.getState().selectedRepoId !== repoId
+      ) {
+        return;
+      }
+      store.setRepoCommandError(
+        repoId,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  };
+
   const startTaskTerminal = (taskId: string) => {
     const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
     if (
@@ -923,7 +970,7 @@ export function createMobileController(
     }
   };
 
-  const refreshTaskCollections = async () => {
+  const refreshTaskCollections = async (): Promise<boolean> => {
     const readRevision = taskCollectionsRevision;
     const selectedRepoId = store.getState().selectedRepoId;
     let recentTasks: TaskSummary[];
@@ -938,7 +985,7 @@ export function createMobileController(
         taskCollectionsRevision !== readRevision ||
         store.getState().selectedRepoId !== selectedRepoId
       ) {
-        return;
+        return false;
       }
       throw error;
     }
@@ -946,7 +993,7 @@ export function createMobileController(
       taskCollectionsRevision !== readRevision ||
       store.getState().selectedRepoId !== selectedRepoId
     ) {
-      return;
+      return false;
     }
 
     taskCollectionsRevision += 1;
@@ -954,7 +1001,7 @@ export function createMobileController(
     store.setRecentTasks(recentTasks);
     store.setRepoTasks(repoTasks);
     if (!(await refreshSearchResults())) {
-      return;
+      return false;
     }
     store.reconcileTaskUiSlots(
       uniqueTasksById([
@@ -965,6 +1012,32 @@ export function createMobileController(
       { authoritative: true }
     );
     reconcileSelectedTask(true);
+    return true;
+  };
+
+  const loadCreatedRepoCommandTask = async (
+    pendingTask: PendingRepoCommandTask
+  ): Promise<boolean> => {
+    try {
+      const committed = await refreshTaskCollections();
+      if (!committed || !findCollectionTask(pendingTask.taskId)) {
+        store.setRepoCommandTaskLoadError(
+          pendingTask,
+          REPO_COMMAND_TASK_LOAD_ERROR
+        );
+        return false;
+      }
+    } catch {
+      store.setRepoCommandTaskLoadError(
+        pendingTask,
+        REPO_COMMAND_TASK_LOAD_ERROR
+      );
+      return false;
+    }
+
+    store.resolveRepoCommandTask(pendingTask.taskId);
+    setUnownedErrorMessage(null);
+    return true;
   };
 
   const applyLiveCloudTasks = (
@@ -1497,6 +1570,14 @@ export function createMobileController(
 
     setNavigationView(view) {
       store.setActiveView(view);
+      const state = store.getState();
+      if (
+        view === "more" &&
+        state.runningRepoCommandId === null &&
+        state.pendingRepoCommandTask === null
+      ) {
+        void loadRepoCommands();
+      }
     },
 
     setTaskDetailVisible(visible) {
@@ -1516,6 +1597,13 @@ export function createMobileController(
     },
 
     async selectRepo(repoId) {
+      const state = store.getState();
+      if (
+        state.runningRepoCommandId !== null ||
+        state.pendingRepoCommandTask !== null
+      ) {
+        return;
+      }
       taskCollectionsRevision += 1;
       store.selectRepo(repoId);
       try {
@@ -1526,6 +1614,74 @@ export function createMobileController(
       } catch (error) {
         fail(error);
       }
+      if (store.getState().activeView === "more") {
+        await loadRepoCommands();
+      }
+    },
+
+    loadRepoCommands,
+
+    async runRepoCommand(commandId) {
+      const state = store.getState();
+      const repoId = state.selectedRepoId;
+      const catalog = state.repoCommandCatalog;
+      const command = catalog?.commands.find(
+        (candidate) => candidate.id === commandId
+      );
+      if (!repoId || !catalog || catalog.repoId !== repoId || !command) {
+        return null;
+      }
+      if (!store.beginRepoCommandRun(commandId)) {
+        return null;
+      }
+
+      let reloadCatalog = false;
+      let openedTaskId: string | null = null;
+      try {
+        const response = await client.runRepoCommand(
+          repoId,
+          commandId,
+          catalog.revision
+        );
+        const responseRoute = getClientResolvedTaskRoute(response);
+        if (responseRoute) {
+          pendingTaskIdentities.set(response.taskId, responseRoute);
+        }
+        if (await loadCreatedRepoCommandTask({ commandId, taskId: response.taskId })) {
+          this.openTask(response.taskId);
+          openedTaskId = response.taskId;
+        }
+      } catch (error) {
+        fail(error);
+        reloadCatalog = isStaleRepoCommandError(error);
+      } finally {
+        store.finishRepoCommandRun(commandId);
+      }
+      if (reloadCatalog) {
+        await loadRepoCommands();
+      }
+      return openedTaskId;
+    },
+
+    async retryRepoCommand() {
+      const pendingTask = store.beginRepoCommandTaskRefresh();
+      if (!pendingTask) {
+        if (!store.getState().pendingRepoCommandTask) {
+          await loadRepoCommands();
+        }
+        return null;
+      }
+
+      let openedTaskId: string | null = null;
+      try {
+        if (await loadCreatedRepoCommandTask(pendingTask)) {
+          this.openTask(pendingTask.taskId);
+          openedTaskId = pendingTask.taskId;
+        }
+      } finally {
+        store.finishRepoCommandRun(pendingTask.commandId);
+      }
+      return openedTaskId;
     },
 
     openTask(taskId) {

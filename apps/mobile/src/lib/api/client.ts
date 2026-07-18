@@ -7,6 +7,8 @@ import type {
   CreateTaskRequest,
   CreateTaskResponse,
   RepoSummary,
+  RepoCommandCatalog,
+  RunRepoCommandResponse,
   DesktopSummary,
   MobileServerStatus,
   TaskActionResponse,
@@ -52,6 +54,12 @@ export interface KannaTransport {
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
   listRepoTasks(repoId: string): Promise<TaskSummary[]>;
+  listRepoCommands(repoId: string): Promise<RepoCommandCatalog>;
+  runRepoCommand(
+    repoId: string,
+    commandId: string,
+    catalogRevision: string
+  ): Promise<RunRepoCommandResponse>;
   listRecentTasks(): Promise<TaskSummary[]>;
   getTask?(taskId: string): Promise<TaskDetail>;
   searchTasks(query: string): Promise<TaskSummary[]>;
@@ -78,6 +86,12 @@ export interface KannaClient {
   listDesktops(): Promise<DesktopSummary[]>;
   listRepos(): Promise<RepoSummary[]>;
   listRepoTasks(repoId: string): Promise<TaskSummary[]>;
+  listRepoCommands(repoId: string): Promise<RepoCommandCatalog>;
+  runRepoCommand(
+    repoId: string,
+    commandId: string,
+    catalogRevision: string
+  ): Promise<RunRepoCommandResponse>;
   listRecentTasks(): Promise<TaskSummary[]>;
   getTask?(taskId: string): Promise<TaskDetail>;
   searchTasks(query: string): Promise<TaskSummary[]>;
@@ -128,6 +142,9 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     listDesktops: () => transport.listDesktops(),
     listRepos: () => transport.listRepos(),
     listRepoTasks: (repoId) => transport.listRepoTasks(repoId),
+    listRepoCommands: (repoId) => transport.listRepoCommands(repoId),
+    runRepoCommand: (repoId, commandId, catalogRevision) =>
+      transport.runRepoCommand(repoId, commandId, catalogRevision),
     listRecentTasks: () => transport.listRecentTasks(),
     ...(transport.getTask
       ? { getTask: (taskId: string) => transport.getTask!(taskId) }

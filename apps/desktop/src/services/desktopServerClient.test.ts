@@ -6,6 +6,8 @@ import {
   fetchDesktopRepoAgentProviders,
   fetchDesktopRepoKannaDefinitions,
   fetchDesktopRepoPipelineDefinition,
+  fetchDesktopRepoCommands,
+  runDesktopRepoCommand,
   fetchDesktopSnapshot,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
@@ -108,6 +110,41 @@ describe("desktopServerClient", () => {
         headers: undefined,
         body: undefined,
       },
+    );
+  });
+
+  it("lists and runs encoded repository commands", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        repoId: "repo/one",
+        revision: "catalog-v1",
+        commands: []
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        taskId: "command-task",
+        reused: false
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchDesktopRepoCommands("repo/one")).resolves.toMatchObject({
+      revision: "catalog-v1"
+    });
+    await expect(
+      runDesktopRepoCommand("repo/one", "custom:ship/release", "catalog-v1")
+    ).resolves.toEqual({ taskId: "command-task", reused: false });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:48121/v1/repos/repo%2Fone/commands",
+      { method: "GET", headers: undefined, body: undefined }
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:48121/v1/repos/repo%2Fone/commands/custom%3Aship%2Frelease/run",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ catalogRevision: "catalog-v1" })
+      }
     );
   });
 

@@ -16,6 +16,63 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 describe("remote transport", () => {
+  it("routes repository command catalog and runs through the owning desktop", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>()
+      .mockResolvedValueOnce({
+        repoId: "local-repo-1",
+        revision: "catalog-v1",
+        commands: []
+      })
+      .mockResolvedValueOnce({ taskId: "local-command-task", reused: false });
+    const listCloudTasks = vi.fn(async () => [{
+      id: "cloud-task-1",
+      repoId: "cloud-repo-1",
+      title: "Cloud task",
+      stage: "in progress",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "local-repo-1",
+      ownerLocalTaskId: "local-task-1",
+      ownerOnline: true
+    }]);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks
+    });
+
+    await expect(transport.listRepoCommands("cloud-repo-1")).resolves.toEqual({
+      repoId: "cloud-repo-1",
+      revision: "catalog-v1",
+      commands: []
+    });
+    await expect(
+      transport.runRepoCommand(
+        "cloud-repo-1",
+        "factory:create-agent",
+        "catalog-v1"
+      )
+    ).resolves.toMatchObject({
+      reused: false,
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "local-repo-1",
+      ownerLocalTaskId: "local-command-task"
+    });
+
+    expect(invokeDesktop).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/repos/local-repo-1/commands",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/repos/local-repo-1/commands/factory%3Acreate-agent/run",
+      body: { catalogRevision: "catalog-v1" }
+    });
+  });
+
   it("routes cloud task file reads to the owner desktop and encoded local task id", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       path: "docs/spec one.md",

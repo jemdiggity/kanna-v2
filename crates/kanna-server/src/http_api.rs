@@ -8,6 +8,7 @@ mod e2e_sql;
 mod ksp;
 mod operator_events;
 mod pairing;
+mod repo_commands;
 mod repos;
 #[path = "http_api/router.rs"]
 mod routes;

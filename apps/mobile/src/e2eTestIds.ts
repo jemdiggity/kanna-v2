@@ -88,6 +88,12 @@ export const MOBILE_E2E_IDS = {
   moreCommand(actionId: string): string {
     return `mobile.more.command.${actionId}`;
   },
+  moreRepo(repoId: string): string {
+    return `mobile.more.repo.${repoId}`;
+  },
+  moreCommandGroup(group: string): string {
+    return `mobile.more.command-group.${group}`;
+  },
   taskListItem(taskId: string): string {
     return `mobile.task-row.${taskId}`;
   }

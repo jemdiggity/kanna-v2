@@ -59,6 +59,12 @@ export interface DesktopServerClientHandlersForTests {
     agentSelector: string,
   ) => MaybePromise<DesktopRepoAgentDefinition>;
   fetchRepoAgentProviders?: (repoId: string) => MaybePromise<AgentProvider[]>;
+  fetchRepoCommands?: (repoId: string) => MaybePromise<DesktopRepoCommandCatalog>;
+  runRepoCommand?: (
+    repoId: string,
+    commandId: string,
+    catalogRevision: string,
+  ) => MaybePromise<RunDesktopRepoCommandResponse>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
   fetchPendingIncomingTransfers?: () => MaybePromise<PendingIncomingTransfer[]>;
@@ -232,6 +238,49 @@ export interface DesktopRepoPipelineDefinition {
 export interface DesktopRepoAgentDefinition {
   revision: string | null;
   definition: AgentDefinition;
+}
+
+export interface DesktopRepoCommand {
+  id: string;
+  label: string;
+  description: string;
+  group: "automation" | "configure";
+}
+
+export interface DesktopRepoCommandCatalog {
+  repoId: string;
+  revision: string;
+  commands: DesktopRepoCommand[];
+}
+
+export interface RunDesktopRepoCommandResponse {
+  taskId: string;
+  reused: boolean;
+}
+
+export async function fetchDesktopRepoCommands(
+  repoId: string,
+): Promise<DesktopRepoCommandCatalog> {
+  if (clientHandlersForTests?.fetchRepoCommands) {
+    return await clientHandlersForTests.fetchRepoCommands(repoId);
+  }
+  return await requestJson<DesktopRepoCommandCatalog>(
+    `/v1/repos/${encodeURIComponent(repoId)}/commands`,
+  );
+}
+
+export async function runDesktopRepoCommand(
+  repoId: string,
+  commandId: string,
+  catalogRevision: string,
+): Promise<RunDesktopRepoCommandResponse> {
+  if (clientHandlersForTests?.runRepoCommand) {
+    return await clientHandlersForTests.runRepoCommand(repoId, commandId, catalogRevision);
+  }
+  return await requestJson<RunDesktopRepoCommandResponse>(
+    `/v1/repos/${encodeURIComponent(repoId)}/commands/${encodeURIComponent(commandId)}/run`,
+    { method: "POST", body: { catalogRevision } },
+  );
 }
 
 export async function fetchDesktopRepoKannaDefinitions(

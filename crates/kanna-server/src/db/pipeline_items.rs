@@ -323,6 +323,20 @@ impl Db {
         }
     }
 
+    pub fn get_pipeline_item_agent_spawn_options(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT agent_spawn_options FROM pipeline_item WHERE id = ?",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
     #[allow(dead_code)]
     pub fn get_pipeline_item_title_by_repo_branch(
         &self,

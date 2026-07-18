@@ -1,69 +1,46 @@
 import React, { useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import type { TaskSummary } from "../lib/api/types";
-import type { RefreshStatus } from "../state/sessionStore";
 import {
-  buildMoreCommandPalette,
-  type MoreCommandAction
-} from "./moreCommands";
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View
+} from "react-native";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
+import type { RepoCommandCatalog, RepoSummary } from "../lib/api/types";
+import type { RepoCommandStatus } from "../state/sessionStore";
+import { buildRepoCommandSections } from "./repoCommandPresentation";
 
 interface MoreScreenProps {
-  forceCloudEnabled: boolean;
-  showDeveloperDiagnostics: boolean;
-  refreshStatus: RefreshStatus;
-  selectedTask: TaskSummary | null;
-  onRefresh(): void;
-  onForceCloudChange(enabled: boolean): void;
-  onOpenComposer(): void;
-  onAdvanceTaskStage(taskId: string): void;
-  onRunMergeAgent(taskId: string): void;
-  onCloseTask(taskId: string): void;
+  repos: RepoSummary[];
+  selectedRepoId: string | null;
+  catalog: RepoCommandCatalog | null;
+  status: RepoCommandStatus;
+  errorMessage: string | null;
+  runningCommandId: string | null;
+  onSelectRepo(repoId: string): void;
+  onRunCommand(commandId: string): void;
+  onRetry(): void;
 }
 
 export function MoreScreen({
-  forceCloudEnabled,
-  showDeveloperDiagnostics,
-  refreshStatus,
-  selectedTask,
-  onRefresh,
-  onForceCloudChange,
-  onOpenComposer,
-  onAdvanceTaskStage,
-  onRunMergeAgent,
-  onCloseTask
+  repos,
+  selectedRepoId,
+  catalog,
+  status,
+  errorMessage,
+  runningCommandId,
+  onSelectRepo,
+  onRunCommand,
+  onRetry
 }: MoreScreenProps) {
   const [query, setQuery] = useState("");
-  const paletteEntries = useMemo(
-    () => buildMoreCommandPalette({ refreshStatus, selectedTask }, query),
-    [query, refreshStatus, selectedTask]
+  const sections = useMemo(
+    () => buildRepoCommandSections(catalog, query),
+    [catalog, query]
   );
-
-  const handleAction = (action: MoreCommandAction) => {
-    switch (action.id) {
-      case "refresh":
-        onRefresh();
-        break;
-      case "compose":
-        onOpenComposer();
-        break;
-      case "advance-stage":
-        if (selectedTask) {
-          onAdvanceTaskStage(selectedTask.id);
-        }
-        break;
-      case "merge-agent":
-        if (selectedTask) {
-          onRunMergeAgent(selectedTask.id);
-        }
-        break;
-      case "close-task":
-        if (selectedTask) {
-          onCloseTask(selectedTask.id);
-        }
-        break;
-    }
-  };
 
   return (
     <ScrollView
@@ -74,123 +51,167 @@ export function MoreScreen({
     >
       <View style={styles.wrap}>
         <Text style={styles.heading}>More</Text>
+        <Text style={styles.subheading}>Run a command for a repository.</Text>
 
-        <View style={styles.paletteCard}>
-          {selectedTask ? (
-            <View style={styles.activeTaskRow}>
-              <Text numberOfLines={1} style={styles.activeTaskTitle}>
-                {selectedTask.title}
-              </Text>
-              <View style={styles.taskStagePill}>
-                <Text style={styles.taskStageLabel}>{selectedTask.stage ?? "unknown"}</Text>
-              </View>
-            </View>
-          ) : null}
-
-          <TextInput
-            autoCapitalize="none"
-            onChangeText={setQuery}
-            placeholder="Search or run a command"
-            placeholderTextColor="#6A7E9D"
-            style={styles.searchInput}
-            value={query}
-          />
-
-          <View style={styles.paletteList}>
-            {paletteEntries.length ? (
-              paletteEntries.map((action) => {
-                const isRefreshing =
-                  action.id === "refresh" && refreshStatus === "refreshing";
-
-                return (
-                  <Pressable
-                    disabled={isRefreshing}
-                    key={action.id}
-                    style={({ pressed }) => [
-                      styles.action,
-                      isRefreshing
-                        ? styles.actionDisabled
-                        : pressed
-                          ? styles.actionPressed
-                          : null
-                    ]}
-                    testID={MOBILE_E2E_IDS.moreCommand(action.id)}
-                    onPress={() => handleAction(action)}
-                  >
-                    <Text style={styles.commandLabel}>{action.sectionTitle}</Text>
-                    <Text style={styles.actionTitle}>{action.title}</Text>
-                    <Text style={styles.actionCopy}>{action.copy}</Text>
-                  </Pressable>
-                );
-              })
-            ) : (
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyTitle}>No commands matched</Text>
-                <Text style={styles.emptyCopy}>
-                  Try merge, stage, refresh, or task.
-                </Text>
-              </View>
-            )}
-          </View>
-        </View>
-        {showDeveloperDiagnostics ? (
-          <View style={styles.diagnosticsCard}>
-            <Text style={styles.commandLabel}>Developer diagnostics</Text>
-            <Pressable
-              accessibilityLabel="Force Cloud"
-              accessibilityState={{ checked: forceCloudEnabled }}
-              style={styles.diagnosticToggle}
-              testID={MOBILE_E2E_IDS.developerForceCloudToggle}
-              onPress={() => onForceCloudChange(!forceCloudEnabled)}
-            >
-              <View
-                style={[
-                  styles.diagnosticIndicator,
-                  forceCloudEnabled ? styles.diagnosticIndicatorActive : null
+        <ScrollView
+          contentContainerStyle={styles.repoRow}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+        >
+          {repos.map((repo) => {
+            const selected = repo.id === selectedRepoId;
+            return (
+              <Pressable
+                disabled={runningCommandId !== null}
+                key={repo.id}
+                onPress={() => {
+                  if (runningCommandId === null) {
+                    onSelectRepo(repo.id);
+                  }
+                }}
+                style={({ pressed }) => [
+                  styles.repoChip,
+                  selected ? styles.repoChipSelected : null,
+                  runningCommandId !== null
+                    ? styles.commandDisabled
+                    : pressed
+                      ? styles.commandPressed
+                      : null
                 ]}
-              />
-              <View style={styles.diagnosticText}>
-                <Text style={styles.actionTitle}>Force Cloud</Text>
-                <Text style={styles.actionCopy}>
-                  {forceCloudEnabled ? "Relay only" : "Automatic LAN preferred"}
+                testID={MOBILE_E2E_IDS.moreRepo(repo.id)}
+              >
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.repoLabel,
+                    selected ? styles.repoLabelSelected : null
+                  ]}
+                >
+                  {repo.name}
                 </Text>
-              </View>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
+        <TextInput
+          autoCapitalize="none"
+          onChangeText={setQuery}
+          placeholder="Search repository commands"
+          placeholderTextColor="#6A7E9D"
+          style={styles.searchInput}
+          value={query}
+        />
+
+        {!selectedRepoId ? (
+          <EmptyState
+            title="Select a repository"
+            copy="Choose a repository to see its commands."
+          />
+        ) : status === "loading" ? (
+          <View style={styles.statusCard}>
+            <ActivityIndicator color="#8CB8EF" />
+            <Text style={styles.statusCopy}>Loading repository commands…</Text>
+          </View>
+        ) : status === "error" ? (
+          <View style={styles.statusCard}>
+            <Text style={styles.emptyTitle}>Commands unavailable</Text>
+            <Text style={styles.emptyCopy}>
+              {errorMessage ?? "Could not load commands."}
+            </Text>
+            <Pressable
+              onPress={onRetry}
+              style={({ pressed }) => [
+                styles.retryButton,
+                pressed ? styles.commandPressed : null
+              ]}
+            >
+              <Text style={styles.retryLabel}>Try Again</Text>
             </Pressable>
           </View>
-        ) : null}
+        ) : sections.length === 0 ? (
+          <EmptyState
+            title={query.trim() ? "No commands matched" : "No repository commands"}
+            copy={
+              query.trim()
+                ? "Try a different search."
+                : "This repository has no available commands."
+            }
+          />
+        ) : (
+          sections.map((section) => (
+            <View
+              key={section.group}
+              style={styles.section}
+              testID={MOBILE_E2E_IDS.moreCommandGroup(section.group)}
+            >
+              <Text style={styles.sectionLabel}>{section.title}</Text>
+              <View style={styles.commandList}>
+                {section.commands.map((command) => {
+                  const running = runningCommandId === command.id;
+                  return (
+                    <Pressable
+                      disabled={runningCommandId !== null}
+                      key={command.id}
+                      onPress={() => onRunCommand(command.id)}
+                      style={({ pressed }) => [
+                        styles.command,
+                        runningCommandId !== null
+                          ? styles.commandDisabled
+                          : pressed
+                            ? styles.commandPressed
+                            : null
+                      ]}
+                      testID={MOBILE_E2E_IDS.moreCommand(command.id)}
+                    >
+                      <View style={styles.commandText}>
+                        <Text style={styles.commandTitle}>
+                          {running ? "Running…" : command.label}
+                        </Text>
+                        <Text style={styles.commandCopy}>
+                          {command.description}
+                        </Text>
+                      </View>
+                      <Text style={styles.chevron}>›</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          ))
+        )}
       </View>
     </ScrollView>
   );
 }
 
+function EmptyState({ title, copy }: { title: string; copy: string }) {
+  return (
+    <View style={styles.statusCard}>
+      <Text style={styles.emptyTitle}>{title}</Text>
+      <Text style={styles.emptyCopy}>{copy}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  content: {
-    paddingBottom: 140
-  },
-  wrap: {
-    gap: 14
-  },
-  heading: {
-    color: "#F5F7FB",
-    fontSize: 24,
-    fontWeight: "700"
-  },
-  paletteCard: {
+  content: { paddingBottom: 140 },
+  wrap: { gap: 14 },
+  heading: { color: "#F5F7FB", fontSize: 24, fontWeight: "700" },
+  subheading: { color: "#93A7C8", fontSize: 14, marginTop: -8 },
+  repoRow: { gap: 8, paddingRight: 12 },
+  repoChip: {
     backgroundColor: "#0D1727",
     borderColor: "#22304D",
-    borderRadius: 20,
+    borderRadius: 999,
     borderWidth: 1,
-    gap: 12,
-    padding: 16
+    maxWidth: 220,
+    paddingHorizontal: 14,
+    paddingVertical: 9
   },
-  diagnosticsCard: {
-    backgroundColor: "#0D1727",
-    borderColor: "#22304D",
-    borderRadius: 20,
-    borderWidth: 1,
-    gap: 10,
-    padding: 16
-  },
+  repoChipSelected: { backgroundColor: "#17345A", borderColor: "#4C82C7" },
+  repoLabel: { color: "#9EADC3", fontSize: 13, fontWeight: "700" },
+  repoLabelSelected: { color: "#EAF3FF" },
   searchInput: {
     backgroundColor: "#10192A",
     borderColor: "#22304D",
@@ -201,105 +222,59 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 13
   },
-  paletteList: {
-    gap: 10
-  },
-  activeTaskRow: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 10,
-    justifyContent: "space-between"
-  },
-  commandLabel: {
+  section: { gap: 8 },
+  sectionLabel: {
     color: "#7FA7D9",
     fontSize: 12,
     fontWeight: "700",
+    letterSpacing: 0.5,
     textTransform: "uppercase"
   },
-  activeTaskTitle: {
-    color: "#F5F7FB",
-    flex: 1,
-    fontSize: 15,
-    fontWeight: "700"
-  },
-  taskStagePill: {
-    backgroundColor: "#172843",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6
-  },
-  taskStageLabel: {
-    color: "#9EB6DC",
-    fontSize: 11,
-    fontWeight: "700",
-    textTransform: "uppercase"
-  },
-  emptyState: {
+  commandList: { gap: 8 },
+  command: {
     alignItems: "center",
-    backgroundColor: "#10192A",
-    borderColor: "#20304C",
+    backgroundColor: "#0D1727",
+    borderColor: "#22304D",
     borderRadius: 16,
     borderWidth: 1,
-    gap: 6,
-    padding: 20
+    flexDirection: "row",
+    gap: 12,
+    padding: 15
   },
-  emptyTitle: {
-    color: "#F5F7FB",
-    fontSize: 15,
-    fontWeight: "700"
+  commandDisabled: { opacity: 0.62 },
+  commandPressed: {
+    backgroundColor: "#182842",
+    borderColor: "#3A5F91",
+    opacity: 0.82,
+    transform: [{ scale: 0.98 }]
   },
+  commandText: { flex: 1, gap: 4 },
+  commandTitle: { color: "#F5F7FB", fontSize: 16, fontWeight: "700" },
+  commandCopy: { color: "#A8B7CC", fontSize: 13, lineHeight: 18 },
+  chevron: { color: "#6883A8", fontSize: 25, fontWeight: "300" },
+  statusCard: {
+    alignItems: "center",
+    backgroundColor: "#0D1727",
+    borderColor: "#22304D",
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 8,
+    padding: 22
+  },
+  statusCopy: { color: "#A8B7CC", fontSize: 14 },
+  emptyTitle: { color: "#F5F7FB", fontSize: 15, fontWeight: "700" },
   emptyCopy: {
     color: "#93A7C8",
     fontSize: 13,
     lineHeight: 19,
     textAlign: "center"
   },
-  action: {
-    backgroundColor: "#111B2C",
-    borderColor: "#20304C",
-    borderRadius: 16,
-    borderWidth: 1,
-    gap: 6,
-    padding: 14
+  retryButton: {
+    backgroundColor: "#275C96",
+    borderRadius: 12,
+    marginTop: 4,
+    paddingHorizontal: 16,
+    paddingVertical: 10
   },
-  actionDisabled: {
-    opacity: 0.65
-  },
-  actionPressed: {
-    backgroundColor: "#182842",
-    borderColor: "#3A5F91",
-    opacity: 0.82,
-    transform: [{ scale: 0.98 }]
-  },
-  actionTitle: {
-    color: "#F5F7FB",
-    fontSize: 16,
-    fontWeight: "700"
-  },
-  actionCopy: {
-    color: "#B4C2D8",
-    fontSize: 14,
-    lineHeight: 20
-  },
-  diagnosticToggle: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 12,
-    paddingVertical: 4
-  },
-  diagnosticIndicator: {
-    backgroundColor: "#172338",
-    borderColor: "#3B5278",
-    borderRadius: 8,
-    borderWidth: 1,
-    height: 16,
-    width: 16
-  },
-  diagnosticIndicatorActive: {
-    backgroundColor: "#56A2FF",
-    borderColor: "#8EC2FF"
-  },
-  diagnosticText: {
-    flex: 1
-  }
+  retryLabel: { color: "#F5F7FB", fontSize: 14, fontWeight: "700" }
 });

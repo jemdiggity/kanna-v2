@@ -30,6 +30,29 @@ export interface RepoSummary {
   name: string;
 }
 
+export type RepoCommandGroup = "automation" | "configure";
+
+export interface RepoCommand {
+  id: string;
+  label: string;
+  description: string;
+  group: RepoCommandGroup;
+}
+
+export interface RepoCommandCatalog {
+  repoId: string;
+  revision: string;
+  commands: RepoCommand[];
+}
+
+export interface RunRepoCommandResponse {
+  taskId: string;
+  reused: boolean;
+  ownerDesktopId?: string;
+  ownerLocalRepoId?: string;
+  ownerLocalTaskId?: string;
+}
+
 export interface PairingClaimRequest {
   code: string;
   deviceId: string;

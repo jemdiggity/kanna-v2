@@ -11,6 +11,18 @@ describe("mobile E2E selector helpers", () => {
     });
   });
 
+  it("exposes repository command controls through stable Appium selectors", () => {
+    expect(selectorHelpers.selectors.moreRepoOptionsXPath).toBe(
+      '//*[starts-with(@name, "mobile.more.repo.")]'
+    );
+    expect(selectorHelpers.selectors.moreCommandGroup("configure")).toBe(
+      "~mobile.more.command-group.configure"
+    );
+    expect(selectorHelpers.selectors.moreCommand("factory:create-agent")).toBe(
+      "~mobile.more.command.factory:create-agent"
+    );
+  });
+
   it("exposes native file-preview controls for the relay smoke", () => {
     expect(selectorHelpers.selectors).toMatchObject({
       taskFilePreviewClose: "~mobile.task-file-preview.close",

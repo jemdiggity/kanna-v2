@@ -62,8 +62,15 @@ interface ProfileMachinesUi {
   getOtaStatusValue(): Promise<ProfileMachinesElement>;
   getAddTaskButton(): Promise<ProfileMachinesElement>;
   getCreateTaskCancelButton(): Promise<ProfileMachinesElement>;
-  getCreateTaskCommand(): Promise<ScrollableProfileMachinesElement>;
   getCreateTaskPromptInput(): Promise<ProfileMachinesElement>;
+  getRepoOption(): Promise<ProfileMachinesElement>;
+  getConfigureCommandGroup(): Promise<ProfileMachinesElement>;
+  getCreateAgentCommand(): Promise<ScrollableProfileMachinesElement>;
+  getTaskDetailScreen(): Promise<ProfileMachinesElement>;
+  getTaskTitleButton(): Promise<ProfileMachinesElement>;
+  getExpandedTaskId(): Promise<ProfileMachinesElement>;
+  getTaskSnapshotMarker(): Promise<ProfileMachinesElement>;
+  getTaskBackButton(): Promise<ProfileMachinesElement>;
   waitUntil(
     condition: () => Promise<boolean>,
     options: { interval: number; timeout: number; timeoutMsg: string }
@@ -97,8 +104,17 @@ function createProfileMachinesUi(driver: Browser): ProfileMachinesUi {
     getOtaStatusValue: async () => driver.$(selectors.legacyUpdateInfoOtaValue),
     getAddTaskButton: async () => driver.$(selectors.addTaskButton),
     getCreateTaskCancelButton: async () => driver.$(selectors.createTaskCancelButton),
-    getCreateTaskCommand: async () => driver.$(selectors.createTaskCommand),
     getCreateTaskPromptInput: async () => driver.$(selectors.createTaskPromptInput),
+    getRepoOption: async () => driver.$(selectors.moreRepoOptionsXPath),
+    getConfigureCommandGroup: async () =>
+      driver.$(selectors.moreCommandGroup("configure")),
+    getCreateAgentCommand: async () =>
+      driver.$(selectors.moreCommand("factory:create-agent")),
+    getTaskDetailScreen: async () => driver.$(selectors.taskDetailScreen),
+    getTaskTitleButton: async () => driver.$(selectors.taskTitleButton),
+    getExpandedTaskId: async () => driver.$(selectors.taskExpandedTaskId),
+    getTaskSnapshotMarker: async () => driver.$(selectors.taskSnapshotMarker),
+    getTaskBackButton: async () => driver.$(selectors.taskBackButton),
     waitUntil: async (condition, options) => driver.waitUntil(condition, options)
   };
 }
@@ -116,10 +132,7 @@ export async function assertToolbarActionPathsReachable(
     ProfileMachinesUi,
     | "getAddTaskButton"
     | "getCreateTaskCancelButton"
-    | "getCreateTaskCommand"
     | "getCreateTaskPromptInput"
-    | "getMoreTab"
-    | "getMoreScreen"
     | "waitUntil"
   >
 ): Promise<void> {
@@ -146,16 +159,58 @@ export async function assertToolbarActionPathsReachable(
   };
 
   await openAndCloseComposer(await ui.getAddTaskButton());
+}
 
+export async function assertRepositoryCommandJourney(
+  ui: Pick<
+    ProfileMachinesUi,
+    | "getMoreTab"
+    | "getMoreScreen"
+    | "getRepoOption"
+    | "getConfigureCommandGroup"
+    | "getCreateAgentCommand"
+    | "getTaskDetailScreen"
+    | "getTaskTitleButton"
+    | "getExpandedTaskId"
+    | "getTaskSnapshotMarker"
+    | "getTaskBackButton"
+  >
+): Promise<void> {
   const moreTab = await ui.getMoreTab();
   await moreTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await moreTab.click();
+  await (await ui.getMoreScreen()).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
 
-  const moreScreen = await ui.getMoreScreen();
-  await moreScreen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  const createTaskCommand = await ui.getCreateTaskCommand();
-  await createTaskCommand.scrollIntoView({ direction: "down", maxScrolls: 5 });
-  await openAndCloseComposer(createTaskCommand);
+  const repoOption = await ui.getRepoOption();
+  await repoOption.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await repoOption.click();
+  await (await ui.getConfigureCommandGroup()).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+  const command = await ui.getCreateAgentCommand();
+  await command.scrollIntoView({ direction: "down", maxScrolls: 5 });
+  await command.click();
+
+  await (await ui.getTaskDetailScreen()).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+  await (await ui.getTaskTitleButton()).click();
+  const expandedTaskId = await ui.getExpandedTaskId();
+  await expandedTaskId.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const taskId = (await expandedTaskId.getText()).trim();
+  if (!taskId) {
+    throw new Error("Expected repository command to open a task with an ID");
+  }
+
+  const marker = await (await ui.getTaskSnapshotMarker()).getAttribute("label");
+  if (!marker?.split("\n").some((entry) => entry.startsWith(`${taskId}:`))) {
+    throw new Error(
+      `Expected canonical task ${taskId} in refreshed task snapshot, got ${marker ?? "<missing>"}`
+    );
+  }
+  await (await ui.getTaskBackButton()).click();
 }
 
 export async function submitPairingCode(
@@ -447,6 +502,7 @@ export async function runProfileConnectionSmoke(driver: Browser): Promise<void> 
   });
   await assertToolbarActionPathsReachable(ui);
   await assertOtaDiagnosticsHidden(ui);
+  await assertRepositoryCommandJourney(ui);
   await openProfileSheet(ui);
   await assertProfileSignInControlsReachable(ui);
   await assertProfilePasswordCanRevealAndHide(ui);

@@ -90,6 +90,7 @@ fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
         max_turns: None,
         max_budget_usd: None,
         setup_cmds: Vec::new(),
+        task_template: None,
         resume_session_id: None,
         notify_task_id: None,
         parent_task_id: None,

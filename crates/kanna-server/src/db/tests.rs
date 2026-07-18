@@ -994,7 +994,10 @@ fn ui_snapshot_treats_null_pinned_as_unpinned() {
     )
     .expect("task");
     db.conn
-        .execute("UPDATE pipeline_item SET pinned = NULL WHERE id = ?", ["task-1"])
+        .execute(
+            "UPDATE pipeline_item SET pinned = NULL WHERE id = ?",
+            ["task-1"],
+        )
         .expect("clear pinned");
 
     let snapshot = db.ui_snapshot().expect("snapshot with nullable pinned");

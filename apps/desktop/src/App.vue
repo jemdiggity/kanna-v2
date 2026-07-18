@@ -9,7 +9,7 @@ import AppModalLayer from "./components/AppModalLayer.vue";
 import type { AppModalLayerController } from "./components/AppModalLayer.types";
 import { type KeyboardActions } from "./composables/useKeyboardShortcuts";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
-import { useCustomTasks } from "./composables/useCustomTasks";
+import { useRepoCommands } from "./composables/useRepoCommands";
 import { useToast } from "./composables/useToast";
 import { useAppUpdate } from "./composables/useAppUpdate";
 import { useAppCloudWorkspace } from "./composables/useAppCloudWorkspace";
@@ -32,7 +32,7 @@ const { t } = useI18n();
 const db = inject<DbHandle>("db")!;
 const dbName = inject<string>("dbName")!;
 const windowWorkspace = inject<WindowWorkspaceController>("windowWorkspace")!;
-const { tasks: customTasks, scan: scanCustomTasks } = useCustomTasks();
+const { catalog: repoCommandCatalog, scan: scanRepoCommands } = useRepoCommands();
 const { effectiveAppTheme } = useThemeRuntime();
 const appUpdate = useAppUpdate();
 useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
@@ -228,7 +228,7 @@ const appTaskNavigation = useAppTaskNavigation({
   selectedCloudItemId,
   showBlockerSelect,
   blockerSelectMode,
-  customTasks,
+  repoCommandCatalog,
   openPeerPicker,
   openPairPeerPicker,
 });
@@ -358,7 +358,7 @@ const appKeyboardActions = useAppKeyboardActions({
   closeFilePicker,
   closeFileFlow,
   onShellClose,
-  scanCustomTasks,
+  scanRepoCommands,
   handleBlockTask,
   handleEditBlockedTask,
 });

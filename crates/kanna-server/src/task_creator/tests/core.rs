@@ -1,6 +1,87 @@
 use super::super::definitions::{AgentDefinition, PipelineDefinition, RepoDefinitions};
 use super::super::provider::resolve_agent_provider_with;
 use super::*;
+
+#[test]
+fn repo_command_template_identity_persists_the_selected_teardown_for_close() {
+    let repo_root = init_git_repo("repo-command-template-teardown");
+    for (slug, teardown) in [
+        ("same-label-first", "printf WRONG_TEMPLATE_TEARDOWN"),
+        ("same-label-selected", "printf SELECTED_TEMPLATE_TEARDOWN"),
+    ] {
+        let task_dir = repo_root.join(format!(".kanna/tasks/{slug}"));
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(
+            task_dir.join("agent.md"),
+            format!("---\nname: Shared label\nteardown: [{teardown}]\n---\nRun {slug}.\n"),
+        )
+        .unwrap();
+    }
+    publish_origin_main(&repo_root, "publish same-label task templates");
+
+    let config = test_config("repo-command-template-teardown");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    let repo = db.get_repo("repo-1").unwrap().unwrap();
+    let launch =
+        crate::repo_commands::resolve_repo_command_launch(&repo, "custom:same-label-selected")
+            .unwrap()
+            .1
+            .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: launch.prompt,
+            display_name: Some(launch.display_name),
+            pipeline_name: None,
+            stage: launch.stage,
+            base_ref: None,
+            agent: launch.agent,
+            agent_provider: launch.agent_provider,
+            agent_type: launch.agent_type,
+            terminal_cols: None,
+            terminal_rows: None,
+            model: launch.model,
+            permission_mode: launch.permission_mode,
+            allowed_tools: launch.allowed_tools,
+            disallowed_tools: launch.disallowed_tools,
+            max_turns: launch.max_turns,
+            max_budget_usd: launch.max_budget_usd,
+            setup_cmds: launch.setup_cmds,
+            task_template: launch.task_template,
+            resume_session_id: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: None,
+        },
+    )
+    .unwrap();
+    let task_id = prepared.task_id().to_string();
+    let stored_options = db
+        .get_test_pipeline_item_spawn_options(&task_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        stored_options.contains("custom:same-label-selected"),
+        "selected template identity must be durable: {stored_options}"
+    );
+
+    let teardown = super::super::prepare_workspace_teardown_for_close(&db, &config, &task_id)
+        .expect("selected template teardown");
+    let command = match teardown.session {
+        PreparedSessionSpawn::Pty { args, .. } => args.join(" "),
+        PreparedSessionSpawn::Agent { .. } => panic!("teardown must use a PTY"),
+    };
+    assert!(command.contains("SELECTED_TEMPLATE_TEARDOWN"), "{command}");
+    assert!(!command.contains("WRONG_TEMPLATE_TEARDOWN"), "{command}");
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
 use crate::db::{NewRepo, Repo};
 
 #[test]
@@ -311,6 +392,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -1998,6 +2080,7 @@ fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() 
                 max_turns: None,
                 max_budget_usd: None,
                 setup_cmds: None,
+                task_template: None,
                 resume_session_id: None,
                 blocker_task_ids: None,
                 notify_task_id: None,
@@ -2371,6 +2454,7 @@ fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
                 max_turns: None,
                 max_budget_usd: None,
                 setup_cmds: None,
+                task_template: None,
                 resume_session_id: None,
                 notify_task_id: None,
                 parent_task_id: None,
@@ -2453,6 +2537,7 @@ fn prepare_task_uses_requested_initial_terminal_geometry() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -2503,6 +2588,7 @@ fn prepare_task_uses_default_initial_terminal_geometry_for_oversized_request() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -2562,6 +2648,7 @@ fn prepare_task_uses_create_request_agent_selector() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -2622,6 +2709,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             setup_cmds: Some(vec![
                 "printf 'custom setup' > .kanna/custom-setup-ran".to_string()
             ]),
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -2700,6 +2788,7 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: Some(resume_session_id.to_string()),
             notify_task_id: None,
             parent_task_id: None,
@@ -2754,6 +2843,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -2808,6 +2898,7 @@ fn prepare_task_for_api_uses_requested_task_id() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -2852,6 +2943,7 @@ fn create_dormant_task_for_api_uses_requested_task_id() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -2907,6 +2999,7 @@ fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -2965,6 +3058,7 @@ fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collisio
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -3018,6 +3112,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -3089,6 +3184,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -3148,6 +3244,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -3219,6 +3316,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -3294,6 +3392,7 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
@@ -3342,6 +3441,7 @@ fn prepare_task_rejects_missing_parent_task() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
@@ -3478,6 +3578,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
@@ -3595,6 +3696,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
@@ -3632,6 +3734,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            task_template: None,
             resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,

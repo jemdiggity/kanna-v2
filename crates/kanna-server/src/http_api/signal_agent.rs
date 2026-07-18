@@ -16,8 +16,8 @@ pub(super) struct SignalAgentRequest {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SignalAgentResponse {
-    task_id: String,
-    created: bool,
+    pub(super) task_id: String,
+    pub(super) created: bool,
 }
 
 pub(super) async fn signal_agent(
@@ -25,7 +25,18 @@ pub(super) async fn signal_agent(
     axum::extract::Path((repo_id, agent)): axum::extract::Path<(String, String)>,
     Json(payload): Json<SignalAgentRequest>,
 ) -> Result<Json<SignalAgentResponse>, (axum::http::StatusCode, String)> {
-    let message = payload.message.trim();
+    signal_agent_request(state, repo_id, agent, payload.message)
+        .await
+        .map(Json)
+}
+
+pub(super) async fn signal_agent_request(
+    state: Arc<AppState>,
+    repo_id: String,
+    agent: String,
+    message: String,
+) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
+    let message = message.trim();
     if message.is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -54,10 +65,10 @@ pub(super) async fn signal_agent(
                 )
             })?;
         submit_task_input(&mut daemon, &running.session_id, message).await?;
-        return Ok(Json(SignalAgentResponse {
+        return Ok(SignalAgentResponse {
             task_id: running.task_id,
             created: false,
-        }));
+        });
     }
 
     let prepared = {
@@ -83,10 +94,10 @@ pub(super) async fn signal_agent(
     state.publish_state_changed(StateChangeScope::Tasks);
     spawn_signal_agent_task_detached(Arc::clone(&state), prepared);
 
-    Ok(Json(SignalAgentResponse {
+    Ok(SignalAgentResponse {
         task_id,
         created: true,
-    }))
+    })
 }
 
 fn spawn_signal_agent_task_detached(

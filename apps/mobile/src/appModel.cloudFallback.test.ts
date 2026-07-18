@@ -242,7 +242,26 @@ function createTwoDesktopLanFixture() {
       ]);
     }
     if (url.endsWith("/v1/repos")) {
-      return response([]);
+      return response(
+        desktopId === "desktop-a"
+          ? [{ id: "repo-a", name: "Repository A" }]
+          : []
+      );
+    }
+    if (url.endsWith("/v1/repos/repo-a/commands")) {
+      return response({
+        repoId: "repo-a",
+        revision: "repo-a-v1",
+        commands: [{
+          id: "factory:create-agent",
+          label: "Create Agent",
+          description: "Create a repository agent",
+          group: "configure"
+        }]
+      });
+    }
+    if (url.endsWith("/v1/repos/repo-a/commands/factory%3Acreate-agent/run")) {
+      return response({ taskId: "task-command-a", reused: false });
     }
     if (url.endsWith("/v1/tasks/recent")) {
       return response(
@@ -827,6 +846,68 @@ describe("createAppModel cloud routing", () => {
       {
         method: "POST",
         url: `${lan.baseUrls["desktop-a"]}/v1/tasks/task-a/actions/close`
+      }
+    ]);
+  });
+
+  it("pins taskless repository commands to the desktop that listed the repository", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        onUpdate([]);
+        return vi.fn();
+      })
+    };
+    const lan = createTwoDesktopLanFixture();
+    const app = createAppModel({
+      authSession,
+      fetchImpl: lan.fetchImpl,
+      persistence: lan.persistence,
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: lan.bonjourBrowser,
+        createRelayClient: () => createRelayClientMock()
+      }
+    });
+
+    await app.initialize();
+    await expect(app.client.listRepos()).resolves.toContainEqual({
+      id: "repo-a",
+      name: "Repository A"
+    });
+    app.sessionStore.selectDesktop("desktop-b");
+    await expect(app.client.listRepoCommands("repo-a")).resolves.toMatchObject({
+      repoId: "repo-a",
+      revision: "repo-a-v1"
+    });
+    await expect(
+      app.client.runRepoCommand(
+        "repo-a",
+        "factory:create-agent",
+        "repo-a-v1"
+      )
+    ).resolves.toMatchObject({
+      taskId: "cloud:desktop-a:repo-a:task-command-a",
+      ownerDesktopId: "desktop-a",
+      ownerLocalRepoId: "repo-a",
+      ownerLocalTaskId: "task-command-a"
+    });
+    expect(
+      lan.requests.filter(({ url }) => url.includes("/v1/repos/repo-a/commands"))
+    ).toEqual([
+      {
+        method: "GET",
+        url: `${lan.baseUrls["desktop-a"]}/v1/repos/repo-a/commands`
+      },
+      {
+        method: "POST",
+        url:
+          `${lan.baseUrls["desktop-a"]}` +
+          "/v1/repos/repo-a/commands/factory%3Acreate-agent/run"
       }
     ]);
   });
