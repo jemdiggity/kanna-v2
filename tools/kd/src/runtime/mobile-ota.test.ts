@@ -535,10 +535,28 @@ describe("kd mobile OTA", () => {
           return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
         }
         if (command === "gcloud" && joined.includes("secrets get-iam-policy kanna-mobile-ota-private-key-pem")) {
-          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/secretmanager.secretAccessor",
+                members: ["serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com"],
+              }],
+            }),
+            stderr: "",
+          };
         }
         if (command === "gcloud" && joined.includes("storage buckets get-iam-policy gs://kanna-staging.firebasestorage.app")) {
-          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/storage.objectViewer",
+                members: ["serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com"],
+              }],
+            }),
+            stderr: "",
+          };
         }
         if (command === "curl" && args.at(-1) === "https://relay-staging.kanna.build/health") {
           return { exitCode: 0, stdout: "{\"ok\":true}", stderr: "" };
@@ -563,6 +581,13 @@ describe("kd mobile OTA", () => {
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("create"))).toBe(false);
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("add-iam-policy-binding"))).toBe(false);
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("access"))).toBe(false);
+    const iamCalls = calls.filter((call) => call.args.includes("get-iam-policy"));
+    expect(iamCalls).toHaveLength(2);
+    for (const call of iamCalls) {
+      expect(call.args).toContain("--format=json");
+      expect(call.args.some((arg) => arg.startsWith("--filter"))).toBe(false);
+      expect(call.args.some((arg) => arg.startsWith("--flatten"))).toBe(false);
+    }
   });
 
   it("reports a missing OTA pointer without probing update objects", async () => {
@@ -582,10 +607,28 @@ describe("kd mobile OTA", () => {
           return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
         }
         if (command === "gcloud" && joined.includes("secrets get-iam-policy kanna-mobile-ota-private-key-pem")) {
-          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/secretmanager.secretAccessor",
+                members: ["serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com"],
+              }],
+            }),
+            stderr: "",
+          };
         }
         if (command === "gcloud" && joined.includes("storage buckets get-iam-policy gs://kanna-staging.firebasestorage.app")) {
-          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/storage.objectViewer",
+                members: ["serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com"],
+              }],
+            }),
+            stderr: "",
+          };
         }
         if (command === "curl" && args.at(-1) === "https://relay-staging.kanna.build/health") {
           return { exitCode: 0, stdout: "{\"ok\":true}", stderr: "" };
@@ -606,5 +649,61 @@ describe("kd mobile OTA", () => {
     expect(result.message).toContain("FAIL pointer");
     expect(result.message).toContain("manifest: relay reports no update for the channel");
     expect(calls.some((call) => call.args.join(" ").includes("/updates/"))).toBe(false);
+  });
+
+  it("rejects a relay storage member bound to the wrong IAM role", async () => {
+    const repoRoot = await makeRepoFixture();
+    const member = "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com";
+    const pointer = {
+      currentUpdateId: "11111111-2222-3333-4444-555555555555",
+      runtimeVersion: "1.0.0",
+    };
+    const runner: CommandRunner = {
+      async run(command, args) {
+        const joined = args.join(" ");
+        if (command === "gcloud" && joined.includes("channels/staging.json")) {
+          return { exitCode: 0, stdout: JSON.stringify(pointer), stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("updates/11111111-2222-3333-4444-555555555555/")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets describe")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("compute instances describe")) {
+          return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets get-iam-policy")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{ role: "roles/secretmanager.secretAccessor", members: [member] }],
+            }),
+            stderr: "",
+          };
+        }
+        if (command === "gcloud" && joined.includes("storage buckets get-iam-policy")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{ role: "roles/storage.objectCreator", members: [member] }],
+            }),
+            stderr: "",
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "ok", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected command: ${command} ${joined}` };
+      },
+    };
+
+    const result = await executeMobileOtaDoctorWithContext(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("FAIL GCS IAM");
   });
 });

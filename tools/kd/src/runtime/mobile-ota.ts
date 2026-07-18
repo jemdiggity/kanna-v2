@@ -92,6 +92,13 @@ interface OtaDoctorCheck {
   detail: string;
 }
 
+interface IamPolicy {
+  bindings?: Array<{
+    role?: string;
+    members?: string[];
+  }>;
+}
+
 const OTA_SECRET_NAME = "kanna-mobile-ota-private-key-pem";
 const OTA_KEY_ID = "kanna-mobile-ota-v1";
 
@@ -566,10 +573,9 @@ export async function executeMobileOtaDoctorWithContext(
         OTA_SECRET_NAME,
         "--project",
         projectId,
-        "--flatten=bindings[].members",
-        `--filter=bindings.role:roles/secretmanager.secretAccessor AND bindings.members:serviceAccount:${serviceAccount}`,
-        "--format=value(bindings.members)",
+        "--format=json",
       ],
+      expectedRole: "roles/secretmanager.secretAccessor",
       expectedMember: `serviceAccount:${serviceAccount}`,
       passDetail: `${serviceAccount} can read ${OTA_SECRET_NAME}`,
       failDetail: `${serviceAccount} is not listed as a Secret Manager accessor for ${OTA_SECRET_NAME}`,
@@ -584,10 +590,9 @@ export async function executeMobileOtaDoctorWithContext(
         `gs://${bucket}`,
         "--project",
         projectId,
-        "--flatten=bindings[].members",
-        `--filter=bindings.role:roles/storage.objectViewer AND bindings.members:serviceAccount:${serviceAccount}`,
-        "--format=value(bindings.members)",
+        "--format=json",
       ],
+      expectedRole: "roles/storage.objectViewer",
       expectedMember: `serviceAccount:${serviceAccount}`,
       passDetail: `${serviceAccount} can read gs://${bucket}`,
       failDetail: `${serviceAccount} is not listed as a Storage Object Viewer for gs://${bucket}`,
@@ -762,6 +767,7 @@ async function addIamPolicyCheck(
     name: string;
     command: string;
     args: string[];
+    expectedRole: string;
     expectedMember: string;
     passDetail: string;
     failDetail: string;
@@ -771,12 +777,24 @@ async function addIamPolicyCheck(
     cwd: context.repoRoot,
     env: context.env,
   });
-  const hasMember = result.stdout.includes(input.expectedMember);
+  const policy = parseIamPolicy(result.stdout);
+  const hasBinding = policy?.bindings?.some((binding) =>
+    binding.role === input.expectedRole && binding.members?.includes(input.expectedMember)
+  ) === true;
   checks.push({
-    status: result.exitCode === 0 && hasMember ? "PASS" : "FAIL",
+    status: result.exitCode === 0 && hasBinding ? "PASS" : "FAIL",
     name: input.name,
-    detail: result.exitCode === 0 && hasMember ? input.passDetail : `${input.failDetail}: ${summarizeCommandFailure(result)}`,
+    detail: result.exitCode === 0 && hasBinding ? input.passDetail : `${input.failDetail}: ${summarizeCommandFailure(result)}`,
   });
+}
+
+function parseIamPolicy(stdout: string): IamPolicy | null {
+  try {
+    const parsed = JSON.parse(stdout) as IamPolicy;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function parsePointer(stdout: string): OtaChannelPointer | null {
