@@ -50,7 +50,6 @@ async function makeRepoFixture(): Promise<string> {
   );
   await writeFile(join(repoRoot, "apps/mobile/dist/_expo/static/js/ios/main.hbc"), "bundle bytes");
   await writeFile(join(repoRoot, "apps/mobile/dist/assets/icon.png"), "png bytes");
-  await writeFile(join(repoRoot, "apps/mobile/dist/expoConfig.json"), "{}");
   return repoRoot;
 }
 
@@ -127,21 +126,43 @@ describe("kd mobile OTA", () => {
       updateId: expectedUpdateId,
       pointerObject: "ota/ios/1.0.0/channels/staging.json",
     });
-    expect(plan.commands.map((command) => command.command)).toEqual(["pnpm", "gcloud", "gcloud"]);
-    expect(plan.commands[0]?.args).toContain("expo");
-    expect(plan.commands[1]?.args).toContain("--recursive");
-    expect(plan.commands[2]?.args).toContain("gs://kanna-staging.firebasestorage.app/ota/ios/1.0.0/channels/staging.json");
+    expect(plan.commands.map((command) => command.command)).toEqual([
+      "pnpm",
+      "pnpm",
+      "gcloud",
+      "gcloud",
+    ]);
+    expect(plan.commands[0]?.args).toContain("export");
+    expect(plan.commands[1]?.args).toEqual([
+      "exec",
+      "expo",
+      "config",
+      "--type",
+      "public",
+      "--json",
+    ]);
+    expect(plan.commands[2]?.args).toContain("--recursive");
+    expect(plan.commands[3]?.args).toContain("gs://kanna-staging.firebasestorage.app/ota/ios/1.0.0/channels/staging.json");
   });
 
   it("checks git cleanliness and runs export before publishing in dry-run mode", async () => {
     const repoRoot = await makeRepoFixture();
-    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const expoPublicConfig = JSON.stringify({
+      name: "Kanna Staging",
+      runtimeVersion: "1.0.0",
+      extra: { kanna: { appEnv: "staging" } },
+    });
+    const calls: Array<{
+      command: string;
+      args: string[];
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+    }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, cwd: options?.cwd });
+        calls.push({ command, args, cwd: options?.cwd, env: options?.env });
         if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
-        if (command === "pnpm") {
-          await mkdir(join(repoRoot, "apps/mobile/dist"), { recursive: true });
+        if (command === "pnpm" && args.includes("export")) {
           await mkdir(join(repoRoot, "apps/mobile/dist/bundles"), { recursive: true });
           await writeFile(
             join(repoRoot, "apps/mobile/dist/metadata.json"),
@@ -154,9 +175,11 @@ describe("kd mobile OTA", () => {
               },
             })
           );
-          await writeFile(join(repoRoot, "apps/mobile/dist/expoConfig.json"), "{}");
           await writeFile(join(repoRoot, "apps/mobile/dist/bundles/main.hbc"), "bundle");
           return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "pnpm" && args.includes("config")) {
+          return { exitCode: 0, stdout: expoPublicConfig, stderr: "" };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
@@ -174,6 +197,13 @@ describe("kd mobile OTA", () => {
     expect(result.ok).toBe(true);
     expect(calls[0]).toMatchObject({ command: "git", args: ["status", "--porcelain"], cwd: repoRoot });
     expect(calls[1]).toMatchObject({ command: "pnpm", cwd: join(repoRoot, "apps/mobile") });
+    expect(calls[2]).toMatchObject({
+      command: "pnpm",
+      args: ["exec", "expo", "config", "--type", "public", "--json"],
+      cwd: join(repoRoot, "apps/mobile"),
+      env: { KANNA_APP_ENV: "staging" },
+    });
+    expect(calls.some((call) => call.command === "gcloud")).toBe(false);
     expect(result.message).toContain("Dry run: mobile OTA update");
     expect(result.message).toContain("curl -H 'expo-protocol-version: 1'");
   });
@@ -200,9 +230,9 @@ describe("kd mobile OTA", () => {
     });
     const expectedUpdateId = computeExpoUpdateId(Buffer.from(expectedStagedMetadata));
     const runner: CommandRunner = {
-      async run(command) {
+      async run(command, args) {
         if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
-        if (command === "pnpm") {
+        if (command === "pnpm" && args.includes("export")) {
           await mkdir(join(repoRoot, "apps/mobile/dist/_expo/static/js/ios"), { recursive: true });
           await mkdir(join(repoRoot, "apps/mobile/dist/assets"), { recursive: true });
           await writeFile(
@@ -222,10 +252,16 @@ describe("kd mobile OTA", () => {
               },
             })
           );
-          await writeFile(join(repoRoot, "apps/mobile/dist/expoConfig.json"), "{}");
           await writeFile(join(repoRoot, "apps/mobile/dist/_expo/static/js/ios/main.hbc"), bundleBytes);
           await writeFile(join(repoRoot, "apps/mobile/dist/assets/icon.png"), assetBytes);
           return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "pnpm" && args.includes("config")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ name: "Kanna Staging", runtimeVersion: "1.0.0" }),
+            stderr: "",
+          };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
