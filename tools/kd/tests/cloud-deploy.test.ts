@@ -19,10 +19,14 @@ describe("cloud deploy runtime", () => {
     const manifests = dockerfile.indexOf("COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./");
     const patches = dockerfile.indexOf("COPY patches/ ./patches/");
     const install = dockerfile.indexOf("RUN pnpm install --frozen-lockfile --filter kanna-relay...");
+    const deploy = dockerfile.indexOf(
+      "RUN pnpm --config.allowUnusedPatches=true --filter kanna-relay deploy --prod --legacy /relay"
+    );
 
     expect(manifests).toBeGreaterThanOrEqual(0);
     expect(patches).toBeGreaterThan(manifests);
     expect(install).toBeGreaterThan(patches);
+    expect(deploy).toBeGreaterThan(install);
   });
 
   it("resolves the production Firebase project from env before .firebaserc", () => {
