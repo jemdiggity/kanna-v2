@@ -37,8 +37,11 @@ import {
   TASK_COMPOSER_TEXT_INPUT_PROPS
 } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
-import { showTaskQuickReplyMenu } from "./taskQuickReplyMenu";
-import { buildTaskQuickReply } from "./taskQuickReplies";
+import { QuickReplySendControl } from "./QuickReplySendControl";
+import {
+  buildTaskQuickReply,
+  type TaskQuickReply
+} from "./taskQuickReplies";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
 import { getTerminalBottomInset } from "./terminalSafeArea";
 
@@ -67,6 +70,8 @@ interface TaskScreenProps {
   companionUnread?: boolean;
   companionErrorMessage?: string | null;
   companionEventStatus?: TaskCompanionEventStatus;
+  quickReplies: readonly TaskQuickReply[];
+  quickRepliesHydrated: boolean;
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
@@ -107,6 +112,8 @@ export function TaskScreen({
   companionUnread = false,
   companionErrorMessage = null,
   companionEventStatus = "idle",
+  quickReplies,
+  quickRepliesHydrated,
   onBack,
   onAdvanceTaskStage,
   onCloseTask,
@@ -252,22 +259,20 @@ export function TaskScreen({
       }
     });
   };
-  const openQuickReplyMenu = () => {
-    const openedTaskId = composerSnapshotRef.current.taskId;
-    if (composerSnapshotRef.current.isComposerDisabled) {
+  const selectQuickReply = (replyId: string) => {
+    const currentSnapshot = composerSnapshotRef.current;
+    if (
+      currentSnapshot.taskId !== task.id ||
+      currentSnapshot.isComposerDisabled
+    ) {
       return;
     }
 
-    showTaskQuickReplyMenu((quickReply) => {
-      const currentSnapshot = composerSnapshotRef.current;
-      if (
-        currentSnapshot.taskId !== openedTaskId ||
-        currentSnapshot.isComposerDisabled
-      ) {
-        return;
-      }
-      submitInput(buildTaskQuickReply(quickReply, currentSnapshot.draftInput));
-    });
+    const quickReply = quickReplies.find((reply) => reply.id === replyId);
+    if (!quickReply) {
+      return;
+    }
+    submitInput(buildTaskQuickReply(quickReply, currentSnapshot.draftInput));
   };
 
   useEffect(() => {
@@ -561,22 +566,13 @@ export function TaskScreen({
             testID={MOBILE_E2E_IDS.taskInput}
             value={draftInput}
           />
-          <Pressable
-            accessibilityHint="Press and hold for quick replies."
-            accessibilityLabel="Send reply"
-            accessibilityRole="button"
-            accessibilityState={{ disabled: isComposerDisabled }}
+          <QuickReplySendControl
             disabled={isComposerDisabled}
-            style={[
-              styles.sendButton,
-              isComposerDisabled ? styles.sendButtonDisabled : null
-            ]}
-            testID={MOBILE_E2E_IDS.taskSendButton}
-            onLongPress={openQuickReplyMenu}
+            hydrated={quickRepliesHydrated}
+            replies={quickReplies}
             onPress={sendDraftInput}
-          >
-            <Text style={styles.sendButtonLabel}>Send</Text>
-          </Pressable>
+            onSelectReply={selectQuickReply}
+          />
         </View>
       </View>
 
@@ -856,20 +852,6 @@ const styles = StyleSheet.create({
   inputFieldDisabled: {
     color: "#6F89AE",
     opacity: 0.65
-  },
-  sendButton: {
-    backgroundColor: "#E8F1FF",
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 11
-  },
-  sendButtonDisabled: {
-    opacity: 0.45
-  },
-  sendButtonLabel: {
-    color: "#0B1220",
-    fontSize: 13,
-    fontWeight: "700"
   },
   e2eTaskSnapshotMarker: {
     color: "transparent",

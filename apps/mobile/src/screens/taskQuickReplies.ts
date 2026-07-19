@@ -14,13 +14,6 @@ export const DEFAULT_TASK_QUICK_REPLIES: readonly TaskQuickReply[] = [
   }
 ];
 
-// Compatibility for the native menu while the responder control is introduced.
-export const TASK_QUICK_REPLIES = DEFAULT_TASK_QUICK_REPLIES.map((reply) => ({
-  ...reply,
-  label: reply.text,
-  messagePrefix: reply.text
-}));
-
 export interface TaskQuickReplyValidation {
   valid: boolean;
   errors: Record<number, string>;

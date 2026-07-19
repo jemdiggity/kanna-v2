@@ -1,6 +1,7 @@
 import React from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_TASK_QUICK_REPLIES } from "../screens/taskQuickReplies";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -103,6 +104,8 @@ describe("RootNavigator", () => {
           onForceCloudChange={vi.fn()}
           onOpenAccount={vi.fn()}
           openMachinesRequestKey={0}
+          quickReplies={DEFAULT_TASK_QUICK_REPLIES}
+          quickRepliesHydrated
           state={{
             accountDesktops: [],
             composerAgentProvider: "claude",

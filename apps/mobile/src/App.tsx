@@ -30,6 +30,7 @@ import {
 } from "./lib/updates/otaUpdates";
 import RootNavigator from "./navigation/RootNavigator";
 import { buildInitialNavigationState } from "./navigation/navigationState";
+import { DEFAULT_TASK_QUICK_REPLIES } from "./screens/taskQuickReplies";
 import { buildMachineInventory, summarizeMachines } from "./state/machineInventory";
 
 const OTA_FOREGROUND_CHECK_THROTTLE_MS = 5 * 60 * 1000;
@@ -176,6 +177,8 @@ export default function App() {
             forceCloudEnabled={forceCloudEnabled}
             initialState={initialNavigationStateRef.current}
             openMachinesRequestKey={openMachinesRequestKey}
+            quickReplies={DEFAULT_TASK_QUICK_REPLIES}
+            quickRepliesHydrated
             state={state}
             onForceCloudChange={(enabled) => {
               setForceCloudEnabled(enabled);
