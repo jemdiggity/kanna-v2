@@ -6,6 +6,7 @@ import {
 } from "react-test-renderer";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { KannaClient } from "../lib/api/client";
+import type { TaskSummary } from "../lib/api/types";
 import {
   createMobileController,
   type MobileController
@@ -174,7 +175,6 @@ vi.mock("../components/CreateTaskComposer", () => ({
 vi.mock("../screens/MachinesScreen", () => ({ MachinesScreen: "MachinesScreen" }));
 vi.mock("../screens/SearchScreen", () => ({ SearchScreen: "SearchScreen" }));
 vi.mock("../screens/TaskScreen", () => ({ TaskScreen: "TaskScreen" }));
-vi.mock("../screens/TasksScreen", () => ({ TasksScreen: "TasksScreen" }));
 vi.mock("../screens/taskActionMenu", () => ({ showTaskActionMenu: vi.fn() }));
 
 let RootNavigator: typeof import("./RootNavigator").default | null = null;
@@ -201,8 +201,34 @@ async function flushMicrotasks(iterations = 12): Promise<void> {
   }
 }
 
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function createClientMock(): KannaClient {
   return {
+    getStatus: vi.fn().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      lanHost: "127.0.0.1",
+      lanPort: 48120,
+      pairingCode: null
+    }),
+    listDesktops: vi.fn().mockResolvedValue([]),
+    listRepos: vi.fn().mockResolvedValue([
+      { id: "repo-1", name: "Repo One" }
+    ]),
     listRepoCommands: vi.fn(async (repoId: string) => {
       if (repoId === "repo-1") {
         throw new Error("404 /v1/repos/repo-1/commands");
@@ -218,8 +244,26 @@ function createClientMock(): KannaClient {
         }]
       };
     }),
-    listRepoTasks: vi.fn().mockResolvedValue([])
+    listRepoTasks: vi.fn().mockResolvedValue([]),
+    listRecentTasks: vi.fn().mockResolvedValue([]),
+    searchTasks: vi.fn().mockResolvedValue([])
   } as unknown as KannaClient;
+}
+
+function visibleText(): string {
+  if (!rendered) return "";
+  return rendered.root
+    .findAllByType("Text")
+    .flatMap((node) => node.children)
+    .filter((child): child is string => typeof child === "string")
+    .join(" ");
+}
+
+function hasLoadingTasks(): boolean {
+  if (!rendered) return false;
+  return rendered.root.findAll(
+    (node) => node.props.accessibilityLabel === "Loading tasks, loading"
+  ).length > 0;
 }
 
 function NavigatorHarness({
@@ -252,6 +296,128 @@ function NavigatorHarness({
     />
   );
 }
+
+describe("RootNavigator task collection integration", () => {
+  it("renders loading before the initial snapshot, then a genuine empty state", async () => {
+    const initialTasks = createDeferred<TaskSummary[]>();
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockReturnValue(initialTasks.promise);
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+    let bootstrap!: Promise<void>;
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      bootstrap = controller!.bootstrap();
+      await flushMicrotasks();
+    });
+
+    expect(hasLoadingTasks()).toBe(true);
+    expect(visibleText()).not.toContain("No tasks yet.");
+
+    initialTasks.resolve([]);
+    await act(async () => {
+      await bootstrap;
+    });
+
+    expect(hasLoadingTasks()).toBe(false);
+    expect(visibleText()).toContain("No tasks yet.");
+  });
+
+  it("renders task content after the initial authoritative collection read", async () => {
+    const task: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Loaded from the desktop",
+      stage: "in progress"
+    };
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValue([task]);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([task]);
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    expect(hasLoadingTasks()).toBe(false);
+    expect(
+      rendered.root.find(
+        (node) => node.props.testID === "mobile.task-row.task-1"
+      )
+    ).toBeDefined();
+    expect(visibleText()).toContain("Loaded from the desktop");
+  });
+
+  it("renders a static error when the initial collection read fails", async () => {
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockRejectedValue(
+      new Error("task snapshot unavailable")
+    );
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    expect(hasLoadingTasks()).toBe(false);
+    expect(visibleText()).toContain("Could not load tasks.");
+  });
+
+  it("preserves existing task content while a later refresh is pending", async () => {
+    const task: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Keep me visible",
+      stage: "review"
+    };
+    const refreshTasks = createDeferred<TaskSummary[]>();
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks)
+      .mockResolvedValueOnce([task])
+      .mockReturnValueOnce(refreshTasks.promise);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([task]);
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    let refresh!: Promise<void>;
+    await act(async () => {
+      refresh = controller!.refresh();
+      await flushMicrotasks();
+    });
+
+    expect(store.getState().refreshStatus).toBe("refreshing");
+    expect(hasLoadingTasks()).toBe(false);
+    expect(visibleText()).toContain("Keep me visible");
+    expect(
+      rendered.root.find(
+        (node) => node.props.testID === "mobile.task-row.task-1"
+      )
+    ).toBeDefined();
+
+    refreshTasks.resolve([task]);
+    await act(async () => {
+      await refresh;
+    });
+  });
+});
 
 describe("RootNavigator More integration", () => {
   it("falls through an unavailable repo and renders commands without removing it from shared state", async () => {
