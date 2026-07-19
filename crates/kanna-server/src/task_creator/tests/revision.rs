@@ -108,6 +108,10 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         "Add integration coverage for spawned Kanna context.",
     )
     .unwrap();
+    assert!(
+        prepared.terminal_prelude.is_none(),
+        "revision spawns must not be labeled as forward stage advances"
+    );
     assert_eq!(
         prepared.completion_transition,
         PipelineStageTransition::Auto

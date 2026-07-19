@@ -40,6 +40,7 @@ pub(super) async fn spawn_prepared_task(
         prepared.session_id,
         prepared.cwd,
         prepared.env,
+        None,
         prepared.session,
     );
 
@@ -160,6 +161,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         session_id.clone(),
         prepared.cwd.clone(),
         prepared.env.clone(),
+        prepared.terminal_prelude.clone(),
         prepared.session.clone(),
     );
     let event = match daemon.send_command(&command).await {
@@ -306,6 +308,7 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
         prepared.session_id,
         prepared.cwd,
         prepared.env,
+        None,
         prepared.session,
     );
     match daemon.send_command(&command).await {
@@ -448,6 +451,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         session_id.clone(),
         prepared.cwd,
         prepared.env,
+        None,
         prepared.session,
     );
 
@@ -555,6 +559,7 @@ fn spawn_session_command(
     session_id: String,
     cwd: String,
     env: std::collections::HashMap<String, String>,
+    terminal_prelude: Option<Vec<u8>>,
     session: PreparedSessionSpawn,
 ) -> DaemonCommand {
     match session {
@@ -573,7 +578,7 @@ fn spawn_session_command(
             cols,
             rows,
             agent_provider: Some(agent_provider),
-            terminal_prelude: None,
+            terminal_prelude,
         },
         PreparedSessionSpawn::Agent {
             agent_provider,

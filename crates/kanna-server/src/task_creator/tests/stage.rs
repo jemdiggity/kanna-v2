@@ -1049,6 +1049,12 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     assert_eq!(run.task_id, "task-1");
     assert_eq!(run.next_stage, "review");
     assert_eq!(run.session_id, "task-1");
+    assert_eq!(
+        run.terminal_prelude,
+        Some(
+            super::super::terminal_marker::format_stage_transition_marker("in progress", "review",)
+        )
+    );
     // The transition forks: same task, fresh branch + worktree from the
     // committed tip of task-source.
     let fork_branch = run
@@ -1089,10 +1095,23 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     ));
     match commands.get(2) {
         Some(kanna_daemon::protocol::Command::Spawn {
-            session_id, cwd, ..
+            session_id,
+            cwd,
+            terminal_prelude,
+            ..
         }) => {
             assert_eq!(session_id, "task-1");
             assert_eq!(cwd, &fork_worktree);
+            assert_eq!(
+                terminal_prelude.as_deref(),
+                Some(
+                    super::super::terminal_marker::format_stage_transition_marker(
+                        "in progress",
+                        "review",
+                    )
+                    .as_slice()
+                )
+            );
         }
         Some(kanna_daemon::protocol::Command::SpawnAgent { session_id, params }) => {
             assert_eq!(session_id, "task-1");
