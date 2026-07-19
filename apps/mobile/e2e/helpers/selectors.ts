@@ -76,7 +76,10 @@ export const selectors = {
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
   legacyUpdateInfoOtaValue: "~mobile.update-info.ota",
   developerForceCloudToggle: `~${MOBILE_E2E_IDS.developerForceCloudToggle}`,
-  taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]'
+  taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]',
+  taskQuickReply(replyId: string): string {
+    return `~${MOBILE_E2E_IDS.taskQuickReply(replyId)}`;
+  }
 } as const;
 
 export function machineRowSelector(desktopId: string): string {

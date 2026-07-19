@@ -16,9 +16,6 @@ import type {
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
-const QUICK_REPLY_LABEL = "SGTM. Proceed.";
-const QUICK_REPLY_MENU_TITLE = "Quick Replies";
-const QUICK_REPLY_LONG_PRESS_MS = 800;
 const TASK_COMPOSER_PLACEHOLDER = "Reply…";
 const TASK_COMPOSER_MULTILINE_DRAFT =
   "First relay line.\nSecond relay line.\nThird relay line.";
@@ -102,7 +99,6 @@ interface RelayElement {
   getSize(): Promise<{ height: number; width: number }>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
-  longPress(options: { duration: number }): Promise<unknown>;
   setValue(value: string): Promise<unknown>;
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
 }
@@ -118,8 +114,7 @@ interface RelayUi {
   getAgentMessageView(): Promise<RelayElement>;
   getAgentMessageReady(): Promise<RelayElement>;
   getBackButton(): Promise<RelayElement>;
-  getQuickRepliesMenuTitle(): Promise<RelayElement>;
-  getQuickReplyOption(label: string): Promise<RelayElement>;
+  dragFirstQuickReply(): Promise<void>;
   getTaskActionMenuTitle(): Promise<RelayElement>;
   getTaskActionOption(label: string): Promise<RelayElement>;
   getTaskInput(): Promise<RelayElement>;
@@ -280,11 +275,45 @@ function createRelayUi(driver: Browser): RelayUi {
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
-    async getQuickRepliesMenuTitle() {
-      return driver.$(`~${QUICK_REPLY_MENU_TITLE}`);
-    },
-    async getQuickReplyOption(label) {
-      return driver.$(`~${label}`);
+    async dragFirstQuickReply() {
+      const send = await driver.$(selectors.taskSendButton);
+      const [location, size] = await Promise.all([
+        send.getLocation(),
+        send.getSize()
+      ]);
+      const centerX = Math.round(location.x + size.width / 2);
+      const centerY = Math.round(location.y + size.height / 2);
+
+      try {
+        await driver.performActions([
+          {
+            type: "pointer",
+            id: "quick-reply-finger",
+            parameters: { pointerType: "touch" },
+            actions: [
+              {
+                type: "pointerMove",
+                duration: 0,
+                origin: "viewport",
+                x: centerX,
+                y: centerY
+              },
+              { type: "pointerDown", button: 0 },
+              { type: "pause", duration: 650 },
+              {
+                type: "pointerMove",
+                duration: 180,
+                origin: "viewport",
+                x: centerX,
+                y: centerY - 52
+              },
+              { type: "pointerUp", button: 0 }
+            ]
+          }
+        ]);
+      } finally {
+        await driver.releaseActions();
+      }
     },
     async getTaskActionMenuTitle() {
       return driver.$(`~${TASK_ACTION_MENU_TITLE}`);
@@ -424,8 +453,7 @@ export async function verifyRelayComposerResetJourney(
 export async function verifyRelayQuickReplyJourney(
   ui: Pick<
     RelayUi,
-    | "getQuickRepliesMenuTitle"
-    | "getQuickReplyOption"
+    | "dragFirstQuickReply"
     | "getTaskInput"
     | "getTaskSendButton"
     | "waitUntil"
@@ -438,13 +466,7 @@ export async function verifyRelayQuickReplyJourney(
 
   const send = await ui.getTaskSendButton();
   await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await send.longPress({ duration: QUICK_REPLY_LONG_PRESS_MS });
-
-  const menuTitle = await ui.getQuickRepliesMenuTitle();
-  await menuTitle.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  const quickReply = await ui.getQuickReplyOption(QUICK_REPLY_LABEL);
-  await quickReply.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await quickReply.click();
+  await ui.dragFirstQuickReply();
 
   await ui.waitUntil(
     async () => {

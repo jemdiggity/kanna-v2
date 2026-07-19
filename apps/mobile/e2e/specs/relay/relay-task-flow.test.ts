@@ -596,7 +596,7 @@ describe("relay composer reset journey", () => {
 });
 
 describe("relay quick reply journey", () => {
-  it("long-presses Send, selects SGTM, and waits for the composer to clear", async () => {
+  it("drags from Send to SGTM and waits for the composer to clear", async () => {
     const calls: string[] = [];
     let composerValue: string | null = "";
     const input = {
@@ -616,35 +616,14 @@ describe("relay quick reply journey", () => {
       }),
     };
     const send = {
-      click: vi.fn(async () => {
-        calls.push("send.click");
-      }),
-      longPress: vi.fn(async ({ duration }: { duration: number }) => {
-        calls.push(`send.longPress:${duration}`);
-      }),
       waitForDisplayed: vi.fn(async () => {
         calls.push("send.waitForDisplayed");
       }),
     };
-    const title = {
-      waitForDisplayed: vi.fn(async () => {
-        calls.push("title.waitForDisplayed");
-      }),
-    };
-    const quickReply = {
-      click: vi.fn(async () => {
-        calls.push("quickReply.click");
-        composerValue = null;
-      }),
-      waitForDisplayed: vi.fn(async () => {
-        calls.push("quickReply.waitForDisplayed");
-      }),
-    };
     const ui = {
-      getQuickRepliesMenuTitle: vi.fn(async () => title),
-      getQuickReplyOption: vi.fn(async (label: string) => {
-        calls.push(`ui.getQuickReplyOption:${label}`);
-        return quickReply;
+      dragFirstQuickReply: vi.fn(async () => {
+        calls.push("ui.dragFirstQuickReply");
+        composerValue = null;
       }),
       getTaskInput: vi.fn(async () => input),
       getTaskSendButton: vi.fn(async () => send),
@@ -658,16 +637,11 @@ describe("relay quick reply journey", () => {
       "  Preserve the relay fixture.  ",
     );
 
-    expect(send.click).not.toHaveBeenCalled();
     expect(calls).toEqual([
       "input.waitForDisplayed",
       'input.setValue:"  Preserve the relay fixture.  "',
       "send.waitForDisplayed",
-      "send.longPress:800",
-      "title.waitForDisplayed",
-      "ui.getQuickReplyOption:SGTM. Proceed.",
-      "quickReply.waitForDisplayed",
-      "quickReply.click",
+      "ui.dragFirstQuickReply",
       "input.getAttribute:value",
       "input.getAttribute:label",
     ]);
