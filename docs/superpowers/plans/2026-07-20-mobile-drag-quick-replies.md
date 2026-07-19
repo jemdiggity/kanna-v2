@@ -288,7 +288,7 @@ export function selectTaskQuickReplyIndex(
 ): number | null;
 ```
 
-Use centers `52 + index * 56`, accept a vertical half-band of 28 points, and accept horizontal displacement from `-239` through `37` points. Clamp `replyCount` to 0–5 and return `null` outside a valid card.
+Use centers `52 + index * 56`, accept a vertical half-band of 32 points (the 24-point card half-height plus the approved 8-point hit extension), and accept horizontal displacement from `-239` through `37` points. Clamp `replyCount` to 0–5 and return `null` outside a valid card.
 
 - [ ] **Step 4: Run geometry tests and verify GREEN**
 
