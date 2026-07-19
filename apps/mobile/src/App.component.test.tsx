@@ -5,6 +5,7 @@ import type { AppModel } from "./appModel";
 import type { KannaClient } from "./lib/api/client";
 import { createMobileController } from "./state/mobileController";
 import { createSessionStore } from "./state/sessionStore";
+import { MOBILE_E2E_IDS } from "./e2eTestIds";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -73,6 +74,9 @@ vi.mock("./components/CreateTaskComposer", () => ({
 }));
 vi.mock("./components/FloatingToolbar", () => ({
   FloatingToolbar: "FloatingToolbar"
+}));
+vi.mock("./components/LoadingText", () => ({
+  LoadingText: "LoadingText"
 }));
 vi.mock("./components/UpdateReadyBanner", () => ({
   UpdateReadyBanner: "UpdateReadyBanner"
@@ -187,6 +191,10 @@ describe("App component wiring", () => {
 
     const renderer = await mountModel(model);
     expect(renderer.root.findAllByType("RootNavigator")).toHaveLength(0);
+    expect(renderer.root.findByType("LoadingText").props).toMatchObject({
+      label: "Starting Kanna",
+      testID: MOBILE_E2E_IDS.appStartupLoading
+    });
 
     await act(async () => {
       initialized.resolve();
@@ -194,6 +202,7 @@ describe("App component wiring", () => {
     });
 
     const navigator = renderer.root.findByType("RootNavigator");
+    expect(renderer.root.findAllByType("LoadingText")).toHaveLength(0);
     expect(navigator.props.initialState.routes.map((route: { name: string }) => route.name))
       .toEqual(["MainTabs", "TaskDetail"]);
     expect(navigator.props.initialState.routes[0].state.routes[1].name)

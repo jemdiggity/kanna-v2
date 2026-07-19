@@ -22,6 +22,7 @@ import {
 import { createAppModel, resolveForceCloud, type AppModel } from "./appModel";
 import { AccountSheet } from "./components/AccountSheet";
 import { UpdateReadyBanner } from "./components/UpdateReadyBanner";
+import { LoadingText } from "./components/LoadingText";
 import { MOBILE_E2E_IDS } from "./e2eTestIds";
 import {
   checkAndFetchUpdate,
@@ -159,6 +160,15 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safeArea} testID={MOBILE_E2E_IDS.appShell}>
       <View style={styles.shell}>
+        {!initialized ? (
+          <View style={styles.startupLoading}>
+            <LoadingText
+              label="Starting Kanna"
+              style={styles.startupLoadingText}
+              testID={MOBILE_E2E_IDS.appStartupLoading}
+            />
+          </View>
+        ) : null}
         {initialized && initialNavigationStateRef.current ? (
           <RootNavigator
             controller={controller}
@@ -220,6 +230,15 @@ const styles = StyleSheet.create({
   },
   shell: {
     flex: 1
+  },
+  startupLoading: {
+    alignItems: "center",
+    flex: 1,
+    justifyContent: "center"
+  },
+  startupLoadingText: {
+    color: "#93A7C8",
+    fontSize: 15
   },
   initializationError: {
     backgroundColor: "#612124",
