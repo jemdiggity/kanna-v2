@@ -59,7 +59,13 @@ import {
   type StagingRelayActiveDesktopIdsInput
 } from "../runtime/staging-relay";
 import { shipRelease } from "../runtime/release";
-import { getRustCacheStatus, recordRustCache, warmRustCache } from "../runtime/rust-cache";
+import {
+  beginRustCacheBuild,
+  getRustCacheStatus,
+  noteRustCacheRecordMiss,
+  recordRustCache,
+  warmRustCache
+} from "../runtime/rust-cache";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
@@ -1907,7 +1913,16 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
+      const cache = {
+        repoRoot: context.repoRoot,
+        homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
+        commit: context.commit
+      };
+      await beginRustCacheBuild(cache);
       const staged = await buildDesktopSidecars(nodeCommandRunner, context.repoRoot);
+      await recordRustCache(cache, "sidecars");
       return {
         ok: true,
         message: `Built and staged ${staged.length} sidecars.`,
@@ -2064,10 +2079,30 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
+      const cache = {
+        repoRoot: context.repoRoot,
+        homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
+        commit: context.commit
+      };
+      const devStatus = await getDevStatus(nodeCommandRunner, context.tmux);
       return executeRustTests({
         repoRoot: context.repoRoot,
         env: context.env,
         runner: nodeCommandRunner,
+        cache: {
+          async begin() {
+            await beginRustCacheBuild(cache);
+          },
+          async record() {
+            if (devStatus.running) {
+              noteRustCacheRecordMiss(cache, "dev-active");
+              return;
+            }
+            await recordRustCache(cache, "all");
+          }
+        }
       });
     },
   },

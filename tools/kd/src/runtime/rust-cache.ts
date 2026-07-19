@@ -439,6 +439,25 @@ export async function recordRustCache(
   }
 }
 
+export function noteRustCacheRecordMiss(
+  input: RustCacheRuntimeInput,
+  category: string
+): RustCacheOperationResult {
+  const result = recordMiss(category);
+  safeAppendEvent(input.homeDir, {
+    timestamp: new Date().toISOString(),
+    repository: repositoryId(repositoryDirectoryFromFilesystem(input.repoRoot)),
+    commit: input.commit,
+    destination: input.repoRoot,
+    layouts: [],
+    outcome: "record-miss",
+    category,
+    wallMs: 0,
+    allocationDeltaBytes: 0
+  });
+  return result;
+}
+
 export async function withRustCacheBuild<T>(
   input: RustCacheRuntimeInput,
   layouts: RustCacheLayouts,
