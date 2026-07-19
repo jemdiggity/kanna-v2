@@ -21,6 +21,9 @@ export const MOBILE_E2E_IDS = {
   taskComposerChrome: "mobile.task-composer-chrome",
   taskInput: "mobile.task-input",
   taskSendButton: "mobile.task-send-button",
+  taskQuickReplyRail: "mobile.quick-reply.rail",
+  taskQuickReplyPicker: "mobile.quick-reply.picker",
+  taskQuickReplyPickerCancel: "mobile.quick-reply.picker.cancel",
   taskStopButton: "mobile.task-stop-button",
   agentMessageView: "mobile.agent-message-view",
   agentMessageReady: "mobile.agent-message-ready",
@@ -103,5 +106,8 @@ export const MOBILE_E2E_IDS = {
   },
   taskListItem(taskId: string): string {
     return `mobile.task-row.${taskId}`;
+  },
+  taskQuickReply(replyId: string): string {
+    return `mobile.quick-reply.${replyId}`;
   }
 } as const;
