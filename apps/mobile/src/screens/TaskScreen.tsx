@@ -11,6 +11,7 @@ import {
   View
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
+import { LoadingText } from "../components/LoadingText";
 import type { TaskFileContent, TaskSummary } from "../lib/api/types";
 import type {
   TaskCompanionEventStatus,
@@ -187,6 +188,12 @@ export function TaskScreen({
       agentStatus === "connecting" ||
       agentStatus === "error"
     : model.isComposerDisabled;
+  const isAnimatedCreation =
+    taskCreationPhase === "pending" || taskCreationPhase === "recovering";
+  const isAnimatedTerminalConnection =
+    taskCreationPhase === "idle" &&
+    !isAgentTask &&
+    (terminalStatus === "idle" || terminalStatus === "connecting");
   const terminalBottomInset = getTerminalBottomInset(screenHeight, composerTop);
   const composerSnapshotRef = useRef({
     taskId: task.id,
@@ -331,7 +338,14 @@ export function TaskScreen({
             <View style={styles.skeletonLineMid} />
             <View style={styles.skeletonLineShort} />
             <View style={styles.terminalOverlay} testID={MOBILE_E2E_IDS.terminalOverlay}>
-              <Text style={styles.terminalOverlayLabel}>{model.overlayLabel}</Text>
+              {isAnimatedCreation ? (
+                <LoadingText
+                  label={model.overlayLabel ?? "Creating task"}
+                  style={styles.terminalOverlayLabel}
+                />
+              ) : (
+                <Text style={styles.terminalOverlayLabel}>{model.overlayLabel}</Text>
+              )}
               {taskCreationErrorMessage ? (
                 <Text style={styles.taskCreationError}>{taskCreationErrorMessage}</Text>
               ) : null}
@@ -379,7 +393,14 @@ export function TaskScreen({
             <View style={styles.skeletonLineShort} />
             {model.overlayLabel ? (
               <View style={styles.terminalOverlay} testID={MOBILE_E2E_IDS.terminalOverlay}>
-                <Text style={styles.terminalOverlayLabel}>{model.overlayLabel}</Text>
+                {isAnimatedTerminalConnection ? (
+                  <LoadingText
+                    label={model.overlayLabel}
+                    style={styles.terminalOverlayLabel}
+                  />
+                ) : (
+                  <Text style={styles.terminalOverlayLabel}>{model.overlayLabel}</Text>
+                )}
               </View>
             ) : null}
           </View>

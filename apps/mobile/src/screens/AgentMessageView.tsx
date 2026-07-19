@@ -2,6 +2,7 @@ import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { AgentEvent, FrameAgentEvent, PermissionDecision, TurnStats } from "@kanna/agent-protocol";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
+import { LoadingText } from "../components/LoadingText";
 import type { TaskTerminalStatus } from "../state/sessionStore";
 
 interface AgentMessageViewProps {
@@ -58,7 +59,9 @@ export function AgentMessageView({
           </View>
         ) : null}
         {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-        {status === "connecting" ? <Text style={styles.mutedText}>Connecting...</Text> : null}
+        {status === "connecting" ? (
+          <LoadingText label="Connecting" style={styles.mutedText} />
+        ) : null}
       </ScrollView>
       <Pressable style={styles.stopButton} testID={MOBILE_E2E_IDS.taskStopButton} onPress={onInterrupt}>
         <Text style={styles.stopButtonLabel}>Stop</Text>
