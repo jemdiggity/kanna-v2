@@ -59,6 +59,7 @@ import {
   type StagingRelayActiveDesktopIdsInput
 } from "../runtime/staging-relay";
 import { shipRelease } from "../runtime/release";
+import { getRustCacheStatus, recordRustCache, warmRustCache } from "../runtime/rust-cache";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
@@ -215,6 +216,7 @@ const emulatorsExecInputSchema = z.object({
 });
 
 const emptyInputSchema = z.object({});
+const rustCacheRecordInputSchema = z.object({ layouts: z.enum(["sidecars", "all"]) });
 
 const lanLabInputSchema = z.object({
   hosts: z.string()
@@ -1845,6 +1847,58 @@ export const taskDefinitions = [
         message: `Synced Kanna dev environment files.`,
         data: { cargoConfig }
       };
+    }
+  },
+  {
+    id: "rust-cache.warm",
+    description: "Warm the private Cargo build tree from a compatible Kanache donor.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const result = await warmRustCache({
+        repoRoot: context.repoRoot,
+        homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
+        commit: context.commit
+      });
+      return { ok: true, message: result.message, data: result };
+    }
+  },
+  {
+    id: "rust-cache.record",
+    description: "Record a clean private Cargo build tree as a Kanache donor.",
+    inputSchema: rustCacheRecordInputSchema,
+    execute: async (_context, input) => {
+      const parsed = rustCacheRecordInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      const result = await recordRustCache(
+        {
+          repoRoot: context.repoRoot,
+          homeDir: context.homeDir,
+          env: context.env,
+          runner: nodeCommandRunner,
+          commit: context.commit
+        },
+        parsed.layouts
+      );
+      return { ok: true, message: result.message, data: result };
+    }
+  },
+  {
+    id: "rust-cache.status",
+    description: "Show Kanache installation, manifest, and recent cache events.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const status = await getRustCacheStatus({
+        repoRoot: context.repoRoot,
+        homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
+        commit: context.commit
+      });
+      return { ok: true, message: formatJsonResult(status), data: status };
     }
   },
   {

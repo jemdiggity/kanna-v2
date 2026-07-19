@@ -358,6 +358,15 @@ function parseFlagInput(
       index += 1;
       continue;
     }
+    if (arg === "--layouts") {
+      const value = rest[index + 1];
+      if (value !== "sidecars" && value !== "all") {
+        throw new Error("--layouts requires sidecars or all");
+      }
+      input.layouts = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--") {
       input.extraArgs = rest.slice(index + 1);
       break;
@@ -496,6 +505,17 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "build" && command === "sidecars") {
     return { taskId: "build.sidecars", input: {} };
   }
+  if (group === "rust-cache" && command === "warm") {
+    return { taskId: "rust-cache.warm", input: {} };
+  }
+  if (group === "rust-cache" && command === "status") {
+    return { taskId: "rust-cache.status", input: {} };
+  }
+  if (group === "rust-cache" && command === "record") {
+    const input = parseFlagInput(rest, {});
+    if (!input.layouts) throw new Error("rust-cache record requires --layouts");
+    return { taskId: "rust-cache.record", input };
+  }
   if (group === "release" && command === "ship") {
     return { taskId: "release.ship", input: parseFlagInput(rest, {}) };
   }
@@ -613,6 +633,8 @@ const helpTopics: Record<string, string[]> = {
     "  clean [--all] [--dry] [--shared-rust-build]",
     "  build desktop",
     "  build sidecars",
+    "  rust-cache warm|status",
+    "  rust-cache record --layouts sidecars|all",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
@@ -908,6 +930,29 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd build sidecars",
     "",
     "Build Kanna desktop sidecars."
+  ],
+  "rust-cache": [
+    "Usage: kd rust-cache <command>",
+    "",
+    "Commands:",
+    "  rust-cache warm",
+    "  rust-cache record --layouts sidecars|all",
+    "  rust-cache status"
+  ],
+  "rust-cache warm": [
+    "Usage: kd rust-cache warm",
+    "",
+    "Warm the private Cargo build tree from a compatible Kanache donor."
+  ],
+  "rust-cache record": [
+    "Usage: kd rust-cache record --layouts sidecars|all",
+    "",
+    "Record a clean private Cargo build tree as a Kanache donor."
+  ],
+  "rust-cache status": [
+    "Usage: kd rust-cache status",
+    "",
+    "Show the pinned Kanache tool, current manifest, and recent cache events."
   ],
   release: [
     "Usage: kd release <command>",
