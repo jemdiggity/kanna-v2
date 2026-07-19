@@ -6,11 +6,13 @@ import { TaskList } from "../components/TaskList";
 import { orderActivityTasks } from "./activityTaskOrder";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
+import type { TaskCollectionStatus } from "../state/sessionStore";
 
 interface TasksScreenProps {
   heading?: string | null;
   repos: RepoSummary[];
   selectedRepoId: string | null;
+  taskCollectionStatus: TaskCollectionStatus;
   taskSlots: TaskUiSlot[];
   onSelectRepo(repoId: string): void;
   onOpenTask(taskId: string): void;
@@ -43,6 +45,7 @@ export function TasksScreen({
   heading,
   repos,
   selectedRepoId,
+  taskCollectionStatus,
   taskSlots,
   onSelectRepo,
   onOpenTask
@@ -105,6 +108,12 @@ export function TasksScreen({
 
         <TaskList
           emptyLabel="No tasks yet."
+          errorLabel={
+            taskCollectionStatus === "error" ? "Could not load tasks." : null
+          }
+          loading={
+            taskCollectionStatus === "loading" && displayedTaskSlots.length === 0
+          }
           taskSlots={displayedTaskSlots}
           onOpenTask={onOpenTask}
         />

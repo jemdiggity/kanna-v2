@@ -297,6 +297,7 @@ function TasksTabRoute() {
       <TasksScreen
         repos={state.repos}
         selectedRepoId={state.selectedRepoId}
+        taskCollectionStatus={state.taskCollectionStatus}
         taskSlots={projectTaskUiSlots(state.repoTasks, state.taskUiSlots)}
         onSelectRepo={(repoId) => {
           void controller.selectRepo(repoId);
@@ -315,6 +316,7 @@ function ActivityTabRoute() {
         heading="Recent"
         repos={state.repos}
         selectedRepoId={state.selectedRepoId}
+        taskCollectionStatus={state.taskCollectionStatus}
         taskSlots={projectTaskUiSlots(state.recentTasks, state.taskUiSlots)}
         onSelectRepo={(repoId) => {
           void controller.selectRepo(repoId);
