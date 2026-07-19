@@ -150,7 +150,7 @@ Use `pnpm` for all package management and script execution. Not npm.
 - `scripts/` — build, release, setup, and maintenance scripts
 - `tools/kd/` — `kd` CLI and `kd-mcp` self-development workflow server
 - `docs/` — planning and spec documents
-- `.cargo/config.toml` — sets `target-dir = ".build"` (shared Rust build cache)
+- `.cargo/config.toml` — keeps each checkout's Rust outputs under its private `.build/` tree
 
 ## Development Workflow
 
@@ -170,6 +170,14 @@ Worktrees are fully isolated from the main branch instance:
 - **Separate tmux server** — `kd dev up` uses a tmux server named `kanna-{worktree-dir}` instead of the default `kanna`, and creates the desktop/mobile windows inside a same-named session on that server
 
 This means the main Kanna app and a dev worktree can run simultaneously without port or data conflicts.
+
+### Rust build cache
+
+New Kanna-managed worktrees attempt an exact-`HEAD` Kanache warm after environment sync. Kanache copies compatible Cargo intermediates from a clean worktree at the same commit into the new worktree's private `.build/cargo-build`; final sidecars and Tauri `externalBin` staging remain private to the producing build. A missing, incompatible, or refused donor is a normal cache miss and development continues with a cold `.build/cargo-build` build.
+
+Set `KANNA_RUST_CACHE=off` to disable both warming and donor recording immediately. On a clean checkout with its dev session stopped, `./kd test rust` seeds both the implicit host and explicit Apple target layouts. Use `./kd rust-cache status` to inspect the pinned Kanache revision, current manifest, and recent local measurements.
+
+Kanache is development-only. Release builds remain Bazel-only and never install or execute Kanache.
 
 ### Launching the dev environment
 
@@ -229,6 +237,7 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
 ./kd dev up --attach         # start and attach to tmux session
 ./kd env print               # print resolved ports, DB, daemon dir, transfer root
+./kd rust-cache status       # inspect Kanache pin, manifest, and recent cache events
 ./kd doctor                  # check local prerequisites
 ./kd setup --check           # check prerequisites without installing
 ./kd clean --all             # remove generated artifacts
@@ -284,7 +293,7 @@ cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignore
 
 ### First build in a worktree
 
-The first `./kd dev up` in a fresh worktree compiles ~523 Rust crates (the daemon builds quickly, but the full Tauri app takes several minutes). Subsequent builds are incremental.
+The first `./kd dev up` in a fresh worktree reuses an exact-commit Kanache donor when one is available. Otherwise it compiles ~523 Rust crates (the daemon builds quickly, but the full Tauri app takes several minutes). Subsequent builds are incremental within that worktree.
 
 ### Cloud deployment
 
