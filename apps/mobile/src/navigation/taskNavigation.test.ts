@@ -37,12 +37,12 @@ describe("planTaskDetailNavigation", () => {
     })).toEqual({ type: "replace", taskId: "task-b" });
   });
 
-  it("returns to the existing detail route from Task More", () => {
+  it("returns to the existing detail route from a covering screen", () => {
     expect(planTaskDetailNavigation({
       routes: [
         { name: "MainTabs" },
         { name: "TaskDetail", params: { taskId: "task-a" } },
-        { name: "TaskMore" }
+        { name: "Search" }
       ],
       taskId: "task-b",
       pendingTaskId: null
