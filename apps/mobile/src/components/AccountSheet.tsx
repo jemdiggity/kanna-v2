@@ -20,6 +20,7 @@ interface AccountSheetProps {
   visible: boolean;
   onClose(): void;
   onOpenMachines(): void;
+  onOpenQuickReplies(): void;
   onSignIn(email: string, password: string): void;
   onSignOut(): void;
 }
@@ -31,6 +32,7 @@ export function AccountSheet({
   visible,
   onClose,
   onOpenMachines,
+  onOpenQuickReplies,
   onSignIn,
   onSignOut
 }: AccountSheetProps) {
@@ -89,6 +91,21 @@ export function AccountSheet({
               <Text style={styles.machinesTitle}>Machines</Text>
               <Text style={styles.machinesDetail}>
                 {machineSummary(machineCount, availableMachineCount)}
+              </Text>
+            </View>
+            <Text style={styles.disclosure}>›</Text>
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel="Open Quick Replies"
+            style={styles.machinesRow}
+            testID={MOBILE_E2E_IDS.accountQuickRepliesButton}
+            onPress={onOpenQuickReplies}
+          >
+            <View>
+              <Text style={styles.machinesTitle}>Quick Replies</Text>
+              <Text style={styles.machinesDetail}>
+                Customize hold-and-drag replies
               </Text>
             </View>
             <Text style={styles.disclosure}>›</Text>

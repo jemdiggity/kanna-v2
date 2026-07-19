@@ -14,6 +14,10 @@ const harness = vi.hoisted(() => ({
   checkAndFetchUpdate: vi.fn().mockResolvedValue({ state: "up-to-date" }),
   currentAppState: "background",
   currentModel: null as AppModel | null,
+  quickReplyPreferences: {
+    load: vi.fn(),
+    save: vi.fn()
+  },
   reloadToApplyUpdate: vi.fn().mockResolvedValue(undefined)
 }));
 
@@ -64,11 +68,20 @@ vi.mock("./lib/updates/otaUpdates", () => ({
   reloadToApplyUpdate: (...args: unknown[]) => harness.reloadToApplyUpdate(...args)
 }));
 
+vi.mock("./state/taskQuickReplyPreferences", () => ({
+  createDefaultTaskQuickReplyPreferences: vi.fn(async () =>
+    harness.quickReplyPreferences
+  )
+}));
+
 vi.mock("./navigation/RootNavigator", () => ({
   default: "RootNavigator"
 }));
 vi.mock("./components/AccountBadge", () => ({ AccountBadge: "AccountBadge" }));
 vi.mock("./components/AccountSheet", () => ({ AccountSheet: "AccountSheet" }));
+vi.mock("./components/QuickReplyEditorModal", () => ({
+  QuickReplyEditorModal: "QuickReplyEditorModal"
+}));
 vi.mock("./components/CreateTaskComposer", () => ({
   CreateTaskComposer: "CreateTaskComposer"
 }));
@@ -97,6 +110,12 @@ beforeEach(() => {
   harness.checkAndFetchUpdate.mockReset().mockResolvedValue({ state: "up-to-date" });
   harness.currentAppState = "background";
   harness.currentModel = null;
+  harness.quickReplyPreferences.load
+    .mockReset()
+    .mockResolvedValue([{ id: "sgtm-proceed", text: "SGTM. Proceed." }]);
+  harness.quickReplyPreferences.save.mockReset().mockImplementation(
+    async (replies: Array<{ id: string; text: string }>) => replies
+  );
   harness.reloadToApplyUpdate.mockReset().mockResolvedValue(undefined);
 });
 
@@ -288,6 +307,86 @@ describe("App component wiring", () => {
 
     expect(renderer.root.findByType("RootNavigator").props.openMachinesRequestKey)
       .toBe(1);
+  });
+
+  it("keeps quick replies gated until device preferences hydrate", async () => {
+    const loaded = deferred<Array<{ id: string; text: string }>>();
+    harness.quickReplyPreferences.load.mockReturnValueOnce(loaded.promise);
+    const { model } = createModel();
+    const renderer = await mountModel(model);
+
+    expect(renderer.root.findByType("RootNavigator").props).toMatchObject({
+      quickReplies: [{ id: "sgtm-proceed", text: "SGTM. Proceed." }],
+      quickRepliesHydrated: false
+    });
+
+    await act(async () => {
+      loaded.resolve([{ id: "custom", text: "Ship it." }]);
+      await flushMicrotasks();
+    });
+
+    expect(renderer.root.findByType("RootNavigator").props).toMatchObject({
+      quickReplies: [{ id: "custom", text: "Ship it." }],
+      quickRepliesHydrated: true
+    });
+  });
+
+  it("opens the editor from Account and publishes replies only after save", async () => {
+    const { model } = createModel();
+    const renderer = await mountModel(model);
+    const navigator = renderer.root.findByType("RootNavigator");
+
+    await act(async () => navigator.props.onOpenAccount());
+    let accountSheet = renderer.root.findByType("AccountSheet");
+    expect(accountSheet.props.visible).toBe(true);
+
+    await act(async () => accountSheet.props.onOpenQuickReplies());
+    accountSheet = renderer.root.findByType("AccountSheet");
+    const editor = renderer.root.findByType("QuickReplyEditorModal");
+    expect(accountSheet.props.visible).toBe(false);
+    expect(editor.props.visible).toBe(true);
+
+    const editedReplies = [{ id: "custom", text: "Ship it." }];
+    await act(async () => {
+      await editor.props.onSave(editedReplies);
+      await flushMicrotasks();
+    });
+
+    expect(harness.quickReplyPreferences.save).toHaveBeenCalledWith(
+      editedReplies
+    );
+    expect(renderer.root.findByType("RootNavigator").props.quickReplies).toEqual(
+      editedReplies
+    );
+  });
+
+  it("falls back to the default when preference hydration rejects", async () => {
+    harness.quickReplyPreferences.load.mockRejectedValueOnce(
+      new Error("storage unavailable")
+    );
+    const { model } = createModel();
+    const renderer = await mountModel(model);
+
+    expect(renderer.root.findByType("RootNavigator").props).toMatchObject({
+      quickReplies: [{ id: "sgtm-proceed", text: "SGTM. Proceed." }],
+      quickRepliesHydrated: true
+    });
+  });
+
+  it("keeps the live list unchanged when preference save rejects", async () => {
+    harness.quickReplyPreferences.save.mockRejectedValueOnce(
+      new Error("disk full")
+    );
+    const { model } = createModel();
+    const renderer = await mountModel(model);
+    const editor = renderer.root.findByType("QuickReplyEditorModal");
+
+    await expect(
+      editor.props.onSave([{ id: "custom", text: "Ship it." }])
+    ).rejects.toThrow("disk full");
+    expect(renderer.root.findByType("RootNavigator").props.quickReplies).toEqual(
+      [{ id: "sgtm-proceed", text: "SGTM. Proceed." }]
+    );
   });
 
   it("routes the canonical More diagnostics toggle through the app model", async () => {

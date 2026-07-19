@@ -46,6 +46,7 @@ export const MOBILE_E2E_IDS = {
   accountSheet: "mobile.account-sheet",
   accountCloseButton: "mobile.account-close",
   accountMachinesButton: "mobile.account-machines",
+  accountQuickRepliesButton: "mobile.account-quick-replies",
   accountEmailInput: "mobile.account-email",
   accountPasswordInput: "mobile.account-password",
   accountPasswordToggle: "mobile.account-toggle-password",
@@ -89,6 +90,11 @@ export const MOBILE_E2E_IDS = {
   updateReadyBanner: "mobile.update-ready",
   updateReadyDismissButton: "mobile.update-ready.dismiss",
   updateReadyRestartButton: "mobile.update-ready.restart",
+  quickReplyEditor: "mobile.quick-replies.editor",
+  quickReplyEditorAdd: "mobile.quick-replies.add",
+  quickReplyEditorDone: "mobile.quick-replies.done",
+  quickReplyEditorCancel: "mobile.quick-replies.cancel",
+  quickReplyEditorSaveError: "mobile.quick-replies.save-error",
   toolbarTab(tabName: string): string {
     return `mobile.toolbar.tab.${tabName}`;
   },
@@ -109,5 +115,20 @@ export const MOBILE_E2E_IDS = {
   },
   taskQuickReply(replyId: string): string {
     return `mobile.quick-reply.${replyId}`;
+  },
+  quickReplyEditorInput(replyId: string): string {
+    return `mobile.quick-replies.${replyId}.input`;
+  },
+  quickReplyEditorMoveUp(replyId: string): string {
+    return `mobile.quick-replies.${replyId}.up`;
+  },
+  quickReplyEditorMoveDown(replyId: string): string {
+    return `mobile.quick-replies.${replyId}.down`;
+  },
+  quickReplyEditorDelete(replyId: string): string {
+    return `mobile.quick-replies.${replyId}.delete`;
+  },
+  quickReplyEditorError(replyId: string): string {
+    return `mobile.quick-replies.${replyId}.error`;
   }
 } as const;

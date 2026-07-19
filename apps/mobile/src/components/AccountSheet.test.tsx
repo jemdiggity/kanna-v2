@@ -141,6 +141,7 @@ function renderSignedOutSheet(): ElementNode {
     visible: true,
     onClose: vi.fn(),
     onOpenMachines: vi.fn(),
+    onOpenQuickReplies: vi.fn(),
     onSignIn: vi.fn(),
     onSignOut: vi.fn()
   }) as ElementNode;
@@ -182,6 +183,7 @@ describe("AccountSheet", () => {
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
       onSignIn: vi.fn(),
       onSignOut: vi.fn()
     }) as ElementNode;
@@ -189,6 +191,30 @@ describe("AccountSheet", () => {
     expect(findNodeByTestId(tree, "mobile.account-machines")).not.toBeNull();
     expect(textContent(tree)).toContain("3 machines · 2 available");
     expect(findNodeByTestId(tree, "mobile.account-connection-status")).toBeNull();
+  });
+
+  it("opens global quick reply settings", () => {
+    if (!AccountSheet) {
+      throw new Error("AccountSheet was not loaded");
+    }
+    const onOpenQuickReplies = vi.fn();
+    reactState.index = 0;
+    const tree = AccountSheet({
+      auth: { status: "signedOut" },
+      machineCount: 0,
+      availableMachineCount: 0,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies,
+      onSignIn: vi.fn(),
+      onSignOut: vi.fn()
+    }) as ElementNode;
+
+    const button = findNodeByTestId(tree, "mobile.account-quick-replies");
+    expect(button).not.toBeNull();
+    (button?.props?.onPress as () => void)();
+    expect(onOpenQuickReplies).toHaveBeenCalledOnce();
   });
 
   it("shows the signed-in account initials beside the identity", () => {
@@ -211,6 +237,7 @@ describe("AccountSheet", () => {
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
       onSignIn: vi.fn(),
       onSignOut: vi.fn()
     }) as ElementNode;
@@ -297,6 +324,7 @@ describe("AccountSheet", () => {
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
       onSignIn: vi.fn(),
       onSignOut
     }) as ElementNode;

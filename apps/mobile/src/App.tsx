@@ -21,6 +21,7 @@ import {
 } from "./appLifecycle";
 import { createAppModel, resolveForceCloud, type AppModel } from "./appModel";
 import { AccountSheet } from "./components/AccountSheet";
+import { QuickReplyEditorModal } from "./components/QuickReplyEditorModal";
 import { UpdateReadyBanner } from "./components/UpdateReadyBanner";
 import { LoadingText } from "./components/LoadingText";
 import { MOBILE_E2E_IDS } from "./e2eTestIds";
@@ -30,8 +31,15 @@ import {
 } from "./lib/updates/otaUpdates";
 import RootNavigator from "./navigation/RootNavigator";
 import { buildInitialNavigationState } from "./navigation/navigationState";
-import { DEFAULT_TASK_QUICK_REPLIES } from "./screens/taskQuickReplies";
+import {
+  DEFAULT_TASK_QUICK_REPLIES,
+  type TaskQuickReply
+} from "./screens/taskQuickReplies";
 import { buildMachineInventory, summarizeMachines } from "./state/machineInventory";
+import {
+  createDefaultTaskQuickReplyPreferences,
+  type TaskQuickReplyPreferences
+} from "./state/taskQuickReplyPreferences";
 
 const OTA_FOREGROUND_CHECK_THROTTLE_MS = 5 * 60 * 1000;
 
@@ -53,7 +61,19 @@ export default function App() {
     model.sessionStore.getState
   );
   const { controller } = model;
+  const quickReplyPreferencesRef = useRef<
+    Promise<TaskQuickReplyPreferences> | null
+  >(null);
+  if (!quickReplyPreferencesRef.current) {
+    quickReplyPreferencesRef.current =
+      createDefaultTaskQuickReplyPreferences();
+  }
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
+  const [quickReplyEditorVisible, setQuickReplyEditorVisible] = useState(false);
+  const [quickReplies, setQuickReplies] = useState<TaskQuickReply[]>(() =>
+    DEFAULT_TASK_QUICK_REPLIES.map((reply) => ({ ...reply }))
+  );
+  const [quickRepliesHydrated, setQuickRepliesHydrated] = useState(false);
   const [forceCloudEnabled, setForceCloudEnabled] = useState(resolveForceCloud());
   const [openMachinesRequestKey, setOpenMachinesRequestKey] = useState(0);
   const [initialized, setInitialized] = useState(false);
@@ -87,6 +107,39 @@ export default function App() {
       setUpdatePromptVisible(true);
     }
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void quickReplyPreferencesRef.current
+      ?.then((preferences) => preferences.load())
+      .then((loadedReplies) => {
+        if (!cancelled && loadedReplies) {
+          setQuickReplies(loadedReplies);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) {
+          setQuickRepliesHydrated(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const saveQuickReplies = useCallback(
+    async (replies: readonly TaskQuickReply[]) => {
+      const preferences = await quickReplyPreferencesRef.current;
+      if (!preferences) {
+        throw new Error("Quick reply preferences are unavailable.");
+      }
+      const savedReplies = await preferences.save(replies);
+      setQuickReplies(savedReplies);
+    },
+    []
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -177,8 +230,8 @@ export default function App() {
             forceCloudEnabled={forceCloudEnabled}
             initialState={initialNavigationStateRef.current}
             openMachinesRequestKey={openMachinesRequestKey}
-            quickReplies={DEFAULT_TASK_QUICK_REPLIES}
-            quickRepliesHydrated
+            quickReplies={quickReplies}
+            quickRepliesHydrated={quickRepliesHydrated}
             state={state}
             onForceCloudChange={(enabled) => {
               setForceCloudEnabled(enabled);
@@ -205,12 +258,22 @@ export default function App() {
             setAccountSheetVisible(false);
             setOpenMachinesRequestKey((requestKey) => requestKey + 1);
           }}
+          onOpenQuickReplies={() => {
+            setAccountSheetVisible(false);
+            setQuickReplyEditorVisible(true);
+          }}
           onSignIn={(email, password) => {
             void controller.signInWithEmailPassword(email, password);
           }}
           onSignOut={() => {
             void controller.signOut();
           }}
+        />
+        <QuickReplyEditorModal
+          replies={quickReplies}
+          visible={quickReplyEditorVisible}
+          onClose={() => setQuickReplyEditorVisible(false)}
+          onSave={saveQuickReplies}
         />
         {updatePromptVisible ? (
           <UpdateReadyBanner
