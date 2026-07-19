@@ -294,6 +294,8 @@ Always use `./kd cloud deploy --staging` or `./kd cloud deploy --production` for
 
 Self-hosted mobile OTA updates are served by the relay at `/ota/manifest` and `/ota/assets`, stored in the environment Firebase/GCS bucket under `ota/ios/<runtimeVersion>/`, and code-signed with key id `kanna-mobile-ota-v1`. The public certificate is committed at `apps/mobile/certs/ota-codesign.pem`. Provision the bucket and relay read access idempotently through `./kd mobile ota provision --staging|--production`, then provision the private key through `./kd mobile ota provision-secret --staging|--production --key-path <path>` into Secret Manager as `kanna-mobile-ota-private-key-pem`. Both commands require an explicit environment flag.
 
+Agents may publish or roll back the staging OTA channel through the canonical `./kd mobile ota publish --staging` workflow without additional human approval. Publishing or rolling back the production OTA channel requires explicit human approval for that operation. Read-only production `status` and `doctor` checks do not require approval.
+
 Deploy relay support through `./kd cloud deploy --staging|--production --relay`. Publish only through `./kd mobile ota publish --staging|--production`; publishing is separate from infrastructure provisioning. Check pointers with `./kd mobile ota status --staging|--production`. Run read-only cloud and relay preflight with `./kd mobile ota doctor --staging|--production` or the `preflight` alias; this requires Google Cloud credentials for the target project and performs no writes. Roll back by repointing the channel with `./kd mobile ota publish --staging|--production --rollback-to <updateId>`.
 
 ## Architecture
