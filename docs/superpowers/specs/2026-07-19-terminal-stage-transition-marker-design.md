@@ -20,7 +20,7 @@ Only a real stage transition emits this marker. Initial task creation, stage rer
 
 The transition marker belongs to session initialization rather than to an individual frontend. `kanna-server` is the source of truth for stage transitions and knows both the departed and destination stage names. It will format the transition marker and attach it as an optional terminal prelude to the daemon spawn command for a prepared stage swap.
 
-The daemon will accept the optional prelude on PTY and headless-agent session spawn commands. During session construction, it will write the prelude into the new headless terminal before the child process can produce output, then publish it through the same output stream used for process bytes. This gives snapshots and live clients one consistent ordering and avoids frontend races around `session_created` and attach snapshots.
+The daemon will accept the optional prelude on PTY session spawn commands. During session construction, it will write the prelude into the new headless terminal before the child process can produce output, then publish it through the same output stream used for process bytes. This gives snapshots and live clients one consistent ordering and avoids frontend races around `session_created` and attach snapshots. SDK/headless agent sessions have no terminal snapshot and render structured agent events, so they remain unchanged.
 
 The prelude is a general session-spawn capability, but this change has one producer: true pipeline stage swaps. All other spawn call sites omit it.
 
@@ -50,4 +50,5 @@ The marker is presentation metadata and must not create a separate transition fa
 - Adding clickable or DOM-rendered stage dividers over the terminal.
 - Backfilling markers into terminal history from transitions completed before this feature ships.
 - Marking posts, reruns, revision resumes, task creation, or task closure.
+- Adding an equivalent stage divider to SDK/headless AgentView sessions.
 - Adding user-configurable marker colors or text.
