@@ -16,6 +16,7 @@
 - `apps/mobile/src/navigation/navigationConfig.ts` — canonical route registry; remove `TaskMore`.
 - `apps/mobile/src/navigation/navigationState.test.ts` — remove the obsolete projection test that constructs a `TaskMore` route.
 - `apps/mobile/src/navigation/navigationState.ts` — root-stack types and active-view projection; remove `TaskMore`.
+- `apps/mobile/src/navigation/taskNavigation.test.ts` — retain covered-task routing coverage using a real remaining covering route.
 - `apps/mobile/src/navigation/RootNavigator.tsx` — remove route-push plumbing, the transparent screen, and the action-sheet focus effect.
 - `apps/mobile/src/screens/TaskScreen.tsx` — remove the route override so `+` always uses the direct native action-sheet path.
 - `apps/mobile/src/screens/TaskScreen.test.tsx` — remove the obsolete route-delegation fixture and retain direct action selection coverage.
@@ -27,6 +28,7 @@
 - Modify: `apps/mobile/src/navigation/navigationConfig.ts`
 - Modify: `apps/mobile/src/navigation/navigationState.test.ts`
 - Modify: `apps/mobile/src/navigation/navigationState.ts`
+- Modify: `apps/mobile/src/navigation/taskNavigation.test.ts`
 
 - [ ] **Step 1: Write the failing route-inventory regression test**
 
@@ -84,12 +86,28 @@ case "TaskDetail":
 
 Delete the `projects TaskMore to the task route's underlying Activity origin` test from `navigationState.test.ts`, because callers can no longer construct that route.
 
+In `taskNavigation.test.ts`, preserve the generic covered-detail behavior while replacing the obsolete fixture with a real route:
+
+```ts
+it("returns to the existing detail route from a covering screen", () => {
+  expect(planTaskDetailNavigation({
+    routes: [
+      { name: "MainTabs" },
+      { name: "TaskDetail", params: { taskId: "task-a" } },
+      { name: "Search" }
+    ],
+    taskId: "task-b",
+    pendingTaskId: null
+  })).toEqual({ type: "popTo", taskId: "task-b" });
+});
+```
+
 - [ ] **Step 4: Run the focused navigation-model tests and verify GREEN**
 
 Run:
 
 ```bash
-pnpm --dir apps/mobile test -- src/navigation/RootNavigator.test.ts src/navigation/navigationState.test.ts
+pnpm --dir apps/mobile test -- src/navigation/RootNavigator.test.ts src/navigation/navigationState.test.ts src/navigation/taskNavigation.test.ts
 ```
 
 Expected: both test files PASS.
@@ -97,7 +115,7 @@ Expected: both test files PASS.
 - [ ] **Step 5: Commit the navigation-model change**
 
 ```bash
-git add apps/mobile/src/navigation/RootNavigator.test.ts apps/mobile/src/navigation/navigationConfig.ts apps/mobile/src/navigation/navigationState.test.ts apps/mobile/src/navigation/navigationState.ts
+git add apps/mobile/src/navigation/RootNavigator.test.ts apps/mobile/src/navigation/navigationConfig.ts apps/mobile/src/navigation/navigationState.test.ts apps/mobile/src/navigation/navigationState.ts apps/mobile/src/navigation/taskNavigation.test.ts
 git commit -m "test(mobile): remove task actions from route inventory"
 ```
 
