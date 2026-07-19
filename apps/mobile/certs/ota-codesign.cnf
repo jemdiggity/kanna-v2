@@ -1,0 +1,16 @@
+[req]
+distinguished_name = subject
+prompt = no
+x509_extensions = code_signing
+
+[subject]
+CN = Kanna Mobile OTA v1
+O = Kanna
+OU = Mobile
+
+[code_signing]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = critical,codeSigning
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
