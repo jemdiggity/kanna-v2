@@ -394,4 +394,35 @@ describe("QuickReplySendControl", () => {
       renderer.root.findAllByProps({ testID: "mobile.quick-reply.picker" })
     ).toHaveLength(0);
   });
+
+  it("closes the accessible picker without sending when task scope changes", () => {
+    const { onPress, onSelectReply, renderer } = renderControl();
+    const send = renderer.root.findByProps({
+      testID: "mobile.task-send-button"
+    });
+    act(() =>
+      send.props.onAccessibilityAction({
+        nativeEvent: { actionName: "showQuickReplies" }
+      })
+    );
+
+    act(() =>
+      renderer.update(
+        <QuickReplySendControl
+          disabled={false}
+          gestureScopeKey="task-b"
+          hydrated
+          replies={DEFAULT_TASK_QUICK_REPLIES}
+          onPress={onPress}
+          onSelectReply={onSelectReply}
+        />
+      )
+    );
+
+    expect(
+      renderer.root.findAllByProps({ testID: "mobile.quick-reply.picker" })
+    ).toHaveLength(0);
+    expect(onPress).not.toHaveBeenCalled();
+    expect(onSelectReply).not.toHaveBeenCalled();
+  });
 });

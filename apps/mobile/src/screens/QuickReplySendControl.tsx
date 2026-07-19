@@ -65,12 +65,18 @@ export function QuickReplySendControl({
   const phaseRef = useRef<GesturePhase>("idle");
   const selectedIndexRef = useRef<number | null>(null);
   const gestureScopeAtGrantRef = useRef<string | null>(null);
+  const pickerScopeRef = useRef<string | null>(null);
   const cancelledTapRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const entrance = useRef(new Animated.Value(0)).current;
   const [active, setActive] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [pickerVisible, setPickerVisible] = useState(false);
+
+  const closePicker = useCallback(() => {
+    pickerScopeRef.current = null;
+    setPickerVisible(false);
+  }, []);
 
   const clearLongPressTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -200,8 +206,9 @@ export function QuickReplySendControl({
     previousGestureScopeKeyRef.current = gestureScopeKey;
     if (disabled || scopeChanged) {
       resetGesture();
+      closePicker();
     }
-  }, [disabled, gestureScopeKey, resetGesture]);
+  }, [closePicker, disabled, gestureScopeKey, resetGesture]);
 
   useEffect(
     () => () => {
@@ -212,8 +219,15 @@ export function QuickReplySendControl({
   );
 
   const selectAccessibleReply = (replyId: string) => {
-    setPickerVisible(false);
-    propsRef.current.onSelectReply(replyId);
+    const pickerIsCurrent =
+      !propsRef.current.disabled &&
+      propsRef.current.hydrated &&
+      pickerScopeRef.current === propsRef.current.gestureScopeKey &&
+      propsRef.current.replies.some((reply) => reply.id === replyId);
+    closePicker();
+    if (pickerIsCurrent) {
+      propsRef.current.onSelectReply(replyId);
+    }
   };
 
   return (
@@ -274,6 +288,7 @@ export function QuickReplySendControl({
             event.nativeEvent.actionName === "showQuickReplies" &&
             propsRef.current.hydrated
           ) {
+            pickerScopeRef.current = propsRef.current.gestureScopeKey;
             setPickerVisible(true);
           }
         }}
@@ -287,7 +302,7 @@ export function QuickReplySendControl({
         animationType="fade"
         transparent
         visible={pickerVisible}
-        onRequestClose={() => setPickerVisible(false)}
+        onRequestClose={closePicker}
       >
         <View style={styles.pickerBackdrop}>
           <View
@@ -310,7 +325,7 @@ export function QuickReplySendControl({
             ))}
             <Pressable
               accessibilityRole="button"
-              onPress={() => setPickerVisible(false)}
+              onPress={closePicker}
               style={styles.pickerCancel}
               testID={MOBILE_E2E_IDS.taskQuickReplyPickerCancel}
             >
