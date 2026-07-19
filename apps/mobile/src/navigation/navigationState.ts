@@ -14,7 +14,6 @@ export type MainTabParamList = {
 export type RootStackParamList = {
   MainTabs: undefined;
   TaskDetail: { taskId: string };
-  TaskMore: undefined;
   Search: undefined;
   Desktops: undefined;
 };
@@ -82,7 +81,6 @@ export function projectActiveView(
       case "MainTabs":
         return projectMainTab(route.state);
       case "TaskDetail":
-      case "TaskMore":
         break;
     }
   }

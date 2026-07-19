@@ -15,7 +15,6 @@ describe("canonical route inventory", () => {
     expect(ROOT_STACK_ROUTES).toEqual([
       "MainTabs",
       "TaskDetail",
-      "TaskMore",
       "Search",
       "Desktops"
     ]);

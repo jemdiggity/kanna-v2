@@ -84,20 +84,6 @@ describe("buildInitialNavigationState", () => {
 });
 
 describe("projectActiveView", () => {
-  it("projects TaskMore to the task route's underlying Activity origin", () => {
-    const state = buildInitialNavigationState({
-      activeView: "recent",
-      selectedTaskId: "task-activity"
-    });
-    const withTaskMore: InitialState = {
-      ...state,
-      index: 2,
-      routes: [...state.routes, { name: "TaskMore" }]
-    };
-
-    expect(projectActiveView(withTaskMore)).toBe("recent");
-  });
-
   it("falls back to Tasks for absent navigation state", () => {
     expect(projectActiveView(undefined)).toBe("tasks");
   });
