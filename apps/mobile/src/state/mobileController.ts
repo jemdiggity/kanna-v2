@@ -1121,6 +1121,7 @@ export function createMobileController(
       { authoritative: true }
     );
     reconcileSelectedTask(true);
+    store.setTaskCollectionStatus("ready");
     return true;
   };
 

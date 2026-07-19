@@ -1881,6 +1881,7 @@ describe("createMobileController", () => {
   });
 
   it("ignores a stale initial collection rejection after a newer repo selection", async () => {
+    vi.useFakeTimers();
     const store = createSessionStore();
     const client = createClientMock();
     const staleRead = createDeferred<TaskSummary[]>();
@@ -1889,6 +1890,14 @@ describe("createMobileController", () => {
       staleReadStarted.resolve();
       return staleRead.promise;
     });
+    client.listRecentTasks.mockResolvedValueOnce([
+      {
+        id: "task-repo-2",
+        repoId: "repo-2",
+        title: "Repo Two task",
+        stage: "pr"
+      }
+    ]);
     const controller = createMobileController(client, store);
 
     const bootstrap = controller.bootstrap();
@@ -1896,10 +1905,13 @@ describe("createMobileController", () => {
     await controller.selectRepo("repo-2");
     staleRead.reject(new Error("obsolete bootstrap tasks failed"));
     await bootstrap;
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushMicrotasks();
 
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
       errorMessage: null,
+      taskCollectionStatus: "ready",
       selectedRepoId: "repo-2",
       repoTasks: [expect.objectContaining({ id: "task-repo-2" })]
     });
