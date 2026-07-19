@@ -55,6 +55,8 @@ export interface RustCacheOperationResult {
   message: string;
 }
 
+export type RustCacheLayouts = "sidecars" | "all";
+
 export async function ensureKanacheBinary(input: {
   homeDir: string;
   runner: CommandRunner;
@@ -151,6 +153,22 @@ function repositoryId(commonDirectory: string): string {
   return createHash("sha256").update(commonDirectory).digest("hex").slice(0, 16);
 }
 
+function repositoryDirectoryFromFilesystem(repoRoot: string): string {
+  const dotGit = join(repoRoot, ".git");
+  try {
+    if (lstatSync(dotGit).isDirectory()) return resolve(dotGit);
+    const gitDirectoryLine = readFileSync(dotGit, "utf8").trim();
+    if (!gitDirectoryLine.startsWith("gitdir: ")) return resolve(repoRoot);
+    const gitDirectoryValue = gitDirectoryLine.slice("gitdir: ".length);
+    const gitDirectory = resolve(repoRoot, gitDirectoryValue);
+    const commonDirectoryFile = join(gitDirectory, "commondir");
+    if (!existsSync(commonDirectoryFile)) return gitDirectory;
+    return resolve(gitDirectory, readFileSync(commonDirectoryFile, "utf8").trim());
+  } catch {
+    return resolve(repoRoot);
+  }
+}
+
 function availableBytes(path: string): bigint {
   const stats = statfsSync(path, { bigint: true });
   return stats.bavail * stats.bsize;
@@ -193,6 +211,17 @@ function miss(category: string, detail?: string): RustCacheOperationResult {
     outcome: "miss",
     category,
     message: detail ? `Kanache cache miss (${category}): ${detail}` : `Kanache cache miss (${category}).`
+  };
+}
+
+function recordMiss(category: string, detail?: string): RustCacheOperationResult {
+  return {
+    ok: true,
+    outcome: "record-miss",
+    category,
+    message: detail
+      ? `Kanache donor not recorded (${category}): ${detail}`
+      : `Kanache donor not recorded (${category}).`
   };
 }
 
@@ -317,4 +346,159 @@ export async function warmRustCache(
   } catch (error) {
     return miss("internal-error", error instanceof Error ? error.message : String(error));
   }
+}
+
+export async function beginRustCacheBuild(
+  input: RustCacheRuntimeInput
+): Promise<RustCacheOperationResult> {
+  const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
+  if (!mode.enabled) {
+    if (mode.warning) console.warn(`[kd] ${mode.warning}`);
+    return recordMiss(mode.warning ? "invalid-mode" : "disabled", mode.warning);
+  }
+  if (process.platform !== "darwin") return recordMiss("unsupported-platform");
+
+  try {
+    const binary = await ensureKanacheBinary({ homeDir: input.homeDir, runner: input.runner });
+    const result = await input.runner.run(binary, ["manifest", "begin", input.repoRoot], {
+      cwd: input.repoRoot,
+      env: input.env
+    });
+    if (result.exitCode !== 0) {
+      return recordMiss("manifest-begin", result.stderr.trim());
+    }
+    return {
+      ok: true,
+      outcome: "recorded",
+      category: "manifest-begin",
+      message: "Cleared prior Kanache donor eligibility."
+    };
+  } catch (error) {
+    return recordMiss("manifest-begin", error instanceof Error ? error.message : String(error));
+  }
+}
+
+export async function recordRustCache(
+  input: RustCacheRuntimeInput,
+  layouts: RustCacheLayouts
+): Promise<RustCacheOperationResult> {
+  const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
+  if (!mode.enabled) {
+    if (mode.warning) console.warn(`[kd] ${mode.warning}`);
+    return recordMiss(mode.warning ? "invalid-mode" : "disabled", mode.warning);
+  }
+  if (process.platform !== "darwin") return recordMiss("unsupported-platform");
+
+  try {
+    const clean = await input.runner.run(
+      "git",
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    if (clean.exitCode !== 0) return recordMiss("git-status", clean.stderr.trim());
+    if (clean.stdout.trim()) return recordMiss("dirty-worktree");
+
+    const rustc = await input.runner.run("rustc", ["-vV"], {
+      cwd: input.repoRoot,
+      env: input.env
+    });
+    const hostTarget = rustc.exitCode === 0 ? parseHostTarget(rustc.stdout) : undefined;
+    if (!hostTarget) return recordMiss("rustc-host", rustc.stderr.trim());
+
+    const binary = await ensureKanacheBinary({ homeDir: input.homeDir, runner: input.runner });
+    const targets = layouts === "sidecars" ? [hostTarget] : [hostTarget, "host"].sort();
+    const args = ["manifest", "record", input.repoRoot, "--profile", KANACHE_PROFILE];
+    for (const target of targets) args.push("--target", target);
+    const started = performance.now();
+    const result = await input.runner.run(binary, args, {
+      cwd: input.repoRoot,
+      env: input.env
+    });
+    const wallMs = Math.round(performance.now() - started);
+    const recorded = result.exitCode === 0;
+    safeAppendEvent(input.homeDir, {
+      timestamp: new Date().toISOString(),
+      repository: repositoryId(repositoryDirectoryFromFilesystem(input.repoRoot)),
+      commit: input.commit,
+      destination: input.repoRoot,
+      layouts: targets,
+      outcome: recorded ? "recorded" : "record-miss",
+      category: recorded ? "manifest-recorded" : "manifest-record",
+      wallMs,
+      allocationDeltaBytes: 0
+    });
+    if (!recorded) return recordMiss("manifest-record", result.stderr.trim());
+    return {
+      ok: true,
+      outcome: "recorded",
+      category: "manifest-recorded",
+      message: `Recorded Kanache donor layouts: ${targets.join(", ")}.`
+    };
+  } catch (error) {
+    return recordMiss("manifest-record", error instanceof Error ? error.message : String(error));
+  }
+}
+
+export async function withRustCacheBuild<T>(
+  input: RustCacheRuntimeInput,
+  layouts: RustCacheLayouts,
+  operation: () => Promise<T>,
+  succeeded: (value: T) => boolean
+): Promise<T> {
+  await beginRustCacheBuild(input);
+  const value = await operation();
+  if (succeeded(value)) await recordRustCache(input, layouts);
+  return value;
+}
+
+export async function getRustCacheStatus(input: RustCacheRuntimeInput): Promise<{
+  enabled: boolean;
+  warning?: string;
+  revision: string;
+  binary: string;
+  installed: boolean;
+  manifest?: ReturnType<typeof parseKanacheManifest>;
+  events: RustCacheEvent[];
+}> {
+  const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
+  const paths = resolveKanachePaths(input.homeDir);
+  const manifestPath = join(input.repoRoot, ".build", "cargo-build", ".kanache-manifest.json");
+  let manifest: ReturnType<typeof parseKanacheManifest> | undefined;
+  if (existsSync(manifestPath)) {
+    try {
+      manifest = parseKanacheManifest(readFileSync(manifestPath, "utf8"));
+    } catch (error) {
+      console.warn(
+        `[kd] Ignored invalid current Kanache manifest: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  let commonDirectory = repositoryDirectoryFromFilesystem(input.repoRoot);
+  try {
+    commonDirectory =
+      (await gitCommonDirectory(input.runner, input.repoRoot, input.env)) ?? commonDirectory;
+  } catch {
+    // The filesystem-derived identity keeps status usable if Git is unavailable.
+  }
+  let events: RustCacheEvent[] = [];
+  try {
+    events = readRustCacheEvents(input.homeDir, repositoryId(commonDirectory), 10, (warning) =>
+      console.warn(`[kd] ${warning}`)
+    );
+  } catch (error) {
+    console.warn(`[kd] ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return {
+    enabled: mode.enabled,
+    ...(mode.warning ? { warning: mode.warning } : {}),
+    revision: paths.revision,
+    binary: paths.binary,
+    installed: existsSync(paths.binary),
+    ...(manifest ? { manifest } : {}),
+    events
+  };
 }

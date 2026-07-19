@@ -14,15 +14,63 @@ import { describe, expect, it } from "vitest";
 import {
   appendRustCacheEvent,
   ensureKanacheBinary,
+  getRustCacheStatus,
   readRustCacheEvents,
-  warmRustCache
+  warmRustCache,
+  withRustCacheBuild
 } from "../src/runtime/rust-cache";
+import type { RustCacheRuntimeInput } from "../src/runtime/rust-cache";
 import {
   KANACHE_REPOSITORY,
   KANACHE_REVISION,
   resolveKanachePaths
 } from "../src/runtime/rust-cache-policy";
 import type { CommandRunner } from "../src/runtime/process";
+
+function fakeRuntimeInput(input: {
+  calls?: string[];
+  clean?: boolean;
+  host?: string;
+} = {}): RustCacheRuntimeInput {
+  const root = mkdtempSync(join(tmpdir(), "kd-kanache-lifecycle-"));
+  const home = join(root, "home");
+  const repoRoot = join(root, "repo");
+  mkdirSync(repoRoot, { recursive: true });
+  const binary = resolveKanachePaths(home).binary;
+  mkdirSync(join(binary, ".."), { recursive: true });
+  writeFileSync(binary, "fake");
+
+  return {
+    repoRoot,
+    homeDir: home,
+    env: {},
+    commit: "abc",
+    runner: {
+      async run(command, args) {
+        const renderedCommand = command === binary ? "kanache" : command;
+        input.calls?.push(`${renderedCommand} ${args.join(" ")}`);
+        if (command === "git" && args.includes("status")) {
+          return {
+            exitCode: 0,
+            stdout: input.clean === false ? " M Cargo.toml\n" : "",
+            stderr: ""
+          };
+        }
+        if (command === "git" && args.at(-1) === "--git-common-dir") {
+          return { exitCode: 0, stdout: join(root, ".git") + "\n", stderr: "" };
+        }
+        if (command === "rustc") {
+          return {
+            exitCode: 0,
+            stdout: `host: ${input.host ?? "aarch64-apple-darwin"}\n`,
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    }
+  };
+}
 
 describe("Kanache runtime", () => {
   it("installs the pinned locked revision into an atomic version root", async () => {
@@ -194,5 +242,52 @@ describe("Kanache runtime", () => {
       "user data"
     );
     expect(calls).toEqual([]);
+  });
+
+  it("brackets a successful bounded build and records the narrow layout", async () => {
+    const calls: string[] = [];
+    const cache = fakeRuntimeInput({ calls, clean: true, host: "aarch64-apple-darwin" });
+    const value = await withRustCacheBuild(
+      cache,
+      "sidecars",
+      async () => {
+        calls.push("BUILD");
+        return { ok: true };
+      },
+      (result) => result.ok
+    );
+
+    expect(value).toEqual({ ok: true });
+    expect(calls).toEqual([
+      `kanache manifest begin ${cache.repoRoot}`,
+      "BUILD",
+      "git status --porcelain=v1 --untracked-files=all",
+      "rustc -vV",
+      `kanache manifest record ${cache.repoRoot} --profile dev --target aarch64-apple-darwin`
+    ]);
+  });
+
+  it("does not record a failed bounded build", async () => {
+    const calls: string[] = [];
+    const result = await withRustCacheBuild(
+      fakeRuntimeInput({ calls, clean: true }),
+      "all",
+      async () => {
+        calls.push("BUILD");
+        return { ok: false };
+      },
+      (value) => value.ok
+    );
+
+    expect(result).toEqual({ ok: false });
+    expect(calls.filter((call) => call.includes("manifest record"))).toEqual([]);
+  });
+
+  it("status reports enablement, pin, current manifest, and recent events", async () => {
+    const status = await getRustCacheStatus(fakeRuntimeInput({ clean: true }));
+
+    expect(status).toMatchObject({ enabled: true, revision: KANACHE_REVISION });
+    expect(status).toHaveProperty("binary");
+    expect(status).toHaveProperty("events");
   });
 });
