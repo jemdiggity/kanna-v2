@@ -3,6 +3,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { cloudEnvironmentToKdEnvironment, resolveKdEnvironment, type CloudEnvironmentName } from "./environment";
+import {
+  OTA_CERTIFICATE_RELATIVE_PATH,
+  validateMobileOtaCertificate,
+} from "./mobile-ota-certificate";
 import type { CommandRunner } from "./process";
 
 export interface MobileOtaInput {
@@ -25,6 +29,7 @@ export interface MobileOtaContext {
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
   request?: MobileOtaHttpRequest;
+  validateOtaCertificate?: typeof validateMobileOtaCertificate;
 }
 
 export interface MobileOtaHttpRequestInput {
@@ -210,6 +215,10 @@ export async function executeMobileOtaPublishWithContext(
 ): Promise<{ ok: boolean; message: string; data?: unknown }> {
   const environment = resolveMobileOtaEnvironment(input, "publish");
   await assertCleanGitWorktree(context.repoRoot, context.runner);
+  const validateCertificate = context.validateOtaCertificate ?? validateMobileOtaCertificate;
+  await validateCertificate({
+    certificatePath: join(context.repoRoot, OTA_CERTIFICATE_RELATIVE_PATH),
+  });
   const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(environment));
   if (!identity.otaBucket || !identity.otaChannel) {
     throw new Error(`Mobile OTA is not configured for ${environment}.`);
@@ -492,6 +501,24 @@ export async function executeMobileOtaDoctorWithContext(
     },
   ];
 
+  const validateCertificate = context.validateOtaCertificate ?? validateMobileOtaCertificate;
+  try {
+    const certificate = await validateCertificate({
+      certificatePath: join(context.repoRoot, OTA_CERTIFICATE_RELATIVE_PATH),
+    });
+    checks.push({
+      status: "PASS",
+      name: "certificate",
+      detail: `Code Signing EKU; valid ${certificate.validFrom} through ${certificate.validTo}`,
+    });
+  } catch (error: unknown) {
+    checks.push({
+      status: "FAIL",
+      name: "certificate",
+      detail: error instanceof Error ? error.message : "Mobile OTA certificate validation failed.",
+    });
+  }
+
   const pointerResult = await context.runner.run("gcloud", [
     "storage",
     "cat",
@@ -661,7 +688,11 @@ export async function executeMobileOtaProvisionSecretWithContext(
   if (!identity.gceVmName) {
     throw new Error(`Relay VM is not configured for ${environment}.`);
   }
-  await readFile(input.keyPath);
+  const validateCertificate = context.validateOtaCertificate ?? validateMobileOtaCertificate;
+  await validateCertificate({
+    certificatePath: join(context.repoRoot, OTA_CERTIFICATE_RELATIVE_PATH),
+    privateKeyPath: input.keyPath,
+  });
 
   const secretName = OTA_SECRET_NAME;
   const projectId = identity.firebaseProjectId;

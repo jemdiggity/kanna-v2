@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseCliArgs } from "../cli.js";
 import { resolveKdEnvironment } from "./environment.js";
@@ -17,6 +18,15 @@ import {
 import type { CommandRunner } from "./process.js";
 
 const tempDirs: string[] = [];
+const repositoryCertificatePath = fileURLToPath(
+  new URL("../../../../apps/mobile/certs/ota-codesign.pem", import.meta.url)
+);
+const acceptOtaCertificate = async () => ({
+  keyId: "kanna-mobile-ota-v1" as const,
+  codeSigning: true as const,
+  validFrom: "Jul 19 19:34:32 2026 GMT",
+  validTo: "Jul 16 19:34:32 2036 GMT",
+});
 
 type MobileOtaProvisionExecutor = (
   input: { staging: boolean; production: boolean },
@@ -44,11 +54,18 @@ afterEach(async () => {
   tempDirs.length = 0;
 });
 
-async function makeRepoFixture(): Promise<string> {
+async function makeRepoFixture(
+  options: { certificatePem?: string } = {}
+): Promise<string> {
   const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-ota-"));
   tempDirs.push(repoRoot);
   await mkdir(join(repoRoot, "apps/mobile/src"), { recursive: true });
+  await mkdir(join(repoRoot, "apps/mobile/certs"), { recursive: true });
   await mkdir(join(repoRoot, "apps/mobile/dist"), { recursive: true });
+  await writeFile(
+    join(repoRoot, "apps/mobile/certs/ota-codesign.pem"),
+    options.certificatePem ?? (await readFile(repositoryCertificatePath, "utf8"))
+  );
   await writeFile(
     join(repoRoot, "apps/mobile/src/mobileEnvironments.json"),
     JSON.stringify({
@@ -243,6 +260,23 @@ describe("kd mobile OTA", () => {
     expect(calls.some((call) => call.command === "gcloud")).toBe(false);
     expect(result.message).toContain("Dry run: mobile OTA update");
     expect(result.message).toContain("curl -H 'expo-protocol-version: 1'");
+  });
+
+  it("rejects publish before export when the committed certificate is invalid", async () => {
+    const repoRoot = await makeRepoFixture({ certificatePem: "not a certificate" });
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(executeMobileOtaPublishWithContext(
+      { staging: true, production: false, dryRun: true },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("not valid X.509");
+    expect(calls).toEqual([{ command: "git", args: ["status", "--porcelain"] }]);
   });
 
   it("surfaces Expo public config command failures before cloud access", async () => {
@@ -579,7 +613,7 @@ describe("kd mobile OTA", () => {
 
     const result = await executeMobileOtaProvisionSecretWithContext(
       { staging: true, production: false, keyPath },
-      { repoRoot, env: {}, runner }
+      { repoRoot, env: {}, runner, validateOtaCertificate: acceptOtaCertificate }
     );
 
     expect(result.ok).toBe(true);
@@ -589,6 +623,29 @@ describe("kd mobile OTA", () => {
     expect(calls.map((call) => call.args.slice(0, 3).join(" "))).toContain("secrets create kanna-mobile-ota-private-key-pem");
     expect(calls.map((call) => call.args.slice(0, 4).join(" "))).toContain("secrets versions add kanna-mobile-ota-private-key-pem");
     expect(calls.at(-1)?.args).toContain("roles/secretmanager.secretAccessor");
+  });
+
+  it("rejects provision-secret before cloud commands when the key mismatches", async () => {
+    const repoRoot = await makeRepoFixture();
+    const keyPath = join(repoRoot, "mismatched-private-key.pem");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    await writeFile(
+      keyPath,
+      privateKey.export({ type: "pkcs8", format: "pem" }).toString()
+    );
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(executeMobileOtaProvisionSecretWithContext(
+      { staging: true, production: false, keyPath },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("does not match the committed mobile OTA certificate");
+    expect(calls).toEqual([]);
   });
 
   it("does not create or version an OTA secret when secret inspection is forbidden", async () => {
@@ -608,7 +665,7 @@ describe("kd mobile OTA", () => {
 
     await expect(executeMobileOtaProvisionSecretWithContext(
       { staging: true, production: false, keyPath },
-      { repoRoot, env: {}, runner }
+      { repoRoot, env: {}, runner, validateOtaCertificate: acceptOtaCertificate }
     )).rejects.toThrow("PERMISSION_DENIED");
     expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
     expect(calls.some(({ args }) => args.includes("versions"))).toBe(false);
@@ -695,6 +752,62 @@ describe("kd mobile OTA", () => {
       expect(call.args.some((arg) => arg.startsWith("--filter"))).toBe(false);
       expect(call.args.some((arg) => arg.startsWith("--flatten"))).toBe(false);
     }
+  });
+
+  it("reports an invalid committed certificate as a read-only doctor failure", async () => {
+    const repoRoot = await makeRepoFixture({ certificatePem: "not a certificate" });
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const pointer = {
+      currentUpdateId: "11111111-2222-3333-4444-555555555555",
+      createdAt: "2026-06-30T00:00:00.000Z",
+      runtimeVersion: "1.0.0",
+    };
+    const member = "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com";
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (command === "gcloud" && joined.includes("channels/staging.json")) {
+          return { exitCode: 0, stdout: JSON.stringify(pointer), stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("updates/11111111-2222-3333-4444-555555555555/")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets describe")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("compute instances describe")) {
+          return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("get-iam-policy")) {
+          const role = joined.includes("secrets get-iam-policy")
+            ? "roles/secretmanager.secretAccessor"
+            : "roles/storage.objectViewer";
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ bindings: [{ role, members: [member] }] }),
+            stderr: "",
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "ok", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected command: ${command} ${joined}` };
+      },
+    };
+
+    const result = await executeMobileOtaDoctorWithContext(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("FAIL certificate");
+    expect(result.message).toContain("not valid X.509");
+    expect(calls.some(({ args }) => args.includes("cp"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("rsync"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("add-iam-policy-binding"))).toBe(false);
   });
 
   it("reports a missing OTA pointer without probing update objects", async () => {
