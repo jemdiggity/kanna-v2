@@ -638,7 +638,10 @@ git commit -m "feat(kd): manage Kanache donor lifecycle"
 > build ownership or a dev-activity guard. The final implementation exposes
 > only `warm` and `status`; recording remains an internal post-success action of
 > `build sidecars` and `test rust`. It also revokes the local success marker
-> independently of Kanache before either bounded workflow mutates Cargo state.
+> independently of Kanache before either bounded workflow mutates Cargo state,
+> and holds a cross-process single-flight lock across begin → build → record.
+> Valid dead-process locks can be recovered, while ownerless or malformed lock
+> state fails closed to avoid racing a paused lock creator.
 
 **Files:**
 - Modify: `tools/kd/src/cli.ts`

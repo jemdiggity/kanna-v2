@@ -171,6 +171,16 @@ immediately. If the build fails, no new success marker is written. A record
 failure never changes the build command's successful result; it is logged as a
 cache-record miss.
 
+The complete begin-build-record interval is protected by a repository-local,
+cross-process single-flight lock. The lock token is inherited only by the
+intentional `test rust` → `build sidecars` nesting, so a second bounded workflow
+cannot republish eligibility while the first is still mutating a declared
+layout. `test rust` rechecks dev-session activity immediately before publishing
+the combined host/explicit manifest. Valid dead-process owners are recoverable;
+ownerless or malformed locks fail closed because no waiter can prove that a
+paused creator will not resume. Operators may remove such a lock only after
+confirming no bounded `kd` Rust workflow is active.
+
 This lifecycle relies on Kanna's canonical-build rule: development Cargo
 commands run through `kd`. A direct Cargo invocation cannot clear the marker and
 is therefore outside the supported donor-recording contract. All `kd` paths

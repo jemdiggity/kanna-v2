@@ -64,7 +64,8 @@ import {
   getRustCacheStatus,
   noteRustCacheRecordMiss,
   recordRustCache,
-  warmRustCache
+  warmRustCache,
+  withRustCacheLifecycleLock
 } from "../runtime/rust-cache";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
@@ -1899,14 +1900,17 @@ export const taskDefinitions = [
         runner: nodeCommandRunner,
         commit: context.commit
       };
-      await beginRustCacheBuild(cache);
-      const staged = await buildDesktopSidecars(nodeCommandRunner, context.repoRoot);
-      await recordRustCache(cache, "sidecars");
-      return {
-        ok: true,
-        message: `Built and staged ${staged.length} sidecars.`,
-        data: { staged }
-      };
+      return withRustCacheLifecycleLock(cache, async (ownerEnv) => {
+        const ownedCache = { ...cache, env: ownerEnv };
+        await beginRustCacheBuild(ownedCache);
+        const staged = await buildDesktopSidecars(nodeCommandRunner, context.repoRoot);
+        await recordRustCache(ownedCache, "sidecars");
+        return {
+          ok: true,
+          message: `Built and staged ${staged.length} sidecars.`,
+          data: { staged }
+        };
+      });
     }
   },
   {
@@ -2065,23 +2069,26 @@ export const taskDefinitions = [
         runner: nodeCommandRunner,
         commit: context.commit
       };
-      const devStatus = await getDevStatus(nodeCommandRunner, context.tmux);
-      return executeRustTests({
-        repoRoot: context.repoRoot,
-        env: context.env,
-        runner: nodeCommandRunner,
-        cache: {
-          async begin() {
-            await beginRustCacheBuild(cache);
-          },
-          async record() {
-            if (devStatus.running) {
-              noteRustCacheRecordMiss(cache, "dev-active");
-              return;
+      return withRustCacheLifecycleLock(cache, async (ownerEnv) => {
+        const ownedCache = { ...cache, env: ownerEnv };
+        return executeRustTests({
+          repoRoot: context.repoRoot,
+          env: ownerEnv,
+          runner: nodeCommandRunner,
+          cache: {
+            async begin() {
+              await beginRustCacheBuild(ownedCache);
+            },
+            async record() {
+              const devStatus = await getDevStatus(nodeCommandRunner, context.tmux);
+              if (devStatus.running) {
+                noteRustCacheRecordMiss(ownedCache, "dev-active");
+                return;
+              }
+              await recordRustCache(ownedCache, "all");
             }
-            await recordRustCache(cache, "all");
           }
-        }
+        });
       });
     },
   },

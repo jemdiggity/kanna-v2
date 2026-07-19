@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,7 +20,8 @@ import {
   recordRustCache,
   readRustCacheEvents,
   warmRustCache,
-  withRustCacheBuild
+  withRustCacheBuild,
+  withRustCacheLifecycleLock
 } from "../src/runtime/rust-cache";
 import type { RustCacheRuntimeInput } from "../src/runtime/rust-cache";
 import {
@@ -322,5 +324,81 @@ describe("Kanache runtime", () => {
     expect(status).toMatchObject({ enabled: true, revision: KANACHE_REVISION });
     expect(status).toHaveProperty("binary");
     expect(status).toHaveProperty("events");
+  });
+
+  it("serializes bounded builds while allowing the owning process to reenter", async () => {
+    const cache = fakeRuntimeInput();
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstMayFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = withRustCacheLifecycleLock(
+      cache,
+      async (ownerEnv) => {
+        order.push("first-enter");
+        await withRustCacheLifecycleLock(
+          { ...cache, env: ownerEnv },
+          async () => order.push("nested-enter"),
+          { pollMs: 5, timeoutMs: 500 }
+        );
+        await firstMayFinish;
+        order.push("first-exit");
+      },
+      { pollMs: 5, timeoutMs: 500 }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const second = withRustCacheLifecycleLock(
+      cache,
+      async () => order.push("second-enter"),
+      { pollMs: 5, timeoutMs: 500 }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(order).toEqual(["first-enter", "nested-enter"]);
+
+    releaseFirst?.();
+    await Promise.all([first, second]);
+    expect(order).toEqual([
+      "first-enter",
+      "nested-enter",
+      "first-exit",
+      "second-enter"
+    ]);
+  });
+
+  it("fails closed instead of deleting an unverifiable owner file", async () => {
+    const cache = fakeRuntimeInput();
+    const lockDirectory = join(cache.repoRoot, ".build", ".kanache-lifecycle-lock");
+    const ownerFile = join(lockDirectory, "owner.json");
+    mkdirSync(lockDirectory, { recursive: true });
+    writeFileSync(ownerFile, "partially-written-owner");
+    const old = new Date(Date.now() - 10_000);
+    utimesSync(lockDirectory, old, old);
+
+    await expect(
+      withRustCacheLifecycleLock(cache, async () => undefined, {
+        pollMs: 5,
+        timeoutMs: 20
+      })
+    ).rejects.toThrow("timed out waiting");
+    expect(readFileSync(ownerFile, "utf8")).toBe("partially-written-owner");
+  });
+
+  it("fails closed instead of recovering an ownerless lock directory", async () => {
+    const cache = fakeRuntimeInput();
+    const lockDirectory = join(cache.repoRoot, ".build", ".kanache-lifecycle-lock");
+    mkdirSync(lockDirectory, { recursive: true });
+    const old = new Date(Date.now() - 10_000);
+    utimesSync(lockDirectory, old, old);
+
+    await expect(
+      withRustCacheLifecycleLock(cache, async () => undefined, {
+        pollMs: 5,
+        timeoutMs: 20
+      })
+    ).rejects.toThrow("timed out waiting");
+    expect(existsSync(lockDirectory)).toBe(true);
   });
 });

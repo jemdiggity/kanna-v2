@@ -10,13 +10,16 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statfsSync,
-  unlinkSync
+  unlinkSync,
+  writeFileSync
 } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { CommandRunner } from "./process";
 import {
   KANACHE_PROFILE,
@@ -60,6 +63,14 @@ export interface RustCacheOperationResult {
 }
 
 export type RustCacheLayouts = "sidecars" | "all";
+
+const RUST_CACHE_LIFECYCLE_TOKEN = "KANNA_RUST_CACHE_LIFECYCLE_TOKEN";
+
+interface RustCacheLifecycleOwner {
+  token: string;
+  pid: number;
+  createdAt: string;
+}
 
 export async function ensureKanacheBinary(input: {
   homeDir: string;
@@ -306,6 +317,131 @@ function clearRustCacheSuccessMarker(repoRoot: string): void {
     throw new Error(`failed to persist Kanache donor revocation at ${marker}`, { cause: error });
   } finally {
     if (directory !== undefined) closeSync(directory);
+  }
+}
+
+function readLifecycleOwner(lockDirectory: string): RustCacheLifecycleOwner | undefined {
+  try {
+    const value = JSON.parse(
+      readFileSync(join(lockDirectory, "owner.json"), "utf8")
+    ) as Partial<RustCacheLifecycleOwner>;
+    if (
+      typeof value.token !== "string" ||
+      typeof value.pid !== "number" ||
+      typeof value.createdAt !== "string"
+    ) {
+      return undefined;
+    }
+    return value as RustCacheLifecycleOwner;
+  } catch {
+    return undefined;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function removeLifecycleLock(lockDirectory: string, expectedToken?: string): boolean {
+  const owner = readLifecycleOwner(lockDirectory);
+  if (expectedToken && owner?.token !== expectedToken) return false;
+  try {
+    unlinkSync(join(lockDirectory, "owner.json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  try {
+    rmdirSync(lockDirectory);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function withRustCacheLifecycleLock<T>(
+  input: RustCacheRuntimeInput,
+  operation: (ownerEnv: NodeJS.ProcessEnv) => Promise<T>,
+  options: { pollMs?: number; timeoutMs?: number } = {}
+): Promise<T> {
+  const lockDirectory = join(input.repoRoot, ".build", ".kanache-lifecycle-lock");
+  const inheritedToken = input.env[RUST_CACHE_LIFECYCLE_TOKEN]?.trim();
+  const inheritedOwner = readLifecycleOwner(lockDirectory);
+  if (inheritedToken && inheritedOwner?.token === inheritedToken) {
+    return operation(input.env);
+  }
+
+  mkdirSync(dirname(lockDirectory), { recursive: true });
+  const token = randomUUID();
+  const pollMs = options.pollMs ?? 250;
+  const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (true) {
+    try {
+      mkdirSync(lockDirectory);
+      const owner: RustCacheLifecycleOwner = {
+        token,
+        pid: process.pid,
+        createdAt: new Date().toISOString()
+      };
+      try {
+        writeFileSync(join(lockDirectory, "owner.json"), `${JSON.stringify(owner)}\n`, {
+          flag: "wx",
+          mode: 0o600
+        });
+      } catch (error) {
+        // Only remove the directory when it is still empty. An ownerless lock is
+        // otherwise intentionally left in place: another process cannot prove
+        // that the creator will not resume and publish through this pathname.
+        try {
+          rmdirSync(lockDirectory);
+        } catch {
+          // Fail closed and leave any unverifiable state for manual cleanup.
+        }
+        throw error;
+      }
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw new Error(`failed to acquire Kanache lifecycle lock at ${lockDirectory}`, {
+          cause: error
+        });
+      }
+
+      let lockStats;
+      try {
+        lockStats = lstatSync(lockDirectory);
+      } catch (lockError) {
+        if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw lockError;
+      }
+      if (lockStats.isSymbolicLink() || !lockStats.isDirectory()) {
+        throw new Error(`unsafe Kanache lifecycle lock at ${lockDirectory}`);
+      }
+      const owner = readLifecycleOwner(lockDirectory);
+      if (owner && !processIsAlive(owner.pid)) {
+        removeLifecycleLock(lockDirectory, owner.token);
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for Kanache lifecycle lock at ${lockDirectory}`);
+      }
+      await delay(pollMs);
+    }
+  }
+
+  const ownerEnv = { ...input.env, [RUST_CACHE_LIFECYCLE_TOKEN]: token };
+  try {
+    return await operation(ownerEnv);
+  } finally {
+    if (!removeLifecycleLock(lockDirectory, token)) {
+      console.warn(`[kd] Kanache lifecycle lock ownership changed at ${lockDirectory}.`);
+    }
   }
 }
 
