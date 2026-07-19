@@ -12,7 +12,7 @@
 
 ## File Structure
 
-- `apps/mobile/src/navigation/navigationConfig.test.ts` — regression assertion for the canonical root-route inventory.
+- `apps/mobile/src/navigation/RootNavigator.test.ts` — regression assertion for the canonical root-route inventory.
 - `apps/mobile/src/navigation/navigationConfig.ts` — canonical route registry; remove `TaskMore`.
 - `apps/mobile/src/navigation/navigationState.test.ts` — remove the obsolete projection test that constructs a `TaskMore` route.
 - `apps/mobile/src/navigation/navigationState.ts` — root-stack types and active-view projection; remove `TaskMore`.
@@ -23,14 +23,14 @@
 ### Task 1: Lock the Root Stack to Real Screens
 
 **Files:**
-- Modify: `apps/mobile/src/navigation/navigationConfig.test.ts`
+- Modify: `apps/mobile/src/navigation/RootNavigator.test.ts`
 - Modify: `apps/mobile/src/navigation/navigationConfig.ts`
 - Modify: `apps/mobile/src/navigation/navigationState.test.ts`
 - Modify: `apps/mobile/src/navigation/navigationState.ts`
 
 - [ ] **Step 1: Write the failing route-inventory regression test**
 
-Change the expected root route inventory in `navigationConfig.test.ts` so it excludes `TaskMore`:
+Change the expected root route inventory in `RootNavigator.test.ts` so it excludes `TaskMore`:
 
 ```ts
 expect(ROOT_STACK_ROUTES).toEqual([
@@ -46,7 +46,7 @@ expect(ROOT_STACK_ROUTES).toEqual([
 Run:
 
 ```bash
-pnpm --dir apps/mobile test -- src/navigation/navigationConfig.test.ts
+pnpm --dir apps/mobile test -- src/navigation/RootNavigator.test.ts
 ```
 
 Expected: FAIL because the received array still contains `"TaskMore"`.
@@ -89,7 +89,7 @@ Delete the `projects TaskMore to the task route's underlying Activity origin` te
 Run:
 
 ```bash
-pnpm --dir apps/mobile test -- src/navigation/navigationConfig.test.ts src/navigation/navigationState.test.ts
+pnpm --dir apps/mobile test -- src/navigation/RootNavigator.test.ts src/navigation/navigationState.test.ts
 ```
 
 Expected: both test files PASS.
@@ -97,7 +97,7 @@ Expected: both test files PASS.
 - [ ] **Step 5: Commit the navigation-model change**
 
 ```bash
-git add apps/mobile/src/navigation/navigationConfig.test.ts apps/mobile/src/navigation/navigationConfig.ts apps/mobile/src/navigation/navigationState.test.ts apps/mobile/src/navigation/navigationState.ts
+git add apps/mobile/src/navigation/RootNavigator.test.ts apps/mobile/src/navigation/navigationConfig.ts apps/mobile/src/navigation/navigationState.test.ts apps/mobile/src/navigation/navigationState.ts
 git commit -m "test(mobile): remove task actions from route inventory"
 ```
 
