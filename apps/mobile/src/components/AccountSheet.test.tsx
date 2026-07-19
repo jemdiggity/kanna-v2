@@ -138,6 +138,7 @@ function renderSignedOutSheet(): ElementNode {
     auth: { status: "signedOut" },
     machineCount: 3,
     availableMachineCount: 2,
+    quickRepliesReady: true,
     visible: true,
     onClose: vi.fn(),
     onOpenMachines: vi.fn(),
@@ -180,6 +181,7 @@ describe("AccountSheet", () => {
       auth,
       machineCount: 3,
       availableMachineCount: 2,
+      quickRepliesReady: true,
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
@@ -203,6 +205,7 @@ describe("AccountSheet", () => {
       auth: { status: "signedOut" },
       machineCount: 0,
       availableMachineCount: 0,
+      quickRepliesReady: true,
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
@@ -215,6 +218,30 @@ describe("AccountSheet", () => {
     expect(button).not.toBeNull();
     (button?.props?.onPress as () => void)();
     expect(onOpenQuickReplies).toHaveBeenCalledOnce();
+  });
+
+  it("disables quick reply settings until saved replies are ready", () => {
+    if (!AccountSheet) {
+      throw new Error("AccountSheet was not loaded");
+    }
+    reactState.index = 0;
+    const tree = AccountSheet({
+      auth: { status: "signedOut" },
+      machineCount: 0,
+      availableMachineCount: 0,
+      quickRepliesReady: false,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onSignOut: vi.fn()
+    }) as ElementNode;
+
+    const button = findNodeByTestId(tree, "mobile.account-quick-replies");
+    expect(button?.props?.disabled).toBe(true);
+    expect(button?.props?.accessibilityState).toEqual({ disabled: true });
+    expect(textContent(tree)).toContain("Loading saved replies…");
   });
 
   it("shows the signed-in account initials beside the identity", () => {
@@ -234,6 +261,7 @@ describe("AccountSheet", () => {
       },
       machineCount: 1,
       availableMachineCount: 1,
+      quickRepliesReady: true,
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
@@ -321,6 +349,7 @@ describe("AccountSheet", () => {
       },
       machineCount: 3,
       availableMachineCount: 2,
+      quickRepliesReady: true,
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),

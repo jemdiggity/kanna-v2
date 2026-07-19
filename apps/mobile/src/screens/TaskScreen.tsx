@@ -568,6 +568,7 @@ export function TaskScreen({
           />
           <QuickReplySendControl
             disabled={isComposerDisabled}
+            gestureScopeKey={task.id}
             hydrated={quickRepliesHydrated}
             replies={quickReplies}
             onPress={sendDraftInput}

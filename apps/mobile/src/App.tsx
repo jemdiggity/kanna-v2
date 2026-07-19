@@ -68,6 +68,7 @@ export default function App() {
     quickReplyPreferencesRef.current =
       createDefaultTaskQuickReplyPreferences();
   }
+  const quickReplyMutationVersionRef = useRef(0);
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
   const [quickReplyEditorVisible, setQuickReplyEditorVisible] = useState(false);
   const [quickReplies, setQuickReplies] = useState<TaskQuickReply[]>(() =>
@@ -110,10 +111,15 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    const hydrationMutationVersion = quickReplyMutationVersionRef.current;
     void quickReplyPreferencesRef.current
       ?.then((preferences) => preferences.load())
       .then((loadedReplies) => {
-        if (!cancelled && loadedReplies) {
+        if (
+          !cancelled &&
+          loadedReplies &&
+          quickReplyMutationVersionRef.current === hydrationMutationVersion
+        ) {
           setQuickReplies(loadedReplies);
         }
       })
@@ -136,6 +142,7 @@ export default function App() {
         throw new Error("Quick reply preferences are unavailable.");
       }
       const savedReplies = await preferences.save(replies);
+      quickReplyMutationVersionRef.current += 1;
       setQuickReplies(savedReplies);
     },
     []
@@ -252,6 +259,7 @@ export default function App() {
           auth={state.auth}
           machineCount={machineSummary.total}
           availableMachineCount={machineSummary.available}
+          quickRepliesReady={quickRepliesHydrated}
           visible={accountSheetVisible}
           onClose={() => setAccountSheetVisible(false)}
           onOpenMachines={() => {
@@ -259,6 +267,9 @@ export default function App() {
             setOpenMachinesRequestKey((requestKey) => requestKey + 1);
           }}
           onOpenQuickReplies={() => {
+            if (!quickRepliesHydrated) {
+              return;
+            }
             setAccountSheetVisible(false);
             setQuickReplyEditorVisible(true);
           }}

@@ -42,7 +42,13 @@ export function normalizeTaskQuickReplies(value: unknown): TaskQuickReply[] {
     const id = candidate.id.trim();
     const text = candidate.text.trim();
     const normalizedText = text.toLocaleLowerCase();
-    if (!id || !text || ids.has(id) || normalizedTexts.has(normalizedText)) {
+    if (
+      !id ||
+      !text ||
+      text.length > MAX_TASK_QUICK_REPLY_LENGTH ||
+      ids.has(id) ||
+      normalizedTexts.has(normalizedText)
+    ) {
       continue;
     }
 

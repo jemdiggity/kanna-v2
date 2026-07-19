@@ -63,6 +63,25 @@ describe("task quick reply preferences", () => {
     ]);
   });
 
+  it("finds valid replies after more than five overlong stored entries", async () => {
+    storage.getItem.mockResolvedValue(
+      JSON.stringify({
+        version: 1,
+        replies: [
+          ...Array.from({ length: 5 }, (_, index) => ({
+            id: `overlong-${index}`,
+            text: `${index}${"x".repeat(200)}`
+          })),
+          { id: "valid", text: "Ship it" }
+        ]
+      })
+    );
+
+    await expect(
+      createTaskQuickReplyPreferences(storage).load()
+    ).resolves.toEqual([{ id: "valid", text: "Ship it" }]);
+  });
+
   it("normalizes and round-trips valid replies", async () => {
     const repository = createTaskQuickReplyPreferences(storage);
 

@@ -17,6 +17,7 @@ interface AccountSheetProps {
   auth: AuthState;
   machineCount: number;
   availableMachineCount: number;
+  quickRepliesReady: boolean;
   visible: boolean;
   onClose(): void;
   onOpenMachines(): void;
@@ -29,6 +30,7 @@ export function AccountSheet({
   auth,
   machineCount,
   availableMachineCount,
+  quickRepliesReady,
   visible,
   onClose,
   onOpenMachines,
@@ -98,14 +100,21 @@ export function AccountSheet({
 
           <Pressable
             accessibilityLabel="Open Quick Replies"
-            style={styles.machinesRow}
+            accessibilityState={{ disabled: !quickRepliesReady }}
+            disabled={!quickRepliesReady}
+            style={[
+              styles.machinesRow,
+              !quickRepliesReady ? styles.disabledRow : null
+            ]}
             testID={MOBILE_E2E_IDS.accountQuickRepliesButton}
             onPress={onOpenQuickReplies}
           >
             <View>
               <Text style={styles.machinesTitle}>Quick Replies</Text>
               <Text style={styles.machinesDetail}>
-                Customize hold-and-drag replies
+                {quickRepliesReady
+                  ? "Customize hold-and-drag replies"
+                  : "Loading saved replies…"}
               </Text>
             </View>
             <Text style={styles.disclosure}>›</Text>
@@ -266,6 +275,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     padding: 14
+  },
+  disabledRow: {
+    opacity: 0.55
   },
   machinesTitle: {
     color: "#F5F7FB",

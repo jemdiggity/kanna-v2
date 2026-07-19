@@ -1,10 +1,12 @@
 import React from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QuickReplyEditorModal } from "./QuickReplyEditorModal";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
+
+const editorHarness = vi.hoisted(() => ({ focus: vi.fn() }));
 
 vi.mock("react-native", async () => {
   const ReactModule = await import("react");
@@ -27,12 +29,23 @@ vi.mock("react-native", async () => {
       create: <T extends Record<string, unknown>>(styles: T) => styles
     },
     Text: "Text",
-    TextInput: "TextInput",
+    TextInput: ReactModule.forwardRef(
+      (props: Record<string, unknown>, ref) => {
+        ReactModule.useImperativeHandle(ref, () => ({
+          focus: editorHarness.focus
+        }));
+        return ReactModule.createElement("TextInput", props);
+      }
+    ),
     View: "View"
   };
 });
 
 const mounted: ReactTestRenderer[] = [];
+
+beforeEach(() => {
+  editorHarness.focus.mockReset();
+});
 
 afterEach(() => {
   for (const renderer of mounted.splice(0)) {
@@ -157,6 +170,7 @@ describe("QuickReplyEditorModal", () => {
     ).toMatch(/unique/i);
     expect(onSave).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+    expect(editorHarness.focus).toHaveBeenCalledOnce();
   });
 
   it.each([

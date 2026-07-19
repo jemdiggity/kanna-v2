@@ -38,6 +38,7 @@ export function QuickReplyEditorModal({
   onSave
 }: QuickReplyEditorModalProps) {
   const wasVisibleRef = useRef(false);
+  const inputRefs = useRef(new Map<string, TextInput>());
   const [draftReplies, setDraftReplies] = useState<TaskQuickReply[]>(() =>
     copyReplies(replies)
   );
@@ -106,6 +107,16 @@ export function QuickReplyEditorModal({
     setListError(validation.listError);
     setSaveError(null);
     if (!validation.valid) {
+      const firstInvalidIndex = Object.keys(validation.errors)
+        .map(Number)
+        .sort((left, right) => left - right)[0];
+      const firstInvalidReply =
+        firstInvalidIndex === undefined
+          ? undefined
+          : draftReplies[firstInvalidIndex];
+      if (firstInvalidReply) {
+        inputRefs.current.get(firstInvalidReply.id)?.focus();
+      }
       return;
     }
 
@@ -194,6 +205,13 @@ export function QuickReplyEditorModal({
                     onChangeText={(text) => updateReply(reply.id, text)}
                     placeholder="Quick reply"
                     placeholderTextColor="#6A7E9D"
+                    ref={(input) => {
+                      if (input) {
+                        inputRefs.current.set(reply.id, input);
+                      } else {
+                        inputRefs.current.delete(reply.id);
+                      }
+                    }}
                     style={[
                       styles.input,
                       errors[index] ? styles.inputError : null

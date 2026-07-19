@@ -319,6 +319,8 @@ describe("App component wiring", () => {
       quickReplies: [{ id: "sgtm-proceed", text: "SGTM. Proceed." }],
       quickRepliesHydrated: false
     });
+    expect(renderer.root.findByType("AccountSheet").props.quickRepliesReady)
+      .toBe(false);
 
     await act(async () => {
       loaded.resolve([{ id: "custom", text: "Ship it." }]);
@@ -329,6 +331,8 @@ describe("App component wiring", () => {
       quickReplies: [{ id: "custom", text: "Ship it." }],
       quickRepliesHydrated: true
     });
+    expect(renderer.root.findByType("AccountSheet").props.quickRepliesReady)
+      .toBe(true);
   });
 
   it("opens the editor from Account and publishes replies only after save", async () => {
@@ -358,6 +362,30 @@ describe("App component wiring", () => {
     expect(renderer.root.findByType("RootNavigator").props.quickReplies).toEqual(
       editedReplies
     );
+  });
+
+  it("does not let a late preference load overwrite a completed save", async () => {
+    const loaded = deferred<Array<{ id: string; text: string }>>();
+    harness.quickReplyPreferences.load.mockReturnValueOnce(loaded.promise);
+    const { model } = createModel();
+    const renderer = await mountModel(model);
+    const editor = renderer.root.findByType("QuickReplyEditorModal");
+    const editedReplies = [{ id: "custom", text: "Ship it." }];
+
+    await act(async () => {
+      await editor.props.onSave(editedReplies);
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      loaded.resolve([{ id: "old", text: "Old stored reply" }]);
+      await flushMicrotasks();
+    });
+
+    expect(renderer.root.findByType("RootNavigator").props.quickReplies).toEqual(
+      editedReplies
+    );
+    expect(renderer.root.findByType("RootNavigator").props.quickRepliesHydrated)
+      .toBe(true);
   });
 
   it("falls back to the default when preference hydration rejects", async () => {

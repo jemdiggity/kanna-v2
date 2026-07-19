@@ -1,6 +1,5 @@
 import {
   DEFAULT_TASK_QUICK_REPLIES,
-  MAX_TASK_QUICK_REPLY_LENGTH,
   normalizeTaskQuickReplies,
   type TaskQuickReply,
   validateTaskQuickReplies
@@ -40,9 +39,7 @@ export function createTaskQuickReplyPreferences(
           return defaultTaskQuickReplies();
         }
 
-        const replies = normalizeTaskQuickReplies(envelope.replies).filter(
-          (reply) => reply.text.length <= MAX_TASK_QUICK_REPLY_LENGTH
-        );
+        const replies = normalizeTaskQuickReplies(envelope.replies);
         return replies.length > 0 ? replies : defaultTaskQuickReplies();
       } catch {
         return defaultTaskQuickReplies();

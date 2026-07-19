@@ -108,6 +108,7 @@ function renderControl(
     renderer = create(
       <QuickReplySendControl
         disabled={false}
+        gestureScopeKey="task-a"
         hydrated
         replies={DEFAULT_TASK_QUICK_REPLIES}
         onPress={onPress}
@@ -222,6 +223,56 @@ describe("QuickReplySendControl", () => {
     expect(onPress).not.toHaveBeenCalled();
   });
 
+  it("cancels an active gesture when its task scope changes", () => {
+    const { onPress, onSelectReply, renderer } = renderControl();
+
+    act(() => panResponder().onPanResponderGrant?.(event, displacement()));
+    act(() => vi.advanceTimersByTime(400));
+    act(() =>
+      renderer.update(
+        <QuickReplySendControl
+          disabled={false}
+          gestureScopeKey="task-b"
+          hydrated
+          replies={DEFAULT_TASK_QUICK_REPLIES}
+          onPress={onPress}
+          onSelectReply={onSelectReply}
+        />
+      )
+    );
+    act(() =>
+      panResponder().onPanResponderRelease?.(event, displacement(0, -52))
+    );
+
+    expect(onPress).not.toHaveBeenCalled();
+    expect(onSelectReply).not.toHaveBeenCalled();
+  });
+
+  it("cancels an active gesture when Send becomes disabled", () => {
+    const { onPress, onSelectReply, renderer } = renderControl();
+
+    act(() => panResponder().onPanResponderGrant?.(event, displacement()));
+    act(() => vi.advanceTimersByTime(400));
+    act(() =>
+      renderer.update(
+        <QuickReplySendControl
+          disabled
+          gestureScopeKey="task-a"
+          hydrated
+          replies={DEFAULT_TASK_QUICK_REPLIES}
+          onPress={onPress}
+          onSelectReply={onSelectReply}
+        />
+      )
+    );
+    act(() =>
+      panResponder().onPanResponderRelease?.(event, displacement(0, -52))
+    );
+
+    expect(onPress).not.toHaveBeenCalled();
+    expect(onSelectReply).not.toHaveBeenCalled();
+  });
+
   it("cancels responder termination", () => {
     const { onPress, onSelectReply, renderer } = renderControl();
 
@@ -300,6 +351,25 @@ describe("QuickReplySendControl", () => {
     expect(
       renderer.root.findAllByProps({ testID: "mobile.quick-reply.picker" })
     ).toHaveLength(0);
+  });
+
+  it("keeps drag card rendering aligned to its fixed hit geometry", () => {
+    const { renderer } = renderControl();
+
+    act(() => panResponder().onPanResponderGrant?.(event, displacement()));
+    act(() => vi.advanceTimersByTime(400));
+
+    const card = renderer.root.findByProps({
+      testID: "mobile.quick-reply.sgtm-proceed"
+    });
+    const label = card.findByType("Text");
+    const cardStyles = Array.isArray(card.props.style)
+      ? card.props.style
+      : [card.props.style];
+    expect(cardStyles).toContainEqual(
+      expect.objectContaining({ height: 48 })
+    );
+    expect(label.props.allowFontScaling).toBe(false);
   });
 
   it("cancels the accessible picker without selecting", () => {

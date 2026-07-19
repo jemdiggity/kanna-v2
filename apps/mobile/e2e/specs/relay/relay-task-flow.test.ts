@@ -4,6 +4,7 @@ import {
   assertRelayTaskRowPresentation,
   inspectTaskFilePreviewWebView,
   openRelayFixtureTask,
+  performFirstQuickReplyDrag,
   verifyRelayComposerResetJourney,
   verifyRelayTaskActionMenuJourney,
   verifyRelayQuickReplyJourney,
@@ -596,6 +597,66 @@ describe("relay composer reset journey", () => {
 });
 
 describe("relay quick reply journey", () => {
+  it("performs the real long-press drag coordinates and releases actions", async () => {
+    const send = {
+      getLocation: vi.fn(async () => ({ x: 100, y: 200 })),
+      getSize: vi.fn(async () => ({ width: 58, height: 40 }))
+    };
+    const driver = {
+      $: vi.fn(async () => send),
+      performActions: vi.fn(async () => undefined),
+      releaseActions: vi.fn(async () => undefined)
+    };
+
+    await performFirstQuickReplyDrag(driver as never);
+
+    expect(driver.performActions).toHaveBeenCalledWith([
+      {
+        type: "pointer",
+        id: "quick-reply-finger",
+        parameters: { pointerType: "touch" },
+        actions: [
+          {
+            type: "pointerMove",
+            duration: 0,
+            origin: "viewport",
+            x: 129,
+            y: 220
+          },
+          { type: "pointerDown", button: 0 },
+          { type: "pause", duration: 650 },
+          {
+            type: "pointerMove",
+            duration: 180,
+            origin: "viewport",
+            x: 129,
+            y: 168
+          },
+          { type: "pointerUp", button: 0 }
+        ]
+      }
+    ]);
+    expect(driver.releaseActions).toHaveBeenCalledOnce();
+  });
+
+  it("releases pointer actions when the real quick-reply drag fails", async () => {
+    const driver = {
+      $: vi.fn(async () => ({
+        getLocation: vi.fn(async () => ({ x: 0, y: 0 })),
+        getSize: vi.fn(async () => ({ width: 58, height: 40 }))
+      })),
+      performActions: vi.fn(async () => {
+        throw new Error("gesture failed");
+      }),
+      releaseActions: vi.fn(async () => undefined)
+    };
+
+    await expect(performFirstQuickReplyDrag(driver as never)).rejects.toThrow(
+      "gesture failed"
+    );
+    expect(driver.releaseActions).toHaveBeenCalledOnce();
+  });
+
   it("drags from Send to SGTM and waits for the composer to clear", async () => {
     const calls: string[] = [];
     let composerValue: string | null = "";

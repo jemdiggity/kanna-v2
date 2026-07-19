@@ -243,6 +243,49 @@ async function isTaskVisible(ui: RelayUi, taskId: string): Promise<boolean> {
     .catch(() => false);
 }
 
+export async function performFirstQuickReplyDrag(
+  driver: Pick<Browser, "$" | "performActions" | "releaseActions">,
+): Promise<void> {
+  const send = await driver.$(selectors.taskSendButton);
+  const [location, size] = await Promise.all([
+    send.getLocation(),
+    send.getSize()
+  ]);
+  const centerX = Math.round(location.x + size.width / 2);
+  const centerY = Math.round(location.y + size.height / 2);
+
+  try {
+    await driver.performActions([
+      {
+        type: "pointer",
+        id: "quick-reply-finger",
+        parameters: { pointerType: "touch" },
+        actions: [
+          {
+            type: "pointerMove",
+            duration: 0,
+            origin: "viewport",
+            x: centerX,
+            y: centerY
+          },
+          { type: "pointerDown", button: 0 },
+          { type: "pause", duration: 650 },
+          {
+            type: "pointerMove",
+            duration: 180,
+            origin: "viewport",
+            x: centerX,
+            y: centerY - 52
+          },
+          { type: "pointerUp", button: 0 }
+        ]
+      }
+    ]);
+  } finally {
+    await driver.releaseActions();
+  }
+}
+
 function createRelayUi(driver: Browser): RelayUi {
   return {
     async getAccountButton() {
@@ -276,44 +319,7 @@ function createRelayUi(driver: Browser): RelayUi {
       return driver.$(selectors.taskBackButton);
     },
     async dragFirstQuickReply() {
-      const send = await driver.$(selectors.taskSendButton);
-      const [location, size] = await Promise.all([
-        send.getLocation(),
-        send.getSize()
-      ]);
-      const centerX = Math.round(location.x + size.width / 2);
-      const centerY = Math.round(location.y + size.height / 2);
-
-      try {
-        await driver.performActions([
-          {
-            type: "pointer",
-            id: "quick-reply-finger",
-            parameters: { pointerType: "touch" },
-            actions: [
-              {
-                type: "pointerMove",
-                duration: 0,
-                origin: "viewport",
-                x: centerX,
-                y: centerY
-              },
-              { type: "pointerDown", button: 0 },
-              { type: "pause", duration: 650 },
-              {
-                type: "pointerMove",
-                duration: 180,
-                origin: "viewport",
-                x: centerX,
-                y: centerY - 52
-              },
-              { type: "pointerUp", button: 0 }
-            ]
-          }
-        ]);
-      } finally {
-        await driver.releaseActions();
-      }
+      await performFirstQuickReplyDrag(driver);
     },
     async getTaskActionMenuTitle() {
       return driver.$(`~${TASK_ACTION_MENU_TITLE}`);

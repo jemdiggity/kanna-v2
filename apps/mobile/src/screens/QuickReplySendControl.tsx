@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import {
   Animated,
   Modal,
@@ -21,6 +27,7 @@ import type { TaskQuickReply } from "./taskQuickReplies";
 
 interface QuickReplySendControlProps {
   disabled: boolean;
+  gestureScopeKey: string;
   hydrated: boolean;
   replies: readonly TaskQuickReply[];
   onPress(): void;
@@ -31,6 +38,7 @@ type GesturePhase = "idle" | "tracking" | "active";
 
 export function QuickReplySendControl({
   disabled,
+  gestureScopeKey,
   hydrated,
   replies,
   onPress,
@@ -38,6 +46,7 @@ export function QuickReplySendControl({
 }: QuickReplySendControlProps) {
   const propsRef = useRef({
     disabled,
+    gestureScopeKey,
     hydrated,
     replies,
     onPress,
@@ -45,6 +54,7 @@ export function QuickReplySendControl({
   });
   propsRef.current = {
     disabled,
+    gestureScopeKey,
     hydrated,
     replies,
     onPress,
@@ -54,6 +64,7 @@ export function QuickReplySendControl({
   const mountedRef = useRef(true);
   const phaseRef = useRef<GesturePhase>("idle");
   const selectedIndexRef = useRef<number | null>(null);
+  const gestureScopeAtGrantRef = useRef<string | null>(null);
   const cancelledTapRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const entrance = useRef(new Animated.Value(0)).current;
@@ -61,30 +72,36 @@ export function QuickReplySendControl({
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [pickerVisible, setPickerVisible] = useState(false);
 
-  const clearLongPressTimer = () => {
+  const clearLongPressTimer = useCallback(() => {
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-  };
+  }, []);
 
-  const resetGesture = () => {
+  const resetGesture = useCallback(() => {
     clearLongPressTimer();
     phaseRef.current = "idle";
     selectedIndexRef.current = null;
+    gestureScopeAtGrantRef.current = null;
     cancelledTapRef.current = false;
     if (mountedRef.current) {
       setSelectedIndex(null);
       setActive(false);
     }
-  };
+  }, [clearLongPressTimer]);
 
-  const activateGesture = () => {
+  const activateGesture = useCallback(() => {
     timerRef.current = null;
     if (!mountedRef.current || phaseRef.current !== "tracking") {
       return;
     }
-    if (!propsRef.current.hydrated || propsRef.current.replies.length === 0) {
+    if (
+      propsRef.current.disabled ||
+      gestureScopeAtGrantRef.current !== propsRef.current.gestureScopeKey ||
+      !propsRef.current.hydrated ||
+      propsRef.current.replies.length === 0
+    ) {
       cancelledTapRef.current = true;
       return;
     }
@@ -97,7 +114,7 @@ export function QuickReplySendControl({
       toValue: 1,
       useNativeDriver: true
     }).start();
-  };
+  }, [entrance]);
 
   const panResponder = useMemo(
     () =>
@@ -110,6 +127,8 @@ export function QuickReplySendControl({
           }
           clearLongPressTimer();
           phaseRef.current = "tracking";
+          gestureScopeAtGrantRef.current =
+            propsRef.current.gestureScopeKey;
           selectedIndexRef.current = null;
           cancelledTapRef.current = false;
           timerRef.current = setTimeout(
@@ -140,8 +159,12 @@ export function QuickReplySendControl({
         },
         onPanResponderRelease: (_event, gestureState) => {
           const phase = phaseRef.current;
+          const gestureIsCurrent =
+            !propsRef.current.disabled &&
+            gestureScopeAtGrantRef.current ===
+              propsRef.current.gestureScopeKey;
           const releaseIndex =
-            phase === "active"
+            phase === "active" && gestureIsCurrent
               ? selectTaskQuickReplyIndex(
                   gestureState,
                   propsRef.current.replies.length
@@ -152,6 +175,7 @@ export function QuickReplySendControl({
               ? propsRef.current.replies[releaseIndex]
               : null;
           const shouldSendDraft =
+            gestureIsCurrent &&
             phase === "tracking" &&
             !cancelledTapRef.current &&
             !exceedsTaskQuickReplyTapSlop(gestureState);
@@ -166,8 +190,18 @@ export function QuickReplySendControl({
         onPanResponderTerminate: resetGesture,
         onPanResponderTerminationRequest: () => false
       }),
-    [entrance]
+    [activateGesture, resetGesture]
   );
+
+  const previousGestureScopeKeyRef = useRef(gestureScopeKey);
+  useEffect(() => {
+    const scopeChanged =
+      previousGestureScopeKeyRef.current !== gestureScopeKey;
+    previousGestureScopeKeyRef.current = gestureScopeKey;
+    if (disabled || scopeChanged) {
+      resetGesture();
+    }
+  }, [disabled, gestureScopeKey, resetGesture]);
 
   useEffect(
     () => () => {
@@ -327,6 +361,7 @@ function QuickReplyCard({
       testID={MOBILE_E2E_IDS.taskQuickReply(reply.id)}
     >
       <Text
+        allowFontScaling={false}
         ellipsizeMode="tail"
         numberOfLines={2}
         style={[
@@ -376,7 +411,7 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     borderWidth: 1,
     justifyContent: "center",
-    minHeight: TASK_QUICK_REPLY_CARD_HEIGHT,
+    height: TASK_QUICK_REPLY_CARD_HEIGHT,
     paddingHorizontal: 15,
     paddingVertical: 8,
     shadowColor: "#000000",
