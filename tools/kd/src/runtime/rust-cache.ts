@@ -214,6 +214,27 @@ function miss(category: string, detail?: string): RustCacheOperationResult {
   };
 }
 
+function warmMiss(
+  input: RustCacheRuntimeInput,
+  category: string,
+  detail?: string,
+  commit = input.commit
+): RustCacheOperationResult {
+  const result = miss(category, detail);
+  safeAppendEvent(input.homeDir, {
+    timestamp: new Date().toISOString(),
+    repository: repositoryId(repositoryDirectoryFromFilesystem(input.repoRoot)),
+    commit,
+    destination: input.repoRoot,
+    layouts: [],
+    outcome: "miss",
+    category,
+    wallMs: 0,
+    allocationDeltaBytes: 0
+  });
+  return result;
+}
+
 function recordMiss(category: string, detail?: string): RustCacheOperationResult {
   return {
     ok: true,
@@ -223,6 +244,27 @@ function recordMiss(category: string, detail?: string): RustCacheOperationResult
       ? `Kanache donor not recorded (${category}): ${detail}`
       : `Kanache donor not recorded (${category}).`
   };
+}
+
+function recordFailure(
+  input: RustCacheRuntimeInput,
+  category: string,
+  detail?: string,
+  layouts: string[] = []
+): RustCacheOperationResult {
+  const result = recordMiss(category, detail);
+  safeAppendEvent(input.homeDir, {
+    timestamp: new Date().toISOString(),
+    repository: repositoryId(repositoryDirectoryFromFilesystem(input.repoRoot)),
+    commit: input.commit,
+    destination: input.repoRoot,
+    layouts,
+    outcome: "record-miss",
+    category,
+    wallMs: 0,
+    allocationDeltaBytes: 0
+  });
+  return result;
 }
 
 function validDonorFiles(path: string): boolean {
@@ -249,12 +291,12 @@ export async function warmRustCache(
   const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
   if (!mode.enabled) {
     if (mode.warning) console.warn(`[kd] ${mode.warning}`);
-    return miss(mode.warning ? "invalid-mode" : "disabled", mode.warning);
+    return warmMiss(input, mode.warning ? "invalid-mode" : "disabled", mode.warning);
   }
-  if (process.platform !== "darwin") return miss("unsupported-platform");
+  if (process.platform !== "darwin") return warmMiss(input, "unsupported-platform");
 
   const destination = join(input.repoRoot, ".build", "cargo-build");
-  if (existsSync(destination)) return miss("destination-exists");
+  if (existsSync(destination)) return warmMiss(input, "destination-exists");
 
   try {
     const worktrees = await input.runner.run("git", ["worktree", "list", "--porcelain"], {
@@ -262,23 +304,31 @@ export async function warmRustCache(
       env: input.env
     });
     if (worktrees.exitCode !== 0) {
-      return miss("git-worktree-list", worktrees.stderr.trim());
+      return warmMiss(input, "git-worktree-list", worktrees.stderr.trim());
+    }
+    const head = await input.runner.run("git", ["rev-parse", "HEAD"], {
+      cwd: input.repoRoot,
+      env: input.env
+    });
+    const fullCommit = head.exitCode === 0 ? head.stdout.trim() : "";
+    if (!/^[0-9a-f]{40}$/i.test(fullCommit)) {
+      return warmMiss(input, "git-head", head.stderr.trim());
     }
     const rustc = await input.runner.run("rustc", ["-vV"], {
       cwd: input.repoRoot,
       env: input.env
     });
     const hostTarget = rustc.exitCode === 0 ? parseHostTarget(rustc.stdout) : undefined;
-    if (!hostTarget) return miss("rustc-host", rustc.stderr.trim());
+    if (!hostTarget) return warmMiss(input, "rustc-host", rustc.stderr.trim(), fullCommit);
 
     const currentCommon = await gitCommonDirectory(input.runner, input.repoRoot, input.env);
-    if (!currentCommon) return miss("git-common-dir");
+    if (!currentCommon) return warmMiss(input, "git-common-dir", undefined, fullCommit);
     const candidates: DonorCandidate[] = [];
 
     for (const worktree of parseWorktreeList(worktrees.stdout)) {
       if (
         resolve(worktree.path) === resolve(input.repoRoot) ||
-        worktree.head !== input.commit ||
+        worktree.head !== fullCommit ||
         !validDonorFiles(worktree.path)
       ) {
         continue;
@@ -296,7 +346,7 @@ export async function warmRustCache(
     }
 
     const donors = rankDonors(candidates, hostTarget);
-    if (donors.length === 0) return miss("no-donor");
+    if (donors.length === 0) return warmMiss(input, "no-donor", undefined, fullCommit);
 
     const binary = await ensureKanacheBinary({ homeDir: input.homeDir, runner: input.runner });
     const repository = repositoryId(currentCommon);
@@ -323,7 +373,7 @@ export async function warmRustCache(
       safeAppendEvent(input.homeDir, {
         timestamp: new Date().toISOString(),
         repository,
-        commit: input.commit,
+        commit: fullCommit,
         destination: input.repoRoot,
         donor: donor.path,
         layouts: donor.manifest.targets,
@@ -342,9 +392,13 @@ export async function warmRustCache(
         };
       }
     }
-    return miss("all-donors-refused");
+    return warmMiss(input, "all-donors-refused", undefined, fullCommit);
   } catch (error) {
-    return miss("internal-error", error instanceof Error ? error.message : String(error));
+    return warmMiss(
+      input,
+      "internal-error",
+      error instanceof Error ? error.message : String(error)
+    );
   }
 }
 
@@ -354,9 +408,13 @@ export async function beginRustCacheBuild(
   const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
   if (!mode.enabled) {
     if (mode.warning) console.warn(`[kd] ${mode.warning}`);
-    return recordMiss(mode.warning ? "invalid-mode" : "disabled", mode.warning);
+    return recordFailure(
+      input,
+      mode.warning ? "invalid-mode" : "disabled",
+      mode.warning
+    );
   }
-  if (process.platform !== "darwin") return recordMiss("unsupported-platform");
+  if (process.platform !== "darwin") return recordFailure(input, "unsupported-platform");
 
   try {
     const binary = await ensureKanacheBinary({ homeDir: input.homeDir, runner: input.runner });
@@ -385,9 +443,13 @@ export async function recordRustCache(
   const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
   if (!mode.enabled) {
     if (mode.warning) console.warn(`[kd] ${mode.warning}`);
-    return recordMiss(mode.warning ? "invalid-mode" : "disabled", mode.warning);
+    return recordFailure(
+      input,
+      mode.warning ? "invalid-mode" : "disabled",
+      mode.warning
+    );
   }
-  if (process.platform !== "darwin") return recordMiss("unsupported-platform");
+  if (process.platform !== "darwin") return recordFailure(input, "unsupported-platform");
 
   try {
     const clean = await input.runner.run(
@@ -395,15 +457,15 @@ export async function recordRustCache(
       ["status", "--porcelain=v1", "--untracked-files=all"],
       { cwd: input.repoRoot, env: input.env }
     );
-    if (clean.exitCode !== 0) return recordMiss("git-status", clean.stderr.trim());
-    if (clean.stdout.trim()) return recordMiss("dirty-worktree");
+    if (clean.exitCode !== 0) return recordFailure(input, "git-status", clean.stderr.trim());
+    if (clean.stdout.trim()) return recordFailure(input, "dirty-worktree");
 
     const rustc = await input.runner.run("rustc", ["-vV"], {
       cwd: input.repoRoot,
       env: input.env
     });
     const hostTarget = rustc.exitCode === 0 ? parseHostTarget(rustc.stdout) : undefined;
-    if (!hostTarget) return recordMiss("rustc-host", rustc.stderr.trim());
+    if (!hostTarget) return recordFailure(input, "rustc-host", rustc.stderr.trim());
 
     const binary = await ensureKanacheBinary({ homeDir: input.homeDir, runner: input.runner });
     const targets = layouts === "sidecars" ? [hostTarget] : [hostTarget, "host"].sort();
@@ -435,7 +497,11 @@ export async function recordRustCache(
       message: `Recorded Kanache donor layouts: ${targets.join(", ")}.`
     };
   } catch (error) {
-    return recordMiss("manifest-record", error instanceof Error ? error.message : String(error));
+    return recordFailure(
+      input,
+      "manifest-record",
+      error instanceof Error ? error.message : String(error)
+    );
   }
 }
 

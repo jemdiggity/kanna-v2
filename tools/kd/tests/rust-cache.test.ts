@@ -15,6 +15,7 @@ import {
   appendRustCacheEvent,
   ensureKanacheBinary,
   getRustCacheStatus,
+  recordRustCache,
   readRustCacheEvents,
   warmRustCache,
   withRustCacheBuild
@@ -165,6 +166,7 @@ describe("Kanache runtime", () => {
     }
 
     const warmCalls: string[][] = [];
+    const fullCommit = "abc1234000000000000000000000000000000000";
     const runner: CommandRunner = {
       async run(command, args) {
         if (command === "git" && args.join(" ") === "worktree list --porcelain") {
@@ -172,13 +174,13 @@ describe("Kanache runtime", () => {
             exitCode: 0,
             stdout: [
               `worktree ${current}`,
-              "HEAD abc",
+              `HEAD ${fullCommit}`,
               "",
               `worktree ${first}`,
-              "HEAD abc",
+              `HEAD ${fullCommit}`,
               "",
               `worktree ${second}`,
-              "HEAD abc",
+              `HEAD ${fullCommit}`,
               ""
             ].join("\n"),
             stderr: ""
@@ -186,6 +188,9 @@ describe("Kanache runtime", () => {
         }
         if (command === "git" && args.at(-1) === "--git-common-dir") {
           return { exitCode: 0, stdout: join(root, ".git") + "\n", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse HEAD") {
+          return { exitCode: 0, stdout: `${fullCommit}\n`, stderr: "" };
         }
         if (command === "rustc") {
           return { exitCode: 0, stdout: "host: aarch64-apple-darwin\n", stderr: "" };
@@ -207,7 +212,7 @@ describe("Kanache runtime", () => {
       homeDir: home,
       env: {},
       runner,
-      commit: "abc"
+      commit: "abc1234"
     });
 
     expect(result).toMatchObject({ ok: true, outcome: "hit", donor: second });
@@ -242,6 +247,9 @@ describe("Kanache runtime", () => {
       "user data"
     );
     expect(calls).toEqual([]);
+    expect(
+      readFileSync(resolveKanachePaths(join(root, "home")).events, "utf8")
+    ).toContain('"category":"destination-exists"');
   });
 
   it("brackets a successful bounded build and records the narrow layout", async () => {
@@ -281,6 +289,17 @@ describe("Kanache runtime", () => {
 
     expect(result).toEqual({ ok: false });
     expect(calls.filter((call) => call.includes("manifest record"))).toEqual([]);
+  });
+
+  it("records why a dirty checkout was not published as a donor", async () => {
+    const cache = fakeRuntimeInput({ clean: false });
+
+    const result = await recordRustCache(cache, "all");
+
+    expect(result).toMatchObject({ outcome: "record-miss", category: "dirty-worktree" });
+    expect(readFileSync(resolveKanachePaths(cache.homeDir).events, "utf8")).toContain(
+      '"category":"dirty-worktree"'
+    );
   });
 
   it("status reports enablement, pin, current manifest, and recent events", async () => {
