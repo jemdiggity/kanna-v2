@@ -197,6 +197,7 @@ pub(crate) async fn handle_command(
             cols,
             rows,
             agent_provider,
+            terminal_prelude: _,
         } => {
             log::info!(
                 "[spawn] session={} executable={} cwd={} cols={} rows={}",

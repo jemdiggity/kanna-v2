@@ -573,6 +573,7 @@ fn spawn_session_command(
             cols,
             rows,
             agent_provider: Some(agent_provider),
+            terminal_prelude: None,
         },
         PreparedSessionSpawn::Agent {
             agent_provider,
