@@ -633,6 +633,13 @@ git commit -m "feat(kd): manage Kanache donor lifecycle"
 
 ### Task 5: CLI and kd task surface
 
+> **Post-implementation safety correction:** independent review found that a
+> public `rust-cache record` command could publish Cargo state without bounded
+> build ownership or a dev-activity guard. The final implementation exposes
+> only `warm` and `status`; recording remains an internal post-success action of
+> `build sidecars` and `test rust`. It also revokes the local success marker
+> independently of Kanache before either bounded workflow mutates Cargo state.
+
 **Files:**
 - Modify: `tools/kd/src/cli.ts`
 - Modify: `tools/kd/tests/cli.test.ts`

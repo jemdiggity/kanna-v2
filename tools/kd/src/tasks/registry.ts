@@ -222,7 +222,6 @@ const emulatorsExecInputSchema = z.object({
 });
 
 const emptyInputSchema = z.object({});
-const rustCacheRecordInputSchema = z.object({ layouts: z.enum(["sidecars", "all"]) });
 
 const lanLabInputSchema = z.object({
   hosts: z.string()
@@ -1868,26 +1867,6 @@ export const taskDefinitions = [
         runner: nodeCommandRunner,
         commit: context.commit
       });
-      return { ok: true, message: result.message, data: result };
-    }
-  },
-  {
-    id: "rust-cache.record",
-    description: "Record a clean private Cargo build tree as a Kanache donor.",
-    inputSchema: rustCacheRecordInputSchema,
-    execute: async (_context, input) => {
-      const parsed = rustCacheRecordInputSchema.parse(input);
-      const context = await resolveDefaultContext(process.env);
-      const result = await recordRustCache(
-        {
-          repoRoot: context.repoRoot,
-          homeDir: context.homeDir,
-          env: context.env,
-          runner: nodeCommandRunner,
-          commit: context.commit
-        },
-        parsed.layouts
-      );
       return { ok: true, message: result.message, data: result };
     }
   },

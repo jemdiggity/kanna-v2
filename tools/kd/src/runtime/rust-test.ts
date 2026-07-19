@@ -33,11 +33,7 @@ export async function executeRustTests(input: {
   runner: CommandRunner;
   cache?: RustTestCacheLifecycle;
 }) {
-  try {
-    await input.cache?.begin();
-  } catch {
-    // Cache maintenance must never replace the canonical test result.
-  }
+  await input.cache?.begin();
   const commands: ExecutedRustTestCommand[] = [];
   for (const command of buildRustTestCommands()) {
     const result = await input.runner.run(command.command, command.args, {

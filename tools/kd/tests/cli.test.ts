@@ -144,9 +144,6 @@ describe("kd CLI", () => {
     await expect(runCli(["rust-cache", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd rust-cache <command>"));
 
-    await expect(runCli(["rust-cache", "record", "--help"])).resolves.toBe(0);
-    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd rust-cache record"));
-
     await expect(runCli(["not-a-command", "--help"])).resolves.toBe(1);
     expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
   });
@@ -632,18 +629,9 @@ describe("kd CLI", () => {
       taskId: "rust-cache.status",
       input: {}
     });
-    expect(parseCliArgs(["rust-cache", "record", "--layouts", "sidecars"])).toEqual({
-      taskId: "rust-cache.record",
-      input: { layouts: "sidecars" }
-    });
-    expect(parseCliArgs(["rust-cache", "record", "--layouts", "all"])).toEqual({
-      taskId: "rust-cache.record",
-      input: { layouts: "all" }
-    });
-    expect(() => parseCliArgs(["rust-cache", "record"])).toThrow("--layouts");
-    expect(() =>
-      parseCliArgs(["rust-cache", "record", "--layouts", "release"])
-    ).toThrow("sidecars or all");
+    expect(() => parseCliArgs(["rust-cache", "record", "--layouts", "all"])).toThrow(
+      "Unknown command"
+    );
   });
 
   it("parses remote doctor commands", () => {

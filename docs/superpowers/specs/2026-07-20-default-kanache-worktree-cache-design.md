@@ -86,16 +86,15 @@ The public development surface is:
 
 ```text
 ./kd rust-cache warm
-./kd rust-cache record --layouts sidecars|all
 ./kd rust-cache status
 ```
 
 `warm` bootstraps Kanache, selects a donor, attempts publication, and reports a
-hit or miss. `record --layouts sidecars` records the explicit-target layout;
-`record --layouts all` records both host and explicit-target layouts. Automatic
-callers choose the narrowest set known to have completed successfully. `status`
-reports the pinned tool, enablement, current build-tree state, and recent local
-events.
+hit or miss. Donor recording is deliberately internal to the bounded
+`build sidecars` and `test rust` workflows; there is no public command that can
+publish an unowned or dev-active Cargo tree. Automatic callers choose the
+narrowest set known to have completed successfully. `status` reports the pinned
+tool, enablement, current build-tree state, and recent local events.
 
 `KANNA_RUST_CACHE=off` disables bootstrap, warm, and record. Unset, `on`, and
 `kanache` all mean enabled. Unknown values fail closed to disabled with a clear
@@ -163,10 +162,14 @@ recording is allowed only when the bounded sidecar workflow owns the
 explicit-target builds; a generic sidecar command skips recording if another
 explicit-target Cargo build is detected.
 
-Before each bounded workflow, `kd` removes the prior Kanache success marker via
-`manifest begin`. After success it calls `manifest record` immediately. If the
-build fails, no new success marker is written. A record failure never changes
-the build command's successful result; it is logged as a cache-record miss.
+Before each bounded workflow, `kd` locally removes and durably syncs the prior
+Kanache success marker before best-effort `manifest begin`. Marker revocation
+does not depend on Kanache being installed or runnable. If local revocation is
+impossible, the workflow does not mutate Cargo state because proceeding would
+leave a stale donor advertised. After success it calls `manifest record`
+immediately. If the build fails, no new success marker is written. A record
+failure never changes the build command's successful result; it is logged as a
+cache-record miss.
 
 This lifecycle relies on Kanna's canonical-build rule: development Cargo
 commands run through `kd`. A direct Cargo invocation cannot clear the marker and

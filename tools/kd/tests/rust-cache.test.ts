@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   appendRustCacheEvent,
+  beginRustCacheBuild,
   ensureKanacheBinary,
   getRustCacheStatus,
   recordRustCache,
@@ -133,6 +134,19 @@ describe("Kanache runtime", () => {
       readRustCacheEvents(home, "repo", 10, (warning) => warnings.push(warning))
     ).toHaveLength(1);
     expect(warnings).toEqual(["Ignored malformed Kanache event log line 2."]);
+  });
+
+  it("clears donor eligibility locally even when caching is disabled", async () => {
+    const cache = fakeRuntimeInput();
+    const marker = join(cache.repoRoot, ".build", "cargo-build", ".kanache-success");
+    mkdirSync(join(marker, ".."), { recursive: true });
+    writeFileSync(marker, "old-success");
+    cache.env.KANNA_RUST_CACHE = "off";
+
+    const result = await beginRustCacheBuild(cache);
+
+    expect(result).toMatchObject({ outcome: "record-miss", category: "disabled" });
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("tries ranked exact-HEAD donors until Kanache publishes", async () => {

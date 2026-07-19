@@ -150,4 +150,28 @@ describe("Rust test orchestration", () => {
     expect(result.ok).toBe(false);
     expect(order).not.toContain("cache.record.all");
   });
+
+  it("does not mutate Cargo state when donor eligibility cannot be revoked", async () => {
+    const commands: string[] = [];
+
+    await expect(
+      executeRustTests({
+        repoRoot: "/repo",
+        env: {},
+        runner: {
+          async run(command) {
+            commands.push(command);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+        },
+        cache: {
+          async begin() {
+            throw new Error("marker is not removable");
+          },
+          async record() {}
+        }
+      })
+    ).rejects.toThrow("marker is not removable");
+    expect(commands).toEqual([]);
+  });
 });

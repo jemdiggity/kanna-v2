@@ -1,14 +1,18 @@
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
-  statfsSync
+  statfsSync,
+  unlinkSync
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
@@ -285,6 +289,26 @@ function validDonorFiles(path: string): boolean {
   }
 }
 
+function clearRustCacheSuccessMarker(repoRoot: string): void {
+  const marker = join(repoRoot, ".build", "cargo-build", ".kanache-success");
+  try {
+    unlinkSync(marker);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(`failed to revoke Kanache donor eligibility at ${marker}`, { cause: error });
+  }
+
+  let directory: number | undefined;
+  try {
+    directory = openSync(dirname(marker), "r");
+    fsyncSync(directory);
+  } catch (error) {
+    throw new Error(`failed to persist Kanache donor revocation at ${marker}`, { cause: error });
+  } finally {
+    if (directory !== undefined) closeSync(directory);
+  }
+}
+
 export async function warmRustCache(
   input: RustCacheRuntimeInput
 ): Promise<RustCacheOperationResult> {
@@ -405,6 +429,7 @@ export async function warmRustCache(
 export async function beginRustCacheBuild(
   input: RustCacheRuntimeInput
 ): Promise<RustCacheOperationResult> {
+  clearRustCacheSuccessMarker(input.repoRoot);
   const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
   if (!mode.enabled) {
     if (mode.warning) console.warn(`[kd] ${mode.warning}`);
