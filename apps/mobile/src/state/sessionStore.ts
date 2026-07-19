@@ -88,6 +88,7 @@ export type TaskCompanionEventStatus =
   | "sent"
   | "error";
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
+export type TaskCollectionStatus = "loading" | "ready" | "error";
 export type AuthState = MobileAuthState;
 export type ComposerAgentProvider = AgentProvider;
 export type TaskCreationPhase = "idle" | "pending" | "recovering" | "uncertain";
@@ -125,6 +126,7 @@ export interface SessionState {
   serverStatus: string | null;
   errorMessage: string | null;
   refreshStatus: RefreshStatus;
+  taskCollectionStatus: TaskCollectionStatus;
   auth: AuthState;
   desktops: DesktopSummary[];
   accountDesktops: DesktopSummary[];
@@ -195,6 +197,7 @@ export interface SessionStore {
   setDesktopStatus(status: string | null, desktopName: string | null, pairingCode: string | null, desktopId?: string | null): void;
   setErrorMessage(message: string | null): void;
   setRefreshStatus(status: RefreshStatus): void;
+  setTaskCollectionStatus(status: TaskCollectionStatus): void;
   setAuthState(auth: AuthState): void;
   setDesktops(desktops: DesktopSummary[]): void;
   setMachineSourceDesktops(sources: {
@@ -284,6 +287,7 @@ export function createSessionStore(): SessionStore {
     serverStatus: null,
     errorMessage: null,
     refreshStatus: "idle",
+    taskCollectionStatus: "loading",
     auth: { status: "signedOut" },
     desktops: [],
     accountDesktops: [],
@@ -489,6 +493,10 @@ export function createSessionStore(): SessionStore {
     },
     setRefreshStatus(refreshStatus) {
       state = { ...state, refreshStatus };
+      publish();
+    },
+    setTaskCollectionStatus(taskCollectionStatus) {
+      state = { ...state, taskCollectionStatus };
       publish();
     },
     setAuthState(auth) {
