@@ -106,6 +106,7 @@ git commit -m "fix(kd): centralize Kanache runtime eligibility"
 
 **Files:**
 - Modify: `tools/kd/tests/rust-cache.test.ts`
+- Modify: `tools/kd/tests/rust-cache.integration.test.ts`
 - Modify: `tools/kd/src/runtime/rust-cache.ts`
 
 - [ ] **Step 1: Write the failing runtime tests**
@@ -118,6 +119,17 @@ Insert the explicit platform between the existing `env` and `commit` fields:
 env: { KANNA_RUST_CACHE: "on" },
 platform: "darwin",
 commit: "abc",
+```
+
+Also make the macOS integration fixture explicit about the non-CI path so a parent CI process cannot change the behavior under test:
+
+```ts
+const env = {
+  ...process.env,
+  CI: "",
+  KANNA_RUST_CACHE: "on",
+  FAKE_KANACHE_LOG: log
+};
 ```
 
 ```ts

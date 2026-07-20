@@ -153,6 +153,7 @@ async function createFixture(): Promise<IntegrationFixture> {
   chmodSync(binary, 0o755);
   const env = {
     ...process.env,
+    CI: "",
     KANNA_RUST_CACHE: "on",
     FAKE_KANACHE_LOG: log
   };
@@ -170,7 +171,8 @@ async function createFixture(): Promise<IntegrationFixture> {
       homeDir: home,
       env,
       runner: nodeCommandRunner,
-      commit: head
+      commit: head,
+      platform: "darwin"
     }
   };
 }
