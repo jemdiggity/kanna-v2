@@ -69,7 +69,6 @@ interface TaskScreenProps {
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
-  onOpenTaskActions?(): void;
   onReadTaskFile(path: string): Promise<TaskFileContent>;
   onSendInput(input: string): void;
   onStopAgent(): void;
@@ -110,7 +109,6 @@ export function TaskScreen({
   onBack,
   onAdvanceTaskStage,
   onCloseTask,
-  onOpenTaskActions,
   onReadTaskFile,
   onSendInput,
   onStopAgent,
@@ -520,7 +518,7 @@ export function TaskScreen({
             accessibilityRole="button"
             style={styles.plusButton}
             testID={MOBILE_E2E_IDS.taskMoreButton}
-            onPress={onOpenTaskActions ?? openTaskActionMenu}
+            onPress={openTaskActionMenu}
           >
             <Text style={styles.plusButtonLabel}>+</Text>
           </Pressable>

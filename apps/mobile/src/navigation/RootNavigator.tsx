@@ -40,7 +40,6 @@ import { MoreScreen } from "../screens/MoreScreen";
 import { filterCommandAvailableRepos } from "../screens/repoCommandPresentation";
 import { SearchScreen } from "../screens/SearchScreen";
 import { TaskScreen } from "../screens/TaskScreen";
-import { showTaskActionMenu } from "../screens/taskActionMenu";
 import { TasksScreen } from "../screens/TasksScreen";
 import type { MobileController } from "../state/mobileController";
 import { buildMachineInventory } from "../state/machineInventory";
@@ -113,7 +112,6 @@ interface NavigationContent {
   pushPreparedTask(taskId: string): void;
   pushSearch(): void;
   pushTask(taskId: string): void;
-  pushTaskMore(): void;
   state: SessionState;
   taskDetailViewportRef: React.MutableRefObject<{
     width: number;
@@ -175,12 +173,6 @@ export default function RootNavigator({
       navigationRef.dispatch(StackActions.push("Desktops"));
     }
   }, [navigationRef]);
-  const pushTaskMore = useCallback(() => {
-    if (navigationRef.isReady()) {
-      navigationRef.dispatch(StackActions.push("TaskMore"));
-    }
-  }, [navigationRef]);
-
   useEffect(() => {
     if (previousOpenMachinesRequestKeyRef.current === openMachinesRequestKey) return;
     previousOpenMachinesRequestKeyRef.current = openMachinesRequestKey;
@@ -198,7 +190,6 @@ export default function RootNavigator({
     pushPreparedTask,
     pushSearch,
     pushTask,
-    pushTaskMore,
     state,
     taskDetailViewportRef
   }), [
@@ -211,7 +202,6 @@ export default function RootNavigator({
     pushPreparedTask,
     pushSearch,
     pushTask,
-    pushTaskMore,
     state
   ]);
 
@@ -251,15 +241,6 @@ export default function RootNavigator({
               component={TaskDetailRoute}
               name="TaskDetail"
               options={{ headerShown: false }}
-            />
-            <RootStack.Screen
-              component={TaskMoreRoute}
-              name="TaskMore"
-              options={{
-                contentStyle: styles.transparentStackContent,
-                headerShown: false,
-                presentation: "transparentModal"
-              }}
             />
             <RootStack.Screen
               component={SearchRoute}
@@ -403,44 +384,6 @@ function DesktopsRoute({ navigation }: NativeStackScreenProps<RootStackParamList
   );
 }
 
-function TaskMoreRoute({
-  navigation
-}: NativeStackScreenProps<RootStackParamList, "TaskMore">) {
-  const {
-    controller,
-    pushPreparedTask,
-    state
-  } = useNavigationContent();
-  const selectedTask = resolveSelectedTask(state);
-  const selectedTaskId = selectedTask
-    ? resolveDurableTaskId(state, selectedTask.id)
-    : null;
-
-  useFocusEffect(
-    useCallback(() => {
-      let dismissed = false;
-      const dismiss = () => {
-        if (dismissed) return;
-        dismissed = true;
-        if (navigation.canGoBack()) navigation.goBack();
-      };
-      showTaskActionMenu((action) => {
-        dismiss();
-        if (!selectedTaskId) return;
-        if (action === "advance-stage") {
-          void controller.advanceDesktopTaskStage(selectedTaskId).then((taskId) => {
-            if (taskId) pushPreparedTask(taskId);
-          });
-        } else {
-          void controller.closeDesktopTask(selectedTaskId);
-        }
-      }, dismiss);
-    }, [controller, navigation, pushPreparedTask, selectedTaskId])
-  );
-
-  return <View style={styles.transparentTaskActions} />;
-}
-
 function MoreRouteContent() {
   const { controller, pushPreparedTask, state } = useNavigationContent();
   const commandRepos = filterCommandAvailableRepos(
@@ -480,7 +423,6 @@ function TaskDetailRoute({
   const {
     controller,
     e2eTaskSnapshotMarker,
-    pushTaskMore,
     state
   } = useNavigationContent();
   const routeTaskId = route.params.taskId;
@@ -577,7 +519,6 @@ function TaskDetailRoute({
           void controller.closeDesktopTask(durableTaskId);
         }
       }}
-      onOpenTaskActions={pushTaskMore}
       onReadTaskFile={(path) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         return durableTaskId
@@ -775,9 +716,6 @@ const styles = StyleSheet.create({
   stackContent: {
     backgroundColor: "#08111E"
   },
-  transparentStackContent: {
-    backgroundColor: "transparent"
-  },
   header: {
     backgroundColor: "#08111E"
   },
@@ -796,9 +734,6 @@ const styles = StyleSheet.create({
   },
   taskPlaceholder: {
     backgroundColor: "#08111E",
-    flex: 1
-  },
-  transparentTaskActions: {
     flex: 1
   },
   topBar: {

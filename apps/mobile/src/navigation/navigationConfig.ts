@@ -37,7 +37,6 @@ export const MAIN_TAB_ROUTES: TabRoute[] = [
 export const ROOT_STACK_ROUTES = [
   "MainTabs",
   "TaskDetail",
-  "TaskMore",
   "Search",
   "Desktops"
 ] as const;
