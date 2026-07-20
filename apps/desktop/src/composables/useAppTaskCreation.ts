@@ -102,7 +102,9 @@ export function useAppTaskCreation({
           fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error);
             console.error("[App] failed to load repo definitions for new task modal:", error);
-            toast.error(`${t("toasts.repoDefinitionsFailed")}: ${message}`);
+            if (loadGeneration === newTaskOptionsLoadGeneration && showNewTaskModal.value) {
+              toast.error(`${t("toasts.repoDefinitionsFailed")}: ${message}`);
+            }
             return null;
           }),
           invoke<string>("git_default_branch", { repoPath }).catch((error) => {

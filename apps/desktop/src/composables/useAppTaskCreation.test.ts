@@ -15,10 +15,12 @@ vi.mock("../invoke", () => ({
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function createTaskCreationHarness() {
@@ -239,6 +241,31 @@ describe("useAppTaskCreation", () => {
     expect(availableBaseBranches.value).toEqual(["origin/trunk"]);
     expect(creation.availableAgentProviders.value).toEqual(["codex"]);
     expect(creation.newTaskOptionsLoading.value).toBe(false);
+  });
+
+  it("does not report definition errors from a superseded repository load", async () => {
+    const oldDefinitions = deferred<never>();
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: (repoId) =>
+        repoId === "repo-1"
+          ? oldDefinitions.promise
+          : Promise.resolve({
+              revision: "repo-2-rev",
+              refName: "origin/main",
+              config: {},
+              defaultPipeline: "default",
+              pipelines: ["default"],
+            }),
+    });
+    const { creation, store, toast } = createTaskCreationHarness();
+    store.repos.push({ id: "repo-2", path: "/repo-2" });
+
+    const firstOpen = creation.openNewTaskModal("repo-1");
+    await creation.openNewTaskModal("repo-2");
+    oldDefinitions.reject(new Error("stale repo unavailable"));
+    await firstOpen;
+
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("loads pipeline choices and the default from the repo definitions manifest", async () => {
