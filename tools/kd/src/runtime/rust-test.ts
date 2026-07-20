@@ -8,6 +8,11 @@ export interface RustTestCommand {
 
 interface ExecutedRustTestCommand extends RustTestCommand, CommandResult {}
 
+export interface RustTestCacheLifecycle {
+  begin(): Promise<void>;
+  record(): Promise<void>;
+}
+
 export function buildRustTestCommands(): RustTestCommand[] {
   return [
     {
@@ -26,7 +31,9 @@ export async function executeRustTests(input: {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
+  cache?: RustTestCacheLifecycle;
 }) {
+  await input.cache?.begin();
   const commands: ExecutedRustTestCommand[] = [];
   for (const command of buildRustTestCommands()) {
     const result = await input.runner.run(command.command, command.args, {
@@ -42,6 +49,11 @@ export async function executeRustTests(input: {
         data: { commands },
       };
     }
+  }
+  try {
+    await input.cache?.record();
+  } catch {
+    // Cache maintenance must never replace the canonical test result.
   }
   return { ok: true, message: "Canonical Rust tests passed.", data: { commands } };
 }

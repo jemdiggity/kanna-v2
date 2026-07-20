@@ -99,4 +99,79 @@ describe("Rust test orchestration", () => {
       },
     });
   });
+
+  it("begins before canonical Rust tests and records all layouts only after success", async () => {
+    const order: string[] = [];
+    const result = await executeRustTests({
+      repoRoot: "/repo",
+      env: {},
+      runner: {
+        async run(command) {
+          order.push(command);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+      },
+      cache: {
+        async begin() {
+          order.push("cache.begin");
+        },
+        async record() {
+          order.push("cache.record.all");
+        }
+      }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(order[0]).toBe("cache.begin");
+    expect(order.at(-1)).toBe("cache.record.all");
+  });
+
+  it("leaves the marker cleared when a canonical Rust test fails", async () => {
+    const order: string[] = [];
+    const result = await executeRustTests({
+      repoRoot: "/repo",
+      env: {},
+      runner: {
+        async run(command) {
+          order.push(command);
+          return { exitCode: 1, stdout: "", stderr: "failed" };
+        }
+      },
+      cache: {
+        async begin() {
+          order.push("cache.begin");
+        },
+        async record() {
+          order.push("cache.record.all");
+        }
+      }
+    });
+
+    expect(result.ok).toBe(false);
+    expect(order).not.toContain("cache.record.all");
+  });
+
+  it("does not mutate Cargo state when donor eligibility cannot be revoked", async () => {
+    const commands: string[] = [];
+
+    await expect(
+      executeRustTests({
+        repoRoot: "/repo",
+        env: {},
+        runner: {
+          async run(command) {
+            commands.push(command);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+        },
+        cache: {
+          async begin() {
+            throw new Error("marker is not removable");
+          },
+          async record() {}
+        }
+      })
+    ).rejects.toThrow("marker is not removable");
+    expect(commands).toEqual([]);
+  });
 });

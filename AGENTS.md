@@ -150,7 +150,7 @@ Use `pnpm` for all package management and script execution. Not npm.
 - `scripts/` — build, release, setup, and maintenance scripts
 - `tools/kd/` — `kd` CLI and `kd-mcp` self-development workflow server
 - `docs/` — planning and spec documents
-- `.cargo/config.toml` — sets `target-dir = ".build"` (shared Rust build cache)
+- `.cargo/config.toml` — keeps each checkout's Rust outputs under its private `.build/` tree
 
 ## Development Workflow
 
@@ -170,6 +170,14 @@ Worktrees are fully isolated from the main branch instance:
 - **Separate tmux server** — `kd dev up` uses a tmux server named `kanna-{worktree-dir}` instead of the default `kanna`, and creates the desktop/mobile windows inside a same-named session on that server
 
 This means the main Kanna app and a dev worktree can run simultaneously without port or data conflicts.
+
+### Rust build cache
+
+Kanache worktree warming is an experimental, default-off proof of concept. Normal Kanna-managed worktrees keep a cold, private `.build/cargo-build` after environment sync. To opt in, set `KANNA_RUST_CACHE=on`, run `./kd rust-cache warm` in a fresh exact-`HEAD` worktree before its first Rust build, and keep the variable set for bounded donor-producing commands. Kanache copies compatible Cargo intermediates from a clean worktree at the same commit into the destination's private build tree; final sidecars and Tauri `externalBin` staging remain private to the producing build. A missing, incompatible, or refused donor is a normal cache miss.
+
+Unset, blank, and `KANNA_RUST_CACHE=off` all disable bootstrap, warming, and donor recording. With `KANNA_RUST_CACHE=on`, a clean checkout whose dev session is stopped can run `./kd test rust` to seed both the implicit host and explicit Apple target layouts. Use `./kd rust-cache status` to inspect the pinned revision, current manifest, and recent local measurements. Do not enable Kanache by default until the representative Kanna-scale gates in `docs/superpowers/specs/2026-07-20-default-kanache-worktree-cache-design.md` pass.
+
+Kanache is development-only. Release builds remain Bazel-only and never install or execute Kanache.
 
 ### Launching the dev environment
 
@@ -229,6 +237,7 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
 ./kd dev up --attach         # start and attach to tmux session
 ./kd env print               # print resolved ports, DB, daemon dir, transfer root
+./kd rust-cache status       # inspect Kanache pin, manifest, and recent cache events
 ./kd doctor                  # check local prerequisites
 ./kd setup --check           # check prerequisites without installing
 ./kd clean --all             # remove generated artifacts
@@ -284,7 +293,7 @@ cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignore
 
 ### First build in a worktree
 
-The first `./kd dev up` in a fresh worktree compiles ~523 Rust crates (the daemon builds quickly, but the full Tauri app takes several minutes). Subsequent builds are incremental.
+The first `./kd dev up` in a fresh worktree compiles ~523 Rust crates (the daemon builds quickly, but the full Tauri app takes several minutes). Subsequent builds are incremental within that worktree. The opt-in Kanache experiment can warm a fresh private build tree first, but normal setup does not invoke it.
 
 ### Cloud deployment
 

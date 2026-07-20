@@ -59,6 +59,14 @@ import {
   type StagingRelayActiveDesktopIdsInput
 } from "../runtime/staging-relay";
 import { shipRelease } from "../runtime/release";
+import {
+  beginRustCacheBuild,
+  getRustCacheStatus,
+  noteRustCacheRecordMiss,
+  recordRustCache,
+  warmRustCache,
+  withRustCacheLifecycleLock
+} from "../runtime/rust-cache";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
@@ -1848,17 +1856,61 @@ export const taskDefinitions = [
     }
   },
   {
+    id: "rust-cache.warm",
+    description: "Warm the private Cargo build tree from a compatible Kanache donor.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const result = await warmRustCache({
+        repoRoot: context.repoRoot,
+        homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
+        commit: context.commit
+      });
+      return { ok: true, message: result.message, data: result };
+    }
+  },
+  {
+    id: "rust-cache.status",
+    description: "Show Kanache installation, manifest, and recent cache events.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const status = await getRustCacheStatus({
+        repoRoot: context.repoRoot,
+        homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
+        commit: context.commit
+      });
+      return { ok: true, message: formatJsonResult(status), data: status };
+    }
+  },
+  {
     id: "build.sidecars",
     description: "Build Kanna desktop sidecars.",
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      const staged = await buildDesktopSidecars(nodeCommandRunner, context.repoRoot);
-      return {
-        ok: true,
-        message: `Built and staged ${staged.length} sidecars.`,
-        data: { staged }
+      const cache = {
+        repoRoot: context.repoRoot,
+        homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
+        commit: context.commit
       };
+      return withRustCacheLifecycleLock(cache, async (ownerEnv) => {
+        const ownedCache = { ...cache, env: ownerEnv };
+        await beginRustCacheBuild(ownedCache);
+        const staged = await buildDesktopSidecars(nodeCommandRunner, context.repoRoot);
+        await recordRustCache(ownedCache, "sidecars");
+        return {
+          ok: true,
+          message: `Built and staged ${staged.length} sidecars.`,
+          data: { staged }
+        };
+      });
     }
   },
   {
@@ -2010,10 +2062,33 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      return executeRustTests({
+      const cache = {
         repoRoot: context.repoRoot,
+        homeDir: context.homeDir,
         env: context.env,
         runner: nodeCommandRunner,
+        commit: context.commit
+      };
+      return withRustCacheLifecycleLock(cache, async (ownerEnv) => {
+        const ownedCache = { ...cache, env: ownerEnv };
+        return executeRustTests({
+          repoRoot: context.repoRoot,
+          env: ownerEnv,
+          runner: nodeCommandRunner,
+          cache: {
+            async begin() {
+              await beginRustCacheBuild(ownedCache);
+            },
+            async record() {
+              const devStatus = await getDevStatus(nodeCommandRunner, context.tmux);
+              if (devStatus.running) {
+                noteRustCacheRecordMiss(ownedCache, "dev-active");
+                return;
+              }
+              await recordRustCache(ownedCache, "all");
+            }
+          }
+        });
       });
     },
   },
