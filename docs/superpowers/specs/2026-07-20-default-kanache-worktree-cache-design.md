@@ -1,274 +1,231 @@
-# Default Kanache worktree cache
+# Opt-in Kanache worktree cache technical spike
 
-Status: approved design for implementation.
+**Status:** Experimental, default-off. No-go for productization until a
+representative Kanna-scale canary passes the gates below.
 
-## Problem
+## Decision
 
-Kanna keeps Cargo's `build-dir` private to each checkout because sharing one
-mutable Cargo directory across worktrees previously produced silent stale
-`.rmeta` reuse. That isolation is correct, but active worktrees collectively
-consume roughly 94 GiB even though their sources and most Rust build outputs
-are usually identical.
+Kanna keeps Cargo's mutable `build-dir` private to each checkout. The former
+shared directory produced silent stale `.rmeta` reuse, so this experiment must
+never restore a shared Cargo path. Final target artifacts, sidecars, and Tauri
+`externalBin` staging also remain private to the build that produced them.
 
-Kanache now provides a reviewed APFS copy-on-write warm operation for clean
-worktrees at the exact same Git commit. It clones only declared, locked Cargo
-layouts into a private destination, invalidates local/path-package state, and
-removes final executables, sidecars, and Tauri staging. Kanna should use that
-operation by default for development worktrees while preserving cold Cargo
-builds as the correctness fallback.
+The pinned Kanache revision remains available as a development proof of
+concept, but Kanna does not invoke it during normal worktree setup. An unset or
+blank `KANNA_RUST_CACHE`, and the explicit value `off`, disable bootstrap,
+warming, and donor recording. A developer must set `KANNA_RUST_CACHE=on` or
+`KANNA_RUST_CACHE=kanache` for each opt-in command or shell.
 
-This is a measured rollout, not a change to release architecture. Bazel remains
-the only release build path.
+This reverses the earlier default-on proposal. The upstream revision describes
+itself as a technical spike, did not have a representative Kanna tree, and
+recommends no-go pending Kanna-scale evidence. The fake-tool integration suite
+proves Kanna's orchestration boundaries; it does not establish the physical
+size or build-time benefit required for rollout.
 
-## Goals
+Release architecture is unchanged. Bazel remains the only release build path
+and never installs or executes Kanache.
 
-- Attempt a Kanache warm automatically for every new local Kanna worktree.
-- Keep every destination Cargo tree private; never share mutable Cargo paths.
-- Select only exact-`HEAD`, clean, compatible donors from the same repository.
-- Preserve private final sidecars and Tauri `externalBin` staging.
-- Fall back to the current cold build whenever caching is unavailable or
-  refused.
-- Seed future donors from bounded successful `kd` Rust workflows.
-- Record enough local evidence to decide whether Kanache meets Kanna's
-  `< 30 s` warm and `< 1 GiB` physical-growth targets.
-- Provide an immediate environment-variable rollback.
+## Scope and invariants
 
-## Non-goals
+The experiment may:
 
-- Bazel release, signing, notarization, or packaging changes.
-- Sharing one mutable Cargo build directory.
-- Cross-commit or dirty-worktree reuse.
-- A permanent cache worktree, cache daemon, or new Kanna database state.
-- Automatically declaring a long-running `tauri dev` build successful.
-- Garbage collection beyond Kanna's existing worktree teardown and a
-  versioned, machine-global Kanache tool installation.
+- clone compatible Cargo intermediates from a clean, exact-`HEAD` worktree;
+- publish them into an absent, destination-private `.build/cargo-build`;
+- record donors only around bounded successful `kd` Rust workflows;
+- log local timing and APFS allocation deltas.
 
-## Chosen architecture
+It must not:
 
-The integration lives in `kd`, Kanna's existing development control plane.
-`kd` will bootstrap and invoke an exact Kanache revision, discover donors with
-Git, manage bounded manifest lifecycles, and expose status. The repository
-setup config will call the warm command explicitly, making it default-on
-without hiding worktree creation behavior inside Cargo configuration.
+- share a mutable Cargo build directory;
+- reuse across commits or repositories;
+- replace or delete an existing destination build tree;
+- expose a donor while a supported workflow mutates one of its declared
+  layouts;
+- source final binaries or Tauri staging inputs from another worktree;
+- become a release, signing, packaging, or app runtime dependency.
 
-The initial pinned upstream is:
+## Pinned tool and opt-in surface
+
+The only accepted upstream is:
 
 ```text
 repository: https://github.com/jemdiggity/kanache
 revision:   6107c7b533a77a0c7c190b75c0284e7501c6edbf
 ```
 
-Kanna will never resolve a floating branch, tag, or arbitrary `kanache` from
-`PATH`.
-
-## Components
-
-### Versioned tool bootstrap
-
-`kd` resolves the binary beneath:
+`kd` installs it with locked Cargo resolution into:
 
 ```text
 ~/Library/Caches/kanna/tools/kanache/<revision>/bin/kanache
 ```
 
-If absent, `kd` runs a locked `cargo install` from the pinned Git revision into
-a process-private temporary root, verifies the resulting executable with
-`kanache --version`, and atomically publishes the version directory. Concurrent
-installers may duplicate compilation, but only a complete installation can win
-publication. A failed bootstrap is a cache miss, not a failed Kanna setup.
+Installation uses a process-private temporary root, verifies `kanache
+--version`, and atomically publishes the version directory. Kanna never uses a
+floating ref or an arbitrary executable from `PATH`. A bootstrap failure is a
+cache miss and cannot fail the underlying build.
 
-This tool is development-only. It is not embedded in Kanna.app and is never
-consulted by Bazel release commands.
+The public experiment surface is:
 
-### `kd rust-cache` commands
-
-The public development surface is:
-
-```text
-./kd rust-cache warm
-./kd rust-cache status
+```bash
+KANNA_RUST_CACHE=on ./kd rust-cache warm
+KANNA_RUST_CACHE=on ./kd rust-cache status
+KANNA_RUST_CACHE=on ./kd build sidecars
+KANNA_RUST_CACHE=on ./kd test rust
 ```
 
-`warm` bootstraps Kanache, selects a donor, attempts publication, and reports a
-hit or miss. Donor recording is deliberately internal to the bounded
-`build sidecars` and `test rust` workflows; there is no public command that can
-publish an unowned or dev-active Cargo tree. Automatic callers choose the
-narrowest set known to have completed successfully. `status` reports the pinned
-tool, enablement, current build-tree state, and recent local events.
+`.kanna/config.json` runs only `pnpm install` and `./kd env sync`; it does not
+warm a new worktree. `rust-cache warm` is idempotent. An existing
+`.build/cargo-build` produces `destination-exists` and remains untouched.
 
-`KANNA_RUST_CACHE=off` disables bootstrap, warm, and record. Unset, `on`, and
-`kanache` all mean enabled. Unknown values fail closed to disabled with a clear
-warning rather than guessing.
+## Donor discovery and publication
 
-### Worktree setup
+`kd` reads `git worktree list --porcelain` and filters candidates before
+invoking Kanache:
 
-`.kanna/config.json` will run:
+1. the candidate is not the destination after filesystem canonicalization;
+2. its canonical Git common directory equals the destination repository's;
+3. its full commit hash exactly equals the destination `HEAD`;
+4. it contains a regular manifest and success marker beneath a non-symlinked
+   private build root;
+5. its manifest declares profile `dev`, no extra inputs, and at least one
+   supported host/Apple layout.
 
-```text
-pnpm install
-./kd env sync
-./kd rust-cache warm
-```
+Filesystem canonicalization is necessary on macOS because the same temporary
+path can appear as both `/var/...` and `/private/var/...`. The integration test
+uses that real alias behavior and would reject every valid donor if identity
+were compared lexically.
 
-The warm command is idempotent. If `.build/cargo-build` already exists, it
-reports a miss and does not remove or replace it. Manual checkouts that skip
-Kanna setup retain today's behavior.
+Candidates are ranked by reusable coverage: implicit host plus explicit host
+target, implicit host only, explicit target only, then newest manifest.
+Kanache remains the final authority for cleanliness, toolchain, lockfile,
+Rust flags, layouts, build-script inputs, locking, and atomic publication. If
+one candidate refuses, `kd` tries the next. It never combines multiple donors.
 
-### Donor discovery and ranking
+Kanna development layouts are:
 
-`kd` reads `git worktree list --porcelain` from the current repository and
-filters candidates before invoking Kanache:
+- `host` for implicit Cargo host builds;
+- the installed Rust host triple, normally `aarch64-apple-darwin`, for explicit
+  sidecar builds.
 
-1. candidate is not the destination;
-2. candidate resolves under the same Git common directory;
-3. candidate has the exact destination `HEAD`;
-4. candidate contains a Kanache manifest and success marker;
-5. candidate is a real directory, not a symlinked path.
+## Donor-marker lifecycle
 
-Kanache remains the final authority for repository identity, cleanliness,
-toolchain, `Cargo.lock`, Rust flags, layouts, extra inputs, locks, topology, and
-atomic publication. A `kd` prefilter is only an optimization.
+Before a supported bounded workflow starts Cargo, `kd` removes and directory-
+syncs `.build/cargo-build/.kanache-success` independently of whether Kanache is
+installed or enabled. Failure to revoke the marker prevents the Cargo mutation.
+Opt-in mode then runs `kanache manifest begin`. Only a clean, successful bounded
+workflow may run `manifest record` and create a new marker.
 
-Kanna development layouts are profile `dev` with:
+The complete interval uses a repository-local cross-process lock. The lock
+token can be inherited only by the intentional `test rust` → `build sidecars`
+nesting. A malformed or ownerless lock fails closed; a verifiably dead process
+owner may be recovered.
 
-- implicit host layout: `host`;
-- explicit sidecar layout: the installed Rust host triple, currently
-  `aarch64-apple-darwin` on supported development machines.
+| Workflow | Cargo mutation and marker contract |
+| --- | --- |
+| `./kd build sidecars` | Revoke/begin, build and stage every explicit-target sidecar, then record only the explicit target after success. |
+| `./kd dev up` | Runs the bounded sidecar command first. The later long-running Tauri host build is not recorded; the explicit-only marker cannot advertise host state. |
+| `./kd test rust` | Holds the outer lifecycle lock, revokes before the suite, permits the nested sidecar lifecycle, runs host tests, then records host plus explicit layouts only if the full suite succeeds and no dev session is active. |
+| `./kd build desktop` | Frontend/Turbo build only; it does not invoke Cargo and does not affect donor state. |
+| `./kd clean --all` | Removes the private build tree, including any manifest and marker. |
+| Bazel release commands | Never read, install, warm, or record Kanache state. |
 
-Candidates are ranked by reusable coverage: both layouts, host only, then
-explicit sidecar only. Within the same coverage, the newest valid manifest is
-tried first. `kd` attempts candidates until one succeeds or all refuse. Once a
-warm succeeds, no second donor is combined with it.
+Direct `cargo`, `pnpm exec tauri`, and other ad hoc Cargo invocations are not
+donor-producing workflows. If a checkout was previously recorded while the
+experiment was enabled, remove its `.kanache-success` marker before any direct
+Cargo mutation. Such commands may consume a private warmed tree, but they must
+not leave it advertised as a supported donor. Normal default-off checkouts do
+not create these markers.
 
-Kanna records no extra inputs initially. All local and path packages plus
-build-script-run fingerprints are conservatively invalidated by Kanache. If a
-future ignored input can influence a retained registry unit, it must be added
-explicitly before that build becomes eligible as a donor.
+## Failure and observability
 
-### Donor recording
+Disabled mode, unsupported platforms/filesystems, bootstrap errors, missing or
+incompatible donors, an existing destination, Git/Rust discovery failures,
+Kanache refusals, and recording failures all preserve the private cold-build
+fallback. `kd` never deletes an existing destination to force a hit.
 
-Only bounded successful commands may create a success marker:
-
-- `kd build sidecars` records the explicit-target `dev` layout after all
-  sidecars build and stage successfully.
-- `kd test rust` records both host and explicit-target `dev` layouts after the
-  complete canonical Rust suite succeeds.
-
-Recording is best-effort and requires a clean worktree. Dirty worktrees remain
-valid build consumers but cannot become donors. If a Kanna-managed desktop
-process is already running for the worktree, commands skip `all` recording
-because Tauri may be mutating host Cargo state concurrently. Sidecar-only
-recording is allowed only when the bounded sidecar workflow owns the
-explicit-target builds; a generic sidecar command skips recording if another
-explicit-target Cargo build is detected.
-
-Before each bounded workflow, `kd` locally removes and durably syncs the prior
-Kanache success marker before best-effort `manifest begin`. Marker revocation
-does not depend on Kanache being installed or runnable. If local revocation is
-impossible, the workflow does not mutate Cargo state because proceeding would
-leave a stale donor advertised. After success it calls `manifest record`
-immediately. If the build fails, no new success marker is written. A record
-failure never changes the build command's successful result; it is logged as a
-cache-record miss.
-
-The complete begin-build-record interval is protected by a repository-local,
-cross-process single-flight lock. The lock token is inherited only by the
-intentional `test rust` → `build sidecars` nesting, so a second bounded workflow
-cannot republish eligibility while the first is still mutating a declared
-layout. `test rust` rechecks dev-session activity immediately before publishing
-the combined host/explicit manifest. Valid dead-process owners are recoverable;
-ownerless or malformed locks fail closed because no waiter can prove that a
-paused creator will not resume. Operators may remove such a lock only after
-confirming no bounded `kd` Rust workflow is active.
-
-This lifecycle relies on Kanna's canonical-build rule: development Cargo
-commands run through `kd`. A direct Cargo invocation cannot clear the marker and
-is therefore outside the supported donor-recording contract. All `kd` paths
-that mutate a declared layout must call `manifest begin` before spawning Cargo,
-even when that path will not record afterward.
-
-Long-running `kd dev up` consumes a warm tree but does not record host success.
-Its initial bounded sidecar build may record only the explicit layout before
-Tauri starts. Kanache's undeclared-layout pruning makes later host mutations
-irrelevant to an explicit-only donor.
-
-## Failure behavior
-
-Caching is an optimization. These cases all print a concise reason and continue
-with the existing private cold build:
-
-- disabled environment setting;
-- unsupported OS or filesystem;
-- tool download/build failure;
-- no exact-`HEAD` donor;
-- dirty or incompatible donor/destination;
-- missing, busy, or replaced Cargo lock;
-- an existing destination build directory;
-- any Kanache refusal or nonzero exit.
-
-Kanache guarantees temp cleanup and atomic destination publication. `kd` will
-not delete an existing build directory to force a cache hit. An unexpected
-post-failure destination tree is treated as an error requiring user inspection,
-not automatically removed.
-
-## Observability
-
-Every warm and record attempt emits a human-readable one-line result and
-appends one JSON object to:
+Warm and record attempts append JSON lines to:
 
 ```text
 ~/Library/Caches/kanna/kanache/events.jsonl
 ```
 
-Fields include timestamp, repository identity hash, commit, destination,
-donor when selected, requested layouts, outcome, refusal category, wall time,
-and APFS free-space delta measured around the operation. Logs contain local
-paths but no source content, environment values, or file hashes.
+Events include repository identity, commit, destination, donor, layouts,
+outcome/category, wall time, and allocation delta. `./kd rust-cache status`
+shows the mode, pinned revision, installed binary, current manifest, and recent
+repository events. Malformed historical events are ignored with a warning.
 
-`kd rust-cache status` shows enablement, pinned revision, binary path, current
-manifest/layout summary, and the most recent events for the current repository.
-Malformed historical event lines are ignored with a warning; they never affect
-cache correctness.
+## Automated integration coverage
 
-## Testing
+`tools/kd/tests/rust-cache.integration.test.ts` uses the real Node process
+runner, real temporary Git repositories, and real linked worktrees. Only
+Kanache is replaced with a deterministic executable. The suite verifies:
 
-Unit tests cover:
+- exact-full-`HEAD` donor filtering;
+- canonical same-repository filtering, including a registered path redirected
+  to a foreign Git common directory;
+- first-donor refusal and next-donor fallback;
+- atomic destination publication by the tool substitute;
+- no invocation or deletion when the destination exists;
+- real-process `manifest begin` → build → `manifest record` ordering and final
+  marker publication.
 
-- pinned binary path and bootstrap plan;
-- enable/disable parsing;
-- worktree porcelain parsing and exact-commit filtering;
-- donor ranking for both/host/explicit layouts;
-- existing-destination and no-donor cold fallbacks;
-- event serialization and status filtering;
-- bounded build lifecycle command ordering;
-- release tasks never invoking the cache layer.
+Normal CI also compiles but skips a real-pinned-tool smoke. A developer can run
+it explicitly:
 
-Integration tests use a fake Kanache executable and temporary Git worktrees to
-verify hit, refusal, candidate fallback, no destination deletion, and record
-behavior without downloading tools.
+```bash
+KANNA_REAL_KANACHE_ACCEPTANCE=1 \
+  pnpm --dir tools/kd exec vitest run tests/rust-cache.integration.test.ts \
+  --maxWorkers=1
+```
 
-The Kanna-scale canary then uses the real pinned binary and records:
+That smoke bootstraps the exact pin, builds and records a tiny real Cargo donor,
+warms a sibling worktree, rebuilds it, and checks that final executables have
+different inodes. It is opt-in because it requires macOS/APFS, Git, the pinned
+Rust/Cargo toolchain, network access on first bootstrap, substantial compile
+time, and mutation of the user cache beneath `~/Library/Caches/kanna`. The fake
+integration suite substitutes for orchestration correctness in ordinary CI;
+the real smoke covers the external tool boundary when explicitly requested.
 
-- donor logical size and file count;
-- warm wall time and free-space delta;
-- first `kd build sidecars` and first host Cargo build time;
-- rebuilt registry versus local artifacts from Cargo JSON output where
-  practical;
-- immediate edit propagation;
-- donor removal followed by no-op and edited builds.
+## Representative Kanna-scale canary
 
-Success for continuing the default rollout is a representative 7–9 GiB donor
-warmed in under 30 seconds with under 1 GiB physical growth, zero stale output,
-and no registry rebuild caused solely by relocation. Failure rolls back with
-`KANNA_RUST_CACHE=off` while retaining the private per-worktree build layout.
+Neither automated suite proves product viability. Before any default-on change,
+run a manual canary with:
 
-## Rollout
+- macOS on APFS;
+- Kanna's pinned Rust/Cargo toolchain;
+- a clean 7–9 GiB donor and at least two fresh exact-`HEAD` Kanna worktrees;
+- no active dev, Cargo, or competing disk-heavy processes;
+- at least 20 GiB free disk for donor, cold control, and warmed destination;
+- the exact pinned Kanache revision above.
 
-1. Land the default-on `kd` integration and tests.
-2. Seed a clean main Kanna checkout by running `./kd test rust` once.
-3. Create two exact-`HEAD` worktrees through Kanna and capture warm/build
-   evidence.
-4. Keep default-on if the safety and resource targets pass.
-5. If performance misses, disable by environment while deciding between
-   per-profile lazy cloning and a permanent donor cache. Never fall back to a
-   shared mutable Cargo directory.
+Suggested flow:
+
+```bash
+export KANNA_RUST_CACHE=on
+./kd test rust
+
+# In a fresh exact-HEAD sibling whose .build/cargo-build is absent:
+./kd rust-cache warm
+./kd rust-cache status
+./kd build sidecars
+```
+
+Capture a same-batch cold control and the warmed sibling. The rollout gates are:
+
+1. **Warm time:** under 30 seconds for the representative donor.
+2. **Physical growth:** under 1 GiB APFS free-space loss for the warmed private
+   tree, measured independently from logical size.
+3. **Invalidation:** source, `Cargo.lock`, features, `RUSTFLAGS`, target, and
+   toolchain changes rebuild affected units and never execute stale behavior.
+4. **Relocation:** moving between real Kanna worktree roots does not cause a
+   registry rebuild solely because of absolute paths.
+5. **Final privacy:** sidecars, desktop executables, and Tauri staging remain
+   private paths with distinct inodes and never appear in a shared store.
+6. **Concurrency/removal:** concurrent warm/record operations refuse or
+   serialize safely, and donor removal does not break no-op or edited builds.
+
+Record logical size/file count, physical allocation delta, warm wall time,
+first sidecar and host build time, Cargo rebuilt/fresh units, and every
+invalidation result. Until committed representative evidence passes every
+gate, Kanache remains default-off. Missing a gate is a no-go, not a reason to
+weaken Cargo isolation or enable the experiment optimistically.

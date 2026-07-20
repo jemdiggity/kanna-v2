@@ -2,8 +2,7 @@
   "$schema": "https://schemas.kanna.build/config.schema.json",
   "setup": [
     "pnpm install",
-    "./kd env sync",
-    "./kd rust-cache warm"
+    "./kd env sync"
   ],
   "teardown": ["./kd dev down --kill-daemon", "./kd clean --all"],
   "test": ["pnpm test"],

@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -168,17 +169,25 @@ function repositoryId(commonDirectory: string): string {
   return createHash("sha256").update(commonDirectory).digest("hex").slice(0, 16);
 }
 
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 function repositoryDirectoryFromFilesystem(repoRoot: string): string {
   const dotGit = join(repoRoot, ".git");
   try {
-    if (lstatSync(dotGit).isDirectory()) return resolve(dotGit);
+    if (lstatSync(dotGit).isDirectory()) return canonicalPath(dotGit);
     const gitDirectoryLine = readFileSync(dotGit, "utf8").trim();
-    if (!gitDirectoryLine.startsWith("gitdir: ")) return resolve(repoRoot);
+    if (!gitDirectoryLine.startsWith("gitdir: ")) return canonicalPath(repoRoot);
     const gitDirectoryValue = gitDirectoryLine.slice("gitdir: ".length);
     const gitDirectory = resolve(repoRoot, gitDirectoryValue);
     const commonDirectoryFile = join(gitDirectory, "commondir");
-    if (!existsSync(commonDirectoryFile)) return gitDirectory;
-    return resolve(gitDirectory, readFileSync(commonDirectoryFile, "utf8").trim());
+    if (!existsSync(commonDirectoryFile)) return canonicalPath(gitDirectory);
+    return canonicalPath(resolve(gitDirectory, readFileSync(commonDirectoryFile, "utf8").trim()));
   } catch {
     return resolve(repoRoot);
   }
@@ -209,7 +218,7 @@ async function gitCommonDirectory(
   if (result.exitCode !== 0) return undefined;
   const value = result.stdout.trim();
   if (!value) return undefined;
-  return resolve(path, value);
+  return canonicalPath(resolve(path, value));
 }
 
 function safeAppendEvent(homeDir: string, event: RustCacheEvent): void {
@@ -487,7 +496,7 @@ export async function warmRustCache(
 
     for (const worktree of parseWorktreeList(worktrees.stdout)) {
       if (
-        resolve(worktree.path) === resolve(input.repoRoot) ||
+        canonicalPath(worktree.path) === canonicalPath(input.repoRoot) ||
         worktree.head !== fullCommit ||
         !validDonorFiles(worktree.path)
       ) {

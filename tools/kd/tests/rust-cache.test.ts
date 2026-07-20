@@ -47,7 +47,7 @@ function fakeRuntimeInput(input: {
   return {
     repoRoot,
     homeDir: home,
-    env: {},
+    env: { KANNA_RUST_CACHE: "on" },
     commit: "abc",
     runner: {
       async run(command, args) {
@@ -226,7 +226,7 @@ describe("Kanache runtime", () => {
     const result = await warmRustCache({
       repoRoot: current,
       homeDir: home,
-      env: {},
+      env: { KANNA_RUST_CACHE: "on" },
       runner,
       commit: "abc1234"
     });
@@ -244,7 +244,7 @@ describe("Kanache runtime", () => {
     const result = await warmRustCache({
       repoRoot: root,
       homeDir: join(root, "home"),
-      env: {},
+      env: { KANNA_RUST_CACHE: "on" },
       commit: "abc",
       runner: {
         async run(command) {

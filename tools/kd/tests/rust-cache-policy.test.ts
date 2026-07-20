@@ -9,8 +9,9 @@ import {
 } from "../src/runtime/rust-cache-policy";
 
 describe("rust cache policy", () => {
-  it("enables Kanache by default and accepts only documented values", () => {
-    expect(parseRustCacheMode(undefined)).toEqual({ enabled: true });
+  it("keeps Kanache opt-in and accepts only documented values", () => {
+    expect(parseRustCacheMode(undefined)).toEqual({ enabled: false });
+    expect(parseRustCacheMode("  ")).toEqual({ enabled: false });
     expect(parseRustCacheMode("on")).toEqual({ enabled: true });
     expect(parseRustCacheMode("kanache")).toEqual({ enabled: true });
     expect(parseRustCacheMode("off")).toEqual({ enabled: false });
