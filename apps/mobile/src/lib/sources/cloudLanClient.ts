@@ -85,6 +85,8 @@ interface TaskReadEntry {
   supplements: Set<(tasks: TaskSummary[]) => void>;
 }
 
+class OptionalLanReadInFlightError extends Error {}
+
 type ProvisionalTaskRoute = Extract<DisplayTaskRoute, { source: "lan" }> & {
   localRepoId?: string;
   displayRepoId?: string;
@@ -606,7 +608,11 @@ export function createCloudLanClient(
       isLatestRead || acceptedTaskSnapshot === undefined;
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
 
-    if (lanStillEnabled && lanResult?.status === "rejected") {
+    if (
+      lanStillEnabled &&
+      lanResult?.status === "rejected" &&
+      !(lanResult.reason instanceof OptionalLanReadInFlightError)
+    ) {
       options.onLanReadUnavailable?.();
     }
 
@@ -1017,7 +1023,11 @@ export function createCloudLanClient(
     const isLatestRead = readEpoch === latestDesktopReadEpoch;
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
 
-    if (lanStillEnabled && lanResult?.status === "rejected") {
+    if (
+      lanStillEnabled &&
+      lanResult?.status === "rejected" &&
+      !(lanResult.reason instanceof OptionalLanReadInFlightError)
+    ) {
       options.onLanReadUnavailable?.();
     }
 
@@ -1396,7 +1406,9 @@ function settleOptionalLanRead<T>(
   if (!pendingRead.started) {
     return Promise.resolve({
       status: "rejected",
-      reason: new Error("Optional LAN read is already in flight.")
+      reason: new OptionalLanReadInFlightError(
+        "Optional LAN read is already in flight."
+      )
     });
   }
 
