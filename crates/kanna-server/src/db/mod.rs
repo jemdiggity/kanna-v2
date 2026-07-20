@@ -167,6 +167,19 @@ pub struct SnapshotTaskBlocker {
     pub blocker_item_id: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotBlockerTaskState {
+    pub closed_at: Option<String>,
+    pub stage: Option<String>,
+    pub pr_url: Option<String>,
+}
+
+impl SnapshotBlockerTaskState {
+    pub fn is_resolved(&self) -> bool {
+        self.closed_at.is_some() || (self.stage.as_deref() == Some("pr") && self.pr_url.is_some())
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ClosedTaskIdentity {
     pub id: String,
@@ -185,6 +198,7 @@ pub struct SnapshotEntry {
 pub struct UiSnapshot {
     pub entries: Vec<SnapshotEntry>,
     pub task_blockers: Vec<SnapshotTaskBlocker>,
+    pub blocker_task_states: HashMap<String, SnapshotBlockerTaskState>,
     pub worktree_paths: HashMap<String, String>,
     pub settings: HashMap<String, String>,
 }

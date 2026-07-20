@@ -1,6 +1,13 @@
 import { ref, type ComputedRef, type Ref } from "vue";
 import type { RepoConfig } from "@kanna/core";
-import type { AgentProvider, DbHandle, PipelineItem, Repo, TaskBlocker } from "../types/kanna";
+import type {
+  AgentProvider,
+  BlockerTaskStates,
+  DbHandle,
+  PipelineItem,
+  Repo,
+  TaskBlocker,
+} from "../types/kanna";
 import type { PipelineDefinition, AgentDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import i18n from "../i18n";
@@ -90,6 +97,7 @@ export interface RepoSnapshotEntry {
 export interface KannaSnapshot {
   entries: RepoSnapshotEntry[];
   taskBlockers: TaskBlocker[];
+  blockerTaskStates?: BlockerTaskStates;
   worktreePaths: Record<string, string>;
   settings: Record<string, string>;
 }
@@ -116,6 +124,7 @@ export interface StoreState {
   items: Ref<PipelineItem[]>;
   taskUiSlots: Ref<TaskUiSlot[]>;
   taskBlockers: Ref<TaskBlocker[]>;
+  blockerTaskStates: Ref<BlockerTaskStates>;
   worktreePaths: Ref<Record<string, string>>;
   snapshotSettings: Ref<Record<string, string>>;
   initialWindowBootstrap: Ref<WindowBootstrap | null>;
@@ -263,6 +272,7 @@ export function createStoreState(): StoreState {
   const items = ref<PipelineItem[]>([]);
   const taskUiSlots = ref<TaskUiSlot[]>([]);
   const taskBlockers = ref<TaskBlocker[]>([]);
+  const blockerTaskStates = ref<BlockerTaskStates>({});
   const worktreePaths = ref<Record<string, string>>({});
   const snapshotSettings = ref<Record<string, string>>({});
   const initialWindowBootstrap = ref<WindowBootstrap | null>(null);
@@ -291,6 +301,7 @@ export function createStoreState(): StoreState {
     items,
     taskUiSlots,
     taskBlockers,
+    blockerTaskStates,
     worktreePaths,
     snapshotSettings,
     initialWindowBootstrap,

@@ -24,8 +24,11 @@ function createTaskCreationHarness() {
   const store = {
     selectedRepoId: "repo-1",
     selectedItemId: null as string | null,
+    currentItem: null as { id: string } | null,
     repos: [{ id: "repo-1", path: "/repo" }],
     items: [],
+    taskBlockers: [] as Array<{ blocked_item_id: string; blocker_item_id: string }>,
+    blockerTaskStates: {} as Record<string, { closed_at: string | null; stage: string; pr_url: string | null }>,
     taskUiSlots: [],
     lastSelectedItemByRepo: {} as Record<string, string>,
     persistSelection: vi.fn(async () => {}),
@@ -33,6 +36,7 @@ function createTaskCreationHarness() {
     createRepo: vi.fn(async () => "repo-1"),
     importRepo: vi.fn(async () => "repo-1"),
     cloneAndImportRepo: vi.fn(async () => {}),
+    listBlockersForItem: vi.fn(async () => []),
     loadAgent: vi.fn(async () => ({
       prompt: "Configure the GitHub flow by composing stock flavors.",
       agent_provider: ["codex", "claude"],
@@ -172,6 +176,24 @@ describe("useAppTaskCreation", () => {
     await creation.handleNewTaskSubmit("Ship MRU", "codex", "default", "origin/main", "agent");
 
     expect(onAgentChoiceUsed).toHaveBeenCalledWith({ provider: "codex", executionType: "agent" });
+  });
+
+  it("classifies a task as blocked from hidden blocker state", () => {
+    const { creation, store } = createTaskCreationHarness();
+    store.currentItem = { id: "task-dependent" };
+    store.taskBlockers = [{
+      blocked_item_id: "task-dependent",
+      blocker_item_id: "task-hidden",
+    }];
+    store.blockerTaskStates = {
+      "task-hidden": {
+        closed_at: null,
+        stage: "review",
+        pr_url: null,
+      },
+    };
+
+    expect(creation.currentTaskIsBlocked.value).toBe(true);
   });
 
   it("does not record agent choice usage when task creation fails", async () => {

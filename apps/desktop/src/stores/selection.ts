@@ -103,6 +103,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
       repoId,
       items: context.state.items.value,
       blockers: context.state.taskBlockers.value,
+      blockerTaskStates: context.state.blockerTaskStates.value,
       getStageOrder,
     });
   }

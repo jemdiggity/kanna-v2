@@ -86,6 +86,13 @@ pub(crate) fn map_ui_snapshot(
     let blockers = snapshot.task_blockers.into_iter().fold(
         HashMap::<String, Vec<String>>::new(),
         |mut by_task, blocker| {
+            if snapshot
+                .blocker_task_states
+                .get(&blocker.blocker_item_id)
+                .is_some_and(|state| state.is_resolved())
+            {
+                return by_task;
+            }
             by_task
                 .entry(blocker.blocked_item_id)
                 .or_default()
@@ -352,7 +359,8 @@ impl PublisherState {
 mod tests {
     use super::{map_ui_snapshot, PublisherState, PublisherStep};
     use crate::db::{
-        SnapshotEntry, SnapshotPipelineItem, SnapshotRepo, SnapshotTaskBlocker, UiSnapshot,
+        SnapshotBlockerTaskState, SnapshotEntry, SnapshotPipelineItem, SnapshotRepo,
+        SnapshotTaskBlocker, UiSnapshot,
     };
     use std::collections::HashMap;
     use tokio::time::{Duration, Instant};
@@ -412,6 +420,7 @@ mod tests {
                 blocked_item_id: "task-1".into(),
                 blocker_item_id: "task-blocker".into(),
             }],
+            blocker_task_states: HashMap::new(),
             worktree_paths: HashMap::new(),
             settings: HashMap::new(),
         }
@@ -451,6 +460,25 @@ mod tests {
             json["tasks"][0]["agent"],
             serde_json::json!({"provider":"codex","type":"pty"})
         );
+    }
+
+    #[test]
+    fn snapshot_mapping_omits_resolved_blockers() {
+        let mut source = ui_snapshot("idle");
+        source.blocker_task_states.insert(
+            "task-blocker".into(),
+            SnapshotBlockerTaskState {
+                closed_at: Some("2026-07-19 22:49:04".into()),
+                stage: Some("pr".into()),
+                pr_url: Some("https://github.com/kanna/kanna/pull/41".into()),
+            },
+        );
+
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["tasks"][0]["status"], "active");
+        assert_eq!(json["tasks"][0]["blockedByTaskIds"], serde_json::json!([]));
     }
 
     #[test]

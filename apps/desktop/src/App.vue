@@ -267,6 +267,7 @@ const appTaskCreation = useAppTaskCreation({
 });
 const {
   currentBlockers,
+  currentTaskIsBlocked,
   openNewTaskModal,
 } = appTaskCreation;
 
@@ -434,6 +435,7 @@ const modalLayerController = {
         :recover-task-session="store.recoverTaskSession"
         :maximized="maximized"
         :blockers="currentBlockers"
+        :blocked="currentTaskIsBlocked"
         :has-repos="sidebarRepos.length > 0"
         :cloud-task="mainPanelIsCloudTask"
         :cloud-terminal-ref="mainPanelCloudTerminalRef"

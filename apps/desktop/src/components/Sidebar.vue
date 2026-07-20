@@ -95,6 +95,7 @@ function sidebarOrderingOptions(repoId: string) {
     repoId,
     items: props.taskSlots,
     blockers: store.taskBlockers,
+    blockerTaskStates: store.blockerTaskStates,
     getStageOrder: store.getStageOrder,
     searchQuery: searchQuery.value,
   };

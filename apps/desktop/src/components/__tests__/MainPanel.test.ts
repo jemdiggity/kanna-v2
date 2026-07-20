@@ -358,4 +358,28 @@ describe("MainPanel", () => {
     expect(wrapper.find(".setup-placeholder").exists()).toBe(false);
     expect(wrapper.get('[data-testid="terminal-tabs"]').attributes("data-session-id")).toBe("task-pending");
   });
+
+  it("shows the blocked placeholder when relationship state is unresolved but blocker details are hidden", async () => {
+    const { default: MainPanel } = await import("../MainPanel.vue");
+
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(),
+        repoPath: "/tmp/repo",
+        hasRepos: true,
+        blockers: [],
+        blocked: true,
+      },
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+
+    expect(wrapper.find(".blocked-placeholder").exists()).toBe(true);
+    expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
+  });
 });

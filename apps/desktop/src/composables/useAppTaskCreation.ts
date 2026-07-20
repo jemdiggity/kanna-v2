@@ -1,4 +1,4 @@
-import { ref, type ComputedRef, type Ref } from "vue";
+import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
 import type { AgentProvider } from "../types/kanna";
 import type { AgentExecutionType } from "../stores/agentExecutionType";
@@ -8,6 +8,7 @@ import { getDefaultBaseBranch } from "../utils/baseBranchPicker";
 import { parseRepoInput } from "../utils/parseRepoInput";
 import { defaultReposHome } from "../utils/reposHome";
 import { fileExistsSafe } from "../utils/invokeHelpers";
+import { isBlockerResolved } from "../utils/blockerResolution";
 import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
 import {
   fetchDesktopRepoAgentProviders,
@@ -309,10 +310,23 @@ export function useAppTaskCreation({
     return store.listBlockersForItem(item.id);
   }, []);
 
+  const currentTaskIsBlocked = computed(() => {
+    if (mainPanelIsCloudTask.value) return false;
+    const item = store.currentItem;
+    if (!item) return false;
+    return (store.taskBlockers ?? []).some((blocker) => {
+      if (blocker.blocked_item_id !== item.id) return false;
+      const blockerState = (store.blockerTaskStates ?? {})[blocker.blocker_item_id]
+        ?? store.items.find((candidate) => candidate.id === blocker.blocker_item_id);
+      return !blockerState || !isBlockerResolved(blockerState);
+    });
+  });
+
   return {
     cloningRepo,
     availableAgentProviders,
     currentBlockers,
+    currentTaskIsBlocked,
     openNewTaskModal,
     handleNewTaskSubmit,
     handleCreateRepo,

@@ -173,6 +173,8 @@ async fn snapshot_route_returns_ui_hydration_payload() {
         db.close_pipeline_item("task-closed").unwrap();
         db.insert_task_blocker("task-visible", "task-blocker")
             .unwrap();
+        db.insert_task_blocker("task-visible", "task-closed")
+            .unwrap();
         db.upsert_worktree(
             "wt-task-visible",
             "task-visible",
@@ -219,7 +221,25 @@ async fn snapshot_route_returns_ui_hydration_payload() {
     assert_eq!(snapshot["entries"][0]["items"][1]["id"], "task-blocker");
     assert_eq!(
         snapshot["taskBlockers"],
-        serde_json::json!([{ "blocked_item_id": "task-visible", "blocker_item_id": "task-blocker" }])
+        serde_json::json!([
+            { "blocked_item_id": "task-visible", "blocker_item_id": "task-blocker" },
+            { "blocked_item_id": "task-visible", "blocker_item_id": "task-closed" }
+        ])
+    );
+    assert_eq!(
+        snapshot["blockerTaskStates"]["task-blocker"],
+        serde_json::json!({
+            "closed_at": null,
+            "stage": "review",
+            "pr_url": null
+        })
+    );
+    assert!(snapshot["blockerTaskStates"]["task-closed"]["closed_at"]
+        .as_str()
+        .is_some());
+    assert_eq!(
+        snapshot["blockerTaskStates"]["task-closed"]["stage"],
+        "done"
     );
     assert_eq!(
         snapshot["worktreePaths"],

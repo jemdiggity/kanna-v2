@@ -38,7 +38,13 @@ function flattenSnapshotItems(snapshot: KannaSnapshot): PipelineItem[] {
 }
 
 export function createQueriesApi(context: StoreContext): QueriesApi {
-  const baseSnapshot = ref<KannaSnapshot>({ entries: [], taskBlockers: [], worktreePaths: {}, settings: {} });
+  const baseSnapshot = ref<KannaSnapshot>({
+    entries: [],
+    taskBlockers: [],
+    blockerTaskStates: {},
+    worktreePaths: {},
+    settings: {},
+  });
   const snapshotPending = ref(false);
   const snapshotError = ref<unknown>(null);
   const optimisticItems = ref<OptimisticItemOverlay[]>([]);
@@ -59,6 +65,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     context.state.repos.value = repos.value;
     context.state.items.value = items.value;
     context.state.taskBlockers.value = mergedSnapshot.value.taskBlockers;
+    context.state.blockerTaskStates.value = { ...(mergedSnapshot.value.blockerTaskStates ?? {}) };
     context.state.worktreePaths.value = { ...mergedSnapshot.value.worktreePaths };
     context.state.snapshotSettings.value = { ...mergedSnapshot.value.settings };
     context.state.taskUiSlots.value = reconcileTaskUiSlots(
