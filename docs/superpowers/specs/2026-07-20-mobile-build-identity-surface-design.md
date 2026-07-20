@@ -38,8 +38,8 @@ Adding `expo-application` is a native dependency change. Following the repositor
 
 The running source is classified in this order:
 
-1. When Expo Updates is disabled, display `Development bundle (Metro)`. Development builds intentionally do not configure OTA updates.
-2. When Expo Updates reports an embedded launch, display `Embedded bundle`, even if the module exposes an identifier for the embedded update.
+1. In a development runtime, display `Development bundle (Metro)`. Development builds intentionally do not configure OTA updates.
+2. In a packaged runtime, display `Embedded bundle` when Expo Updates reports an embedded launch or is disabled, even if the module exposes an identifier for the embedded update.
 3. Otherwise, when an update ID is present, display the full ID as the currently running OTA update.
 4. If Updates is enabled but neither an embedded launch nor an update ID can be identified, display `Unknown`.
 

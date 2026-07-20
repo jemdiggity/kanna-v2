@@ -7,6 +7,7 @@ describe("buildIdentity", () => {
       buildIdentity({
         nativeApplicationVersion: "2.4.0",
         nativeBuildVersion: "108",
+        isDevelopment: false,
         updatesEnabled: true,
         isEmbeddedLaunch: false,
         updateId: "84667f93-5c7b-45fb-9f78-7045160cb842",
@@ -35,6 +36,7 @@ describe("buildIdentity", () => {
     const identity = buildIdentity({
       nativeApplicationVersion: "2.4.0",
       nativeBuildVersion: "108",
+      isDevelopment: false,
       updatesEnabled: true,
       isEmbeddedLaunch: true,
       updateId: "embedded-update-id",
@@ -55,6 +57,7 @@ describe("buildIdentity", () => {
     const identity = buildIdentity({
       nativeApplicationVersion: "2.4.0",
       nativeBuildVersion: "108",
+      isDevelopment: true,
       updatesEnabled: false,
       isEmbeddedLaunch: false,
       updateId: null,
@@ -78,6 +81,7 @@ describe("buildIdentity", () => {
       buildIdentity({
         nativeApplicationVersion: null,
         nativeBuildVersion: null,
+        isDevelopment: false,
         updatesEnabled: true,
         isEmbeddedLaunch: false,
         updateId: null,
@@ -100,6 +104,7 @@ describe("buildIdentity", () => {
 
   it("uses the available native value in the collapsed summary", () => {
     const base = {
+      isDevelopment: true,
       updatesEnabled: false,
       isEmbeddedLaunch: false,
       updateId: null,
@@ -124,5 +129,26 @@ describe("buildIdentity", () => {
         nativeBuildVersion: "108"
       }).nativeSummary
     ).toBe("108");
+  });
+
+  it("identifies a disabled packaged release as its embedded bundle", () => {
+    const identity = buildIdentity({
+      nativeApplicationVersion: "2.4.0",
+      nativeBuildVersion: "108",
+      isDevelopment: false,
+      updatesEnabled: false,
+      isEmbeddedLaunch: false,
+      updateId: null,
+      runtimeVersion: "2.1.2",
+      channel: "production",
+      appEnvironment: "prod",
+      configuredRuntimeVersion: "2.1.2",
+      configuredChannel: "production"
+    });
+
+    expect(identity.source).toEqual({
+      kind: "embedded",
+      label: "Embedded bundle"
+    });
   });
 });

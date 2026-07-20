@@ -25,6 +25,7 @@ export interface BuildIdentity {
 export interface BuildIdentityInput {
   nativeApplicationVersion: string | null;
   nativeBuildVersion: string | null;
+  isDevelopment: boolean;
   updatesEnabled: boolean;
   isEmbeddedLaunch: boolean;
   updateId: string | null;
@@ -76,6 +77,7 @@ export function getCurrentBuildIdentity(): BuildIdentity {
   return buildIdentity({
     nativeApplicationVersion: application.nativeApplicationVersion,
     nativeBuildVersion: application.nativeBuildVersion,
+    isDevelopment: typeof __DEV__ !== "undefined" && __DEV__,
     updatesEnabled: updates.isEnabled,
     isEmbeddedLaunch: updates.isEmbeddedLaunch,
     updateId: updates.updateId,
@@ -89,14 +91,14 @@ export function getCurrentBuildIdentity(): BuildIdentity {
 }
 
 function buildSource(input: BuildIdentityInput): BuildSource {
-  if (!input.updatesEnabled) {
+  if (input.isDevelopment) {
     return {
       kind: "development",
       label: "Development bundle (Metro)"
     };
   }
 
-  if (input.isEmbeddedLaunch) {
+  if (!input.updatesEnabled || input.isEmbeddedLaunch) {
     return { kind: "embedded", label: "Embedded bundle" };
   }
 
