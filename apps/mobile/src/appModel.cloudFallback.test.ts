@@ -2276,6 +2276,9 @@ describe("createAppModel cloud routing", () => {
         expect.objectContaining({ id: cloudOnlyTask.id }),
         lanOnlyTask
       ]);
+      expect(app.client.getTaskRouteIdentity?.(lanOnlyTask.id)).toBe(
+        JSON.stringify(["lan", "desktop-lan", lanOnlyTask.id])
+      );
       expect(app.sessionStore.getState()).toMatchObject({
         selectedTaskId: lanOnlyTask.id,
         taskAgentTaskId: lanOnlyTask.id,
@@ -3926,5 +3929,142 @@ describe("createAppModel cloud routing", () => {
     ]);
     expect(app.sessionStore.getState().liveLanDesktops).toEqual([]);
     expect(taskIndex.listDesktops).toHaveBeenCalledWith("user-1");
+  });
+
+  it("migrates an open account task to relay when LAN validation times out", async () => {
+    vi.useFakeTimers();
+    const accountTask = cloudTask({
+      id: "cloud:desktop-lan:repo-lan:local-task",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-lan",
+      ownerLocalTaskId: "local-task",
+      agentType: "pty"
+    });
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          desktopId: "desktop-lan",
+          displayName: "LAN Mac",
+          updatedAt: "2026-07-20T00:00:00.000Z"
+        }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([accountTask]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const lan = createLanFixture(async () => [
+      {
+        id: "local-task",
+        repoId: "repo-lan",
+        title: "LAN task",
+        stage: "in progress",
+        agentType: "pty"
+      }
+    ]);
+    const services = lan.bonjourBrowser.getServices();
+    const bonjour = createMutableBonjourBrowser([...services]);
+    const hangingStatusProbe = deferred<Response>();
+    let statusProbeShouldHang = false;
+    const fetchImpl = vi.fn((url: string, init?: Parameters<FetchLike>[1]) => {
+      if (statusProbeShouldHang && url.endsWith("/v1/status")) {
+        return hangingStatusProbe.promise;
+      }
+      return lan.fetchImpl(url, init);
+    }) as FetchLike;
+    const { authSession } = createMutableAuthSession(signedInState());
+    const relayClient = createRelayClientMock(
+      vi.fn().mockResolvedValue(new Set(["desktop-lan"]))
+    );
+    const sockets: Array<{
+      close: ReturnType<typeof vi.fn>;
+      onopen: (() => void) | null;
+      onmessage: ((event: { data: string }) => void) | null;
+      send: ReturnType<typeof vi.fn>;
+    }> = [];
+    class TestWebSocket {
+      close = vi.fn();
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onopen: (() => void) | null = null;
+      send = vi.fn();
+
+      constructor(_url: string) {
+        sockets.push(this);
+      }
+    }
+    vi.stubGlobal("WebSocket", TestWebSocket);
+    const app = createAppModel({
+      authSession,
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-lan",
+          trustedDesktops: [],
+          repoCreationProfiles: []
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: bonjour.browser,
+        createRelayClient: () => relayClient
+      }
+    });
+
+    try {
+      await app.initialize();
+      expect(pushCloudTasks).not.toBeNull();
+      pushCloudTasks?.([accountTask]);
+      await vi.advanceTimersByTimeAsync(0);
+      await flushAsyncWork(40);
+      expect(app.sessionStore.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: accountTask.id, title: "LAN task" })
+      ]);
+
+      app.controller.openTask(accountTask.id);
+      for (const socket of sockets) {
+        socket.onopen?.();
+        socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+      }
+      const lanTerminalSocket = sockets.find((socket) =>
+        socket.send.mock.calls.some(
+          ([frame]) => JSON.parse(frame).kind === "terminal"
+        )
+      );
+      expect(lanTerminalSocket).toBeDefined();
+      expect(relayClient.observeTaskTerminal).not.toHaveBeenCalled();
+
+      statusProbeShouldHang = true;
+      bonjour.setServices([...services]);
+      await flushAsyncWork(6);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(relayClient.observeTaskTerminal).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await flushAsyncWork(12);
+
+      expect(lanTerminalSocket!.close).toHaveBeenCalledOnce();
+      expect(relayClient.observeTaskTerminal).toHaveBeenCalledWith(
+        { desktopId: "desktop-lan", taskId: "local-task" },
+        expect.any(Function)
+      );
+      expect(app.sessionStore.getState()).toMatchObject({
+        selectedTaskId: accountTask.id,
+        taskTerminalTaskId: accountTask.id
+      });
+      expect(app.sessionStore.getState().auth.status).toBe("signedIn");
+      expect(app.sessionStore.getState().accountDesktops).toEqual([
+        expect.objectContaining({ id: "desktop-lan", mode: "remote" })
+      ]);
+    } finally {
+      app.controller.dispose();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });

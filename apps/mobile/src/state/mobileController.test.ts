@@ -4835,6 +4835,42 @@ describe("createMobileController", () => {
     });
   });
 
+  it("rebinds the selected terminal when its effective route changes", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    let routeIdentity = "lan:desktop-a:task-1";
+    let publishRouteChange: (() => void) | null = null;
+    const unsubscribe = vi.fn();
+    const streams: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+    client.getTaskRouteIdentity = vi.fn(() => routeIdentity);
+    client.observeTaskTerminal.mockImplementation(() => {
+      const close = vi.fn();
+      streams.push({ close });
+      return { close };
+    });
+    const controller = createMobileController(client, store, undefined, {
+      subscribeTaskRouteChanges(listener) {
+        publishRouteChange = listener;
+        return unsubscribe;
+      }
+    });
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    expect(streams).toHaveLength(1);
+
+    publishRouteChange?.();
+    expect(streams).toHaveLength(1);
+
+    routeIdentity = "cloud:task-1";
+    publishRouteChange?.();
+    expect(streams).toHaveLength(2);
+    expect(streams[0]!.close).toHaveBeenCalledOnce();
+
+    controller.dispose();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
   it("ignores buffered terminal events from the previous route after rebinding", async () => {
     const store = createSessionStore();
     const client = createClientMock();

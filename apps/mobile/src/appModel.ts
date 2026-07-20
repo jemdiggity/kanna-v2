@@ -168,6 +168,10 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let currentLanDiscoveryRefresh: (() => Promise<void>) | null = null;
   let lanDiscoveryRefreshQueued = false;
   let activeAuthUid = signedInUid(authSession.getState());
+  const taskRouteListeners = new Set<() => void>();
+  const publishTaskRouteChange = () => {
+    for (const listener of taskRouteListeners) listener();
+  };
   // Native discovery can settle after the first cloud snapshot and relay
   // presence read. Feed it through the same complete-snapshot drain so the
   // newly reachable LAN source is incorporated without publishing a partial
@@ -240,6 +244,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       onMachineSourcesChanged: (sources) => {
         sessionStore.setMachineSourceDesktops(sources);
       },
+      onTaskRoutesChanged: publishTaskRouteChange,
       relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
         extraRelayUrl: extra?.relayUrl
       }),
@@ -269,6 +274,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     clientGeneration = nextGeneration;
     activeClient = nextClient;
     previousClient.dispose();
+    publishTaskRouteChange();
   };
   const client = createDelegatingClient(() => activeClient.client);
   let persistencePromise: Promise<SessionPersistence> | null = persistence
@@ -337,6 +343,10 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     pairingService,
     persistSessionContext: persistContext,
     replaceClientForTrustChange: replaceActiveClient,
+    subscribeTaskRouteChanges(listener) {
+      taskRouteListeners.add(listener);
+      return () => taskRouteListeners.delete(listener);
+    },
     subscribeCloudTasks: (uid, onUpdate, onError) => {
       const epoch = ++liveSubscriptionEpoch;
       let updateRevision = 0;
@@ -670,6 +680,7 @@ function createClientForMode({
   onActiveDesktopIdsChanged,
   onMachineSourceWarnings,
   onMachineSourcesChanged,
+  onTaskRoutesChanged,
   relayUrl,
   taskIndex,
 }: {
@@ -701,6 +712,7 @@ function createClientForMode({
     account: DesktopSummary[];
     local: DesktopSummary[];
   }): void;
+  onTaskRoutesChanged(): void;
   relayUrl: string | null;
   taskIndex?: CloudTaskIndex;
 }): ResolvedAppClient {
@@ -791,7 +803,8 @@ function createClientForMode({
       bonjourBrowser,
       fetchImpl,
       getSelectedDesktopId,
-      getTrustedDesktopIds
+      getTrustedDesktopIds,
+      onValidatedRoutesChanged: onTaskRoutesChanged
     });
 
     const composedClient = createCloudLanClient(
@@ -803,7 +816,9 @@ function createClientForMode({
         lanClientForDesktop: trustedLanClient.clientForDesktop,
         initialDesktopSources: getMachineSourceDesktops(),
         onDesktopSourceWarnings: onMachineSourceWarnings,
-        onDesktopSourcesChanged: onMachineSourcesChanged
+        onDesktopSourcesChanged: onMachineSourcesChanged,
+        onLanReadUnavailable:
+          trustedLanClient.invalidatePendingValidatedRoutes
       }
     );
 
@@ -825,7 +840,8 @@ function createClientForMode({
       fetchImpl,
       getSelectedDesktopId,
       getTrustedDesktopIds: () =>
-        getTrustedDesktops().map((desktop) => desktop.desktopId)
+        getTrustedDesktops().map((desktop) => desktop.desktopId),
+      onValidatedRoutesChanged: onTaskRoutesChanged
     });
     const sourceTrackingClient: KannaClient = {
       ...trustedLanClient.client,
@@ -920,18 +936,56 @@ function createTrustedLanFallbackClient({
   bonjourBrowser,
   fetchImpl,
   getSelectedDesktopId,
-  getTrustedDesktopIds
+  getTrustedDesktopIds,
+  onValidatedRoutesChanged
 }: {
   bonjourBrowser: BonjourBrowser;
   fetchImpl: FetchLike;
   getSelectedDesktopId(): string | null;
   getTrustedDesktopIds(): readonly string[];
+  onValidatedRoutesChanged(): void;
 }): {
   client: KannaClient;
   clientForDesktop(desktopId: string): KannaClient | null;
+  invalidatePendingValidatedRoutes(): void;
 } {
   const validatedBaseUrls = new Map<string, string>();
   let lastValidatedDesktopId: string | null = null;
+  let pendingValidationCount = 0;
+  const replaceValidatedBaseUrls = (
+    endpoints: readonly { desktopId: string; baseUrl: string }[]
+  ) => {
+    const nextBaseUrls = new Map(
+      endpoints.map((endpoint) => [endpoint.desktopId, endpoint.baseUrl])
+    );
+    const changed = !areStringMapsEqual(validatedBaseUrls, nextBaseUrls);
+    validatedBaseUrls.clear();
+    for (const [desktopId, baseUrl] of nextBaseUrls) {
+      validatedBaseUrls.set(desktopId, baseUrl);
+    }
+    lastValidatedDesktopId = endpoints[0]?.desktopId ?? null;
+    if (changed) onValidatedRoutesChanged();
+  };
+  const setValidatedBaseUrl = (desktopId: string, baseUrl: string) => {
+    const changed = validatedBaseUrls.get(desktopId) !== baseUrl;
+    validatedBaseUrls.set(desktopId, baseUrl);
+    lastValidatedDesktopId = desktopId;
+    if (changed) onValidatedRoutesChanged();
+  };
+  const invalidateValidatedRoutes = () => {
+    replaceValidatedBaseUrls([]);
+  };
+  const withPendingValidation = async <T>(read: () => Promise<T>) => {
+    pendingValidationCount += 1;
+    try {
+      return await read();
+    } finally {
+      pendingValidationCount -= 1;
+    }
+  };
+  const invalidatePendingValidatedRoutes = () => {
+    if (pendingValidationCount > 0) invalidateValidatedRoutes();
+  };
   const clientForBaseUrl = (resolvedBaseUrl: string) =>
     createKannaClient(createLanTransport(resolvedBaseUrl, fetchImpl));
   const resolveClient = async (desktopId: string | null) => {
@@ -943,17 +997,28 @@ function createTrustedLanFallbackClient({
           .getServices()
           .filter((service) => service.txt.desktopId === desktopId)
       : bonjourBrowser.getServices();
-    const endpoint = await resolveTrustedBonjourEndpoint({
-      fetchImpl,
-      services,
-      preferredDesktopId: desktopId ?? getSelectedDesktopId(),
-      trustedDesktopIds
-    });
+    const endpoint = await withPendingValidation(() =>
+      resolveTrustedBonjourEndpoint({
+        fetchImpl,
+        services,
+        preferredDesktopId: desktopId ?? getSelectedDesktopId(),
+        trustedDesktopIds
+      })
+    );
     if (!endpoint) {
+      if (desktopId) {
+        if (validatedBaseUrls.delete(desktopId)) {
+          if (lastValidatedDesktopId === desktopId) {
+            lastValidatedDesktopId = validatedBaseUrls.keys().next().value ?? null;
+          }
+          onValidatedRoutesChanged();
+        }
+      } else {
+        invalidateValidatedRoutes();
+      }
       return createDisconnectedClient();
     }
-    validatedBaseUrls.set(endpoint.desktopId, endpoint.baseUrl);
-    lastValidatedDesktopId = endpoint.desktopId;
+    setValidatedBaseUrl(endpoint.desktopId, endpoint.baseUrl);
     return clientForBaseUrl(endpoint.baseUrl);
   };
   const currentClient = (desktopId: string | null) => {
@@ -1010,17 +1075,15 @@ function createTrustedLanFallbackClient({
   const client: KannaClient = {
     ...createResolvingClient(null),
     async listDesktops() {
-      const endpoints = await resolveTrustedBonjourEndpoints({
-        fetchImpl,
-        services: bonjourBrowser.getServices(),
-        preferredDesktopId: getSelectedDesktopId(),
-        trustedDesktopIds: getTrustedDesktopIds()
-      });
-      validatedBaseUrls.clear();
-      for (const endpoint of endpoints) {
-        validatedBaseUrls.set(endpoint.desktopId, endpoint.baseUrl);
-      }
-      if (endpoints[0]) lastValidatedDesktopId = endpoints[0].desktopId;
+      const endpoints = await withPendingValidation(() =>
+        resolveTrustedBonjourEndpoints({
+          fetchImpl,
+          services: bonjourBrowser.getServices(),
+          preferredDesktopId: getSelectedDesktopId(),
+          trustedDesktopIds: getTrustedDesktopIds()
+        })
+      );
+      replaceValidatedBaseUrls(endpoints);
       return endpoints.map((endpoint): DesktopSummary => ({
         id: endpoint.desktopId,
         name: endpoint.displayName,
@@ -1034,6 +1097,7 @@ function createTrustedLanFallbackClient({
   };
   return {
     client,
+    invalidatePendingValidatedRoutes,
     clientForDesktop(desktopId) {
       if (
         !getTrustedDesktopIds().includes(desktopId)
@@ -1041,9 +1105,7 @@ function createTrustedLanFallbackClient({
         return null;
       }
       const validatedBaseUrl = validatedBaseUrls.get(desktopId);
-      return validatedBaseUrl
-        ? clientForBaseUrl(validatedBaseUrl)
-        : createResolvingClient(desktopId);
+      return validatedBaseUrl ? clientForBaseUrl(validatedBaseUrl) : null;
     }
   };
 }
@@ -1052,6 +1114,17 @@ function hasTrustedLanPeer(
   trustedDesktops: readonly TrustedDesktopRecord[]
 ): boolean {
   return trustedDesktops.length > 0;
+}
+
+function areStringMapsEqual(
+  left: ReadonlyMap<string, string>,
+  right: ReadonlyMap<string, string>
+): boolean {
+  if (left.size !== right.size) return false;
+  for (const [key, value] of left) {
+    if (right.get(key) !== value) return false;
+  }
+  return true;
 }
 
 function areStringSetsEqual(

@@ -42,6 +42,7 @@ export interface CloudLanClientOptions {
   onDesktopSourceWarnings?(warnings: DesktopSourceWarnings): void;
   initialDesktopSources?: DesktopSources;
   onDesktopSourcesChanged?(sources: DesktopSources): void;
+  onLanReadUnavailable?(): void;
 }
 
 export interface DesktopSourceWarnings {
@@ -83,6 +84,8 @@ interface TaskReadEntry {
   promise: Promise<TaskSummary[]>;
   supplements: Set<(tasks: TaskSummary[]) => void>;
 }
+
+class OptionalLanReadInFlightError extends Error {}
 
 type ProvisionalTaskRoute = Extract<DisplayTaskRoute, { source: "lan" }> & {
   localRepoId?: string;
@@ -605,6 +608,14 @@ export function createCloudLanClient(
       isLatestRead || acceptedTaskSnapshot === undefined;
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
 
+    if (
+      lanStillEnabled &&
+      lanResult?.status === "rejected" &&
+      !(lanResult.reason instanceof OptionalLanReadInFlightError)
+    ) {
+      options.onLanReadUnavailable?.();
+    }
+
     if (canEstablishSnapshot && cloudResult.status === "fulfilled") {
       lastCloudTasks = cloudResult.value;
     }
@@ -1012,6 +1023,14 @@ export function createCloudLanClient(
     const isLatestRead = readEpoch === latestDesktopReadEpoch;
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
 
+    if (
+      lanStillEnabled &&
+      lanResult?.status === "rejected" &&
+      !(lanResult.reason instanceof OptionalLanReadInFlightError)
+    ) {
+      options.onLanReadUnavailable?.();
+    }
+
     reportDesktopSourceWarnings({
       account: cloudResult.status === "fulfilled"
         ? null
@@ -1387,7 +1406,9 @@ function settleOptionalLanRead<T>(
   if (!pendingRead.started) {
     return Promise.resolve({
       status: "rejected",
-      reason: new Error("Optional LAN read is already in flight.")
+      reason: new OptionalLanReadInFlightError(
+        "Optional LAN read is already in flight."
+      )
     });
   }
 

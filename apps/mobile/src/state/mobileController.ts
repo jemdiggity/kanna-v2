@@ -104,6 +104,7 @@ export interface MobileControllerOptions {
   persistSessionContext?: (context?: PersistedSessionContext) => Promise<void>;
   pairingService?: MachinePairingService;
   replaceClientForTrustChange?: () => void;
+  subscribeTaskRouteChanges?: (listener: () => void) => () => void;
 }
 
 let fallbackTaskCreationCounter = 0;
@@ -198,6 +199,7 @@ export function createMobileController(
   let backgroundRefreshMode: "collections" | "desktops" = "collections";
   let authUnsubscribe: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
+  let taskRoutesUnsubscribe: (() => void) | null = null;
   let bootstrapInFlight: Promise<void> | null = null;
   let bootstrapRequested = false;
   let cloudSubscriptionEpoch = 0;
@@ -997,6 +999,16 @@ export function createMobileController(
     }
     startTaskCompanion(taskId);
   };
+
+  const reconcileSelectedTaskRoute = () => {
+    const selectedTaskId = store.getState().selectedTaskId;
+    const durableTaskId = durableTaskIdForSelection(selectedTaskId);
+    if (durableTaskId && findTask(durableTaskId)) {
+      startTaskView(durableTaskId);
+    }
+  };
+  taskRoutesUnsubscribe =
+    options.subscribeTaskRouteChanges?.(reconcileSelectedTaskRoute) ?? null;
 
   const loadCollections = async () => {
     const readRevision = taskCollectionsRevision;
@@ -2277,6 +2289,8 @@ export function createMobileController(
       }
       authUnsubscribe?.();
       authUnsubscribe = null;
+      taskRoutesUnsubscribe?.();
+      taskRoutesUnsubscribe = null;
     }
   };
 }
