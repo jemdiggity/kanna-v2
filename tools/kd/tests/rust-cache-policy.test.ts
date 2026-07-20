@@ -5,6 +5,7 @@ import {
   parseRustCacheMode,
   parseWorktreeList,
   rankDonors,
+  resolveRustCacheEligibility,
   resolveKanachePaths
 } from "../src/runtime/rust-cache-policy";
 
@@ -17,6 +18,35 @@ describe("rust cache policy", () => {
     expect(parseRustCacheMode("off")).toEqual({ enabled: false });
     expect(parseRustCacheMode("mystery")).toEqual({
       enabled: false,
+      warning: "Unknown KANNA_RUST_CACHE value \"mystery\"; cache disabled."
+    });
+  });
+
+  it.each([
+    [{ mode: "on", platform: "darwin", ci: undefined }, { enabled: true }],
+    [{ mode: "kanache", platform: "darwin", ci: "  " }, { enabled: true }],
+    [
+      { mode: "on", platform: "darwin", ci: "false" },
+      { enabled: false, category: "disabled-in-ci" }
+    ],
+    [
+      { mode: "on", platform: "linux", ci: undefined },
+      { enabled: false, category: "unsupported-platform" }
+    ],
+    [
+      { mode: "off", platform: "linux", ci: "true" },
+      { enabled: false, category: "disabled" }
+    ]
+  ] as const)("resolves runtime eligibility for %o", (input, expected) => {
+    expect(resolveRustCacheEligibility(input)).toEqual(expected);
+  });
+
+  it("preserves invalid-mode precedence over platform and CI gates", () => {
+    expect(
+      resolveRustCacheEligibility({ mode: "mystery", platform: "linux", ci: "true" })
+    ).toEqual({
+      enabled: false,
+      category: "invalid-mode",
       warning: "Unknown KANNA_RUST_CACHE value \"mystery\"; cache disabled."
     });
   });

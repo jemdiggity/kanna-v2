@@ -42,6 +42,34 @@ export function parseRustCacheMode(value: string | undefined): {
   };
 }
 
+export type RustCacheEligibility =
+  | { enabled: true }
+  | {
+      enabled: false;
+      category: "disabled" | "invalid-mode" | "unsupported-platform" | "disabled-in-ci";
+      warning?: string;
+    };
+
+export function resolveRustCacheEligibility(input: {
+  mode: string | undefined;
+  platform: NodeJS.Platform;
+  ci: string | undefined;
+}): RustCacheEligibility {
+  const mode = parseRustCacheMode(input.mode);
+  if (!mode.enabled) {
+    return mode.warning
+      ? { enabled: false, category: "invalid-mode", warning: mode.warning }
+      : { enabled: false, category: "disabled" };
+  }
+  if (input.platform !== "darwin") {
+    return { enabled: false, category: "unsupported-platform" };
+  }
+  if (input.ci?.trim()) {
+    return { enabled: false, category: "disabled-in-ci" };
+  }
+  return { enabled: true };
+}
+
 export function resolveKanachePaths(homeDir: string): KanachePaths {
   const versionRoot = join(
     homeDir,
