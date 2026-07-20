@@ -126,7 +126,7 @@
 
   Expected: PASS with existing output ordering unchanged.
 
-- [ ] **Step 5: Commit daemon instrumentation**
+- [x] **Step 5: Commit daemon instrumentation**
 
   ```bash
   git add crates/daemon/src/main.rs crates/daemon/src/output.rs crates/daemon/src/session.rs crates/daemon/src/tests.rs
@@ -139,7 +139,7 @@
 - Modify: `crates/daemon/tests/reconnect.rs`
 - Modify: `crates/daemon/src/output.rs`
 
-- [ ] **Step 1: Add the deterministic red integration probe**
+- [x] **Step 1: Add the deterministic red integration probe**
 
   Add `non_reading_attached_client_does_not_block_healthy_terminal_output` to `reconnect.rs`:
 
@@ -152,17 +152,17 @@
 
   Keep A alive until the assertion so the failure cannot be explained by disconnect cleanup.
 
-- [ ] **Step 2: Run the probe against current fanout**
+- [x] **Step 2: Run the probe against current fanout**
 
   Run: `cargo test -p kanna-daemon --test reconnect non_reading_attached_client_does_not_block_healthy_terminal_output -- --nocapture`
 
   Expected: FAIL by timeout, proving the sequential `write_event().await` fanout can suspend PTY ingestion. If it unexpectedly passes after repeated runs, leave behavior unchanged, retain the probe, and skip Steps 3-5 as mandated by the approved proven-fix gate.
 
-- [ ] **Step 3: Add a fanout test for slow-client removal**
+- [x] **Step 3: Add a fanout test for slow-client removal**
 
   Add a focused test asserting a writer that cannot finish within 500ms is shut down and removed, while a healthy writer receives the same chunk immediately. Assert the healthy writer still receives subsequent chunks in order.
 
-- [ ] **Step 4: Implement bounded concurrent live fanout**
+- [x] **Step 4: Implement bounded concurrent live fanout**
 
   Replace sequential attached-writer delivery with concurrent writes using `futures::future::join_all`. Each per-client write is guarded by `tokio::time::timeout(STALL_THRESHOLD, write_event(...))`. A timeout or write error:
 
@@ -173,7 +173,7 @@
 
   Continue awaiting the group before processing the next PTY chunk, preserving per-client chunk order. Because writes run concurrently, healthy clients receive the current chunk without waiting behind the stalled client; the output loop is bounded to one 500ms timeout before the stalled writer is removed.
 
-- [ ] **Step 5: Run the regression tests repeatedly**
+- [x] **Step 5: Run the regression tests repeatedly**
 
   Run:
 

@@ -8,7 +8,7 @@ use kanna_daemon::{
     recovery::RecoveryManager,
     terminal_perf::{self, TerminalPerfContext, OUTPUT_GAP_THRESHOLD, STALL_THRESHOLD},
 };
-use tokio::io::unix::AsyncFd;
+use tokio::io::{unix::AsyncFd, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::client::{SessionObservers, SessionSizes, SessionWriters, TerminalEmulatorClients};
@@ -24,6 +24,7 @@ const STAGE_ATTACHED_WRITER: &str = "attached_writer";
 const STAGE_RECOVERY_WRITE: &str = "recovery_write";
 const STAGE_OBSERVER_WRITE: &str = "observer_write";
 
+#[cfg(test)]
 pub(crate) const DAEMON_TERMINAL_PERF_STAGES: [&str; 7] = [
     STAGE_MIRROR_OUTPUT,
     STAGE_DETECT_STATUS,
@@ -481,21 +482,37 @@ pub(crate) async fn handle_output_chunk(
         writers.get(session_id).cloned().unwrap_or_default()
     };
     if !attached_writers.is_empty() {
-        let mut failed = Vec::new();
-        for (i, w) in attached_writers.iter().enumerate() {
-            let write_started = Instant::now();
-            let write_operation = terminal_perf::global_monitor().begin(perf_context(
-                session_id,
-                STAGE_ATTACHED_WRITER,
-                chunk,
-                data.len(),
-            ));
-            let result = write_event(&mut *w.lock().await, &evt).await;
-            write_operation.finish();
-            note_slow_stage(write_started, STAGE_ATTACHED_WRITER, &mut slow_stage);
-            if result.is_err() {
-                failed.push(i);
+        let results = futures::future::join_all(attached_writers.iter().map(|writer| {
+            let writer = writer.clone();
+            let evt = evt.clone();
+            let context = perf_context(session_id, STAGE_ATTACHED_WRITER, chunk, data.len());
+            async move {
+                let write_started = Instant::now();
+                let write_operation = terminal_perf::global_monitor().begin(context);
+                let result = tokio::time::timeout(STALL_THRESHOLD, async {
+                    write_event(&mut *writer.lock().await, &evt).await
+                })
+                .await;
+                write_operation.finish();
+
+                let failed = !matches!(result, Ok(Ok(())));
+                if failed {
+                    let _ = tokio::time::timeout(Duration::from_millis(100), async {
+                        writer.lock().await.shutdown().await
+                    })
+                    .await;
+                }
+                (failed, write_started.elapsed() >= STALL_THRESHOLD)
             }
+        }))
+        .await;
+        let failed: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (failed, _))| failed.then_some(index))
+            .collect();
+        if results.iter().any(|(_, stalled)| *stalled) {
+            slow_stage.get_or_insert(STAGE_ATTACHED_WRITER);
         }
         if !failed.is_empty() {
             let failed_ids: Vec<usize> = failed

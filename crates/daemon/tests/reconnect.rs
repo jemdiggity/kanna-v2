@@ -1426,6 +1426,75 @@ fn test_broadcast_both_clients_receive_output() {
 }
 
 #[test]
+fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
+    let daemon = DaemonHandle::start();
+    let session_id = "sess-slow-terminal-consumer";
+    let dir = atomic_attach_dir("slow-terminal-consumer");
+
+    let mut control = daemon.connect();
+    control.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 65536 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+                .to_string(),
+        ],
+        cwd: dir.display().to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    expect_session_created(&mut control, session_id);
+
+    let mut stalled = daemon.connect();
+    attach(&mut stalled, session_id);
+    std::fs::write(dir.join("go"), b"go").unwrap();
+
+    // Let the daemon fill this attachment's Unix socket. Keeping `stalled`
+    // alive but unread reproduces a WebSocket/KSP consumer that has stopped
+    // draining terminal frames.
+    thread::sleep(Duration::from_millis(400));
+
+    let mut healthy = daemon.connect();
+    attach(&mut healthy, session_id);
+    control.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"HEALTHY_MARKER\n".to_vec(),
+    });
+
+    let output = healthy
+        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(1_500));
+    let output = String::from_utf8_lossy(&output);
+    let flood_done = output
+        .find("FLOOD_DONE")
+        .expect("healthy reader should observe the end of the ordered flood");
+    let marker = output
+        .find("HEALTHY_MARKER")
+        .expect("healthy reader should observe input after the stalled client is isolated");
+    assert!(
+        flood_done < marker,
+        "healthy output must remain ordered: {output:?}"
+    );
+
+    // A removed slow client must not impose the timeout again on every later
+    // chunk. This second marker should take the ordinary fast path.
+    control.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"SECOND_HEALTHY_MARKER\n".to_vec(),
+    });
+    let second = healthy.collect_output_until_contains_with_timeout(
+        "SECOND_HEALTHY_MARKER",
+        Duration::from_millis(300),
+    );
+    assert!(String::from_utf8_lossy(&second).contains("SECOND_HEALTHY_MARKER"));
+
+    drop(stalled);
+    cleanup_atomic_attach_dir(&dir);
+}
+
+#[test]
 fn test_concurrent_attach_snapshot_cutover_keeps_snapshot_first_and_streaming_live_output() {
     let daemon = DaemonHandle::start();
     let mut shared = daemon.connect();
