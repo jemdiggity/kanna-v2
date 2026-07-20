@@ -35,7 +35,7 @@ assert_eq!(snapshot["blockerTaskStates"]["task-blocker"]["stage"], "review");
 
 - [ ] **Step 2: Run the focused Rust test and verify RED**
 
-Run: `cargo test -p kanna-server snapshot_route_returns_ui_hydration_payload -- --exact`
+Run: `cargo test -p kanna-server snapshot_route_returns_ui_hydration_payload`
 
 Expected: FAIL because `blockerTaskStates` is absent.
 
@@ -63,7 +63,7 @@ Add `blocker_task_states: HashMap<String, SnapshotBlockerTaskState>` to `UiSnaps
 
 - [ ] **Step 4: Run the focused Rust test and verify GREEN**
 
-Run: `cargo test -p kanna-server snapshot_route_returns_ui_hydration_payload -- --exact`
+Run: `cargo test -p kanna-server snapshot_route_returns_ui_hydration_payload`
 
 Expected: PASS.
 

@@ -1,5 +1,6 @@
 use super::{
-    Db, SnapshotEntry, SnapshotPipelineItem, SnapshotRepo, SnapshotTaskBlocker, UiSnapshot,
+    Db, SnapshotBlockerTaskState, SnapshotEntry, SnapshotPipelineItem, SnapshotRepo,
+    SnapshotTaskBlocker, UiSnapshot,
 };
 use std::collections::HashMap;
 
@@ -15,6 +16,7 @@ impl Db {
         Ok(UiSnapshot {
             entries,
             task_blockers: self.list_snapshot_task_blockers()?,
+            blocker_task_states: self.list_snapshot_blocker_task_states()?,
             worktree_paths: self.list_snapshot_worktree_paths()?,
             settings: self.list_snapshot_settings()?,
         })
@@ -125,6 +127,29 @@ impl Db {
                 blocked_item_id: row.get(0)?,
                 blocker_item_id: row.get(1)?,
             })
+        })?;
+        rows.collect()
+    }
+
+    fn list_snapshot_blocker_task_states(
+        &self,
+    ) -> Result<HashMap<String, SnapshotBlockerTaskState>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT blocker_item.id, blocker_item.closed_at,
+                    blocker_item.stage, blocker_item.pr_url
+             FROM task_blocker
+             JOIN pipeline_item blocker_item ON blocker_item.id = task_blocker.blocker_item_id
+             ORDER BY blocker_item.id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                SnapshotBlockerTaskState {
+                    closed_at: row.get(1)?,
+                    stage: row.get(2)?,
+                    pr_url: row.get(3)?,
+                },
+            ))
         })?;
         rows.collect()
     }

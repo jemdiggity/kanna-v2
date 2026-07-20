@@ -412,6 +412,7 @@ mod tests {
                 blocked_item_id: "task-1".into(),
                 blocker_item_id: "task-blocker".into(),
             }],
+            blocker_task_states: HashMap::new(),
             worktree_paths: HashMap::new(),
             settings: HashMap::new(),
         }
