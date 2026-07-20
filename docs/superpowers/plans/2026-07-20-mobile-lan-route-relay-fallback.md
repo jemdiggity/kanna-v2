@@ -4,7 +4,7 @@
 
 **Goal:** Migrate an already-open account-owned mobile task from a failed LAN route to its relay fallback at the existing 1,000 ms optional-LAN deadline.
 
-**Architecture:** Treat the optional desktop-source timeout as the boundary that expires synchronous LAN routing, while leaving account inventory and the longer Bonjour probe intact. A small app-model route-change event connects trusted-LAN validation changes to the mobile controller, which reconciles the selected task through its existing route-identity-aware `startTaskView()` path for PTY, agent, and companion streams.
+**Architecture:** Treat the optional LAN timeout as the boundary that expires synchronous routing only when Bonjour validation is still pending, while leaving account inventory and ordinary task-read failures intact. A small app-model route-change event connects trusted-LAN validation changes to the mobile controller, which reconciles the selected task through its existing route-identity-aware `startTaskView()` path for PTY, agent, and companion streams.
 
 **Tech Stack:** TypeScript, React Native/Expo, Vitest fake timers, Kanna LAN and relay transports
 
@@ -14,7 +14,7 @@
 
 - Modify `apps/mobile/src/state/mobileController.ts`: subscribe to effective task-route changes, reconcile the selected stream, and unsubscribe on disposal.
 - Modify `apps/mobile/src/state/mobileController.test.ts`: prove the shared controller boundary rebinds an open PTY stream and ignores unchanged route identities.
-- Modify `apps/mobile/src/lib/sources/cloudLanClient.ts`: report when the optional LAN desktop read fails or is already in flight.
+- Modify `apps/mobile/src/lib/sources/cloudLanClient.ts`: report actual optional LAN timeouts/failures without treating a shared read already in flight as a new failure.
 - Modify `apps/mobile/src/lib/sources/cloudLanClient.test.ts`: pin the route-expiry callback to the 1,000 ms optional-read deadline.
 - Modify `apps/mobile/src/appModel.ts`: expire trusted synchronous LAN URLs, publish validation changes, and connect them to the controller subscription.
 - Modify `apps/mobile/src/appModel.cloudFallback.test.ts`: reproduce the iPhone journey with fake timers, a hanging `/v1/status`, `controller.openTask()`, and PTY migration to relay.
@@ -117,7 +117,7 @@ git add apps/mobile/src/state/mobileController.ts apps/mobile/src/state/mobileCo
 git commit -m "fix(mobile): reconcile active task route changes"
 ```
 
-### Task 2: Expire LAN routability at the optional desktop deadline
+### Task 2: Report actual LAN unavailability at the optional deadline
 
 **Files:**
 - Modify: `apps/mobile/src/lib/sources/cloudLanClient.test.ts:2060`
@@ -138,22 +138,22 @@ it("expires LAN routability when the optional desktop read times out", async () 
       { id: "desktop-a", name: "Desktop A", online: true, mode: "remote" }
     ]);
     lan.listDesktops.mockReturnValue(pendingLanDesktops.promise);
-    const onLanDesktopReadUnavailable = vi.fn();
+    const onLanReadUnavailable = vi.fn();
     const client = createCloudLanClient(cloud, lan, {
       isLanEnabled: () => true,
       optionalLanWaitMs: 1_000,
-      onLanDesktopReadUnavailable
+      onLanReadUnavailable
     });
 
     const result = client.listDesktops();
     await vi.advanceTimersByTimeAsync(999);
-    expect(onLanDesktopReadUnavailable).not.toHaveBeenCalled();
+    expect(onLanReadUnavailable).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
 
     await expect(result).resolves.toEqual([
       expect.objectContaining({ id: "desktop-a", mode: "remote" })
     ]);
-    expect(onLanDesktopReadUnavailable).toHaveBeenCalledOnce();
+    expect(onLanReadUnavailable).toHaveBeenCalledOnce();
   } finally {
     vi.useRealTimers();
   }
@@ -168,7 +168,7 @@ Run:
 pnpm --dir apps/mobile test -- src/lib/sources/cloudLanClient.test.ts -t "expires LAN routability when the optional desktop read times out"
 ```
 
-Expected: FAIL because `CloudLanClientOptions` does not expose or invoke `onLanDesktopReadUnavailable`.
+Expected: FAIL because `CloudLanClientOptions` does not expose or invoke `onLanReadUnavailable`.
 
 - [ ] **Step 3: Add the deadline callback**
 
@@ -176,7 +176,7 @@ Extend the option contract:
 
 ```ts
 export interface CloudLanClientOptions {
-  onLanDesktopReadUnavailable?(): void;
+  onLanReadUnavailable?(): void;
 }
 ```
 
@@ -185,9 +185,10 @@ In `listDesktops()`, after both source results settle and before publishing warn
 ```ts
 if (
   lanStillEnabled &&
-  lanResult?.status === "rejected"
+  lanResult?.status === "rejected" &&
+  !(lanResult.reason instanceof OptionalLanReadInFlightError)
 ) {
-  options.onLanDesktopReadUnavailable?.();
+  options.onLanReadUnavailable?.();
 }
 ```
 
@@ -282,7 +283,7 @@ subscribeTaskRouteChanges(listener) {
 }
 ```
 
-Extend `createTrustedLanFallbackClient()` with `onValidatedRoutesChanged` and an `invalidateValidatedRoutes()` method. Add a focused string-map equality helper and centralize cache replacement so callbacks fire only when the desktop-to-URL mapping actually changes:
+Extend `createTrustedLanFallbackClient()` with `onValidatedRoutesChanged`, pending-validation tracking, and an `invalidatePendingValidatedRoutes()` method. Add a focused string-map equality helper and centralize cache replacement so callbacks fire only when the desktop-to-URL mapping actually changes:
 
 ```ts
 function areStringMapsEqual(
@@ -302,11 +303,8 @@ const publishIfChanged = (previous: Map<string, string>) => {
   }
 };
 
-invalidateValidatedRoutes() {
-  if (validatedBaseUrls.size === 0) return;
-  validatedBaseUrls.clear();
-  lastValidatedDesktopId = null;
-  onValidatedRoutesChanged();
+invalidatePendingValidatedRoutes() {
+  if (pendingValidationCount > 0) invalidateValidatedRoutes();
 }
 ```
 
@@ -321,8 +319,8 @@ const composedClient = createCloudLanClient(cloudClient, trustedLanClient.client
   initialDesktopSources: getMachineSourceDesktops(),
   onDesktopSourceWarnings: onMachineSourceWarnings,
   onDesktopSourcesChanged: onMachineSourcesChanged,
-  onLanDesktopReadUnavailable:
-    trustedLanClient.invalidateValidatedRoutes
+  onLanReadUnavailable:
+    trustedLanClient.invalidatePendingValidatedRoutes
 });
 ```
 
