@@ -1,4 +1,5 @@
 mod commands;
+mod definition_cache;
 mod definition_source;
 mod definitions;
 mod environment;
@@ -21,6 +22,7 @@ use commands::{
     build_agent_command, build_kanna_preamble, build_task_shell_command,
     build_teardown_shell_command,
 };
+pub(crate) use definition_cache::RepoDefinitionsCache;
 use definitions::{
     PipelineStage, PipelineStagePolicy, PipelineStageTransition, RepoConfig, RepoDefinitions,
 };
@@ -106,67 +108,75 @@ pub(crate) struct RevisionedAgentDefinition {
 }
 
 pub(crate) fn load_repo_kanna_definitions(
+    cache: &RepoDefinitionsCache,
     repo: &Repo,
 ) -> Result<RepoKannaDefinitions, DefinitionLookupError> {
-    let definitions = RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other)?;
-    let pipelines = definitions
-        .pipeline_names()
-        .map_err(DefinitionLookupError::Other)?
-        .into_iter()
-        .filter(|name| validate_definition_component(name, "pipeline name").is_ok())
-        .collect();
-    let default_pipeline = definitions
-        .config()
-        .pipeline
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-    Ok(RepoKannaDefinitions {
-        revision: definitions.revision().map(str::to_string),
-        ref_name: definitions.ref_name().to_string(),
-        config: definitions.config().clone(),
-        default_pipeline,
-        pipelines,
+    cache.with_definitions(repo, |definitions| {
+        let pipelines = definitions
+            .pipeline_names()
+            .map_err(DefinitionLookupError::Other)?
+            .into_iter()
+            .filter(|name| validate_definition_component(name, "pipeline name").is_ok())
+            .collect();
+        let default_pipeline = definitions
+            .config()
+            .pipeline
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        Ok(RepoKannaDefinitions {
+            revision: definitions.revision().map(str::to_string),
+            ref_name: definitions.ref_name().to_string(),
+            config: definitions.config().clone(),
+            default_pipeline,
+            pipelines,
+        })
     })
 }
 
 pub(crate) fn load_repo_pipeline_definition(
+    cache: &RepoDefinitionsCache,
     repo: &Repo,
     pipeline_name: &str,
 ) -> Result<RevisionedPipelineDefinition, DefinitionLookupError> {
     validate_definition_component(pipeline_name, "pipeline name")?;
-    let definitions = RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other)?;
-    let mut definition = definitions
-        .pipeline_optional(pipeline_name)
-        .map_err(DefinitionLookupError::Other)?
-        .ok_or_else(|| {
-            DefinitionLookupError::NotFound(format!(
-                "pipeline definition not found: {pipeline_name}"
-            ))
-        })?;
-    if definition.name.is_none() {
-        definition.name = Some(pipeline_name.to_string());
-    }
-    Ok(RevisionedPipelineDefinition {
-        revision: definitions.revision().map(str::to_string),
-        definition,
+    cache.with_definitions(repo, |definitions| {
+        let mut definition = definitions
+            .pipeline_optional(pipeline_name)
+            .map_err(DefinitionLookupError::Other)?
+            .ok_or_else(|| {
+                DefinitionLookupError::NotFound(format!(
+                    "pipeline definition not found: {pipeline_name}"
+                ))
+            })?;
+        if definition.name.is_none() {
+            definition.name = Some(pipeline_name.to_string());
+        }
+        Ok(RevisionedPipelineDefinition {
+            revision: definitions.revision().map(str::to_string),
+            definition,
+        })
     })
 }
 
 pub(crate) fn load_repo_agent_definition(
+    cache: &RepoDefinitionsCache,
     repo: &Repo,
     agent_selector: &str,
 ) -> Result<RevisionedAgentDefinition, DefinitionLookupError> {
     validate_agent_selector(agent_selector)?;
-    let definitions = RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other)?;
-    let definition = definitions
-        .agent_optional(agent_selector)
-        .map_err(DefinitionLookupError::Other)?
-        .ok_or_else(|| {
-            DefinitionLookupError::NotFound(format!("agent definition not found: {agent_selector}"))
-        })?;
-    Ok(RevisionedAgentDefinition {
-        revision: definitions.revision().map(str::to_string),
-        definition,
+    cache.with_definitions(repo, |definitions| {
+        let definition = definitions
+            .agent_optional(agent_selector)
+            .map_err(DefinitionLookupError::Other)?
+            .ok_or_else(|| {
+                DefinitionLookupError::NotFound(format!(
+                    "agent definition not found: {agent_selector}"
+                ))
+            })?;
+        Ok(RevisionedAgentDefinition {
+            revision: definitions.revision().map(str::to_string),
+            definition,
+        })
     })
 }
 

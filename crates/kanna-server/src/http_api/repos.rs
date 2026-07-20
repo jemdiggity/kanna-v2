@@ -249,7 +249,7 @@ pub(super) async fn get_repo_kanna_definitions(
     Path(repo_id): Path<String>,
 ) -> Result<Json<crate::task_creator::RepoKannaDefinitions>, HttpError> {
     let repo = get_definition_repo(&state, &repo_id)?;
-    crate::task_creator::load_repo_kanna_definitions(&repo)
+    crate::task_creator::load_repo_kanna_definitions(&state.repo_definitions, &repo)
         .map(Json)
         .map_err(map_definition_lookup_error)
 }
@@ -259,9 +259,13 @@ pub(super) async fn get_repo_pipeline_definition(
     Path((repo_id, pipeline_name)): Path<(String, String)>,
 ) -> Result<Json<crate::task_creator::RevisionedPipelineDefinition>, HttpError> {
     let repo = get_definition_repo(&state, &repo_id)?;
-    crate::task_creator::load_repo_pipeline_definition(&repo, &pipeline_name)
-        .map(Json)
-        .map_err(map_definition_lookup_error)
+    crate::task_creator::load_repo_pipeline_definition(
+        &state.repo_definitions,
+        &repo,
+        &pipeline_name,
+    )
+    .map(Json)
+    .map_err(map_definition_lookup_error)
 }
 
 pub(super) async fn get_repo_agent_definition(
@@ -269,7 +273,7 @@ pub(super) async fn get_repo_agent_definition(
     Path((repo_id, agent_selector)): Path<(String, String)>,
 ) -> Result<Json<crate::task_creator::RevisionedAgentDefinition>, HttpError> {
     let repo = get_definition_repo(&state, &repo_id)?;
-    crate::task_creator::load_repo_agent_definition(&repo, &agent_selector)
+    crate::task_creator::load_repo_agent_definition(&state.repo_definitions, &repo, &agent_selector)
         .map(Json)
         .map_err(map_definition_lookup_error)
 }

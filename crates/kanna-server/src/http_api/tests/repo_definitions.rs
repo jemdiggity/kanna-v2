@@ -107,6 +107,26 @@ impl RemoteDefinitionsFixture {
         run_git(&self.publisher, &["push", "origin", &self.branch]);
         self.revision = git_stdout(&self.publisher, &["rev-parse", "HEAD"]);
     }
+
+    fn publish_pipeline_prompt(&mut self, prompt: &str) {
+        std::fs::write(
+            self.publisher.join(".kanna/pipelines/remote-qa.json"),
+            json!({
+                "stages": [{
+                    "name": "review",
+                    "agent": "review@strict",
+                    "prompt": prompt,
+                    "policy": {"transition": "manual"}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        run_git(&self.publisher, &["add", ".kanna"]);
+        run_git(&self.publisher, &["commit", "-m", "update remote pipeline"]);
+        run_git(&self.publisher, &["push", "origin", &self.branch]);
+        self.revision = git_stdout(&self.publisher, &["rev-parse", "HEAD"]);
+    }
 }
 
 fn write_remote_definitions(repo: &Path) {
@@ -391,6 +411,30 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         .as_str()
         .unwrap()
         .contains("LOCAL_STALE_EXTENSION"));
+}
+
+#[tokio::test]
+async fn repo_definition_routes_share_a_fresh_resolved_snapshot() {
+    let mut fixture = RemoteDefinitionsFixture::new("route-cache", "main");
+    let app = fixture.router("repo-1");
+
+    let (status, manifest) = json_response(&app, "/v1/repos/repo-1/kanna-definitions").await;
+    assert_eq!(status, StatusCode::OK);
+    let cached_revision = manifest["revision"].clone();
+
+    fixture.publish_pipeline_prompt("REMOTE_PIPELINE_AFTER_CACHE");
+
+    let (status, pipeline) = json_response(
+        &app,
+        "/v1/repos/repo-1/kanna-definitions/pipelines/remote-qa",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pipeline["revision"], cached_revision);
+    assert_eq!(
+        pipeline["definition"]["stages"][0]["prompt"],
+        "REMOTE_PIPELINE"
+    );
 }
 
 #[tokio::test]
