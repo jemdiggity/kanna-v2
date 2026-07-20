@@ -5,6 +5,7 @@ WORKDIR /app
 RUN corepack enable
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ ./patches/
 COPY services/relay/package.json ./services/relay/package.json
 COPY tools/kd/package.json ./tools/kd/package.json
 COPY services/relay/tsconfig.json ./services/relay/tsconfig.json
@@ -12,7 +13,7 @@ COPY services/relay/src/ ./services/relay/src/
 
 RUN pnpm install --frozen-lockfile --filter kanna-relay...
 RUN pnpm --dir services/relay build
-RUN pnpm --filter kanna-relay deploy --prod --legacy /relay
+RUN pnpm --config.allowUnusedPatches=true --filter kanna-relay deploy --prod --legacy /relay
 
 FROM node:22-alpine
 

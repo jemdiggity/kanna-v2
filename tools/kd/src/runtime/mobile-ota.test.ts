@@ -1,10 +1,12 @@
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseCliArgs } from "../cli.js";
 import { resolveKdEnvironment } from "./environment.js";
+import * as mobileOtaRuntime from "./mobile-ota.js";
 import {
   buildMobileOtaPublishPlan,
   computeExpoUpdateId,
@@ -16,17 +18,54 @@ import {
 import type { CommandRunner } from "./process.js";
 
 const tempDirs: string[] = [];
+const repositoryCertificatePath = fileURLToPath(
+  new URL("../../../../apps/mobile/certs/ota-codesign.pem", import.meta.url)
+);
+const acceptOtaCertificate = async () => ({
+  keyId: "kanna-mobile-ota-v1" as const,
+  codeSigning: true as const,
+  validFrom: "Jul 19 19:34:32 2026 GMT",
+  validTo: "Jul 16 19:34:32 2036 GMT",
+});
+
+type MobileOtaProvisionExecutor = (
+  input: { staging: boolean; production: boolean },
+  context: {
+    repoRoot: string;
+    env: NodeJS.ProcessEnv;
+    runner: CommandRunner;
+    request?: (input: {
+      url: string;
+      method: "POST";
+      headers: Record<string, string>;
+      body: unknown;
+    }) => Promise<{ ok: boolean; status: number; body: string }>;
+  }
+) => Promise<{ ok: boolean; message: string; data?: unknown }>;
+
+function getMobileOtaProvisionExecutor(): MobileOtaProvisionExecutor {
+  const executor = Reflect.get(mobileOtaRuntime, "executeMobileOtaProvisionWithContext") as unknown;
+  expect(executor).toBeTypeOf("function");
+  return executor as MobileOtaProvisionExecutor;
+}
 
 afterEach(async () => {
   await Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true })));
   tempDirs.length = 0;
 });
 
-async function makeRepoFixture(): Promise<string> {
+async function makeRepoFixture(
+  options: { certificatePem?: string } = {}
+): Promise<string> {
   const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-ota-"));
   tempDirs.push(repoRoot);
   await mkdir(join(repoRoot, "apps/mobile/src"), { recursive: true });
+  await mkdir(join(repoRoot, "apps/mobile/certs"), { recursive: true });
   await mkdir(join(repoRoot, "apps/mobile/dist"), { recursive: true });
+  await writeFile(
+    join(repoRoot, "apps/mobile/certs/ota-codesign.pem"),
+    options.certificatePem ?? (await readFile(repositoryCertificatePath, "utf8"))
+  );
   await writeFile(
     join(repoRoot, "apps/mobile/src/mobileEnvironments.json"),
     JSON.stringify({
@@ -73,6 +112,10 @@ describe("kd mobile OTA", () => {
     expect(parseCliArgs(["mobile", "ota", "status", "--production"])).toEqual({
       taskId: "mobile.ota.status",
       input: { staging: false, production: true },
+    });
+    expect(parseCliArgs(["mobile", "ota", "provision", "--staging"])).toEqual({
+      taskId: "mobile.ota.provision",
+      input: { staging: true, production: false },
     });
     expect(parseCliArgs(["mobile", "ota", "provision-secret", "--staging", "--key-path", "/tmp/key.pem"])).toEqual({
       taskId: "mobile.ota.provision-secret",
@@ -219,6 +262,23 @@ describe("kd mobile OTA", () => {
     expect(result.message).toContain("curl -H 'expo-protocol-version: 1'");
   });
 
+  it("rejects publish before export when the committed certificate is invalid", async () => {
+    const repoRoot = await makeRepoFixture({ certificatePem: "not a certificate" });
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(executeMobileOtaPublishWithContext(
+      { staging: true, production: false, dryRun: true },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("not valid X.509");
+    expect(calls).toEqual([{ command: "git", args: ["status", "--porcelain"] }]);
+  });
+
   it("surfaces Expo public config command failures before cloud access", async () => {
     const repoRoot = await makeRepoFixture();
     const calls: Array<{ command: string; args: string[] }> = [];
@@ -345,6 +405,194 @@ describe("kd mobile OTA", () => {
     expect(result.message).toContain(`Dry run: mobile OTA update ${expectedUpdateId}`);
   });
 
+  it("provisions a missing staging OTA bucket and relay storage access", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const requests: Array<{
+      url: string;
+      method: "POST";
+      headers: Record<string, string>;
+      body: unknown;
+    }> = [];
+    const serviceAccount = "kanna-relay-staging@kanna-staging.iam.gserviceaccount.com";
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (joined.includes("storage buckets describe")) {
+          return { exitCode: 1, stdout: "", stderr: "not found: 404" };
+        }
+        if (joined.includes("auth print-access-token")) {
+          return { exitCode: 0, stdout: "test-access-token\n", stderr: "" };
+        }
+        if (joined.includes("compute instances describe")) {
+          return { exitCode: 0, stdout: `${serviceAccount}\n`, stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const result = await getMobileOtaProvisionExecutor()(
+      { staging: true, production: false },
+      {
+        repoRoot,
+        env: {},
+        runner,
+        async request(input) {
+          requests.push(input);
+          return { ok: true, status: 200, body: "{}" };
+        },
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls.map(({ args }) => args)).toContainEqual([
+      "services", "enable", "storage.googleapis.com", "firebasestorage.googleapis.com",
+      "--project", "kanna-staging",
+    ]);
+    expect(calls.map(({ args }) => args)).toContainEqual([
+      "auth", "print-access-token",
+    ]);
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(requests).toEqual([{
+      url: "https://firebasestorage.googleapis.com/v1alpha/projects/kanna-staging/defaultBucket",
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-access-token",
+        "content-type": "application/json",
+      },
+      body: { location: "US-CENTRAL1" },
+    }]);
+    expect(calls.map(({ args }) => args)).toContainEqual([
+      "storage", "buckets", "add-iam-policy-binding",
+      "gs://kanna-staging.firebasestorage.app", "--project", "kanna-staging",
+      "--member", `serviceAccount:${serviceAccount}`,
+      "--role", "roles/storage.objectViewer",
+    ]);
+    expect(result.message).toContain("kanna-staging.firebasestorage.app");
+    expect(result.message).toContain(serviceAccount);
+  });
+
+  it("reuses an existing staging OTA bucket", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    let requested = false;
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (joined.includes("storage buckets describe")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (joined.includes("compute instances describe")) {
+          return {
+            exitCode: 0,
+            stdout: "kanna-relay-staging@kanna-staging.iam.gserviceaccount.com\n",
+            stderr: "",
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await getMobileOtaProvisionExecutor()(
+      { staging: true, production: false },
+      {
+        repoRoot,
+        env: {},
+        runner,
+        async request() {
+          requested = true;
+          return { ok: true, status: 200, body: "{}" };
+        },
+      }
+    );
+
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("print-access-token"))).toBe(false);
+    expect(requested).toBe(false);
+  });
+
+  it("does not create an OTA bucket when bucket inspection is forbidden", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (args.join(" ").includes("storage buckets describe")) {
+          return { exitCode: 1, stdout: "", stderr: "PERMISSION_DENIED" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(getMobileOtaProvisionExecutor()(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("PERMISSION_DENIED");
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("print-access-token"))).toBe(false);
+  });
+
+  it("stops before IAM and hides the access token when Firebase bucket provisioning fails", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (joined.includes("storage buckets describe")) {
+          return { exitCode: 1, stdout: "", stderr: "not found: 404" };
+        }
+        if (joined.includes("auth print-access-token")) {
+          return { exitCode: 0, stdout: "test-access-token\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const result = getMobileOtaProvisionExecutor()(
+      { staging: true, production: false },
+      {
+        repoRoot,
+        env: {},
+        runner,
+        async request() {
+          return {
+            ok: false,
+            status: 400,
+            body: "Blaze plan required; token=test-access-token",
+          };
+        },
+      }
+    );
+
+    await expect(result).rejects.toThrow(
+      "Firebase default-bucket provisioning failed (HTTP 400): Blaze plan required; token=[redacted]"
+    );
+    await expect(result).rejects.not.toThrow("test-access-token");
+    expect(calls.some(({ args }) => args.includes("add-iam-policy-binding"))).toBe(false);
+  });
+
+  it("requires exactly one environment for OTA infrastructure provisioning", async () => {
+    const repoRoot = await makeRepoFixture();
+    const runner: CommandRunner = {
+      async run() {
+        throw new Error("cloud command must not run");
+      },
+    };
+    const executeProvision = getMobileOtaProvisionExecutor();
+
+    await expect(executeProvision(
+      { staging: false, production: false },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("mobile ota provision requires --staging or --production");
+    await expect(executeProvision(
+      { staging: true, production: true },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("mobile ota provision accepts only one of --staging or --production");
+  });
+
   it("provisions the private key through kd-managed gcloud commands", async () => {
     const repoRoot = await makeRepoFixture();
     const keyPath = join(repoRoot, "ota-private-key.pem");
@@ -354,7 +602,7 @@ describe("kd mobile OTA", () => {
       async run(command, args) {
         calls.push({ command, args });
         if (args.includes("describe") && args.includes("kanna-mobile-ota-private-key-pem")) {
-          return { exitCode: 1, stdout: "", stderr: "missing" };
+          return { exitCode: 1, stdout: "", stderr: "not found: 404" };
         }
         if (args.includes("instances") && args.includes("describe")) {
           return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
@@ -365,13 +613,62 @@ describe("kd mobile OTA", () => {
 
     const result = await executeMobileOtaProvisionSecretWithContext(
       { staging: true, production: false, keyPath },
-      { repoRoot, env: {}, runner }
+      { repoRoot, env: {}, runner, validateOtaCertificate: acceptOtaCertificate }
     );
 
     expect(result.ok).toBe(true);
+    expect(calls.map((call) => call.args)).toContainEqual([
+      "services", "enable", "secretmanager.googleapis.com", "--project", "kanna-staging",
+    ]);
     expect(calls.map((call) => call.args.slice(0, 3).join(" "))).toContain("secrets create kanna-mobile-ota-private-key-pem");
     expect(calls.map((call) => call.args.slice(0, 4).join(" "))).toContain("secrets versions add kanna-mobile-ota-private-key-pem");
     expect(calls.at(-1)?.args).toContain("roles/secretmanager.secretAccessor");
+  });
+
+  it("rejects provision-secret before cloud commands when the key mismatches", async () => {
+    const repoRoot = await makeRepoFixture();
+    const keyPath = join(repoRoot, "mismatched-private-key.pem");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    await writeFile(
+      keyPath,
+      privateKey.export({ type: "pkcs8", format: "pem" }).toString()
+    );
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(executeMobileOtaProvisionSecretWithContext(
+      { staging: true, production: false, keyPath },
+      { repoRoot, env: {}, runner }
+    )).rejects.toThrow("does not match the committed mobile OTA certificate");
+    expect(calls).toEqual([]);
+  });
+
+  it("does not create or version an OTA secret when secret inspection is forbidden", async () => {
+    const repoRoot = await makeRepoFixture();
+    const keyPath = join(repoRoot, "ota-private-key.pem");
+    await writeFile(keyPath, "private key");
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (args.includes("describe") && args.includes("kanna-mobile-ota-private-key-pem")) {
+          return { exitCode: 1, stdout: "", stderr: "PERMISSION_DENIED" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(executeMobileOtaProvisionSecretWithContext(
+      { staging: true, production: false, keyPath },
+      { repoRoot, env: {}, runner, validateOtaCertificate: acceptOtaCertificate }
+    )).rejects.toThrow("PERMISSION_DENIED");
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("versions"))).toBe(false);
   });
 
   it("runs a read-only staging OTA doctor against GCS, relay, and Secret Manager wiring", async () => {
@@ -402,10 +699,28 @@ describe("kd mobile OTA", () => {
           return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
         }
         if (command === "gcloud" && joined.includes("secrets get-iam-policy kanna-mobile-ota-private-key-pem")) {
-          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/secretmanager.secretAccessor",
+                members: ["serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com"],
+              }],
+            }),
+            stderr: "",
+          };
         }
         if (command === "gcloud" && joined.includes("storage buckets get-iam-policy gs://kanna-staging.firebasestorage.app")) {
-          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/storage.objectViewer",
+                members: ["serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com"],
+              }],
+            }),
+            stderr: "",
+          };
         }
         if (command === "curl" && args.at(-1) === "https://relay-staging.kanna.build/health") {
           return { exitCode: 0, stdout: "{\"ok\":true}", stderr: "" };
@@ -430,6 +745,69 @@ describe("kd mobile OTA", () => {
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("create"))).toBe(false);
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("add-iam-policy-binding"))).toBe(false);
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("access"))).toBe(false);
+    const iamCalls = calls.filter((call) => call.args.includes("get-iam-policy"));
+    expect(iamCalls).toHaveLength(2);
+    for (const call of iamCalls) {
+      expect(call.args).toContain("--format=json");
+      expect(call.args.some((arg) => arg.startsWith("--filter"))).toBe(false);
+      expect(call.args.some((arg) => arg.startsWith("--flatten"))).toBe(false);
+    }
+  });
+
+  it("reports an invalid committed certificate as a read-only doctor failure", async () => {
+    const repoRoot = await makeRepoFixture({ certificatePem: "not a certificate" });
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const pointer = {
+      currentUpdateId: "11111111-2222-3333-4444-555555555555",
+      createdAt: "2026-06-30T00:00:00.000Z",
+      runtimeVersion: "1.0.0",
+    };
+    const member = "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com";
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (command === "gcloud" && joined.includes("channels/staging.json")) {
+          return { exitCode: 0, stdout: JSON.stringify(pointer), stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("updates/11111111-2222-3333-4444-555555555555/")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets describe")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("compute instances describe")) {
+          return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("get-iam-policy")) {
+          const role = joined.includes("secrets get-iam-policy")
+            ? "roles/secretmanager.secretAccessor"
+            : "roles/storage.objectViewer";
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ bindings: [{ role, members: [member] }] }),
+            stderr: "",
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "ok", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected command: ${command} ${joined}` };
+      },
+    };
+
+    const result = await executeMobileOtaDoctorWithContext(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("FAIL certificate");
+    expect(result.message).toContain("not valid X.509");
+    expect(calls.some(({ args }) => args.includes("cp"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("rsync"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("create"))).toBe(false);
+    expect(calls.some(({ args }) => args.includes("add-iam-policy-binding"))).toBe(false);
   });
 
   it("reports a missing OTA pointer without probing update objects", async () => {
@@ -449,10 +827,28 @@ describe("kd mobile OTA", () => {
           return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
         }
         if (command === "gcloud" && joined.includes("secrets get-iam-policy kanna-mobile-ota-private-key-pem")) {
-          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/secretmanager.secretAccessor",
+                members: ["serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com"],
+              }],
+            }),
+            stderr: "",
+          };
         }
         if (command === "gcloud" && joined.includes("storage buckets get-iam-policy gs://kanna-staging.firebasestorage.app")) {
-          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{
+                role: "roles/storage.objectViewer",
+                members: ["serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com"],
+              }],
+            }),
+            stderr: "",
+          };
         }
         if (command === "curl" && args.at(-1) === "https://relay-staging.kanna.build/health") {
           return { exitCode: 0, stdout: "{\"ok\":true}", stderr: "" };
@@ -473,5 +869,61 @@ describe("kd mobile OTA", () => {
     expect(result.message).toContain("FAIL pointer");
     expect(result.message).toContain("manifest: relay reports no update for the channel");
     expect(calls.some((call) => call.args.join(" ").includes("/updates/"))).toBe(false);
+  });
+
+  it("rejects a relay storage member bound to the wrong IAM role", async () => {
+    const repoRoot = await makeRepoFixture();
+    const member = "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com";
+    const pointer = {
+      currentUpdateId: "11111111-2222-3333-4444-555555555555",
+      runtimeVersion: "1.0.0",
+    };
+    const runner: CommandRunner = {
+      async run(command, args) {
+        const joined = args.join(" ");
+        if (command === "gcloud" && joined.includes("channels/staging.json")) {
+          return { exitCode: 0, stdout: JSON.stringify(pointer), stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("updates/11111111-2222-3333-4444-555555555555/")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets describe")) {
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("compute instances describe")) {
+          return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets get-iam-policy")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{ role: "roles/secretmanager.secretAccessor", members: [member] }],
+            }),
+            stderr: "",
+          };
+        }
+        if (command === "gcloud" && joined.includes("storage buckets get-iam-policy")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              bindings: [{ role: "roles/storage.objectCreator", members: [member] }],
+            }),
+            stderr: "",
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "ok", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected command: ${command} ${joined}` };
+      },
+    };
+
+    const result = await executeMobileOtaDoctorWithContext(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("FAIL GCS IAM");
   });
 });

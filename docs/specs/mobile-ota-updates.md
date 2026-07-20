@@ -22,11 +22,14 @@ by the relay and stored in the per-environment Firebase/GCS bucket.
 - Origins: `https://relay-staging.kanna.build` for staging and `https://relay.kanna.build` for production.
 - Dev: disabled.
 - Channels: `staging` and `production`, passed by `expo-channel-name`.
-- Runtime version: `2.0.0` currently, sourced from `apps/mobile/src/mobileEnvironments.json` as `runtimeVersion`.
+- Runtime version: sourced from the selected environment in `apps/mobile/src/mobileEnvironments.json` as `runtimeVersion`.
 - Code signing: RSA SHA-256, Expo alg `rsa-v1_5-sha256`.
 - Code signing key id: `kanna-mobile-ota-v1`.
 - Public cert: `apps/mobile/certs/ota-codesign.pem`.
-- Public cert SHA-256 fingerprint: `5E:D1:D8:56:C6:C6:92:6A:3E:D7:C5:AE:E9:1F:40:09:53:58:EF:29:3C:66:FB:69:D9:5A:B3:3C:53:62:CB:D4`.
+- Public cert profile: `apps/mobile/certs/ota-codesign.cnf`.
+- Public cert key usage: critical `digitalSignature`.
+- Public cert extended key usage: critical Code Signing (`1.3.6.1.5.5.7.3.3`).
+- Public cert SHA-256 fingerprint: `18:5A:94:97:1B:8C:07:A4:CA:8E:22:51:85:FA:64:31:EE:6C:9B:B8:E5:AD:06:17:93:CD:AD:90:CF:D9:6B:22`.
 - Private key secret: Google Secret Manager secret `kanna-mobile-ota-private-key-pem` in each environment project.
 
 ## GCS Layout
@@ -44,7 +47,7 @@ ota/ios/<runtimeVersion>/channels/<channel>.json
 The channel pointer is the commit point:
 
 ```json
-{ "currentUpdateId": "<updateId>", "createdAt": "...", "runtimeVersion": "2.0.0" }
+{ "currentUpdateId": "<updateId>", "createdAt": "...", "runtimeVersion": "2.1.1" }
 ```
 
 `updateId` is deterministic: SHA-256 of `metadata.json`, converted to the Expo
@@ -63,12 +66,42 @@ onto the VM and mounts it read-only into the relay container at
 
 ## Operations
 
-Provision the private key secret after key generation or rotation:
+Provision the environment bucket, required API, and relay bucket-read IAM before the first deploy. This command is idempotent and requires an explicit environment:
+
+```bash
+./kd mobile ota provision --staging
+./kd mobile ota provision --production
+```
+
+Provision the private key secret after key generation or rotation. This command idempotently enables Secret Manager, creates the secret when absent, adds a version, and grants the relay service account access:
 
 ```bash
 ./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
 ./kd mobile ota provision-secret --production --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
 ```
+
+Before its first cloud command, `provision-secret` parses the committed
+certificate and rejects an invalid private key or a key whose derived public
+key does not match the certificate. It never prints PEM contents or derived
+key bytes.
+
+Reissue the public certificate only from the existing private key and committed
+profile. Generate into a temporary directory, inspect the public certificate,
+then replace only `apps/mobile/certs/ota-codesign.pem`:
+
+```bash
+OTA_CERT_DIR=$(mktemp -d /tmp/kanna-ota-cert.XXXXXX)
+openssl req -new -x509 -sha256 -days 3650 \
+  -key "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem" \
+  -config apps/mobile/certs/ota-codesign.cnf \
+  -out "$OTA_CERT_DIR/ota-codesign.pem"
+openssl x509 -in "$OTA_CERT_DIR/ota-codesign.pem" -noout -purpose
+```
+
+The public output must report `Code signing : Yes`. Replacing the certificate
+changes embedded native update configuration, so increment every environment's
+`runtimeVersion` before installing or publishing a build containing it. Never
+print, copy into the repository, or commit the private key.
 
 Deploy relay support through the normal cloud deploy flow:
 
@@ -83,6 +116,9 @@ Publish a JS/asset update:
 ./kd mobile ota publish --staging
 ./kd mobile ota publish --production
 ```
+
+`publish` validates the committed certificate and its validity window before
+Expo export or cloud upload.
 
 Check the current pointer:
 
@@ -104,11 +140,25 @@ write GCS objects, modify Secret Manager, or install/launch a device app. It
 requires Google Cloud credentials for the target project and verifies:
 
 - environment resolution, OTA bucket, channel, and `runtimeVersion`
+- committed certificate validity and Code Signing extended key usage
 - current GCS channel pointer and referenced update metadata/config readability
 - relay `/health` and `/ota/manifest` behavior for the current channel
 - Secret Manager private-key secret existence
 - relay VM service account resolution
 - relay service account IAM for Secret Manager and OTA GCS reads
+
+The canonical staging setup and verification sequence is:
+
+```bash
+./kd mobile ota provision --staging
+./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
+./kd cloud deploy --staging --relay
+./kd mobile ota doctor --staging
+./kd mobile ota status --staging
+```
+
+The last two commands are read-only. Publishing is a separate operation and is
+not implied by provisioning or deployment.
 
 Rollback by repointing the channel to a prior update id:
 

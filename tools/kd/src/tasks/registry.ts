@@ -45,6 +45,7 @@ import {
 } from "../runtime/mobile-qa";
 import {
   executeMobileOtaDoctorWithContext,
+  executeMobileOtaProvisionWithContext,
   executeMobileOtaProvisionSecretWithContext,
   executeMobileOtaPublishWithContext,
   executeMobileOtaStatusWithContext
@@ -185,6 +186,11 @@ const mobileOtaStatusInputSchema = z.object({
 });
 
 const mobileOtaDoctorInputSchema = z.object({
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false)
+});
+
+const mobileOtaProvisionInputSchema = z.object({
   production: z.boolean().default(false),
   staging: z.boolean().default(false)
 });
@@ -1685,6 +1691,19 @@ export const taskDefinitions = [
     execute: async (_context, input) => {
       const context = await resolveDefaultContext(process.env);
       return executeMobileOtaDoctorWithContext(mobileOtaDoctorInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
+  },
+  {
+    id: "mobile.ota.provision",
+    description: "Provision Kanna mobile OTA bucket and relay storage access.",
+    inputSchema: mobileOtaProvisionInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobileOtaProvisionWithContext(mobileOtaProvisionInputSchema.parse(input), {
         repoRoot: context.repoRoot,
         env: context.env,
         runner: nodeCommandRunner

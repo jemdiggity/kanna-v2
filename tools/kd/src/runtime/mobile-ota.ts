@@ -3,6 +3,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { cloudEnvironmentToKdEnvironment, resolveKdEnvironment, type CloudEnvironmentName } from "./environment";
+import {
+  OTA_CERTIFICATE_RELATIVE_PATH,
+  validateMobileOtaCertificate,
+} from "./mobile-ota-certificate";
 import type { CommandRunner } from "./process";
 
 export interface MobileOtaInput {
@@ -18,11 +22,26 @@ export interface MobileOtaProvisionSecretInput {
   keyPath: string;
 }
 
+export type MobileOtaProvisionInput = Pick<MobileOtaInput, "staging" | "production">;
+
 export interface MobileOtaContext {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
+  request?: MobileOtaHttpRequest;
+  validateOtaCertificate?: typeof validateMobileOtaCertificate;
 }
+
+export interface MobileOtaHttpRequestInput {
+  url: string;
+  method: "POST";
+  headers: Record<string, string>;
+  body: unknown;
+}
+
+export type MobileOtaHttpRequest = (
+  input: MobileOtaHttpRequestInput
+) => Promise<{ ok: boolean; status: number; body: string }>;
 
 export interface MobileOtaCommandPlan {
   command: string;
@@ -88,6 +107,13 @@ interface OtaDoctorCheck {
   status: "PASS" | "FAIL";
   name: string;
   detail: string;
+}
+
+interface IamPolicy {
+  bindings?: Array<{
+    role?: string;
+    members?: string[];
+  }>;
 }
 
 const OTA_SECRET_NAME = "kanna-mobile-ota-private-key-pem";
@@ -189,6 +215,10 @@ export async function executeMobileOtaPublishWithContext(
 ): Promise<{ ok: boolean; message: string; data?: unknown }> {
   const environment = resolveMobileOtaEnvironment(input, "publish");
   await assertCleanGitWorktree(context.repoRoot, context.runner);
+  const validateCertificate = context.validateOtaCertificate ?? validateMobileOtaCertificate;
+  await validateCertificate({
+    certificatePath: join(context.repoRoot, OTA_CERTIFICATE_RELATIVE_PATH),
+  });
   const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(environment));
   if (!identity.otaBucket || !identity.otaChannel) {
     throw new Error(`Mobile OTA is not configured for ${environment}.`);
@@ -334,6 +364,110 @@ export async function executeMobileOtaStatusWithContext(
   };
 }
 
+export async function executeMobileOtaProvisionWithContext(
+  input: MobileOtaProvisionInput,
+  context: MobileOtaContext
+): Promise<{ ok: boolean; message: string; data?: unknown }> {
+  const environment = resolveMobileOtaEnvironment(input, "provision");
+  const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(environment));
+  const projectId = identity.firebaseProjectId;
+  const bucket = identity.otaBucket;
+  if (!bucket || !identity.gceVmName) {
+    throw new Error(`Mobile OTA provisioning is not configured for ${environment}.`);
+  }
+
+  await mustRun(context.runner, "gcloud", [
+    "services",
+    "enable",
+    "storage.googleapis.com",
+    "firebasestorage.googleapis.com",
+    "--project",
+    projectId,
+  ], context.repoRoot, context.env);
+
+  const bucketUrl = `gs://${bucket}`;
+  const describe = await context.runner.run("gcloud", [
+    "storage",
+    "buckets",
+    "describe",
+    bucketUrl,
+    "--project",
+    projectId,
+    "--format=json",
+  ], { cwd: context.repoRoot, env: context.env });
+  if (describe.exitCode !== 0) {
+    if (!isNotFoundFailure(describe)) {
+      throw new Error(summarizeCommandFailure(describe));
+    }
+    const accessTokenResult = await context.runner.run("gcloud", [
+      "auth",
+      "print-access-token",
+    ], { cwd: context.repoRoot, env: context.env });
+    const accessToken = accessTokenResult.stdout.trim();
+    if (accessTokenResult.exitCode !== 0 || accessToken.length === 0) {
+      throw new Error(summarizeCommandFailure(accessTokenResult));
+    }
+
+    const request = context.request ?? executeMobileOtaHttpRequest;
+    const response = await request({
+      url: `https://firebasestorage.googleapis.com/v1alpha/projects/${projectId}/defaultBucket`,
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: { location: "US-CENTRAL1" },
+    });
+    if (!response.ok) {
+      const sanitizedBody = response.body.replaceAll(accessToken, "[redacted]").trim();
+      throw new Error(
+        `Firebase default-bucket provisioning failed (HTTP ${response.status}): ${sanitizedBody || "request failed"}`
+      );
+    }
+  }
+
+  const serviceAccountResult = await context.runner.run("gcloud", [
+    "compute",
+    "instances",
+    "describe",
+    identity.gceVmName,
+    "--project",
+    projectId,
+    "--zone",
+    "us-central1-a",
+    "--format",
+    "value(serviceAccounts[0].email)",
+  ], { cwd: context.repoRoot, env: context.env });
+  const serviceAccount = serviceAccountResult.stdout.trim();
+  if (serviceAccountResult.exitCode !== 0 || serviceAccount.length === 0) {
+    throw new Error(summarizeCommandFailure(serviceAccountResult));
+  }
+
+  await mustRun(context.runner, "gcloud", [
+    "storage",
+    "buckets",
+    "add-iam-policy-binding",
+    bucketUrl,
+    "--project",
+    projectId,
+    "--member",
+    `serviceAccount:${serviceAccount}`,
+    "--role",
+    "roles/storage.objectViewer",
+  ], context.repoRoot, context.env);
+
+  return {
+    ok: true,
+    message: [
+      `Provisioned mobile OTA infrastructure for ${environment}.`,
+      `project: ${projectId}`,
+      `bucket: ${bucket}`,
+      `relay service account: ${serviceAccount}`,
+    ].join("\n"),
+    data: { environment, projectId, bucket, serviceAccount },
+  };
+}
+
 export async function executeMobileOtaDoctorWithContext(
   input: Pick<MobileOtaInput, "staging" | "production">,
   context: MobileOtaContext
@@ -366,6 +500,24 @@ export async function executeMobileOtaDoctorWithContext(
       detail: `${environment} project=${projectId} bucket=${bucket} channel=${channel} runtimeVersion=${runtimeVersion}`,
     },
   ];
+
+  const validateCertificate = context.validateOtaCertificate ?? validateMobileOtaCertificate;
+  try {
+    const certificate = await validateCertificate({
+      certificatePath: join(context.repoRoot, OTA_CERTIFICATE_RELATIVE_PATH),
+    });
+    checks.push({
+      status: "PASS",
+      name: "certificate",
+      detail: `Code Signing EKU; valid ${certificate.validFrom} through ${certificate.validTo}`,
+    });
+  } catch (error: unknown) {
+    checks.push({
+      status: "FAIL",
+      name: "certificate",
+      detail: error instanceof Error ? error.message : "Mobile OTA certificate validation failed.",
+    });
+  }
 
   const pointerResult = await context.runner.run("gcloud", [
     "storage",
@@ -475,10 +627,9 @@ export async function executeMobileOtaDoctorWithContext(
         OTA_SECRET_NAME,
         "--project",
         projectId,
-        "--flatten=bindings[].members",
-        `--filter=bindings.role:roles/secretmanager.secretAccessor AND bindings.members:serviceAccount:${serviceAccount}`,
-        "--format=value(bindings.members)",
+        "--format=json",
       ],
+      expectedRole: "roles/secretmanager.secretAccessor",
       expectedMember: `serviceAccount:${serviceAccount}`,
       passDetail: `${serviceAccount} can read ${OTA_SECRET_NAME}`,
       failDetail: `${serviceAccount} is not listed as a Secret Manager accessor for ${OTA_SECRET_NAME}`,
@@ -493,10 +644,9 @@ export async function executeMobileOtaDoctorWithContext(
         `gs://${bucket}`,
         "--project",
         projectId,
-        "--flatten=bindings[].members",
-        `--filter=bindings.role:roles/storage.objectViewer AND bindings.members:serviceAccount:${serviceAccount}`,
-        "--format=value(bindings.members)",
+        "--format=json",
       ],
+      expectedRole: "roles/storage.objectViewer",
       expectedMember: `serviceAccount:${serviceAccount}`,
       passDetail: `${serviceAccount} can read gs://${bucket}`,
       failDetail: `${serviceAccount} is not listed as a Storage Object Viewer for gs://${bucket}`,
@@ -538,10 +688,22 @@ export async function executeMobileOtaProvisionSecretWithContext(
   if (!identity.gceVmName) {
     throw new Error(`Relay VM is not configured for ${environment}.`);
   }
-  await readFile(input.keyPath);
+  const validateCertificate = context.validateOtaCertificate ?? validateMobileOtaCertificate;
+  await validateCertificate({
+    certificatePath: join(context.repoRoot, OTA_CERTIFICATE_RELATIVE_PATH),
+    privateKeyPath: input.keyPath,
+  });
 
   const secretName = OTA_SECRET_NAME;
   const projectId = identity.firebaseProjectId;
+  await mustRun(context.runner, "gcloud", [
+    "services",
+    "enable",
+    "secretmanager.googleapis.com",
+    "--project",
+    projectId,
+  ], context.repoRoot, context.env);
+
   const describe = await context.runner.run("gcloud", [
     "secrets",
     "describe",
@@ -550,6 +712,9 @@ export async function executeMobileOtaProvisionSecretWithContext(
     projectId,
   ], { cwd: context.repoRoot, env: context.env });
   if (describe.exitCode !== 0) {
+    if (!isNotFoundFailure(describe)) {
+      throw new Error(summarizeCommandFailure(describe));
+    }
     await mustRun(context.runner, "gcloud", [
       "secrets",
       "create",
@@ -660,6 +825,7 @@ async function addIamPolicyCheck(
     name: string;
     command: string;
     args: string[];
+    expectedRole: string;
     expectedMember: string;
     passDetail: string;
     failDetail: string;
@@ -669,12 +835,24 @@ async function addIamPolicyCheck(
     cwd: context.repoRoot,
     env: context.env,
   });
-  const hasMember = result.stdout.includes(input.expectedMember);
+  const policy = parseIamPolicy(result.stdout);
+  const hasBinding = policy?.bindings?.some((binding) =>
+    binding.role === input.expectedRole && binding.members?.includes(input.expectedMember)
+  ) === true;
   checks.push({
-    status: result.exitCode === 0 && hasMember ? "PASS" : "FAIL",
+    status: result.exitCode === 0 && hasBinding ? "PASS" : "FAIL",
     name: input.name,
-    detail: result.exitCode === 0 && hasMember ? input.passDetail : `${input.failDetail}: ${summarizeCommandFailure(result)}`,
+    detail: result.exitCode === 0 && hasBinding ? input.passDetail : `${input.failDetail}: ${summarizeCommandFailure(result)}`,
   });
+}
+
+function parseIamPolicy(stdout: string): IamPolicy | null {
+  try {
+    const parsed = JSON.parse(stdout) as IamPolicy;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function parsePointer(stdout: string): OtaChannelPointer | null {
@@ -688,6 +866,26 @@ function parsePointer(stdout: string): OtaChannelPointer | null {
 
 function summarizeCommandFailure(result: { stdout: string; stderr: string }): string {
   return (result.stderr || result.stdout || "command failed").trim();
+}
+
+function isNotFoundFailure(result: { stdout: string; stderr: string }): boolean {
+  const message = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  return message.includes("not found") || message.includes("not_found") || message.includes("404");
+}
+
+async function executeMobileOtaHttpRequest(
+  input: MobileOtaHttpRequestInput
+): Promise<{ ok: boolean; status: number; body: string }> {
+  const response = await fetch(input.url, {
+    method: input.method,
+    headers: input.headers,
+    body: JSON.stringify(input.body),
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: await response.text(),
+  };
 }
 
 function buildExpoExportCommand(repoRoot: string, environment: CloudEnvironmentName, distDir: string): MobileOtaCommandPlan {

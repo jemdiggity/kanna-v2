@@ -457,13 +457,19 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
         input: parseFlagInput(otaRest, { staging: false, production: false }),
       };
     }
+    if (subcommand === "provision") {
+      return {
+        taskId: "mobile.ota.provision",
+        input: parseFlagInput(otaRest, { staging: false, production: false }),
+      };
+    }
     if (subcommand === "provision-secret") {
       return {
         taskId: "mobile.ota.provision-secret",
         input: parseFlagInput(otaRest, { staging: false, production: false }),
       };
     }
-    throw new Error("mobile ota requires publish, status, doctor, preflight, or provision-secret");
+    throw new Error("mobile ota requires publish, status, doctor, preflight, provision, or provision-secret");
   }
   if (group === "dev" && command === "restart") {
     return parseDevRestartInput(rest);
@@ -595,6 +601,7 @@ const helpTopics: Record<string, string[]> = {
     "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
     "  mobile ota status --staging|--production",
     "  mobile ota doctor|preflight --staging|--production",
+    "  mobile ota provision --staging|--production",
     "  mobile ota provision-secret --staging|--production --key-path <path>",
     "  mobile test",
     "  mobile device-smoke",
@@ -783,6 +790,7 @@ const helpTopics: Record<string, string[]> = {
     "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
     "  mobile ota status --staging|--production",
     "  mobile ota doctor|preflight --staging|--production",
+    "  mobile ota provision --staging|--production",
     "  mobile ota provision-secret --staging|--production --key-path <path>"
   ],
   "mobile ota publish": [
@@ -804,6 +812,11 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd mobile ota preflight --staging|--production",
     "",
     "Alias for 'kd mobile ota doctor'."
+  ],
+  "mobile ota provision": [
+    "Usage: kd mobile ota provision --staging|--production",
+    "",
+    "Provision the Kanna mobile OTA bucket and relay storage access."
   ],
   "mobile ota provision-secret": [
     "Usage: kd mobile ota provision-secret --staging|--production --key-path <path>",

@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildRelayDeployPlan,
@@ -13,6 +13,22 @@ import {
 import type { CommandRunner } from "../src/runtime/process";
 
 describe("cloud deploy runtime", () => {
+  it("includes workspace patched dependencies in the relay Docker build context", () => {
+    const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
+    const dockerfile = readFileSync(resolve(repoRoot, "services/relay/Dockerfile"), "utf8");
+    const manifests = dockerfile.indexOf("COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./");
+    const patches = dockerfile.indexOf("COPY patches/ ./patches/");
+    const install = dockerfile.indexOf("RUN pnpm install --frozen-lockfile --filter kanna-relay...");
+    const deploy = dockerfile.indexOf(
+      "RUN pnpm --config.allowUnusedPatches=true --filter kanna-relay deploy --prod --legacy /relay"
+    );
+
+    expect(manifests).toBeGreaterThanOrEqual(0);
+    expect(patches).toBeGreaterThan(manifests);
+    expect(install).toBeGreaterThan(patches);
+    expect(deploy).toBeGreaterThan(install);
+  });
+
   it("resolves the production Firebase project from env before .firebaserc", () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
     writeFileSync(
