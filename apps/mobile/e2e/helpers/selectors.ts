@@ -41,6 +41,12 @@ export const selectors = {
   accountSheet: `~${MOBILE_E2E_IDS.accountSheet}`,
   accountCloseButton: `~${MOBILE_E2E_IDS.accountCloseButton}`,
   accountMachinesButton: `~${MOBILE_E2E_IDS.accountMachinesButton}`,
+  accountQuickRepliesButton: `~${MOBILE_E2E_IDS.accountQuickRepliesButton}`,
+  quickReplyEditor: `~${MOBILE_E2E_IDS.quickReplyEditor}`,
+  quickReplyEditorDone: `~${MOBILE_E2E_IDS.quickReplyEditorDone}`,
+  quickReplyEditorCancel: `~${MOBILE_E2E_IDS.quickReplyEditorCancel}`,
+  quickReplyEditorInputsXPath:
+    '//*[starts-with(@name, "mobile.quick-replies.") and contains(@name, ".input")]',
   machinesScreen: `~${MOBILE_E2E_IDS.machinesScreen}`,
   machinesBackButton: `~${MOBILE_E2E_IDS.machinesBackButton}`,
   machinesAddButton: `~${MOBILE_E2E_IDS.machinesAddButton}`,
