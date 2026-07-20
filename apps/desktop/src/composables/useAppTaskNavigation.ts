@@ -134,6 +134,7 @@ export function useAppTaskNavigation({
     const sortOptions = {
       repoId,
       blockers: store.taskBlockers,
+      blockerTaskStates: store.blockerTaskStates,
       getStageOrder: store.getStageOrder,
       searchQuery,
     };
@@ -309,13 +310,13 @@ export function useAppTaskNavigation({
 
   function isBlocked(itemId: string | null): boolean {
     if (itemId === null) return false;
-    // Optimistic resolution: a blocker parked at `pr` with a PR created no
-    // longer blocks (see isBlockerResolved). A blocker row whose task is
-    // unknown counts as unresolved.
+    // Blocker lifecycle state remains available even when closed or hidden
+    // blockers are absent from the visible task list.
     return (store.taskBlockers ?? []).some((blocker) => {
       if (blocker.blocked_item_id !== itemId) return false;
-      const blockerItem = store.items.find((item) => item.id === blocker.blocker_item_id);
-      return !blockerItem || !isBlockerResolved(blockerItem);
+      const blockerState = (store.blockerTaskStates ?? {})[blocker.blocker_item_id]
+        ?? store.items.find((item) => item.id === blocker.blocker_item_id);
+      return !blockerState || !isBlockerResolved(blockerState);
     });
   }
 

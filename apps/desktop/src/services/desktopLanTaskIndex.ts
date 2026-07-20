@@ -1,5 +1,6 @@
-import type { DbHandle, Repo, TaskBlocker } from "../types/kanna";
+import type { BlockerTaskStates, DbHandle, Repo, TaskBlocker } from "../types/kanna";
 import { invoke } from "../invoke";
+import { isBlockerResolved } from "../utils/blockerResolution";
 import { buildCloudTaskSnapshot } from "../utils/cloudTaskSnapshot";
 import { mapDesktopCloudTasks, type DesktopCloudSnapshot, type DesktopCloudTaskSnapshot } from "./desktopCloudTaskIndex";
 import { fetchDesktopSnapshot } from "./desktopServerClient";
@@ -32,7 +33,11 @@ export async function publishDesktopLanTaskSnapshot(db?: DbHandle | null): Promi
         desktopId,
         item,
         repo: { ...repo, remote_url: remoteUrl },
-        blockedByTaskIds: blockedByTaskIds(snapshot.taskBlockers, item.id),
+        blockedByTaskIds: blockedByTaskIds(
+          snapshot.taskBlockers,
+          snapshot.blockerTaskStates ?? {},
+          item.id,
+        ),
       }));
     }
   }
@@ -48,9 +53,17 @@ export async function publishDesktopLanTaskSnapshot(db?: DbHandle | null): Promi
   });
 }
 
-function blockedByTaskIds(blockers: TaskBlocker[], itemId: string): string[] {
+function blockedByTaskIds(
+  blockers: TaskBlocker[],
+  blockerTaskStates: BlockerTaskStates,
+  itemId: string,
+): string[] {
   return blockers
-    .filter((blocker) => blocker.blocked_item_id === itemId)
+    .filter((blocker) => {
+      if (blocker.blocked_item_id !== itemId) return false;
+      const blockerState = blockerTaskStates[blocker.blocker_item_id];
+      return !blockerState || !isBlockerResolved(blockerState);
+    })
     .map((blocker) => blocker.blocker_item_id);
 }
 

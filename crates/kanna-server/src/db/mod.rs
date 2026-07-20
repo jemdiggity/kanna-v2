@@ -176,8 +176,7 @@ pub struct SnapshotBlockerTaskState {
 
 impl SnapshotBlockerTaskState {
     pub fn is_resolved(&self) -> bool {
-        self.closed_at.is_some()
-            || (self.stage.as_deref() == Some("pr") && self.pr_url.is_some())
+        self.closed_at.is_some() || (self.stage.as_deref() == Some("pr") && self.pr_url.is_some())
     }
 }
 

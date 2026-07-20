@@ -1,4 +1,4 @@
-import type { PipelineItem, TaskBlocker } from "../types/kanna";
+import type { BlockerTaskStates, PipelineItem, TaskBlocker } from "../types/kanna";
 import type { SidebarTaskItem } from "../types/taskUi";
 import { isBlockerResolved } from "./blockerResolution";
 import { taskSearchMatch, type TaskSearchable } from "./taskSearch";
@@ -23,6 +23,7 @@ interface OrderingOptions<T extends OrderingItem> {
   repoId: string;
   items: readonly T[];
   blockers?: readonly TaskBlocker[];
+  blockerTaskStates?: Readonly<BlockerTaskStates>;
   getStageOrder: (repoId: string) => readonly string[];
   searchQuery?: string;
 }
@@ -95,8 +96,9 @@ function normalizedSearchQuery(query: string | undefined): string {
  * unresolved. Blockers resolve optimistically (closed, or parked at `pr`
  * with a PR created — see isBlockerResolved), so a dependent that started
  * stacking on a PR'd blocker leaves the blocked section even though its
- * task_blocker rows persist until the blocker closes. A blocker row whose
- * task is not in `items` cannot be judged and counts as unresolved.
+ * task_blocker rows persist after resolution. Blocker task state is projected
+ * separately because closed and hidden blockers are absent from `items`.
+ * A blocker with no projected or visible state counts as unresolved.
  */
 function blockedTaskIds<T extends OrderingItem>(
   options: OrderingOptions<T>,
@@ -110,8 +112,9 @@ function blockedTaskIds<T extends OrderingItem>(
 
   const blocked = new Set<string>();
   for (const blocker of options.blockers ?? []) {
-    const blockerItem = itemsByTaskId.get(blocker.blocker_item_id);
-    if (!blockerItem || !isBlockerResolved(blockerItem)) {
+    const blockerState = options.blockerTaskStates?.[blocker.blocker_item_id]
+      ?? itemsByTaskId.get(blocker.blocker_item_id);
+    if (!blockerState || !isBlockerResolved(blockerState)) {
       blocked.add(blocker.blocked_item_id);
     }
   }

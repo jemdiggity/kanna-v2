@@ -174,7 +174,7 @@ Repeat the commands from Step 2. Expected: PASS.
 Run:
 
 ```bash
-pnpm --dir apps/desktop typecheck
+pnpm --dir apps/desktop exec vue-tsc --noEmit
 pnpm --dir apps/desktop test --run src/utils/sidebarOrdering.test.ts src/services/desktopLanTaskIndex.test.ts src/services/desktopServerClient.test.ts
 ```
 

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { publishDesktopLanTaskSnapshot } from "./desktopLanTaskIndex";
+import { setDesktopSnapshotFetcherForTests } from "./desktopServerClient";
 import { __resetRepoRemoteUrlCacheForTests } from "./repoRemoteUrl";
 
 const mocks = vi.hoisted(() => ({
@@ -55,6 +56,13 @@ function openItem(id: string) {
 
 describe("desktop LAN task index publisher", () => {
   beforeEach(() => {
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [],
+      taskBlockers: [],
+      blockerTaskStates: {},
+      worktreePaths: {},
+      settings: {},
+    }));
     __resetRepoRemoteUrlCacheForTests();
     mocks.invoke.mockReset();
     mocks.listRepos.mockReset();
@@ -82,5 +90,28 @@ describe("desktop LAN task index publisher", () => {
     expect(
       mocks.invoke.mock.calls.filter(([command]) => command === "git_remote_url"),
     ).toHaveLength(0);
+  });
+
+  it("omits resolved blockers from the published task snapshot", async () => {
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [{ repo: repo() as never, items: [openItem("task-open") as never] }],
+      taskBlockers: [{ blocked_item_id: "task-open", blocker_item_id: "task-closed" }],
+      blockerTaskStates: {
+        "task-closed": {
+          closed_at: "2026-07-19T22:49:04Z",
+          stage: "pr",
+          pr_url: "https://github.com/acme/repo/pull/7",
+        },
+      },
+      worktreePaths: {},
+      settings: {},
+    }));
+
+    await publishDesktopLanTaskSnapshot();
+
+    const publishCall = mocks.invoke.mock.calls.find(
+      ([command]) => command === "set_transfer_task_snapshot",
+    );
+    expect(publishCall?.[1].snapshot.tasks[0].blockedByTaskIds).toEqual([]);
   });
 });

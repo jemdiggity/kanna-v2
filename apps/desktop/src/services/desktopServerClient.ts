@@ -1,7 +1,7 @@
 import { isAgentProvider, type AgentProvider } from "@kanna/agent-protocol";
 import type { RepoConfig } from "@kanna/core";
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
-import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
+import type { BlockerTaskStates, PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import { invoke } from "../invoke";
@@ -14,6 +14,7 @@ export interface DesktopSnapshotEntry {
 export interface DesktopSnapshot {
   entries: DesktopSnapshotEntry[];
   taskBlockers: TaskBlocker[];
+  blockerTaskStates?: BlockerTaskStates;
   worktreePaths: Record<string, string>;
   settings: Record<string, string>;
 }

@@ -232,6 +232,40 @@ describe("sidebarOrdering", () => {
     ).not.toContain("dependent");
   });
 
+  it("uses snapshot state when a closed blocker is absent from visible items", () => {
+    const blockers: TaskBlocker[] = [
+      { blocked_item_id: "dependent", blocker_item_id: "closed-upstream" },
+    ];
+    const items = [item({ id: "dependent", stage: "in progress" })];
+
+    const groups = groupedSidebarItemsByStage({
+      repoId: "repo-1",
+      items,
+      blockers,
+      blockerTaskStates: {
+        "closed-upstream": {
+          closed_at: "2026-07-19T22:49:04Z",
+          stage: "pr",
+          pr_url: null,
+        },
+      },
+      getStageOrder,
+    });
+
+    expect(groups.flatMap((group) => group.items.map((entry) => entry.id))).toContain("dependent");
+  });
+
+  it("keeps a task blocked when its blocker state is unavailable", () => {
+    const blockers: TaskBlocker[] = [
+      { blocked_item_id: "dependent", blocker_item_id: "unknown-upstream" },
+    ];
+    const items = [item({ id: "dependent", stage: "in progress" })];
+
+    const groups = groupedSidebarItemsByStage({ repoId: "repo-1", items, blockers, getStageOrder });
+
+    expect(groups.flatMap((group) => group.items.map((entry) => entry.id))).not.toContain("dependent");
+  });
+
   it("nests a subtask directly beneath its parent and hides it from its own stage group", () => {
     const items = [
       item({ id: "parent", stage: "in progress", created_at: "2026-05-31T00:00:02.000Z" }),
