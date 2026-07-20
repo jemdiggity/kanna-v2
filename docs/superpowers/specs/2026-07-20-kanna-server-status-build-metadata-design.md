@@ -6,7 +6,7 @@ Make `GET /v1/status` identify the active installed Kanna build unambiguously. P
 
 ## API Contract
 
-The status response will replace the optional `serverVersion` field with two required camel-case fields:
+The status response adds two required canonical camel-case fields while retaining the existing optional `serverVersion` field as a deprecated compatibility alias:
 
 ```json
 {
@@ -15,6 +15,7 @@ The status response will replace the optional `serverVersion` field with two req
   "desktopName": "Studio Mac",
   "version": "0.0.69-staging.1",
   "environment": "staging",
+  "serverVersion": "0.0.69-staging.1",
   "lanHost": "0.0.0.0",
   "lanPort": 48121,
   "pairingCode": null
@@ -27,7 +28,7 @@ The status response will replace the optional `serverVersion` field with two req
 - `staging` for the installed staging app;
 - `development` when no installed release environment applies.
 
-This is an intentional pre-1.0 breaking API change. All in-repository producers and consumers will move to the new required fields together; `serverVersion` will not remain as an alias.
+New consumers use `version` and `environment`. `serverVersion` remains present so existing consumers continue to decode status responses; it always equals `version` and carries no independent identity. The Rust server and desktop models keep it optional for compatibility with older responses, but every response produced by the current build populates it.
 
 ## Metadata Ownership and Flow
 
@@ -42,13 +43,13 @@ At runtime, the desktop will construct server metadata from:
 
 The desktop will write required `version` and `environment` keys into the instance-specific `server.toml`. Production and staging already use separate app-data roots and ports; their generated configurations will now also carry explicit identities.
 
-`kanna-server` will deserialize both fields as required configuration and return them unchanged from `GET /v1/status`, including tunneled status requests. It will not infer environment from a port or infer version from a prerelease suffix.
+`kanna-server` will deserialize both canonical fields as required configuration and return them unchanged from `GET /v1/status`, including tunneled status requests. It copies `version` into the deprecated `serverVersion` response alias. It will not infer environment from a port or infer version from a prerelease suffix.
 
 ## Lifecycle and Stale-Server Detection
 
-The desktop's stopped status snapshot will expose the same canonical version and environment as a running server response.
+The desktop's stopped status snapshot will expose the same canonical version, environment, and compatibility alias as a running server response.
 
-When adopting an existing server process, the desktop will require the response's desktop identity, version, and environment to match the active app. Generated-config freshness checks will likewise require both metadata lines. A mismatch causes the existing replacement flow to stop the stale process and launch the packaged sidecar with fresh configuration.
+When adopting an existing server process, the desktop will require the response's desktop identity, canonical version, and environment to match the active app. `serverVersion` is not an authority for stale-process detection. Generated-config freshness checks will likewise require both canonical metadata lines. A mismatch causes the existing replacement flow to stop the stale process and launch the packaged sidecar with fresh configuration.
 
 Because the new fields are required, configuration fixtures and test harnesses that launch `kanna-server` must supply both. This deliberately prevents a server from presenting ambiguous build identity.
 
@@ -73,12 +74,14 @@ Tests will prove the metadata flow at the relevant boundaries:
 1. Release tests verify that the resolved full staging prerelease is present during the Bazel build and that production uses its resolved release version.
 2. Desktop configuration tests verify production, staging, and development environment values alongside the active desktop version.
 3. Desktop status/stale-process tests verify that both version and environment must match.
-4. `kanna-server` status tests verify exact production and staging response payloads, including `0.0.69-staging.1` for staging.
-5. Existing transport and remote harness fixtures are updated to demonstrate that direct and tunneled `/v1/status` paths preserve the same contract.
+4. A Rust integration test launches two actual compiled `kanna-server` child processes with separate production and staging TOML configurations and loopback ports, then asserts exact HTTP JSON. The staging assertion includes `0.0.69-staging.1`; both responses include the matching `serverVersion` alias.
+5. The tunneled dispatcher test asserts the exact status body, proving that direct and tunneled routes preserve the same contract.
+6. Existing desktop and remote harness fixtures include all three response fields.
+
+A full release-installed-app E2E is not part of the regular test suite because it would require building and signing both production and staging macOS bundles, installing them side by side into an isolated host, controlling their fixed instance ports and app-data roots, and launching GUI application processes. A dedicated macOS release QA runner that provisions signing identities, installs both generated bundles, and reserves the production/staging ports would make that test feasible. Until that exists, the child-process integration test substitutes at the relevant boundary: it runs the real `kanna-server` executable, loads distinct runtime configurations, binds distinct TCP ports, and crosses the HTTP serialization boundary.
 
 ## Out of Scope
 
 - Changing the production or staging port assignments.
 - Giving the reusable sidecar binary its own release identity.
-- Supporting legacy `serverVersion` clients after this coordinated pre-1.0 API change.
 - Changing mobile application versioning or OTA runtime versions.

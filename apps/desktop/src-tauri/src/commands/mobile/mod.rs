@@ -36,6 +36,9 @@ pub struct MobileServerStatus {
     pub version: String,
     #[serde(default)]
     pub environment: String,
+    /// Deprecated compatibility alias for `version`.
+    #[serde(default)]
+    pub server_version: Option<String>,
     pub lan_host: String,
     pub lan_port: u16,
     pub pairing_code: Option<String>,
@@ -469,6 +472,7 @@ fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, Str
         desktop_name: state.desktop_name.clone(),
         version: current_server_version().to_string(),
         environment: server_environment(state.cloud_env).to_string(),
+        server_version: Some(current_server_version().to_string()),
         lan_host: "0.0.0.0".to_string(),
         lan_port: local_server_port_for_cloud_env(state.cloud_env),
         pairing_code: None,
@@ -948,6 +952,7 @@ mod tests {
             desktop_name: "Studio Mac".to_string(),
             version: current_server_version().to_string(),
             environment: "production".to_string(),
+            server_version: Some(current_server_version().to_string()),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
             pairing_code: None,
@@ -959,6 +964,10 @@ mod tests {
             current_server_version(),
             "production",
         ));
+        assert_eq!(
+            status.server_version.as_deref(),
+            Some(current_server_version())
+        );
 
         let stale_wrong_version = MobileServerStatus {
             version: "__stale__".to_string(),
@@ -999,6 +1008,10 @@ mod tests {
         assert_eq!(status.desktop_id, "desktop-legacy");
         assert!(status.version.is_empty());
         assert!(status.environment.is_empty());
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["serverVersion"],
+            "0.0.68"
+        );
         assert!(!is_current_server_status(
             &status,
             "desktop-legacy",
@@ -1057,6 +1070,10 @@ mod tests {
         assert_eq!(status.desktop_id, expected_desktop_id);
         assert_eq!(status.version, current_server_version());
         assert_eq!(status.environment, "development");
+        assert_eq!(
+            status.server_version.as_deref(),
+            Some(status.version.as_str())
+        );
 
         stop_server_on_port(port)
             .await
@@ -1117,6 +1134,10 @@ mod tests {
         assert_eq!(status.desktop_id, expected_desktop_id);
         assert_eq!(status.version, current_server_version());
         assert_eq!(status.environment, "development");
+        assert_eq!(
+            status.server_version.as_deref(),
+            Some(status.version.as_str())
+        );
 
         stop_server_on_port(port)
             .await
@@ -1174,6 +1195,10 @@ mod tests {
         assert_eq!(status.desktop_id, expected_desktop_id);
         assert_eq!(status.version, current_server_version());
         assert_eq!(status.environment, "development");
+        assert_eq!(
+            status.server_version.as_deref(),
+            Some(status.version.as_str())
+        );
 
         existing_server
             .kill()
@@ -2120,6 +2145,7 @@ while True:
             "desktopName": "Production Port Owner",
             "version": "test-production",
             "environment": "production",
+            "serverVersion": "test-production",
             "lanHost": "127.0.0.1",
             "lanPort": int(sys.argv[1]),
             "pairingCode": None,
@@ -2215,6 +2241,7 @@ while True:
                 "desktopName": "Wait Test",
                 "version": current_server_version(),
                 "environment": "development",
+                "serverVersion": current_server_version(),
                 "lanHost": "127.0.0.1",
                 "lanPort": port,
                 "pairingCode": null

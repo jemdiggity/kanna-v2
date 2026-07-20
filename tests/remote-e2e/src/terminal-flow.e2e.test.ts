@@ -226,7 +226,12 @@ describe("remote task terminal flow E2E", () => {
         path: "/v1/status",
         body: null
       });
-      expect(status).toMatchObject({ desktopId: harness.desktopId });
+      expect(status).toMatchObject({
+        desktopId: harness.desktopId,
+        version: "remote-e2e",
+        environment: "development",
+        serverVersion: "remote-e2e"
+      });
 
       await harness.client.invokeDesktop({
         desktopId: harness.desktopId,

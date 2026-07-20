@@ -199,4 +199,19 @@ async fn e2e_mobile_controls_gate_direct_lan_but_preserve_tunneled_transport() {
 
     let tunneled = super::dispatch_http_invoke(state, "GET", "/v1/status", json!(null)).await;
     assert_eq!(tunneled.status, StatusCode::OK.as_u16());
+    assert_eq!(tunneled.error, None);
+    assert_eq!(
+        tunneled.body,
+        Some(json!({
+            "state": "running",
+            "desktopId": "desktop-e2e-lan-gate",
+            "desktopName": "Gate Mac",
+            "version": "test-version",
+            "environment": "development",
+            "serverVersion": "test-version",
+            "lanHost": "0.0.0.0",
+            "lanPort": 48120,
+            "pairingCode": null
+        }))
+    );
 }

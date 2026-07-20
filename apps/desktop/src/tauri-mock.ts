@@ -166,6 +166,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     desktopName: "Mock Desktop",
     version: "0.0.0",
     environment: "development",
+    serverVersion: "0.0.0",
     lanHost: "127.0.0.1",
     lanPort: 48120,
     pairingCode: null,

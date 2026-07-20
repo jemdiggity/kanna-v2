@@ -41,6 +41,8 @@ pub struct MobileServerStatus {
     pub desktop_name: String,
     pub version: String,
     pub environment: String,
+    /// Deprecated compatibility alias for `version`.
+    pub server_version: Option<String>,
     pub lan_host: String,
     pub lan_port: u16,
     pub pairing_code: Option<String>,
@@ -624,6 +626,7 @@ pub fn build_mobile_server_status(
         desktop_name: config.desktop_name.clone(),
         version: config.version.clone(),
         environment: config.environment.clone(),
+        server_version: Some(config.version.clone()),
         lan_host: config.lan_host.clone(),
         lan_port: config.lan_port,
         pairing_code,
@@ -1084,7 +1087,7 @@ mod tests {
         assert_eq!(status.desktop_name, "Studio Mac");
         assert_eq!(status_json["version"], "0.0.69");
         assert_eq!(status_json["environment"], "production");
-        assert!(status_json.get("serverVersion").is_none());
+        assert_eq!(status_json["serverVersion"], "0.0.69");
         assert_eq!(status.pairing_code.as_deref(), Some("ABC123"));
     }
 
@@ -1115,6 +1118,6 @@ mod tests {
 
         assert_eq!(status_json["version"], "0.0.69-staging.1");
         assert_eq!(status_json["environment"], "staging");
-        assert!(status_json.get("serverVersion").is_none());
+        assert_eq!(status_json["serverVersion"], "0.0.69-staging.1");
     }
 }

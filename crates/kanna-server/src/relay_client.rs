@@ -342,6 +342,7 @@ mod tests {
                     "desktopName": "Studio Mac",
                     "version": "test-version",
                     "environment": "development",
+                    "serverVersion": "test-version",
                     "lanHost": "127.0.0.1",
                     "lanPort": 48120,
                     "pairingCode": null

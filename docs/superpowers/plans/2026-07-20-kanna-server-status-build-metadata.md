@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `/v1/status` report the active desktop build's required canonical `version` and `environment`, including the complete staging prerelease.
+**Goal:** Make `/v1/status` report the active desktop build's required canonical `version` and `environment`, including the complete staging prerelease, while preserving `serverVersion` as a deprecated compatibility alias.
 
-**Architecture:** The desktop app remains the installed-build identity owner. Its build-time version and bundle-derived environment are written into the instance-specific `server.toml`; `kanna-server` requires and returns those values without inference. Production and staging keep sharing the reusable sidecar binary while reporting distinct runtime identities.
+**Architecture:** The desktop app remains the installed-build identity owner. Its build-time version and bundle-derived environment are written into the instance-specific `server.toml`; `kanna-server` requires and returns those values without inference and copies the canonical version into the deprecated `serverVersion` response alias. Production and staging keep sharing the reusable sidecar binary while reporting distinct runtime identities.
 
 **Tech Stack:** Rust, Axum/Serde/TOML, Tauri v2, TypeScript/Vitest, Bazel release orchestration.
 
@@ -15,12 +15,14 @@
 - `crates/kanna-server/src/config.rs` — require `version` and `environment` in server runtime configuration.
 - `crates/kanna-server/src/mobile_api.rs` — define and build the canonical status response.
 - `crates/kanna-server/src/http_api/tests/revision_status.rs` — assert the HTTP payload contract.
+- `crates/kanna-server/tests/status_build_identity_http.rs` — launch real production and staging server processes and assert exact HTTP responses.
 - `crates/kanna-server/src/http_api/test_support.rs` and Rust server fixtures — migrate test `Config` literals to canonical metadata.
 - `apps/desktop/src-tauri/src/commands/mobile/mod.rs` — decode status, construct stopped snapshots, and compare version plus environment.
 - `apps/desktop/src-tauri/src/commands/mobile/config.rs` — write and validate canonical runtime metadata.
 - `apps/desktop/src/tauri-mock.ts` — update the browser mock response.
 - `tests/remote-e2e/src/harness.ts` and `tests/remote-e2e/src/staging.ts` — update real server TOML fixtures.
 - `tools/kd/tests/release.test.ts` — prove resolved production and complete staging versions are present during Bazel builds.
+- `docs/superpowers/specs/2026-07-20-kanna-server-status-build-metadata-design.md` — document compatibility and installed-app E2E limitations.
 
 ### Task 1: Require canonical build metadata in `kanna-server`
 
@@ -85,11 +87,12 @@ version: raw.version,
 environment: raw.environment,
 ```
 
-Change `MobileServerStatus` to replace `server_version: Option<String>` with:
+Change `MobileServerStatus` to add the canonical fields while retaining the compatibility field:
 
 ```rust
 pub version: String,
 pub environment: String,
+pub server_version: Option<String>,
 ```
 
 and build them from configuration:
@@ -97,9 +100,10 @@ and build them from configuration:
 ```rust
 version: config.version.clone(),
 environment: config.environment.clone(),
+server_version: Some(config.version.clone()),
 ```
 
-Do not accept a `server_version` alias and do not infer either field.
+Do not accept `server_version` as configuration and do not infer either canonical field. The alias is response-only and must always equal the canonical version in current responses.
 
 - [ ] **Step 4: Migrate all server fixtures mechanically**
 
@@ -125,7 +129,7 @@ crates/kanna-server/tests/legacy_database_relocation.rs
 crates/kanna-server/tests/provider_resolution_http.rs
 ```
 
-replace each Rust fixture field:
+replace each server `Config` fixture field:
 
 ```rust
 server_version: Some("test-version".to_string()),
@@ -151,7 +155,7 @@ version = "test-version"
 environment = "development"
 ```
 
-Update JSON expectations from `serverVersion` to the two canonical camel-case keys.
+Update JSON expectations to include the two canonical camel-case keys and retain `serverVersion` with the same value as `version`.
 
 - [ ] **Step 5: Format and verify GREEN**
 
@@ -164,7 +168,7 @@ cargo test --manifest-path crates/kanna-server/Cargo.toml config::tests -- --noc
 rg -n 'server_version|serverVersion' crates/kanna-server
 ```
 
-Expected: focused tests PASS and `rg` returns no matches.
+Expected: focused tests PASS and matches are limited to the deprecated response field and its tests; `Config` and TOML fixtures do not contain the legacy key.
 
 - [ ] **Step 6: Commit the server contract**
 
@@ -216,15 +220,16 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml current_server_stat
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml build_server_config_includes_build_metadata -- --nocapture
 ```
 
-Expected: FAIL because the desktop still models and writes optional `serverVersion` only.
+Expected: FAIL because the desktop does not yet model the canonical build identity.
 
 - [ ] **Step 3: Implement desktop metadata derivation and propagation**
 
-Replace the desktop `MobileServerStatus.server_version` field with:
+Add canonical fields to desktop `MobileServerStatus` while retaining the optional compatibility field:
 
 ```rust
 pub version: String,
 pub environment: String,
+pub server_version: Option<String>,
 ```
 
 Add one helper beside `current_server_version`:
@@ -264,7 +269,8 @@ to:
 
 ```ts
 version: "0.0.0",
-environment: "development"
+environment: "development",
+serverVersion: "0.0.0"
 ```
 
 Production fake responses use `environment: "production"`; staging responses use `environment: "staging"` and the full prerelease where the test is about installed staging.
@@ -280,7 +286,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml build_server_config
 rg -n 'server_version|serverVersion' apps/desktop/src-tauri/src/commands/mobile apps/desktop/src/tauri-mock.ts
 ```
 
-Expected: focused tests PASS and `rg` returns no matches.
+Expected: focused tests PASS and alias matches are limited to response models, response fixtures, and compatibility assertions; canonical version and environment remain authoritative.
 
 - [ ] **Step 6: Commit desktop propagation**
 
@@ -356,7 +362,7 @@ Update relay client status JSON assertions to require:
 ```rust
 assert_eq!(status_body["version"], "test-version");
 assert_eq!(status_body["environment"], "development");
-assert!(status_body.get("serverVersion").is_none());
+assert_eq!(status_body["serverVersion"], "test-version");
 ```
 
 - [ ] **Step 2: Run direct and tunneled status coverage**
@@ -371,15 +377,15 @@ cargo test --manifest-path crates/kanna-server/Cargo.toml e2e_sql_routes -- --no
 
 Expected: PASS with identical canonical metadata on direct and tunneled status paths.
 
-- [ ] **Step 3: Verify no legacy field remains in runtime code or fixtures**
+- [ ] **Step 3: Verify the compatibility alias is populated from the canonical version**
 
 Run:
 
 ```bash
-rg -n 'server_version|serverVersion' crates/kanna-server apps/desktop tests/remote-e2e tools/kd
+rg -n 'server_version|serverVersion' crates/kanna-server apps/desktop tests/remote-e2e
 ```
 
-Expected: no matches. If unrelated historical documentation appears outside these runtime paths, leave it unchanged.
+Expected: matches are limited to the deprecated response field, fixtures, and assertions; no server configuration source or freshness check treats the alias as authoritative.
 
 - [ ] **Step 4: Commit harness migration**
 
@@ -387,6 +393,42 @@ Expected: no matches. If unrelated historical documentation appears outside thes
 git add tests/remote-e2e crates/kanna-server/src/relay_client.rs crates/kanna-server/src/http_api/tests/e2e_sql_routes.rs
 git commit -m "test(server): cover build identity across status transports"
 ```
+
+### Task 4A: Add process-boundary production and staging coverage
+
+**Files:**
+- Create: `crates/kanna-server/tests/status_build_identity_http.rs`
+- Modify: `crates/kanna-server/src/http_api/tests/e2e_sql_routes.rs`
+- Modify: `docs/superpowers/specs/2026-07-20-kanna-server-status-build-metadata-design.md`
+
+- [ ] **Step 1: Write the failing child-process HTTP test**
+
+Launch `env!("CARGO_BIN_EXE_kanna-server")` twice with separate temporary `server.toml`, database, daemon, pairing-store, and loopback-port values. Poll each real listener and compare the complete decoded JSON values. Production must report `version` and `serverVersion` as `0.0.69` with `environment: "production"`; staging must report both version fields as `0.0.69-staging.1` with `environment: "staging"`.
+
+- [ ] **Step 2: Confirm RED**
+
+```bash
+cargo test -p kanna-server --test status_build_identity_http -- --nocapture
+```
+
+Expected: FAIL because the current server omits `serverVersion`.
+
+- [ ] **Step 3: Populate the alias and update desktop response models**
+
+Add `server_version: Option<String>` to the server and desktop `MobileServerStatus` models. Populate it with `Some(canonical_version.clone())` in running and stopped responses, update browser/process fixtures, and keep stale-process matching based only on `version` and `environment`.
+
+- [ ] **Step 4: Assert the tunneled body**
+
+Extend `e2e_mobile_controls_gate_direct_lan_but_preserve_tunneled_transport` to compare the full tunneled JSON body, including `version`, `environment`, and `serverVersion`, after direct LAN HTTP has been disabled.
+
+- [ ] **Step 5: Confirm GREEN and document the installed-app gap**
+
+```bash
+cargo test -p kanna-server --test status_build_identity_http -- --nocapture
+cargo test -p kanna-server e2e_mobile_controls_gate_direct_lan_but_preserve_tunneled_transport -- --nocapture
+```
+
+Document that release-installed-app E2E requires signed production and staging bundles, an isolated macOS runner, controlled fixed ports/app-data roots, and GUI process launch. Record the real child-process/config/TCP/HTTP test as the narrower substitute.
 
 ### Task 5: Full verification
 
@@ -437,6 +479,6 @@ Confirm from source and fresh test output:
 - production reports `environment: "production"` and its complete release version;
 - staging reports `environment: "staging"` and a complete prerelease such as `0.0.69-staging.1`;
 - development reports `environment: "development"`;
-- `/v1/status` contains no `serverVersion`;
+- `/v1/status` contains `serverVersion` as a deprecated alias exactly equal to `version`;
 - version and environment originate in desktop build/runtime metadata and are not inferred by `kanna-server`;
 - direct and tunneled status paths return the same contract.

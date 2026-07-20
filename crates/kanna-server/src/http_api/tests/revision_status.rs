@@ -910,6 +910,6 @@ async fn status_route_does_not_expose_pairing_secret() {
     assert_eq!(status.state, "running");
     assert_eq!(status_json["version"], "test-version");
     assert_eq!(status_json["environment"], "development");
-    assert!(status_json.get("serverVersion").is_none());
+    assert_eq!(status_json["serverVersion"], "test-version");
     assert!(status.pairing_code.is_none());
 }
