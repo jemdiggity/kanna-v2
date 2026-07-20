@@ -5,15 +5,20 @@ Kanna desktop app.
 
 ## Prerequisites
 
-macOS with the following on `PATH` (checked by `./kd doctor`):
+macOS with the following installed (all verified by `./kd setup --check`, per
+`tools/kd/src/runtime/setup.ts`):
 
+- Xcode Command Line Tools (`xcode-select --install`)
 - `git`
-- `pnpm` (the repo pins `pnpm@11` via the `packageManager` field; Node.js is
-  required to run pnpm and the `kd` CLI)
-- `tmux` — `kd dev up` runs the dev processes in a background tmux session
+- Node.js and `pnpm` (the repo pins `pnpm@11` via the `packageManager` field)
 - `rustc` / `cargo` — the toolchain version is pinned by `rust-toolchain.toml`
   and installed automatically by rustup
-- `sqlite3`
+- Bazel — the release/packaging build graph (see [Release](release.md))
+- Zig — required by the build toolchain
+- `tmux` — `kd dev up` runs the dev processes in a background tmux session
+
+`sqlite3` is also used (it ships with macOS); it is not part of the setup
+check, but `./kd doctor` verifies it.
 
 For agent sessions you also need at least one agent CLI installed and
 authenticated (Claude CLI is the default provider; Copilot, Codex, OpenCode,
@@ -24,11 +29,17 @@ and Antigravity are also supported).
 ```sh
 git clone <repo-url> kanna
 cd kanna
-./kd setup          # checks prerequisites, then installs workspace deps
-./kd doctor         # re-check prerequisites at any time
+./kd setup          # runs the full prerequisite checks, then pnpm install
+./kd setup --check  # the same checks without installing anything
+./kd doctor         # quick binary check: git, pnpm, tmux, rustc, cargo, sqlite3
 ```
 
-`./kd setup --check` verifies prerequisites without installing anything.
+The `./kd` launcher self-bootstraps on first run (it pnpm-installs and builds
+`tools/kd` before executing). `./kd setup` then verifies the Xcode Command
+Line Tools, the toolchain commands listed above, and the workspace
+`node_modules`, and installs workspace dependencies with `pnpm install`.
+`./kd doctor` is a narrower any-time health check of the six binaries listed
+in the comment above.
 
 Use `pnpm` for all package management and script execution — never npm.
 

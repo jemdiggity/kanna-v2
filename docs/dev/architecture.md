@@ -141,8 +141,8 @@ display name) is keyed by `KANNA_APP_ENV`; OTA compatibility is keyed by
   `kanna-build` (production), `kanna-staging` (staging), `kanna-local`
   (emulators).
 
-Deploy only via `./kd cloud deploy --staging|--production`, never the Firebase
-CLI directly.
+Deploy only via `./kd cloud deploy` (with `--staging` or `--production`),
+never the Firebase CLI directly.
 
 ### Supporting crates and packages
 

@@ -52,7 +52,9 @@ Grouped highlights — run `./kd` for the full surface (task ids live in
 ./kd dev up --attach         # attach to the tmux session
 ./kd dev down                # stop; --kill-daemon also kills workspace daemons
 ./kd dev restart             # stop + start (optional component: desktop|mobile|backend)
-./kd dev status / log        # inspect; `log mobile` for the mobile window
+./kd dev status              # inspect tmux session status
+./kd dev log                 # recent desktop output
+./kd dev log mobile          # recent mobile output
 ./kd env print               # resolved ports, DB, daemon dir, transfer root
 ./kd doctor                  # prerequisite check
 ./kd clean --all             # remove generated artifacts
@@ -74,7 +76,7 @@ pnpm test                    # canonical JS/TS suite
 ./kd mobile doctor --device  # on-device preflight without building
 ./kd mobile up --staging     # staging Metro against installed Kanna Staging
 ./kd mobile up --production  # mobile against installed /Applications/Kanna.app
-./kd mobile ota …            # OTA publish/status/doctor/provision (see release.md)
+./kd mobile ota status --staging  # OTA channel pointer; all OTA workflows in release.md
 ```
 
 Always start end-to-end mobile runs from `./kd dev up --mobile` or
@@ -86,8 +88,11 @@ identity are documented in detail in `AGENTS.md`.
 ### Cloud & release
 
 ```sh
-./kd cloud deploy --staging|--production [--relay]
-./kd release ship --dry-run | --release | --staging --release
+./kd cloud deploy --staging            # Firebase; add --relay for the relay
+./kd cloud deploy --production
+./kd release ship --dry-run            # build/sign without publishing
+./kd release ship --release            # tag, publish, upload manifest
+./kd release ship --staging --release  # staging channel prerelease
 ```
 
 See [Release](release.md). Never run `firebase deploy` or `pnpm exec tauri`

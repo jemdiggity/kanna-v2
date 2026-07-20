@@ -34,11 +34,20 @@ E2E uses W3C WebDriver via `tauri-plugin-webdriver` on port 4445 — debug build
 only (macOS WKWebView):
 
 ```sh
-# Terminal 1: a worktree dev instance
-cd {repo}/.kanna-worktrees/task-{uuid} && ./kd dev up --attach
+# Terminal 1: a worktree dev instance, started on an explicit test database
+cd {repo}/.kanna-worktrees/task-{uuid}
+./kd dev up --db kanna-test.db --attach
+
 # Terminal 2:
-cd apps/desktop && pnpm test:e2e
+cd apps/desktop
+pnpm test:e2e
 ```
+
+The `--db kanna-test.db` flag is required: the E2E preload
+(`apps/desktop/tests/e2e/preload.ts`) checks the running app's database name
+and refuses to run against anything that is not a test DB (the name must
+contain `test`), so an instance started with the default worktree database is
+rejected.
 
 Mock suites (`tests/e2e/mock/`) cover app-launch, task lifecycle, diff view,
 import, keyboard shortcuts, preferences; real suites (`tests/e2e/real/`) drive

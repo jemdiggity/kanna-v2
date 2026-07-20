@@ -9,8 +9,10 @@ Firebase cloud services. Everything goes through `kd`.
 The root `VERSION` file is the single source of truth for the packaged app
 version. `./kd release ship --release` updates `VERSION`, `tauri.conf.json`,
 and Rust package metadata, commits, tags `vX.Y.Z`, and publishes a GitHub
-release. `package.json` versions are all `0.0.0` and meaningless; the desktop
-app reads `VERSION` at compile time via `build.rs`.
+release. `VERSION` governs the packaged desktop app only — workspace
+`package.json` versions play no part in it (app-related packages sit at
+`0.0.0`; a few services version independently, e.g. `services/relay` at
+`0.1.0`). The desktop app reads `VERSION` at compile time via `build.rs`.
 
 ## Desktop: dev path vs. release path
 
@@ -90,13 +92,16 @@ compatibility: bump it for any native code/config/SDK/dependency change
 (including the identity config plugin and the embedded OTA certificate);
 JS-only changes keep the runtime and are OTA-deliverable.
 
+Every OTA command requires an explicit `--staging` or `--production` flag;
+the examples below use staging:
+
 ```sh
-./kd mobile ota publish --staging|--production          # publish signed update
-./kd mobile ota publish --staging --rollback-to <id>    # repoint the channel
-./kd mobile ota status --staging|--production           # channel pointer
-./kd mobile ota doctor --staging|--production           # read-only preflight
-./kd mobile ota provision --staging|--production        # bucket + relay IAM
-./kd mobile ota provision-secret … --key-path <pem>     # private key → Secret Manager
+./kd mobile ota publish --staging                     # publish signed update
+./kd mobile ota publish --staging --rollback-to <id>  # repoint the channel
+./kd mobile ota status --staging                      # channel pointer
+./kd mobile ota doctor --staging                      # read-only preflight
+./kd mobile ota provision --staging                   # bucket + relay IAM
+./kd mobile ota provision-secret --staging --key-path <pem>  # key → Secret Manager
 ```
 
 **Approval policy:** staging publish/rollback is self-serve (including for
