@@ -3,6 +3,7 @@ mod agent_runtime;
 mod bench;
 mod client;
 mod connection;
+mod fanout;
 mod fd_transfer;
 mod handoff;
 mod headless_terminal;

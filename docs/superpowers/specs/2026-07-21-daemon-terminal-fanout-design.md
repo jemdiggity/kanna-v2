@@ -71,41 +71,55 @@ Restoring the pre-4153e4dc desktop Tauri event path would be the wrong fix:
 ## 3. Root-cause fix: per-subscriber bounded mailboxes in the daemon
 
 New `crates/daemon/src/fanout.rs`. Each session owns a `SessionFanout`
-(registry entry presence also keeps the existing "stream started" meaning of
-`session_writers`); each attached writer and each observer becomes a
-`Subscriber`:
+(whose `streaming` flag keeps the existing "stream started" meaning of
+`session_writers` entry presence); each attached writer and each observer
+becomes a `Subscriber`:
 
-- a bounded `mpsc` mailbox (`SUBSCRIBER_MAILBOX_CAPACITY` pre-serialized
-  event lines, each `Arc<str>`, serialized once per event for all
-  subscribers); and
+- a byte-budgeted mailbox (`SUBSCRIBER_MAILBOX_MAX_BYTES` of undelivered
+  pre-serialized event lines, each `Arc<str>`, serialized once per event for
+  all subscribers); and
 - a dedicated writer task that drains the mailbox onto that client's
   socket (`Arc<Mutex<OwnedWriteHalf>>`, shared with command replies exactly
   as today) and wraps each socket write in the existing
   `attached_writer`/`observer_write` `terminal_perf` stages.
 
-The PTY ingestion loop **only ever calls `try_send`**. It never awaits client
-socket or WebSocket progress; neither do headless mirroring or recovery
-persistence, which keep running even when every subscriber is wedged.
+The PTY ingestion loop **only ever enqueues without awaiting**. It never
+awaits client socket or WebSocket progress; neither do headless mirroring or
+recovery persistence, which keep running even when every subscriber is
+wedged.
 
 ### Lag behavior (explicit)
 
-- **Bounded memory:** at most `SUBSCRIBER_MAILBOX_CAPACITY` undelivered lines
-  per subscriber, plus the kernel socket buffer.
-- **Observable:** overflow emits a `terminal_perf … event=lag` record
+Disconnecting an overflowing subscriber was considered and rejected: a
+subscriber that is actively draining but momentarily slower than a PTY burst
+(the normal case during heavy output) would be disconnected and reconnect in
+a churn loop. Instead lag is handled in place, mosh-style, using the
+authoritative headless terminal:
+
+- **Bounded memory:** at most `SUBSCRIBER_MAILBOX_MAX_BYTES` undelivered
+  serialized bytes per subscriber, plus the kernel socket buffer. A
+  subscriber over budget is marked *lagged* and further output is dropped
+  for it — enqueueing to everyone else continues untouched.
+- **Observable:** the transition emits a `terminal_perf … event=lag` record
   (new `TerminalPerfEventKind::Lag`) with stage, session, chunk, and queue
-  capacity; slow-but-not-overflowing sockets keep emitting the existing
-  stall/recovered records from the writer task.
-- **Deterministic resync:** an overflowing subscriber is disconnected —
-  writer task aborted, socket write half shut down so the client observes
-  EOF. Every production consumer already treats stream loss as "re-attach
-  and resynchronize from a fresh authoritative snapshot": KSP
-  `stream_terminal` re-attaches with backoff and re-sends `term_snapshot`;
-  the relay client re-issues `observe_session`, which replays a fresh
-  snapshot. The headless terminal is authoritative, so disconnection *is*
-  the resynchronization mechanism — no partial-stream repair, no unbounded
-  buffering.
+  budget; the eventual resync emits `event=recovered` carrying the lag
+  episode duration; slow-but-within-budget sockets keep emitting the
+  existing stall/recovered records from the writer task.
+- **Deterministic resync:** once a lagged subscriber's backlog fully drains,
+  the daemon re-syncs it in place by queueing a fresh authoritative
+  snapshot — on the next output chunk, or within one 500ms status tick
+  during silence. This is the same snapshot-first contract every consumer
+  already implements for attach and reattach: KSP forwards the mid-stream
+  `Snapshot` as a `term_snapshot` frame (desktop/mobile reset and
+  rehydrate), the relay observer forwards it as a `terminal_snapshot`
+  event, and task-transfer already forwards mid-stream snapshots.
 - **Isolation:** healthy subscribers keep their own mailboxes draining;
-  per-client ordering is preserved by the per-subscriber queue.
+  per-client ordering is preserved by the per-subscriber queue, and a
+  resynced subscriber sees snapshot-then-live with nothing duplicated or
+  lost in between.
+- **Final events:** on session exit/kill, a subscriber that still cannot
+  take the Exit event is disconnected (writer task aborted, write half shut
+  down) so its client observes EOF instead of a silent dead stream.
 
 ### Atomic snapshot-to-live cutover
 
@@ -154,12 +168,14 @@ Red first, against the current fanout, in `crates/daemon/tests/reconnect.rs`:
    stays saturated, and stays ordered.
 2. A permanently non-reading observer (no timeout at all today — this is the
    indefinite-stall path) must not delay a healthy attached client.
-3. With both a non-reading attached client and a non-reading observer
-   saturated, PTY ingestion itself keeps advancing: the headless snapshot
-   (served over a healthy control connection) reflects new input within a
-   tight bound, proving mirroring and recovery are decoupled from every
-   subscriber.
+3. A subscriber that overflows its byte budget is not disconnected: once it
+   resumes draining it is resynchronized in place from a fresh authoritative
+   snapshot containing the content it missed, live output resumes after the
+   snapshot, and neither the healthy subscriber nor PTY ingestion (headless
+   snapshot over a control connection) was ever delayed.
 
-Plus focused unit coverage for mailbox lag disconnect (diagnostic record,
-registry cleanup, healthy-subscriber ordering) and the existing concurrent
-attach cutover, kill, handoff, and cleanup suites staying green.
+Plus source-order unit tests that the ingestion loop never writes to a
+subscriber socket and that the attach cutover holds the fanout lock across
+snapshot and registration, a KSP test that a mid-stream daemon `Snapshot` is
+forwarded as a `term_snapshot` frame, and the existing concurrent attach
+cutover, kill, handoff, and cleanup suites staying green.

@@ -687,6 +687,14 @@ async fn observer_loop(
             Ok(DaemonEvent::Output { session_id, data }) => Action::Send {
                 event: relay_output_event(&session_id, data),
             },
+            // The daemon resynchronizes a subscriber that lagged behind live
+            // output by sending a fresh authoritative snapshot mid-stream.
+            Ok(DaemonEvent::Snapshot {
+                session_id: sid,
+                snapshot,
+            }) => Action::Send {
+                event: relay_snapshot_event(&sid, snapshot),
+            },
             Ok(DaemonEvent::Exit {
                 session_id: sid,
                 code,

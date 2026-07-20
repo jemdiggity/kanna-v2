@@ -1908,6 +1908,31 @@ async fn stream_terminal_once(
                     return StreamRunEnd::Done;
                 }
             }
+            // A mid-stream snapshot is the daemon resynchronizing this
+            // subscriber after it lagged behind live output; forward it so
+            // the client rehydrates exactly like on reattach.
+            Ok(DaemonEvent::Snapshot {
+                session_id: event_session,
+                snapshot,
+            }) if event_session == session_id => {
+                let frame = ServerFrame::TermSnapshot {
+                    task_id: task_id.to_string(),
+                    cols: snapshot.cols,
+                    rows: snapshot.rows,
+                    data_b64: b64(snapshot.vt.as_bytes()),
+                };
+                if send_terminal_frame(
+                    frame_tx.clone(),
+                    frame,
+                    session_id.to_string(),
+                    terminal_perf::global_monitor().clone(),
+                )
+                .await
+                .is_err()
+                {
+                    return StreamRunEnd::Done;
+                }
+            }
             Ok(DaemonEvent::Exit {
                 session_id: event_session,
                 code,
@@ -3918,6 +3943,22 @@ mod tests {
                 session_id: "daemon-terminal-1".to_string(),
                 data: vec![0x98, 0x80, b'\n'],
             };
+            // A lag resync arrives as a mid-stream Snapshot on the same
+            // connection and must be forwarded like the attach snapshot.
+            let resync_snapshot = DaemonEvent::Snapshot {
+                session_id: "daemon-terminal-1".to_string(),
+                snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                    version: 1,
+                    rows: 24,
+                    cols: 80,
+                    cursor_row: 2,
+                    cursor_col: 0,
+                    cursor_visible: true,
+                    saved_at: 0,
+                    sequence: 0,
+                    vt: "RESYNCED\n".to_string(),
+                },
+            };
             let exit = DaemonEvent::Exit {
                 session_id: "daemon-terminal-1".to_string(),
                 code: 0,
@@ -3925,7 +3966,13 @@ mod tests {
                 killed: false,
             };
 
-            for event in [snapshot, output_prefix, output_suffix, exit] {
+            for event in [
+                snapshot,
+                output_prefix,
+                output_suffix,
+                resync_snapshot,
+                exit,
+            ] {
                 write_half
                     .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
                     .await
@@ -4008,6 +4055,15 @@ mod tests {
                 assert_eq!(decode(data_b64), vec![0x98, 0x80, b'\n']);
             }
             other => panic!("expected second terminal output, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot {
+                task_id, data_b64, ..
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(decode(data_b64), b"RESYNCED\n");
+            }
+            other => panic!("expected mid-stream resync snapshot, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
             ServerFrame::SessionExit { task_id, code } => {

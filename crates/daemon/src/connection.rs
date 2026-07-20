@@ -10,10 +10,11 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::client::{
-    cleanup_client_writer_registries, effective_terminal_size, finish_attach_cutover,
-    replay_current_status, unregister_terminal_emulator_client, LostHandoffSessions,
-    SessionObservers, SessionSizes, SessionWriters, TerminalEmulatorClients,
+    cleanup_client_writer_registries, effective_terminal_size, register_terminal_emulator_client,
+    unregister_terminal_emulator_client, LostHandoffSessions, SessionSizes,
+    TerminalEmulatorClients,
 };
+use crate::fanout::{session_fanout, SessionFanouts, SubscriberKind};
 use crate::handoff::{blank_snapshot, handle_handoff};
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
@@ -34,10 +35,9 @@ pub(crate) async fn handle_connection(
     stream: UnixStream,
     sessions: Arc<Mutex<SessionManager>>,
     broadcast_tx: broadcast::Sender<String>,
-    session_writers: SessionWriters,
+    fanouts: SessionFanouts,
     terminal_emulator_clients: TerminalEmulatorClients,
     session_sizes: SessionSizes,
-    session_observers: SessionObservers,
     lost_handoff_sessions: LostHandoffSessions,
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
@@ -60,9 +60,8 @@ pub(crate) async fn handle_connection(
                     raw_fd,
                     &mut reader,
                     sessions.clone(),
-                    session_writers.clone(),
+                    fanouts.clone(),
                     session_sizes.clone(),
-                    session_observers.clone(),
                     writer.clone(),
                     broadcast_tx.clone(),
                     recovery_manager.clone(),
@@ -108,21 +107,24 @@ pub(crate) async fn handle_connection(
                     continue;
                 }
                 drop(mgr);
-                let mut observers = session_observers.lock().await;
-                observers
-                    .entry(session_id.clone())
-                    .or_insert_with(Vec::new)
-                    .push(writer.clone());
+                let fanout = session_fanout(&fanouts, &session_id).await;
+                fanout.state.lock().await.register(
+                    &session_id,
+                    SubscriberKind::Observer,
+                    &writer,
+                    &[],
+                );
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
             Some(Command::Unobserve { session_id }) => {
-                let mut observers = session_observers.lock().await;
-                if let Some(list) = observers.get_mut(&session_id) {
-                    let writer_ptr = Arc::as_ptr(&writer);
-                    list.retain(|w| Arc::as_ptr(w) != writer_ptr);
-                    if list.is_empty() {
-                        observers.remove(&session_id);
-                    }
+                if let Some(fanout) =
+                    crate::fanout::existing_session_fanout(&fanouts, &session_id).await
+                {
+                    fanout
+                        .state
+                        .lock()
+                        .await
+                        .remove(SubscriberKind::Observer, Arc::as_ptr(&writer) as usize);
                 }
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
@@ -132,10 +134,9 @@ pub(crate) async fn handle_connection(
                     sessions.clone(),
                     writer.clone(),
                     broadcast_tx.clone(),
-                    session_writers.clone(),
+                    fanouts.clone(),
                     terminal_emulator_clients.clone(),
                     session_sizes.clone(),
-                    session_observers.clone(),
                     lost_handoff_sessions.clone(),
                     recovery_manager.clone(),
                     agent_sessions.clone(),
@@ -153,10 +154,9 @@ pub(crate) async fn handle_connection(
     // writer so dead Unix socket fds cannot survive on idle sessions.
     let remaining_sizes = cleanup_client_writer_registries(
         &writer,
-        &session_writers,
+        &fanouts,
         &terminal_emulator_clients,
         &session_sizes,
-        &session_observers,
     )
     .await;
     for (session_id, cols, rows) in remaining_sizes {
@@ -179,10 +179,9 @@ pub(crate) async fn handle_command(
     sessions: Arc<Mutex<SessionManager>>,
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     broadcast_tx: broadcast::Sender<String>,
-    session_writers: SessionWriters,
+    fanouts: SessionFanouts,
     terminal_emulator_clients: TerminalEmulatorClients,
     session_sizes: SessionSizes,
-    session_observers: SessionObservers,
     lost_handoff_sessions: LostHandoffSessions,
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
@@ -285,10 +284,12 @@ pub(crate) async fn handle_command(
 
                     // Start stream_output immediately so startup output
                     // (including kitty keyboard mode push) is captured.
-                    session_writers
+                    session_fanout(&fanouts, &session_id)
+                        .await
+                        .state
                         .lock()
                         .await
-                        .insert(session_id.clone(), Vec::new());
+                        .mark_streaming();
 
                     if let Some(prelude) = terminal_prelude
                         .as_deref()
@@ -300,10 +301,8 @@ pub(crate) async fn handle_command(
                             0,
                             &handle,
                             &broadcast_tx,
-                            &session_writers,
+                            &fanouts,
                             &terminal_emulator_clients,
-                            &session_sizes,
-                            &session_observers,
                             &recovery_manager,
                         )
                         .await;
@@ -311,10 +310,9 @@ pub(crate) async fn handle_command(
 
                     let sid = session_id.clone();
                     let sessions_exit = sessions.clone();
-                    let writers_for_stream = session_writers.clone();
+                    let fanouts_for_stream = fanouts.clone();
                     let terminal_clients_for_stream = terminal_emulator_clients.clone();
                     let sizes_for_stream = session_sizes.clone();
-                    let observers_for_stream = session_observers.clone();
                     let recovery_for_stream = recovery_manager.clone();
                     let broadcast_for_stream = broadcast_tx.clone();
                     tokio::spawn(async move {
@@ -324,11 +322,10 @@ pub(crate) async fn handle_command(
                             input_rx,
                             stream_control,
                             broadcast_for_stream,
-                            writers_for_stream,
+                            fanouts_for_stream,
                             terminal_clients_for_stream,
                             sessions_exit,
                             sizes_for_stream,
-                            observers_for_stream,
                             recovery_for_stream,
                             handle,
                         )
@@ -356,12 +353,15 @@ pub(crate) async fn handle_command(
         Command::Detach { session_id } => {
             log::info!("[detach] session={}", session_id);
             let evt = if sessions.lock().await.contains(&session_id) {
-                let mut writers = session_writers.lock().await;
-                if let Some(vec) = writers.get_mut(&session_id) {
-                    let ptr = Arc::as_ptr(&writer) as usize;
-                    vec.retain(|w| Arc::as_ptr(w) as usize != ptr);
+                if let Some(fanout) =
+                    crate::fanout::existing_session_fanout(&fanouts, &session_id).await
+                {
+                    fanout
+                        .state
+                        .lock()
+                        .await
+                        .remove(SubscriberKind::Attached, Arc::as_ptr(&writer) as usize);
                 }
-                drop(writers);
 
                 // Remove this client from the size registry and recompute
                 {
@@ -464,7 +464,8 @@ pub(crate) async fn handle_command(
                 return;
             };
 
-            let is_streaming = session_writers.lock().await.contains_key(&session_id);
+            let fanout = session_fanout(&fanouts, &session_id).await;
+            let is_streaming = fanout.state.lock().await.streaming();
             if !is_streaming {
                 log::info!(
                     "[attach_snapshot] starting stream_output on first attach for adopted/non-streaming session {}",
@@ -503,18 +504,14 @@ pub(crate) async fn handle_command(
                     );
                 }
 
-                let writers_for_stream = session_writers.clone();
+                let fanouts_for_stream = fanouts.clone();
                 let terminal_clients_for_stream = terminal_emulator_clients.clone();
                 let sizes_for_stream = session_sizes.clone();
-                let observers_for_stream = session_observers.clone();
                 let recovery_for_stream = recovery_manager.clone();
                 let sessions_for_stream = sessions.clone();
                 let session_id_for_stream = session_id.clone();
                 let handle_for_stream = Arc::clone(&session);
-                session_writers
-                    .lock()
-                    .await
-                    .insert(session_id.clone(), Vec::new());
+                fanout.state.lock().await.mark_streaming();
                 tokio::spawn(async move {
                     stream_output(
                         session_id_for_stream,
@@ -522,11 +519,10 @@ pub(crate) async fn handle_command(
                         input_rx,
                         stream_control,
                         broadcast_tx.clone(),
-                        writers_for_stream,
+                        fanouts_for_stream,
                         terminal_clients_for_stream,
                         sessions_for_stream,
                         sizes_for_stream,
-                        observers_for_stream,
                         recovery_for_stream,
                         handle_for_stream,
                     )
@@ -534,6 +530,12 @@ pub(crate) async fn handle_command(
                 });
             }
 
+            // Atomic snapshot-to-live cutover: the ingestion loop holds the
+            // same fanout lock across (mirror -> enqueue), so the snapshot
+            // taken here and the registration behind it cannot interleave
+            // with a chunk — the client sees each chunk exactly once, either
+            // inside the snapshot or as live output queued after it.
+            let mut fanout_state = fanout.state.lock().await;
             let snapshot = match session.snapshot(&session_id).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -546,22 +548,28 @@ pub(crate) async fn handle_command(
                     blank_snapshot(rows, cols)
                 }
             };
-
-            let snapshot_event = Event::Snapshot {
-                session_id: session_id.clone(),
-                snapshot,
-            };
-            finish_attach_cutover(
-                &writer,
-                &session_writers,
-                &terminal_emulator_clients,
+            let initial_events = [
+                Event::Snapshot {
+                    session_id: session_id.clone(),
+                    snapshot,
+                },
+                Event::StatusChanged {
+                    session_id: session_id.clone(),
+                    status: session.status().await,
+                    waiting_prompt_snippet: None,
+                },
+            ];
+            fanout_state.register(
                 &session_id,
-                emulate_terminal,
-                &snapshot_event,
-            )
-            .await;
-
-            replay_current_status(&writer, &session_id, session.status().await).await;
+                SubscriberKind::Attached,
+                &writer,
+                &initial_events,
+            );
+            if emulate_terminal {
+                register_terminal_emulator_client(&terminal_emulator_clients, &session_id, &writer)
+                    .await;
+            }
+            drop(fanout_state);
         }
 
         Command::Resize {
@@ -680,6 +688,7 @@ pub(crate) async fn handle_command(
                 )),
             };
             let success = result.is_ok();
+            let killed_fanout = fanouts.lock().await.remove(&session_id);
             if success {
                 sessions.lock().await.remove(&session_id);
                 // A kill removes the session from the map, so the output
@@ -689,7 +698,8 @@ pub(crate) async fn handle_command(
                 // exactly one Exit, and a kill-then-respawn of the same
                 // session id always orders Exit before the new
                 // SessionCreated. `killed` marks it as an orchestrated kill,
-                // not the agent finishing.
+                // not the agent finishing; Subscribe consumers (e.g. the
+                // completion-notify watcher) filter killed exits themselves.
                 let exit_evt = Event::Exit {
                     session_id: session_id.clone(),
                     code: 128 + libc::SIGKILL,
@@ -704,44 +714,19 @@ pub(crate) async fn handle_command(
                 if let Ok(json) = serde_json::to_string(&exit_evt) {
                     let _ = broadcast_tx.send(json);
                 }
-                if let Some(writers) = session_writers.lock().await.get(&session_id) {
-                    for w in writers.iter() {
-                        let _ = write_event(&mut *w.lock().await, &exit_evt).await;
-                    }
-                }
-                if let Some(observers) = session_observers.lock().await.get(&session_id) {
-                    for obs in observers.iter() {
-                        let _ = write_event(&mut *obs.lock().await, &exit_evt).await;
-                    }
-                }
-            }
-            let killed_writers = session_writers.lock().await.remove(&session_id);
-            terminal_emulator_clients.lock().await.remove(&session_id);
-            session_sizes.lock().await.remove(&session_id);
-            let killed_observers = session_observers.lock().await.remove(&session_id);
-            if success {
-                // A killed session must reach attached clients the same way a
-                // natural exit does, or they keep believing a dead stream is
-                // live (the killed session's reader skips its exit broadcast
-                // because the session is already gone from the manager).
-                // Deliberately per-writer, not on the Subscribe broadcast:
-                // subscribers (e.g. completion notify) must not see engine
-                // kills as task completion.
-                let exit_evt = Event::Exit {
-                    session_id: session_id.clone(),
-                    code: 128 + libc::SIGKILL,
-                    resume_session_id: None,
-                    killed: true,
-                };
-                for client in killed_writers
-                    .into_iter()
-                    .flatten()
-                    .chain(killed_observers.into_iter().flatten())
-                {
-                    let _ = write_event(&mut *client.lock().await, &exit_evt).await;
+                // A killed session must reach attached clients and observers
+                // the same way a natural exit does, or they keep believing a
+                // dead stream is live. Exactly one Exit per subscriber,
+                // queued behind any not-yet-delivered output; a subscriber
+                // that is still lagging is disconnected so it observes EOF.
+                if let Some(fanout) = &killed_fanout {
+                    fanout.state.lock().await.deliver_final(&exit_evt);
                 }
                 recovery_manager.end_session(&session_id).await;
             }
+            drop(killed_fanout);
+            terminal_emulator_clients.lock().await.remove(&session_id);
+            session_sizes.lock().await.remove(&session_id);
             let evt = match result {
                 Ok(_) => Event::Ok,
                 Err(e) => error_event(None, e.to_string()),

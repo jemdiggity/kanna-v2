@@ -12,7 +12,8 @@ use serde::Serialize;
 use tokio::io::BufReader;
 use tokio::sync::{broadcast, Mutex};
 
-use crate::client::{SessionObservers, SessionSizes, SessionWriters};
+use crate::client::SessionSizes;
+use crate::fanout::SessionFanouts;
 use crate::session::{SessionManager, StreamControl};
 use crate::socket::{read_command, write_event};
 use crate::util::error_event;
@@ -529,9 +530,8 @@ pub(crate) async fn handle_handoff(
     socket_fd: std::os::unix::io::RawFd,
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
     sessions: Arc<Mutex<SessionManager>>,
-    session_writers: SessionWriters,
+    fanouts: SessionFanouts,
     session_sizes: SessionSizes,
-    session_observers: SessionObservers,
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     broadcast_tx: broadcast::Sender<String>,
     recovery_manager: RecoveryManager,
@@ -821,11 +821,11 @@ pub(crate) async fn handle_handoff(
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    // Clear all writer slots after adoption succeeds; stream_output tasks will
-    // end as this process exits and clients should reconnect to the new daemon.
-    session_writers.lock().await.clear();
+    // Clear all subscriber fanouts after adoption succeeds; stream_output
+    // tasks will end as this process exits and clients should reconnect to
+    // the new daemon.
+    fanouts.lock().await.clear();
     session_sizes.lock().await.clear();
-    session_observers.lock().await.clear();
 
     for fd in cloned_pty_fds {
         let ret = unsafe { libc::close(fd) };

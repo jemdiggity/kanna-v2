@@ -53,6 +53,9 @@ pub enum TerminalPerfEventKind {
     Stall,
     Recovered,
     Gap,
+    /// A bounded per-subscriber mailbox overflowed and the subscriber was
+    /// disconnected for snapshot resync.
+    Lag,
 }
 
 impl TerminalPerfEventKind {
@@ -61,6 +64,7 @@ impl TerminalPerfEventKind {
             Self::Stall => "stall",
             Self::Recovered => "recovered",
             Self::Gap => "gap",
+            Self::Lag => "lag",
         }
     }
 }
