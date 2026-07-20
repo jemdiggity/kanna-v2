@@ -3,6 +3,9 @@ const STALL_THRESHOLD_MS = 500
 const STALL_REPEAT_MS = 10_000
 const FRAME_GAP_THRESHOLD_MS = 2_000
 
+export type TerminalOutputPerfVisibility = "visible" | "hidden"
+let e2eVisibilityOverride: TerminalOutputPerfVisibility | null = null
+
 export type TerminalOutputPerfEventKind = "stall" | "recovered" | "gap"
 
 export interface TerminalOutputPerfEvent {
@@ -52,7 +55,7 @@ interface SessionPerfState {
 interface TerminalOutputPerfDependencies {
   now: () => number
   wallNow: () => number
-  visibility: () => "visible" | "hidden"
+  visibility: () => TerminalOutputPerfVisibility
   warn: (record: string) => void
   setInterval: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>
   clearInterval: (timer: ReturnType<typeof setInterval>) => void
@@ -73,9 +76,11 @@ export class TerminalOutputPerfRegistry {
       now: dependencies.now ?? (() => performance.now()),
       wallNow: dependencies.wallNow ?? (() => Date.now()),
       visibility: dependencies.visibility ?? (() =>
-        typeof document !== "undefined" && document.visibilityState === "hidden"
-          ? "hidden"
-          : "visible"),
+        e2eVisibilityOverride ?? (
+          typeof document !== "undefined" && document.visibilityState === "hidden"
+            ? "hidden"
+            : "visible"
+        )),
       warn: dependencies.warn ?? ((record) => console.warn(record)),
       setInterval: dependencies.setInterval ?? ((callback, delayMs) => setInterval(callback, delayMs)),
       clearInterval: dependencies.clearInterval ?? ((timer) => clearInterval(timer)),
@@ -167,6 +172,32 @@ export class TerminalOutputPerfRegistry {
     this.maxEventLoopDriftMs = 0
     this.maxXtermBacklogMs = 0
     this.latestEvent = null
+  }
+
+  beginEventLoopProbeForE2E(): void {
+    if (this.watchdog !== null) {
+      this.dependencies.clearInterval(this.watchdog)
+      this.watchdog = null
+    }
+    this.resetSnapshot()
+    this.nextWatchdogAt = this.dependencies.now() + WATCHDOG_INTERVAL_MS
+    for (const state of this.sessions.values()) {
+      state.eventLoopStage = null
+      state.eventLoopStallDurationMs = 0
+      state.lastEventLoopReportAt = null
+    }
+  }
+
+  endEventLoopProbeForE2E(): void {
+    this.poll()
+    for (const state of this.sessions.values()) {
+      state.eventLoopStage = null
+      state.eventLoopStallDurationMs = 0
+      state.lastEventLoopReportAt = null
+    }
+    if (this.sessions.size > 0) {
+      this.startWatchdog()
+    }
   }
 
   private startWatchdog(): void {
@@ -333,4 +364,16 @@ export function getTerminalOutputPerfSnapshot(): TerminalOutputPerfSnapshot {
 
 export function resetTerminalOutputPerfSnapshot(): void {
   globalTerminalOutputPerf.resetSnapshot()
+}
+
+export function beginTerminalOutputPerfEventLoopProbeForE2E(
+  visibility: TerminalOutputPerfVisibility,
+): void {
+  e2eVisibilityOverride = visibility
+  globalTerminalOutputPerf.beginEventLoopProbeForE2E()
+}
+
+export function endTerminalOutputPerfEventLoopProbeForE2E(): void {
+  globalTerminalOutputPerf.endEventLoopProbeForE2E()
+  e2eVisibilityOverride = null
 }

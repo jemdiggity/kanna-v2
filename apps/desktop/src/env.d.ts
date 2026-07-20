@@ -62,6 +62,8 @@ interface KannaTerminalOutputPerfSnapshot {
 interface KannaTerminalOutputPerfE2EApi {
   snapshot: () => KannaTerminalOutputPerfSnapshot;
   clear: () => void;
+  beginEventLoopProbe: (visibility: "visible" | "hidden") => void;
+  endEventLoopProbe: () => void;
 }
 
 interface KannaAuthIndexedDbFaultE2EApi {

@@ -220,28 +220,6 @@ async function readOutputSequences(
   });
 }
 
-async function focusAppWindow(client: WebDriverClient): Promise<void> {
-  const sessionId = (client as unknown as { sessionId?: string | null }).sessionId;
-  if (!sessionId) throw new Error("missing WebDriver session");
-  const handlesResponse = await fetch(
-    `${client.getBaseUrl()}/session/${sessionId}/window/handles`,
-  ).then((response) => response.json()) as { value?: string[] };
-  const handle = handlesResponse.value?.[0];
-  if (!handle) throw new Error("missing WebDriver window handle");
-  await fetch(`${client.getBaseUrl()}/session/${sessionId}/window`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ handle }),
-  });
-
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const visibility = await client.executeSync<string>("return document.visibilityState;");
-    if (visibility === "visible") return;
-    await sleep(50);
-  }
-  throw new Error("WebDriver window remained hidden after switching to it");
-}
-
 async function killSessionBestEffort(client: WebDriverClient, sessionId: string): Promise<void> {
   await client.executeAsync<string>(
     `const cb = arguments[arguments.length - 1];
@@ -387,12 +365,15 @@ describe("terminal output performance", () => {
     await waitForSessions(client, [task.id]);
     await selectTask(client, task);
     await waitForTerminalBufferText(client, task.id, "Perf Watchdog live output");
-    await focusAppWindow(client);
-    await sleep(300);
-    await clearTerminalPerf(client);
-    await sleep(750);
-
-    const healthy = await readTerminalPerf(client);
+    const healthy = await client.executeSync<TerminalPerfSnapshot>(
+      `const perf = window.__KANNA_E2E__?.terminalOutputPerf;
+       if (!perf?.beginEventLoopProbe || !perf?.endEventLoopProbe) {
+         throw new Error("terminal output event-loop probe unavailable");
+       }
+       perf.beginEventLoopProbe("visible");
+       perf.endEventLoopProbe();
+       return perf.snapshot();`,
+    );
     expect(healthy.latestEvent).toBeNull();
     expect(healthy.maxFrameGapMs).toBeLessThan(500);
     const before = await readOutputSequences(client, task.id, "Perf Watchdog");
@@ -400,8 +381,11 @@ describe("terminal output performance", () => {
     expect(beforeLast).toBeTypeOf("number");
 
     await client.executeSync(
-      `const deadline = performance.now() + 750;
+      `const perf = window.__KANNA_E2E__?.terminalOutputPerf;
+       perf.beginEventLoopProbe("visible");
+       const deadline = performance.now() + 750;
        while (performance.now() < deadline) {}
+       perf.endEventLoopProbe();
        return "unblocked";`,
     );
 

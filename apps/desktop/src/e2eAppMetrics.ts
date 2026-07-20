@@ -1,3 +1,10 @@
+import {
+  beginTerminalOutputPerfEventLoopProbeForE2E,
+  endTerminalOutputPerfEventLoopProbeForE2E,
+  getTerminalOutputPerfSnapshot,
+  resetTerminalOutputPerfSnapshot,
+} from "./perf/terminalOutputPerf";
+
 export interface E2EAppMetricsSnapshot {
   invokeCounts: Record<string, number>;
   invokeCalls: Array<{ command: string; args: unknown }>;
@@ -71,8 +78,6 @@ export const e2eAppMetrics: E2EAppMetricsApi = {
 export const e2eTerminalOutputPerf = {
   snapshot: getTerminalOutputPerfSnapshot,
   clear: resetTerminalOutputPerfSnapshot,
+  beginEventLoopProbe: beginTerminalOutputPerfEventLoopProbeForE2E,
+  endEventLoopProbe: endTerminalOutputPerfEventLoopProbeForE2E,
 };
-import {
-  getTerminalOutputPerfSnapshot,
-  resetTerminalOutputPerfSnapshot,
-} from "./perf/terminalOutputPerf";
