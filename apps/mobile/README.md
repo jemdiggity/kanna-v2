@@ -15,13 +15,26 @@ Bump `runtimeVersion` whenever a change touches native code, native config, the
 Expo SDK, native dependencies, or `plugins/withKannaNativeIdentity.js`. JS-only
 changes keep the same `runtimeVersion` and are OTA-deliverable.
 
-The Expo SDK 57 native runtime uses `runtimeVersion` `2.0.0`. Staging and
-production OTA updates built for the former SDK 53 `1.0.0` runtime are not
-compatible; install a new native build before publishing or applying `2.0.0`
-updates.
+The current Expo SDK 57 native runtime uses `runtimeVersion` `2.1.2`. OTA
+updates built for an earlier runtime are not compatible; install a native build
+with the matching runtime before publishing or applying an update.
 
 Development builds (`KANNA_APP_ENV=dev`) do not configure OTA updates; they run
 from Metro/dev-client.
+
+## About This Build
+
+Open **More → About this build** in the mobile app to inspect the installed
+native application version and build number, OTA runtime version, app
+environment and channel, and the JavaScript source currently running. The row
+stays collapsed until pressed so repository commands remain the primary More
+screen content.
+
+A full UUID under **Running source** identifies a downloaded Expo OTA update;
+tap it to copy the exact update ID. **Embedded bundle** means the app is running
+the JavaScript packaged in the installed native binary. **Development bundle
+(Metro)** means a dev-client session is loading JavaScript from Metro rather
+than Expo Updates.
 
 ## Production iOS Archive
 
