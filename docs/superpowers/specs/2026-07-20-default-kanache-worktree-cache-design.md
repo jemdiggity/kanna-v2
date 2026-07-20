@@ -25,6 +25,37 @@ size or build-time benefit required for rollout.
 Release architecture is unchanged. Bazel remains the only release build path
 and never installs or executes Kanache.
 
+## Runtime eligibility
+
+Kanache is eligible only when all three conditions hold:
+
+1. `KANNA_RUST_CACHE` is explicitly `on` or `kanache`;
+2. the runtime platform is macOS (`darwin`);
+3. `CI` is unset or blank.
+
+Any nonblank `CI` value disables the experiment, including values such as
+`false`, because presence is the portable signal used by CI providers. A CI
+invocation returns the observable category `disabled-in-ci`; a non-macOS
+invocation returns `unsupported-platform`. Neither environment may bootstrap
+Kanache, inspect donors, warm a destination, or record a donor. Existing
+donor-marker revocation remains fail-closed around bounded Cargo workflows.
+
+The eligibility decision lives in one policy function used by warm, build,
+record, and status paths. Production defaults platform and environment inputs
+from the current process. Unit tests inject both values instead of mutating
+`process.platform` or depending on the host runner. The required matrix is:
+
+| Platform | `CI` | Opt-in | Result |
+| --- | --- | --- | --- |
+| `darwin` | unset/blank | `on` or `kanache` | eligible |
+| `darwin` | nonblank | `on` or `kanache` | `disabled-in-ci` |
+| non-`darwin` | any | `on` or `kanache` | `unsupported-platform` |
+| any | any | unset, blank, `off`, or unknown | disabled or `invalid-mode` |
+
+Mode validation runs first, followed by platform and CI eligibility. This
+keeps default-off behavior and invalid-value warnings stable while making the
+macOS-only tests deterministic on Linux CI.
+
 ## Scope and invariants
 
 The experiment may:
