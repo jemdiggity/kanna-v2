@@ -32,7 +32,10 @@ pub struct MobileServerStatus {
     pub state: String,
     pub desktop_id: String,
     pub desktop_name: String,
-    pub server_version: Option<String>,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub environment: String,
     pub lan_host: String,
     pub lan_port: u16,
     pub pairing_code: Option<String>,
@@ -151,8 +154,12 @@ impl MobileServerManager {
         let existing_status = self.fetch_status(&api_base_url).await.ok();
         if let Some(status) = existing_status {
             ensure_server_belongs_to_desktop(&status, &expected_desktop_id)?;
-            if is_current_server_status(&status, &expected_desktop_id, current_server_version())
-                && server_config_matches_runtime(&config_path, &expected_desktop_id, cloud_env)
+            if is_current_server_status(
+                &status,
+                &expected_desktop_id,
+                current_server_version(),
+                server_environment(cloud_env),
+            ) && server_config_matches_runtime(&config_path, &expected_desktop_id, cloud_env)
             {
                 let mut state = self.inner.lock().await;
                 state.started = true;
@@ -460,7 +467,8 @@ fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, Str
         state: state.status.clone(),
         desktop_id: desktop_id(&state.config_path)?,
         desktop_name: state.desktop_name.clone(),
-        server_version: Some(current_server_version().to_string()),
+        version: current_server_version().to_string(),
+        environment: server_environment(state.cloud_env).to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: local_server_port_for_cloud_env(state.cloud_env),
         pairing_code: None,
@@ -471,13 +479,21 @@ fn current_server_version() -> &'static str {
     crate::KANNA_VERSION
 }
 
+fn server_environment(cloud_env: Option<DesktopCloudEnvironment>) -> &'static str {
+    cloud_env
+        .map(DesktopCloudEnvironment::as_str)
+        .unwrap_or("development")
+}
+
 fn is_current_server_status(
     status: &MobileServerStatus,
     expected_desktop_id: &str,
-    expected_server_version: &str,
+    expected_version: &str,
+    expected_environment: &str,
 ) -> bool {
     status.desktop_id == expected_desktop_id
-        && status.server_version.as_deref() == Some(expected_server_version)
+        && status.version == expected_version
+        && status.environment == expected_environment
 }
 
 fn ensure_server_belongs_to_desktop(
@@ -925,12 +941,13 @@ mod tests {
     }
 
     #[test]
-    fn current_server_status_requires_matching_version() {
+    fn current_server_status_requires_matching_build_metadata() {
         let status = MobileServerStatus {
             state: "running".to_string(),
             desktop_id: "desktop-1".to_string(),
             desktop_name: "Studio Mac".to_string(),
-            server_version: Some(current_server_version().to_string()),
+            version: current_server_version().to_string(),
+            environment: "production".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
             pairing_code: None,
@@ -939,27 +956,54 @@ mod tests {
         assert!(is_current_server_status(
             &status,
             "desktop-1",
-            current_server_version()
-        ));
-
-        let stale_missing_version = MobileServerStatus {
-            server_version: None,
-            ..status.clone()
-        };
-        assert!(!is_current_server_status(
-            &stale_missing_version,
-            "desktop-1",
-            current_server_version()
+            current_server_version(),
+            "production",
         ));
 
         let stale_wrong_version = MobileServerStatus {
-            server_version: Some("__stale__".to_string()),
-            ..status
+            version: "__stale__".to_string(),
+            ..status.clone()
         };
         assert!(!is_current_server_status(
             &stale_wrong_version,
             "desktop-1",
-            current_server_version()
+            current_server_version(),
+            "production",
+        ));
+
+        let stale_wrong_environment = MobileServerStatus {
+            environment: "staging".to_string(),
+            ..status
+        };
+        assert!(!is_current_server_status(
+            &stale_wrong_environment,
+            "desktop-1",
+            current_server_version(),
+            "production",
+        ));
+    }
+
+    #[test]
+    fn legacy_status_without_build_metadata_remains_identifiable_as_stale() {
+        let status: MobileServerStatus = serde_json::from_value(serde_json::json!({
+            "state": "running",
+            "desktopId": "desktop-legacy",
+            "desktopName": "Legacy Desktop",
+            "serverVersion": "0.0.68",
+            "lanHost": "0.0.0.0",
+            "lanPort": 48120,
+            "pairingCode": null
+        }))
+        .expect("legacy status should remain decodable for safe replacement");
+
+        assert_eq!(status.desktop_id, "desktop-legacy");
+        assert!(status.version.is_empty());
+        assert!(status.environment.is_empty());
+        assert!(!is_current_server_status(
+            &status,
+            "desktop-legacy",
+            current_server_version(),
+            "production",
         ));
     }
 
@@ -986,7 +1030,8 @@ mod tests {
             &daemon_dir,
             &expected_desktop_id,
             None,
-            None,
+            "__stale__",
+            "development",
             port,
         );
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
@@ -1010,10 +1055,8 @@ mod tests {
             .await
             .expect("replacement server should report status");
         assert_eq!(status.desktop_id, expected_desktop_id);
-        assert_eq!(
-            status.server_version.as_deref(),
-            Some(current_server_version())
-        );
+        assert_eq!(status.version, current_server_version());
+        assert_eq!(status.environment, "development");
 
         stop_server_on_port(port)
             .await
@@ -1047,7 +1090,8 @@ mod tests {
             &daemon_dir,
             stale_desktop_id,
             None,
-            None,
+            "__stale__",
+            "development",
             port,
         );
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
@@ -1071,10 +1115,8 @@ mod tests {
             .await
             .expect("replacement server should report status");
         assert_eq!(status.desktop_id, expected_desktop_id);
-        assert_eq!(
-            status.server_version.as_deref(),
-            Some(current_server_version())
-        );
+        assert_eq!(status.version, current_server_version());
+        assert_eq!(status.environment, "development");
 
         stop_server_on_port(port)
             .await
@@ -1130,10 +1172,8 @@ mod tests {
             .await
             .expect("reused server should report status");
         assert_eq!(status.desktop_id, expected_desktop_id);
-        assert_eq!(
-            status.server_version.as_deref(),
-            Some(current_server_version())
-        );
+        assert_eq!(status.version, current_server_version());
+        assert_eq!(status.environment, "development");
 
         existing_server
             .kill()
@@ -1175,7 +1215,8 @@ mod tests {
             &stale_daemon_dir,
             &expected_desktop_id,
             None,
-            Some(current_server_version()),
+            current_server_version(),
+            "development",
             port,
         );
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
@@ -1993,7 +2034,8 @@ mod tests {
         daemon_dir: &std::path::Path,
         desktop_id: &str,
         desktop_secret: Option<&str>,
-        server_version: Option<&str>,
+        version: &str,
+        environment: &str,
         port: u16,
     ) {
         if let Some(parent) = config_path.parent() {
@@ -2002,9 +2044,11 @@ mod tests {
         let secret_line = desktop_secret
             .map(|secret| format!("desktop_secret = \"{}\"\n", escape_toml_string(secret)))
             .unwrap_or_default();
-        let version_line = server_version
-            .map(|version| format!("server_version = \"{}\"\n", escape_toml_string(version)))
-            .unwrap_or_default();
+        let build_metadata = format!(
+            "version = \"{}\"\nenvironment = \"{}\"\n",
+            escape_toml_string(version),
+            escape_toml_string(environment),
+        );
         let server_binary_sha256_line = sidecar_sha256_config_line("kanna-server")
             .map(|line| format!("{line}\n"))
             .unwrap_or_default();
@@ -2018,7 +2062,7 @@ mod tests {
             server_binary_sha256_line,
             escape_toml_string(desktop_id),
             secret_line,
-            version_line,
+            build_metadata,
             port,
             escape_toml_string(&pairing_store_path.to_string_lossy()),
         );
@@ -2074,7 +2118,8 @@ while True:
             "state": "running",
             "desktopId": "desktop-production-port-owner",
             "desktopName": "Production Port Owner",
-            "serverVersion": "test-production",
+            "version": "test-production",
+            "environment": "production",
             "lanHost": "127.0.0.1",
             "lanPort": int(sys.argv[1]),
             "pairingCode": None,
@@ -2168,7 +2213,8 @@ while True:
                 "state": "running",
                 "desktopId": "desktop-wait-test",
                 "desktopName": "Wait Test",
-                "serverVersion": current_server_version(),
+                "version": current_server_version(),
+                "environment": "development",
                 "lanHost": "127.0.0.1",
                 "lanPort": port,
                 "pairingCode": null
