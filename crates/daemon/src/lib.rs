@@ -6,3 +6,4 @@ pub mod pty;
 pub mod recovery;
 pub mod session;
 pub mod subprocess_env;
+pub mod terminal_perf;
