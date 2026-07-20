@@ -7,6 +7,7 @@
 //! `packages/agent-protocol`).
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,7 @@ use kanna_agent_protocol::{
     ClientFrame, CompanionEvent, FrameAgentEvent, PermissionDecision, ServerFrame, StreamKind,
 };
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
+use kanna_daemon::terminal_perf::{self, TerminalPerfContext, TerminalPerfMonitor};
 
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
@@ -41,6 +43,61 @@ pub enum AuthMode {
 
 fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn terminal_frame_context(
+    frame: &ServerFrame,
+    session_id: Option<&str>,
+    stage: &'static str,
+    queue: Option<(usize, usize)>,
+) -> Option<TerminalPerfContext> {
+    let (task_id, encoded_bytes) = match frame {
+        ServerFrame::TermSnapshot {
+            task_id, data_b64, ..
+        }
+        | ServerFrame::TermOutput { task_id, data_b64 } => (task_id, data_b64.len()),
+        _ => return None,
+    };
+    let mut context =
+        TerminalPerfContext::new("ksp", session_id.unwrap_or(task_id.as_str()), stage);
+    context.task_id = Some(task_id.clone());
+    context.bytes = encoded_bytes;
+    if let Some((available, capacity)) = queue {
+        context.queue_available = Some(available);
+        context.queue_capacity = Some(capacity);
+    }
+    Some(context)
+}
+
+async fn monitored_terminal_future<T, F>(
+    context: Option<TerminalPerfContext>,
+    monitor: TerminalPerfMonitor,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    let operation = context.map(|context| monitor.begin(context));
+    let result = future.await;
+    if let Some(operation) = operation {
+        operation.finish();
+    }
+    result
+}
+
+async fn send_terminal_frame(
+    frame_tx: mpsc::Sender<ServerFrame>,
+    frame: ServerFrame,
+    session_id: String,
+    monitor: TerminalPerfMonitor,
+) -> Result<(), mpsc::error::SendError<ServerFrame>> {
+    let context = terminal_frame_context(
+        &frame,
+        Some(&session_id),
+        "outbound_queue",
+        Some((frame_tx.capacity(), frame_tx.max_capacity())),
+    );
+    monitored_terminal_future(context, monitor, frame_tx.send(frame)).await
 }
 
 /// Length-aware constant-time byte comparison. Returns false for differing
@@ -262,10 +319,25 @@ pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     });
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = outbound_rx.recv().await {
-            let Ok(json) = serde_json::to_string(&frame) else {
+            let serialize_context = terminal_frame_context(&frame, None, "frame_serialize", None);
+            let Ok(json) = monitored_terminal_future(
+                serialize_context,
+                terminal_perf::global_monitor().clone(),
+                async { serde_json::to_string(&frame) },
+            )
+            .await
+            else {
                 continue;
             };
-            if ws_tx.send(WsMessage::Text(json.into())).await.is_err() {
+            let send_context = terminal_frame_context(&frame, None, "websocket_send", None);
+            if monitored_terminal_future(
+                send_context,
+                terminal_perf::global_monitor().clone(),
+                ws_tx.send(WsMessage::Text(json.into())),
+            )
+            .await
+            .is_err()
+            {
                 return;
             }
         }
@@ -307,13 +379,24 @@ pub async fn handle_tungstenite_stream(
     });
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = outbound_rx.recv().await {
-            let Ok(json) = serde_json::to_string(&frame) else {
+            let serialize_context = terminal_frame_context(&frame, None, "frame_serialize", None);
+            let Ok(json) = monitored_terminal_future(
+                serialize_context,
+                terminal_perf::global_monitor().clone(),
+                async { serde_json::to_string(&frame) },
+            )
+            .await
+            else {
                 continue;
             };
-            if ws_tx
-                .send(TungsteniteMessage::Text(json.into()))
-                .await
-                .is_err()
+            let send_context = terminal_frame_context(&frame, None, "websocket_send", None);
+            if monitored_terminal_future(
+                send_context,
+                terminal_perf::global_monitor().clone(),
+                ws_tx.send(TungsteniteMessage::Text(json.into())),
+            )
+            .await
+            .is_err()
             {
                 return;
             }
@@ -1771,7 +1854,15 @@ async fn stream_terminal_once(
                 rows: snapshot.rows,
                 data_b64: b64(snapshot.vt.as_bytes()),
             };
-            if frame_tx.send(frame).await.is_err() {
+            if send_terminal_frame(
+                frame_tx.clone(),
+                frame,
+                session_id.to_string(),
+                terminal_perf::global_monitor().clone(),
+            )
+            .await
+            .is_err()
+            {
                 return StreamRunEnd::Done;
             }
         }
@@ -1802,13 +1893,17 @@ async fn stream_terminal_once(
                 session_id: event_session,
                 data,
             }) if event_session == session_id => {
-                if frame_tx
-                    .send(ServerFrame::TermOutput {
+                if send_terminal_frame(
+                    frame_tx.clone(),
+                    ServerFrame::TermOutput {
                         task_id: task_id.to_string(),
                         data_b64: b64(&data),
-                    })
-                    .await
-                    .is_err()
+                    },
+                    session_id.to_string(),
+                    terminal_perf::global_monitor().clone(),
+                )
+                .await
+                .is_err()
                 {
                     return StreamRunEnd::Done;
                 }
@@ -1836,6 +1931,7 @@ async fn stream_terminal_once(
 mod tests {
     use super::*;
     use kanna_agent_protocol::{CompanionDocumentKind, CompanionEvent};
+    use kanna_daemon::terminal_perf::{format_event, TerminalPerfMonitor};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1877,6 +1973,87 @@ mod tests {
             let _ = axum::serve(listener, router).await;
         });
         format!("ws://{addr}/v1/stream")
+    }
+
+    fn perf_test_monitor() -> TerminalPerfMonitor {
+        TerminalPerfMonitor::with_thresholds(Duration::from_millis(20), Duration::from_secs(1))
+    }
+
+    #[tokio::test]
+    async fn full_terminal_frame_queue_reports_outbound_queue_stall() {
+        let monitor = perf_test_monitor();
+        let (frame_tx, mut frame_rx) = mpsc::channel(1);
+        frame_tx.send(auth_ok_frame()).await.unwrap();
+        let frame = ServerFrame::TermOutput {
+            task_id: "task-queue".to_string(),
+            data_b64: "VE9QX1NFQ1JFVF9QQVlMT0FE".to_string(),
+        };
+
+        let send = tokio::spawn(send_terminal_frame(
+            frame_tx,
+            frame,
+            "session-queue".to_string(),
+            monitor.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let events = monitor.poll();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].context.stage, "outbound_queue");
+        assert_eq!(events[0].context.task_id.as_deref(), Some("task-queue"));
+        assert_eq!(events[0].context.queue_available, Some(0));
+        assert_eq!(events[0].context.queue_capacity, Some(1));
+        assert!(!format_event(&events[0], 0).contains("VE9QX1NFQ1JFVF9QQVlMT0FE"));
+
+        let _ = frame_rx.recv().await;
+        send.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_websocket_sink_reports_websocket_send_not_queue_stall() {
+        let monitor = perf_test_monitor();
+        let frame = ServerFrame::TermOutput {
+            task_id: "task-socket".to_string(),
+            data_b64: "cGF5bG9hZA==".to_string(),
+        };
+        let context =
+            terminal_frame_context(&frame, Some("session-socket"), "websocket_send", None);
+
+        let held = tokio::spawn(monitored_terminal_future(
+            context,
+            monitor.clone(),
+            std::future::pending::<()>(),
+        ));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let events = monitor.poll();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].context.stage, "websocket_send");
+        assert_ne!(events[0].context.stage, "outbound_queue");
+        held.abort();
+    }
+
+    #[tokio::test]
+    async fn fast_terminal_frame_emits_no_perf_record() {
+        let monitor = perf_test_monitor();
+        let (frame_tx, mut frame_rx) = mpsc::channel(1);
+        let receive = tokio::spawn(async move { frame_rx.recv().await });
+
+        send_terminal_frame(
+            frame_tx,
+            ServerFrame::TermOutput {
+                task_id: "task-fast".to_string(),
+                data_b64: "ZmFzdA==".to_string(),
+            },
+            "session-fast".to_string(),
+            monitor.clone(),
+        )
+        .await
+        .unwrap();
+        receive.await.unwrap();
+
+        assert!(monitor.poll().is_empty());
+        assert_eq!(monitor.active_count(), 0);
     }
 
     fn daemon_socket_path_for_dir(daemon_dir: &str) -> PathBuf {

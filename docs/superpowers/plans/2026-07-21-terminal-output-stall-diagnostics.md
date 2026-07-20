@@ -185,7 +185,7 @@
 
   Expected: PASS on both repeated probes and the complete reconnect suite.
 
-- [ ] **Step 6: Commit the proven fix**
+- [x] **Step 6: Commit the proven fix**
 
   ```bash
   git add crates/daemon/src/output.rs crates/daemon/tests/reconnect.rs
@@ -198,7 +198,7 @@
 - Modify: `crates/kanna-server/src/main.rs`
 - Modify: `crates/kanna-server/src/ksp.rs`
 
-- [ ] **Step 1: Add tiny-queue and held-sink tests**
+- [x] **Step 1: Add tiny-queue and held-sink tests**
 
   Add Tokio tests in `ksp.rs` that use a test-owned monitor:
 
@@ -215,17 +215,17 @@
 
   Assert queue diagnostics include available and maximum capacity and contain no `data_b64` payload.
 
-- [ ] **Step 2: Run focused KSP tests and confirm failure**
+- [x] **Step 2: Run focused KSP tests and confirm failure**
 
   Run: `cargo test -p kanna-server ksp::tests::full_terminal_frame_queue_reports_outbound_queue_stall -- --nocapture`
 
   Expected: FAIL because KSP sends are not instrumented.
 
-- [ ] **Step 3: Add instrumented helpers and start the watchdog**
+- [x] **Step 3: Add instrumented helpers and start the watchdog**
 
   Start the shared Rust watchdog once in server startup. Wrap terminal `frame_tx.send(frame).await` in `outbound_queue`, capturing `Sender::capacity()` and `Sender::max_capacity()` before awaiting. Wrap terminal-frame JSON serialization as `frame_serialize` and the socket sink await as `websocket_send`. Identify terminal frames without altering the KSP schema. Leave non-terminal coalescing and ordering unchanged.
 
-- [ ] **Step 4: Run KSP tests**
+- [x] **Step 4: Run KSP tests**
 
   Run: `cargo test -p kanna-server ksp::tests -- --nocapture`
 
