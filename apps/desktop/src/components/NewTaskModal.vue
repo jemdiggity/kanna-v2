@@ -40,7 +40,14 @@ const pipelineOptions = computed(() => {
   if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
   return ["default"];
 });
-const selectedPipeline = ref<string>(props.defaultPipeline ?? pipelineOptions.value[0] ?? "default");
+const resolvedDefaultPipeline = computed(() => {
+  if (props.defaultPipeline && pipelineOptions.value.includes(props.defaultPipeline)) {
+    return props.defaultPipeline;
+  }
+  return pipelineOptions.value[0] ?? "default";
+});
+const selectedPipeline = ref<string>(resolvedDefaultPipeline.value);
+let pipelineSelectionIsAutomatic = true;
 const showPipelinePicker = ref(false);
 const pipelineLabelId = "pipeline-label";
 const pipelineActionLabelId = "pipeline-action-label";
@@ -135,6 +142,12 @@ watch(agentChoices, (choices) => {
   if (choices.some((choice) => choiceMatches(choice, agentProvider.value, displayMode.value))) return;
   const nextChoice = preferredChoice();
   if (nextChoice) applyChoice(nextChoice);
+}, { immediate: true });
+
+watch([resolvedDefaultPipeline, pipelineOptions], ([defaultPipeline, options]) => {
+  if (!pipelineSelectionIsAutomatic && options.includes(selectedPipeline.value)) return;
+  selectedPipeline.value = defaultPipeline;
+  pipelineSelectionIsAutomatic = true;
 }, { immediate: true });
 
 function agentChoiceLabel(provider: AgentProvider, executionType: AgentExecutionType): string {
@@ -247,6 +260,7 @@ function handleBaseBranchSearchKeydown(event: KeyboardEvent) {
 
 function handlePipelineSelect(pipeline: string) {
   selectedPipeline.value = pipeline;
+  pipelineSelectionIsAutomatic = false;
   showPipelinePicker.value = false;
   nextTick(() => {
     document.getElementById(pipelineToggleId)?.focus();

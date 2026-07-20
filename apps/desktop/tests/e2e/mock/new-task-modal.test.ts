@@ -500,15 +500,25 @@ describe("new task modal", () => {
       );
       expect(loadedState).toEqual({
         prompt: "Prompt remains editable while options load",
-        pipeline: expect.any(String),
+        pipeline: "qa-review",
         baseBranch: expect.any(String),
         createDisabled: false,
         agentDisabled: false,
         pipelineDisabled: false,
         baseBranchDisabled: false,
       });
-      expect(loadedState.pipeline.length).toBeGreaterThan(0);
       expect(loadedState.baseBranch.length).toBeGreaterThan(0);
+
+      await client.executeSync(
+        buildSelectorKeydownScript(".prompt-input", { key: "Enter", meta: true }),
+      );
+      const created = await waitForTaskCreated(client, "Prompt remains editable while options load");
+      const pipelineRows = await queryDb(
+        client,
+        "SELECT pipeline FROM pipeline_item WHERE id = ?",
+        [created.id],
+      ) as Array<{ pipeline: string }>;
+      expect(pipelineRows[0]?.pipeline).toBe("qa-review");
     } finally {
       await client.executeSync(
         `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
