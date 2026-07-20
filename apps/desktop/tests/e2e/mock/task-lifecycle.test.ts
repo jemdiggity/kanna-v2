@@ -4,6 +4,7 @@ import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { resolveAppKannaServer } from "../helpers/kannaServer";
 
 async function waitForPipelineItem<T>(
   client: WebDriverClient,
@@ -794,6 +795,168 @@ describe("task lifecycle", () => {
       || JSON.stringify(call).includes(closedBranch)
     );
     expect(callsForClosedTask).toEqual([]);
+  });
+
+  it("keeps dependents with resolved hidden blockers out of the Blocked section after snapshot hydration", async () => {
+    const dependentTaskId = "task-resolved-blocker-dependent-e2e";
+    const closedBlockerTaskId = "task-resolved-closed-blocker-e2e";
+    const prBlockerTaskId = "task-resolved-pr-blocker-e2e";
+    const hiddenRepoId = "repo-resolved-pr-blocker-e2e";
+
+    await execDb(
+      client,
+      `INSERT INTO repo (id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at)
+       VALUES (?, ?, ?, 'main', 1, 99, ?, ?)`,
+      [
+        hiddenRepoId,
+        "/tmp/kanna-resolved-pr-blocker-e2e",
+        "Hidden resolved blocker repo",
+        "2026-07-20T00:00:00.000Z",
+        "2026-07-20T00:00:00.000Z",
+      ],
+    );
+    await seedPtyTask(client, {
+      id: dependentTaskId,
+      repoId,
+      prompt: "Dependent with resolved blockers",
+      stage: "in progress",
+      branch: dependentTaskId,
+      closedAt: null,
+      createdAt: "2100-07-20T03:00:00.000Z",
+    });
+    await seedPtyTask(client, {
+      id: closedBlockerTaskId,
+      repoId,
+      prompt: "Closed blocker absent from visible snapshot items",
+      stage: "review",
+      branch: closedBlockerTaskId,
+      closedAt: "2026-07-20T01:00:00.000Z",
+      createdAt: "2100-07-20T02:00:00.000Z",
+    });
+    await seedPtyTask(client, {
+      id: prBlockerTaskId,
+      repoId: hiddenRepoId,
+      prompt: "PR blocker absent with its hidden repository",
+      stage: "pr",
+      branch: prBlockerTaskId,
+      closedAt: null,
+      createdAt: "2100-07-20T01:00:00.000Z",
+    });
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET pr_url = ? WHERE id = ?",
+      ["https://github.com/kanna-test/kanna-test/pull/42", prBlockerTaskId],
+    );
+    await execDb(
+      client,
+      "INSERT INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?), (?, ?)",
+      [dependentTaskId, closedBlockerTaskId, dependentTaskId, prBlockerTaskId],
+    );
+
+    const { baseUrl } = await resolveAppKannaServer(client);
+    const response = await fetch(`${baseUrl}/v1/snapshot`);
+    expect(response.status).toBe(200);
+    const snapshot = await response.json() as {
+      entries: Array<{ items: Array<{ id: string }> }>;
+      taskBlockers: Array<{ blocked_item_id: string; blocker_item_id: string }>;
+      blockerTaskStates: Record<string, {
+        closed_at: string | null;
+        stage: string | null;
+        pr_url: string | null;
+      }>;
+    };
+    const snapshotItemIds = snapshot.entries.flatMap((entry) => entry.items.map((item) => item.id));
+    expect(snapshotItemIds).toContain(dependentTaskId);
+    expect(snapshotItemIds).not.toContain(closedBlockerTaskId);
+    expect(snapshotItemIds).not.toContain(prBlockerTaskId);
+    expect(snapshot.taskBlockers).toEqual(expect.arrayContaining([
+      { blocked_item_id: dependentTaskId, blocker_item_id: closedBlockerTaskId },
+      { blocked_item_id: dependentTaskId, blocker_item_id: prBlockerTaskId },
+    ]));
+    expect(snapshot.blockerTaskStates[closedBlockerTaskId]?.closed_at).toBe(
+      "2026-07-20T01:00:00.000Z",
+    );
+    expect(snapshot.blockerTaskStates[prBlockerTaskId]).toMatchObject({
+      closed_at: null,
+      stage: "pr",
+      pr_url: "https://github.com/kanna-test/kanna-test/pull/42",
+    });
+
+    await persistWindowSelection(client, { repoId, itemId: dependentTaskId });
+    await client.executeSync("location.reload();");
+    await client.waitForAppReady();
+    await waitForCondition(
+      async () => client.executeSync<boolean>(
+        `const ctx = window.__KANNA_E2E__.setupState;
+         const read = (value) => value && value.__v_isRef ? value.value : value;
+         const currentItem = read(ctx.store.currentItem);
+         const row = document.querySelector(${JSON.stringify(
+           `.repo-section[data-repo-id="${repoId}"] .pipeline-item[data-task-id="${dependentTaskId}"]`,
+         )});
+         const sectionLabel = row?.closest(".type-zone")?.previousElementSibling?.textContent?.trim() ?? null;
+         return currentItem?.id === ${JSON.stringify(dependentTaskId)}
+           && sectionLabel === "in progress";`,
+      ),
+      "resolved-blocker dependent to hydrate in its normal stage",
+      10_000,
+      async () => client.executeSync(
+        `const ctx = window.__KANNA_E2E__.setupState;
+         const read = (value) => value && value.__v_isRef ? value.value : value;
+         const row = document.querySelector(${JSON.stringify(
+           `.repo-section[data-repo-id="${repoId}"] .pipeline-item[data-task-id="${dependentTaskId}"]`,
+         )});
+         return {
+           selectedItemId: read(ctx.store.selectedItemId),
+           currentItemId: read(ctx.store.currentItem)?.id ?? null,
+           rowFound: row !== null,
+           sectionLabel: row?.closest(".type-zone")?.previousElementSibling?.textContent?.trim() ?? null,
+           sidebarText: document.querySelector(".sidebar")?.textContent ?? "",
+           blockedPlaceholderVisible: document.querySelector(".main-panel .blocked-placeholder") !== null,
+         };`,
+      ),
+    );
+
+    const hydrated = await client.executeSync<{
+      selectedItemId: string | null;
+      currentItemId: string | null;
+      itemIds: string[];
+      blockerStates: Record<string, { closed_at: string | null; stage: string | null; pr_url: string | null }>;
+      sectionLabel: string | null;
+      mainPanelText: string;
+      blockedPlaceholderVisible: boolean;
+    }>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const read = (value) => value && value.__v_isRef ? value.value : value;
+       const currentItem = read(ctx.store.currentItem);
+       const row = document.querySelector(${JSON.stringify(
+         `.repo-section[data-repo-id="${repoId}"] .pipeline-item[data-task-id="${dependentTaskId}"]`,
+       )});
+       return {
+         selectedItemId: read(ctx.store.selectedItemId),
+         currentItemId: currentItem?.id ?? null,
+         itemIds: read(ctx.store.items).map((item) => item.id),
+         blockerStates: JSON.parse(JSON.stringify(read(ctx.store.blockerTaskStates))),
+         sectionLabel: row?.closest(".type-zone")?.previousElementSibling?.textContent?.trim() ?? null,
+         mainPanelText: document.querySelector(".main-panel")?.textContent ?? "",
+         blockedPlaceholderVisible: document.querySelector(".main-panel .blocked-placeholder") !== null,
+       };`,
+    );
+    expect(hydrated).toMatchObject({
+      selectedItemId: dependentTaskId,
+      currentItemId: dependentTaskId,
+      sectionLabel: "in progress",
+      blockedPlaceholderVisible: false,
+    });
+    expect(hydrated.itemIds).toContain(dependentTaskId);
+    expect(hydrated.itemIds).not.toContain(closedBlockerTaskId);
+    expect(hydrated.itemIds).not.toContain(prBlockerTaskId);
+    expect(hydrated.blockerStates[closedBlockerTaskId]?.closed_at).toBe(
+      "2026-07-20T01:00:00.000Z",
+    );
+    expect(hydrated.blockerStates[prBlockerTaskId]?.pr_url).toBe(
+      "https://github.com/kanna-test/kanna-test/pull/42",
+    );
+    expect(hydrated.mainPanelText).toContain("Dependent with resolved blockers");
   });
 
   it("keeps the current repo selected when closing its only task while another repo has a task", async () => {

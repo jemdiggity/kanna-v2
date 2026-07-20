@@ -36,6 +36,7 @@ Frontend snapshot fixtures may omit `blockerTaskStates` while migrating. Consume
 - Sidebar regression test: a dependent is not grouped as blocked when its blocker is absent from visible items but its snapshot state is closed.
 - Conservative test: a relationship with no blocker task state remains blocked.
 - LAN/cloud projection test: resolved blocker relationships are not published as active blockers.
+- Desktop E2E regression: seed retained edges to a closed blocker and a hidden PR blocker, reload through the real local `/v1/snapshot` endpoint, and verify the dependent remains in its normal Sidebar stage and never renders MainPanel's blocked placeholder.
 - Existing focused Rust and desktop unit suites must remain green.
 
 ## Non-goals

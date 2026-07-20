@@ -164,7 +164,42 @@ Pass `snapshot.blockerTaskStates` into the LAN helper and retain only relationsh
 
 Repeat the commands from Step 2. Expected: PASS.
 
-### Task 4: Verify the integrated change
+### Task 4: Cover real-server desktop hydration
+
+**Files:**
+- Modify: `apps/desktop/tests/e2e/mock/task-lifecycle.test.ts`
+
+- [ ] **Step 1: Add the integrated lifecycle regression**
+
+Seed an open dependent in the visible fixture repo, a closed blocker in that repo, and an open `pr` blocker with a PR URL in a hidden repo. Retain both `task_blocker` rows. Fetch the real local `/v1/snapshot` response and assert both blockers are absent from `entries[].items` while their states and relationship rows are present. Persist selection to the dependent and reload the webview so normal application startup hydrates the HTTP snapshot.
+
+After reload, assert:
+
+```ts
+expect(state.itemIds).toContain(dependentTaskId);
+expect(state.itemIds).not.toContain(closedBlockerTaskId);
+expect(state.itemIds).not.toContain(prBlockerTaskId);
+expect(state.sectionLabel).toBe("in progress");
+expect(state.blockedPlaceholderVisible).toBe(false);
+```
+
+- [ ] **Step 2: Verify the regression test detects broken blocker-state wiring**
+
+Temporarily remove `blockerTaskStates` from the Sidebar ordering options and run:
+
+```bash
+pnpm --dir apps/desktop test:e2e -- mock/task-lifecycle.test.ts
+```
+
+Expected: FAIL because the dependent moves to the Blocked section. Restore the production line immediately afterward.
+
+- [ ] **Step 3: Run the focused E2E test and verify GREEN**
+
+Run: `pnpm --dir apps/desktop test:e2e -- mock/task-lifecycle.test.ts`
+
+Expected: PASS with the dependent under `in progress` and no blocked placeholder.
+
+### Task 5: Verify the integrated change
 
 **Files:**
 - Verify all modified files
@@ -186,7 +221,18 @@ Run: `cargo test -p kanna-server`
 
 Expected: PASS.
 
-- [ ] **Step 3: Run repository diff checks**
+- [ ] **Step 3: Run the repository-wide and daemon suites requested by review**
+
+Run:
+
+```bash
+pnpm test
+cd crates/daemon && cargo test -- --test-threads=1
+```
+
+Expected: both commands PASS.
+
+- [ ] **Step 4: Run repository diff checks**
 
 Run:
 
