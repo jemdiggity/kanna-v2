@@ -53,8 +53,9 @@ pub enum TerminalPerfEventKind {
     Stall,
     Recovered,
     Gap,
-    /// A bounded per-subscriber mailbox overflowed and the subscriber was
-    /// disconnected for snapshot resync.
+    /// A subscriber's undelivered backlog exceeded its byte budget; it stops
+    /// receiving live output until an in-place snapshot resync (reported as
+    /// `Recovered` with the lag episode duration) once its backlog drains.
     Lag,
 }
 

@@ -1,7 +1,8 @@
 //! Lag-aware terminal event fanout.
 //!
-//! Every attached writer and passive observer owns a byte-bounded mailbox
-//! drained by a dedicated writer task. The PTY ingestion loop only ever
+//! Every attached writer and passive observer owns a mailbox (an unbounded
+//! channel guarded by byte-budget accounting — the budget, not the channel,
+//! bounds memory) drained by a dedicated writer task. The PTY ingestion loop only ever
 //! enqueues without awaiting, so no subscriber's socket or WebSocket progress
 //! can delay PTY reads, headless terminal mirroring, recovery persistence, or
 //! healthy subscribers.
@@ -96,12 +97,25 @@ pub(crate) struct Subscriber {
     /// Serialized bytes enqueued but not yet written to the socket. Shared
     /// with the writer task, which subtracts after each completed write.
     pending_bytes: Arc<AtomicUsize>,
+    /// Set when this registration is replaced or removed. The writer task
+    /// checks it under the socket writer lock before every write, so once a
+    /// replacement registration has written anything (e.g. its fresh
+    /// snapshot), no stale queued line from this registration can follow it.
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
     lagged_since: Option<Instant>,
     writer: SessionWriter,
     writer_task: tokio::task::JoinHandle<()>,
 }
 
 impl Subscriber {
+    /// Stop this registration's writer stream: any in-flight line completes
+    /// (lines stay whole on the socket), everything still queued is
+    /// discarded. Required when the same connection re-registers so the new
+    /// registration's snapshot is the cutover boundary.
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
     fn perf_context(&self, line: &EventLine) -> TerminalPerfContext {
         let mut context =
             TerminalPerfContext::new("daemon", self.session_id.clone(), self.kind.write_stage());
@@ -169,7 +183,9 @@ impl FanoutState {
 
     /// Register a subscriber, queueing its initial events (snapshot, current
     /// status) ahead of any live output. An existing registration for the
-    /// same writer is replaced.
+    /// same writer is replaced and its writer stream cancelled, so on a
+    /// same-connection reattach the fresh snapshot is the cutover boundary:
+    /// no output queued for the old registration can be delivered after it.
     pub(crate) fn register(
         &mut self,
         session_id: &str,
@@ -178,17 +194,18 @@ impl FanoutState {
         initial_events: &[Event],
     ) {
         let writer_id = Arc::as_ptr(writer) as usize;
-        self.list_mut(kind)
-            .retain(|subscriber| subscriber.writer_id != writer_id);
+        cancel_and_remove(self.list_mut(kind), writer_id);
 
         let (tx, rx) = mpsc::unbounded_channel();
         let pending_bytes = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer_task = spawn_writer_task(
             session_id.to_string(),
             kind,
             writer.clone(),
             rx,
             pending_bytes.clone(),
+            cancelled.clone(),
         );
         let subscriber = Subscriber {
             writer_id,
@@ -196,6 +213,7 @@ impl FanoutState {
             session_id: session_id.to_string(),
             tx,
             pending_bytes,
+            cancelled,
             lagged_since: None,
             writer: writer.clone(),
             writer_task,
@@ -312,19 +330,17 @@ impl FanoutState {
         }
     }
 
-    /// Remove a subscriber registration; its writer task drains any queued
-    /// events and then finishes.
+    /// Remove a subscriber registration. Its writer stream is cancelled:
+    /// undelivered queued events are discarded so they cannot surface after
+    /// a later re-registration's fresh snapshot on the same connection.
     pub(crate) fn remove(&mut self, kind: SubscriberKind, writer_id: usize) {
-        self.list_mut(kind)
-            .retain(|subscriber| subscriber.writer_id != writer_id);
+        cancel_and_remove(self.list_mut(kind), writer_id);
     }
 
     /// Remove every registration owned by a disconnected client connection.
     pub(crate) fn remove_writer_everywhere(&mut self, writer_id: usize) {
-        self.attached
-            .retain(|subscriber| subscriber.writer_id != writer_id);
-        self.observers
-            .retain(|subscriber| subscriber.writer_id != writer_id);
+        cancel_and_remove(&mut self.attached, writer_id);
+        cancel_and_remove(&mut self.observers, writer_id);
     }
 
     #[cfg(test)]
@@ -338,6 +354,17 @@ impl FanoutState {
             SubscriberKind::Observer => &mut self.observers,
         }
     }
+}
+
+fn cancel_and_remove(list: &mut Vec<Subscriber>, writer_id: usize) {
+    list.retain(|subscriber| {
+        if subscriber.writer_id == writer_id {
+            subscriber.cancel();
+            false
+        } else {
+            true
+        }
+    });
 }
 
 #[derive(Default)]
@@ -391,6 +418,7 @@ fn spawn_writer_task(
     writer: SessionWriter,
     mut rx: mpsc::UnboundedReceiver<EventLine>,
     pending_bytes: Arc<AtomicUsize>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(item) = rx.recv().await {
@@ -401,6 +429,16 @@ fn spawn_writer_task(
             let operation = terminal_perf::global_monitor().begin(context);
             let result = {
                 let mut guard = writer.lock().await;
+                // Checked under the shared socket writer lock: if a
+                // replacement registration already wrote its snapshot, the
+                // lock ordering guarantees this load observes the
+                // cancellation, so no stale line can follow that snapshot.
+                if cancelled.load(Ordering::Acquire) {
+                    drop(guard);
+                    operation.finish();
+                    pending_bytes.fetch_sub(item.line.len(), Ordering::Relaxed);
+                    return;
+                }
                 match guard.write_all(item.line.as_bytes()).await {
                     Ok(()) => guard.flush().await,
                     Err(error) => Err(error),

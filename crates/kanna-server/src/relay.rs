@@ -775,6 +775,151 @@ mod tests {
         }
     }
 
+    /// Drives the real `observer_loop` against a fake daemon connection and
+    /// a real WebSocket sink: the initial snapshot, live output, the daemon's
+    /// mid-stream lag-resync Snapshot, output after it, and the exit must all
+    /// be forwarded in order as relay events.
+    #[tokio::test]
+    async fn observer_loop_forwards_mid_stream_snapshot_resync_then_live_output() {
+        use kanna_daemon::protocol::Event as DaemonEvent;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        fn terminal_snapshot(vt: &str) -> TerminalSnapshot {
+            TerminalSnapshot {
+                version: 1,
+                rows: 24,
+                cols: 80,
+                cursor_row: 0,
+                cursor_col: 0,
+                cursor_visible: true,
+                saved_at: 0,
+                sequence: 0,
+                vt: vt.to_string(),
+            }
+        }
+
+        let unique = format!(
+            "relay-observer-resync-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(&unique);
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener =
+            tokio::net::UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+
+        let fake_daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept daemon connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            // observer_loop first requests the initial snapshot.
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read snapshot command");
+            assert!(
+                line.contains("Snapshot"),
+                "expected Snapshot command, got {line:?}"
+            );
+
+            let events = [
+                DaemonEvent::Snapshot {
+                    session_id: "sess-observer".to_string(),
+                    snapshot: terminal_snapshot("INITIAL"),
+                },
+                DaemonEvent::Output {
+                    session_id: "sess-observer".to_string(),
+                    data: b"live-before".to_vec(),
+                },
+                DaemonEvent::Snapshot {
+                    session_id: "sess-observer".to_string(),
+                    snapshot: terminal_snapshot("RESYNCED"),
+                },
+                DaemonEvent::Output {
+                    session_id: "sess-observer".to_string(),
+                    data: b"live-after".to_vec(),
+                },
+                DaemonEvent::Exit {
+                    session_id: "sess-observer".to_string(),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+            ];
+            for event in events {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .expect("write daemon event");
+            }
+        });
+
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind relay stand-in");
+        let addr = tcp.local_addr().expect("local addr");
+        let relay_server = tokio::spawn(async move {
+            let (stream, _) = tcp.accept().await.expect("accept ws");
+            let mut ws =
+                tokio_tungstenite::accept_async(tokio_tungstenite::MaybeTlsStream::Plain(stream))
+                    .await
+                    .expect("ws handshake");
+            let mut messages = Vec::new();
+            while let Some(Ok(message)) = ws.next().await {
+                if let TungsteniteMessage::Text(text) = message {
+                    messages.push(text.to_string());
+                }
+            }
+            messages
+        });
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .expect("connect ws");
+        let (sink, _read) = ws.split();
+        let sink = Arc::new(Mutex::new(sink));
+
+        let daemon = daemon_client::DaemonClient::connect(daemon_dir.to_str().unwrap())
+            .await
+            .expect("connect fake daemon");
+        observer_loop(daemon, "sess-observer", sink.clone()).await;
+        fake_daemon.await.expect("fake daemon");
+        sink.lock().await.close().await.expect("close ws");
+        let messages = relay_server.await.expect("relay server");
+
+        let events: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|message| serde_json::from_str(message).expect("parse relay message"))
+            .collect();
+        let names: Vec<&str> = events
+            .iter()
+            .map(|event| event["name"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "terminal_snapshot",
+                "terminal_output",
+                "terminal_snapshot",
+                "terminal_output",
+                "session_exit",
+            ],
+            "observer relay events out of order: {events:?}"
+        );
+        assert_eq!(events[0]["payload"]["snapshot"]["vt"], "INITIAL");
+        assert_eq!(events[2]["payload"]["snapshot"]["vt"], "RESYNCED");
+
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
     #[test]
     fn relay_tunnel_ksp_auth_is_already_satisfied_by_relay() {
         assert_eq!(

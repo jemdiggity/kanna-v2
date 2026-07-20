@@ -314,12 +314,61 @@ impl Drop for DaemonHandle {
     }
 }
 
+/// Wait until any daemon log file under this daemon's data dir contains
+/// `needle`. Used to assert that socket/mailbox backpressure diagnostics
+/// actually fired, so a flood that the OS quietly buffers away fails the
+/// test instead of passing vacuously.
+fn wait_for_daemon_log(daemon: &DaemonHandle, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let found = std::fs::read_dir(&daemon._dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "log")
+            })
+            .any(|entry| {
+                std::fs::read_to_string(entry.path())
+                    .map(|contents| contents.contains(needle))
+                    .unwrap_or(false)
+            });
+        if found {
+            return;
+        }
+        if Instant::now() > deadline {
+            panic!("daemon log never contained {needle:?}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 struct ClientConn {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
 }
 
 impl ClientConn {
+    /// Shrink this connection's socket receive buffer so a non-reading
+    /// client saturates kernel buffering after a few KiB instead of letting
+    /// the OS absorb an entire test flood.
+    fn clamp_recv_buffer(&self, bytes: i32) {
+        use std::os::fd::AsRawFd;
+        let ret = unsafe {
+            libc::setsockopt(
+                self.writer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&bytes as *const i32).cast::<libc::c_void>(),
+                std::mem::size_of::<i32>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(ret, 0, "failed to clamp SO_RCVBUF");
+    }
+
     fn connect(socket_path: &Path) -> Self {
         let stream = UnixStream::connect(socket_path).expect("failed to connect to daemon");
         stream
@@ -632,6 +681,10 @@ fn stage_transition_prelude_precedes_process_output_in_snapshot() {
     });
     expect_session_created(&mut conn, session_id);
     wait_for_file(&dir.join("ready"));
+    // `ready` proves the process wrote to the PTY, not that the daemon has
+    // mirrored it yet; wait until the headless terminal caught up before
+    // asserting on an attach snapshot.
+    wait_for_snapshot(&mut conn, session_id, "NEW_STAGE_PROCESS_OUTPUT");
 
     let snapshot = attach_snapshot_and_capture(&mut conn, session_id);
     let marker_index = snapshot
@@ -1245,7 +1298,7 @@ fn test_stale_reader_does_not_remove_respawned_session_with_same_id() {
     );
 
     std::thread::sleep(Duration::from_millis(250));
-    let snapshot = request_snapshot(&mut shared, "sess-respawn");
+    let snapshot = wait_for_snapshot(&mut shared, "sess-respawn", "NEW_READY");
     assert!(
         snapshot.vt.contains("NEW_READY"),
         "respawned session should survive stale cleanup, got {:?}",
@@ -1517,8 +1570,11 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
 
     // Both clients attach before the flood. `stalled` never reads another
     // byte, reproducing a WebSocket/KSP consumer that has stopped draining
-    // terminal frames; its Unix socket fills within the first few chunks.
+    // terminal frames; its clamped receive buffer guarantees its socket
+    // saturates within the first few chunks instead of the OS absorbing the
+    // whole flood.
     let mut stalled = daemon.connect();
+    stalled.clamp_recv_buffer(4096);
     attach(&mut stalled, session_id);
     let mut healthy = daemon.connect();
     attach(&mut healthy, session_id);
@@ -1564,6 +1620,16 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     );
     assert!(String::from_utf8_lossy(&second).contains("SECOND_HEALTHY_MARKER"));
 
+    // Prove real socket backpressure occurred on the stalled subscriber's
+    // writer stream: its socket write must have blocked long enough to emit
+    // a stall diagnostic. Without this the flood could fit entirely inside
+    // kernel buffers and the test would pass without testing anything.
+    wait_for_daemon_log(
+        &daemon,
+        "stage=attached_writer event=stall",
+        Duration::from_secs(5),
+    );
+
     drop(stalled);
     cleanup_atomic_attach_dir(&dir);
 }
@@ -1598,7 +1664,10 @@ fn stalled_observer_does_not_delay_healthy_subscriber_or_pty_ingestion() {
     // shared WebSocket sink is under backpressure (the cloud-workspace
     // remote terminal path). Its daemon-side write historically had no
     // timeout at all, so this saturation froze PTY ingestion indefinitely.
+    // The clamped receive buffer guarantees the saturation actually happens
+    // instead of the OS absorbing the whole flood.
     let mut stalled_observer = daemon.connect();
+    stalled_observer.clamp_recv_buffer(4096);
     observe(&mut stalled_observer, session_id);
 
     let mut healthy = daemon.connect();
@@ -1619,6 +1688,14 @@ fn stalled_observer_does_not_delay_healthy_subscriber_or_pty_ingestion() {
         Duration::from_millis(350),
     );
     wait_for_snapshot(&mut control, session_id, "OBSERVER_ISOLATION_MARKER");
+
+    // Prove the observer's writer stream really hit socket backpressure —
+    // the isolation above is only meaningful if its socket write blocked.
+    wait_for_daemon_log(
+        &daemon,
+        "stage=observer_write event=stall",
+        Duration::from_secs(5),
+    );
 
     drop(stalled_observer);
     cleanup_atomic_attach_dir(&dir);
@@ -1680,6 +1757,196 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
     healthy.wait_for_content_with_timeout("POST_OVERFLOW_MARKER", Duration::from_millis(500));
     stalled.wait_for_content_with_timeout("POST_OVERFLOW_MARKER", Duration::from_secs(5));
     wait_for_snapshot(&mut control, session_id, "POST_OVERFLOW_MARKER");
+
+    // Prove the byte-budget overflow and the in-place resync actually
+    // happened rather than the kernel quietly buffering the whole flood.
+    wait_for_daemon_log(
+        &daemon,
+        "stage=attached_writer event=lag",
+        Duration::from_secs(5),
+    );
+    wait_for_daemon_log(
+        &daemon,
+        "stage=attached_writer event=recovered",
+        Duration::from_secs(5),
+    );
+
+    cleanup_atomic_attach_dir(&dir);
+}
+
+#[test]
+fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
+    let _flood_probe_guard = FLOOD_PROBE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let daemon =
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "65536")]);
+    let session_id = "sess-overflowing-observer";
+    let dir = atomic_attach_dir("overflowing-observer");
+
+    let mut control = daemon.connect();
+    control.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 262144 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+                .to_string(),
+        ],
+        cwd: dir.display().to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    expect_session_created(&mut control, session_id);
+
+    let mut observer = daemon.connect();
+    observer.clamp_recv_buffer(4096);
+    observe(&mut observer, session_id);
+    let mut healthy = daemon.connect();
+    attach(&mut healthy, session_id);
+
+    std::fs::write(dir.join("go"), b"go").unwrap();
+
+    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_millis(2_500));
+    wait_for_daemon_log(
+        &daemon,
+        "stage=observer_write event=lag",
+        Duration::from_secs(5),
+    );
+
+    // Once the observer resumes reading and drains its bounded backlog, the
+    // daemon resyncs it in place: it must observe a fresh mid-stream Snapshot
+    // event containing the content it missed…
+    let resync_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(
+            Instant::now() < resync_deadline,
+            "observer never received a resync snapshot containing the missed flood tail"
+        );
+        match observer.recv_with_timeout(Duration::from_millis(100)) {
+            Ok(Evt::Snapshot { snapshot, .. }) if snapshot.vt.contains("FLOOD_DONE") => break,
+            Ok(_) | Err(_) => {}
+        }
+    }
+    wait_for_daemon_log(
+        &daemon,
+        "stage=observer_write event=recovered",
+        Duration::from_secs(5),
+    );
+
+    // …followed by live Output again.
+    control.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"OBSERVER_FRESH_MARKER\n".to_vec(),
+    });
+    let fresh = observer.collect_output_until_contains_with_timeout(
+        "OBSERVER_FRESH_MARKER",
+        Duration::from_secs(5),
+    );
+    assert!(String::from_utf8_lossy(&fresh).contains("OBSERVER_FRESH_MARKER"));
+
+    cleanup_atomic_attach_dir(&dir);
+}
+
+#[test]
+fn same_connection_reattach_discards_stale_backlog_behind_fresh_snapshot() {
+    let _flood_probe_guard = FLOOD_PROBE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let daemon = DaemonHandle::start();
+    let session_id = "sess-reattach-cutover-boundary";
+    let dir = atomic_attach_dir("reattach-cutover-boundary");
+
+    let mut control = daemon.connect();
+    control.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            // 'S' fill marks stale pre-reattach output; the flood exceeds the
+            // clamped socket buffers so the subject's mailbox holds a backlog
+            // when it re-attaches.
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 65536 /dev/zero | tr '\\000' S; printf '\\r\\nSTALE_DONE\\r\\n'; : > flooded; cat"
+                .to_string(),
+        ],
+        cwd: dir.display().to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    expect_session_created(&mut control, session_id);
+
+    let mut subject = daemon.connect();
+    subject.clamp_recv_buffer(4096);
+    attach(&mut subject, session_id);
+
+    // Build pending output the subject has not read.
+    std::fs::write(dir.join("go"), b"go").unwrap();
+    wait_for_file(&dir.join("flooded"));
+    thread::sleep(Duration::from_millis(300));
+
+    // Re-attach on the same connection while the backlog is queued. The fresh
+    // Snapshot must be the cutover boundary: queued Output from the replaced
+    // registration must never be delivered after it.
+    subject.send(&Cmd::AttachSnapshot {
+        session_id: session_id.to_string(),
+        emulate_terminal: false,
+    });
+
+    // Drain until the reattach Snapshot arrives (stale output before it is
+    // expected — it was already on the wire or in socket buffers).
+    let snapshot_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            Instant::now() < snapshot_deadline,
+            "reattach snapshot never arrived"
+        );
+        match subject.recv_with_timeout(Duration::from_millis(100)) {
+            Ok(Evt::Snapshot {
+                session_id: sid, ..
+            }) => {
+                assert_eq!(sid, session_id);
+                break;
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+
+    // Everything after the Snapshot must be post-cutover: request fresh live
+    // output and require that no stale flood bytes appear before it.
+    control.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"FRESH_AFTER_REATTACH\n".to_vec(),
+    });
+    let post_snapshot_deadline = Instant::now() + Duration::from_secs(10);
+    let mut post_snapshot_output = Vec::new();
+    loop {
+        assert!(
+            Instant::now() < post_snapshot_deadline,
+            "fresh output never arrived after the reattach snapshot; got {:?}",
+            String::from_utf8_lossy(&post_snapshot_output)
+        );
+        match subject.recv_with_timeout(Duration::from_millis(100)) {
+            Ok(Evt::Output { data, .. }) => {
+                post_snapshot_output.extend_from_slice(&data);
+                let text = String::from_utf8_lossy(&post_snapshot_output);
+                assert!(
+                    !text.contains("SSSSSSSS"),
+                    "stale pre-reattach output was delivered after the fresh snapshot: {text:?}"
+                );
+                if text.contains("FRESH_AFTER_REATTACH") {
+                    break;
+                }
+            }
+            Ok(Evt::Snapshot { .. }) => {
+                panic!("unexpected extra snapshot after the reattach cutover")
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
 
     cleanup_atomic_attach_dir(&dir);
 }

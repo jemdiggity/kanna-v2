@@ -75,9 +75,10 @@ New `crates/daemon/src/fanout.rs`. Each session owns a `SessionFanout`
 `session_writers` entry presence); each attached writer and each observer
 becomes a `Subscriber`:
 
-- a byte-budgeted mailbox (`SUBSCRIBER_MAILBOX_MAX_BYTES` of undelivered
-  pre-serialized event lines, each `Arc<str>`, serialized once per event for
-  all subscribers); and
+- a mailbox — an unbounded channel guarded by byte-budget accounting
+  (`SUBSCRIBER_MAILBOX_MAX_BYTES` of undelivered pre-serialized event lines,
+  each `Arc<str>`, serialized once per event for all subscribers); the
+  budget, not the channel, is what bounds memory; and
 - a dedicated writer task that drains the mailbox onto that client's
   socket (`Arc<Mutex<OwnedWriteHalf>>`, shared with command replies exactly
   as today) and wraps each socket write in the existing
@@ -120,6 +121,15 @@ authoritative headless terminal:
 - **Final events:** on session exit/kill, a subscriber that still cannot
   take the Exit event is disconnected (writer task aborted, write half shut
   down) so its client observes EOF instead of a silent dead stream.
+
+### Same-connection re-registration
+
+Replacing or removing a subscriber cancels its writer stream: the in-flight
+line completes (lines stay whole on the socket) and everything still queued
+is discarded, with the cancellation checked under the shared socket writer
+lock. A same-connection reattach or re-observe therefore keeps one ordered
+writer stream — queued output from the replaced registration can never be
+delivered after the fresh snapshot.
 
 ### Atomic snapshot-to-live cutover
 
@@ -174,8 +184,16 @@ Red first, against the current fanout, in `crates/daemon/tests/reconnect.rs`:
    snapshot, and neither the healthy subscriber nor PTY ingestion (headless
    snapshot over a control connection) was ever delayed.
 
-Plus source-order unit tests that the ingestion loop never writes to a
-subscriber socket and that the attach cutover holds the fanout lock across
-snapshot and registration, a KSP test that a mid-stream daemon `Snapshot` is
-forwarded as a `term_snapshot` frame, and the existing concurrent attach
-cutover, kill, handoff, and cleanup suites staying green.
+The saturation probes clamp the stalled connection's `SO_RCVBUF` and assert
+the corresponding `terminal_perf` stall/lag records in the daemon log, so a
+flood the kernel quietly buffers away fails the test instead of passing
+vacuously. Additional coverage: a same-connection reattach with a queued
+backlog proving the fresh snapshot is the cutover boundary (no stale output
+after it), observer overflow/resync (fresh mid-stream Snapshot followed by
+live Output), an `observer_loop` integration test forwarding a mid-stream
+resync Snapshot over a real WebSocket sink, source-order unit tests that the
+ingestion loop never writes to a subscriber socket and that the attach
+cutover holds the fanout lock across snapshot and registration, a KSP test
+that a mid-stream daemon `Snapshot` is forwarded as a `term_snapshot` frame,
+and the existing concurrent attach cutover, kill, handoff, and cleanup
+suites staying green.
