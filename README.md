@@ -20,6 +20,11 @@ curl -fsSL https://raw.githubusercontent.com/jemdiggity/kanna/main/scripts/insta
 
 Requires [Claude CLI](https://docs.anthropic.com/en/docs/claude-code).
 
+## Developing Kanna
+
+Developer documentation — getting started, architecture, workflow, testing,
+and release — lives in [docs/dev/](docs/dev/README.md).
+
 ## Build Paths
 
 Development uses the normal Tauri path:
