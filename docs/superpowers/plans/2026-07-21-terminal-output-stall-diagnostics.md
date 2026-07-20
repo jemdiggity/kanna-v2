@@ -231,7 +231,7 @@
 
   Expected: PASS; fast frames produce no diagnostic events.
 
-- [ ] **Step 5: Commit KSP instrumentation**
+- [x] **Step 5: Commit KSP instrumentation**
 
   ```bash
   git add crates/kanna-server/src/main.rs crates/kanna-server/src/ksp.rs
@@ -248,7 +248,7 @@
 - Modify: `apps/desktop/src/composables/terminalSessionLifecycle.ts`
 - Modify: `apps/desktop/src/composables/useTerminal.test.ts`
 
-- [ ] **Step 1: Add stream dispatch timestamp tests**
+- [x] **Step 1: Add stream dispatch timestamp tests**
 
   Extend `TerminalStreamHandlers.onOutput` to receive:
 
@@ -260,7 +260,7 @@
 
   Add an injectable monotonic `now` option to `StreamClient` tests and assert a `term_output` handler receives the exact local timestamp. Existing one-argument handlers must remain valid.
 
-- [ ] **Step 2: Add WebView monitor tests with fake time**
+- [x] **Step 2: Add WebView monitor tests with fake time**
 
   Test a class or factory with injected `now`, wall clock, visibility, logger, and interval scheduler. Cover:
 
@@ -272,7 +272,7 @@
   - detach removes state and stops the interval when the last terminal leaves;
   - the serialized record does not contain a supplied base64 string or decoded marker.
 
-- [ ] **Step 3: Run frontend tests and confirm failure**
+- [x] **Step 3: Run frontend tests and confirm failure**
 
   Run:
 
@@ -283,7 +283,7 @@
 
   Expected: FAIL because metadata and the monitor do not exist.
 
-- [ ] **Step 4: Implement bounded frontend monitoring**
+- [x] **Step 4: Implement bounded frontend monitoring**
 
   `terminalOutputPerf.ts` owns one module-level registry keyed by session id and one 250ms interval while the registry is non-empty. Per session retain only counters, latest timestamps, maxima for E2E inspection, and the latest diagnostic record. Implement:
 
@@ -303,7 +303,7 @@
 
   In `terminalSessionLifecycle.ts`, attach the monitor alongside the terminal stream. On output, measure base64 decoding, call `beginXtermWrite`, and pass its idempotent completion function to `terminal.write(bytes, callback)`. Dispose it with the stream lifecycle. Preserve clipboard parsing and first-output behavior.
 
-- [ ] **Step 5: Run frontend tests**
+- [x] **Step 5: Run frontend tests**
 
   Run:
 

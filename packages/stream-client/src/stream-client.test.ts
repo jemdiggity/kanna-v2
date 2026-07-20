@@ -270,6 +270,35 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("stamps terminal output dispatch with the local monotonic clock", () => {
+    const now = vi.fn(() => 1_234.5);
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      now,
+    });
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok" });
+    const received: Array<{ dataB64: string; receivedAtMs: number }> = [];
+    client.attachTerminal("task-timed", {
+      onOutput: (dataB64, metadata) => received.push({
+        dataB64,
+        receivedAtMs: metadata.receivedAtMs,
+      }),
+    });
+
+    socket.receive({
+      type: "term_output",
+      task_id: "task-timed",
+      data_b64: "dGltZWQ=",
+    });
+
+    expect(received).toEqual([{ dataB64: "dGltZWQ=", receivedAtMs: 1_234.5 }]);
+    expect(now).toHaveBeenCalledOnce();
+    client.close();
+  });
+
   it("keeps terminal streams healthy when an old server does not support companions", () => {
     const terminalErrors: string[] = [];
     const unavailable: string[] = [];
