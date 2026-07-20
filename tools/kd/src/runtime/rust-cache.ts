@@ -27,9 +27,9 @@ import {
   KANACHE_REPOSITORY,
   KANACHE_REVISION,
   parseKanacheManifest,
-  parseRustCacheMode,
   parseWorktreeList,
   rankDonors,
+  resolveRustCacheEligibility,
   resolveKanachePaths
 } from "./rust-cache-policy";
 import type { DonorCandidate } from "./rust-cache-policy";
@@ -53,6 +53,7 @@ export interface RustCacheRuntimeInput {
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
   commit: string;
+  platform?: NodeJS.Platform;
 }
 
 export interface RustCacheOperationResult {
@@ -71,6 +72,14 @@ interface RustCacheLifecycleOwner {
   token: string;
   pid: number;
   createdAt: string;
+}
+
+function rustCacheEligibility(input: RustCacheRuntimeInput) {
+  return resolveRustCacheEligibility({
+    mode: input.env.KANNA_RUST_CACHE,
+    platform: input.platform ?? process.platform,
+    ci: input.env.CI
+  });
 }
 
 export async function ensureKanacheBinary(input: {
@@ -457,12 +466,11 @@ export async function withRustCacheLifecycleLock<T>(
 export async function warmRustCache(
   input: RustCacheRuntimeInput
 ): Promise<RustCacheOperationResult> {
-  const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
-  if (!mode.enabled) {
-    if (mode.warning) console.warn(`[kd] ${mode.warning}`);
-    return warmMiss(input, mode.warning ? "invalid-mode" : "disabled", mode.warning);
+  const eligibility = rustCacheEligibility(input);
+  if (!eligibility.enabled) {
+    if (eligibility.warning) console.warn(`[kd] ${eligibility.warning}`);
+    return warmMiss(input, eligibility.category, eligibility.warning);
   }
-  if (process.platform !== "darwin") return warmMiss(input, "unsupported-platform");
 
   const destination = join(input.repoRoot, ".build", "cargo-build");
   if (existsSync(destination)) return warmMiss(input, "destination-exists");
@@ -575,16 +583,11 @@ export async function beginRustCacheBuild(
   input: RustCacheRuntimeInput
 ): Promise<RustCacheOperationResult> {
   clearRustCacheSuccessMarker(input.repoRoot);
-  const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
-  if (!mode.enabled) {
-    if (mode.warning) console.warn(`[kd] ${mode.warning}`);
-    return recordFailure(
-      input,
-      mode.warning ? "invalid-mode" : "disabled",
-      mode.warning
-    );
+  const eligibility = rustCacheEligibility(input);
+  if (!eligibility.enabled) {
+    if (eligibility.warning) console.warn(`[kd] ${eligibility.warning}`);
+    return recordFailure(input, eligibility.category, eligibility.warning);
   }
-  if (process.platform !== "darwin") return recordFailure(input, "unsupported-platform");
 
   try {
     const binary = await ensureKanacheBinary({ homeDir: input.homeDir, runner: input.runner });
@@ -610,16 +613,11 @@ export async function recordRustCache(
   input: RustCacheRuntimeInput,
   layouts: RustCacheLayouts
 ): Promise<RustCacheOperationResult> {
-  const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
-  if (!mode.enabled) {
-    if (mode.warning) console.warn(`[kd] ${mode.warning}`);
-    return recordFailure(
-      input,
-      mode.warning ? "invalid-mode" : "disabled",
-      mode.warning
-    );
+  const eligibility = rustCacheEligibility(input);
+  if (!eligibility.enabled) {
+    if (eligibility.warning) console.warn(`[kd] ${eligibility.warning}`);
+    return recordFailure(input, eligibility.category, eligibility.warning);
   }
-  if (process.platform !== "darwin") return recordFailure(input, "unsupported-platform");
 
   try {
     const clean = await input.runner.run(
@@ -708,6 +706,7 @@ export async function withRustCacheBuild<T>(
 
 export async function getRustCacheStatus(input: RustCacheRuntimeInput): Promise<{
   enabled: boolean;
+  category?: string;
   warning?: string;
   revision: string;
   binary: string;
@@ -715,7 +714,7 @@ export async function getRustCacheStatus(input: RustCacheRuntimeInput): Promise<
   manifest?: ReturnType<typeof parseKanacheManifest>;
   events: RustCacheEvent[];
 }> {
-  const mode = parseRustCacheMode(input.env.KANNA_RUST_CACHE);
+  const eligibility = rustCacheEligibility(input);
   const paths = resolveKanachePaths(input.homeDir);
   const manifestPath = join(input.repoRoot, ".build", "cargo-build", ".kanache-manifest.json");
   let manifest: ReturnType<typeof parseKanacheManifest> | undefined;
@@ -732,11 +731,13 @@ export async function getRustCacheStatus(input: RustCacheRuntimeInput): Promise<
   }
 
   let commonDirectory = repositoryDirectoryFromFilesystem(input.repoRoot);
-  try {
-    commonDirectory =
-      (await gitCommonDirectory(input.runner, input.repoRoot, input.env)) ?? commonDirectory;
-  } catch {
-    // The filesystem-derived identity keeps status usable if Git is unavailable.
+  if (eligibility.enabled) {
+    try {
+      commonDirectory =
+        (await gitCommonDirectory(input.runner, input.repoRoot, input.env)) ?? commonDirectory;
+    } catch {
+      // The filesystem-derived identity keeps status usable if Git is unavailable.
+    }
   }
   let events: RustCacheEvent[] = [];
   try {
@@ -748,8 +749,11 @@ export async function getRustCacheStatus(input: RustCacheRuntimeInput): Promise<
   }
 
   return {
-    enabled: mode.enabled,
-    ...(mode.warning ? { warning: mode.warning } : {}),
+    enabled: eligibility.enabled,
+    ...(!eligibility.enabled ? { category: eligibility.category } : {}),
+    ...(!eligibility.enabled && eligibility.warning
+      ? { warning: eligibility.warning }
+      : {}),
     revision: paths.revision,
     binary: paths.binary,
     installed: existsSync(paths.binary),

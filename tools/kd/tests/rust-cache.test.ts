@@ -48,6 +48,7 @@ function fakeRuntimeInput(input: {
     repoRoot,
     homeDir: home,
     env: { KANNA_RUST_CACHE: "on" },
+    platform: "darwin",
     commit: "abc",
     runner: {
       async run(command, args) {
@@ -149,6 +150,27 @@ describe("Kanache runtime", () => {
 
     expect(result).toMatchObject({ outcome: "record-miss", category: "disabled" });
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it("disables every Kanache entry point in CI without running tools", async () => {
+    const calls: string[] = [];
+    const cache = fakeRuntimeInput({ calls });
+    cache.env.CI = "false";
+    const marker = join(cache.repoRoot, ".build", "cargo-build", ".kanache-success");
+    mkdirSync(join(marker, ".."), { recursive: true });
+    writeFileSync(marker, "old-success");
+
+    expect(await warmRustCache(cache)).toMatchObject({ category: "disabled-in-ci" });
+    expect(await beginRustCacheBuild(cache)).toMatchObject({ category: "disabled-in-ci" });
+    expect(existsSync(marker)).toBe(false);
+    expect(await recordRustCache(cache, "all")).toMatchObject({
+      category: "disabled-in-ci"
+    });
+    expect(await getRustCacheStatus(cache)).toMatchObject({
+      enabled: false,
+      category: "disabled-in-ci"
+    });
+    expect(calls).toEqual([]);
   });
 
   it("tries ranked exact-HEAD donors until Kanache publishes", async () => {

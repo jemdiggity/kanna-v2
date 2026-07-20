@@ -132,7 +132,7 @@ it("disables every Kanache entry point in CI without running tools", async () =>
   expect(await warmRustCache(cache)).toMatchObject({ category: "disabled-in-ci" });
   expect(await beginRustCacheBuild(cache)).toMatchObject({ category: "disabled-in-ci" });
   expect(existsSync(marker)).toBe(false);
-  expect(await recordRustCache(cache, "workspace")).toMatchObject({
+  expect(await recordRustCache(cache, "all")).toMatchObject({
     category: "disabled-in-ci"
   });
   expect(await getRustCacheStatus(cache)).toMatchObject({ enabled: false });
