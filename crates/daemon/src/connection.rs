@@ -15,7 +15,7 @@ use crate::client::{
     SessionObservers, SessionSizes, SessionWriters, TerminalEmulatorClients,
 };
 use crate::handoff::{blank_snapshot, handle_handoff};
-use crate::output::stream_output;
+use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{SessionHandle, SessionManager, SessionRecord, StreamControl};
 use crate::socket::{read_command, write_event};
@@ -197,6 +197,7 @@ pub(crate) async fn handle_command(
             cols,
             rows,
             agent_provider,
+            terminal_prelude,
         } => {
             log::info!(
                 "[spawn] session={} executable={} cwd={} cols={} rows={}",
@@ -288,6 +289,24 @@ pub(crate) async fn handle_command(
                         .lock()
                         .await
                         .insert(session_id.clone(), Vec::new());
+
+                    if let Some(prelude) = terminal_prelude
+                        .as_deref()
+                        .filter(|bytes| !bytes.is_empty())
+                    {
+                        handle_output_chunk(
+                            &session_id,
+                            prelude,
+                            &handle,
+                            &broadcast_tx,
+                            &session_writers,
+                            &terminal_emulator_clients,
+                            &session_sizes,
+                            &session_observers,
+                            &recovery_manager,
+                        )
+                        .await;
+                    }
 
                     let sid = session_id.clone();
                     let sessions_exit = sessions.clone();

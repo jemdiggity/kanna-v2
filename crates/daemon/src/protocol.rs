@@ -147,6 +147,8 @@ pub enum Command {
         rows: u16,
         #[serde(default)]
         agent_provider: Option<AgentProvider>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_prelude: Option<Vec<u8>>,
     },
     AttachSnapshot {
         session_id: String,
@@ -331,6 +333,7 @@ mod tests {
             cols: 80,
             rows: 24,
             agent_provider: Some(AgentProvider::Codex),
+            terminal_prelude: Some(b"stage marker\r\n".to_vec()),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let decoded: Command = serde_json::from_str(&json).unwrap();
@@ -341,6 +344,7 @@ mod tests {
                 cols,
                 rows,
                 agent_provider,
+                terminal_prelude,
                 ..
             } => {
                 assert_eq!(session_id, "abc123");
@@ -348,9 +352,34 @@ mod tests {
                 assert_eq!(cols, 80);
                 assert_eq!(rows, 24);
                 assert_eq!(agent_provider, Some(AgentProvider::Codex));
+                assert_eq!(terminal_prelude, Some(b"stage marker\r\n".to_vec()));
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_command_spawn_legacy_payload_defaults_terminal_prelude() {
+        let decoded: Command = serde_json::from_value(serde_json::json!({
+            "type": "Spawn",
+            "session_id": "legacy-session",
+            "executable": "/bin/bash",
+            "args": [],
+            "cwd": "/tmp",
+            "env": {},
+            "cols": 80,
+            "rows": 24,
+            "agent_provider": "codex"
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            decoded,
+            Command::Spawn {
+                terminal_prelude: None,
+                ..
+            }
+        ));
     }
 
     #[test]

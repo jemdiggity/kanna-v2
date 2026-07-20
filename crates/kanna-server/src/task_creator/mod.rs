@@ -8,6 +8,7 @@ mod prompt;
 mod provider;
 mod resume;
 mod stages;
+mod terminal_marker;
 mod types;
 mod worktree;
 
@@ -640,6 +641,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         resumed_from_run_id,
         cwd: worktree_path,
         env: spawn_env,
+        terminal_prelude: None,
         session,
     })
 }

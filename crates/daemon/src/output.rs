@@ -319,7 +319,7 @@ pub(crate) async fn stream_output(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_output_chunk(
+pub(crate) async fn handle_output_chunk(
     session_id: &str,
     data: &[u8],
     session: &Arc<SessionHandle>,

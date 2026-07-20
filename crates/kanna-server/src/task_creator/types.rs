@@ -234,6 +234,9 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) resumed_from_run_id: Option<String>,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
+    /// Ordered bytes seeded into a replacement PTY's terminal history before
+    /// the new stage's process output. Absent for non-transition spawns.
+    pub(super) terminal_prelude: Option<Vec<u8>>,
     pub(super) session: PreparedSessionSpawn,
 }
 

@@ -234,7 +234,12 @@ fn prepare_swap_to_index(
             workspace_teardown,
         });
     };
-    prepare_stage_run_for_target(
+    let from_stage = context
+        .source_task
+        .stage
+        .as_deref()
+        .ok_or_else(|| format!("task has no stage: {}", context.source_task_id))?;
+    let mut run = prepare_stage_run_for_target(
         db,
         config,
         context,
@@ -243,8 +248,12 @@ fn prepare_swap_to_index(
         "main",
         None,
         None,
-    )
-    .map(|run| PreparedStageTransition::Run(Box::new(run)))
+    )?;
+    run.terminal_prelude = Some(super::terminal_marker::format_stage_transition_marker(
+        from_stage,
+        &next_stage.name,
+    ));
+    Ok(PreparedStageTransition::Run(Box::new(run)))
 }
 
 fn prepare_post_dispatch(

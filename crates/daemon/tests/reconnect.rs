@@ -34,6 +34,8 @@ enum Cmd {
         env: HashMap<String, String>,
         cols: u16,
         rows: u16,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal_prelude: Option<Vec<u8>>,
     },
     AttachSnapshot {
         session_id: String,
@@ -478,6 +480,7 @@ fn spawn_echo_session(conn: &mut ClientConn, session_id: &str) {
         env: HashMap::new(),
         cols: 80,
         rows: 24,
+        terminal_prelude: None,
     });
 
     expect_session_created(conn, session_id);
@@ -520,6 +523,7 @@ fn spawn_shell_session(conn: &mut ClientConn, session_id: &str, script: &str) {
         env: HashMap::new(),
         cols: 80,
         rows: 24,
+        terminal_prelude: None,
     });
 
     match conn.recv() {
@@ -545,6 +549,50 @@ fn test_subscriber_receives_session_created_for_spawned_sessions() {
         Evt::SessionCreated { session_id } => assert_eq!(session_id, "sess-created-broadcast"),
         other => panic!("expected SessionCreated broadcast, got: {:?}", other),
     }
+}
+
+#[test]
+fn stage_transition_prelude_precedes_process_output_in_snapshot() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "sess-stage-transition-prelude";
+    let dir = atomic_attach_dir("stage-transition-prelude");
+    let prelude = "\r\n\x1b[2m━━ Stage advanced: in progress → review ━━\x1b[0m\r\n"
+        .as_bytes()
+        .to_vec();
+
+    conn.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'NEW_STAGE_PROCESS_OUTPUT\\n'; : > ready; sleep 2".to_string(),
+        ],
+        cwd: dir.display().to_string(),
+        env: HashMap::new(),
+        cols: 100,
+        rows: 24,
+        terminal_prelude: Some(prelude),
+    });
+    expect_session_created(&mut conn, session_id);
+    wait_for_file(&dir.join("ready"));
+
+    let snapshot = attach_snapshot_and_capture(&mut conn, session_id);
+    let marker_index = snapshot
+        .vt
+        .find("Stage advanced: in progress → review")
+        .expect("snapshot should contain the stage transition prelude");
+    let process_index = snapshot
+        .vt
+        .find("NEW_STAGE_PROCESS_OUTPUT")
+        .expect("snapshot should contain process output");
+    assert!(
+        marker_index < process_index,
+        "stage marker must precede process output in snapshot: {}",
+        snapshot.vt
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -846,6 +894,7 @@ fn spawn_hidden_prefix_session(conn: &mut ClientConn, session_id: &str, cwd: &Pa
         env: HashMap::new(),
         cols: 80,
         rows: 24,
+        terminal_prelude: None,
     });
 
     match conn.recv() {
@@ -1093,6 +1142,7 @@ fn kill_keeps_same_management_connection_responsive() {
         env: HashMap::new(),
         cols: 80,
         rows: 24,
+        terminal_prelude: None,
     });
     expect_session_created_with_timeout(
         &mut management,
@@ -1485,6 +1535,7 @@ fn test_attached_client_suppresses_headless_terminal_replies() {
         env: HashMap::new(),
         cols: 80,
         rows: 24,
+        terminal_prelude: None,
     });
     match shared.recv() {
         Evt::SessionCreated { session_id } => assert_eq!(session_id, "sess-terminal-query"),
