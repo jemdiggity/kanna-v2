@@ -1448,38 +1448,45 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     });
     expect_session_created(&mut control, session_id);
 
+    // Both clients attach before the flood. `stalled` never reads another
+    // byte, reproducing a WebSocket/KSP consumer that has stopped draining
+    // terminal frames; its Unix socket fills within the first few chunks.
     let mut stalled = daemon.connect();
     attach(&mut stalled, session_id);
-    std::fs::write(dir.join("go"), b"go").unwrap();
-
-    // Let the daemon fill this attachment's Unix socket. Keeping `stalled`
-    // alive but unread reproduces a WebSocket/KSP consumer that has stopped
-    // draining terminal frames.
-    thread::sleep(Duration::from_millis(400));
-
     let mut healthy = daemon.connect();
     attach(&mut healthy, session_id);
+
+    let flood_started = Instant::now();
+    std::fs::write(dir.join("go"), b"go").unwrap();
+
+    // Zero-delay requirement: the healthy client must receive the entire
+    // flood while the stalled client's socket is saturated, well below the
+    // former 500ms per-chunk write timeout — not merely less than it.
+    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(350));
+    let flood_latency = flood_started.elapsed();
+    assert!(
+        flood_latency < Duration::from_millis(350),
+        "healthy delivery must not wait on the stalled subscriber; took {flood_latency:?}"
+    );
+
     control.send(&Cmd::InputNoReply {
         session_id: session_id.to_string(),
         data: b"HEALTHY_MARKER\n".to_vec(),
     });
-
     let output = healthy
-        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(1_500));
+        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(350));
     let output = String::from_utf8_lossy(&output);
-    let flood_done = output
-        .find("FLOOD_DONE")
-        .expect("healthy reader should observe the end of the ordered flood");
     let marker = output
         .find("HEALTHY_MARKER")
-        .expect("healthy reader should observe input after the stalled client is isolated");
-    assert!(
-        flood_done < marker,
-        "healthy output must remain ordered: {output:?}"
-    );
+        .expect("healthy reader should observe input while the stalled client is saturated");
+    if let Some(flood_done) = output.find("FLOOD_DONE") {
+        assert!(
+            flood_done < marker,
+            "healthy output must remain ordered: {output:?}"
+        );
+    }
 
-    // A removed slow client must not impose the timeout again on every later
-    // chunk. This second marker should take the ordinary fast path.
+    // Later chunks must keep taking the ordinary fast path.
     control.send(&Cmd::InputNoReply {
         session_id: session_id.to_string(),
         data: b"SECOND_HEALTHY_MARKER\n".to_vec(),
@@ -1491,6 +1498,135 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     assert!(String::from_utf8_lossy(&second).contains("SECOND_HEALTHY_MARKER"));
 
     drop(stalled);
+    cleanup_atomic_attach_dir(&dir);
+}
+
+#[test]
+fn stalled_observer_does_not_delay_healthy_subscriber_or_pty_ingestion() {
+    let daemon = DaemonHandle::start();
+    let session_id = "sess-stalled-observer";
+    let dir = atomic_attach_dir("stalled-observer");
+
+    let mut control = daemon.connect();
+    control.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 524288 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+                .to_string(),
+        ],
+        cwd: dir.display().to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    expect_session_created(&mut control, session_id);
+
+    // A passive observer that stops reading models the relay observer whose
+    // shared WebSocket sink is under backpressure (the cloud-workspace
+    // remote terminal path). Its daemon-side write historically had no
+    // timeout at all, so this saturation froze PTY ingestion indefinitely.
+    let mut stalled_observer = daemon.connect();
+    observe(&mut stalled_observer, session_id);
+
+    let mut healthy = daemon.connect();
+    attach(&mut healthy, session_id);
+
+    std::fs::write(dir.join("go"), b"go").unwrap();
+
+    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(1_500));
+
+    // PTY ingestion itself must keep advancing while the observer is
+    // saturated: new input has to reach the authoritative headless terminal.
+    control.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"OBSERVER_ISOLATION_MARKER\n".to_vec(),
+    });
+    healthy.collect_output_until_contains_with_timeout(
+        "OBSERVER_ISOLATION_MARKER",
+        Duration::from_millis(350),
+    );
+    wait_for_snapshot(&mut control, session_id, "OBSERVER_ISOLATION_MARKER");
+
+    drop(stalled_observer);
+    cleanup_atomic_attach_dir(&dir);
+}
+
+#[test]
+fn overflowing_subscriber_is_disconnected_for_snapshot_resync() {
+    let daemon = DaemonHandle::start();
+    let session_id = "sess-overflowing-subscriber";
+    let dir = atomic_attach_dir("overflowing-subscriber");
+
+    let mut control = daemon.connect();
+    control.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            // Enough chunks to overflow a bounded per-subscriber mailbox on
+            // top of the kernel socket buffers.
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 4194304 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+                .to_string(),
+        ],
+        cwd: dir.display().to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    expect_session_created(&mut control, session_id);
+
+    let mut stalled = daemon.connect();
+    attach(&mut stalled, session_id);
+    let mut healthy = daemon.connect();
+    attach(&mut healthy, session_id);
+
+    std::fs::write(dir.join("go"), b"go").unwrap();
+
+    let output = healthy
+        .collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(2_500));
+    assert!(
+        String::from_utf8_lossy(&output).contains("FLOOD_DONE"),
+        "healthy subscriber must receive the full flood while the lagging one overflows"
+    );
+
+    // The lagging subscriber must be deterministically disconnected so its
+    // client can resynchronize from a fresh authoritative snapshot: after the
+    // buffered backlog, its stream ends with EOF instead of staying silently
+    // wedged on a live-looking connection.
+    let raw = stalled.reader.get_mut();
+    raw.set_read_timeout(Some(Duration::from_millis(250))).unwrap();
+    let mut scratch = [0u8; 65536];
+    let eof_deadline = Instant::now() + Duration::from_secs(10);
+    let saw_eof = loop {
+        if Instant::now() > eof_deadline {
+            break false;
+        }
+        match std::io::Read::read(raw, &mut scratch) {
+            Ok(0) => break true,
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    };
+    assert!(
+        saw_eof,
+        "an overflowing subscriber must observe EOF for deterministic snapshot resync"
+    );
+
+    // The session itself stays healthy for everyone else.
+    control.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"POST_OVERFLOW_MARKER\n".to_vec(),
+    });
+    healthy.collect_output_until_contains_with_timeout(
+        "POST_OVERFLOW_MARKER",
+        Duration::from_millis(350),
+    );
+    wait_for_snapshot(&mut control, session_id, "POST_OVERFLOW_MARKER");
+
     cleanup_atomic_attach_dir(&dir);
 }
 
