@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Browser } from "webdriverio";
 import { waitForExpoAppReady } from "../../run";
 import {
-  assertOtaDiagnosticsHidden,
+  assertBuildInfoJourney,
   assertMachineOrigins,
   assertPairingFailure,
   assertPairingSheetFresh,
@@ -395,8 +395,8 @@ describe("Repository command journey", () => {
   });
 });
 
-describe("OTA diagnostics", () => {
-  it("waits for More navigation before checking that the legacy OTA element is absent", async () => {
+describe("About this build journey", () => {
+  it("expands build information and validates the real dev-client identity fields", async () => {
     const events: string[] = [];
     const moreTab = {
       ...createElement(),
@@ -406,30 +406,101 @@ describe("OTA diagnostics", () => {
       ...createElement(),
       waitForDisplayed: vi.fn(async () => events.push("More displayed"))
     };
-    const otaStatus = {
-      ...createElement(false),
-      isExisting: vi.fn(async () => {
-        events.push("check OTA absent");
-        return false;
+    const buildElement = (value: string, name: string) => ({
+      ...createElement(),
+      getText: vi.fn(async () => {
+        events.push(`read ${name}`);
+        return value;
       })
+    });
+    const buildToggle = {
+      ...createElement(),
+      click: vi.fn(async () => events.push("expand build info")),
+      scrollIntoView: vi.fn(async () => events.push("scroll build toggle"))
+    };
+    const buildDetails = {
+      ...createElement(),
+      scrollIntoView: vi.fn(async () => events.push("scroll build details")),
+      waitForDisplayed: vi.fn(async () => events.push("build details displayed"))
     };
 
-    await assertOtaDiagnosticsHidden({
+    await assertBuildInfoJourney({
       getMoreTab: async () => moreTab,
       getMoreScreen: async () => moreScreen,
-      getOtaStatusValue: async () => otaStatus
+      getBuildInfoToggle: async () => buildToggle,
+      getBuildInfoDetails: async () => buildDetails,
+      getBuildInfoNative: async () => buildElement("1.8.0 (214)", "native"),
+      getBuildInfoRuntime: async () => buildElement("2.1.2", "runtime"),
+      getBuildInfoEnvironment: async () => buildElement("dev", "environment"),
+      getBuildInfoChannel: async () => buildElement("None", "channel"),
+      getBuildInfoRunningSource: async () =>
+        buildElement("Development bundle (Metro)", "running source"),
+      getBuildInfoUpdateId: async () => createElement(false),
+      getBuildInfoCopyHint: async () => createElement(false),
+      waitUntil: createWaitUntil()
+    }, {
+      runtimeVersion: "2.1.2",
+      environment: "dev",
+      channel: "None",
+      runningSource: "Development bundle (Metro)"
     });
 
     expect(moreTab.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
-    expect(events).toEqual(["click More", "More displayed", "check OTA absent"]);
+    expect(events).toEqual([
+      "click More",
+      "More displayed",
+      "scroll build toggle",
+      "expand build info",
+      "scroll build details",
+      "build details displayed",
+      "read native",
+      "read runtime",
+      "read environment",
+      "read channel",
+      "read running source"
+    ]);
   });
 
-  it("fails when the legacy OTA element still exists on More", async () => {
-    await expect(assertOtaDiagnosticsHidden({
+  it("exercises copy feedback when the running source is an OTA update", async () => {
+    const updateId = "84667f93-5c7b-45fb-9f78-7045160cb842";
+    let copied = false;
+    const value = (text: string) => ({
+      ...createElement(),
+      getText: vi.fn(async () => text)
+    });
+    const scrollable = {
+      ...createElement(),
+      scrollIntoView: vi.fn(async () => undefined)
+    };
+    const updateIdControl = {
+      ...createElement(),
+      click: vi.fn(async () => {
+        copied = true;
+      })
+    };
+
+    await assertBuildInfoJourney({
       getMoreTab: async () => createElement(),
       getMoreScreen: async () => createElement(),
-      getOtaStatusValue: async () => createElement()
-    })).rejects.toThrow("Expected OTA diagnostics to be absent from More");
+      getBuildInfoToggle: async () => scrollable,
+      getBuildInfoDetails: async () => scrollable,
+      getBuildInfoNative: async () => value("1.8.0 (214)"),
+      getBuildInfoRuntime: async () => value("2.1.2"),
+      getBuildInfoEnvironment: async () => value("staging"),
+      getBuildInfoChannel: async () => value("staging"),
+      getBuildInfoRunningSource: async () => value(updateId),
+      getBuildInfoUpdateId: async () => updateIdControl,
+      getBuildInfoCopyHint: async () => value(copied ? "Copied" : "Tap to copy"),
+      waitUntil: createWaitUntil()
+    }, {
+      runtimeVersion: "2.1.2",
+      environment: "staging",
+      channel: "staging",
+      runningSource: updateId
+    });
+
+    expect(updateIdControl.click).toHaveBeenCalledOnce();
+    expect(copied).toBe(true);
   });
 });
 

@@ -78,6 +78,24 @@ describe("BuildInfoPanel", () => {
     expect(copy()).toContain("Channel");
     expect(copy()).toContain("Running source");
     expect(copy()).toContain("84667f93-5c7b-45fb-9f78-7045160cb842");
+    expect(
+      rendered.root.findByProps({ testID: "mobile.build-info.native" }).children
+    ).toContain("2.4.0 (108)");
+    expect(
+      rendered.root.findByProps({ testID: "mobile.build-info.runtime" }).children
+    ).toContain("2.1.2");
+    expect(
+      rendered.root.findByProps({ testID: "mobile.build-info.environment" })
+        .children
+    ).toContain("staging");
+    expect(
+      rendered.root.findByProps({ testID: "mobile.build-info.channel" }).children
+    ).toContain("staging");
+    expect(
+      rendered.root.findByProps({
+        testID: "mobile.build-info.running-source"
+      }).children
+    ).toHaveLength(1);
   });
 
   it("copies the full update ID and resets its feedback", async () => {
@@ -135,6 +153,11 @@ describe("BuildInfoPanel", () => {
     });
 
     expect(copy()).toContain("Embedded bundle");
+    expect(
+      rendered.root.findByProps({
+        testID: "mobile.build-info.running-source"
+      }).children
+    ).toContain("Embedded bundle");
     expect(
       rendered.root.findAllByProps({ testID: "mobile.build-info.update-id" })
     ).toHaveLength(0);

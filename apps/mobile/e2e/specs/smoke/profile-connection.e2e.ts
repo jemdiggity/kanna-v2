@@ -3,6 +3,7 @@ import type {
   HarnessPairingSession,
   MobileHybridFixture
 } from "../../helpers/relay-harness";
+import { resolveMobileAppEnvironment } from "../../../src/mobileEnvironment";
 import { claimPairingPayloadThroughDeepLink } from "../../helpers/trust-seed";
 import {
   machineRemoveButtonSelector,
@@ -59,7 +60,15 @@ interface ProfileMachinesUi {
   getSignInButton(): Promise<ProfileMachinesElement>;
   getMoreTab(): Promise<ProfileMachinesElement>;
   getMoreScreen(): Promise<ProfileMachinesElement>;
-  getOtaStatusValue(): Promise<ProfileMachinesElement>;
+  getBuildInfoToggle(): Promise<ScrollableProfileMachinesElement>;
+  getBuildInfoDetails(): Promise<ScrollableProfileMachinesElement>;
+  getBuildInfoNative(): Promise<ProfileMachinesElement>;
+  getBuildInfoRuntime(): Promise<ProfileMachinesElement>;
+  getBuildInfoEnvironment(): Promise<ProfileMachinesElement>;
+  getBuildInfoChannel(): Promise<ProfileMachinesElement>;
+  getBuildInfoRunningSource(): Promise<ProfileMachinesElement>;
+  getBuildInfoUpdateId(): Promise<ProfileMachinesElement>;
+  getBuildInfoCopyHint(): Promise<ProfileMachinesElement>;
   getAddTaskButton(): Promise<ProfileMachinesElement>;
   getCreateTaskCancelButton(): Promise<ProfileMachinesElement>;
   getCreateTaskPromptInput(): Promise<ProfileMachinesElement>;
@@ -101,7 +110,16 @@ function createProfileMachinesUi(driver: Browser): ProfileMachinesUi {
     getSignInButton: async () => driver.$(selectors.accountSignInButton),
     getMoreTab: async () => driver.$(selectors.moreTab),
     getMoreScreen: async () => driver.$(selectors.moreScreen),
-    getOtaStatusValue: async () => driver.$(selectors.legacyUpdateInfoOtaValue),
+    getBuildInfoToggle: async () => driver.$(selectors.buildInfoToggle),
+    getBuildInfoDetails: async () => driver.$(selectors.buildInfoDetails),
+    getBuildInfoNative: async () => driver.$(selectors.buildInfoNative),
+    getBuildInfoRuntime: async () => driver.$(selectors.buildInfoRuntime),
+    getBuildInfoEnvironment: async () => driver.$(selectors.buildInfoEnvironment),
+    getBuildInfoChannel: async () => driver.$(selectors.buildInfoChannel),
+    getBuildInfoRunningSource: async () =>
+      driver.$(selectors.buildInfoRunningSource),
+    getBuildInfoUpdateId: async () => driver.$(selectors.buildInfoUpdateId),
+    getBuildInfoCopyHint: async () => driver.$(selectors.buildInfoCopyHint),
     getAddTaskButton: async () => driver.$(selectors.addTaskButton),
     getCreateTaskCancelButton: async () => driver.$(selectors.createTaskCancelButton),
     getCreateTaskPromptInput: async () => driver.$(selectors.createTaskPromptInput),
@@ -352,8 +370,28 @@ export async function removeManualMachine(
   );
 }
 
-export async function assertOtaDiagnosticsHidden(
-  ui: Pick<ProfileMachinesUi, "getMoreTab" | "getMoreScreen" | "getOtaStatusValue">
+export async function assertBuildInfoJourney(
+  ui: Pick<
+    ProfileMachinesUi,
+    | "getMoreTab"
+    | "getMoreScreen"
+    | "getBuildInfoToggle"
+    | "getBuildInfoDetails"
+    | "getBuildInfoNative"
+    | "getBuildInfoRuntime"
+    | "getBuildInfoEnvironment"
+    | "getBuildInfoChannel"
+    | "getBuildInfoRunningSource"
+    | "getBuildInfoUpdateId"
+    | "getBuildInfoCopyHint"
+    | "waitUntil"
+  >,
+  expected: {
+    channel: string;
+    environment: string;
+    runningSource: string;
+    runtimeVersion: string;
+  }
 ): Promise<void> {
   const moreTab = await ui.getMoreTab();
   await moreTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
@@ -362,10 +400,65 @@ export async function assertOtaDiagnosticsHidden(
   const moreScreen = await ui.getMoreScreen();
   await moreScreen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 
-  const otaStatus = await ui.getOtaStatusValue();
-  if (await otaStatus.isExisting()) {
-    throw new Error("Expected OTA diagnostics to be absent from More");
+  const toggle = await ui.getBuildInfoToggle();
+  await toggle.scrollIntoView({ direction: "down", maxScrolls: 8 });
+  await toggle.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await toggle.click();
+
+  const details = await ui.getBuildInfoDetails();
+  await details.scrollIntoView({ direction: "down", maxScrolls: 4 });
+  await details.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+
+  const native = await readBuildInfoValue(await ui.getBuildInfoNative(), "Native");
+  if (!native) {
+    throw new Error("Expected About this build to render a Native value");
   }
+
+  await assertBuildInfoValue(ui.getBuildInfoRuntime(), "Runtime", expected.runtimeVersion);
+  await assertBuildInfoValue(ui.getBuildInfoEnvironment(), "Environment", expected.environment);
+  await assertBuildInfoValue(ui.getBuildInfoChannel(), "Channel", expected.channel);
+  await assertBuildInfoValue(
+    ui.getBuildInfoRunningSource(),
+    "Running source",
+    expected.runningSource
+  );
+
+  const updateId = await ui.getBuildInfoUpdateId();
+  if (!(await updateId.isExisting())) return;
+
+  await updateId.click();
+  await ui.waitUntil(
+    async () =>
+      (await (await ui.getBuildInfoCopyHint()).getText()).trim() === "Copied",
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the OTA update ID copy control to report Copied"
+    }
+  );
+}
+
+async function assertBuildInfoValue(
+  elementPromise: Promise<ProfileMachinesElement>,
+  label: string,
+  expected: string
+): Promise<void> {
+  const value = await readBuildInfoValue(await elementPromise, label);
+  if (value !== expected) {
+    throw new Error(`Expected ${label} to be ${expected}, got ${value || "<empty>"}`);
+  }
+}
+
+async function readBuildInfoValue(
+  element: ProfileMachinesElement,
+  label: string
+): Promise<string> {
+  await element.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const value = (await element.getText()).trim();
+  if (!value) {
+    throw new Error(`Expected About this build to render a ${label} value`);
+  }
+  return value;
 }
 
 export async function openProfileSheet(
@@ -497,12 +590,18 @@ async function getAccessibilityLabel(
 
 export async function runProfileConnectionSmoke(driver: Browser): Promise<void> {
   const ui = createProfileMachinesUi(driver);
+  const environment = resolveMobileAppEnvironment(process.env.KANNA_APP_ENV);
   await (await driver.$(selectors.appShell)).waitForDisplayed({
     timeout: SCREEN_TIMEOUT_MS
   });
   await assertToolbarActionPathsReachable(ui);
-  await assertOtaDiagnosticsHidden(ui);
   await assertRepositoryCommandJourney(ui);
+  await assertBuildInfoJourney(ui, {
+    channel: environment.otaChannel ?? "None",
+    environment: environment.name,
+    runningSource: "Development bundle (Metro)",
+    runtimeVersion: environment.runtimeVersion
+  });
   await openProfileSheet(ui);
   await assertProfileSignInControlsReachable(ui);
   await assertProfilePasswordCanRevealAndHide(ui);

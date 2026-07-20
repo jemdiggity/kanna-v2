@@ -62,10 +62,26 @@ export function BuildInfoPanel({
 
       {expanded ? (
         <View style={styles.details} testID={MOBILE_E2E_IDS.buildInfoDetails}>
-          <InfoRow label="Native" value={identity.nativeSummary} />
-          <InfoRow label="Runtime" value={identity.runtimeVersion} />
-          <InfoRow label="Environment" value={identity.environment} />
-          <InfoRow label="Channel" value={identity.channel} />
+          <InfoRow
+            label="Native"
+            valueTestID={MOBILE_E2E_IDS.buildInfoNative}
+            value={identity.nativeSummary}
+          />
+          <InfoRow
+            label="Runtime"
+            valueTestID={MOBILE_E2E_IDS.buildInfoRuntime}
+            value={identity.runtimeVersion}
+          />
+          <InfoRow
+            label="Environment"
+            valueTestID={MOBILE_E2E_IDS.buildInfoEnvironment}
+            value={identity.environment}
+          />
+          <InfoRow
+            label="Channel"
+            valueTestID={MOBILE_E2E_IDS.buildInfoChannel}
+            value={identity.channel}
+          />
           <View style={styles.sourceRow}>
             <Text style={styles.detailLabel}>Running source</Text>
             {identity.source.kind === "ota" ? (
@@ -79,7 +95,11 @@ export function BuildInfoPanel({
                 ]}
                 testID={MOBILE_E2E_IDS.buildInfoUpdateId}
               >
-                <Text selectable style={styles.updateId}>
+                <Text
+                  selectable
+                  style={styles.updateId}
+                  testID={MOBILE_E2E_IDS.buildInfoRunningSource}
+                >
                   {identity.source.updateId}
                 </Text>
                 <Text
@@ -90,7 +110,12 @@ export function BuildInfoPanel({
                 </Text>
               </Pressable>
             ) : (
-              <Text style={styles.detailValue}>{identity.source.label}</Text>
+              <Text
+                style={styles.detailValue}
+                testID={MOBILE_E2E_IDS.buildInfoRunningSource}
+              >
+                {identity.source.label}
+              </Text>
             )}
           </View>
         </View>
@@ -99,11 +124,19 @@ export function BuildInfoPanel({
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: string }) {
+function InfoRow({
+  label,
+  valueTestID,
+  value
+}: {
+  label: string;
+  valueTestID: string;
+  value: string;
+}) {
   return (
     <View style={styles.detailRow}>
       <Text style={styles.detailLabel}>{label}</Text>
-      <Text selectable style={styles.detailValue}>
+      <Text selectable style={styles.detailValue} testID={valueTestID}>
         {value}
       </Text>
     </View>

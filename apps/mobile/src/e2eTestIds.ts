@@ -97,6 +97,11 @@ export const MOBILE_E2E_IDS = {
   quickReplyEditorSaveError: "mobile.quick-replies.save-error",
   buildInfoToggle: "mobile.build-info.toggle",
   buildInfoDetails: "mobile.build-info.details",
+  buildInfoNative: "mobile.build-info.native",
+  buildInfoRuntime: "mobile.build-info.runtime",
+  buildInfoEnvironment: "mobile.build-info.environment",
+  buildInfoChannel: "mobile.build-info.channel",
+  buildInfoRunningSource: "mobile.build-info.running-source",
   buildInfoUpdateId: "mobile.build-info.update-id",
   buildInfoCopyHint: "mobile.build-info.copy-hint",
   toolbarTab(tabName: string): string {
