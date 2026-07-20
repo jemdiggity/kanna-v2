@@ -336,8 +336,8 @@
   1. clear the snapshot;
   2. observe continuously numbered real PTY output under the normal path;
   3. assert no normal-path stage reaches 500ms;
-  4. synchronously block the WebView main thread for 750ms through `browser.execute`;
-  5. wait for the watchdog tick and assert the latest event is `stage=event_loop`, not `outbound_queue` or `websocket_send`;
+  4. synchronously block the WebView main thread for 750ms through `browser.execute` while a deterministic E2E watchdog probe is armed;
+  5. poll through the production watchdog path and assert the latest event is `stage=event_loop`, not `outbound_queue` or `websocket_send`;
   6. assert no numbered marker is lost after the block.
 
 - [x] **Step 2: Run the focused E2E test and confirm failure**
@@ -365,7 +365,7 @@
 
   Expected: PASS; the injected block is classified locally and normal output resumes in order.
 
-- [ ] **Step 5: Commit E2E coverage**
+- [x] **Step 5: Commit E2E coverage**
 
   ```bash
   git add apps/desktop/src/e2eAppMetrics.ts apps/desktop/src/env.d.ts apps/desktop/src/main.ts apps/desktop/tests/e2e/mock/terminal-output-performance.test.ts
@@ -377,7 +377,7 @@
 **Files:**
 - Review all files changed since the design commit.
 
-- [ ] **Step 1: Format and run focused checks**
+- [x] **Step 1: Format and run focused checks**
 
   ```bash
   cargo fmt --all -- --check
@@ -390,7 +390,7 @@
 
   Expected: all PASS.
 
-- [ ] **Step 2: Run repository-level verification**
+- [x] **Step 2: Run repository-level verification**
 
   ```bash
   pnpm test
@@ -399,7 +399,7 @@
 
   Expected: all PASS. If an unrelated pre-existing failure occurs, capture the exact command and output and keep it separate from task regressions.
 
-- [ ] **Step 3: Inspect diagnostics and diff**
+- [x] **Step 3: Inspect diagnostics and diff**
 
   ```bash
   rg -n "terminal_perf" crates/daemon crates/kanna-server apps/desktop packages/stream-client
@@ -410,6 +410,6 @@
 
   Confirm every record is redacted, every monitor is bounded by active sessions/operations, the output frame schema is unchanged, and no direct database or non-worktree files changed.
 
-- [ ] **Step 4: Record final verification evidence**
+- [x] **Step 4: Record final verification evidence**
 
   Update this plan's checkboxes to reflect executed work. Do not advance the manual Kanna stage. Report the implementation, proven root cause (if the deterministic gate reproduced it), diagnostic stages, and exact verification results to the user.
