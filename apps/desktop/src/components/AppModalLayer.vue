@@ -91,6 +91,8 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :base-branches="m.availableBaseBranches.value"
     :default-base-branch="m.defaultBaseBranchName.value"
     :default-branch-name="m.repoDefaultBranchName.value"
+    :options-loading="c.appTaskCreation.newTaskOptionsLoading.value"
+    :submission-pending="c.appTaskCreation.newTaskSubmissionPending.value"
     @submit="(prompt, agentProvider, pipelineName, baseBranch, agentType) => c.appTaskCreation.handleNewTaskSubmit(prompt, agentProvider, pipelineName, baseBranch, agentType)"
     @cancel="m.showNewTaskModal.value = false"
   />

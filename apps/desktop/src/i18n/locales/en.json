@@ -9,6 +9,7 @@
     "baseBranch": "Base branch",
     "baseBranchRequired": "Select a valid base branch",
     "baseBranchSearchPlaceholder": "Search branches...",
+    "loadingOptions": "Loading task options…",
     "untitled": "Untitled",
     "renameTask": "Rename Task"
   },

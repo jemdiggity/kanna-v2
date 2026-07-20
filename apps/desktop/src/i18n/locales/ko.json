@@ -9,6 +9,7 @@
     "baseBranch": "베이스 브랜치",
     "baseBranchRequired": "유효한 베이스 브랜치를 선택하세요",
     "baseBranchSearchPlaceholder": "브랜치 검색...",
+    "loadingOptions": "작업 옵션을 불러오는 중…",
     "untitled": "제목 없음",
     "renameTask": "작업 이름 변경"
   },

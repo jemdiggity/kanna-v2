@@ -24,6 +24,45 @@ vi.mock("../../invoke", () => ({
 }));
 
 describe("NewTaskModal", () => {
+  it("keeps prompt entry available while task options load", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        optionsLoading: true,
+        availableAgentProviders: ["claude"],
+        pipelines: ["default"],
+        baseBranches: ["origin/main"],
+        defaultBaseBranch: "origin/main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await wrapper.get("textarea").setValue("Write while loading");
+
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-testid="task-options-loading"]').text()).toBe("tasks.loadingOptions");
+    expect(wrapper.get('[data-testid="base-branch-toggle"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get(".btn-primary").attributes("disabled")).toBeDefined();
+  });
+
+  it("keeps Create disabled while a previous task submission finishes", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        submissionPending: true,
+        availableAgentProviders: ["claude"],
+        pipelines: ["default"],
+        baseBranches: ["origin/main"],
+        defaultBaseBranch: "origin/main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await wrapper.get("textarea").setValue("Queue another task");
+
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get(".btn-primary").attributes("disabled")).toBeDefined();
+  });
+
   beforeEach(() => {
     invokeMock.mockClear();
   });
