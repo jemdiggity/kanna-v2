@@ -42,7 +42,7 @@ export interface CloudLanClientOptions {
   onDesktopSourceWarnings?(warnings: DesktopSourceWarnings): void;
   initialDesktopSources?: DesktopSources;
   onDesktopSourcesChanged?(sources: DesktopSources): void;
-  onLanDesktopReadUnavailable?(): void;
+  onLanReadUnavailable?(): void;
 }
 
 export interface DesktopSourceWarnings {
@@ -606,6 +606,10 @@ export function createCloudLanClient(
       isLatestRead || acceptedTaskSnapshot === undefined;
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
 
+    if (lanStillEnabled && lanResult?.status === "rejected") {
+      options.onLanReadUnavailable?.();
+    }
+
     if (canEstablishSnapshot && cloudResult.status === "fulfilled") {
       lastCloudTasks = cloudResult.value;
     }
@@ -1014,7 +1018,7 @@ export function createCloudLanClient(
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
 
     if (lanStillEnabled && lanResult?.status === "rejected") {
-      options.onLanDesktopReadUnavailable?.();
+      options.onLanReadUnavailable?.();
     }
 
     reportDesktopSourceWarnings({

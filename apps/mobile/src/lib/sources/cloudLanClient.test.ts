@@ -624,6 +624,36 @@ describe("createCloudLanClient", () => {
     }
   });
 
+  it("expires LAN routability when the optional task read times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const cloudTask = task({ id: "cloud-only" });
+      const cloud = createClientMock({
+        listRecentTasks: vi.fn().mockResolvedValue([cloudTask])
+      });
+      const lan = createClientMock({
+        getStatus: vi.fn(() => new Promise<MobileServerStatus>(() => {}))
+      });
+      const onLanReadUnavailable = vi.fn();
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 1_000,
+        onLanReadUnavailable
+      });
+
+      const result = client.listRecentTasks();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(onLanReadUnavailable).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(result).resolves.toEqual([cloudTask]);
+      expect(onLanReadUnavailable).toHaveBeenCalledOnce();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("shares an unresolved optional LAN task probe across timeout reads and refreshes after settlement", async () => {
     vi.useFakeTimers();
     try {
@@ -2689,20 +2719,20 @@ describe("createCloudLanClient", () => {
       const lan = createClientMock({
         listDesktops: vi.fn().mockReturnValue(pendingLanDesktops.promise)
       });
-      const onLanDesktopReadUnavailable = vi.fn();
+      const onLanReadUnavailable = vi.fn();
       const client = createCloudLanClient(cloud, lan, {
         isLanEnabled: () => true,
         optionalLanWaitMs: 1_000,
-        onLanDesktopReadUnavailable
+        onLanReadUnavailable
       });
 
       const result = client.listDesktops();
       await vi.advanceTimersByTimeAsync(999);
-      expect(onLanDesktopReadUnavailable).not.toHaveBeenCalled();
+      expect(onLanReadUnavailable).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
 
       await expect(result).resolves.toEqual([cloudDesktop]);
-      expect(onLanDesktopReadUnavailable).toHaveBeenCalledOnce();
+      expect(onLanReadUnavailable).toHaveBeenCalledOnce();
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
