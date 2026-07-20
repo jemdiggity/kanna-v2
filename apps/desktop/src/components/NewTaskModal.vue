@@ -24,6 +24,8 @@ const props = defineProps<{
   baseBranches?: string[];
   defaultBaseBranch?: string;
   defaultBranchName?: string;
+  optionsLoading?: boolean;
+  submissionPending?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -38,7 +40,14 @@ const pipelineOptions = computed(() => {
   if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
   return ["default"];
 });
-const selectedPipeline = ref<string>(props.defaultPipeline ?? pipelineOptions.value[0] ?? "default");
+const resolvedDefaultPipeline = computed(() => {
+  if (props.defaultPipeline && pipelineOptions.value.includes(props.defaultPipeline)) {
+    return props.defaultPipeline;
+  }
+  return pipelineOptions.value[0] ?? "default";
+});
+const selectedPipeline = ref<string>(resolvedDefaultPipeline.value);
+let pipelineSelectionIsAutomatic = true;
 const showPipelinePicker = ref(false);
 const pipelineLabelId = "pipeline-label";
 const pipelineActionLabelId = "pipeline-action-label";
@@ -135,6 +144,12 @@ watch(agentChoices, (choices) => {
   if (nextChoice) applyChoice(nextChoice);
 }, { immediate: true });
 
+watch([resolvedDefaultPipeline, pipelineOptions], ([defaultPipeline, options]) => {
+  if (!pipelineSelectionIsAutomatic && options.includes(selectedPipeline.value)) return;
+  selectedPipeline.value = defaultPipeline;
+  pipelineSelectionIsAutomatic = true;
+}, { immediate: true });
+
 function agentChoiceLabel(provider: AgentProvider, executionType: AgentExecutionType): string {
   return executionType === "agent" ? `${providerLabel(provider)} sdk` : providerLabel(provider);
 }
@@ -183,7 +198,14 @@ watch(showBaseBranchPicker, async (open) => {
 
 function handleSubmit() {
   const text = prompt.value.trim();
-  if (!text || agentChoices.value.length === 0 || !hasValidBaseBranch.value || selectedBaseBranch.value === null) return;
+  if (
+    props.optionsLoading
+    || props.submissionPending
+    || !text
+    || agentChoices.value.length === 0
+    || !hasValidBaseBranch.value
+    || selectedBaseBranch.value === null
+  ) return;
   emit("submit", text, agentProvider.value, selectedPipeline.value, selectedBaseBranch.value, displayMode.value);
   prompt.value = "";
 }
@@ -238,6 +260,7 @@ function handleBaseBranchSearchKeydown(event: KeyboardEvent) {
 
 function handlePipelineSelect(pipeline: string) {
   selectedPipeline.value = pipeline;
+  pipelineSelectionIsAutomatic = false;
   showPipelinePicker.value = false;
   nextTick(() => {
     document.getElementById(pipelineToggleId)?.focus();
@@ -353,7 +376,7 @@ function handleKeydown(e: KeyboardEvent) {
         <button
           class="agent-provider"
           type="button"
-          :disabled="agentChoices.length === 0"
+          :disabled="optionsLoading || agentChoices.length === 0"
           @mousedown.prevent
           @click="cycleAgentChoice(1)"
         >
@@ -369,6 +392,13 @@ function handleKeydown(e: KeyboardEvent) {
           :placeholder="$t('tasks.descriptionPlaceholder')"
           rows="6"
         />
+        <div
+          v-if="optionsLoading"
+          class="task-options-loading"
+          data-testid="task-options-loading"
+        >
+          {{ $t('tasks.loadingOptions') }}
+        </div>
         <div class="pipeline-row">
           <label class="pipeline-label">{{ $t("tasks.baseBranch") }}</label>
           <div class="base-branch-dropdown-shell">
@@ -385,6 +415,7 @@ function handleKeydown(e: KeyboardEvent) {
                 type="button"
                 class="change-link"
                 data-testid="base-branch-toggle"
+                :disabled="optionsLoading"
                 @mousedown.prevent
                 @click="toggleBaseBranchPicker"
               >
@@ -445,6 +476,7 @@ function handleKeydown(e: KeyboardEvent) {
                 :aria-expanded="showPipelinePicker"
                 aria-haspopup="listbox"
                 :aria-labelledby="`${pipelineActionLabelId} ${pipelineLabelId} ${pipelineValueId}`"
+                :disabled="optionsLoading"
                 @mousedown.prevent
                 @click="handlePipelineToggle"
                 @keydown="handlePipelineToggleKeydown"
@@ -494,7 +526,7 @@ function handleKeydown(e: KeyboardEvent) {
           <button class="btn btn-cancel" @click="emit('cancel')">{{ $t('actions.cancel') }}</button>
           <button
             class="btn btn-primary"
-            :disabled="!prompt.trim() || agentChoices.length === 0 || !hasValidBaseBranch"
+            :disabled="optionsLoading || submissionPending || !prompt.trim() || agentChoices.length === 0 || !hasValidBaseBranch"
             @click="handleSubmit"
           >
             {{ $t('actions.create') }}
@@ -576,6 +608,12 @@ function handleKeydown(e: KeyboardEvent) {
 
 .prompt-input::placeholder {
   color: var(--kn-text-muted);
+}
+
+.task-options-loading {
+  margin-top: 8px;
+  color: var(--kn-text-muted);
+  font-size: 11px;
 }
 
 .sr-only {

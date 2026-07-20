@@ -5,6 +5,7 @@ import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/rese
 import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { resolveAppKannaServer } from "../helpers/kannaServer";
+import { buildGlobalKeydownScript } from "../helpers/keyboard";
 
 async function waitForPipelineItem<T>(
   client: WebDriverClient,
@@ -691,6 +692,171 @@ describe("task lifecycle", () => {
       `return document.querySelector(".sidebar")?.textContent || "";`
     );
     expect(sidebarText).not.toContain("Close Fast");
+  });
+
+  it("removes the selected task and presents its replacement before close resolves", async () => {
+    const replacementPrompt = "Replacement visible during delayed close";
+    const closingPrompt = "Optimistically hidden during delayed close";
+    const createAgentTask = async (prompt: string): Promise<string> => {
+      const result = await callVueMethod(
+        client,
+        "createItem",
+        repoId,
+        testRepoPath,
+        prompt,
+        "agent",
+      );
+      if (typeof result !== "string" || result.length === 0) {
+        throw new Error(`failed to create task ${prompt}: ${JSON.stringify(result)}`);
+      }
+      return result;
+    };
+
+    const replacementTaskId = await createAgentTask(replacementPrompt);
+    const closingTaskId = await createAgentTask(closingPrompt);
+    await client.waitForText(".task-header", closingPrompt, 10_000);
+
+    await client.executeSync(
+      `const originalFetch = globalThis.fetch;
+       const callOriginalFetch = originalFetch.bind(globalThis);
+       let releaseCloseRequest;
+       const closeRequestGate = new Promise((resolve) => { releaseCloseRequest = resolve; });
+       const gate = {
+         originalFetch,
+         responseHeld: false,
+         responseReleased: false,
+         responseCompleted: false,
+         release() {
+           if (this.responseReleased) return;
+           this.responseReleased = true;
+           releaseCloseRequest();
+         },
+       };
+       window.__KANNA_OPTIMISTIC_CLOSE_GATE__ = gate;
+       globalThis.fetch = async (input, init) => {
+         const url = typeof input === "string"
+           ? input
+           : input instanceof URL
+             ? input.href
+             : input.url;
+         const method = String(
+           init?.method ?? (input instanceof Request ? input.method : "GET")
+         ).toUpperCase();
+         const path = new URL(url, window.location.href).pathname;
+         if (
+           method === "POST"
+           && path === ${JSON.stringify(`/v1/tasks/${encodeURIComponent(closingTaskId)}/actions/close`)}
+         ) {
+           gate.responseHeld = true;
+           await closeRequestGate;
+           const response = await callOriginalFetch(input, init);
+           gate.responseCompleted = true;
+           return response;
+         }
+         return callOriginalFetch(input, init);
+       };
+       return true;`,
+    );
+
+    try {
+      await client.executeSync(
+        buildGlobalKeydownScript({ key: "Delete", meta: true, shift: true }),
+      );
+      await waitForCondition(
+        async () => client.executeSync<boolean>(
+          `return window.__KANNA_OPTIMISTIC_CLOSE_GATE__?.responseHeld === true;`,
+        ),
+        "close request to be held before reaching the server",
+        10_000,
+      );
+
+      const optimisticState = await client.executeSync<{
+        responseReleased: boolean;
+        responseCompleted: boolean;
+        closingVisible: boolean;
+        replacementVisible: boolean;
+        selectedTaskId: string | null;
+        selectedTitle: string;
+        header: string;
+      }>(
+        `const gate = window.__KANNA_OPTIMISTIC_CLOSE_GATE__;
+         const closing = document.querySelector(${JSON.stringify(`.pipeline-item[data-task-id="${closingTaskId}"]`)});
+         const replacement = document.querySelector(${JSON.stringify(`.pipeline-item[data-task-id="${replacementTaskId}"]`)});
+         const selected = document.querySelector(".pipeline-item.selected");
+         return {
+           responseReleased: gate?.responseReleased === true,
+           responseCompleted: gate?.responseCompleted === true,
+           closingVisible: Boolean(closing),
+           replacementVisible: Boolean(replacement),
+           selectedTaskId: selected?.getAttribute("data-task-id") || null,
+           selectedTitle: selected?.querySelector(".item-title")?.textContent?.trim() ?? "",
+           header: document.querySelector(".task-header")?.textContent?.trim() ?? "",
+         };`,
+      );
+      expect(optimisticState).toMatchObject({
+        responseReleased: false,
+        responseCompleted: false,
+        closingVisible: false,
+        replacementVisible: true,
+      });
+      expect(optimisticState.selectedTaskId).toBeTruthy();
+      expect(optimisticState.selectedTaskId).not.toBe(closingTaskId);
+      expect(optimisticState.selectedTitle.length).toBeGreaterThan(0);
+      expect(optimisticState.header).toContain(optimisticState.selectedTitle);
+      expect(optimisticState.header).not.toContain(closingPrompt);
+
+      await client.executeSync(
+        `window.__KANNA_OPTIMISTIC_CLOSE_GATE__.release(); return true;`,
+      );
+      await waitForCondition(
+        async () => client.executeSync<boolean>(
+          `return window.__KANNA_OPTIMISTIC_CLOSE_GATE__?.responseCompleted === true;`,
+        ),
+        "authoritative close response",
+        15_000,
+      );
+      const closedRow = await waitForPipelineItem<{ closed_at: string | null }>(
+        client,
+        "SELECT closed_at FROM pipeline_item WHERE id = ?",
+        [closingTaskId],
+        (row) => typeof row?.closed_at === "string" && row.closed_at.length > 0,
+        15_000,
+      );
+      expect(closedRow.closed_at).toBeTruthy();
+
+      const completedState = await client.executeSync<{
+        closingVisible: boolean;
+        selectedTaskId: string | null;
+        header: string;
+      }>(
+        `const closing = document.querySelector(${JSON.stringify(`.pipeline-item[data-task-id="${closingTaskId}"]`)});
+         const selected = document.querySelector(".pipeline-item.selected");
+         return {
+           closingVisible: Boolean(closing),
+           selectedTaskId: selected?.getAttribute("data-task-id") || null,
+           header: document.querySelector(".task-header")?.textContent?.trim() ?? "",
+         };`,
+      );
+      expect(completedState).toEqual({
+        closingVisible: false,
+        selectedTaskId: optimisticState.selectedTaskId,
+        header: optimisticState.header,
+      });
+    } finally {
+      await client.executeSync(
+        `const gate = window.__KANNA_OPTIMISTIC_CLOSE_GATE__;
+         if (gate) {
+           gate.release?.();
+           globalThis.fetch = gate.originalFetch;
+         }
+         delete window.__KANNA_OPTIMISTIC_CLOSE_GATE__;
+         return true;`,
+      ).catch(() => undefined);
+      for (const taskId of [closingTaskId, replacementTaskId]) {
+        await callVueMethod(client, "store.closeTask", taskId, { selectNext: false })
+          .catch(() => undefined);
+      }
+    }
   });
 
   it("keeps a closed active-stage task out of sidebar selection and terminal startup after reload", async () => {

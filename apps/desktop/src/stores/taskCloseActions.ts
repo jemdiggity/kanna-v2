@@ -6,7 +6,7 @@ import {
   reopenDesktopTask,
 } from "../services/desktopServerClient";
 import { hasOpenSubtasks } from "../utils/taskParenting";
-import { requireService, type StoreContext } from "./state";
+import { requireService, type KannaSnapshot, type StoreContext } from "./state";
 import { resolveAgentProvider } from "./agent-provider";
 import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import type { TasksApi } from "./tasks";
@@ -34,6 +34,24 @@ export function createTaskCloseActions(
     );
   }
 
+  function projectTaskClosed(
+    snapshot: KannaSnapshot,
+    taskId: string,
+    closedAt: string,
+  ): KannaSnapshot {
+    return {
+      ...snapshot,
+      entries: snapshot.entries.map((entry) => ({
+        ...entry,
+        items: entry.items.map((candidate) =>
+          candidate.id === taskId
+            ? { ...candidate, closed_at: closedAt }
+            : candidate,
+        ),
+      })),
+    };
+  }
+
   async function closeTask(
     targetItemId?: string,
     opts?: { selectNext?: boolean },
@@ -54,40 +72,71 @@ export function createTaskCloseActions(
       "selectedTaskId",
     ).value === item.id;
     const selectionIntentAtStart = context.state.selectionIntentVersion.value;
+    const shouldSelectReplacement = opts?.selectNext !== false && itemWasSelected;
+    let replacementSelectionError: unknown = null;
+    const replacementSelection = shouldSelectReplacement
+      ? selectReplacementAfterTaskRemoval(item).catch((error) => {
+          replacementSelectionError = error;
+        })
+      : Promise.resolve();
+    let closeWasCommitted = false;
 
     try {
-      await closeDesktopTask(item.id);
+      await requireService(
+        context.services.withOptimisticItemOverlay,
+        "withOptimisticItemOverlay",
+      )({
+        key: `close-task:${item.id}`,
+        apply: (snapshot) => projectTaskClosed(snapshot, item.id, new Date().toISOString()),
+        run: async () => {
+          try {
+            await closeDesktopTask(item.id);
+            closeWasCommitted = true;
+          } catch (error) {
+            try {
+              closeWasCommitted = await taskCloseWasCommitted(item.id);
+            } catch (verificationError) {
+              console.error(
+                "[store] failed to verify task state after close error:",
+                verificationError,
+              );
+            }
+
+            if (!closeWasCommitted) throw error;
+            console.warn("[store] close response failed after the task was committed:", error);
+          }
+        },
+        reconcile: reloadSnapshot,
+      });
+
+      await replacementSelection;
+      if (replacementSelectionError) throw replacementSelectionError;
+      await invalidateWindowWorkspace("closeTask");
+      return true;
     } catch (error) {
-      let closeWasCommitted = false;
-      try {
-        closeWasCommitted = await taskCloseWasCommitted(item.id);
-      } catch (verificationError) {
-        console.error("[store] failed to verify task state after close error:", verificationError);
-      }
+      await replacementSelection;
 
-      if (!closeWasCommitted) {
-        console.error("[store] close failed:", error);
+      if (closeWasCommitted) {
+        console.error("[store] post-close reconciliation failed:", error);
         context.toast.error(context.tt("toasts.closeTaskFailed"));
-        return false;
+        return true;
       }
 
-      console.warn("[store] close response failed after the task was committed:", error);
-    }
-
-    try {
       const selectionIntentIsCurrent = context.state.selectionIntentVersion.value
         === selectionIntentAtStart;
-      if (opts?.selectNext !== false && itemWasSelected && selectionIntentIsCurrent) {
-        await selectReplacementAfterTaskRemoval(item);
+      if (shouldSelectReplacement && selectionIntentIsCurrent) {
+        requireService(context.services.restoreSelection, "restoreSelection")(item.id);
+        try {
+          await requireService(context.services.persistSelection, "persistSelection")();
+        } catch (persistenceError) {
+          console.error("[store] failed to persist selection after close rollback:", persistenceError);
+        }
       }
-      await reloadSnapshot();
-      await invalidateWindowWorkspace("closeTask");
-    } catch (error) {
-      console.error("[store] post-close reconciliation failed:", error);
-      context.toast.error(context.tt("toasts.closeTaskFailed"));
-    }
 
-    return true;
+      console.error("[store] close failed:", error);
+      context.toast.error(context.tt("toasts.closeTaskFailed"));
+      return false;
+    }
   }
 
   async function undoClose() {

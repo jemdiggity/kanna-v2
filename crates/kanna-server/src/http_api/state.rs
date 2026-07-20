@@ -19,6 +19,7 @@ pub struct AppState {
     #[cfg(debug_assertions)]
     pub(super) e2e_lan_http_enabled: Arc<AtomicBool>,
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
+    pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_creation_flights: Arc<StdMutex<HashSet<String>>>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
@@ -151,6 +152,7 @@ impl AppState {
             #[cfg(debug_assertions)]
             e2e_lan_http_enabled: Arc::new(AtomicBool::new(true)),
             session_replacements: crate::session_replacements::SessionReplacements::default(),
+            repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_creation_flights: Arc::new(StdMutex::new(HashSet::new())),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]

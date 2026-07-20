@@ -67,7 +67,10 @@ export function useAppTaskCreation({
 }: UseAppTaskCreationOptions) {
   const cloningRepo = ref(false);
   const availableAgentProviders = ref<AgentProvider[] | undefined>(undefined);
+  const newTaskOptionsLoading = ref(false);
+  const newTaskSubmissionPending = ref(false);
   let pendingNewTaskSubmit: Promise<void> | null = null;
+  let newTaskOptionsLoadGeneration = 0;
 
   function claimLocalTaskOwnership(repoId: string) {
     claimLocalTaskSelectionOwnership({
@@ -79,65 +82,72 @@ export function useAppTaskCreation({
   }
 
   async function openNewTaskModal(repoId?: string) {
-    await pendingNewTaskSubmit?.catch(() => undefined);
-
+    const loadGeneration = ++newTaskOptionsLoadGeneration;
     const targetRepoId = repoId ?? store.selectedRepoId ?? (sidebarRepos.value.length === 1 ? sidebarRepos.value[0]?.id : undefined);
     if (targetRepoId) store.selectedRepoId = targetRepoId;
+    availableAgentProviders.value = undefined;
+    availablePipelines.value = [];
+    defaultPipelineName.value = undefined;
+    availableBaseBranches.value = [];
+    defaultBaseBranchName.value = undefined;
+    repoDefaultBranchName.value = undefined;
+    newTaskOptionsLoading.value = true;
+    showNewTaskModal.value = true;
+
     const targetRepo = store.repos.find((r) => r.id === targetRepoId);
     const repoPath = targetRepo?.path;
-    if (repoPath) {
-      const [manifest, defaultBranch, baseBranches, repoAgentProviders] = await Promise.all([
-        fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error);
-          console.error("[App] failed to load repo definitions for new task modal:", error);
-          toast.error(`${t("toasts.repoDefinitionsFailed")}: ${message}`);
-          return null;
-        }),
-        invoke<string>("git_default_branch", { repoPath }).catch((error) => {
-          console.debug("[App] failed to read default branch for new task modal:", error);
-          return "";
-        }),
-        invoke<string[]>("git_list_base_branches", { repoPath }).catch((error) => {
-          console.debug("[App] failed to list base branches for new task modal:", error);
-          return [] as string[];
-        }),
-        fetchDesktopRepoAgentProviders(targetRepo.id).catch((error) => {
-          console.debug("[App] failed to resolve repo agent providers for new task modal:", error);
-          return undefined;
-        }),
-      ]);
-      availableAgentProviders.value = repoAgentProviders;
-      availablePipelines.value = manifest?.pipelines ?? [];
-      defaultPipelineName.value = manifest?.defaultPipeline;
-      repoDefaultBranchName.value = defaultBranch || undefined;
-      availableBaseBranches.value = baseBranches;
-      defaultBaseBranchName.value =
-        getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined;
-    } else if (isCloudOnlyRepoId(targetRepoId)) {
-      availableAgentProviders.value = undefined;
-      const cloudRepo = remoteSnapshot.value.repos.find((repo) => repo.id === targetRepoId);
-      const remoteUrl = cloudRepo?.remote_url ?? null;
-      const baseBranches = remoteUrl
-        ? await invoke<string[]>("git_list_remote_base_branches", { remoteUrl }).catch((error) => {
-            console.debug("[App] failed to list remote base branches for cloud repo:", error);
+    try {
+      if (repoPath) {
+        const [manifest, defaultBranch, baseBranches, repoAgentProviders] = await Promise.all([
+          fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error("[App] failed to load repo definitions for new task modal:", error);
+            if (loadGeneration === newTaskOptionsLoadGeneration && showNewTaskModal.value) {
+              toast.error(`${t("toasts.repoDefinitionsFailed")}: ${message}`);
+            }
+            return null;
+          }),
+          invoke<string>("git_default_branch", { repoPath }).catch((error) => {
+            console.debug("[App] failed to read default branch for new task modal:", error);
+            return "";
+          }),
+          invoke<string[]>("git_list_base_branches", { repoPath }).catch((error) => {
+            console.debug("[App] failed to list base branches for new task modal:", error);
             return [] as string[];
-          })
-        : [];
-      availablePipelines.value = [];
-      defaultPipelineName.value = undefined;
-      repoDefaultBranchName.value = cloudRepo?.default_branch || undefined;
-      availableBaseBranches.value = baseBranches;
-      defaultBaseBranchName.value =
-        getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined;
-    } else {
-      availableAgentProviders.value = undefined;
-      availablePipelines.value = [];
-      defaultPipelineName.value = undefined;
-      availableBaseBranches.value = [];
-      defaultBaseBranchName.value = undefined;
-      repoDefaultBranchName.value = undefined;
+          }),
+          fetchDesktopRepoAgentProviders(targetRepo.id).catch((error) => {
+            console.debug("[App] failed to resolve repo agent providers for new task modal:", error);
+            return undefined;
+          }),
+        ]);
+        if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
+        availableAgentProviders.value = repoAgentProviders;
+        availablePipelines.value = manifest?.pipelines ?? [];
+        defaultPipelineName.value = manifest?.defaultPipeline;
+        repoDefaultBranchName.value = defaultBranch || undefined;
+        availableBaseBranches.value = baseBranches;
+        defaultBaseBranchName.value =
+          getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined;
+      } else if (isCloudOnlyRepoId(targetRepoId)) {
+        const cloudRepo = remoteSnapshot.value.repos.find((repo) => repo.id === targetRepoId);
+        const remoteUrl = cloudRepo?.remote_url ?? null;
+        const baseBranches = remoteUrl
+          ? await invoke<string[]>("git_list_remote_base_branches", { remoteUrl }).catch((error) => {
+              console.debug("[App] failed to list remote base branches for cloud repo:", error);
+              return [] as string[];
+            })
+          : [];
+        if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
+        repoDefaultBranchName.value = cloudRepo?.default_branch || undefined;
+        availableBaseBranches.value = baseBranches;
+        defaultBaseBranchName.value =
+          getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined;
+      }
+    } finally {
+      if (loadGeneration === newTaskOptionsLoadGeneration) {
+        newTaskOptionsLoading.value = false;
+      }
     }
-    showNewTaskModal.value = true;
   }
 
   // Handlers that mix UI state + store
@@ -184,6 +194,7 @@ export function useAppTaskCreation({
     if (!repo) return;
     claimLocalTaskOwnership(repo.id);
     showNewTaskModal.value = false;
+    newTaskSubmissionPending.value = true;
     const submitPromise = (async () => {
       await store.createItem(store.selectedRepoId ?? repo.id, repo.path, prompt, agentType, {
         agentProvider,
@@ -206,6 +217,7 @@ export function useAppTaskCreation({
     } finally {
       if (pendingNewTaskSubmit === submitPromise) {
         pendingNewTaskSubmit = null;
+        newTaskSubmissionPending.value = false;
       }
     }
   }
@@ -325,6 +337,8 @@ export function useAppTaskCreation({
   return {
     cloningRepo,
     availableAgentProviders,
+    newTaskOptionsLoading,
+    newTaskSubmissionPending,
     currentBlockers,
     currentTaskIsBlocked,
     openNewTaskModal,

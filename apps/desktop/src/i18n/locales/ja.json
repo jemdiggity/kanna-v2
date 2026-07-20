@@ -9,6 +9,7 @@
     "baseBranch": "ベースブランチ",
     "baseBranchRequired": "有効なベースブランチを選択してください",
     "baseBranchSearchPlaceholder": "ブランチを検索...",
+    "loadingOptions": "タスクオプションを読み込んでいます…",
     "untitled": "無題",
     "renameTask": "タスク名を変更"
   },

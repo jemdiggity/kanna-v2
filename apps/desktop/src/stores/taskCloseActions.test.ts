@@ -80,6 +80,10 @@ function createHarness(durableItem = item()) {
   const selectItem = vi.fn(async (_taskId: string) => {
     state.selectedItemId.value = "create:restored";
   });
+  const restoreSelection = vi.fn((taskId: string) => {
+    state.selectedItemId.value = taskId;
+    selectedTaskId.value = taskId;
+  });
   const services = {
     selectedTaskId: computed(() => selectedTaskId.value),
     currentItem: computed(() => durableItem),
@@ -89,6 +93,7 @@ function createHarness(durableItem = item()) {
     selectReplacementAfterItemRemoval,
     selectItem,
     persistSelection: vi.fn(async () => {}),
+    restoreSelection,
     reconcileSelection: vi.fn(),
     fetchSnapshot: vi.fn(async () => ({
       entries: [{ repo: repo(), items: [durableItem] }],
@@ -97,6 +102,37 @@ function createHarness(durableItem = item()) {
       settings: {},
     })),
     reloadSnapshot: vi.fn(async () => {}),
+    withOptimisticItemOverlay: vi.fn(async (input: {
+      apply: (snapshot: {
+        entries: Array<{ repo: Repo; items: PipelineItem[] }>;
+        taskBlockers: never[];
+        worktreePaths: Record<string, string>;
+        settings: Record<string, string>;
+      }) => {
+        entries: Array<{ repo: Repo; items: PipelineItem[] }>;
+        taskBlockers: never[];
+        worktreePaths: Record<string, string>;
+        settings: Record<string, string>;
+      };
+      run: () => Promise<unknown>;
+      reconcile?: () => Promise<void>;
+    }) => {
+      const authoritativeItems = state.items.value;
+      const projected = input.apply({
+        entries: [{ repo: repo(), items: authoritativeItems }],
+        taskBlockers: [],
+        worktreePaths: {},
+        settings: {},
+      });
+      state.items.value = projected.entries.flatMap((entry) => entry.items);
+      try {
+        const result = await input.run();
+        await input.reconcile?.();
+        return result;
+      } finally {
+        state.items.value = authoritativeItems;
+      }
+    }),
     getAgentProviderAvailability: vi.fn(async () => ({ claude: true })),
     windowWorkspace: { invalidateSharedData: vi.fn(async () => {}) },
   };
@@ -140,6 +176,24 @@ describe("task close durable selection", () => {
     await actions.closeTask(durableItem.id);
 
     expect(services.selectReplacementAfterItemRemoval).toHaveBeenCalledWith(durableItem);
+  });
+
+  it("hides the task and selects its replacement before close completes", async () => {
+    const closeResponse = deferred<void>();
+    setDesktopServerClientHandlersForTests({
+      closeTask: async () => closeResponse.promise,
+    });
+    const durableItem = item();
+    const { actions, services, state } = createHarness(durableItem);
+
+    const closePromise = actions.closeTask(durableItem.id);
+    await vi.waitFor(() => expect(services.withOptimisticItemOverlay).toHaveBeenCalledOnce());
+
+    expect(state.items.value.find((candidate) => candidate.id === durableItem.id)?.closed_at).not.toBeNull();
+    expect(services.selectReplacementAfterItemRemoval).toHaveBeenCalledWith(durableItem);
+
+    closeResponse.resolve();
+    await closePromise;
   });
 
   it("keeps close ownership when a live snapshot removes the selected task", async () => {
@@ -213,7 +267,8 @@ describe("task close durable selection", () => {
     closeResponse.resolve();
     await closePromise;
 
-    expect(services.selectReplacementAfterItemRemoval).not.toHaveBeenCalled();
+    expect(services.selectReplacementAfterItemRemoval).toHaveBeenCalledWith(durableItem);
+    expect(services.restoreSelection).not.toHaveBeenCalled();
     expect(state.selectedRepoId.value).toBe("repo-2");
     expect(state.selectedItemId.value).toBe(createdSlotId);
   });
@@ -232,7 +287,8 @@ describe("task close durable selection", () => {
 
     expect(closed).toBe(false);
     expect(services.fetchSnapshot).toHaveBeenCalledOnce();
-    expect(services.selectReplacementAfterItemRemoval).not.toHaveBeenCalled();
+    expect(services.selectReplacementAfterItemRemoval).toHaveBeenCalledWith(durableItem);
+    expect(services.restoreSelection).toHaveBeenCalledWith(durableItem.id);
     expect(services.reloadSnapshot).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalledWith("Failed to close task");
   });

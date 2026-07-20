@@ -24,6 +24,97 @@ vi.mock("../../invoke", () => ({
 }));
 
 describe("NewTaskModal", () => {
+  it("keeps prompt entry available while task options load", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        optionsLoading: true,
+        availableAgentProviders: ["claude"],
+        pipelines: ["default"],
+        baseBranches: ["origin/main"],
+        defaultBaseBranch: "origin/main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await wrapper.get("textarea").setValue("Write while loading");
+
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-testid="task-options-loading"]').text()).toBe("tasks.loadingOptions");
+    expect(wrapper.get('[data-testid="base-branch-toggle"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get(".btn-primary").attributes("disabled")).toBeDefined();
+  });
+
+  it("uses the repository default pipeline after options load", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        optionsLoading: true,
+        availableAgentProviders: ["claude"],
+        baseBranches: ["origin/main"],
+        defaultBaseBranch: "origin/main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("default");
+
+    await wrapper.setProps({
+      optionsLoading: false,
+      pipelines: ["default", "qa-review"],
+      defaultPipeline: "qa-review",
+    });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("qa-review");
+
+    await wrapper.get("textarea").setValue("Use the configured pipeline");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+    expect(wrapper.emitted("submit")?.[0]).toEqual([
+      "Use the configured pipeline", "claude", "qa-review", "origin/main", "pty",
+    ]);
+  });
+
+  it("keeps a valid user-selected pipeline when options hydrate again", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        pipelines: ["default", "qa-review"],
+        defaultPipeline: "qa-review",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await wrapper.get('[data-testid="pipeline-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="pipeline-option-default"]').trigger("click");
+    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("default");
+
+    await wrapper.setProps({
+      pipelines: ["default", "qa-review", "release"],
+      defaultPipeline: "release",
+    });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("default");
+  });
+
+  it("keeps Create disabled while a previous task submission finishes", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        submissionPending: true,
+        availableAgentProviders: ["claude"],
+        pipelines: ["default"],
+        baseBranches: ["origin/main"],
+        defaultBaseBranch: "origin/main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await wrapper.get("textarea").setValue("Queue another task");
+
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get(".btn-primary").attributes("disabled")).toBeDefined();
+  });
+
   beforeEach(() => {
     invokeMock.mockClear();
   });
