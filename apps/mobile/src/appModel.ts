@@ -1041,9 +1041,7 @@ function createTrustedLanFallbackClient({
         return null;
       }
       const validatedBaseUrl = validatedBaseUrls.get(desktopId);
-      return validatedBaseUrl
-        ? clientForBaseUrl(validatedBaseUrl)
-        : createResolvingClient(desktopId);
+      return validatedBaseUrl ? clientForBaseUrl(validatedBaseUrl) : null;
     }
   };
 }

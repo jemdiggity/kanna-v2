@@ -3927,4 +3927,87 @@ describe("createAppModel cloud routing", () => {
     expect(app.sessionStore.getState().liveLanDesktops).toEqual([]);
     expect(taskIndex.listDesktops).toHaveBeenCalledWith("user-1");
   });
+
+  it("does not disconnect an account-trusted task while its LAN endpoint is being re-resolved", async () => {
+    const duplicate = cloudTask({
+      id: "cloud:desktop-lan:repo-lan:local-task",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "repo-lan",
+      ownerLocalTaskId: "local-task",
+      agentType: "agent"
+    });
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          desktopId: "desktop-lan",
+          displayName: "LAN Mac",
+          updatedAt: "2026-07-20T00:00:00.000Z"
+        }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([duplicate]),
+      subscribeRecentTasks: vi.fn(() => vi.fn())
+    };
+    const lan = createLanFixture(async () => [
+      {
+        id: "local-task",
+        repoId: "repo-lan",
+        title: "LAN task",
+        stage: "in progress",
+        agentType: "agent"
+      }
+    ]);
+    let services = lan.bonjourBrowser.getServices();
+    const bonjourBrowser: BonjourBrowser = {
+      start: vi.fn(),
+      stop: vi.fn(),
+      getServices: () => services,
+      subscribe: () => vi.fn()
+    };
+    const { authSession } = createMutableAuthSession(signedInState());
+    const relayClient = createRelayClientMock();
+    const app = createAppModel({
+      authSession,
+      fetchImpl: lan.fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-lan",
+          trustedDesktops: [],
+          repoCreationProfiles: []
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: false,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser,
+        createRelayClient: () => relayClient
+      }
+    });
+
+    await app.initialize();
+    await expect(app.client.listRecentTasks()).resolves.toEqual([
+      expect.objectContaining({ id: duplicate.id, title: "LAN task" })
+    ]);
+
+    services = [];
+    await expect(app.client.listDesktops()).resolves.toEqual([
+      expect.objectContaining({ id: "desktop-lan", mode: "remote" })
+    ]);
+    expect(app.sessionStore.getState().auth.status).toBe("signedIn");
+
+    const events: Array<{ type: string; message?: string }> = [];
+    app.client.observeTaskAgent(duplicate.id, (event) => events.push(event));
+
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        message: "No trusted desktop is available."
+      })
+    );
+    expect(relayClient.observeTaskAgent).toHaveBeenCalledWith(
+      { desktopId: "desktop-lan", taskId: "local-task" },
+      expect.any(Function)
+    );
+  });
 });
