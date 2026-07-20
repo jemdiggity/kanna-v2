@@ -11,7 +11,7 @@ const COPY_FEEDBACK_MS = 2_000;
 
 interface BuildInfoPanelProps {
   identity?: BuildIdentity;
-  copyUpdateId?(value: string): Promise<void>;
+  copyUpdateId?(value: string): Promise<unknown>;
 }
 
 export function BuildInfoPanel({

@@ -170,6 +170,9 @@ vi.mock("@react-navigation/bottom-tabs", async () => {
 });
 
 vi.mock("../components/AccountBadge", () => ({ AccountBadge: "AccountBadge" }));
+vi.mock("../components/BuildInfoPanel", () => ({
+  BuildInfoPanel: "BuildInfoPanel"
+}));
 vi.mock("../components/CreateTaskComposer", () => ({
   CreateTaskComposer: "CreateTaskComposer"
 }));
