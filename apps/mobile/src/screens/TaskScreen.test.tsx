@@ -105,6 +105,10 @@ vi.mock("./AgentMessageView", () => ({
   AgentMessageView: "AgentMessageView"
 }));
 
+vi.mock("../components/LoadingText", () => ({
+  LoadingText: "LoadingText"
+}));
+
 vi.mock("./TerminalWebView", () => ({
   TerminalWebView: "TerminalWebView"
 }));
@@ -426,9 +430,41 @@ describe("TaskScreen", () => {
       taskId: "create:slot-1"
     });
 
-    expect(findByTypeAndText(tree, "Text", "Creating task")).not.toBeNull();
+    expect(findByType(tree, "LoadingText")?.props).toMatchObject({
+      label: "Creating task"
+    });
     expect(findByTestId(tree, "mobile.task-creation.recover")).toBeNull();
   });
+
+  it.each([
+    ["pending", "Creating task"],
+    ["recovering", "Recovering task"]
+  ] as const)("animates %s task creation", (taskCreationPhase, label) => {
+    const tree = renderTaskScreen({
+      taskCreationPhase,
+      taskId: "create:slot-1"
+    });
+
+    expect(findByType(tree, "LoadingText")?.props.label).toBe(label);
+  });
+
+  it.each(["idle", "connecting"] as const)(
+    "animates PTY %s connection state",
+    (terminalStatus) => {
+      const tree = renderTaskScreen({ terminalStatus });
+
+      expect(findByType(tree, "LoadingText")?.props.label).toBe("Connecting");
+    }
+  );
+
+  it.each(["closed", "error"] as const)(
+    "keeps PTY %s state static",
+    (terminalStatus) => {
+      expect(
+        findByType(renderTaskScreen({ terminalStatus }), "LoadingText")
+      ).toBeNull();
+    }
+  );
 
   it("opens task actions from the plus button", () => {
     const tree = renderTaskScreen({ agentType: "agent" });

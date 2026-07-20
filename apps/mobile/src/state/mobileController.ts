@@ -1038,6 +1038,7 @@ export function createMobileController(
       { authoritative: true }
     );
     reconcileSelectedTask(true);
+    store.setTaskCollectionStatus("ready");
   };
 
   const refreshDesktops = async (options: { force?: boolean } = {}) => {
@@ -1120,6 +1121,7 @@ export function createMobileController(
       { authoritative: true }
     );
     reconcileSelectedTask(true);
+    store.setTaskCollectionStatus("ready");
     return true;
   };
 
@@ -1196,6 +1198,9 @@ export function createMobileController(
     const selectedDurableTaskId = durableTaskIdForSelection(selectedTaskId);
     if (selectedDurableTaskId) {
       startTaskView(selectedDurableTaskId);
+    }
+    if (cloudAuthoritative) {
+      store.setTaskCollectionStatus("ready");
     }
 
     void client.listRepos().then((repos) => {
@@ -1314,6 +1319,9 @@ export function createMobileController(
           error instanceof Error ? error.message : "Cloud task subscription failed";
         cloudSubscriptionError = { epoch, message };
         publishOwnedErrorMessage();
+        if (store.getState().taskCollectionStatus === "loading") {
+          store.setTaskCollectionStatus("error");
+        }
       }
     );
     if (epoch !== cloudSubscriptionEpoch) {
@@ -1346,6 +1354,7 @@ export function createMobileController(
     store.setRecentTasks([]);
     store.setRepoTasks([]);
     store.setSearchResults(store.getState().searchQuery, []);
+    store.setTaskCollectionStatus("loading");
     pendingTaskIdentities.clear();
     desktopMetadataError = null;
     setUnownedErrorMessage(null);
@@ -1377,6 +1386,9 @@ export function createMobileController(
 
   const fail = (error: unknown) => {
     store.setConnectionState("error");
+    if (store.getState().taskCollectionStatus === "loading") {
+      store.setTaskCollectionStatus("error");
+    }
     setUnownedErrorMessage(
       error instanceof Error ? error.message : "Mobile app request failed"
     );
@@ -1456,6 +1468,7 @@ export function createMobileController(
         if (status.state !== "running") {
           stopCloudTaskSubscription();
           store.setConnectionState("idle");
+          store.setTaskCollectionStatus("ready");
           return;
         }
 

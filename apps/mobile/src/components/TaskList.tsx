@@ -3,9 +3,12 @@ import { StyleSheet, Text, View } from "react-native";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 import { TaskCard } from "./TaskCard";
+import { LoadingText } from "./LoadingText";
 
 interface TaskListProps {
   emptyLabel: string;
+  errorLabel?: string | null;
+  loading?: boolean;
   taskSlots: TaskUiSlot[];
   testID?: string;
   onOpenTask(taskId: string): void;
@@ -13,6 +16,8 @@ interface TaskListProps {
 
 export function TaskList({
   emptyLabel,
+  errorLabel = null,
+  loading = false,
   testID,
   taskSlots,
   onOpenTask
@@ -20,7 +25,11 @@ export function TaskList({
   if (!taskSlots.length) {
     return (
       <View collapsable={false} style={styles.emptyCard} testID={testID}>
-        <Text style={styles.emptyLabel}>{emptyLabel}</Text>
+        {loading ? (
+          <LoadingText label="Loading tasks" style={styles.emptyLabel} />
+        ) : (
+          <Text style={styles.emptyLabel}>{errorLabel ?? emptyLabel}</Text>
+        )}
       </View>
     );
   }

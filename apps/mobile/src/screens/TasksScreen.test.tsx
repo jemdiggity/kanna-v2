@@ -1,6 +1,10 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import { projectTaskUiSlots } from "../state/taskUiSlots";
+import type { TaskCollectionStatus } from "../state/sessionStore";
+import {
+  projectTaskUiSlots,
+  type TaskUiSlot
+} from "../state/taskUiSlots";
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -10,6 +14,10 @@ vi.mock("react-native", () => ({
   },
   Text: "Text",
   View: "View"
+}));
+
+vi.mock("../components/LoadingText", () => ({
+  LoadingText: "LoadingText"
 }));
 
 let TasksScreen: typeof import("./TasksScreen").TasksScreen | null = null;
@@ -56,7 +64,83 @@ function findElement(node: ElementNode, type: unknown): ElementNode | null {
   return null;
 }
 
+function renderTasksScreen({
+  taskCollectionStatus = "ready",
+  taskSlots = []
+}: {
+  taskCollectionStatus?: TaskCollectionStatus;
+  taskSlots?: TaskUiSlot[];
+} = {}): ElementNode {
+  if (!TasksScreen) throw new Error("TasksScreen was not loaded");
+  return TasksScreen({
+    heading: "Tasks",
+    repos: [{ id: "repo-1", name: "Repo One" }],
+    selectedRepoId: "repo-1",
+    taskCollectionStatus,
+    taskSlots,
+    onOpenTask: vi.fn(),
+    onSelectRepo: vi.fn()
+  } as never) as ElementNode;
+}
+
 describe("TasksScreen", () => {
+  it("shows loading instead of an empty state before the first snapshot", () => {
+    if (!TaskList) throw new Error("TaskList was not loaded");
+    const tree = renderTasksScreen({ taskCollectionStatus: "loading" });
+    const taskList = findElement(tree, TaskList);
+
+    expect(taskList?.props).toMatchObject({
+      loading: true,
+      errorLabel: null
+    });
+
+    const renderedList = TaskList(taskList?.props as never) as ElementNode;
+    expect(findElement(renderedList, "LoadingText")?.props?.label).toBe(
+      "Loading tasks"
+    );
+    expect(textContent(renderedList)).not.toContain("No tasks yet.");
+  });
+
+  it("shows the genuine empty state after a successful empty snapshot", () => {
+    if (!TaskList) throw new Error("TaskList was not loaded");
+    const tree = renderTasksScreen({ taskCollectionStatus: "ready" });
+    const taskList = findElement(tree, TaskList);
+
+    expect(taskList?.props).toMatchObject({
+      emptyLabel: "No tasks yet.",
+      loading: false
+    });
+    expect(textContent(TaskList(taskList?.props as never) as ElementNode)).toContain(
+      "No tasks yet."
+    );
+  });
+
+  it("shows a static task load failure", () => {
+    if (!TaskList) throw new Error("TaskList was not loaded");
+    const tree = renderTasksScreen({ taskCollectionStatus: "error" });
+    const taskList = findElement(tree, TaskList);
+
+    expect(taskList?.props?.errorLabel).toBe("Could not load tasks.");
+    const renderedList = TaskList(taskList?.props as never) as ElementNode;
+    expect(textContent(renderedList)).toContain("Could not load tasks.");
+    expect(findElement(renderedList, "LoadingText")).toBeNull();
+  });
+
+  it("keeps task content visible while status is loading", () => {
+    const taskSlots = projectTaskUiSlots([{
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Visible task",
+      stage: "in progress"
+    }], []);
+    const tree = renderTasksScreen({
+      taskCollectionStatus: "loading",
+      taskSlots
+    });
+
+    expect(findElement(tree, TaskList)?.props?.loading).toBe(false);
+  });
+
   it("lists a single repo so users can see the active repo scope", () => {
     if (!TasksScreen) throw new Error("TasksScreen was not loaded");
 
@@ -64,6 +148,7 @@ describe("TasksScreen", () => {
       heading: "Tasks",
       repos: [{ id: "repo-1", name: "Repo One" }],
       selectedRepoId: "repo-1",
+      taskCollectionStatus: "ready",
       taskSlots: [],
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
@@ -98,6 +183,7 @@ describe("TasksScreen", () => {
         { id: "repo-b", name: "Repo B" }
       ],
       selectedRepoId: "repo-a",
+      taskCollectionStatus: "ready",
       taskSlots: projectTaskUiSlots(tasks, []),
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
@@ -147,6 +233,7 @@ describe("TasksScreen", () => {
       heading: "Recent",
       repos: [],
       selectedRepoId: "repo-a",
+      taskCollectionStatus: "ready",
       taskSlots: projectTaskUiSlots(tasks, []),
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
@@ -191,6 +278,7 @@ describe("TasksScreen", () => {
       heading: "Tasks",
       repos: [{ id: "repo-a", name: "Repo A" }],
       selectedRepoId: "repo-a",
+      taskCollectionStatus: "ready",
       taskSlots,
       onOpenTask: vi.fn(),
       onSelectRepo: vi.fn()
@@ -224,6 +312,7 @@ describe("TasksScreen", () => {
         { id: "repo-b", name: "Repo B" }
       ],
       selectedRepoId: "repo-a",
+      taskCollectionStatus: "ready",
       taskSlots: projectTaskUiSlots([
         taskA,
         { id: "task-b", repoId: "repo-b", title: "Task B", stage: "review" }
@@ -251,6 +340,7 @@ describe("TasksScreen", () => {
       heading: "Recent",
       repos: [],
       selectedRepoId: null,
+      taskCollectionStatus: "ready",
       taskSlots: [stableSlot],
       onOpenTask,
       onSelectRepo: vi.fn()

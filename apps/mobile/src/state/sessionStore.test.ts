@@ -12,6 +12,18 @@ describe("createSessionStore", () => {
     agentProvider: "codex" as const
   };
 
+  it("tracks first task collection readiness", () => {
+    const store = createSessionStore();
+
+    expect(store.getState().taskCollectionStatus).toBe("loading");
+
+    store.setTaskCollectionStatus("ready");
+    expect(store.getState().taskCollectionStatus).toBe("ready");
+
+    store.setTaskCollectionStatus("error");
+    expect(store.getState().taskCollectionStatus).toBe("error");
+  });
+
   it("preserves repository command ownership until the run settles", () => {
     const store = createSessionStore();
     store.selectRepo("repo-1");

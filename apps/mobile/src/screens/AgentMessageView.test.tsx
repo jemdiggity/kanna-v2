@@ -12,6 +12,10 @@ vi.mock("react-native", () => ({
   View: "View"
 }));
 
+vi.mock("../components/LoadingText", () => ({
+  LoadingText: "LoadingText"
+}));
+
 let AgentMessageView: typeof import("./AgentMessageView").AgentMessageView | null = null;
 
 beforeAll(async () => {
@@ -78,6 +82,21 @@ function findByTestId(node: ElementNode, testID: string): ElementNode | null {
   return null;
 }
 
+function findByType(node: ElementNode, type: unknown): ElementNode | null {
+  if (node.type === type) return node;
+
+  const children = node.props?.children;
+  const childList = Array.isArray(children) ? children : [children];
+  for (const child of childList) {
+    if (child && typeof child === "object") {
+      const match = findByType(child as ElementNode, type);
+      if (match) return match;
+    }
+  }
+
+  return null;
+}
+
 describe("AgentMessageView", () => {
   it("renders neutral agent events as native chat, tools, permissions, stats, and debug", () => {
     const tree = renderAgentView([
@@ -119,6 +138,20 @@ describe("AgentMessageView", () => {
       const tree = renderAgentView([], status);
 
       expect(findByTestId(tree, "mobile.agent-message-ready")).toBeNull();
+    }
+  );
+
+  it("animates the agent connection state", () => {
+    const tree = renderAgentView([], "connecting");
+
+    expect(findByType(tree, "LoadingText")?.props.label).toBe("Connecting");
+    expect(collectText(tree)).not.toContain("Connecting...");
+  });
+
+  it.each(["live", "idle", "error", "closed"] as const)(
+    "does not animate the agent %s state",
+    (status) => {
+      expect(findByType(renderAgentView([], status), "LoadingText")).toBeNull();
     }
   );
 });

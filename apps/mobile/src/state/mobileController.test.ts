@@ -247,6 +247,82 @@ describe("createMobileController", () => {
     };
   }
 
+  it("marks polled task collections ready after bootstrap", async () => {
+    const store = createSessionStore();
+    const controller = createMobileController(createClientMock(), store);
+
+    await controller.bootstrap();
+
+    expect(store.getState().taskCollectionStatus).toBe("ready");
+  });
+
+  it("waits for an authoritative live cloud task publication", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    let liveUpdate: ((
+      tasks: TaskSummary[],
+      publication?: CloudTaskPublication
+    ) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    expect(store.getState().taskCollectionStatus).toBe("loading");
+
+    liveUpdate?.([], { cloudAuthoritative: false });
+    expect(store.getState().taskCollectionStatus).toBe("loading");
+
+    liveUpdate?.([], { cloudAuthoritative: true });
+    expect(store.getState().taskCollectionStatus).toBe("ready");
+  });
+
+  it("stops initial collection loading when the live subscription errors", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    let liveError: ((error: unknown) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, _onUpdate, onError) => {
+        liveError = onError ?? null;
+        return vi.fn();
+      })
+    });
+
+    await controller.bootstrap();
+    liveError?.(new Error("cloud tasks unavailable"));
+
+    expect(store.getState().taskCollectionStatus).toBe("error");
+  });
+
   it("pairs by code without auth and refreshes machine sources", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -1805,6 +1881,7 @@ describe("createMobileController", () => {
   });
 
   it("ignores a stale initial collection rejection after a newer repo selection", async () => {
+    vi.useFakeTimers();
     const store = createSessionStore();
     const client = createClientMock();
     const staleRead = createDeferred<TaskSummary[]>();
@@ -1813,6 +1890,14 @@ describe("createMobileController", () => {
       staleReadStarted.resolve();
       return staleRead.promise;
     });
+    client.listRecentTasks.mockResolvedValueOnce([
+      {
+        id: "task-repo-2",
+        repoId: "repo-2",
+        title: "Repo Two task",
+        stage: "pr"
+      }
+    ]);
     const controller = createMobileController(client, store);
 
     const bootstrap = controller.bootstrap();
@@ -1820,10 +1905,13 @@ describe("createMobileController", () => {
     await controller.selectRepo("repo-2");
     staleRead.reject(new Error("obsolete bootstrap tasks failed"));
     await bootstrap;
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushMicrotasks();
 
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
       errorMessage: null,
+      taskCollectionStatus: "ready",
       selectedRepoId: "repo-2",
       repoTasks: [expect.objectContaining({ id: "task-repo-2" })]
     });
