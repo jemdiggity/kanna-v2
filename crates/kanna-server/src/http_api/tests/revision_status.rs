@@ -211,7 +211,8 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         desktop_id: "desktop-1".to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
         desktop_name: "Studio Mac".to_string(),
-        server_version: Some("test-version".to_string()),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         pairing_store_path: format!("/tmp/kanna-pairings-revision-branch-{unique}.json"),
@@ -494,7 +495,8 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         desktop_id: "desktop-1".to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
         desktop_name: "Studio Mac".to_string(),
-        server_version: Some("test-version".to_string()),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         pairing_store_path: format!("/tmp/kanna-pairings-revision-loop-{unique}.json"),
@@ -800,7 +802,8 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         desktop_id: "desktop-1".to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
         desktop_name: "Studio Mac".to_string(),
-        server_version: Some("test-version".to_string()),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         pairing_store_path: format!("/tmp/kanna-pairings-revision-title-{unique}.json"),
@@ -901,8 +904,12 @@ async fn status_route_does_not_expose_pairing_secret() {
         .await
         .unwrap();
     let status: MobileServerStatus = from_slice(&body).unwrap();
+    let status_json: serde_json::Value = from_slice(&body).unwrap();
 
     assert_eq!(status.desktop_name, "Studio Mac");
     assert_eq!(status.state, "running");
+    assert_eq!(status_json["version"], "test-version");
+    assert_eq!(status_json["environment"], "development");
+    assert!(status_json.get("serverVersion").is_none());
     assert!(status.pairing_code.is_none());
 }

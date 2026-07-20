@@ -15,7 +15,8 @@ pub struct Config {
     pub desktop_id: String,
     pub desktop_secret: Option<String>,
     pub desktop_name: String,
-    pub server_version: Option<String>,
+    pub version: String,
+    pub environment: String,
     pub lan_host: String,
     pub lan_port: u16,
     pub pairing_store_path: String,
@@ -34,7 +35,8 @@ struct RawConfig {
     desktop_id: Option<String>,
     desktop_secret: Option<String>,
     desktop_name: Option<String>,
-    server_version: Option<String>,
+    version: String,
+    environment: String,
     lan_host: Option<String>,
     lan_port: Option<u16>,
     pairing_store_path: Option<String>,
@@ -148,7 +150,8 @@ fn load_from_path(
         desktop_id: raw.desktop_id.unwrap_or_else(default_desktop_id),
         desktop_secret: raw.desktop_secret,
         desktop_name: raw.desktop_name.unwrap_or_else(default_desktop_name),
-        server_version: raw.server_version,
+        version: raw.version,
+        environment: raw.environment,
         lan_host: raw.lan_host.unwrap_or_else(default_lan_host),
         lan_port: raw.lan_port.unwrap_or_else(default_lan_port),
         pairing_store_path: raw
@@ -207,6 +210,8 @@ mod tests {
             format!(
                 "relay_url = \"wss://relay.example\"\n\
                  device_token = \"device-token\"\n\
+                 version = \"0.0.69-staging.1\"\n\
+                 environment = \"staging\"\n\
                  db_path = \"{}\"\n\
                  desktop_id = \"desktop-1\"\n\
                  desktop_name = \"Studio Mac\"\n",
@@ -223,6 +228,8 @@ mod tests {
         );
         assert_eq!(config.lan_host, "0.0.0.0");
         assert_eq!(config.lan_port, 48_120);
+        assert_eq!(config.version, "0.0.69-staging.1");
+        assert_eq!(config.environment, "staging");
         assert_eq!(
             config.pairing_store_path,
             root.join("Kanna")
@@ -230,6 +237,23 @@ mod tests {
                 .display()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn load_from_path_requires_build_metadata() {
+        let root = unique_test_dir("missing-build-metadata");
+        let config_path = root.join("server.toml");
+        fs::write(
+            &config_path,
+            "relay_url = \"wss://relay.example\"\n\
+             device_token = \"device-token\"\n",
+        )
+        .unwrap();
+
+        let error = load_from_path(&config_path, &root).unwrap_err();
+
+        assert!(error.to_string().contains("missing field"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -246,6 +270,8 @@ mod tests {
             format!(
                 "relay_url = \"\"\n\
                  device_token = \"device-token\"\n\
+                 version = \"test-version\"\n\
+                 environment = \"development\"\n\
                  db_path = \"{}\"\n",
                 canonical.display()
             ),
@@ -292,6 +318,8 @@ mod tests {
             &config_path,
             "relay_url = \"ws://127.0.0.1:18080\"\n\
              device_token = \"device-token\"\n\
+             version = \"test-version\"\n\
+             environment = \"development\"\n\
              desktop_id = \"desktop-1\"\n\
              desktop_secret = \"desktop-secret\"\n",
         )
@@ -311,6 +339,8 @@ mod tests {
             &config_path,
             "relay_url = \"ws://127.0.0.1:18080\"\n\
              device_token = \"device-token\"\n\
+             version = \"test-version\"\n\
+             environment = \"development\"\n\
              desktop_id = \"desktop-1\"\n\
              kanna_cli_path = \"/Applications/Kanna.app/Contents/MacOS/kanna-cli\"\n",
         )
@@ -332,6 +362,8 @@ mod tests {
             &config_path,
             "relay_url = \"ws://127.0.0.1:18080\"\n\
              device_token = \"device-token\"\n\
+             version = \"test-version\"\n\
+             environment = \"development\"\n\
              cloud_base_url = \"http://127.0.0.1:5001/kanna-local/us-central1\"\n\
              firebase_project_id = \"kanna-local\"\n\
              desktop_id = \"desktop-1\"\n",
