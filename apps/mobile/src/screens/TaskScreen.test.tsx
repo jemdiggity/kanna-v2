@@ -3,7 +3,10 @@ import type {
   TaskCreationPhase,
   TaskTerminalStatus
 } from "../state/sessionStore";
-import { TASK_QUICK_REPLIES } from "./taskQuickReplies";
+import {
+  DEFAULT_TASK_QUICK_REPLIES,
+  type TaskQuickReply
+} from "./taskQuickReplies";
 
 const hookHarness = vi.hoisted(() => ({
   effectCleanups: [] as Array<(() => void) | undefined>,
@@ -21,7 +24,6 @@ const componentMocks = vi.hoisted(() => ({
   onAdvanceTaskStage: vi.fn(),
   onCloseTask: vi.fn(),
   onSendInput: vi.fn(),
-  showQuickReplyMenu: vi.fn(),
   showTaskActionMenu: vi.fn()
 }));
 
@@ -121,8 +123,8 @@ vi.mock("./VisualCompanionModal", () => ({
   VisualCompanionModal: "VisualCompanionModal"
 }));
 
-vi.mock("./taskQuickReplyMenu", () => ({
-  showTaskQuickReplyMenu: componentMocks.showQuickReplyMenu
+vi.mock("./QuickReplySendControl", () => ({
+  QuickReplySendControl: "QuickReplySendControl"
 }));
 
 vi.mock("./taskActionMenu", () => ({
@@ -148,7 +150,6 @@ beforeEach(() => {
   componentMocks.onAdvanceTaskStage.mockReset();
   componentMocks.onCloseTask.mockReset();
   componentMocks.onSendInput.mockReset();
-  componentMocks.showQuickReplyMenu.mockReset();
   componentMocks.showTaskActionMenu.mockReset();
 });
 interface ElementNode {
@@ -177,6 +178,8 @@ interface RenderTaskScreenOptions {
   taskId?: string;
   title?: string;
   prompt?: string;
+  quickReplies?: readonly TaskQuickReply[];
+  quickRepliesHydrated?: boolean;
   companionStatus?: "idle" | "connecting" | "reconnecting" | "available" | "unavailable" | "error";
   companionSnapshot?: {
     sessionId: string;
@@ -216,6 +219,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     taskId = "task-1",
     title = "Task",
     prompt,
+    quickReplies = DEFAULT_TASK_QUICK_REPLIES,
+    quickRepliesHydrated = true,
     companionStatus = "idle",
     companionSnapshot = null,
     companionUnread = false,
@@ -256,6 +261,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     companionUnread,
     companionErrorMessage,
     companionEventStatus,
+    quickReplies,
+    quickRepliesHydrated,
     e2eTaskSnapshotMarker,
     onBack: vi.fn(),
     onAdvanceTaskStage: componentMocks.onAdvanceTaskStage,
@@ -402,6 +409,16 @@ function pressByTestId(tree: ElementNode, testID: string): void {
   (onPress as () => void)();
 }
 
+function findSendControl(tree: ElementNode): ElementNode | null {
+  return findByType(tree, "QuickReplySendControl");
+}
+
+function pressSend(tree: ElementNode): void {
+  const onPress = findSendControl(tree)?.props?.onPress;
+  expect(onPress).toBeTypeOf("function");
+  (onPress as () => void)();
+}
+
 describe("TaskScreen", () => {
   it("shows uncertain creation inside the task workspace and recovers in place", () => {
     const onRecoverTaskCreation = vi.fn();
@@ -416,7 +433,7 @@ describe("TaskScreen", () => {
     expect(findByTypeAndText(tree, "Text", "Task creation interrupted")).not.toBeNull();
     expect(findByTypeAndText(tree, "Text", "Desktop response was lost")).not.toBeNull();
     expect(findByTestId(tree, "mobile.task-creation.recover")).not.toBeNull();
-    expect(findByTestId(tree, "mobile.task-send-button")?.props).toMatchObject({
+    expect(findSendControl(tree)?.props).toMatchObject({
       disabled: true
     });
 
@@ -892,7 +909,7 @@ describe("TaskScreen", () => {
       agentType: "agent",
       draftInput: "  Use the smaller API.  "
     });
-    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    const sendButton = findSendControl(tree);
 
     (sendButton?.props?.onPress as (() => void))();
 
@@ -920,7 +937,7 @@ describe("TaskScreen", () => {
     input = findByTestId(tree, "mobile.task-input");
     expect(styleEntries(input)).toContainEqual({ height: 82 });
 
-    pressByTestId(tree, "mobile.task-send-button");
+    pressSend(tree);
     resizeComposer({
       nativeEvent: { contentSize: { height: 82, width: 240 } }
     });
@@ -955,7 +972,7 @@ describe("TaskScreen", () => {
     "does not send or clear an empty normal draft %#",
     (draftInput) => {
       const tree = renderTaskScreen({ agentType: "agent", draftInput });
-      const sendButton = findByTestId(tree, "mobile.task-send-button");
+      const sendButton = findSendControl(tree);
 
       (sendButton?.props?.onPress as (() => void))();
 
@@ -966,36 +983,41 @@ describe("TaskScreen", () => {
   );
 
   it.each(["agent", "pty"] as const)(
-    "opens quick replies on long press with an empty %s draft",
+    "exposes hydrated quick replies with an empty %s draft",
     (agentType) => {
       const tree = renderTaskScreen({ agentType });
-      const sendButton = findByTestId(tree, "mobile.task-send-button");
+      const sendButton = findSendControl(tree);
 
       expect(sendButton?.props).toMatchObject({
-        accessibilityHint: "Press and hold for quick replies.",
-        accessibilityLabel: "Send reply",
-        accessibilityRole: "button",
-        accessibilityState: { disabled: false },
-        disabled: false
+        disabled: false,
+        hydrated: true,
+        replies: DEFAULT_TASK_QUICK_REPLIES
       });
-      (sendButton?.props?.onLongPress as (() => void))();
-
-      expect(componentMocks.showQuickReplyMenu).toHaveBeenCalledOnce();
     }
   );
+
+  it("forwards the customized list and hydration state", () => {
+    const customReplies = [{ id: "custom", text: "Ship it." }];
+    const tree = renderTaskScreen({
+      quickReplies: customReplies,
+      quickRepliesHydrated: false
+    });
+
+    expect(findSendControl(tree)?.props).toMatchObject({
+      hydrated: false,
+      replies: customReplies
+    });
+  });
 
   it("sends the selected quick reply plus the current draft and clears it", () => {
     const tree = renderTaskScreen({
       agentType: "agent",
       draftInput: "  Also add regression tests.  "
     });
-    const sendButton = findByTestId(tree, "mobile.task-send-button");
-    (sendButton?.props?.onLongPress as (() => void))();
-    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
-      quickReply: (typeof TASK_QUICK_REPLIES)[number]
-    ) => void;
-
-    onSelect(TASK_QUICK_REPLIES[0]!);
+    const sendButton = findSendControl(tree);
+    (sendButton?.props?.onSelectReply as (replyId: string) => void)(
+      "sgtm-proceed"
+    );
 
     expect(componentMocks.onSendInput).toHaveBeenCalledWith(
       "SGTM. Proceed.\n\nAlso add regression tests."
@@ -1009,15 +1031,13 @@ describe("TaskScreen", () => {
       agentType: "agent",
       draftInput: "Initial detail."
     });
-    const sendButton = findByTestId(tree, "mobile.task-send-button");
+    const sendButton = findSendControl(tree);
     const input = findByTestId(tree, "mobile.task-input");
-    (sendButton?.props?.onLongPress as (() => void))();
-    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
-      quickReply: (typeof TASK_QUICK_REPLIES)[number]
-    ) => void;
 
     (input?.props?.onChangeText as ((value: string) => void))("Latest detail.");
-    onSelect(TASK_QUICK_REPLIES[0]!);
+    (sendButton?.props?.onSelectReply as (replyId: string) => void)(
+      "sgtm-proceed"
+    );
 
     expect(componentMocks.onSendInput).toHaveBeenCalledWith(
       "SGTM. Proceed.\n\nLatest detail."
@@ -1025,15 +1045,28 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenLastCalledWith("");
   });
 
+  it("ignores a reply id that is no longer configured", () => {
+    const tree = renderTaskScreen({
+      draftInput: "Keep this draft.",
+      quickReplies: [{ id: "configured", text: "Proceed." }]
+    });
+
+    (findSendControl(tree)?.props?.onSelectReply as (replyId: string) => void)(
+      "missing"
+    );
+
+    expect(componentMocks.onSendInput).not.toHaveBeenCalled();
+    expect(componentMocks.draftSetter).not.toHaveBeenCalled();
+  });
+
   it("ignores a pending quick reply after the composer becomes unavailable", () => {
     const tree = renderTaskScreen({
       agentType: "agent",
       draftInput: "Keep this draft."
     });
-    const sendButton = findByTestId(tree, "mobile.task-send-button");
-    (sendButton?.props?.onLongPress as (() => void))();
-    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
-      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    const sendButton = findSendControl(tree);
+    const onSelect = sendButton?.props?.onSelectReply as (
+      replyId: string
     ) => void;
 
     renderTaskScreen({
@@ -1041,7 +1074,7 @@ describe("TaskScreen", () => {
       agentStatus: "error",
       draftInput: "Keep this draft."
     });
-    onSelect(TASK_QUICK_REPLIES[0]!);
+    onSelect("sgtm-proceed");
 
     expect(componentMocks.onSendInput).not.toHaveBeenCalled();
     expect(componentMocks.draftSetter).not.toHaveBeenCalled();
@@ -1053,14 +1086,13 @@ describe("TaskScreen", () => {
       draftInput: "Task one detail.",
       taskId: "task-1"
     });
-    const sendButton = findByTestId(tree, "mobile.task-send-button");
-    (sendButton?.props?.onLongPress as (() => void))();
-    const onSelect = componentMocks.showQuickReplyMenu.mock.calls[0]![0] as (
-      quickReply: (typeof TASK_QUICK_REPLIES)[number]
+    const sendButton = findSendControl(tree);
+    const onSelect = sendButton?.props?.onSelectReply as (
+      replyId: string
     ) => void;
 
     renderTaskScreen({ agentType: "agent", taskId: "task-2" });
-    onSelect(TASK_QUICK_REPLIES[0]!);
+    onSelect("sgtm-proceed");
 
     expect(componentMocks.onSendInput).not.toHaveBeenCalled();
     expect(componentMocks.draftSetter).not.toHaveBeenCalled();
@@ -1077,16 +1109,16 @@ describe("TaskScreen", () => {
     "disables ordinary and shortcut sends while %s",
     (_caseName, options) => {
       const tree = renderTaskScreen(options);
-      const sendButton = findByTestId(tree, "mobile.task-send-button");
+      const sendButton = findSendControl(tree);
 
       expect(sendButton?.props).toMatchObject({
-        accessibilityState: { disabled: true },
         disabled: true
       });
-      (sendButton?.props?.onLongPress as (() => void))();
       (sendButton?.props?.onPress as (() => void))();
+      (sendButton?.props?.onSelectReply as (replyId: string) => void)(
+        "sgtm-proceed"
+      );
 
-      expect(componentMocks.showQuickReplyMenu).not.toHaveBeenCalled();
       expect(componentMocks.onSendInput).not.toHaveBeenCalled();
     }
   );

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { DEFAULT_TASK_QUICK_REPLIES } from "../screens/taskQuickReplies";
 import {
   act,
   create,
@@ -290,6 +291,8 @@ function NavigatorHarness({
         selectedTaskId: null
       })}
       openMachinesRequestKey={0}
+      quickReplies={DEFAULT_TASK_QUICK_REPLIES}
+      quickRepliesHydrated
       state={state}
       onForceCloudChange={vi.fn()}
       onOpenAccount={vi.fn()}

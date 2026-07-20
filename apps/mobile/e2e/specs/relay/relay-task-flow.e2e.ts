@@ -16,9 +16,7 @@ import type {
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
-const QUICK_REPLY_LABEL = "SGTM. Proceed.";
-const QUICK_REPLY_MENU_TITLE = "Quick Replies";
-const QUICK_REPLY_LONG_PRESS_MS = 800;
+const IOS_APP_STATE_NOT_RUNNING = 1;
 const TASK_COMPOSER_PLACEHOLDER = "Reply…";
 const TASK_COMPOSER_MULTILINE_DRAFT =
   "First relay line.\nSecond relay line.\nThird relay line.";
@@ -31,6 +29,7 @@ interface RelayCredentials {
 }
 
 interface RelayTaskFlowOptions {
+  bundleId: string;
   companion: RelayVisualCompanionActions & {
     fixture: MobileRelayCompanionFixture;
   };
@@ -38,12 +37,14 @@ interface RelayTaskFlowOptions {
   emitFilePreviewLinks(): Promise<void>;
   filePreview: RelayFilePreviewFixture;
   draft: string;
+  customizedReply: string;
   fixture: PtyTerminalFixture;
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
+  waitForQuickReplyInput(): Promise<void>;
 }
 
 interface RelayVisualCompanionActions {
@@ -102,9 +103,25 @@ interface RelayElement {
   getSize(): Promise<{ height: number; width: number }>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
-  longPress(options: { duration: number }): Promise<unknown>;
   setValue(value: string): Promise<unknown>;
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
+}
+
+interface RelayQuickReplyPersistenceJourney {
+  closeEditor(): Promise<void>;
+  getFirstReplyInput(): Promise<Pick<RelayElement, "getAttribute" | "setValue">>;
+  openEditor(): Promise<void>;
+  relaunchPreservingData(): Promise<void>;
+  save(): Promise<void>;
+  waitForEditorClosed(): Promise<void>;
+  waitUntil(
+    condition: () => Promise<boolean>,
+    options: {
+      interval: number;
+      timeout: number;
+      timeoutMsg: string;
+    }
+  ): Promise<unknown>;
 }
 
 interface RelayUi {
@@ -118,8 +135,7 @@ interface RelayUi {
   getAgentMessageView(): Promise<RelayElement>;
   getAgentMessageReady(): Promise<RelayElement>;
   getBackButton(): Promise<RelayElement>;
-  getQuickRepliesMenuTitle(): Promise<RelayElement>;
-  getQuickReplyOption(label: string): Promise<RelayElement>;
+  dragFirstQuickReply(): Promise<void>;
   getTaskActionMenuTitle(): Promise<RelayElement>;
   getTaskActionOption(label: string): Promise<RelayElement>;
   getTaskInput(): Promise<RelayElement>;
@@ -192,6 +208,7 @@ interface RelayPtySnapshotRevisitJourney {
 }
 
 interface RelayTaskJourneys {
+  verifyQuickReplyPersistence(): Promise<void>;
   verifyComposerReset(): Promise<void>;
   verifyFilePreview(): Promise<void>;
   verifyMarkedRead(): Promise<void>;
@@ -204,13 +221,86 @@ interface RelayTaskJourneys {
 export async function runRelayTaskJourneys(
   journeys: RelayTaskJourneys,
 ): Promise<void> {
+  await journeys.verifyQuickReplyPersistence();
   await journeys.verifyMarkedRead();
   await journeys.verifyPtySnapshotRevisit();
+  await journeys.verifyQuickReply();
   await journeys.verifyTaskActionMenu();
   await journeys.verifyVisualCompanion();
   await journeys.verifyFilePreview();
   await journeys.verifyComposerReset();
-  await journeys.verifyQuickReply();
+}
+
+function createRelayQuickReplyPersistenceJourney(
+  driver: Browser,
+  ui: RelayUi,
+  bundleId: string,
+): RelayQuickReplyPersistenceJourney {
+  const openEditor = async () => {
+    await openProfileSheet(ui);
+    const quickRepliesButton = await driver.$(
+      selectors.accountQuickRepliesButton,
+    );
+    await quickRepliesButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    await ui.waitUntil(
+      async () => await quickRepliesButton.isEnabled().catch(() => false),
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected Quick Replies to enable after preferences hydrated",
+      },
+    );
+    await quickRepliesButton.click();
+    await (await driver.$(selectors.quickReplyEditor)).waitForDisplayed({
+      timeout: SCREEN_TIMEOUT_MS,
+    });
+  };
+
+  return {
+    async closeEditor() {
+      const cancel = await driver.$(selectors.quickReplyEditorCancel);
+      await cancel.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      await cancel.click();
+    },
+    async getFirstReplyInput() {
+      const inputs = Array.from(
+        await driver.$$(selectors.quickReplyEditorInputsXPath),
+      );
+      const firstInput = inputs[0];
+      if (!firstInput) {
+        throw new Error("Expected at least one ordered quick reply input");
+      }
+      await firstInput.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      return firstInput;
+    },
+    openEditor,
+    async relaunchPreservingData() {
+      await relaunchRelayAppPreservingData(driver, bundleId);
+      await dismissSavePasswordPrompt(driver);
+      const appShell = await driver.$(selectors.appShell);
+      await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      await returnToTaskListShell(ui);
+    },
+    async save() {
+      const done = await driver.$(selectors.quickReplyEditorDone);
+      await done.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      await done.click();
+    },
+    async waitForEditorClosed() {
+      await ui.waitUntil(
+        async () =>
+          !(await (await driver.$(selectors.quickReplyEditor))
+            .isExisting()
+            .catch(() => false)),
+        {
+          interval: POLL_INTERVAL_MS,
+          timeout: SCREEN_TIMEOUT_MS,
+          timeoutMsg: "Expected Quick Replies to close after AsyncStorage save",
+        },
+      );
+    },
+    waitUntil: (condition, options) => ui.waitUntil(condition, options),
+  };
 }
 
 export async function verifyRelayPtySnapshotRevisit(
@@ -248,6 +338,77 @@ async function isTaskVisible(ui: RelayUi, taskId: string): Promise<boolean> {
     .catch(() => false);
 }
 
+export async function performFirstQuickReplyDrag(
+  driver: Browser,
+): Promise<void> {
+  const send = await driver.$(selectors.taskSendButton);
+  const [location, size] = await Promise.all([
+    send.getLocation(),
+    send.getSize()
+  ]);
+  const centerX = Math.round(location.x + size.width / 2);
+  const centerY = Math.round(location.y + size.height / 2);
+
+  await driver.execute("mobile: dragFromToForDuration", {
+    duration: 0.65,
+    fromX: centerX,
+    fromY: centerY,
+    toX: centerX,
+    toY: centerY - 52,
+  });
+}
+
+export async function relaunchRelayAppPreservingData(
+  driver: Browser,
+  bundleId: string,
+): Promise<void> {
+  await driver.terminateApp(undefined, bundleId);
+  await driver.waitUntil(
+    async () =>
+      await driver.queryAppState(undefined, bundleId) ===
+        IOS_APP_STATE_NOT_RUNNING,
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected ${bundleId} to terminate before relaunch`,
+    },
+  );
+  await driver.activateApp(undefined, bundleId);
+}
+
+export async function verifyRelayQuickReplyPersistenceJourney(
+  journey: RelayQuickReplyPersistenceJourney,
+  customizedReply: string,
+): Promise<void> {
+  await journey.openEditor();
+  const input = await journey.getFirstReplyInput();
+  await input.setValue(customizedReply);
+  await journey.save();
+  await journey.waitForEditorClosed();
+
+  await journey.relaunchPreservingData();
+
+  await journey.openEditor();
+  const reloadedInput = await journey.getFirstReplyInput();
+  let lastObserved: string | null = null;
+  await journey.waitUntil(
+    async () => {
+      lastObserved = await reloadedInput.getAttribute("value").catch(() => null);
+      if (lastObserved === customizedReply) return true;
+      lastObserved = await reloadedInput.getAttribute("label").catch(() => null);
+      return lastObserved === customizedReply;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected customized quick reply ${JSON.stringify(customizedReply)} ` +
+        `after data-preserving relaunch; last native value was ${JSON.stringify(lastObserved)}`,
+    },
+  );
+  await journey.closeEditor();
+}
+
 function createRelayUi(driver: Browser): RelayUi {
   return {
     async getAccountButton() {
@@ -280,11 +441,8 @@ function createRelayUi(driver: Browser): RelayUi {
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
-    async getQuickRepliesMenuTitle() {
-      return driver.$(`~${QUICK_REPLY_MENU_TITLE}`);
-    },
-    async getQuickReplyOption(label) {
-      return driver.$(`~${label}`);
+    async dragFirstQuickReply() {
+      await performFirstQuickReplyDrag(driver);
     },
     async getTaskActionMenuTitle() {
       return driver.$(`~${TASK_ACTION_MENU_TITLE}`);
@@ -424,8 +582,7 @@ export async function verifyRelayComposerResetJourney(
 export async function verifyRelayQuickReplyJourney(
   ui: Pick<
     RelayUi,
-    | "getQuickRepliesMenuTitle"
-    | "getQuickReplyOption"
+    | "dragFirstQuickReply"
     | "getTaskInput"
     | "getTaskSendButton"
     | "waitUntil"
@@ -438,13 +595,7 @@ export async function verifyRelayQuickReplyJourney(
 
   const send = await ui.getTaskSendButton();
   await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await send.longPress({ duration: QUICK_REPLY_LONG_PRESS_MS });
-
-  const menuTitle = await ui.getQuickRepliesMenuTitle();
-  await menuTitle.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  const quickReply = await ui.getQuickReplyOption(QUICK_REPLY_LABEL);
-  await quickReply.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await quickReply.click();
+  await ui.dragFirstQuickReply();
 
   await ui.waitUntil(
     async () => {
@@ -465,6 +616,15 @@ export async function verifyRelayQuickReplyJourney(
       timeoutMsg: "Expected the task composer to clear after selecting a quick reply",
     },
   );
+}
+
+export async function verifyRelayCustomizedQuickReplyJourney(
+  ui: Parameters<typeof verifyRelayQuickReplyJourney>[0],
+  draft: string,
+  waitForQuickReplyInput: () => Promise<void>,
+): Promise<void> {
+  await verifyRelayQuickReplyJourney(ui, draft);
+  await waitForQuickReplyInput();
 }
 
 function createWebViewContextDriver(driver: Browser): RelayWebViewContextDriver {
@@ -1328,6 +1488,15 @@ export async function runRelayTaskFlow(
     options.setTaskActivity,
   );
   await runRelayTaskJourneys({
+    verifyQuickReplyPersistence: () =>
+      verifyRelayQuickReplyPersistenceJourney(
+        createRelayQuickReplyPersistenceJourney(
+          driver,
+          ui,
+          options.bundleId,
+        ),
+        options.customizedReply,
+      ),
     verifyMarkedRead: () => verifyRelayTaskMarkedRead(ui, options.fixture.taskId, {
       prepareUnread: options.prepareTaskUnreadForMarkRead,
       async openTask() {
@@ -1359,6 +1528,11 @@ export async function runRelayTaskFlow(
       await verifyTerminalFilePreviewFlow(driver, ui, options.filePreview);
     },
     verifyComposerReset: () => verifyRelayComposerResetJourney(ui),
-    verifyQuickReply: () => verifyRelayQuickReplyJourney(ui, options.draft),
+    verifyQuickReply: () =>
+      verifyRelayCustomizedQuickReplyJourney(
+        ui,
+        options.draft,
+        options.waitForQuickReplyInput,
+      ),
   });
 }

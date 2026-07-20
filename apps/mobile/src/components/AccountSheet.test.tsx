@@ -138,9 +138,11 @@ function renderSignedOutSheet(): ElementNode {
     auth: { status: "signedOut" },
     machineCount: 3,
     availableMachineCount: 2,
+    quickRepliesReady: true,
     visible: true,
     onClose: vi.fn(),
     onOpenMachines: vi.fn(),
+    onOpenQuickReplies: vi.fn(),
     onSignIn: vi.fn(),
     onSignOut: vi.fn()
   }) as ElementNode;
@@ -179,9 +181,11 @@ describe("AccountSheet", () => {
       auth,
       machineCount: 3,
       availableMachineCount: 2,
+      quickRepliesReady: true,
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
       onSignIn: vi.fn(),
       onSignOut: vi.fn()
     }) as ElementNode;
@@ -189,6 +193,55 @@ describe("AccountSheet", () => {
     expect(findNodeByTestId(tree, "mobile.account-machines")).not.toBeNull();
     expect(textContent(tree)).toContain("3 machines · 2 available");
     expect(findNodeByTestId(tree, "mobile.account-connection-status")).toBeNull();
+  });
+
+  it("opens global quick reply settings", () => {
+    if (!AccountSheet) {
+      throw new Error("AccountSheet was not loaded");
+    }
+    const onOpenQuickReplies = vi.fn();
+    reactState.index = 0;
+    const tree = AccountSheet({
+      auth: { status: "signedOut" },
+      machineCount: 0,
+      availableMachineCount: 0,
+      quickRepliesReady: true,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies,
+      onSignIn: vi.fn(),
+      onSignOut: vi.fn()
+    }) as ElementNode;
+
+    const button = findNodeByTestId(tree, "mobile.account-quick-replies");
+    expect(button).not.toBeNull();
+    (button?.props?.onPress as () => void)();
+    expect(onOpenQuickReplies).toHaveBeenCalledOnce();
+  });
+
+  it("disables quick reply settings until saved replies are ready", () => {
+    if (!AccountSheet) {
+      throw new Error("AccountSheet was not loaded");
+    }
+    reactState.index = 0;
+    const tree = AccountSheet({
+      auth: { status: "signedOut" },
+      machineCount: 0,
+      availableMachineCount: 0,
+      quickRepliesReady: false,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onSignOut: vi.fn()
+    }) as ElementNode;
+
+    const button = findNodeByTestId(tree, "mobile.account-quick-replies");
+    expect(button?.props?.disabled).toBe(true);
+    expect(button?.props?.accessibilityState).toEqual({ disabled: true });
+    expect(textContent(tree)).toContain("Loading saved replies…");
   });
 
   it("shows the signed-in account initials beside the identity", () => {
@@ -208,9 +261,11 @@ describe("AccountSheet", () => {
       },
       machineCount: 1,
       availableMachineCount: 1,
+      quickRepliesReady: true,
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
       onSignIn: vi.fn(),
       onSignOut: vi.fn()
     }) as ElementNode;
@@ -294,9 +349,11 @@ describe("AccountSheet", () => {
       },
       machineCount: 3,
       availableMachineCount: 2,
+      quickRepliesReady: true,
       visible: true,
       onClose: vi.fn(),
       onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
       onSignIn: vi.fn(),
       onSignOut
     }) as ElementNode;

@@ -27,8 +27,9 @@ const RELAY_ORDERING_NEWER_UPDATED_AT = "2026-07-17T11:00:00.000Z";
 const RELAY_TASK_SENTINEL = "SCRIPT_READY";
 const RELAY_MENU_CURSOR_MARKER = "SCRIPT_MENU_CURSOR:2";
 const RELAY_QUICK_REPLY_DRAFT = "  Preserve the relay fixture.  ";
+const RELAY_CUSTOMIZED_QUICK_REPLY = "Persisted relay approval.";
 const RELAY_QUICK_REPLY_EXPECTED_INPUT =
-  "SGTM. Proceed.\n\nPreserve the relay fixture.";
+  `${RELAY_CUSTOMIZED_QUICK_REPLY}\n\nPreserve the relay fixture.`;
 const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
@@ -199,6 +200,7 @@ export interface MobileRelayHarness {
   quickReply: {
     draft: string;
     expectedInput: string;
+    text: string;
   };
   lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
@@ -515,6 +517,7 @@ export async function startMobileRelayHarness(
       quickReply: {
         draft: RELAY_QUICK_REPLY_DRAFT,
         expectedInput: RELAY_QUICK_REPLY_EXPECTED_INPUT,
+        text: RELAY_CUSTOMIZED_QUICK_REPLY,
       },
       lanOnlyTask,
       localTask,

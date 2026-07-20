@@ -4,7 +4,11 @@ import {
   assertRelayTaskRowPresentation,
   inspectTaskFilePreviewWebView,
   openRelayFixtureTask,
+  performFirstQuickReplyDrag,
+  relaunchRelayAppPreservingData,
+  verifyRelayCustomizedQuickReplyJourney,
   verifyRelayComposerResetJourney,
+  verifyRelayQuickReplyPersistenceJourney,
   verifyRelayTaskActionMenuJourney,
   verifyRelayQuickReplyJourney,
   verifyRelayVisualCompanionJourney,
@@ -27,6 +31,7 @@ describe("relay task flow orchestration", () => {
           verifyMarkedRead(): Promise<void>;
           verifyPtySnapshotRevisit(): Promise<void>;
           verifyQuickReply(): Promise<void>;
+          verifyQuickReplyPersistence(): Promise<void>;
           verifyTaskActionMenu(): Promise<void>;
           verifyVisualCompanion(): Promise<void>;
         }) => Promise<void>;
@@ -37,6 +42,10 @@ describe("relay task flow orchestration", () => {
     if (!runRelayTaskJourneys) return;
 
     await runRelayTaskJourneys({
+      async verifyQuickReplyPersistence() {
+        expect(screen).toBe("list");
+        calls.push("quick-reply-persistence");
+      },
       async verifyMarkedRead() {
         expect(screen).toBe("list");
         calls.push("marked-read");
@@ -68,24 +77,63 @@ describe("relay task flow orchestration", () => {
       },
       async verifyQuickReply() {
         expect(screen).toBe("detail");
-        calls.push("quick-reply");
+        calls.push("quick-reply", "transport");
       },
     });
 
     expect(calls).toEqual([
+      "quick-reply-persistence",
       "marked-read",
       "open",
       "rendered",
       "close",
       "open",
       "rendered",
+      "quick-reply",
+      "transport",
       "task-actions",
       "visual-companion",
       "file-preview",
       "composer-reset",
-      "quick-reply",
     ]);
     expect(screen).toBe("detail");
+  });
+});
+
+describe("customized quick reply relay journey", () => {
+  it("waits for the task-input transport immediately after the drag sends", async () => {
+    const calls: string[] = [];
+
+    await verifyRelayCustomizedQuickReplyJourney(
+      {
+        dragFirstQuickReply: vi.fn(async () => {
+          calls.push("drag-send");
+        }),
+        getTaskInput: vi.fn(async () => ({
+          addValue: vi.fn(async () => undefined),
+          getAttribute: vi.fn(async () => ""),
+          setValue: vi.fn(async () => undefined),
+          waitForDisplayed: vi.fn(async () => undefined),
+        })),
+        getTaskSendButton: vi.fn(async () => ({
+          click: vi.fn(async () => undefined),
+          getAttribute: vi.fn(async () => null),
+          waitForDisplayed: vi.fn(async () => undefined),
+        })),
+        isKeyboardShown: vi.fn(async () => false),
+        pause: vi.fn(async () => undefined),
+        waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+          if (await condition()) return;
+          throw new Error(options.timeoutMsg);
+        }),
+      },
+      "Preserve the relay fixture.",
+      async () => {
+        calls.push("transport");
+      },
+    );
+
+    expect(calls).toEqual(["drag-send", "transport"]);
   });
 });
 
@@ -596,7 +644,125 @@ describe("relay composer reset journey", () => {
 });
 
 describe("relay quick reply journey", () => {
-  it("long-presses Send, selects SGTM, and waits for the composer to clear", async () => {
+  it("edits, saves, relaunches, and reloads the first ordered quick reply", async () => {
+    const calls: string[] = [];
+    let draft = "SGTM. Proceed.";
+    let persisted = draft;
+    let relaunched = false;
+    const input = {
+      getAttribute: vi.fn(async (name: string) => {
+        calls.push(`input.getAttribute:${name}`);
+        return name === "value" ? (relaunched ? persisted : draft) : null;
+      }),
+      setValue: vi.fn(async (value: string) => {
+        calls.push(`input.setValue:${value}`);
+        draft = value;
+      }),
+    };
+    const journey = {
+      closeEditor: vi.fn(async () => {
+        calls.push("close-editor");
+      }),
+      getFirstReplyInput: vi.fn(async () => input),
+      openEditor: vi.fn(async () => {
+        calls.push("open-editor");
+      }),
+      relaunchPreservingData: vi.fn(async () => {
+        calls.push("relaunch");
+        relaunched = true;
+      }),
+      save: vi.fn(async () => {
+        calls.push("save");
+        persisted = draft;
+      }),
+      waitForEditorClosed: vi.fn(async () => {
+        calls.push("editor-closed");
+      }),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+
+    await verifyRelayQuickReplyPersistenceJourney(
+      journey as never,
+      "Persisted relay approval.",
+    );
+
+    expect(calls).toEqual([
+      "open-editor",
+      "input.setValue:Persisted relay approval.",
+      "save",
+      "editor-closed",
+      "relaunch",
+      "open-editor",
+      "input.getAttribute:value",
+      "close-editor",
+    ]);
+  });
+
+  it("waits for a complete process stop before reactivating the app", async () => {
+    const driver = {
+      activateApp: vi.fn(async () => undefined),
+      queryAppState: vi.fn(async () => 4),
+      terminateApp: vi.fn(async () => true),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) return;
+        throw new Error(options.timeoutMsg);
+      }),
+    };
+
+    await expect(
+      relaunchRelayAppPreservingData(driver as never, "build.kanna.app.dev"),
+    ).rejects.toThrow(/terminate before relaunch/i);
+    expect(driver.terminateApp).toHaveBeenCalledWith(
+      undefined,
+      "build.kanna.app.dev",
+    );
+    expect(driver.activateApp).not.toHaveBeenCalled();
+  });
+
+  it("performs the native iOS long-press drag coordinates", async () => {
+    const send = {
+      getLocation: vi.fn(async () => ({ x: 100, y: 200 })),
+      getSize: vi.fn(async () => ({ width: 58, height: 40 }))
+    };
+    const driver = {
+      $: vi.fn(async () => send),
+      execute: vi.fn(async () => undefined),
+    };
+
+    await performFirstQuickReplyDrag(driver as never);
+
+    expect(driver.execute).toHaveBeenCalledWith(
+      "mobile: dragFromToForDuration",
+      {
+        duration: 0.65,
+        fromX: 129,
+        fromY: 220,
+        toX: 129,
+        toY: 168,
+      },
+    );
+  });
+
+  it("propagates a native quick-reply drag failure", async () => {
+    const driver = {
+      $: vi.fn(async () => ({
+        getLocation: vi.fn(async () => ({ x: 0, y: 0 })),
+        getSize: vi.fn(async () => ({ width: 58, height: 40 }))
+      })),
+      execute: vi.fn(async () => {
+        throw new Error("gesture failed");
+      }),
+    };
+
+    await expect(performFirstQuickReplyDrag(driver as never)).rejects.toThrow(
+      "gesture failed"
+    );
+  });
+
+  it("drags from Send to SGTM and waits for the composer to clear", async () => {
     const calls: string[] = [];
     let composerValue: string | null = "";
     const input = {
@@ -616,35 +782,14 @@ describe("relay quick reply journey", () => {
       }),
     };
     const send = {
-      click: vi.fn(async () => {
-        calls.push("send.click");
-      }),
-      longPress: vi.fn(async ({ duration }: { duration: number }) => {
-        calls.push(`send.longPress:${duration}`);
-      }),
       waitForDisplayed: vi.fn(async () => {
         calls.push("send.waitForDisplayed");
       }),
     };
-    const title = {
-      waitForDisplayed: vi.fn(async () => {
-        calls.push("title.waitForDisplayed");
-      }),
-    };
-    const quickReply = {
-      click: vi.fn(async () => {
-        calls.push("quickReply.click");
-        composerValue = null;
-      }),
-      waitForDisplayed: vi.fn(async () => {
-        calls.push("quickReply.waitForDisplayed");
-      }),
-    };
     const ui = {
-      getQuickRepliesMenuTitle: vi.fn(async () => title),
-      getQuickReplyOption: vi.fn(async (label: string) => {
-        calls.push(`ui.getQuickReplyOption:${label}`);
-        return quickReply;
+      dragFirstQuickReply: vi.fn(async () => {
+        calls.push("ui.dragFirstQuickReply");
+        composerValue = null;
       }),
       getTaskInput: vi.fn(async () => input),
       getTaskSendButton: vi.fn(async () => send),
@@ -658,16 +803,11 @@ describe("relay quick reply journey", () => {
       "  Preserve the relay fixture.  ",
     );
 
-    expect(send.click).not.toHaveBeenCalled();
     expect(calls).toEqual([
       "input.waitForDisplayed",
       'input.setValue:"  Preserve the relay fixture.  "',
       "send.waitForDisplayed",
-      "send.longPress:800",
-      "title.waitForDisplayed",
-      "ui.getQuickReplyOption:SGTM. Proceed.",
-      "quickReply.waitForDisplayed",
-      "quickReply.click",
+      "ui.dragFirstQuickReply",
       "input.getAttribute:value",
       "input.getAttribute:label",
     ]);
@@ -675,7 +815,8 @@ describe("relay quick reply journey", () => {
 });
 
 describe("relay quick reply transport observation", () => {
-  const expectedInput = "SGTM. Proceed.\n\nPreserve the relay fixture.";
+  const expectedInput =
+    "Persisted relay approval.\n\nPreserve the relay fixture.";
 
   function assertSingleTaskInput(output: string): void {
     assertSingleSubmittedTaskInput(output, expectedInput);
@@ -684,7 +825,7 @@ describe("relay quick reply transport observation", () => {
   it("accepts one exact multiline task input after normalizing PTY newlines", () => {
     expect(() =>
       assertSingleTaskInput(
-        "SCRIPT_READY\r\nSCRIPT_INPUT:SGTM. Proceed.\r\n\r\n" +
+        "SCRIPT_READY\r\nSCRIPT_INPUT:Persisted relay approval.\r\n\r\n" +
           "Preserve the relay fixture.\r\nSCRIPT_HEARTBEAT 1\r\n",
       )
     ).not.toThrow();
@@ -696,7 +837,7 @@ describe("relay quick reply transport observation", () => {
         "SCRIPT_INPUT: docs/mobile-file-preview.md\r\n" +
           "SCRIPT_INPUT: docs/mobile-file-preview.md:4\r\n" +
           "SCRIPT_INPUT: docs/mobile-preview-missing.md\r\n" +
-          "SCRIPT_INPUT:SGTM. Proceed.\r\r\n\r\r\n" +
+          "SCRIPT_INPUT:Persisted relay approval.\r\r\n\r\r\n" +
           "Preserve the relay fixture.\r\r\n",
       )
     ).not.toThrow();
@@ -705,8 +846,8 @@ describe("relay quick reply transport observation", () => {
   it("rejects the exact quick reply when it is submitted twice", () => {
     expect(() =>
       assertSingleTaskInput(
-        "SCRIPT_INPUT:SGTM. Proceed.\r\n\r\nPreserve the relay fixture.\r\n" +
-          "SCRIPT_INPUT:SGTM. Proceed.\r\n\r\nPreserve the relay fixture.\r\n",
+        "SCRIPT_INPUT:Persisted relay approval.\r\n\r\nPreserve the relay fixture.\r\n" +
+          "SCRIPT_INPUT:Persisted relay approval.\r\n\r\nPreserve the relay fixture.\r\n",
       )
     ).toThrow(/exactly one matching task input.*observed 2/i);
   });

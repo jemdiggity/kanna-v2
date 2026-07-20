@@ -40,6 +40,7 @@ import { MoreScreen } from "../screens/MoreScreen";
 import { filterCommandAvailableRepos } from "../screens/repoCommandPresentation";
 import { SearchScreen } from "../screens/SearchScreen";
 import { TaskScreen } from "../screens/TaskScreen";
+import type { TaskQuickReply } from "../screens/taskQuickReplies";
 import { TasksScreen } from "../screens/TasksScreen";
 import type { MobileController } from "../state/mobileController";
 import { buildMachineInventory } from "../state/machineInventory";
@@ -98,6 +99,8 @@ interface RootNavigatorProps {
   openMachinesRequestKey: number;
   onForceCloudChange(enabled: boolean): void;
   onOpenAccount(): void;
+  quickReplies: readonly TaskQuickReply[];
+  quickRepliesHydrated: boolean;
   state: SessionState;
 }
 
@@ -112,6 +115,8 @@ interface NavigationContent {
   pushPreparedTask(taskId: string): void;
   pushSearch(): void;
   pushTask(taskId: string): void;
+  quickReplies: readonly TaskQuickReply[];
+  quickRepliesHydrated: boolean;
   state: SessionState;
   taskDetailViewportRef: React.MutableRefObject<{
     width: number;
@@ -129,6 +134,8 @@ export default function RootNavigator({
   openMachinesRequestKey,
   onForceCloudChange,
   onOpenAccount,
+  quickReplies,
+  quickRepliesHydrated,
   state
 }: RootNavigatorProps) {
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
@@ -190,6 +197,8 @@ export default function RootNavigator({
     pushPreparedTask,
     pushSearch,
     pushTask,
+    quickReplies,
+    quickRepliesHydrated,
     state,
     taskDetailViewportRef
   }), [
@@ -202,6 +211,8 @@ export default function RootNavigator({
     pushPreparedTask,
     pushSearch,
     pushTask,
+    quickReplies,
+    quickRepliesHydrated,
     state
   ]);
 
@@ -425,6 +436,8 @@ function TaskDetailRoute({
   const {
     controller,
     e2eTaskSnapshotMarker,
+    quickReplies,
+    quickRepliesHydrated,
     state
   } = useNavigationContent();
   const routeTaskId = route.params.taskId;
@@ -506,6 +519,8 @@ function TaskDetailRoute({
       companionUnread={state.taskCompanionUnread}
       companionErrorMessage={state.taskCompanionErrorMessage}
       companionEventStatus={state.taskCompanionEventStatus}
+      quickReplies={quickReplies}
+      quickRepliesHydrated={quickRepliesHydrated}
       taskCreationPhase={resolveTaskCreationPhase(state, routeTaskId)}
       taskCreationErrorMessage={state.composerErrorMessage}
       onBack={() => navigation.goBack()}

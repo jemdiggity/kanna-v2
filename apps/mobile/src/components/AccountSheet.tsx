@@ -17,9 +17,11 @@ interface AccountSheetProps {
   auth: AuthState;
   machineCount: number;
   availableMachineCount: number;
+  quickRepliesReady: boolean;
   visible: boolean;
   onClose(): void;
   onOpenMachines(): void;
+  onOpenQuickReplies(): void;
   onSignIn(email: string, password: string): void;
   onSignOut(): void;
 }
@@ -28,9 +30,11 @@ export function AccountSheet({
   auth,
   machineCount,
   availableMachineCount,
+  quickRepliesReady,
   visible,
   onClose,
   onOpenMachines,
+  onOpenQuickReplies,
   onSignIn,
   onSignOut
 }: AccountSheetProps) {
@@ -89,6 +93,28 @@ export function AccountSheet({
               <Text style={styles.machinesTitle}>Machines</Text>
               <Text style={styles.machinesDetail}>
                 {machineSummary(machineCount, availableMachineCount)}
+              </Text>
+            </View>
+            <Text style={styles.disclosure}>›</Text>
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel="Open Quick Replies"
+            accessibilityState={{ disabled: !quickRepliesReady }}
+            disabled={!quickRepliesReady}
+            style={[
+              styles.machinesRow,
+              !quickRepliesReady ? styles.disabledRow : null
+            ]}
+            testID={MOBILE_E2E_IDS.accountQuickRepliesButton}
+            onPress={onOpenQuickReplies}
+          >
+            <View>
+              <Text style={styles.machinesTitle}>Quick Replies</Text>
+              <Text style={styles.machinesDetail}>
+                {quickRepliesReady
+                  ? "Customize hold-and-drag replies"
+                  : "Loading saved replies…"}
               </Text>
             </View>
             <Text style={styles.disclosure}>›</Text>
@@ -249,6 +275,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     padding: 14
+  },
+  disabledRow: {
+    opacity: 0.55
   },
   machinesTitle: {
     color: "#F5F7FB",

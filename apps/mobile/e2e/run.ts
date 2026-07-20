@@ -320,21 +320,25 @@ async function main(): Promise<void> {
       });
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {
+        bundleId: env.bundleId,
         companion: relayHarness.companion,
         credentials: relayHarness.credentials,
         emitFilePreviewLinks: relayHarness.emitFilePreviewLinks,
         filePreview: relayHarness.filePreview,
         draft: relayHarness.quickReply.draft,
+        customizedReply: relayHarness.quickReply.text,
         fixture: relayHarness.fixture,
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
         setTaskActivity: relayHarness.setTaskActivity,
         taskRow: relayHarness.taskRow,
         taskOrdering: relayHarness.taskOrdering,
-        waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity
+        waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity,
+        async waitForQuickReplyInput() {
+          await relayHarness!.waitForQuickReplyInput(
+            relayHarness!.quickReply.expectedInput
+          );
+        }
       });
-      await relayHarness.waitForQuickReplyInput(
-        relayHarness.quickReply.expectedInput
-      );
     } else if (mode === "hybrid" && relayHarness) {
       await seedTrustedDesktopThroughDeepLink({
         bundleId: env.bundleId,
