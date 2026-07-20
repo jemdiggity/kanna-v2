@@ -121,6 +121,8 @@ platform: "darwin",
 commit: "abc",
 ```
 
+Add `platform: "darwin"` to the two standalone `warmRustCache` fixtures as well, and cover the injected Linux path returning `unsupported-platform` without invoking the runner.
+
 Also make the macOS integration fixture explicit about the non-CI path so a parent CI process cannot change the behavior under test:
 
 ```ts

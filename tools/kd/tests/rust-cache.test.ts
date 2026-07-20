@@ -173,6 +173,18 @@ describe("Kanache runtime", () => {
     expect(calls).toEqual([]);
   });
 
+  it("disables Kanache on non-macOS hosts without running tools", async () => {
+    const calls: string[] = [];
+    const cache = fakeRuntimeInput({ calls });
+    cache.platform = "linux";
+
+    expect(await warmRustCache(cache)).toMatchObject({
+      outcome: "miss",
+      category: "unsupported-platform"
+    });
+    expect(calls).toEqual([]);
+  });
+
   it("tries ranked exact-HEAD donors until Kanache publishes", async () => {
     const root = mkdtempSync(join(tmpdir(), "kd-kanache-warm-"));
     const home = join(root, "home");
@@ -249,6 +261,7 @@ describe("Kanache runtime", () => {
       repoRoot: current,
       homeDir: home,
       env: { KANNA_RUST_CACHE: "on" },
+      platform: "darwin",
       runner,
       commit: "abc1234"
     });
@@ -267,6 +280,7 @@ describe("Kanache runtime", () => {
       repoRoot: root,
       homeDir: join(root, "home"),
       env: { KANNA_RUST_CACHE: "on" },
+      platform: "darwin",
       commit: "abc",
       runner: {
         async run(command) {
