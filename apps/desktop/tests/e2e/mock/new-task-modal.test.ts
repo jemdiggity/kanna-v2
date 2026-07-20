@@ -36,6 +36,7 @@ async function openNewTaskModal(client: WebDriverClient): Promise<void> {
   const modalResult = await callVueMethod(client, "keyboardActions.newTask");
   expect(modalResult).toBeNull();
   await client.waitForElement(".modal-overlay", 5_000);
+  await client.waitForNoElement('[data-testid="task-options-loading"]', 10_000);
 }
 
 async function agentChoiceLabel(client: WebDriverClient): Promise<string> {
@@ -232,6 +233,7 @@ async function reloadApp(client: WebDriverClient, timeoutMs = 15_000): Promise<v
 describe("new task modal", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
+  let repoId = "";
   let testRepoPath = "";
 
   beforeAll(async () => {
@@ -334,7 +336,7 @@ describe("new task modal", () => {
     await git(testRepoPath, ["commit", "-m", "test: add new task modal fixtures"]);
     await git(testRepoPath, ["push", "origin", "main"]);
 
-    await importTestRepo(client, testRepoPath, "new-task-modal-test");
+    repoId = await importTestRepo(client, testRepoPath, "new-task-modal-test");
   });
 
   afterAll(async () => {
@@ -393,9 +395,139 @@ describe("new task modal", () => {
     throw new Error(`agent choice did not reach ${label}; current=${current}`);
   }
 
+  it("renders an editable New Task modal while repository options are unresolved", async () => {
+    await client.executeSync(
+      `const originalFetch = globalThis.fetch;
+       const callOriginalFetch = originalFetch.bind(globalThis);
+       let releaseOptionRequests;
+       const optionRequestGate = new Promise((resolve) => { releaseOptionRequests = resolve; });
+       const heldPaths = new Set([
+         ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`)},
+         ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/agent-providers`)},
+       ]);
+       const gate = {
+         originalFetch,
+         heldPaths,
+         requestsHeld: [],
+         released: false,
+         release() {
+           if (this.released) return;
+           this.released = true;
+           releaseOptionRequests();
+         },
+       };
+       window.__KANNA_NEW_TASK_OPTIONS_GATE__ = gate;
+       globalThis.fetch = async (input, init) => {
+         const url = typeof input === "string"
+           ? input
+           : input instanceof URL
+             ? input.href
+             : input.url;
+         const path = new URL(url, window.location.href).pathname;
+         if (heldPaths.has(path)) {
+           gate.requestsHeld.push(path);
+           await optionRequestGate;
+         }
+         return callOriginalFetch(input, init);
+       };
+       return true;`,
+    );
+
+    try {
+      await client.executeSync(buildGlobalKeydownScript({ key: "N", meta: true, shift: true }));
+
+      const loading = await client.waitForElement('[data-testid="task-options-loading"]', 5_000);
+      expect(loading).toBeTruthy();
+      const prompt = await client.waitForElement(".prompt-input", 2_000);
+      await client.sendKeys(prompt, "Prompt remains editable while options load");
+
+      const pendingState = await client.executeSync<{
+        heading: string;
+        prompt: string;
+        requestsHeld: string[];
+        createDisabled: boolean;
+        agentDisabled: boolean;
+        pipelineDisabled: boolean;
+        baseBranchDisabled: boolean;
+      }>(
+        `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
+         return {
+           heading: document.querySelector(".modal-header h3")?.textContent?.trim() ?? "",
+           prompt: document.querySelector(".prompt-input")?.value ?? "",
+           requestsHeld: Array.from(gate?.requestsHeld ?? []),
+           createDisabled: document.querySelector(".modal-overlay .btn-primary")?.disabled === true,
+           agentDisabled: document.querySelector(".agent-provider")?.disabled === true,
+           pipelineDisabled: document.querySelector('[data-testid="pipeline-toggle"]')?.disabled === true,
+           baseBranchDisabled: document.querySelector('[data-testid="base-branch-toggle"]')?.disabled === true,
+         };`,
+      );
+      expect(pendingState).toEqual({
+        heading: "New Task",
+        prompt: "Prompt remains editable while options load",
+        requestsHeld: expect.arrayContaining([
+          `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`,
+          `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`,
+        ]),
+        createDisabled: true,
+        agentDisabled: true,
+        pipelineDisabled: true,
+        baseBranchDisabled: true,
+      });
+
+      await client.executeSync(
+        `window.__KANNA_NEW_TASK_OPTIONS_GATE__.release(); return true;`,
+      );
+      await client.waitForNoElement('[data-testid="task-options-loading"]', 10_000);
+
+      const loadedState = await client.executeSync<{
+        prompt: string;
+        pipeline: string;
+        baseBranch: string;
+        createDisabled: boolean;
+        agentDisabled: boolean;
+        pipelineDisabled: boolean;
+        baseBranchDisabled: boolean;
+      }>(
+        `return {
+           prompt: document.querySelector(".prompt-input")?.value ?? "",
+           pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
+           baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
+           createDisabled: document.querySelector(".modal-overlay .btn-primary")?.disabled === true,
+           agentDisabled: document.querySelector(".agent-provider")?.disabled === true,
+           pipelineDisabled: document.querySelector('[data-testid="pipeline-toggle"]')?.disabled === true,
+           baseBranchDisabled: document.querySelector('[data-testid="base-branch-toggle"]')?.disabled === true,
+         };`,
+      );
+      expect(loadedState).toEqual({
+        prompt: "Prompt remains editable while options load",
+        pipeline: expect.any(String),
+        baseBranch: expect.any(String),
+        createDisabled: false,
+        agentDisabled: false,
+        pipelineDisabled: false,
+        baseBranchDisabled: false,
+      });
+      expect(loadedState.pipeline.length).toBeGreaterThan(0);
+      expect(loadedState.baseBranch.length).toBeGreaterThan(0);
+    } finally {
+      await client.executeSync(
+        `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
+         if (gate) {
+           gate.release?.();
+           globalThis.fetch = gate.originalFetch;
+         }
+         delete window.__KANNA_NEW_TASK_OPTIONS_GATE__;
+         return true;`,
+      ).catch(() => undefined);
+      await client.executeSync(
+        buildSelectorKeydownScript(".modal-overlay .modal", { key: "Escape" }),
+      ).catch(() => undefined);
+      await client.waitForNoElement(".modal-overlay", 5_000);
+    }
+  });
+
   it("opens the pipeline selector as a compact dropdown matching the base branch selector", async () => {
-    const modalResult = await callVueMethod(client, "keyboardActions.newTask");
-    expect(modalResult).toBeNull();
+    await openNewTaskModal(client);
 
     const toggle = await client.waitForElement('[data-testid="pipeline-toggle"]', 5_000);
     await client.click(toggle);
@@ -432,9 +564,7 @@ describe("new task modal", () => {
     const cliPrompt = "Create CLI Claude task";
     const sdkPrompt = "Create SDK Claude task";
 
-    const modalResult = await callVueMethod(client, "keyboardActions.newTask");
-    expect(modalResult).toBeNull();
-    await client.waitForElement(".modal-overlay", 5_000);
+    await openNewTaskModal(client);
 
     const defaultMode = await client.executeSync<string>(
       `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
@@ -447,9 +577,7 @@ describe("new task modal", () => {
       agent_type: "pty",
     }));
 
-    const directModalResult = await callVueMethod(client, "keyboardActions.newTask");
-    expect(directModalResult).toBeNull();
-    await client.waitForElement(".modal-overlay", 5_000);
+    await openNewTaskModal(client);
     await cycleAgentTo("claude sdk");
 
     const directMode = await client.executeSync<string>(
@@ -485,10 +613,7 @@ describe("new task modal", () => {
     expect(choices).not.toContain("copilot");
 
     await cycleToAgentChoice(client, "opencode sdk");
-    const promptInput = await client.waitForElement(".prompt-input", 2_000);
-    await client.sendKeys(promptInput, prompt);
-    await client.click(await client.waitForElement(".modal-overlay .btn-primary:not(:disabled)", 2_000));
-    await client.waitForNoElement(".modal-overlay", 5_000);
+    await submitTaskFromModal(client, prompt);
 
     const created = await waitForTaskCreated(client, prompt);
     expect(created).toEqual(expect.objectContaining({
@@ -517,7 +642,7 @@ describe("new task modal", () => {
       agent_provider: "opencode",
       agent_type: "agent",
     });
-    expect(await callVueMethod(client, "handleSelectItem", created.id)).toBeNull();
+    expect(await callVueMethod(client, "store.selectItem", created.id)).toBeNull();
     await client.waitForText(
       '[data-testid="agent-message-view"]',
       OPENCODE_COMPLETION_MARKER,
@@ -529,9 +654,7 @@ describe("new task modal", () => {
   it("cycles through installed agents alphabetically", async () => {
     await resetRecentAgentChoices(client);
 
-    const modalResult = await callVueMethod(client, "keyboardActions.newTask");
-    expect(modalResult).toBeNull();
-    await client.waitForElement(".modal-overlay", 5_000);
+    await openNewTaskModal(client);
 
     await client.click(await client.waitForElement(".agent-provider", 2_000));
 
@@ -550,9 +673,7 @@ describe("new task modal", () => {
 
     await setDefaultAgentPreference("claude-sdk");
 
-    const claudeModalResult = await callVueMethod(client, "keyboardActions.newTask");
-    expect(claudeModalResult).toBeNull();
-    await client.waitForElement(".modal-overlay", 5_000);
+    await openNewTaskModal(client);
 
     const claudeMode = await client.executeSync<string>(
       `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
@@ -587,23 +708,23 @@ describe("new task modal", () => {
     await openNewTaskModal(client);
     expect(await agentChoiceLabel(client)).toBe("claude sdk");
 
-    const claudeCliPrompt = "Remember claude cli as the recent task agent";
-    await cycleToAgentChoice(client, "claude");
-    await submitTaskFromModal(client, claudeCliPrompt);
-    expect(await waitForTaskCreated(client, claudeCliPrompt)).toEqual(expect.objectContaining({
-      agent_provider: "claude",
-      agent_type: "pty",
+    const opencodeSdkPrompt = "Remember opencode sdk as the recent task agent";
+    await cycleToAgentChoice(client, "opencode sdk");
+    await submitTaskFromModal(client, opencodeSdkPrompt);
+    expect(await waitForTaskCreated(client, opencodeSdkPrompt)).toEqual(expect.objectContaining({
+      agent_provider: "opencode",
+      agent_type: "agent",
     }));
     expect(await waitForRecentAgentChoicesSetting(client, [
-      { provider: "claude", executionType: "pty" },
+      { provider: "opencode", executionType: "agent" },
       { provider: "claude", executionType: "agent" },
     ])).toEqual([
-      { provider: "claude", executionType: "pty" },
+      { provider: "opencode", executionType: "agent" },
       { provider: "claude", executionType: "agent" },
     ]);
 
     await openNewTaskModal(client);
-    expect(await agentChoiceLabel(client)).toBe("claude");
+    expect(await agentChoiceLabel(client)).toBe("opencode sdk");
     await client.click(await client.waitForElement(".agent-provider", 2_000));
     expect(await agentChoiceLabel(client)).toBe("claude sdk");
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
