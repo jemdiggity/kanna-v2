@@ -16,6 +16,7 @@ const props = defineProps<{
   recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
   maximized?: boolean;
   blockers?: PipelineItem[];
+  blocked?: boolean;
   hasRepos?: boolean;
   cloudTask?: boolean;
   cloudTerminalRef?: {
@@ -50,6 +51,7 @@ const headerItem = computed(() => {
 });
 
 const isBlocked = computed(() => {
+  if (props.blocked !== undefined) return props.blocked;
   if (!props.blockers || props.blockers.length === 0) return false;
   return props.blockers.some(b => !isBlockerResolved(b));
 });

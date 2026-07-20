@@ -114,4 +114,33 @@ describe("desktop LAN task index publisher", () => {
     );
     expect(publishCall?.[1].snapshot.tasks[0].blockedByTaskIds).toEqual([]);
   });
+
+  it("falls back to visible task state when blocker task states are unavailable", async () => {
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [{
+        repo: repo() as never,
+        items: [
+          openItem("task-open") as never,
+          {
+            ...openItem("task-blocker"),
+            stage: "pr",
+            pr_url: "https://github.com/acme/repo/pull/8",
+          } as never,
+        ],
+      }],
+      taskBlockers: [{ blocked_item_id: "task-open", blocker_item_id: "task-blocker" }],
+      worktreePaths: {},
+      settings: {},
+    }));
+
+    await publishDesktopLanTaskSnapshot();
+
+    const publishCall = mocks.invoke.mock.calls.find(
+      ([command]) => command === "set_transfer_task_snapshot",
+    );
+    const publishedTask = publishCall?.[1].snapshot.tasks.find(
+      (task: { ownerLocalTaskId: string }) => task.ownerLocalTaskId === "task-open",
+    );
+    expect(publishedTask.blockedByTaskIds).toEqual([]);
+  });
 });

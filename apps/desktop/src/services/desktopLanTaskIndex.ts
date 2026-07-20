@@ -24,6 +24,11 @@ export async function publishDesktopLanTaskSnapshot(db?: DbHandle | null): Promi
     resolveLanDesktopId(),
     fetchDesktopSnapshot(),
   ]);
+  const visibleTaskStates = Object.fromEntries(
+    snapshot.entries.flatMap(({ items }) =>
+      items.map((item) => [item.id, item] as const),
+    ),
+  );
   const tasks: DesktopCloudTaskSnapshot[] = [];
 
   for (const { repo, items } of snapshot.entries) {
@@ -36,6 +41,7 @@ export async function publishDesktopLanTaskSnapshot(db?: DbHandle | null): Promi
         blockedByTaskIds: blockedByTaskIds(
           snapshot.taskBlockers,
           snapshot.blockerTaskStates ?? {},
+          visibleTaskStates,
           item.id,
         ),
       }));
@@ -56,12 +62,14 @@ export async function publishDesktopLanTaskSnapshot(db?: DbHandle | null): Promi
 function blockedByTaskIds(
   blockers: TaskBlocker[],
   blockerTaskStates: BlockerTaskStates,
+  visibleTaskStates: BlockerTaskStates,
   itemId: string,
 ): string[] {
   return blockers
     .filter((blocker) => {
       if (blocker.blocked_item_id !== itemId) return false;
-      const blockerState = blockerTaskStates[blocker.blocker_item_id];
+      const blockerState = blockerTaskStates[blocker.blocker_item_id]
+        ?? visibleTaskStates[blocker.blocker_item_id];
       return !blockerState || !isBlockerResolved(blockerState);
     })
     .map((blocker) => blocker.blocker_item_id);
