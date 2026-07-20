@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
-use std::io::Read;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -30,6 +31,28 @@ fn two_free_loopback_ports() -> (u16, u16) {
         .port();
     assert_ne!(first_port, second_port);
     (first_port, second_port)
+}
+
+fn free_loopback_port() -> u16 {
+    TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind loopback port")
+        .local_addr()
+        .expect("read loopback port")
+        .port()
+}
+
+fn registered_config_path(root: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        root.join("Library")
+            .join("Application Support")
+            .join("Kanna")
+            .join("server.toml")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        root.join("Kanna").join("server.toml")
+    }
 }
 
 fn toml_string(value: &Path) -> String {
@@ -175,4 +198,63 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
             "pairingCode": null
         })
     );
+}
+
+#[tokio::test]
+async fn register_emits_a_startable_development_config_with_build_identity() {
+    let root = tempfile::Builder::new()
+        .prefix("kanna-status-register-")
+        .tempdir()
+        .expect("create registration test root");
+    let register_output = Command::new(env!("CARGO_BIN_EXE_kanna-server"))
+        .arg("register")
+        .arg("wss://relay.example.test")
+        .env("HOME", root.path())
+        .env("XDG_DATA_HOME", root.path())
+        .output()
+        .expect("run kanna-server register");
+    assert!(
+        register_output.status.success(),
+        "registration failed: {}",
+        String::from_utf8_lossy(&register_output.stderr)
+    );
+
+    let config_path = registered_config_path(root.path());
+    let registered_config = std::fs::read_to_string(&config_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", config_path.display()));
+    let expected_version = include_str!("../../../VERSION").trim();
+    assert!(registered_config.contains(&format!("version = \"{expected_version}\"")));
+    assert!(registered_config.contains("environment = \"development\""));
+
+    let port = free_loopback_port();
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(&config_path)
+            .expect("open registered config"),
+        "lan_host = \"127.0.0.1\"\nlan_port = {port}"
+    )
+    .expect("configure registered server loopback port");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_kanna-server"))
+        .env("HOME", root.path())
+        .env("XDG_DATA_HOME", root.path())
+        .env("KANNA_SERVER_CONFIG", &config_path)
+        .env("RUST_LOG", "off")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start kanna-server from registered config");
+    let mut server = RunningServer {
+        child,
+        _root: root,
+        port,
+        status_url: format!("http://127.0.0.1:{port}/v1/status"),
+    };
+
+    let status = wait_for_status(&mut server).await;
+
+    assert_eq!(status["version"], expected_version);
+    assert_eq!(status["environment"], "development");
+    assert_eq!(status["serverVersion"], expected_version);
 }

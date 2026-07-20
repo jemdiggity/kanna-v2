@@ -127,6 +127,16 @@ fn load_from_path(
         )
     })?;
     let raw: RawConfig = toml::from_str(&content)?;
+    let version = raw.version.trim().to_string();
+    if version.is_empty() {
+        return Err("version must not be empty".into());
+    }
+    if !matches!(
+        raw.environment.as_str(),
+        "development" | "staging" | "production"
+    ) {
+        return Err("environment must be one of development, staging, or production".into());
+    }
     let canonical = canonical_db_path_for_root(data_root);
     let legacy = legacy_db_path_for_root(data_root);
     let db_path = match raw.db_path {
@@ -150,7 +160,7 @@ fn load_from_path(
         desktop_id: raw.desktop_id.unwrap_or_else(default_desktop_id),
         desktop_secret: raw.desktop_secret,
         desktop_name: raw.desktop_name.unwrap_or_else(default_desktop_name),
-        version: raw.version,
+        version,
         environment: raw.environment,
         lan_host: raw.lan_host.unwrap_or_else(default_lan_host),
         lan_port: raw.lan_port.unwrap_or_else(default_lan_port),
@@ -253,6 +263,47 @@ mod tests {
         let error = load_from_path(&config_path, &root).unwrap_err();
 
         assert!(error.to_string().contains("missing field"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_path_rejects_empty_version_after_trimming() {
+        let root = unique_test_dir("empty-version");
+        let config_path = root.join("server.toml");
+        fs::write(
+            &config_path,
+            "relay_url = \"wss://relay.example\"\n\
+             device_token = \"device-token\"\n\
+             version = \"   \"\n\
+             environment = \"development\"\n",
+        )
+        .unwrap();
+
+        let error = load_from_path(&config_path, &root).unwrap_err();
+
+        assert_eq!(error.to_string(), "version must not be empty");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_path_rejects_environment_outside_canonical_domain() {
+        let root = unique_test_dir("invalid-environment");
+        let config_path = root.join("server.toml");
+        fs::write(
+            &config_path,
+            "relay_url = \"wss://relay.example\"\n\
+             device_token = \"device-token\"\n\
+             version = \"0.0.69\"\n\
+             environment = \"prod\"\n",
+        )
+        .unwrap();
+
+        let error = load_from_path(&config_path, &root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "environment must be one of development, staging, or production"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

@@ -17,6 +17,7 @@ rust_binary(
     crate_root = "src/main.rs",
     crate_name = "kanna_server",
     compile_data = [
+        "//:VERSION",
         "//:kanna_builtin_resources",
         "//packages/core:src/pipeline/kanna-task-environment.md",
     ],
@@ -35,6 +36,7 @@ rust_binary(
     crate_root = "src/main.rs",
     crate_name = "kanna_server",
     compile_data = [
+        "//:VERSION",
         "//:kanna_builtin_resources",
         "//packages/core:src/pipeline/kanna-task-environment.md",
     ],
