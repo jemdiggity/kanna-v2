@@ -8,6 +8,7 @@ import {
   TextInput,
   View
 } from "react-native";
+import { BuildInfoPanel } from "../components/BuildInfoPanel";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { RepoCommandCatalog, RepoSummary } from "../lib/api/types";
 import type { RepoCommandStatus } from "../state/sessionStore";
@@ -180,6 +181,8 @@ export function MoreScreen({
             </View>
           ))
         )}
+
+        <BuildInfoPanel />
       </View>
     </ScrollView>
   );
