@@ -2673,6 +2673,42 @@ describe("createCloudLanClient", () => {
     }
   });
 
+  it("expires LAN routability when the optional desktop read times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const pendingLanDesktops = deferred<DesktopSummary[]>();
+      const cloudDesktop: DesktopSummary = {
+        id: "desktop-a",
+        name: "Desktop A",
+        online: true,
+        mode: "remote"
+      };
+      const cloud = createClientMock({
+        listDesktops: vi.fn().mockResolvedValue([cloudDesktop])
+      });
+      const lan = createClientMock({
+        listDesktops: vi.fn().mockReturnValue(pendingLanDesktops.promise)
+      });
+      const onLanDesktopReadUnavailable = vi.fn();
+      const client = createCloudLanClient(cloud, lan, {
+        isLanEnabled: () => true,
+        optionalLanWaitMs: 1_000,
+        onLanDesktopReadUnavailable
+      });
+
+      const result = client.listDesktops();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(onLanDesktopReadUnavailable).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(result).resolves.toEqual([cloudDesktop]);
+      expect(onLanDesktopReadUnavailable).toHaveBeenCalledOnce();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("shares an unresolved optional LAN desktop probe across timeout reads and refreshes after settlement", async () => {
     vi.useFakeTimers();
     try {

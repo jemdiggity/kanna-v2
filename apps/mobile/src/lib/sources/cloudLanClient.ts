@@ -42,6 +42,7 @@ export interface CloudLanClientOptions {
   onDesktopSourceWarnings?(warnings: DesktopSourceWarnings): void;
   initialDesktopSources?: DesktopSources;
   onDesktopSourcesChanged?(sources: DesktopSources): void;
+  onLanDesktopReadUnavailable?(): void;
 }
 
 export interface DesktopSourceWarnings {
@@ -1011,6 +1012,10 @@ export function createCloudLanClient(
     const lanResult = lanRead ? await lanRead : null;
     const isLatestRead = readEpoch === latestDesktopReadEpoch;
     const lanStillEnabled = lanEnabled && options.isLanEnabled();
+
+    if (lanStillEnabled && lanResult?.status === "rejected") {
+      options.onLanDesktopReadUnavailable?.();
+    }
 
     reportDesktopSourceWarnings({
       account: cloudResult.status === "fulfilled"
