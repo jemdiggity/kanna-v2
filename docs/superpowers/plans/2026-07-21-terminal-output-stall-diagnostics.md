@@ -16,7 +16,7 @@
 - Create: `crates/daemon/src/terminal_perf.rs`
 - Modify: `crates/daemon/src/lib.rs`
 
-- [ ] **Step 1: Write threshold, rate-limit, recovery, and bounded-state tests**
+- [x] **Step 1: Write threshold, rate-limit, recovery, and bounded-state tests**
 
   Add unit tests in `terminal_perf.rs` around a test-owned `TerminalPerfMonitor` and explicit `Instant` values. Cover:
 
@@ -36,13 +36,13 @@
 
   Use a `TerminalPerfContext` with `component`, `session_id`, optional `task_id`, `stage`, `chunk`, `bytes`, and optional queue occupancy. Assert formatted records start with `terminal_perf`, contain `event=stall`/`event=recovered`, and never contain a sample payload string.
 
-- [ ] **Step 2: Run the focused tests to prove the new module is absent**
+- [x] **Step 2: Run the focused tests to prove the new module is absent**
 
   Run: `cargo test -p kanna-daemon terminal_perf -- --nocapture`
 
   Expected: FAIL because `terminal_perf` is not exported yet.
 
-- [ ] **Step 3: Implement the monitor and stable formatter**
+- [x] **Step 3: Implement the monitor and stable formatter**
 
   Implement:
 
@@ -70,13 +70,13 @@
 
   Add a process-global monitor and an idempotent `start_global_watchdog()` that scans every 250ms and sends formatted warning records through `log::warn!`. Format wall-clock `at_ms` only when emitting; derive `duration_ms` from monotonic time. Export the module from `lib.rs`.
 
-- [ ] **Step 4: Run the shared monitor tests**
+- [x] **Step 4: Run the shared monitor tests**
 
   Run: `cargo test -p kanna-daemon terminal_perf -- --nocapture`
 
   Expected: PASS, including exact threshold and cleanup assertions.
 
-- [ ] **Step 5: Commit the shared primitive**
+- [x] **Step 5: Commit the shared primitive**
 
   ```bash
   git add crates/daemon/src/terminal_perf.rs crates/daemon/src/lib.rs
@@ -86,12 +86,13 @@
 ## Task 2: Instrument daemon output stages and source gaps
 
 **Files:**
-- Modify: `crates/daemon/src/main.rs`
+- Modify: `crates/daemon/src/startup.rs`
 - Modify: `crates/daemon/src/output.rs`
 - Modify: `crates/daemon/src/session.rs`
+- Modify: `crates/daemon/src/connection.rs`
 - Modify: `crates/daemon/src/tests.rs`
 
-- [ ] **Step 1: Add source-order and diagnostic-content tests**
+- [x] **Step 1: Add source-order and diagnostic-content tests**
 
   Extend source-order tests to require `terminal_perf` guards around:
 
@@ -107,19 +108,19 @@
 
   Add a pure output-gap classifier test that feeds chunk times at `0ms`, `1900ms`, and `4000ms`, asserting only the last transition emits `event=gap`, with `prior_stage` when the previous processing pass exceeded 500ms and `pty_source_silence` otherwise.
 
-- [ ] **Step 2: Run focused daemon tests and confirm failure**
+- [x] **Step 2: Run focused daemon tests and confirm failure**
 
   Run: `cargo test -p kanna-daemon --lib output_gap -- --nocapture`
 
   Expected: FAIL because output gap tracking and the new stage guards are not wired.
 
-- [ ] **Step 3: Wire bounded instrumentation into daemon startup and output processing**
+- [x] **Step 3: Wire bounded instrumentation into daemon startup and output processing**
 
   Start the global watchdog once during daemon startup. In `stream_output`, assign a monotonically increasing chunk number per session and retain only `last_read_at` plus the previous slow stage. On output resumption after two seconds, emit one gap record, classified as a prior downstream blocker or PTY source silence.
 
   Wrap each awaited or CPU-sensitive boundary in a guard with the same chunk number and byte count. Split `Session::snapshot` timing so waiting for the state mutex is `snapshot_lock` and terminal serialization is `snapshot_serialize`. Do not log bytes, decoded output, command text, or snapshots.
 
-- [ ] **Step 4: Run daemon unit tests**
+- [x] **Step 4: Run daemon unit tests**
 
   Run: `cargo test -p kanna-daemon --lib -- --nocapture`
 

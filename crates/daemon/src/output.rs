@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use kanna_daemon::{
     protocol::{self, Event, SessionStatus},
     recovery::RecoveryManager,
+    terminal_perf::{self, TerminalPerfContext, OUTPUT_GAP_THRESHOLD, STALL_THRESHOLD},
 };
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -16,6 +18,66 @@ use crate::session::{
 use crate::socket::write_event;
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
+const STAGE_MIRROR_OUTPUT: &str = "mirror_output";
+const STAGE_DETECT_STATUS: &str = "detect_status";
+const STAGE_ATTACHED_WRITER: &str = "attached_writer";
+const STAGE_RECOVERY_WRITE: &str = "recovery_write";
+const STAGE_OBSERVER_WRITE: &str = "observer_write";
+
+pub(crate) const DAEMON_TERMINAL_PERF_STAGES: [&str; 7] = [
+    STAGE_MIRROR_OUTPUT,
+    STAGE_DETECT_STATUS,
+    STAGE_ATTACHED_WRITER,
+    STAGE_RECOVERY_WRITE,
+    STAGE_OBSERVER_WRITE,
+    "snapshot_lock",
+    "snapshot_serialize",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DaemonOutputGapCause {
+    PriorStage(&'static str),
+    PtySourceSilence,
+}
+
+pub(crate) fn classify_output_gap(
+    previous_read_at: Option<Instant>,
+    read_at: Instant,
+    previous_slow_stage: Option<&'static str>,
+) -> Option<(Duration, DaemonOutputGapCause)> {
+    let duration = read_at.saturating_duration_since(previous_read_at?);
+    if duration < OUTPUT_GAP_THRESHOLD {
+        return None;
+    }
+    Some((
+        duration,
+        previous_slow_stage
+            .map(DaemonOutputGapCause::PriorStage)
+            .unwrap_or(DaemonOutputGapCause::PtySourceSilence),
+    ))
+}
+
+fn perf_context(
+    session_id: &str,
+    stage: &'static str,
+    chunk: u64,
+    bytes: usize,
+) -> TerminalPerfContext {
+    let mut context = TerminalPerfContext::new("daemon", session_id, stage);
+    context.chunk = chunk;
+    context.bytes = bytes;
+    context
+}
+
+fn note_slow_stage(
+    started_at: Instant,
+    stage: &'static str,
+    previous_slow_stage: &mut Option<&'static str>,
+) {
+    if started_at.elapsed() >= STALL_THRESHOLD && previous_slow_stage.is_none() {
+        *previous_slow_stage = Some(stage);
+    }
+}
 
 pub(crate) fn should_mirror_output_to_recovery(_has_live_terminal_client: bool) -> bool {
     true
@@ -57,6 +119,8 @@ pub(crate) async fn stream_output(
     };
     let mut buf = [0u8; 4096];
     let mut chunk_count: usize = 0;
+    let mut previous_read_at = None;
+    let mut previous_slow_stage = None;
     let mut pending_input: VecDeque<Vec<u8>> = VecDeque::new();
     let mut pending_offset = 0usize;
     let mut status_interval =
@@ -168,7 +232,20 @@ pub(crate) async fn stream_output(
                             stream_control.mark_stopped();
                             return;
                         }
+                        let read_at = Instant::now();
                         chunk_count += 1;
+                        if let Some((duration, cause)) =
+                            classify_output_gap(previous_read_at, read_at, previous_slow_stage)
+                        {
+                            let mut context =
+                                perf_context(&session_id, "pty_read", chunk_count as u64, n);
+                            context.prior_stage = Some(match cause {
+                                DaemonOutputGapCause::PriorStage(stage) => stage,
+                                DaemonOutputGapCause::PtySourceSilence => "pty_source_silence",
+                            });
+                            terminal_perf::emit_gap(context, duration);
+                        }
+                        previous_read_at = Some(read_at);
                         if chunk_count <= 5 {
                             log::info!(
                                 "[stream] chunk session={} chunk={} bytes={}",
@@ -178,9 +255,10 @@ pub(crate) async fn stream_output(
                             );
                         }
                         let data = buf[..n].to_vec();
-                        handle_output_chunk(
+                        previous_slow_stage = handle_output_chunk(
                             &session_id,
                             &data,
+                            chunk_count as u64,
                             &session,
                             &broadcast_tx,
                             &session_writers,
@@ -322,6 +400,7 @@ pub(crate) async fn stream_output(
 pub(crate) async fn handle_output_chunk(
     session_id: &str,
     data: &[u8],
+    chunk: u64,
     session: &Arc<SessionHandle>,
     broadcast_tx: &broadcast::Sender<String>,
     session_writers: &SessionWriters,
@@ -329,7 +408,8 @@ pub(crate) async fn handle_output_chunk(
     session_sizes: &SessionSizes,
     session_observers: &SessionObservers,
     recovery_manager: &RecoveryManager,
-) {
+) -> Option<&'static str> {
+    let mut slow_stage = None;
     let has_live_terminal_client = {
         let terminal_clients = terminal_emulator_clients.lock().await;
         !terminal_clients
@@ -337,7 +417,17 @@ pub(crate) async fn handle_output_chunk(
             .is_none_or(|client_ids| client_ids.is_empty())
     };
     let allow_terminal_replies = !has_live_terminal_client;
-    match session.mirror_output(data, allow_terminal_replies).await {
+    let mirror_started = Instant::now();
+    let mirror_operation = terminal_perf::global_monitor().begin(perf_context(
+        session_id,
+        STAGE_MIRROR_OUTPUT,
+        chunk,
+        data.len(),
+    ));
+    let mirror_result = session.mirror_output(data, allow_terminal_replies).await;
+    mirror_operation.finish();
+    note_slow_stage(mirror_started, STAGE_MIRROR_OUTPUT, &mut slow_stage);
+    match mirror_result {
         Ok(MirrorResult { status, replies }) => {
             for reply in replies {
                 if session.enqueue_input(reply).is_err() {
@@ -347,12 +437,21 @@ pub(crate) async fn handle_output_chunk(
                     );
                 }
             }
+            let status_started = Instant::now();
+            let status_operation = terminal_perf::global_monitor().begin(perf_context(
+                session_id,
+                STAGE_DETECT_STATUS,
+                chunk,
+                data.len(),
+            ));
             if let Some(status) = status {
                 log_status_observation(session, session_id, "mirror_output").await;
                 emit_status_changed(session, broadcast_tx, session_id, status).await;
             } else {
                 log_status_observation(session, session_id, "mirror_output").await;
             }
+            status_operation.finish();
+            note_slow_stage(status_started, STAGE_DETECT_STATUS, &mut slow_stage);
         }
         Err(error) => {
             log::error!(
@@ -384,7 +483,17 @@ pub(crate) async fn handle_output_chunk(
     if !attached_writers.is_empty() {
         let mut failed = Vec::new();
         for (i, w) in attached_writers.iter().enumerate() {
-            if write_event(&mut *w.lock().await, &evt).await.is_err() {
+            let write_started = Instant::now();
+            let write_operation = terminal_perf::global_monitor().begin(perf_context(
+                session_id,
+                STAGE_ATTACHED_WRITER,
+                chunk,
+                data.len(),
+            ));
+            let result = write_event(&mut *w.lock().await, &evt).await;
+            write_operation.finish();
+            note_slow_stage(write_started, STAGE_ATTACHED_WRITER, &mut slow_stage);
+            if result.is_err() {
                 failed.push(i);
             }
         }
@@ -419,9 +528,18 @@ pub(crate) async fn handle_output_chunk(
 
     if should_mirror_output_to_recovery(has_live_terminal_client) {
         let sequence = recovery_manager.next_sequence(session_id);
+        let recovery_started = Instant::now();
+        let recovery_operation = terminal_perf::global_monitor().begin(perf_context(
+            session_id,
+            STAGE_RECOVERY_WRITE,
+            chunk,
+            data.len(),
+        ));
         recovery_manager
             .write_output(session_id, data, sequence)
             .await;
+        recovery_operation.finish();
+        note_slow_stage(recovery_started, STAGE_RECOVERY_WRITE, &mut slow_stage);
     }
 
     if let Some(obs_data) = obs_data {
@@ -434,12 +552,22 @@ pub(crate) async fn handle_output_chunk(
             let results = futures::future::join_all(observer_list.iter().map(|obs| {
                 let evt = obs_evt.clone();
                 let obs = obs.clone();
-                async move { write_event(&mut *obs.lock().await, &evt).await }
+                let context = perf_context(session_id, STAGE_OBSERVER_WRITE, chunk, data.len());
+                async move {
+                    let started_at = Instant::now();
+                    let operation = terminal_perf::global_monitor().begin(context);
+                    let result = write_event(&mut *obs.lock().await, &evt).await;
+                    operation.finish();
+                    (result, started_at.elapsed() >= STALL_THRESHOLD)
+                }
             }))
             .await;
+            if results.iter().any(|(_, stalled)| *stalled) {
+                slow_stage.get_or_insert(STAGE_OBSERVER_WRITE);
+            }
             let mut i = 0;
             observer_list.retain(|_| {
-                let ok = results[i].is_ok();
+                let ok = results[i].0.is_ok();
                 i += 1;
                 ok
             });
@@ -448,6 +576,7 @@ pub(crate) async fn handle_output_chunk(
             }
         }
     }
+    slow_stage
 }
 
 async fn emit_status_changed(

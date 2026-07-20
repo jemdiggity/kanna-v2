@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use kanna_daemon::protocol::{self, Event, SessionStatus};
 use tokio::net::UnixStream;
@@ -15,8 +16,9 @@ use crate::handoff::{
     HandoffRequestError, HandoffSessionV1,
 };
 use crate::output::{
-    format_status_observation_log, should_mirror_output_to_recovery,
-    should_rebuild_recovery_session_on_live_terminal_transition,
+    classify_output_gap, format_status_observation_log, should_mirror_output_to_recovery,
+    should_rebuild_recovery_session_on_live_terminal_transition, DaemonOutputGapCause,
+    DAEMON_TERMINAL_PERF_STAGES,
 };
 use crate::paths::panic_log_path;
 
@@ -270,6 +272,51 @@ fn panic_log_path_lives_under_daemon_dir() {
     assert_eq!(
         panic_log_path(Path::new("/tmp/kanna-daemon-test"), 42, 1234),
         PathBuf::from("/tmp/kanna-daemon-test/kanna-daemon-panic_42_1234.log")
+    );
+}
+
+#[test]
+fn output_gap_classifier_uses_monotonic_threshold_and_prior_blocker() {
+    let started = Instant::now();
+
+    assert_eq!(classify_output_gap(None, started, None), None);
+    assert_eq!(
+        classify_output_gap(Some(started), started + Duration::from_millis(1_900), None,),
+        None
+    );
+    assert_eq!(
+        classify_output_gap(
+            Some(started + Duration::from_millis(1_900)),
+            started + Duration::from_millis(4_000),
+            Some("attached_writer"),
+        ),
+        Some((
+            Duration::from_millis(2_100),
+            DaemonOutputGapCause::PriorStage("attached_writer"),
+        ))
+    );
+    assert_eq!(
+        classify_output_gap(Some(started), started + Duration::from_millis(2_000), None,),
+        Some((
+            Duration::from_millis(2_000),
+            DaemonOutputGapCause::PtySourceSilence,
+        ))
+    );
+}
+
+#[test]
+fn daemon_terminal_perf_stage_names_cover_every_output_boundary() {
+    assert_eq!(
+        DAEMON_TERMINAL_PERF_STAGES,
+        [
+            "mirror_output",
+            "detect_status",
+            "attached_writer",
+            "recovery_write",
+            "observer_write",
+            "snapshot_lock",
+            "snapshot_serialize",
+        ]
     );
 }
 

@@ -297,6 +297,7 @@ pub(crate) async fn handle_command(
                         handle_output_chunk(
                             &session_id,
                             prelude,
+                            0,
                             &handle,
                             &broadcast_tx,
                             &session_writers,
@@ -533,7 +534,7 @@ pub(crate) async fn handle_command(
                 });
             }
 
-            let snapshot = match session.snapshot().await {
+            let snapshot = match session.snapshot(&session_id).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     let (rows, cols) = session.rows_cols().await;
@@ -764,7 +765,7 @@ pub(crate) async fn handle_command(
         Command::Snapshot { session_id } => {
             let live_snapshot = {
                 match session_handle(&sessions, &session_id).await {
-                    Some(session) => Some(session.snapshot().await),
+                    Some(session) => Some(session.snapshot(&session_id).await),
                     None => None,
                 }
             };

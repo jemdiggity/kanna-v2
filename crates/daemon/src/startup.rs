@@ -36,6 +36,7 @@ pub(crate) async fn run_daemon() {
         )
         .duplicate_to_stderr(flexi_logger::Duplicate::Info)
         .start();
+    kanna_daemon::terminal_perf::start_global_watchdog();
 
     let pid_path = dir.join("daemon.pid");
     let socket_path = kanna_runtime_defaults::socket_path(&dir);

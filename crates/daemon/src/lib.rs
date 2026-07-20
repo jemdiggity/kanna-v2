@@ -1,3 +1,5 @@
+extern crate self as kanna_daemon;
+
 pub mod agent;
 pub mod bench;
 pub mod headless_terminal;
