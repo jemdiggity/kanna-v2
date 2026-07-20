@@ -314,7 +314,7 @@
 
   Expected: PASS, including held callback and visible/hidden classifications.
 
-- [ ] **Step 6: Commit WebView instrumentation**
+- [x] **Step 6: Commit WebView instrumentation**
 
   ```bash
   git add packages/stream-client/src/index.ts packages/stream-client/src/stream-client.test.ts apps/desktop/src/perf/terminalOutputPerf.ts apps/desktop/src/perf/terminalOutputPerf.test.ts apps/desktop/src/composables/terminalSessionLifecycle.ts apps/desktop/src/composables/useTerminal.test.ts
@@ -329,7 +329,7 @@
 - Modify: `apps/desktop/src/main.ts`
 - Modify: `apps/desktop/tests/e2e/mock/terminal-output-performance.test.ts`
 
-- [ ] **Step 1: Add a failing E2E assertion for event-loop classification**
+- [x] **Step 1: Add a failing E2E assertion for event-loop classification**
 
   Expose a development-only snapshot containing scalar maxima and the latest redacted terminal diagnostic. Extend the E2E test to:
 
@@ -340,26 +340,26 @@
   5. wait for the watchdog tick and assert the latest event is `stage=event_loop`, not `outbound_queue` or `websocket_send`;
   6. assert no numbered marker is lost after the block.
 
-- [ ] **Step 2: Run the focused E2E test and confirm failure**
+- [x] **Step 2: Run the focused E2E test and confirm failure**
 
   Start the canonical worktree environment with `./kd dev up`, then run:
 
   ```bash
-  pnpm --dir apps/desktop test:e2e -- --spec tests/e2e/mock/terminal-output-performance.test.ts
+  pnpm --dir apps/desktop test:e2e -- mock/terminal-output-performance.test.ts
   ```
 
   Expected: FAIL because the development snapshot is not exposed.
 
-- [ ] **Step 3: Expose only bounded redacted diagnostic state**
+- [x] **Step 3: Expose only bounded redacted diagnostic state**
 
   Add `terminalOutputPerf` getters/resetters to the existing development-only `window.__KANNA_E2E__` surface. The snapshot contains active-session count, maximum frame gap, maximum event-loop drift, maximum xterm backlog, pending counts, and the latest structured event. It contains no terminal strings, frame bodies, or history array.
 
-- [ ] **Step 4: Run E2E and terminal fidelity regressions**
+- [x] **Step 4: Run E2E and terminal fidelity regressions**
 
   Run:
 
   ```bash
-  pnpm --dir apps/desktop test:e2e -- --spec tests/e2e/mock/terminal-output-performance.test.ts
+  pnpm --dir apps/desktop test:e2e -- mock/terminal-output-performance.test.ts
   pnpm --dir apps/desktop test -- src/composables/useTerminal.test.ts
   ```
 

@@ -37,6 +37,33 @@ interface KannaAppMetricsE2EApi {
   clear: () => void;
 }
 
+interface KannaTerminalOutputPerfEvent {
+  atMs: number;
+  component: "webview";
+  sessionId: string;
+  stage: string;
+  event: "stall" | "recovered" | "gap";
+  durationMs: number;
+  bytes: number;
+  pendingChunks: number;
+  pendingBytes: number;
+}
+
+interface KannaTerminalOutputPerfSnapshot {
+  activeSessions: number;
+  maxFrameGapMs: number;
+  maxEventLoopDriftMs: number;
+  maxXtermBacklogMs: number;
+  pendingChunks: number;
+  pendingBytes: number;
+  latestEvent: KannaTerminalOutputPerfEvent | null;
+}
+
+interface KannaTerminalOutputPerfE2EApi {
+  snapshot: () => KannaTerminalOutputPerfSnapshot;
+  clear: () => void;
+}
+
 interface KannaAuthIndexedDbFaultE2EApi {
   installed: boolean;
   openFailures: number;
@@ -58,6 +85,7 @@ interface KannaE2EHook {
   dbName: string;
   taskSwitchPerf: KannaTaskSwitchPerfE2EApi;
   appMetrics: KannaAppMetricsE2EApi;
+  terminalOutputPerf: KannaTerminalOutputPerfE2EApi;
   resetStreamClient?: () => void;
   serverWork?: KannaServerWorkE2EApi;
   terminalStreams?: KannaTerminalStreamsE2EApi;

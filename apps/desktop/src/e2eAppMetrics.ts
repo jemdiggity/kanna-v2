@@ -67,3 +67,12 @@ export const e2eAppMetrics: E2EAppMetricsApi = {
     unlistenCounts.clear();
   },
 };
+
+export const e2eTerminalOutputPerf = {
+  snapshot: getTerminalOutputPerfSnapshot,
+  clear: resetTerminalOutputPerfSnapshot,
+};
+import {
+  getTerminalOutputPerfSnapshot,
+  resetTerminalOutputPerfSnapshot,
+} from "./perf/terminalOutputPerf";
