@@ -24,6 +24,8 @@ const PINNED_TASK_ID = "sidebar-parenting-pinned";
 const TARGET_TASK_ID = "sidebar-parenting-target";
 const PARENT_TASK_ID = "sidebar-parenting-parent";
 const CHILD_TASK_ID = "sidebar-parenting-child";
+const ALL_PINNED_FIRST_TASK_ID = "sidebar-all-pinned-first";
+const ALL_PINNED_SECOND_TASK_ID = "sidebar-all-pinned-second";
 
 async function taskRow(client: WebDriverClient, taskId: string): Promise<TaskParentingRow> {
   const rows = await queryDb(
@@ -34,6 +36,26 @@ async function taskRow(client: WebDriverClient, taskId: string): Promise<TaskPar
   const row = rows[0];
   if (!row) throw new Error(`Task row not found: ${taskId}`);
   return row;
+}
+
+async function waitForRepoTask(
+  client: WebDriverClient,
+  repoId: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const rows = await queryDb(
+      client,
+      "SELECT id FROM pipeline_item WHERE repo_id = ?",
+      [repoId],
+    ) as Array<{ id: string }>;
+    if (rows.length > 0) return;
+    await sleep(100);
+  }
+
+  throw new Error(`Timed out waiting for import-created task in repo ${repoId}`);
 }
 
 async function waitForTaskRow(
@@ -85,7 +107,7 @@ async function waitForSidebarRow(
   throw new Error(`Timed out waiting for ${description}; last row was ${JSON.stringify(lastRow)}`);
 }
 
-async function dragSortableTaskOverRow(
+async function dragSortableTaskToTarget(
   client: WebDriverClient,
   sourceSelector: string,
   targetSelector: string,
@@ -93,7 +115,7 @@ async function dragSortableTaskOverRow(
   const result = await client.executeAsync<string | { __error: string }>(
     `const cb = arguments[arguments.length - 1];
      const source = document.querySelector(${JSON.stringify(sourceSelector)});
-     const target = document.querySelector(${JSON.stringify(targetSelector)});
+     let target = document.querySelector(${JSON.stringify(targetSelector)});
      if (!source) {
        cb({ __error: "source not found: " + ${JSON.stringify(sourceSelector)} });
        return;
@@ -104,21 +126,11 @@ async function dragSortableTaskOverRow(
      }
 
      const sourceRect = source.getBoundingClientRect();
-     const targetRect = target.getBoundingClientRect();
      const start = {
        x: Math.round(sourceRect.left + sourceRect.width / 2),
        y: Math.round(sourceRect.top + sourceRect.height / 2),
      };
-     const end = {
-       x: Math.round(targetRect.left + targetRect.width / 2),
-       y: Math.round(targetRect.top + targetRect.height / 2),
-     };
-     const points = [
-       start,
-       { x: start.x, y: start.y + 18 },
-       { x: Math.round((start.x + end.x) / 2), y: Math.round((start.y + end.y) / 2) },
-       end,
-     ];
+     const activationPoint = { x: start.x, y: start.y + 18 };
      const pointerId = 33;
 
      function pointer(type, point, buttons) {
@@ -173,25 +185,56 @@ async function dragSortableTaskOverRow(
        }
      }
 
-     dispatch("pointermove", points[0], 0, source);
-     dispatch("mousemove", points[0], 0, source);
-     dispatch("pointerdown", points[0], 1, source);
-     dispatch("mousedown", points[0], 1, source);
-
-     let index = 1;
-     const tick = () => {
-       if (index < points.length) {
-         dispatch("pointermove", points[index], 1);
-         dispatch("mousemove", points[index], 1);
-         index += 1;
-         setTimeout(tick, 120);
-         return;
-       }
-       dispatch("pointerup", end, 0);
-       dispatch("mouseup", end, 0);
-       setTimeout(() => cb("ok"), 200);
-     };
-     setTimeout(tick, 120);`,
+     dispatch("pointermove", start, 0, source);
+     dispatch("mousemove", start, 0, source);
+     dispatch("pointerdown", start, 1, source);
+     dispatch("mousedown", start, 1, source);
+     setTimeout(() => {
+       dispatch("pointermove", activationPoint, 1);
+       dispatch("mousemove", activationPoint, 1);
+       setTimeout(() => {
+         const targetDeadline = Date.now() + 1_000;
+         const dropWhenTargetIsReady = () => {
+           target = document.querySelector(${JSON.stringify(targetSelector)});
+           const targetRect = target?.getBoundingClientRect();
+           if (!targetRect || targetRect.width === 0 || targetRect.height === 0) {
+             if (Date.now() < targetDeadline) {
+               setTimeout(dropWhenTargetIsReady, 40);
+               return;
+             }
+             dispatch("pointerup", activationPoint, 0);
+             dispatch("mouseup", activationPoint, 0);
+             setTimeout(() => cb({
+               __error: "target has no drop area after drag activation: " + ${JSON.stringify(targetSelector)},
+             }), 200);
+             return;
+           }
+           const end = {
+             x: Math.round(targetRect.left + targetRect.width / 2),
+             y: Math.round(targetRect.top + targetRect.height / 2),
+           };
+           const points = [
+             { x: Math.round((activationPoint.x + end.x) / 2), y: Math.round((activationPoint.y + end.y) / 2) },
+             end,
+           ];
+           let index = 0;
+           const tick = () => {
+             if (index < points.length) {
+               dispatch("pointermove", points[index], 1);
+               dispatch("mousemove", points[index], 1);
+               index += 1;
+               setTimeout(tick, 120);
+               return;
+             }
+             dispatch("pointerup", end, 0);
+             dispatch("mouseup", end, 0);
+             setTimeout(() => cb("ok"), 200);
+           };
+           tick();
+         };
+         dropWhenTargetIsReady();
+       }, 180);
+     }, 120);`,
   );
 
   if (typeof result === "object" && result !== null && "__error" in result) {
@@ -202,6 +245,8 @@ async function dragSortableTaskOverRow(
 describe("sidebar task parenting", () => {
   const client = new WebDriverClient();
   let testRepoPath = "";
+  let allPinnedRepoPath = "";
+  let allPinnedRepoId = "";
 
   beforeAll(async () => {
     await client.createSession();
@@ -290,17 +335,65 @@ describe("sidebar task parenting", () => {
       ],
     );
 
+    allPinnedRepoPath = await createFixtureRepo("sidebar-all-pinned-test");
+    allPinnedRepoId = await importTestRepo(client, allPinnedRepoPath, "sidebar-all-pinned-test");
+    await waitForRepoTask(client, allPinnedRepoId);
+    await execDb(client, "DELETE FROM pipeline_item WHERE repo_id = ?", [allPinnedRepoId]);
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item
+         (id, repo_id, prompt, display_name, stage, agent_type, activity, pinned, pin_order, parent_task_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ALL_PINNED_FIRST_TASK_ID,
+        allPinnedRepoId,
+        "First task in an all-pinned repository",
+        "First all-pinned task",
+        "in progress",
+        "agent",
+        "idle",
+        1,
+        0,
+        null,
+        "2026-05-02T00:00:01.000Z",
+        "2026-05-02T00:00:01.000Z",
+      ],
+    );
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item
+         (id, repo_id, prompt, display_name, stage, agent_type, activity, pinned, pin_order, parent_task_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ALL_PINNED_SECOND_TASK_ID,
+        allPinnedRepoId,
+        "Second task in an all-pinned repository",
+        "Second all-pinned task",
+        "in progress",
+        "agent",
+        "idle",
+        1,
+        1,
+        null,
+        "2026-05-02T00:00:00.000Z",
+        "2026-05-02T00:00:00.000Z",
+      ],
+    );
+
     await callVueMethod(client, "loadItems");
     await client.waitForText(".sidebar", "Pinned drag source", 5_000);
     await client.waitForText(".sidebar", "Unpinned drop target", 5_000);
     await client.waitForText(".sidebar", "Existing child", 5_000);
+    await client.waitForText(".sidebar", "First all-pinned task", 5_000);
+    await client.waitForText(".sidebar", "Second all-pinned task", 5_000);
   });
 
   afterAll(async () => {
     if (testRepoPath) {
       await cleanupWorktrees(client, testRepoPath);
-      await cleanupFixtureRepos([testRepoPath]);
     }
+    if (allPinnedRepoPath) await cleanupWorktrees(client, allPinnedRepoPath);
+    await cleanupFixtureRepos([testRepoPath, allPinnedRepoPath].filter(Boolean));
     await client.deleteSession();
   });
 
@@ -310,7 +403,7 @@ describe("sidebar task parenting", () => {
     await client.waitForElement(sourceSelector, 5_000);
     await client.waitForElement(targetSelector, 5_000);
 
-    await dragSortableTaskOverRow(client, sourceSelector, targetSelector);
+    await dragSortableTaskToTarget(client, sourceSelector, targetSelector);
 
     const row = await waitForTaskRow(
       client,
@@ -331,6 +424,71 @@ describe("sidebar task parenting", () => {
       "dragged task to render as a top-level unpinned task",
     );
     expect(domRow.text).toBe("Pinned drag source");
+  });
+
+  it("unpins into the empty receiver when a repository has multiple pinned tasks and no unpinned tasks", async () => {
+    const repoSelector = `.sidebar .repo-section[data-repo-id="${allPinnedRepoId}"]`;
+    const sourceSelector = `${repoSelector} .pinned-zone .task-subtree[data-task-id="${ALL_PINNED_FIRST_TASK_ID}"]`;
+    const receiverSelector = `${repoSelector} .empty-unpin-zone`;
+
+    await client.waitForElement(sourceSelector, 5_000);
+    await client.waitForElement(receiverSelector, 5_000);
+
+    const initialDbRows = await queryDb(
+      client,
+      "SELECT id, pinned, pin_order, parent_task_id FROM pipeline_item WHERE repo_id = ? ORDER BY pin_order, id",
+      [allPinnedRepoId],
+    ) as TaskParentingRow[];
+    expect(initialDbRows).toEqual([
+      { id: ALL_PINNED_FIRST_TASK_ID, pinned: 1, pin_order: 0, parent_task_id: null },
+      { id: ALL_PINNED_SECOND_TASK_ID, pinned: 1, pin_order: 1, parent_task_id: null },
+    ]);
+
+    const initialRows = (await sidebarRows(client))
+      .filter((row) => row.id === ALL_PINNED_FIRST_TASK_ID || row.id === ALL_PINNED_SECOND_TASK_ID);
+    expect(initialRows.map((row) => ({ id: row.id, inPinnedZone: row.inPinnedZone }))).toEqual([
+      { id: ALL_PINNED_FIRST_TASK_ID, inPinnedZone: true },
+      { id: ALL_PINNED_SECOND_TASK_ID, inPinnedZone: true },
+    ]);
+
+    await dragSortableTaskToTarget(client, sourceSelector, receiverSelector);
+
+    const unpinnedRow = await waitForTaskRow(
+      client,
+      ALL_PINNED_FIRST_TASK_ID,
+      (current) => current.pinned === 0 && current.pin_order == null && current.parent_task_id == null,
+      "task dropped into the empty receiver to be persisted as unpinned",
+    );
+    expect(unpinnedRow).toMatchObject({
+      pinned: 0,
+      pin_order: null,
+      parent_task_id: null,
+    });
+
+    const remainingPinnedRow = await waitForTaskRow(
+      client,
+      ALL_PINNED_SECOND_TASK_ID,
+      (current) => current.pinned === 1 && current.pin_order === 0,
+      "remaining pinned task order to be persisted",
+    );
+    expect(remainingPinnedRow).toMatchObject({
+      pinned: 1,
+      pin_order: 0,
+      parent_task_id: null,
+    });
+
+    await waitForSidebarRow(
+      client,
+      ALL_PINNED_FIRST_TASK_ID,
+      (current) => !current.inPinnedZone && !current.isSubtask,
+      "dragged task to render in the unpinned area",
+    );
+    const finalRows = (await sidebarRows(client))
+      .filter((row) => row.id === ALL_PINNED_FIRST_TASK_ID || row.id === ALL_PINNED_SECOND_TASK_ID);
+    expect(finalRows.map((row) => ({ id: row.id, inPinnedZone: row.inPinnedZone }))).toEqual([
+      { id: ALL_PINNED_SECOND_TASK_ID, inPinnedZone: true },
+      { id: ALL_PINNED_FIRST_TASK_ID, inPinnedZone: false },
+    ]);
   });
 
   it("removes an existing parent-child relationship from the sidebar", async () => {

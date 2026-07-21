@@ -447,6 +447,12 @@ interface SortableMoveEvent {
 const draggedTaskId = ref<string | null>(null);
 const dropParentId = ref<string | null>(null);
 const suppressParentDrop = ref(false);
+const emptyTaskSlots: SidebarTaskItem[] = [];
+
+function isPinnedTaskDragForRepo(repoId: string): boolean {
+  const dragged = readyTaskByDurableId(draggedTaskId.value);
+  return dragged?.repo_id === repoId && Boolean(dragged.pinned);
+}
 
 function pointerFromEvent(event: Event | undefined | null): { x: number; y: number } | null {
   if (event instanceof MouseEvent) return { x: event.clientX, y: event.clientY };
@@ -737,6 +743,30 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
           <div v-show="sortedPinned(repo.id).length > 0" class="pin-divider">
             <div class="pin-divider-line"></div>
           </div>
+
+          <draggable
+            v-if="sortedPinned(repo.id).length > 0 && groupedByStage(repo.id).length === 0"
+            :model-value="emptyTaskSlots"
+            :group="{ name: `repo-${repo.id}` }"
+            item-key="slot_id"
+            :animation="150"
+            :sort="false"
+            :disabled="isSearchActive()"
+            :move="canMoveTask"
+            :force-fallback="true"
+            ghost-class="sortable-ghost"
+            chosen-class="sortable-chosen"
+            fallback-class="sortable-fallback"
+            class="empty-unpin-zone"
+            :class="{ 'empty-unpin-zone-active': isPinnedTaskDragForRepo(repo.id) }"
+            @change="(evt) => onUnpinnedChange(repo.id, evt)"
+            @start="onTaskDragStart"
+            @end="onTaskDragEnd"
+          >
+            <template #item="{ element }">
+              <div class="task-subtree" :data-task-id="element.task_id"></div>
+            </template>
+          </draggable>
 
           <!-- Stage sections (dynamic) -->
           <template v-for="group in groupedByStage(repo.id)" :key="group.stageName">
@@ -1388,6 +1418,22 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .pin-divider-line {
   height: 1px;
   background: var(--kn-border-strong);
+}
+
+.empty-unpin-zone {
+  min-height: 0;
+  margin: 0 6px;
+  overflow: hidden;
+  border: 0 dashed transparent;
+  border-radius: 4px;
+  transition: border-width 120ms ease, background-color 120ms ease;
+}
+
+.empty-unpin-zone-active {
+  min-height: 28px;
+  border-width: 1px;
+  border-color: var(--kn-border-strong);
+  background: var(--kn-bg-hover);
 }
 
 .section-label {
