@@ -718,7 +718,7 @@
           "FILE:@@//Cargo.mcp.toml a82d2f36a001fabe1851249cbfa04ca2975ebd1d9e049f65af7002954beabfda",
           "FILE:@@//crates/daemon/Cargo.lock 15f8b8602cc7ba66bd03a74228b08bcbbb6a5c4413aae02e41ad82c227dc3f30",
           "FILE:@@//Cargo.daemon.toml 1747e3b1d6e0877d2e344e25605f51571a364df576bef9d5c644dbc29f3374ed",
-          "FILE:@@//crates/kanna-server/Cargo.lock 478aedc8dfbb5d6777573214d0349045fd481c82df99316691c1f91d2c3af953",
+          "FILE:@@//crates/kanna-server/Cargo.lock 886297a88ac3c4da54441493f4c596c777c21d7e0c505b2d13ebce2226d4f4bf",
           "FILE:@@//Cargo.server.toml c5baf27838a8539b6a3481f866c77e82081a18670f9d66147cdcb84af463683b",
           "FILE:@@//crates/task-transfer/Cargo.lock 99cd7c5b47591df6399c8aadf839103faac43d710b6b9f53e2a99f78b13e9575",
           "FILE:@@//Cargo.task-transfer.toml 1e556905abb4ad98bc0aea2f7c5e204edb8788a244117aed5e3a7709345319ca",
