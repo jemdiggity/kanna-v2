@@ -305,6 +305,50 @@ describe("Sidebar", () => {
     expect(wrapper.emitted("reorder-pinned")).toEqual([[repo.id, ["durable-ready"]]]);
   });
 
+  it("shows a connected unpin receiver only while dragging in an all-pinned repository", async () => {
+    const tasks = [
+      item("task-1", {
+        display_name: "First pinned task",
+        pinned: 1,
+        pin_order: 0,
+      }),
+      item("task-2", {
+        display_name: "Second pinned task",
+        pinned: 1,
+        pin_order: 1,
+        created_at: "2026-01-01T00:00:05.000Z",
+      }),
+    ];
+    const wrapper = mountSidebar(tasks, null);
+    const vm = wrapper.vm as {
+      onTaskDragStart(evt: { item?: HTMLElement }): void;
+      onTaskDragEnd(evt: { originalEvent?: Event }): void;
+    };
+
+    expect(wrapper.findAll(".type-zone")).toHaveLength(1);
+    expect(wrapper.get(".empty-unpin-zone").classes()).not.toContain("empty-unpin-zone-active");
+
+    const dragged = document.createElement("div");
+    dragged.dataset.taskId = "task-1";
+    vm.onTaskDragStart({ item: dragged });
+    await nextTick();
+
+    expect(wrapper.get(".empty-unpin-zone").classes()).toContain("empty-unpin-zone-active");
+
+    wrapper.findComponent(".empty-unpin-zone").vm.$emit("change", {
+      added: { element: tasks[0]!, newIndex: 0 },
+    });
+    await nextTick();
+
+    expect(wrapper.emitted("unpin-item")).toEqual([["task-1"]]);
+    expect(wrapper.emitted("reorder-pinned")).toEqual([[repo.id, ["task-2"]]]);
+
+    vm.onTaskDragEnd({ originalEvent: new MouseEvent("mouseup") });
+    await nextTick();
+
+    expect(wrapper.get(".empty-unpin-zone").classes()).not.toContain("empty-unpin-zone-active");
+  });
+
   it("blocks every task mutation while an acknowledged slot is still creating", async () => {
     const pending = creatingItem("create:pending", "durable-pending", {
       display_name: "Pending task",
