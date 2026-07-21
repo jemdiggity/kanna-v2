@@ -68,6 +68,7 @@ const defaultSelectableBaseBranch = computed<string | null>(() => {
   return null;
 });
 const selectedBaseBranch = ref<string | null>(defaultSelectableBaseBranch.value);
+let baseBranchSelectionIsAutomatic = true;
 const showBaseBranchPicker = ref(false);
 const baseBranchQuery = ref("");
 const selectedBaseBranchIndex = ref(0);
@@ -176,9 +177,9 @@ const hasValidBaseBranch = computed(() =>
 );
 
 watch([defaultSelectableBaseBranch, selectableBaseBranches], ([defaultBranch, candidates]) => {
-  if (selectedBaseBranch.value === null || !candidates.includes(selectedBaseBranch.value)) {
-    selectedBaseBranch.value = defaultBranch;
-  }
+  if (!baseBranchSelectionIsAutomatic && candidates.includes(selectedBaseBranch.value ?? "")) return;
+  selectedBaseBranch.value = defaultBranch;
+  baseBranchSelectionIsAutomatic = true;
 }, { immediate: true });
 
 watch(showBaseBranchPicker, async (open) => {
@@ -212,6 +213,7 @@ function handleSubmit() {
 
 function handleBaseBranchSelect(branch: string) {
   selectedBaseBranch.value = branch;
+  baseBranchSelectionIsAutomatic = false;
   showBaseBranchPicker.value = false;
 }
 

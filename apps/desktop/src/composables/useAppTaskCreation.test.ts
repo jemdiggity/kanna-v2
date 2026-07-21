@@ -6,6 +6,7 @@ import {
   setDesktopServerClientHandlersForTests,
   updateDesktopServerClientHandlersForTests,
 } from "../services/desktopServerClient";
+import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -33,6 +34,8 @@ function createTaskCreationHarness() {
   const onAgentChoiceUsed = vi.fn(async () => {});
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
+  const remoteSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
+  const cloudOnlyRepoIds = new Set<string>();
   const toast = { warning: vi.fn(), error: vi.fn() };
   const store = {
     selectedRepoId: "repo-1",
@@ -64,7 +67,7 @@ function createTaskCreationHarness() {
     toast: toast as never,
     t: (key: string) => key,
     sidebarRepos: computed(() => [{ id: "repo-1" }]),
-    remoteSnapshot: computed(() => ({ repos: [], items: [] }) as never),
+    remoteSnapshot: computed(() => remoteSnapshot.value),
     mainPanelIsCloudTask: computed(() => false),
     selectedCloudRepoId,
     selectedCloudItemId,
@@ -75,7 +78,7 @@ function createTaskCreationHarness() {
     defaultBaseBranchName,
     repoDefaultBranchName,
     showAddRepoModal: ref(false),
-    isCloudOnlyRepoId: () => false,
+    isCloudOnlyRepoId: (repoId) => Boolean(repoId && cloudOnlyRepoIds.has(repoId)),
     cloudRepoRemoteUrl: () => null,
     onAgentChoiceUsed,
   });
@@ -92,6 +95,8 @@ function createTaskCreationHarness() {
     onAgentChoiceUsed,
     selectedCloudRepoId,
     selectedCloudItemId,
+    remoteSnapshot,
+    cloudOnlyRepoIds,
     toast,
   };
 }
@@ -163,10 +168,11 @@ describe("useAppTaskCreation", () => {
   });
 
   it("hydrates cached repository options while refreshing them on reopen", async () => {
-    const { creation, availablePipelines, defaultPipelineName, availableBaseBranches } =
+    const { creation, showNewTaskModal, availablePipelines, defaultPipelineName, availableBaseBranches } =
       createTaskCreationHarness();
 
     await creation.openNewTaskModal();
+    showNewTaskModal.value = false;
 
     const definitions = deferred<{
       revision: string;
@@ -221,11 +227,13 @@ describe("useAppTaskCreation", () => {
     const {
       creation,
       store,
+      showNewTaskModal,
       availablePipelines,
       availableBaseBranches,
     } = createTaskCreationHarness();
 
     await creation.openNewTaskModal("repo-1");
+    showNewTaskModal.value = false;
     store.repos.push({ id: "repo-2", path: "/repo-2" });
     updateDesktopServerClientHandlersForTests({
       fetchRepoKannaDefinitions: async () => ({
@@ -243,6 +251,7 @@ describe("useAppTaskCreation", () => {
       return "";
     });
     await creation.openNewTaskModal("repo-2");
+    showNewTaskModal.value = false;
 
     const definitions = deferred<{
       revision: string;
@@ -283,6 +292,63 @@ describe("useAppTaskCreation", () => {
     defaultBranch.resolve("main");
     baseBranches.resolve(["origin/main", "main"]);
     await reopenRepoOne;
+  });
+
+  it("hydrates cached remote branches while refreshing a cloud-only repository", async () => {
+    const {
+      creation,
+      store,
+      showNewTaskModal,
+      availableBaseBranches,
+      defaultBaseBranchName,
+      remoteSnapshot,
+      cloudOnlyRepoIds,
+    } = createTaskCreationHarness();
+    const cloudRepoId = "cloud:repo-cloud";
+    const cloudRepo = {
+      id: cloudRepoId,
+      path: "",
+      name: "repo-cloud",
+      default_branch: "main",
+      remote_url: "git@github.com:kanna/repo-cloud.git",
+      remote_url_hash: null,
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-07-21T00:00:00Z",
+      last_opened_at: "2026-07-21T00:00:00Z",
+    };
+    remoteSnapshot.value = { repos: [cloudRepo], items: [], terminalRefs: {} };
+    cloudOnlyRepoIds.add(cloudRepoId);
+    store.selectedRepoId = cloudRepoId;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "git_list_remote_base_branches") return ["origin/main"];
+      return "";
+    });
+
+    await creation.openNewTaskModal(cloudRepoId);
+    showNewTaskModal.value = false;
+
+    const refreshedBranches = deferred<string[]>();
+    remoteSnapshot.value = {
+      repos: [{ ...cloudRepo, default_branch: "trunk" }],
+      items: [],
+      terminalRefs: {},
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_list_remote_base_branches") return refreshedBranches.promise;
+      return Promise.resolve("");
+    });
+
+    const reopenPromise = creation.openNewTaskModal(cloudRepoId);
+
+    expect(availableBaseBranches.value).toEqual(["origin/main"]);
+    expect(defaultBaseBranchName.value).toBe("origin/main");
+
+    refreshedBranches.resolve(["origin/trunk", "trunk"]);
+    await reopenPromise;
+
+    expect(availableBaseBranches.value).toEqual(["origin/trunk", "trunk"]);
+    expect(defaultBaseBranchName.value).toBe("origin/trunk");
   });
 
   it("discards option results from a superseded repository load", async () => {
