@@ -453,6 +453,7 @@ mod tests {
             saved_at: 0,
             sequence: 0,
             vt: vt.to_string(),
+            status: kanna_daemon::protocol::SessionStatus::Idle,
         }
     }
 

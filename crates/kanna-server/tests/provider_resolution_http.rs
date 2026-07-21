@@ -362,6 +362,9 @@ async fn serve_fake_daemon_connection(
             serde_json::from_str(line.trim()).expect("daemon command should be JSON");
         let response = match &command {
             DaemonCommand::Subscribe => DaemonEvent::Ok,
+            DaemonCommand::List => DaemonEvent::SessionList {
+                sessions: Vec::new(),
+            },
             DaemonCommand::Spawn { session_id, .. }
             | DaemonCommand::SpawnAgent { session_id, .. } => DaemonEvent::SessionCreated {
                 session_id: session_id.clone(),
@@ -376,7 +379,7 @@ async fn serve_fake_daemon_connection(
             .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
             .await
             .expect("daemon response should be written");
-        if !matches!(&command, DaemonCommand::Subscribe) {
+        if !matches!(&command, DaemonCommand::Subscribe | DaemonCommand::List) {
             let _ = commands.send(command);
         }
     }
