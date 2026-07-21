@@ -66,7 +66,7 @@ pub(crate) use stages::{
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum DefinitionLookupError {
     InvalidName(String),
     NotFound(String),
