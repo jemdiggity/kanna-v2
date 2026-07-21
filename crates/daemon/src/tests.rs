@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kanna_daemon::protocol::{self, Event, SessionStatus};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
@@ -17,9 +18,9 @@ use crate::handoff::{
     HandoffRequestError, HandoffSessionV1,
 };
 use crate::output::{
-    classify_output_gap, format_status_observation_log, should_mirror_output_to_recovery,
-    should_rebuild_recovery_session_on_live_terminal_transition, DaemonOutputGapCause,
-    DAEMON_TERMINAL_PERF_STAGES,
+    classify_output_gap, fanout_status_changed, format_status_observation_log,
+    should_mirror_output_to_recovery, should_rebuild_recovery_session_on_live_terminal_transition,
+    DaemonOutputGapCause, DAEMON_TERMINAL_PERF_STAGES,
 };
 use crate::paths::panic_log_path;
 
@@ -251,6 +252,44 @@ async fn connection_drop_cleanup_reports_remaining_effective_terminal_size() {
         remaining_sizes,
         vec![("session-resize".to_string(), 120, 43)]
     );
+}
+
+#[tokio::test]
+async fn live_status_changes_reach_attached_terminal_subscribers() {
+    let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
+    let (client, server) = UnixStream::pair().expect("stream pair");
+    let (_read_half, write_half) = server.into_split();
+    let writer = Arc::new(Mutex::new(write_half));
+    let fanout = session_fanout(&fanouts, "status-session").await;
+    fanout
+        .state
+        .lock()
+        .await
+        .register("status-session", SubscriberKind::Attached, &writer, &[]);
+
+    let event = Event::StatusChanged {
+        session_id: "status-session".to_string(),
+        status: SessionStatus::Waiting,
+        waiting_prompt_snippet: Some("Allow this command?".to_string()),
+    };
+    fanout_status_changed(&fanouts, "status-session", &event).await;
+
+    let (client_read, _client_write) = client.into_split();
+    let mut reader = BufReader::new(client_read);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+        .await
+        .expect("attached terminal should receive status")
+        .expect("read status line");
+    let received: Event = serde_json::from_str(line.trim()).expect("parse status event");
+    assert!(matches!(
+        received,
+        Event::StatusChanged {
+            ref session_id,
+            status: SessionStatus::Waiting,
+            ..
+        } if session_id == "status-session"
+    ));
 }
 
 #[test]

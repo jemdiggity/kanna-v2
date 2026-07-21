@@ -223,7 +223,6 @@ export interface StoreServices {
     sessionId: string,
     options?: TaskSessionRecoveryOptions,
   ) => Promise<void>;
-  syncTaskStatusesFromDaemon?: () => Promise<void>;
   applyTaskRuntimeStatus?: (item: PipelineItem, status: string) => Promise<void>;
   waitForSessionExit?: (sessionId: string) => Promise<void>;
   resolveSessionExitWaiters?: (sessionId: string) => void;

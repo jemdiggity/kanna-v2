@@ -416,21 +416,6 @@ export function createInitApi(
       const focusedSelection = resolveFocusedSelectionBeforeExternalRefresh();
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await preserveFocusedTaskAfterExternalRefresh(focusedSelection);
-      await context.services.syncTaskStatusesFromDaemon?.();
-    });
-
-    // Temporary fallback for sessions without a live KSP terminal attachment.
-    // Remove this legacy Tauri listener only when kanna-server can apply runtime
-    // status for unattached sessions while preserving per-window selection.
-    listen("status_changed", async (event: unknown) => {
-      const payload = (event as { payload?: { session_id?: string; status?: string } }).payload ?? (event as { session_id?: string; status?: string });
-      const sessionId = payload.session_id;
-      const status = payload.status;
-      if (!sessionId || typeof status !== "string") return;
-
-      const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
-      if (!item) return;
-      await requireService(context.services.applyTaskRuntimeStatus as ((item: PipelineItem, status: string) => Promise<void>) | undefined, "applyTaskRuntimeStatus")(item, status);
     });
 
     listen("session_exit", async (event: unknown) => {
@@ -485,7 +470,6 @@ export function createInitApi(
 
     listen("daemon_ready", async () => {
       markDaemonReadyObserved();
-      await requireService(context.services.syncTaskStatusesFromDaemon, "syncTaskStatusesFromDaemon")();
     });
 
   }

@@ -190,6 +190,7 @@ vi.mock("../perf/taskSwitchPerf", () => ({
 
 vi.mock("./terminalRuntimeStatusSink", () => ({
   forwardTerminalRuntimeStatus: (...args: unknown[]) => forwardTerminalRuntimeStatusMock(...args),
+  subscribeTerminalRuntimeStatus: vi.fn(() => () => {}),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

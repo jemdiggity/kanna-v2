@@ -63,13 +63,10 @@ const mockState = vi.hoisted(() => {
   let repos = [makeRepo()];
   let pipelineItems = [makeItem()];
   let worktreeRows: Array<{ pipeline_item_id: string; path: string; branch: string }> = [];
-  let sessionStatuses: Array<{ session_id: string; status: string }> = [];
   const listeners = new Map<string, Array<(event: unknown) => void>>();
 
   const invokeMock = vi.fn(async (command: string) => {
     switch (command) {
-      case "list_sessions":
-        return sessionStatuses;
       case "list_dir":
         return [];
       case "spawn_session":
@@ -130,7 +127,6 @@ const mockState = vi.hoisted(() => {
     repos = [makeRepo()];
     pipelineItems = [makeItem()];
     worktreeRows = [];
-    sessionStatuses = [];
     listeners.clear();
     invokeMock.mockClear();
     listenMock.mockClear();
@@ -157,12 +153,6 @@ const mockState = vi.hoisted(() => {
     },
     set worktreeRows(value: Array<{ pipeline_item_id: string; path: string; branch: string }>) {
       worktreeRows = value;
-    },
-    get sessionStatuses() {
-      return sessionStatuses;
-    },
-    set sessionStatuses(value: Array<{ session_id: string; status: string }>) {
-      sessionStatuses = value;
     },
     invokeMock,
     listenMock,
@@ -462,28 +452,18 @@ describe("kanna runtime status reconciliation", () => {
     mockState.putTaskAgentSessionMock.mockClear();
   });
 
-  it("reconciles a selected task to idle from a direct daemon status change", async () => {
-    const store = await createStore();
-    await store.selectRepo("repo-1");
-    await store.selectItem("task-1");
+  it("does not register or poll the removed legacy runtime-status path", async () => {
+    await createStore();
+
+    expect(mockState.listenMock).not.toHaveBeenCalledWith(
+      "status_changed",
+      expect.any(Function),
+    );
+    mockState.invokeMock.mockClear();
+    mockState.emit("daemon_ready", {});
+    mockState.emit("session_created", { session_id: "task-1" });
     await flushStore();
-    mockState.pipelineItems[0]!.activity = "working";
-
-    mockState.emit("status_changed", {
-      session_id: "task-1",
-      status: "waiting",
-    });
-
-    await flushStore();
-
-    await vi.waitFor(() => {
-      expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-        expect.anything(),
-        "task-1",
-        "idle",
-      );
-    });
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("list_sessions");
   });
 
   it("reconciles KSP terminal busy status to working", async () => {
@@ -573,52 +553,6 @@ describe("kanna runtime status reconciliation", () => {
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
-  it("applies duplicate KSP and legacy status delivery only once", async () => {
-    await createStore();
-    mockState.pipelineItems[0]!.activity = "idle";
-    const snapshotCallsBeforeStatus = mockState.fetchSnapshotMock.mock.calls.length;
-
-    await forwardTerminalRuntimeStatus("task-1", "busy");
-    await flushStore();
-    mockState.emit("status_changed", {
-      session_id: "task-1",
-      status: "busy",
-    });
-    await flushStore();
-
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledTimes(1);
-    expect(mockState.fetchSnapshotMock.mock.calls.length - snapshotCallsBeforeStatus).toBe(1);
-    expect(mockState.pipelineItems[0]?.activity).toBe("working");
-  });
-
-  it("ignores daemon status changes for closed tasks", async () => {
-    mockState.pipelineItems = [
-      {
-        ...mockState.pipelineItems[0]!,
-        stage: "done",
-        closed_at: "2026-06-06 05:38:31",
-        activity: "idle",
-      },
-    ];
-
-    await createStore();
-    await flushStore();
-
-    mockState.emit("status_changed", {
-      session_id: "task-1",
-      status: "busy",
-    });
-
-    await flushStore();
-
-    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "working",
-    );
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
-  });
-
   it("reconciles busy status from a forked workspace branch to the durable task", async () => {
     mockState.pipelineItems = [
       {
@@ -634,10 +568,7 @@ describe("kanna runtime status reconciliation", () => {
     await createStore();
     await flushStore();
 
-    mockState.emit("status_changed", {
-      session_id: "task-5aa7c7ec-7",
-      status: "busy",
-    });
+    await forwardTerminalRuntimeStatus("task-5aa7c7ec-7", "busy");
 
     await flushStore();
 
@@ -646,72 +577,6 @@ describe("kanna runtime status reconciliation", () => {
       "5aa7c7ec",
       "working",
     );
-    expect(mockState.pipelineItems[0]?.activity).toBe("working");
-  });
-
-  it("syncs daemon status from a forked workspace branch to the durable task", async () => {
-    mockState.pipelineItems = [
-      {
-        ...mockState.pipelineItems[0]!,
-        id: "5aa7c7ec",
-        branch: "task-5aa7c7ec-7",
-        stage: "pr",
-        agent_provider: "codex",
-        activity: "idle",
-      },
-    ];
-    mockState.sessionStatuses = [{ session_id: "task-5aa7c7ec-7", status: "busy" }];
-
-    await createStore();
-    await flushStore();
-
-    mockState.emit("daemon_ready", {});
-    await flushStore();
-
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "5aa7c7ec",
-      "working",
-    );
-    expect(mockState.pipelineItems[0]?.activity).toBe("working");
-  });
-
-  it("syncs daemon status after an externally-created task first appears on session_created", async () => {
-    mockState.pipelineItems = [];
-    mockState.sessionStatuses = [{ session_id: "task-a4f9a008-3", status: "busy" }];
-
-    await createStore();
-    await flushStore();
-
-    mockState.emit("status_changed", {
-      session_id: "task-a4f9a008-3",
-      status: "busy",
-    });
-    await flushStore();
-
-    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
-
-    mockState.pipelineItems = [
-      mockState.makeItem({
-        id: "a4f9a008",
-        repo_id: "repo-1",
-        branch: "task-a4f9a008-3",
-        agent_provider: "codex",
-        activity: "idle",
-      }),
-    ];
-
-    mockState.emit("session_created", {
-      session_id: "task-a4f9a008-3",
-    });
-
-    await vi.waitFor(() => {
-      expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-        expect.anything(),
-        "a4f9a008",
-        "working",
-      );
-    });
     expect(mockState.pipelineItems[0]?.activity).toBe("working");
   });
 
@@ -879,33 +744,6 @@ describe("kanna runtime status reconciliation", () => {
       "unread",
     );
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
-  });
-
-  it("does not poll all daemon sessions for ordinary terminal output", async () => {
-    const store = await createStore();
-    await store.selectRepo("repo-1");
-    await store.selectItem("task-1");
-    await flushStore();
-    mockState.invokeMock.mockClear();
-    mockState.pipelineItems[0]!.activity = "idle";
-    mockState.updatePipelineItemActivityMock.mockClear();
-
-    mockState.sessionStatuses = [{ session_id: "task-1", status: "waiting" }];
-
-    mockState.emit("terminal_output", {
-      session_id: "task-1",
-      data_b64: "AA==",
-    });
-
-    await vi.advanceTimersByTimeAsync(1000);
-    await flushStore();
-
-    expect(mockState.invokeMock).not.toHaveBeenCalledWith("list_sessions");
-    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "idle",
-    );
   });
 
   it("persists codex resume session ids through the server client from the frontend session_exit path", async () => {

@@ -19,6 +19,7 @@ pub struct AppState {
     #[cfg(debug_assertions)]
     pub(super) e2e_lan_http_enabled: Arc<AtomicBool>,
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
+    pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_creation_flights: Arc<StdMutex<HashSet<String>>>,
     state_changes: broadcast::Sender<ServerFrame>,
@@ -137,6 +138,10 @@ impl AppState {
         self.session_replacements.clone()
     }
 
+    pub(crate) fn terminal_attachments(&self) -> crate::terminal_attachments::TerminalAttachments {
+        self.terminal_attachments.clone()
+    }
+
     pub fn new(config: Config) -> Self {
         if let Err(err) = pairing::PairingStore::load(Path::new(&config.pairing_store_path)) {
             log::warn!(
@@ -152,6 +157,7 @@ impl AppState {
             #[cfg(debug_assertions)]
             e2e_lan_http_enabled: Arc::new(AtomicBool::new(true)),
             session_replacements: crate::session_replacements::SessionReplacements::default(),
+            terminal_attachments: crate::terminal_attachments::TerminalAttachments::default(),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_creation_flights: Arc::new(StdMutex::new(HashSet::new())),
             state_changes: broadcast::channel(256).0,

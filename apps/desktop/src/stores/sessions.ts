@@ -2,7 +2,6 @@ import type { AgentProvider, PipelineItem } from "../types/kanna";
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
-import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv } from "./kannaCliEnv";
@@ -23,11 +22,6 @@ import { fetchRepoConfig, requireService, type AgentSpawnRecoveryOptions, type P
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { applyDesktopTaskRuntimeStatus, putDesktopTaskAgentSession } from "../services/desktopServerClient";
 
-interface DaemonSessionInfo {
-  session_id?: string;
-  status?: string;
-}
-
 const CODEX_SPAWN_SUBMIT_DELAY_MS = 5_000;
 
 function delay(ms: number): Promise<void> {
@@ -36,7 +30,6 @@ function delay(ms: number): Promise<void> {
 
 export interface SessionsApi {
   applyTaskRuntimeStatus: (item: PipelineItem, status: string) => Promise<void>;
-  syncTaskStatusesFromDaemon: () => Promise<void>;
   isAgentProviderAvailable: (provider: AgentProvider) => Promise<boolean>;
   getAgentProviderAvailability: () => Promise<AgentProviderAvailability>;
   waitForSessionExit: (sessionId: string) => Promise<void>;
@@ -127,27 +120,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await context.services.windowWorkspace?.invalidateSharedData("taskActivity");
-    }
-  }
-
-  async function syncTaskStatusesFromDaemon() {
-    if (!isTauri) return;
-
-    // Temporary fallback for sessions without a live KSP terminal attachment.
-    // Remove this poll only when kanna-server can apply runtime status for
-    // unattached sessions while preserving per-window selection.
-    try {
-      const sessions = await invoke<DaemonSessionInfo[]>("list_sessions");
-      for (const session of sessions) {
-        const sessionId = session.session_id;
-        const status = session.status;
-        if (!sessionId || !status) continue;
-        const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
-        if (!item) continue;
-        await applyTaskRuntimeStatus(item, status);
-      }
-    } catch (error) {
-      console.error("[store] failed to sync task statuses from daemon:", error);
     }
   }
 
@@ -484,7 +456,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         data: encodeDaemonInput("\r"),
       });
     }
-    await syncTaskStatusesFromDaemon();
   }
 
   async function recoverTaskSession(
@@ -536,7 +507,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         maxBudgetUsd: spawnOptions.maxBudgetUsd ?? null,
         executable: null,
       });
-      await syncTaskStatusesFromDaemon();
       return;
     }
 
@@ -550,7 +520,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
   return {
     applyTaskRuntimeStatus,
-    syncTaskStatusesFromDaemon,
     isAgentProviderAvailable,
     getAgentProviderAvailability,
     waitForSessionExit,

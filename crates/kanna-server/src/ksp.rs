@@ -933,6 +933,7 @@ impl StreamConn {
     async fn shutdown(&mut self) {
         for ((task_id, kind), task) in self.attachments.drain() {
             task.abort();
+            let _ = task.await;
             if kind == StreamKind::Companion {
                 self.companion_tx.invalidate(&task_id);
             }
@@ -1262,6 +1263,7 @@ impl StreamConn {
             ClientFrame::Detach { task_id, kind } => {
                 if let Some(task) = self.attachments.remove(&(task_id.clone(), kind)) {
                     task.abort();
+                    let _ = task.await;
                 }
                 if kind == StreamKind::Terminal {
                     if let Some(control) = self.terminal_controls.remove(&task_id) {
@@ -1388,6 +1390,7 @@ impl StreamConn {
         // Replace any existing attachment for this (task, kind).
         if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
             existing.abort();
+            let _ = existing.await;
         }
         if kind == StreamKind::Companion {
             let key = (task_id.clone(), kind);
@@ -1423,6 +1426,7 @@ impl StreamConn {
         // Replace any existing attachment for this (task, kind).
         if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
             existing.abort();
+            let _ = existing.await;
         }
 
         let frame_tx = self.frame_tx.clone();
@@ -1433,7 +1437,11 @@ impl StreamConn {
                 daemon_dir, task_id, session_id, from_seq, frame_tx,
             )),
             StreamKind::Terminal => {
-                tokio::spawn(stream_terminal(daemon_dir, task_id, session_id, frame_tx))
+                let lease = self.state.terminal_attachments().attach(session_id.clone());
+                tokio::spawn(async move {
+                    let _lease = lease;
+                    stream_terminal(daemon_dir, task_id, session_id, frame_tx).await;
+                })
             }
             StreamKind::Companion => unreachable!("companion attach handled above"),
         };

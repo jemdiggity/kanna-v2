@@ -2,8 +2,8 @@ import type { Ref } from "vue"
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 import type { StreamClient } from "@kanna/stream-client"
-import { listen } from "../listen"
 import { nextFrameOrTimeout } from "../utils/animationFrame"
+import { subscribeTerminalRuntimeStatus } from "./terminalRuntimeStatusSink"
 import {
   getReconnectRedrawPolicy,
   getReconnectResizeDelayMs,
@@ -74,19 +74,10 @@ export function createTerminalLayoutController(params: {
         finish(policy.settleDelayMs)
       }
 
-      listen("status_changed", (event) => {
-        const payload = event.payload || event
-        if (payload?.session_id === params.sessionId && payload?.status === policy.waitForIdleStatus) {
+      stopListening = subscribeTerminalRuntimeStatus(params.sessionId, (status) => {
+        if (status === policy.waitForIdleStatus) {
           completeFromIdle()
         }
-      }).then((unlisten) => {
-        stopListening = unlisten
-        if (settled) {
-          stopListening()
-        }
-      }).catch(() => {
-        clearTimeout(fallback)
-        finish(0)
       })
     })
   }

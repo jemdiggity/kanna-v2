@@ -21,7 +21,7 @@ pub(super) struct TaskActivityResponse {
     activity: Option<String>,
 }
 
-fn activity_for_runtime_status(
+pub(crate) fn activity_for_runtime_status(
     current_activity: Option<&str>,
     status: &str,
     selected: bool,
