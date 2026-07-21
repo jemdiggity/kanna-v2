@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod build_support;
+
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/jemdiggity/ghostty.git";
 const GHOSTTY_COMMIT: &str = "665a03f380204ce1976941d36649963b4da80880";
@@ -23,6 +25,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_support.rs");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let target = env::var("TARGET").expect("TARGET must be set");
@@ -101,6 +104,8 @@ fn main() {
         println!("cargo:rustc-link-lib=c++");
         println!("cargo:rustc-link-lib=c++abi");
     }
+    build_support::remove_unused_dynamic_library_symlinks(&out_dir)
+        .expect("failed to remove unused libghostty dynamic-library aliases");
     println!("cargo:include={}", include_dir.display());
 }
 

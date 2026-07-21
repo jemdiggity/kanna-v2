@@ -355,6 +355,7 @@ it.skipIf(
     join(repo, "src", "main.rs"),
     'fn main() { println!("real pinned Kanache acceptance"); }\n'
   );
+  await run("cargo", ["generate-lockfile"], { cwd: repo });
   await run("git", ["add", "."], { cwd: repo });
   await run("git", ["commit", "-m", "acceptance fixture"], { cwd: repo });
   const head = await run("git", ["rev-parse", "HEAD"], { cwd: repo });

@@ -32,10 +32,10 @@ export function parseRustCacheMode(value: string | undefined): {
   warning?: string;
 } {
   const normalized = value?.trim().toLowerCase();
-  if (normalized === "on" || normalized === "kanache") {
+  if (!normalized || normalized === "on" || normalized === "kanache") {
     return { enabled: true };
   }
-  if (!normalized || normalized === "off") return { enabled: false };
+  if (normalized === "off") return { enabled: false };
   return {
     enabled: false,
     warning: `Unknown KANNA_RUST_CACHE value ${JSON.stringify(value)}; cache disabled.`

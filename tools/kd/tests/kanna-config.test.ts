@@ -6,8 +6,8 @@ describe("Kanna repository cache defaults", () => {
   const root = resolve(import.meta.dirname, "../../..");
   const config = JSON.parse(readFileSync(resolve(root, ".kanna/config.json"), "utf8"));
 
-  it("keeps Kanache out of default Kanna-managed worktree setup", () => {
-    expect(config.setup).toEqual(["pnpm install", "./kd env sync"]);
+  it("warms Kanache after environment sync in every Kanna-managed worktree", () => {
+    expect(config.setup).toEqual(["pnpm install", "./kd env sync", "./kd rust-cache warm"]);
   });
 
   it("keeps teardown on private workspace cleanup", () => {

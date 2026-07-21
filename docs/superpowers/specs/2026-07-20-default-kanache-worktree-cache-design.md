@@ -1,26 +1,26 @@
-# Opt-in Kanache worktree cache technical spike
+# Default-on Kanache worktree cache
 
-**Status:** Experimental, default-off. No-go for productization until a
-representative Kanna-scale canary passes the gates below.
+**Status:** Enabled by default for local macOS development after the
+representative Kanna-scale canary passed the rollout gates below. CI,
+non-macOS environments, and release builds remain excluded.
 
 ## Decision
 
 Kanna keeps Cargo's mutable `build-dir` private to each checkout. The former
-shared directory produced silent stale `.rmeta` reuse, so this experiment must
+shared directory produced silent stale `.rmeta` reuse, so this cache must
 never restore a shared Cargo path. Final target artifacts, sidecars, and Tauri
 `externalBin` staging also remain private to the build that produced them.
 
-The pinned Kanache revision remains available as a development proof of
-concept, but Kanna does not invoke it during normal worktree setup. An unset or
-blank `KANNA_RUST_CACHE`, and the explicit value `off`, disable bootstrap,
-warming, and donor recording. A developer must set `KANNA_RUST_CACHE=on` or
-`KANNA_RUST_CACHE=kanache` for each opt-in command or shell.
+The pinned Kanache revision is a development-only accelerator. Local macOS
+commands enable it when `KANNA_RUST_CACHE` is unset, blank, `on`, or `kanache`.
+Kanna-managed setup warms a fresh worktree after environment sync. The explicit
+value `KANNA_RUST_CACHE=off` disables bootstrap, warming, and donor recording
+as an immediate rollback.
 
-This reverses the earlier default-on proposal. The upstream revision describes
-itself as a technical spike, did not have a representative Kanna tree, and
-recommends no-go pending Kanna-scale evidence. The fake-tool integration suite
-proves Kanna's orchestration boundaries; it does not establish the physical
-size or build-time benefit required for rollout.
+The default-on decision follows a representative Kanna canary, not only the
+fake-tool integration suite. The canary exposed retained Ghostty dynamic-library
+symlinks that Kanache correctly refused; Kanna now removes those unused aliases
+after the static Ghostty build while preserving the linked static library.
 
 Release architecture is unchanged. Bazel remains the only release build path
 and never installs or executes Kanache.
@@ -29,11 +29,11 @@ and never installs or executes Kanache.
 
 Kanache is eligible only when all three conditions hold:
 
-1. `KANNA_RUST_CACHE` is explicitly `on` or `kanache`;
+1. `KANNA_RUST_CACHE` is unset, blank, `on`, or `kanache`;
 2. the runtime platform is macOS (`darwin`);
 3. `CI` is unset or blank.
 
-Any nonblank `CI` value disables the experiment, including values such as
+Any nonblank `CI` value disables the cache, including values such as
 `false`, because presence is the portable signal used by CI providers. A CI
 invocation returns the observable category `disabled-in-ci`; a non-macOS
 invocation returns `unsupported-platform`. Neither environment may bootstrap
@@ -45,20 +45,20 @@ record, and status paths. Production defaults platform and environment inputs
 from the current process. Unit tests inject both values instead of mutating
 `process.platform` or depending on the host runner. The required matrix is:
 
-| Platform | `CI` | Opt-in | Result |
+| Platform | `CI` | Mode | Result |
 | --- | --- | --- | --- |
-| `darwin` | unset/blank | `on` or `kanache` | eligible |
-| `darwin` | nonblank | `on` or `kanache` | `disabled-in-ci` |
-| non-`darwin` | any | `on` or `kanache` | `unsupported-platform` |
-| any | any | unset, blank, `off`, or unknown | disabled or `invalid-mode` |
+| `darwin` | unset/blank | unset, blank, `on`, or `kanache` | eligible |
+| `darwin` | nonblank | unset, blank, `on`, or `kanache` | `disabled-in-ci` |
+| non-`darwin` | any | unset, blank, `on`, or `kanache` | `unsupported-platform` |
+| any | any | `off` or unknown | disabled or `invalid-mode` |
 
 Mode validation runs first, followed by platform and CI eligibility. This
-keeps default-off behavior and invalid-value warnings stable while making the
+keeps explicit rollback and invalid-value warnings stable while making the
 macOS-only tests deterministic on Linux CI.
 
 ## Scope and invariants
 
-The experiment may:
+The cache may:
 
 - clone compatible Cargo intermediates from a clean, exact-`HEAD` worktree;
 - publish them into an absent, destination-private `.build/cargo-build`;
@@ -75,7 +75,7 @@ It must not:
 - source final binaries or Tauri staging inputs from another worktree;
 - become a release, signing, packaging, or app runtime dependency.
 
-## Pinned tool and opt-in surface
+## Pinned tool and command surface
 
 The only accepted upstream is:
 
@@ -95,17 +95,17 @@ Installation uses a process-private temporary root, verifies `kanache
 floating ref or an arbitrary executable from `PATH`. A bootstrap failure is a
 cache miss and cannot fail the underlying build.
 
-The public experiment surface is:
+The public development surface is:
 
 ```bash
-KANNA_RUST_CACHE=on ./kd rust-cache warm
-KANNA_RUST_CACHE=on ./kd rust-cache status
-KANNA_RUST_CACHE=on ./kd build sidecars
-KANNA_RUST_CACHE=on ./kd test rust
+./kd rust-cache warm
+./kd rust-cache status
+./kd build sidecars
+./kd test rust
 ```
 
-`.kanna/config.json` runs only `pnpm install` and `./kd env sync`; it does not
-warm a new worktree. `rust-cache warm` is idempotent. An existing
+`.kanna/config.json` runs `./kd rust-cache warm` after `pnpm install` and
+`./kd env sync`. `rust-cache warm` is idempotent. An existing
 `.build/cargo-build` produces `destination-exists` and remains untouched.
 
 ## Donor discovery and publication
@@ -143,7 +143,7 @@ Kanna development layouts are:
 Before a supported bounded workflow starts Cargo, `kd` removes and directory-
 syncs `.build/cargo-build/.kanache-success` independently of whether Kanache is
 installed or enabled. Failure to revoke the marker prevents the Cargo mutation.
-Opt-in mode then runs `kanache manifest begin`. Only a clean, successful bounded
+Eligible mode then runs `kanache manifest begin`. Only a clean, successful bounded
 workflow may run `manifest record` and create a new marker.
 
 The complete interval uses a repository-local cross-process lock. The lock
@@ -162,10 +162,10 @@ owner may be recovered.
 
 Direct `cargo`, `pnpm exec tauri`, and other ad hoc Cargo invocations are not
 donor-producing workflows. If a checkout was previously recorded while the
-experiment was enabled, remove its `.kanache-success` marker before any direct
+cache was enabled, remove its `.kanache-success` marker before any direct
 Cargo mutation. Such commands may consume a private warmed tree, but they must
-not leave it advertised as a supported donor. Normal default-off checkouts do
-not create these markers.
+not leave it advertised as a supported donor. Checkouts with
+`KANNA_RUST_CACHE=off` do not create these markers.
 
 ## Failure and observability
 
@@ -219,8 +219,7 @@ the real smoke covers the external tool boundary when explicitly requested.
 
 ## Representative Kanna-scale canary
 
-Neither automated suite proves product viability. Before any default-on change,
-run a manual canary with:
+The default-on rollout used a manual canary with:
 
 - macOS on APFS;
 - Kanna's pinned Rust/Cargo toolchain;
@@ -257,6 +256,20 @@ Capture a same-batch cold control and the warmed sibling. The rollout gates are:
 
 Record logical size/file count, physical allocation delta, warm wall time,
 first sidecar and host build time, Cargo rebuilt/fresh units, and every
-invalidation result. Until committed representative evidence passes every
-gate, Kanache remains default-off. Missing a gate is a no-go, not a reason to
-weaken Cargo isolation or enable the experiment optimistically.
+invalidation result.
+
+The 2026-07-21 canary used a 9.6 GiB logical Kanna donor at exact commit
+`b46222be`. A fresh relocated worktree warmed in 5.69 seconds; the measured
+physical allocation delta was approximately 578 MB, below the 1 GiB gate. Its
+sidecar build completed in 76.79 seconds, retained no symlinks in the Cargo
+intermediate tree, and produced six staged binaries with inodes distinct from
+their private build outputs. The source/build-script change rebuilt Ghostty.
+Kanna's real and fake integration suites cover refusal, locking, publication,
+relocation, donor removal, and final-binary privacy; the pinned Kanache manifest
+validation remains authoritative for Cargo lockfile, feature, flag, target, and
+toolchain invalidation.
+
+These measurements establish the initial rollout, not permission to weaken the
+isolation model. A future regression in any gate is a reason to set
+`KANNA_RUST_CACHE=off` or revert the default, never to share Cargo's mutable
+build directory or final artifacts.
