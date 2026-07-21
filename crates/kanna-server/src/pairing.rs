@@ -12,6 +12,11 @@ pub const MAX_FAILED_CLAIMS: u8 = 5;
 pub struct TrustedDevice {
     pub device_id: String,
     pub device_name: String,
+    /// SHA-256 hex digest of the device secret issued at claim time. Absent
+    /// for devices paired before secrets existed; those devices cannot
+    /// authenticate LAN requests until they re-pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_hash: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -50,6 +55,9 @@ pub struct PairingClaimRequest {
 pub struct PairingClaimResponse {
     pub desktop_id: String,
     pub desktop_name: String,
+    /// One-time plaintext device secret. Only the hash is persisted; the
+    /// mobile app must store this to authenticate LAN requests.
+    pub device_secret: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +129,13 @@ impl PairingStore {
         })
     }
 
-    pub fn add_trusted_device(&mut self, desktop_id: &str, device_id: &str, name: &str) {
+    pub fn add_trusted_device(
+        &mut self,
+        desktop_id: &str,
+        device_id: &str,
+        name: &str,
+        secret_hash: &str,
+    ) {
         let devices = self
             .trusted_devices
             .entry(desktop_id.to_string())
@@ -131,12 +145,39 @@ impl PairingStore {
             .find(|device| device.device_id == device_id)
         {
             device.device_name = name.to_string();
+            device.secret_hash = Some(secret_hash.to_string());
         } else {
             devices.push(TrustedDevice {
                 device_id: device_id.to_string(),
                 device_name: name.to_string(),
+                secret_hash: Some(secret_hash.to_string()),
             });
         }
+    }
+
+    /// Validates a device secret presented on a LAN request against the
+    /// stored hash. Devices paired before secrets existed have no hash and
+    /// never verify.
+    pub fn verify_device_secret(
+        &self,
+        desktop_id: &str,
+        device_id: &str,
+        device_secret: &str,
+    ) -> bool {
+        let Some(devices) = self.trusted_devices.get(desktop_id) else {
+            return false;
+        };
+        let Some(stored_hash) = devices
+            .iter()
+            .find(|device| device.device_id == device_id)
+            .and_then(|device| device.secret_hash.as_deref())
+        else {
+            return false;
+        };
+        constant_time_eq(
+            stored_hash.as_bytes(),
+            hash_device_secret(device_secret).as_bytes(),
+        )
     }
 
     #[cfg(test)]
@@ -146,6 +187,23 @@ impl PairingStore {
             .map(|devices| devices.iter().any(|device| device.device_id == device_id))
             .unwrap_or(false)
     }
+}
+
+pub fn hash_device_secret(device_secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(device_secret.as_bytes());
+    digest.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 #[cfg(test)]
@@ -227,18 +285,36 @@ fn claim_pairing_session_at(
         };
     }
 
+    let device_secret = generate_device_secret().map_err(PairingClaimError::Persistence)?;
     let response = PairingClaimResponse {
         desktop_id: current.session.desktop_id.clone(),
         desktop_name: current.session.desktop_name.clone(),
+        device_secret: device_secret.clone(),
     };
     let store_path = Path::new(&config.pairing_store_path);
     let mut store = PairingStore::load(store_path).map_err(PairingClaimError::Persistence)?;
-    store.add_trusted_device(&response.desktop_id, device_id, device_name);
+    store.add_trusted_device(
+        &response.desktop_id,
+        device_id,
+        device_name,
+        &hash_device_secret(&device_secret),
+    );
     store
         .save(store_path)
         .map_err(PairingClaimError::Persistence)?;
     *active = None;
     Ok(response)
+}
+
+fn generate_device_secret() -> Result<String, String> {
+    use std::io::Read;
+
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("failed to open /dev/urandom: {}", e))?
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("failed to read random bytes: {}", e))?;
+    Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 fn generate_pairing_code() -> Result<String, String> {
@@ -295,10 +371,18 @@ mod tests {
     #[test]
     fn trusted_device_roundtrip_preserves_desktop_binding() {
         let mut store = super::PairingStore::default();
-        store.add_trusted_device("desktop-1", "device-1", "Jeremy's iPhone");
+        store.add_trusted_device(
+            "desktop-1",
+            "device-1",
+            "Jeremy's iPhone",
+            &super::hash_device_secret("secret-1"),
+        );
 
         assert!(store.is_trusted("desktop-1", "device-1"));
         assert!(!store.is_trusted("desktop-2", "device-1"));
+        assert!(store.verify_device_secret("desktop-1", "device-1", "secret-1"));
+        assert!(!store.verify_device_secret("desktop-1", "device-1", "wrong"));
+        assert!(!store.verify_device_secret("desktop-2", "device-1", "secret-1"));
     }
 
     #[test]
@@ -307,11 +391,17 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut store = super::PairingStore::default();
-        store.add_trusted_device("desktop-1", "device-1", "Jeremy's iPhone");
+        store.add_trusted_device(
+            "desktop-1",
+            "device-1",
+            "Jeremy's iPhone",
+            &super::hash_device_secret("secret-1"),
+        );
         store.save(&path).unwrap();
 
         let loaded = super::PairingStore::load(&path).unwrap();
         assert!(loaded.is_trusted("desktop-1", "device-1"));
+        assert!(loaded.verify_device_secret("desktop-1", "device-1", "secret-1"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -380,8 +470,33 @@ mod tests {
 
         assert_eq!(claimed.desktop_id, "desktop-1");
         assert!(active.is_none());
+        assert_eq!(claimed.device_secret.len(), 64);
         let store = super::PairingStore::load(Path::new(&config.pairing_store_path)).unwrap();
         assert!(store.is_trusted("desktop-1", "phone-1"));
+        assert!(store.verify_device_secret("desktop-1", "phone-1", &claimed.device_secret));
+        let raw = std::fs::read_to_string(&config.pairing_store_path).unwrap();
+        assert!(
+            !raw.contains(&claimed.device_secret),
+            "plaintext device secret must never be persisted"
+        );
+    }
+
+    #[test]
+    fn devices_paired_before_secrets_existed_never_verify() {
+        let path = std::env::temp_dir().join("kanna-pairing-legacy-secret-test.json");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            r#"{"trusted_devices":{"desktop-1":[{"device_id":"old-phone","device_name":"Old"}]}}"#,
+        )
+        .unwrap();
+
+        let store = super::PairingStore::load(&path).unwrap();
+        assert!(store.is_trusted("desktop-1", "old-phone"));
+        assert!(!store.verify_device_secret("desktop-1", "old-phone", ""));
+        assert!(!store.verify_device_secret("desktop-1", "old-phone", "anything"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -12,7 +12,12 @@ import {
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import { LoadingText } from "../components/LoadingText";
-import type { TaskFileContent, TaskSummary } from "../lib/api/types";
+import type {
+  TaskDiffContent,
+  TaskDiffRequest,
+  TaskFileContent,
+  TaskSummary
+} from "../lib/api/types";
 import type {
   TaskCompanionEventStatus,
   TaskCompanionStatus,
@@ -26,6 +31,7 @@ import type {
   PermissionDecision
 } from "@kanna/agent-protocol";
 import { AgentMessageView } from "./AgentMessageView";
+import { TaskDiffPreview } from "./TaskDiffPreview";
 import { TaskFilePreview } from "./TaskFilePreview";
 import { TerminalWebView } from "./TerminalWebView";
 import { showTaskActionMenu, type TaskAction } from "./taskActionMenu";
@@ -76,6 +82,7 @@ interface TaskScreenProps {
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
   onReadTaskFile(path: string): Promise<TaskFileContent>;
+  onReadTaskDiff(request: TaskDiffRequest): Promise<TaskDiffContent>;
   onSendInput(input: string): void;
   onStopAgent(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
@@ -118,6 +125,7 @@ export function TaskScreen({
   onAdvanceTaskStage,
   onCloseTask,
   onReadTaskFile,
+  onReadTaskDiff,
   onSendInput,
   onStopAgent,
   onResolveAgentPermission,
@@ -149,6 +157,7 @@ export function TaskScreen({
   const [companionModalTaskId, setCompanionModalTaskId] = useState<string | null>(
     null
   );
+  const [diffModalTaskId, setDiffModalTaskId] = useState<string | null>(null);
   const companionLifecycleRef = useRef<{
     isOpen: boolean;
     onOpenChange: ((isOpen: boolean) => void) | undefined;
@@ -250,6 +259,9 @@ export function TaskScreen({
   const openTaskActionMenu = () => {
     showTaskActionMenu((action: TaskAction) => {
       switch (action) {
+        case "view-diff":
+          setDiffModalTaskId(task.id);
+          break;
         case "advance-stage":
           onAdvanceTaskStage();
           break;
@@ -283,6 +295,7 @@ export function TaskScreen({
       currentTaskId === task.id ? currentTaskId : null
     );
     setCompanionModalTaskId(null);
+    setDiffModalTaskId(null);
     return () => {
       if (!lifecycle.isOpen) return;
       lifecycle.isOpen = false;
@@ -583,6 +596,12 @@ export function TaskScreen({
           path={activeSelectedFile.path}
           readFile={() => onReadTaskFile(activeSelectedFile.path)}
           onClose={() => setSelectedFile(null)}
+        />
+      ) : null}
+      {diffModalTaskId === task.id ? (
+        <TaskDiffPreview
+          readDiff={(request) => onReadTaskDiff(request)}
+          onClose={() => setDiffModalTaskId(null)}
         />
       ) : null}
       {companionModalTaskId === task.id ? (

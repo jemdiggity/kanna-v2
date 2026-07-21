@@ -2222,6 +2222,274 @@ async fn task_file_route_maps_database_failure_to_internal_server_error() {
     assert!(task_file_response_text(response).await.contains("db error"));
 }
 
+struct TaskDiffRouteFixture {
+    app: axum::Router,
+    state: Arc<AppState>,
+    worktree: PathBuf,
+    db_path: PathBuf,
+    _temp_dir: tempfile::TempDir,
+}
+
+impl TaskDiffRouteFixture {
+    fn new() -> Self {
+        let temp_dir = tempfile::tempdir().expect("create task diff route fixture");
+        let worktree = temp_dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("create diff route fixture worktree");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(&worktree)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(worktree.join("README.md"), "hello\n").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-m", "init"]] {
+            assert!(Command::new("git")
+                .current_dir(&worktree)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let worktree_string = worktree.to_string_lossy().to_string();
+        let repo_path = temp_dir.path().to_string_lossy().to_string();
+        let state = super::test_state_with_seed("desktop-task-diff", "Studio Mac", |db| {
+            db.insert_test_repo_with_path("repo-task-diff", &repo_path, "Task Diff")
+                .unwrap();
+            for task_id in ["task-diff", "task-diff-no-workspace"] {
+                db.insert_test_pipeline_item(
+                    task_id,
+                    "repo-task-diff",
+                    "Diff task changes",
+                    Some("Diff task changes"),
+                    "in progress",
+                    "2026-07-21 10:00:00",
+                )
+                .unwrap();
+            }
+            db.upsert_worktree(
+                "wt-task-diff",
+                "task-diff",
+                &worktree_string,
+                "branch-task-diff",
+            )
+            .unwrap();
+        });
+        let db_path = PathBuf::from(&state.config().db_path);
+        let app = super::router(Arc::clone(&state));
+
+        Self {
+            app,
+            state,
+            worktree,
+            db_path,
+            _temp_dir: temp_dir,
+        }
+    }
+
+    async fn get(&self, task_id: &str, authenticated: bool) -> axum::response::Response {
+        let mut request = Request::get(format!("/v1/tasks/{task_id}/diff"));
+        if !authenticated {
+            request = request.header("origin", "https://attacker.example");
+        }
+        let mut request = request.body(Body::empty()).unwrap();
+        if authenticated {
+            request.extensions_mut().insert(AuthenticatedTaskFileAccess);
+        }
+        self.app.clone().oneshot(request).await.unwrap()
+    }
+
+    async fn get_through_authenticated_relay(
+        &self,
+        task_id: &str,
+    ) -> crate::http_api::HttpInvokeResponse {
+        self.get_through_authenticated_relay_with_query(task_id, "")
+            .await
+    }
+
+    async fn get_through_authenticated_relay_with_query(
+        &self,
+        task_id: &str,
+        query: &str,
+    ) -> crate::http_api::HttpInvokeResponse {
+        crate::http_api::dispatch_authenticated_http_invoke(
+            Arc::clone(&self.state),
+            "GET",
+            &format!("/v1/tasks/{task_id}/diff{query}"),
+            serde_json::Value::Null,
+        )
+        .await
+    }
+
+    fn pair_device(&self, device_id: &str, device_secret: &str) {
+        let store_path = std::path::PathBuf::from(&self.state.config().pairing_store_path);
+        let mut store = crate::pairing::PairingStore::load(&store_path).unwrap();
+        store.add_trusted_device(
+            &self.state.config().desktop_id,
+            device_id,
+            "Kanna Mobile",
+            &crate::pairing::hash_device_secret(device_secret),
+        );
+        store.save(&store_path).unwrap();
+    }
+
+    async fn get_with_device_headers(
+        &self,
+        task_id: &str,
+        device_id: &str,
+        device_secret: &str,
+    ) -> axum::response::Response {
+        let request = Request::get(format!("/v1/tasks/{task_id}/diff"))
+            .header("origin", "http://kanna-mobile.local")
+            .header("x-kanna-device-id", device_id)
+            .header("x-kanna-device-secret", device_secret)
+            .body(Body::empty())
+            .unwrap();
+        self.app.clone().oneshot(request).await.unwrap()
+    }
+}
+
+impl Drop for TaskDiffRouteFixture {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.db_path.as_os_str().to_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(path));
+        }
+    }
+}
+
+#[tokio::test]
+async fn task_diff_route_returns_branch_patch_with_uncommitted_changes() {
+    let fixture = TaskDiffRouteFixture::new();
+    std::fs::write(fixture.worktree.join("README.md"), "hello\nchanged\n").unwrap();
+
+    let response = fixture.get("task-diff", true).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let diff: crate::task_diff::TaskDiff = from_slice(&body).unwrap();
+    assert_eq!(diff.task_id, "task-diff");
+    assert_eq!(diff.base_ref.as_deref(), Some("main"));
+    assert!(diff.patch.contains("+changed"));
+    assert!(!diff.truncated);
+}
+
+#[tokio::test]
+async fn task_diff_route_denies_ordinary_http_requests() {
+    let fixture = TaskDiffRouteFixture::new();
+
+    let response = fixture.get("task-diff", false).await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(task_file_response_text(response)
+        .await
+        .contains("authenticated relay"));
+}
+
+#[tokio::test]
+async fn task_diff_route_allows_authenticated_relay_dispatch() {
+    let fixture = TaskDiffRouteFixture::new();
+    std::fs::write(fixture.worktree.join("README.md"), "hello\nvia relay\n").unwrap();
+
+    let response = fixture.get_through_authenticated_relay("task-diff").await;
+
+    assert_eq!(response.status, StatusCode::OK.as_u16());
+    let body = response.body.expect("diff body");
+    assert_eq!(body["taskId"], "task-diff");
+    assert!(body["patch"]
+        .as_str()
+        .expect("patch string")
+        .contains("+via relay"));
+    assert_eq!(response.error, None);
+}
+
+#[tokio::test]
+async fn task_diff_route_allows_paired_lan_device_with_valid_secret() {
+    let fixture = TaskDiffRouteFixture::new();
+    fixture.pair_device("phone-1", "lan-secret");
+    std::fs::write(fixture.worktree.join("README.md"), "hello\nvia lan\n").unwrap();
+
+    let response = fixture
+        .get_with_device_headers("task-diff", "phone-1", "lan-secret")
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let diff: crate::task_diff::TaskDiff = from_slice(&body).unwrap();
+    assert!(diff.patch.contains("+via lan"));
+}
+
+#[tokio::test]
+async fn task_diff_route_rejects_wrong_or_unpaired_device_secrets() {
+    let fixture = TaskDiffRouteFixture::new();
+    fixture.pair_device("phone-1", "lan-secret");
+
+    let wrong_secret = fixture
+        .get_with_device_headers("task-diff", "phone-1", "not-the-secret")
+        .await;
+    assert_eq!(wrong_secret.status(), StatusCode::UNAUTHORIZED);
+
+    let unknown_device = fixture
+        .get_with_device_headers("task-diff", "phone-2", "lan-secret")
+        .await;
+    assert_eq!(unknown_device.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn task_diff_route_honors_scope_and_mode_query_parameters() {
+    let fixture = TaskDiffRouteFixture::new();
+    std::fs::write(fixture.worktree.join("committed.txt"), "committed\n").unwrap();
+    for args in [
+        vec!["add", "committed.txt"],
+        vec!["commit", "-m", "committed change"],
+    ] {
+        assert!(Command::new("git")
+            .current_dir(&fixture.worktree)
+            .args(&args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(fixture.worktree.join("README.md"), "hello\nunstaged\n").unwrap();
+
+    let response = fixture
+        .get_through_authenticated_relay_with_query("task-diff", "?scope=working&mode=unstaged")
+        .await;
+    assert_eq!(response.status, StatusCode::OK.as_u16());
+    let body = response.body.expect("diff body");
+    let patch = body["patch"].as_str().expect("patch string");
+    assert!(patch.contains("+unstaged"));
+    assert!(!patch.contains("committed.txt"));
+    assert_eq!(body["baseRef"], serde_json::Value::Null);
+
+    let invalid = fixture
+        .get_through_authenticated_relay_with_query("task-diff", "?scope=bogus")
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST.as_u16());
+}
+
+#[tokio::test]
+async fn task_diff_route_maps_missing_task_and_workspace() {
+    let fixture = TaskDiffRouteFixture::new();
+
+    let missing = fixture.get("no-such-task", true).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let no_workspace = fixture.get("task-diff-no-workspace", true).await;
+    assert_eq!(no_workspace.status(), StatusCode::CONFLICT);
+}
+
 #[tokio::test]
 async fn task_logs_route_renders_agent_journal_tail() {
     let task_id = format!(

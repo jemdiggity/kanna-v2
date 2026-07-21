@@ -112,6 +112,13 @@ describe("createKannaClient", () => {
         path: "docs/spec one.md",
         content: "# Spec"
       }),
+      readTaskDiff: vi.fn().mockResolvedValue({
+        taskId: "task-1",
+        baseRef: "main",
+        mergeBase: "abc123",
+        patch: "diff --git a/x b/x",
+        truncated: false
+      }),
       observeTaskTerminal: vi.fn().mockReturnValue({
         close: vi.fn()
       }),
@@ -174,6 +181,11 @@ describe("createKannaClient", () => {
       "task/read",
       "docs/spec one.md"
     );
+    await expect(client.readTaskDiff("task/diff")).resolves.toMatchObject({
+      patch: "diff --git a/x b/x"
+    });
+    expect(transport.readTaskDiff).toHaveBeenCalledOnce();
+    expect(transport.readTaskDiff).toHaveBeenCalledWith("task/diff", undefined);
     expect(typeof client.observeTaskTerminal("task-1", vi.fn()).close).toBe("function");
     expect(typeof client.observeTaskCompanion("task-1", vi.fn()).sendEvent).toBe(
       "function"

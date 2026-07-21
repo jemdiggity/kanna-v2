@@ -6,6 +6,7 @@ use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine
 #[cfg(debug_assertions)]
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::ksp_stream;
+use super::lan_trust::attach_trusted_lan_device;
 use super::operator_events::post_operator_events;
 use super::pairing::{claim_pairing_session, create_pairing_session};
 use super::repo_commands::{list_repo_commands, run_repo_command};
@@ -26,6 +27,7 @@ use super::task_actions::{
 use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
 use super::task_blockers::{block_task, unblock_task};
+use super::task_diff::get_task_diff;
 use super::task_files::get_task_file;
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
@@ -109,6 +111,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_task).put(put_task).patch(update_task),
         )
         .route("/v1/tasks/{task_id}/files/content", get(get_task_file))
+        .route("/v1/tasks/{task_id}/diff", get(get_task_diff))
         .route(
             "/v1/tasks/{task_id}/dependent-tasks-exist",
             get(dependent_tasks_exist),
@@ -215,6 +218,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(log_error_responses))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            attach_trusted_lan_device,
+        ))
         .with_state(state)
 }
 

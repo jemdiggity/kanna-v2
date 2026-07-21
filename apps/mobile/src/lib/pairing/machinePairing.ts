@@ -185,7 +185,10 @@ async function claimCandidate(input: {
     desktopId: claim.desktopId,
     displayName: claim.desktopName,
     lanEndpoints: [{ baseUrl, lastSeenAt }],
-    lastSeenAt
+    lastSeenAt,
+    ...(typeof claim.deviceSecret === "string" && claim.deviceSecret
+      ? { deviceSecret: claim.deviceSecret }
+      : {})
   };
 }
 

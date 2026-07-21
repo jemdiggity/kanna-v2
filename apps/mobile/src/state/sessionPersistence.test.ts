@@ -232,6 +232,32 @@ describe("createSessionPersistence", () => {
     });
   });
 
+  it("round-trips the paired device secret on trusted desktops", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+
+    await persistence.save({
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks",
+      trustedDesktops: [
+        {
+          desktopId: "desktop-e2e",
+          displayName: "E2E Mac",
+          lanEndpoints: [],
+          lastSeenAt: "2026-06-05T00:00:00.000Z",
+          deviceSecret: "persisted-lan-secret"
+        }
+      ]
+    });
+
+    const loaded = await persistence.load();
+    expect(loaded?.trustedDesktops?.[0]?.deviceSecret).toBe(
+      "persisted-lan-secret"
+    );
+  });
+
   it("preserves local repo creation profiles", async () => {
     const storage = createMemoryStorage();
     const persistence = createSessionPersistence(storage);

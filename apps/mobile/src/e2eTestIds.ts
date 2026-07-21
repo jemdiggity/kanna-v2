@@ -36,6 +36,18 @@ export const MOBILE_E2E_IDS = {
   visualCompanionClose: "mobile.visual-companion.close",
   visualCompanionStatus: "mobile.visual-companion.status",
   visualCompanionWebView: "mobile.visual-companion.webview",
+  taskDiffTitle: "mobile.task-diff.title",
+  taskDiffScopeOption(scope: string): string {
+    return `mobile.task-diff.scope.${scope}`;
+  },
+  taskDiffModeOption(mode: string): string {
+    return `mobile.task-diff.mode.${mode}`;
+  },
+  taskDiffBase: "mobile.task-diff.base",
+  taskDiffClose: "mobile.task-diff.close",
+  taskDiffError: "mobile.task-diff.error",
+  taskDiffErrorMessage: "mobile.task-diff.error-message",
+  taskDiffInspection: "mobile.task-diff.inspection",
   taskFilePreviewPath: "mobile.task-file-preview.path",
   taskFilePreviewMode: "mobile.task-file-preview.mode",
   taskFilePreviewClose: "mobile.task-file-preview.close",

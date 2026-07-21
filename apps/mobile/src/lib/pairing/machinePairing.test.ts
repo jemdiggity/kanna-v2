@@ -80,6 +80,31 @@ describe("machine pairing", () => {
     );
   });
 
+  it("stores the issued device secret from the claim response", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
+      desktopId: "desktop-2",
+      desktopName: "Studio Mac",
+      deviceSecret: "issued-lan-secret"
+    }));
+
+    await expect(
+      pairingService(fetchImpl).claimPayload(validPayload)
+    ).resolves.toMatchObject({
+      desktopId: "desktop-2",
+      deviceSecret: "issued-lan-secret"
+    });
+  });
+
+  it("pairs against desktops that predate device secrets without storing one", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
+      desktopId: "desktop-2",
+      desktopName: "Studio Mac"
+    }));
+
+    const record = await pairingService(fetchImpl).claimPayload(validPayload);
+    expect("deviceSecret" in record).toBe(false);
+  });
+
   it("claims a manual code while signed out", async () => {
     const fetchImpl = vi.fn<FetchLike>(async (url) => {
       if (url.includes("10.0.0.2")) {

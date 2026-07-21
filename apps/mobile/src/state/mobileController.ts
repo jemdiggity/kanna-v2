@@ -2,6 +2,8 @@ import type {
   CreateTaskResponse,
   RepoSummary,
   TaskActivity,
+  TaskDiffContent,
+  TaskDiffRequest,
   TaskFileContent,
   TaskSummary
 } from "../lib/api/types";
@@ -63,6 +65,7 @@ export interface MobileController {
   runMergeAgent(taskId: string): Promise<string | null>;
   advanceDesktopTaskStage(taskId: string): Promise<string | null>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
+  readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
   interruptTaskAgent(taskId: string): void;
@@ -2199,6 +2202,10 @@ export function createMobileController(
 
     readTaskFile(taskId, path) {
       return client.readTaskFile(taskId, path);
+    },
+
+    readTaskDiff(taskId, request) {
+      return client.readTaskDiff(taskId, request);
     },
 
     async sendTaskInput(taskId, input) {

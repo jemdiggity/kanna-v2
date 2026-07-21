@@ -321,6 +321,9 @@ describe("createAppModel", () => {
     await expect(
       model.client.readTaskFile("task/read", "docs/spec one.md")
     ).rejects.toThrow(/authenticated relay/i);
+    await expect(model.client.readTaskDiff("task/read")).rejects.toThrow(
+      /authenticated relay/i
+    );
   });
 
   it("uses cloud task index for a signed-in model with relay config", async () => {

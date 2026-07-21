@@ -37,6 +37,9 @@ export interface TrustedDesktopRecord {
   displayName: string;
   lanEndpoints: TrustedDesktopLanEndpoint[];
   lastSeenAt: string;
+  /** LAN credential issued when this machine was paired; absent for
+   * machines paired before device secrets existed. */
+  deviceSecret?: string;
 }
 
 export interface SessionPersistence {
@@ -159,7 +162,10 @@ function parseTrustedDesktops(value: unknown): TrustedDesktopRecord[] {
         lastSeenAt:
           typeof candidate.lastSeenAt === "string"
             ? candidate.lastSeenAt
-            : lanEndpoints[0]?.lastSeenAt ?? new Date(0).toISOString()
+            : lanEndpoints[0]?.lastSeenAt ?? new Date(0).toISOString(),
+        ...(typeof candidate.deviceSecret === "string" && candidate.deviceSecret
+          ? { deviceSecret: candidate.deviceSecret }
+          : {})
       }
     ];
   });

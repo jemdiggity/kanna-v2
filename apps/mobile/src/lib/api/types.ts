@@ -65,6 +65,9 @@ export interface PairingClaimRequest {
 export interface PairingClaimResponse {
   desktopId: string;
   desktopName: string;
+  /** Per-device LAN credential issued at claim time; absent from desktops
+   * that predate device secrets. */
+  deviceSecret?: string;
 }
 
 export interface CreateTaskRequest {
@@ -118,6 +121,26 @@ export interface TaskActivityResponse {
 export interface TaskFileContent {
   path: string;
   content: string;
+}
+
+export type TaskDiffBranchMode = "none" | "staged" | "all";
+export type TaskDiffWorkingMode = "all" | "unstaged" | "staged";
+
+export type TaskDiffRequest =
+  | { scope: "branch"; mode: TaskDiffBranchMode }
+  | { scope: "working"; mode: TaskDiffWorkingMode };
+
+export const DEFAULT_TASK_DIFF_REQUEST: TaskDiffRequest = {
+  scope: "branch",
+  mode: "all"
+};
+
+export interface TaskDiffContent {
+  taskId: string;
+  baseRef: string | null;
+  mergeBase: string | null;
+  patch: string;
+  truncated: boolean;
 }
 
 export interface TaskSummary {

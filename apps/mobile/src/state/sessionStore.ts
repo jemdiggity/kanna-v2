@@ -1329,13 +1329,15 @@ function mergeTrustedDesktop(
 
   const lastSeenAt = [existing.lastSeenAt, incoming.lastSeenAt].sort()[1] ?? incoming.lastSeenAt;
 
+  const deviceSecret = incoming.deviceSecret ?? existing.deviceSecret;
   return {
     desktopId: existing.desktopId,
     displayName: incoming.displayName || existing.displayName,
     lanEndpoints: Array.from(endpointByUrl.values()).sort((left, right) =>
       right.lastSeenAt.localeCompare(left.lastSeenAt)
     ),
-    lastSeenAt
+    lastSeenAt,
+    ...(deviceSecret ? { deviceSecret } : {})
   };
 }
 
