@@ -152,6 +152,7 @@ impl HeadlessTerminal {
                 cursor_visible: self.terminal.is_cursor_visible().unwrap_or(true),
                 saved_at: 0,
                 sequence: 0,
+                status: SessionStatus::Idle,
                 vt,
             },
             used_visible_text_fallback,
@@ -794,6 +795,7 @@ mod tests {
             cursor_visible: true,
             saved_at: 0,
             sequence: 0,
+            status: SessionStatus::Idle,
             vt: "hello".to_string(),
         };
 
@@ -829,6 +831,7 @@ mod tests {
             cursor_visible: true,
             saved_at: 0,
             sequence: 0,
+            status: SessionStatus::Idle,
             vt: "ignored".to_string(),
         };
 

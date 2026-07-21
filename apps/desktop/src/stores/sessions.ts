@@ -133,6 +133,9 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
   async function syncTaskStatusesFromDaemon() {
     if (!isTauri) return;
 
+    // Temporary fallback for sessions without a live KSP terminal attachment.
+    // Remove this poll only when kanna-server can apply runtime status for
+    // unattached sessions while preserving per-window selection.
     try {
       const sessions = await invoke<DaemonSessionInfo[]>("list_sessions");
       for (const session of sessions) {

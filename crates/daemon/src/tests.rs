@@ -33,6 +33,7 @@ fn sample_snapshot() -> protocol::TerminalSnapshot {
         cursor_visible: true,
         saved_at: 0,
         sequence: 0,
+        status: protocol::SessionStatus::Idle,
         vt: "hello".to_string(),
     }
 }

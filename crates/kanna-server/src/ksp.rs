@@ -1848,6 +1848,7 @@ async fn stream_terminal_once(
     match attach_reply {
         Ok(DaemonEvent::Snapshot { snapshot, .. }) => {
             *attached_once = true;
+            let status = snapshot.status;
             let frame = ServerFrame::TermSnapshot {
                 task_id: task_id.to_string(),
                 cols: snapshot.cols,
@@ -1862,6 +1863,16 @@ async fn stream_terminal_once(
             )
             .await
             .is_err()
+            {
+                return StreamRunEnd::Done;
+            }
+            if frame_tx
+                .send(ServerFrame::StatusChanged {
+                    task_id: task_id.to_string(),
+                    status: status_str(status).to_string(),
+                })
+                .await
+                .is_err()
             {
                 return StreamRunEnd::Done;
             }
@@ -1929,6 +1940,22 @@ async fn stream_terminal_once(
                 )
                 .await
                 .is_err()
+                {
+                    return StreamRunEnd::Done;
+                }
+            }
+            Ok(DaemonEvent::StatusChanged {
+                session_id: event_session,
+                status,
+                ..
+            }) if event_session == session_id => {
+                if frame_tx
+                    .send(ServerFrame::StatusChanged {
+                        task_id: task_id.to_string(),
+                        status: status_str(status).to_string(),
+                    })
+                    .await
+                    .is_err()
                 {
                     return StreamRunEnd::Done;
                 }
@@ -2965,6 +2992,7 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
+                    status: SessionStatus::Idle,
                     vt: String::new(),
                 },
             };
@@ -3881,6 +3909,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_stream_forwards_runtime_status() {
+        let unique = format!(
+            "ksp-terminal-status-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let daemon_dir_string = daemon_dir.to_string_lossy().to_string();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir_string);
+        let _ = std::fs::remove_file(&socket_path);
+
+        let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = daemon_listener
+                .accept()
+                .await
+                .expect("accept daemon connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read attach snapshot command");
+            let command: DaemonCommand =
+                serde_json::from_str(line.trim()).expect("parse attach snapshot command");
+            assert!(matches!(
+                command,
+                DaemonCommand::AttachSnapshot { ref session_id, .. }
+                    if session_id == "daemon-terminal-status"
+            ));
+
+            let events = [
+                DaemonEvent::Snapshot {
+                    session_id: "daemon-terminal-status".to_string(),
+                    snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                        version: 1,
+                        rows: 24,
+                        cols: 80,
+                        cursor_row: 0,
+                        cursor_col: 0,
+                        cursor_visible: true,
+                        saved_at: 0,
+                        sequence: 0,
+                        status: SessionStatus::Busy,
+                        vt: "busy snapshot".to_string(),
+                    },
+                },
+                DaemonEvent::StatusChanged {
+                    session_id: "another-session".to_string(),
+                    status: SessionStatus::Idle,
+                    waiting_prompt_snippet: None,
+                },
+                DaemonEvent::StatusChanged {
+                    session_id: "daemon-terminal-status".to_string(),
+                    status: SessionStatus::Waiting,
+                    waiting_prompt_snippet: None,
+                },
+                DaemonEvent::Exit {
+                    session_id: "daemon-terminal-status".to_string(),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+            ];
+            for event in events {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .expect("write daemon event");
+            }
+        });
+
+        let (frame_tx, mut frame_rx) = mpsc::channel(8);
+        let mut attached_once = false;
+        assert!(matches!(
+            stream_terminal_once(
+                &daemon_dir_string,
+                "task-status",
+                "daemon-terminal-status",
+                &mut attached_once,
+                &frame_tx,
+            )
+            .await,
+            StreamRunEnd::Done
+        ));
+
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::TermSnapshot { ref task_id, .. }) if task_id == "task-status"
+        ));
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::StatusChanged { ref task_id, ref status })
+                if task_id == "task-status" && status == "busy"
+        ));
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::StatusChanged { ref task_id, ref status })
+                if task_id == "task-status" && status == "waiting"
+        ));
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::SessionExit { ref task_id, code: 0 }) if task_id == "task-status"
+        ));
+        assert!(
+            frame_rx.try_recv().is_err(),
+            "other-session status was forwarded"
+        );
+
+        daemon.await.expect("fake daemon task failed");
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
     async fn terminal_stream_preserves_snapshot_and_split_multibyte_output_bytes() {
         let unique = format!(
             "ksp-terminal-bytes-{}-{}",
@@ -3932,6 +4080,7 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
+                    status: SessionStatus::Idle,
                     vt: "╭─界─╮\n".to_string(),
                 },
             };
@@ -3956,6 +4105,7 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
+                    status: SessionStatus::Idle,
                     vt: "RESYNCED\n".to_string(),
                 },
             };
@@ -4041,6 +4191,13 @@ mod tests {
                 assert_eq!(decode(data_b64), "╭─界─╮\n".as_bytes());
             }
             other => panic!("expected terminal snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::StatusChanged { task_id, status } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(status, "idle");
+            }
+            other => panic!("expected initial terminal status, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
             ServerFrame::TermOutput { task_id, data_b64 } => {
@@ -4137,6 +4294,7 @@ mod tests {
                             cursor_visible: true,
                             saved_at: 0,
                             sequence: 0,
+                            status: SessionStatus::Idle,
                             vt: vt.to_string(),
                         },
                     },
@@ -4200,6 +4358,10 @@ mod tests {
             other => panic!("expected first snapshot, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
+            ServerFrame::StatusChanged { status, .. } => assert_eq!(status, "idle"),
+            other => panic!("expected first snapshot status, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
             ServerFrame::TermOutput { data_b64, .. } => {
                 assert_eq!(decode(data_b64), b"output 0");
             }
@@ -4213,6 +4375,10 @@ mod tests {
                 assert_eq!(decode(data_b64), b"after restart");
             }
             other => panic!("expected re-attach snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::StatusChanged { status, .. } => assert_eq!(status, "idle"),
+            other => panic!("expected re-attach snapshot status, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
             ServerFrame::TermOutput { data_b64, .. } => {
@@ -4422,6 +4588,7 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
+                    status: SessionStatus::Idle,
                     vt: "shell prompt".to_string(),
                 },
             },

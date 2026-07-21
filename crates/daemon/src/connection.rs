@@ -585,7 +585,9 @@ pub(crate) async fn handle_command(
                         session_id,
                         error
                     );
-                    blank_snapshot(rows, cols)
+                    let mut snapshot = blank_snapshot(rows, cols);
+                    snapshot.status = session.status().await;
+                    snapshot
                 }
             };
             let initial_events = [

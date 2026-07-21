@@ -63,6 +63,8 @@ pub struct TerminalSnapshot {
     pub saved_at: u64,
     #[serde(default = "default_sequence")]
     pub sequence: u64,
+    #[serde(default)]
+    pub status: SessionStatus,
     pub vt: String,
 }
 
@@ -600,6 +602,7 @@ mod tests {
                 cursor_visible: true,
                 saved_at: 0,
                 sequence: 0,
+                status: SessionStatus::Idle,
                 vt: "seeded".to_string(),
             },
         };
@@ -632,6 +635,7 @@ mod tests {
                 cursor_visible: true,
                 saved_at: 123,
                 sequence: 7,
+                status: SessionStatus::Idle,
                 vt: "hello".to_string(),
             },
         };
@@ -680,6 +684,57 @@ mod tests {
     }
 
     #[test]
+    fn terminal_snapshot_status_roundtrips_when_present() {
+        let json = r#"{
+            "type":"Snapshot",
+            "session_id":"sess-1",
+            "snapshot":{
+                "version":1,
+                "rows":24,
+                "cols":80,
+                "cursor_row":10,
+                "cursor_col":5,
+                "status":"busy",
+                "vt":"hello"
+            }
+        }"#;
+
+        let decoded: Event = serde_json::from_str(json).unwrap();
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        match decoded {
+            Event::Snapshot { snapshot, .. } => {
+                assert_eq!(snapshot.status, SessionStatus::Busy);
+                assert_eq!(encoded["snapshot"]["status"], serde_json::json!("busy"));
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn terminal_snapshot_status_defaults_to_idle_when_absent() {
+        let json = r#"{
+            "type":"Snapshot",
+            "session_id":"sess-1",
+            "snapshot":{
+                "version":1,
+                "rows":24,
+                "cols":80,
+                "cursor_row":10,
+                "cursor_col":5,
+                "vt":"hello"
+            }
+        }"#;
+
+        let decoded: Event = serde_json::from_str(json).unwrap();
+        match decoded {
+            Event::Snapshot { snapshot, .. } => {
+                assert_eq!(snapshot.status, SessionStatus::Idle);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_event_snapshot_serialization_includes_recovery_metadata_defaults() {
         let evt = Event::Snapshot {
             session_id: "sess-1".to_string(),
@@ -692,6 +747,7 @@ mod tests {
                 cursor_visible: true,
                 saved_at: 0,
                 sequence: 0,
+                status: SessionStatus::Idle,
                 vt: "hello".to_string(),
             },
         };

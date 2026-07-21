@@ -5,6 +5,7 @@ import { invoke } from "../invoke"
 import { listen } from "../listen"
 import { getAppErrorMessage } from "../appError"
 import { markTaskSwitchFirstOutput } from "../perf/taskSwitchPerf"
+import { forwardTerminalRuntimeStatus } from "./terminalRuntimeStatusSink"
 import {
   attachTerminalOutputPerf,
   type TerminalOutputPerfHandle,
@@ -155,6 +156,11 @@ export function createTerminalSessionLifecycle(params: {
             } else {
               liveTerminal.write(bytes)
             }
+          },
+          onStatus: (status) => {
+            void forwardTerminalRuntimeStatus(params.sessionId, status).catch((error) => {
+              console.error("[terminal] failed to apply runtime status:", error)
+            })
           },
           onSessionExit: (code) => {
             params.state.attached = false

@@ -253,7 +253,9 @@ impl SessionHandle {
         ));
         let snapshot = state.headless_terminal.snapshot();
         serialize_operation.finish();
-        snapshot
+        let mut snapshot = snapshot?;
+        snapshot.status = state.status;
+        Ok(snapshot)
     }
 
     pub async fn rows_cols(&self) -> (u16, u16) {

@@ -5,6 +5,7 @@ import { listen } from "../listen";
 import { getSharedStreamClient } from "../composables/desktopStreamClient";
 import { clearCachedTerminalState } from "../composables/terminalStateCache";
 import { markDaemonReadyObserved } from "../composables/daemonReadyState";
+import { registerTerminalRuntimeStatusSink } from "../composables/terminalRuntimeStatusSink";
 import {
   getTaskIdFromTeardownSessionId,
   isTeardownSessionId,
@@ -241,6 +242,15 @@ export function createInitApi(
 
     await requireService(context.services.loadInitialData, "loadInitialData")();
 
+    registerTerminalRuntimeStatusSink(async (sessionId, status) => {
+      const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
+      if (!item) return;
+      await requireService(
+        context.services.applyTaskRuntimeStatus as ((item: PipelineItem, status: string) => Promise<void>) | undefined,
+        "applyTaskRuntimeStatus",
+      )(item, status);
+    });
+
     let eagerRepos = [...context.state.repos.value];
     let eagerItems = [...context.state.items.value];
     let snapshotBlockers = [...context.state.taskBlockers.value];
@@ -409,6 +419,9 @@ export function createInitApi(
       await context.services.syncTaskStatusesFromDaemon?.();
     });
 
+    // Temporary fallback for sessions without a live KSP terminal attachment.
+    // Remove this legacy Tauri listener only when kanna-server can apply runtime
+    // status for unattached sessions while preserving per-window selection.
     listen("status_changed", async (event: unknown) => {
       const payload = (event as { payload?: { session_id?: string; status?: string } }).payload ?? (event as { session_id?: string; status?: string });
       const sessionId = payload.session_id;

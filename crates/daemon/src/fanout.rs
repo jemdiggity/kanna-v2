@@ -542,6 +542,7 @@ mod tests {
                 cursor_visible: true,
                 saved_at: 0,
                 sequence: 0,
+                status: SessionStatus::Idle,
                 vt: "S".repeat(vt_bytes),
             },
         }

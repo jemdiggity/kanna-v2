@@ -2,6 +2,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
+import { forwardTerminalRuntimeStatus } from "../composables/terminalRuntimeStatusSink";
+import { acknowledgeTaskUiSlot, buildCreatingTaskUiSlot } from "./taskUiSlots";
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-16T00:00:00.000Z";
@@ -108,6 +110,16 @@ const mockState = vi.hoisted(() => {
     item.updated_at = now;
   });
 
+  const fetchSnapshotMock = vi.fn(async () => ({
+    entries: repos.map((repo) => ({
+      repo,
+      items: pipelineItems.filter((item) => item.repo_id === repo.id && item.closed_at === null),
+    })),
+    taskBlockers: [],
+    worktreePaths: {},
+    settings: {},
+  }));
+
   function emit(event: string, payload: unknown): void {
     for (const handler of listeners.get(event) ?? []) {
       handler({ payload });
@@ -123,6 +135,7 @@ const mockState = vi.hoisted(() => {
     invokeMock.mockClear();
     listenMock.mockClear();
     updatePipelineItemActivityMock.mockClear();
+    fetchSnapshotMock.mockClear();
   }
 
   return {
@@ -154,6 +167,7 @@ const mockState = vi.hoisted(() => {
     invokeMock,
     listenMock,
     updatePipelineItemActivityMock,
+    fetchSnapshotMock,
     updateAgentSessionIdMock,
     putTaskAgentSessionMock,
     emit,
@@ -397,15 +411,7 @@ describe("kanna runtime status reconciliation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mockState.reset();
-    setDesktopSnapshotFetcherForTests(async () => ({
-      entries: mockState.repos.map((repo) => ({
-        repo,
-        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id && item.closed_at === null),
-      })),
-      taskBlockers: [],
-      worktreePaths: {},
-      settings: {},
-    }));
+    setDesktopSnapshotFetcherForTests(mockState.fetchSnapshotMock);
     setDesktopServerClientHandlersForTests({
       getSetting: async () => null,
       deleteSetting: async () => {},
@@ -478,6 +484,111 @@ describe("kanna runtime status reconciliation", () => {
       );
     });
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+  });
+
+  it("reconciles KSP terminal busy status to working", async () => {
+    await createStore();
+    mockState.pipelineItems[0]!.activity = "idle";
+
+    await forwardTerminalRuntimeStatus("task-1", "busy");
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "task-1",
+      "working",
+    );
+    expect(mockState.pipelineItems[0]?.activity).toBe("working");
+  });
+
+  it("reconciles KSP terminal idle status to idle when selected", async () => {
+    const store = await createStore();
+    await store.selectRepo("repo-1");
+    await store.selectItem("task-1");
+    await flushStore();
+    mockState.pipelineItems[0]!.activity = "working";
+
+    await forwardTerminalRuntimeStatus("task-1", "idle");
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "task-1",
+      "idle",
+    );
+  });
+
+  it("reconciles KSP terminal idle status to unread when unselected", async () => {
+    await createStore();
+    mockState.pipelineItems[0]!.activity = "working";
+
+    await forwardTerminalRuntimeStatus("task-1", "idle");
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "task-1",
+      "unread",
+    );
+  });
+
+  it("keeps the pending-setup guard on KSP terminal idle status", async () => {
+    const store = await createStore();
+    store.taskUiSlots.splice(
+      0,
+      store.taskUiSlots.length,
+      ...acknowledgeTaskUiSlot(
+        [buildCreatingTaskUiSlot({
+          slotId: "create:task-1",
+          repoId: "repo-1",
+          prompt: "Ship it",
+          agentType: "pty",
+          requestedAgentProviders: "claude",
+        })],
+        "create:task-1",
+        "task-1",
+      ),
+    );
+    mockState.pipelineItems[0]!.activity = "working";
+
+    await forwardTerminalRuntimeStatus("task-1", "idle");
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
+    expect(mockState.pipelineItems[0]?.activity).toBe("working");
+  });
+
+  it("keeps the closed-task guard on KSP terminal status", async () => {
+    mockState.pipelineItems = [{
+      ...mockState.pipelineItems[0]!,
+      closed_at: "2026-06-06 05:38:31",
+      activity: "idle",
+    }];
+    await createStore();
+
+    await forwardTerminalRuntimeStatus("task-1", "busy");
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
+    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+  });
+
+  it("applies duplicate KSP and legacy status delivery only once", async () => {
+    await createStore();
+    mockState.pipelineItems[0]!.activity = "idle";
+    const snapshotCallsBeforeStatus = mockState.fetchSnapshotMock.mock.calls.length;
+
+    await forwardTerminalRuntimeStatus("task-1", "busy");
+    await flushStore();
+    mockState.emit("status_changed", {
+      session_id: "task-1",
+      status: "busy",
+    });
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledTimes(1);
+    expect(mockState.fetchSnapshotMock.mock.calls.length - snapshotCallsBeforeStatus).toBe(1);
+    expect(mockState.pipelineItems[0]?.activity).toBe("working");
   });
 
   it("ignores daemon status changes for closed tasks", async () => {
