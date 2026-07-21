@@ -1426,7 +1426,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   overflow: hidden;
   border: 0 dashed transparent;
   border-radius: 4px;
-  transition: min-height 120ms ease, border-width 120ms ease, background-color 120ms ease;
+  transition: border-width 120ms ease, background-color 120ms ease;
 }
 
 .empty-unpin-zone-active {
