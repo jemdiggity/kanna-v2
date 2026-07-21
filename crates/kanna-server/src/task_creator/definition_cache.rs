@@ -164,17 +164,41 @@ impl From<&Repo> for RepoDefinitionCacheKey {
 
 pub(crate) struct RepoDefinitionsCache {
     definitions: TimedCache<RepoDefinitionCacheKey, RepoDefinitions, DefinitionLookupError>,
+    #[cfg(test)]
+    before_load: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Default for RepoDefinitionsCache {
     fn default() -> Self {
         Self {
             definitions: TimedCache::new(REPO_DEFINITION_CACHE_TTL),
+            #[cfg(test)]
+            before_load: Mutex::new(None),
         }
     }
 }
 
 impl RepoDefinitionsCache {
+    #[cfg(test)]
+    pub(crate) fn set_before_load(&self, before_load: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .before_load
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(before_load);
+    }
+
+    #[cfg(test)]
+    fn run_before_load(&self) {
+        let before_load = self
+            .before_load
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(before_load) = before_load {
+            before_load();
+        }
+    }
+
     pub(super) fn with_definitions<T>(
         &self,
         repo: &Repo,
@@ -183,7 +207,11 @@ impl RepoDefinitionsCache {
         let definitions = self.definitions.get_or_try_insert_with(
             RepoDefinitionCacheKey::from(repo),
             Instant::now(),
-            || RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other),
+            || {
+                #[cfg(test)]
+                self.run_before_load();
+                RepoDefinitions::resolve(repo).map_err(DefinitionLookupError::Other)
+            },
         )?;
         read(&definitions)
     }

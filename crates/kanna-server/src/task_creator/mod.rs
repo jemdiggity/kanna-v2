@@ -217,18 +217,22 @@ fn validate_definition_component(value: &str, label: &str) -> Result<(), Definit
 }
 
 pub(crate) fn resolve_available_agent_providers(
+    cache: &RepoDefinitionsCache,
     repo: &Repo,
 ) -> Result<Vec<(AgentProvider, String)>, String> {
-    let definitions = RepoDefinitions::resolve(repo)?;
-    let search_path = build_workspace_search_path(&repo.path, definitions.config());
-    Ok(AgentProvider::ALL
-        .into_iter()
-        .filter_map(|provider| {
-            resolve_provider_executable(provider, search_path.as_deref(), &repo.path)
-                .ok()
-                .map(|executable| (provider, executable))
+    cache
+        .with_definitions(repo, |definitions| {
+            let search_path = build_workspace_search_path(&repo.path, definitions.config());
+            Ok(AgentProvider::ALL
+                .into_iter()
+                .filter_map(|provider| {
+                    resolve_provider_executable(provider, search_path.as_deref(), &repo.path)
+                        .ok()
+                        .map(|executable| (provider, executable))
+                })
+                .collect())
         })
-        .collect())
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug)]

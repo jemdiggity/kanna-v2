@@ -264,3 +264,63 @@ git status --short
 
 Expected: the design and three implementation commits are present and the
 worktree is clean.
+
+### Task 5: Route provider lookup through the shared blocking cache boundary
+
+**Files:**
+- Modify: `crates/kanna-server/src/http_api/repos.rs`
+- Modify: `crates/kanna-server/src/task_creator/mod.rs`
+- Test: `crates/kanna-server/src/http_api/tests/core_routes.rs`
+
+- [x] **Step 1: Add an HTTP responsiveness regression test**
+
+Add a test-only definition-loader gate to `RepoDefinitionsCache`, wire a
+provider-route test that blocks definition resolution after the route begins,
+and run the router on a current-thread Tokio runtime. While the lookup is held,
+assert the runtime receives the loader's start signal promptly and advances an
+unrelated timer; release the loader and retain the existing provider response
+assertions.
+
+- [x] **Step 2: Run the route test and verify it fails**
+
+```bash
+cargo test -p kanna-server repo_agent_provider_route_stays_responsive_and_uses_workspace_local_executables -- --nocapture
+```
+
+Expected: the cache-loader start signal times out because the provider handler
+bypasses the shared definitions cache.
+
+- [x] **Step 3: Reuse the repository definition cache in provider resolution**
+
+Change `resolve_available_agent_providers` to accept
+`&RepoDefinitionsCache`, then derive the workspace search path inside
+`cache.with_definitions`. Preserve the existing provider order, executable
+resolution, and string error surface.
+
+- [x] **Step 4: Move the complete provider lookup onto the blocking pool**
+
+Wrap the repository DB lookup and cached provider resolution in
+`run_blocking_http`, matching the three Kanna-definition handlers. Convert the
+provider error string to the existing internal-server-error response and map
+the result into `AvailableAgentProvidersResponse` after awaiting it.
+
+- [x] **Step 5: Run targeted tests and verify they pass**
+
+```bash
+cargo test -p kanna-server repo_agent_provider_route -- --nocapture
+cargo test -p kanna-server http_api::tests::repo_definitions -- --nocapture
+```
+
+Expected: provider response and responsiveness coverage pass, and existing
+repository-definition route coverage remains green.
+
+- [x] **Step 6: Run the requested verification suite**
+
+```bash
+cargo fmt --all -- --check
+cargo test -p kanna-server
+pnpm test
+(cd crates/daemon && cargo test -- --test-threads=1)
+```
+
+Expected: every command exits successfully.

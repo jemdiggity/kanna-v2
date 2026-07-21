@@ -21,13 +21,16 @@ desktop listener starts an independent full `reloadSnapshot()` for every frame.
 Each reload fetches the snapshot and then fetches Kanna definitions for every
 visible repository, regardless of the invalidation scope.
 
-Repository definitions are cached for 30 seconds. On an expired entry, the
-cache releases its mutex before loading and provides no per-key single-flight
-coordination, so concurrent misses all run `RepoDefinitions::resolve`. That
-resolution synchronously executes `git fetch origin` and several Git ref
-commands. The HTTP handlers execute this work directly on Tokio runtime worker
-threads. A state-change burst can therefore occupy every worker with blocking
-Git processes, especially when a fetch is slow or times out.
+Repository definitions are cached for 30 seconds. The Cmd+N modal requests
+both the repository manifest and available agent providers in parallel. The
+provider route historically resolved definitions directly, bypassing the
+shared cache. On an expired entry, the cached manifest path also released its
+mutex before loading and provided no per-key single-flight coordination, so
+concurrent misses all ran `RepoDefinitions::resolve`. That resolution
+synchronously executes `git fetch origin` and several Git ref commands. The
+HTTP handlers executed this work directly on Tokio runtime worker threads. A
+state-change burst or modal open could therefore occupy workers with blocking
+Git processes, especially when a fetch was slow or timed out.
 
 The same Tokio runtime drives KSP WebSocket input, terminal daemon readers,
 outbound WebSocket writers, and HTTP handlers. Once its workers are occupied,
@@ -39,11 +42,17 @@ directions freeze together.
 
 ### 1. Keep blocking definition resolution off the async runtime
 
-The three repository-definition HTTP endpoints run their complete lookup
-through `tokio::task::spawn_blocking`. This includes the SQLite repository
-lookup, cache access, `RepoDefinitions::resolve`, and definition reads, all of
-which can execute synchronous Git or filesystem operations. The endpoint
-handlers await the blocking task without executing that work on a Tokio worker.
+The three repository-definition HTTP endpoints and the available-provider
+endpoint run their complete lookup through `tokio::task::spawn_blocking`. This
+includes the SQLite repository lookup, cache access,
+`RepoDefinitions::resolve`, definition reads, and executable discovery, all of
+which can execute synchronous Git, shell, or filesystem operations. The
+endpoint handlers await the blocking task without executing that work on a
+Tokio worker.
+
+Available-provider resolution uses the same repository-definition cache as
+the manifest, pipeline, and agent endpoints. Parallel Cmd+N requests therefore
+join one per-repository definition load and read one resolved snapshot.
 
 The cache remains synchronous because every HTTP use of it is inside this
 blocking boundary. Keeping the entire definition operation together also
@@ -102,8 +111,10 @@ Tests are added before implementation:
 1. Concurrent cache misses for one key invoke the loader once and return the
    same value to all callers.
 2. A failed shared load reaches all waiters and a later request retries.
-3. A deliberately blocked definition load does not prevent an unrelated Tokio
-   timer from progressing, proving the Git work is off the async workers.
+3. A deliberately blocked definition load through the actual
+   available-provider route does not prevent its current-thread Tokio runtime
+   from progressing, proving the route uses both the shared cache and the
+   blocking boundary.
 4. Multiple KSP invalidations during one frontend reload produce one active and
    one trailing reload, never one reload per event.
 5. Selection preservation still uses the state captured for each actual

@@ -309,33 +309,19 @@ pub(super) async fn get_repo_agent_definition(
 pub(super) async fn list_available_agent_providers(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
-) -> Result<Json<AvailableAgentProvidersResponse>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {e}"),
-        )
-    })?;
-    let repo = db
-        .get_repo(&repo_id)
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {e}"),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                format!("repo not found: {repo_id}"),
-            )
-        })?;
-    let providers = crate::task_creator::resolve_available_agent_providers(&repo)
-        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?
-        .into_iter()
-        .map(|(id, executable)| AvailableAgentProvider { id, executable })
-        .collect();
-    Ok(Json(AvailableAgentProvidersResponse { providers }))
+) -> Result<Json<AvailableAgentProvidersResponse>, HttpError> {
+    run_blocking_http(move || {
+        let repo = get_definition_repo(&state, &repo_id)?;
+        let providers =
+            crate::task_creator::resolve_available_agent_providers(&state.repo_definitions, &repo)
+                .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?
+                .into_iter()
+                .map(|(id, executable)| AvailableAgentProvider { id, executable })
+                .collect();
+        Ok(AvailableAgentProvidersResponse { providers })
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Debug, Serialize)]
