@@ -15,6 +15,9 @@ vi.mock("react-native", () => ({
   TextInput: "TextInput",
   View: "View"
 }));
+vi.mock("../components/BuildInfoPanel", () => ({
+  BuildInfoPanel: "BuildInfoPanel"
+}));
 
 let MoreScreen: typeof import("./MoreScreen").MoreScreen | null = null;
 let rendered: ReactTestRenderer | null = null;
@@ -168,30 +171,23 @@ describe("MoreScreen", () => {
     expect(input.onRetry).toHaveBeenCalledOnce();
   });
 
-  it("does not expose OTA diagnostics", async () => {
+  it("places compact build information after repository commands", async () => {
     if (!MoreScreen) throw new Error("MoreScreen was not loaded");
 
     await act(async () => {
-      rendered = create(
-        React.createElement(MoreScreen!, {
-          ...props(),
-          updateInfo: {
-            enabled: true,
-            updateId: "0123456789abcdef",
-            runtimeVersion: "2.0.0",
-            channel: "staging"
-          }
-        } as Parameters<typeof MoreScreen>[0])
-      );
+      rendered = create(React.createElement(MoreScreen!, props()));
     });
 
-    const copy = rendered.root
-      .findAll((node) => node.type === "Text")
-      .flatMap((node) => node.children)
-      .join(" ");
-    expect(copy).not.toContain("App update");
-    expect(copy).not.toContain("staging");
-    expect(copy).not.toContain("2.0.0");
-    expect(copy).not.toContain("01234567");
+    const nodes = rendered.root.findAll(() => true);
+    const panels = nodes.filter((node) => node.type === "BuildInfoPanel");
+    const commandGroup = nodes.find(
+      (node) => node.props.testID === "mobile.more.command-group.automation"
+    );
+
+    expect(panels).toHaveLength(1);
+    expect(commandGroup).toBeDefined();
+    expect(nodes.indexOf(panels[0])).toBeGreaterThan(
+      nodes.indexOf(commandGroup!)
+    );
   });
 });

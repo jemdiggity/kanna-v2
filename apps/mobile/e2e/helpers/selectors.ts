@@ -65,6 +65,15 @@ export const selectors = {
   accountSignInButton: `~${MOBILE_E2E_IDS.accountSignInButton}`,
   accountSignOutButton: `~${MOBILE_E2E_IDS.accountSignOutButton}`,
   moreScreen: `~${MOBILE_E2E_IDS.moreScreen}`,
+  buildInfoToggle: `~${MOBILE_E2E_IDS.buildInfoToggle}`,
+  buildInfoDetails: `~${MOBILE_E2E_IDS.buildInfoDetails}`,
+  buildInfoNative: `~${MOBILE_E2E_IDS.buildInfoNative}`,
+  buildInfoRuntime: `~${MOBILE_E2E_IDS.buildInfoRuntime}`,
+  buildInfoEnvironment: `~${MOBILE_E2E_IDS.buildInfoEnvironment}`,
+  buildInfoChannel: `~${MOBILE_E2E_IDS.buildInfoChannel}`,
+  buildInfoRunningSource: `~${MOBILE_E2E_IDS.buildInfoRunningSource}`,
+  buildInfoUpdateId: `~${MOBILE_E2E_IDS.buildInfoUpdateId}`,
+  buildInfoCopyHint: `~${MOBILE_E2E_IDS.buildInfoCopyHint}`,
   taskCreationRecoverButton:
     `~${MOBILE_E2E_IDS.taskCreationRecoverButton}`,
   addTaskButton: `~${MOBILE_E2E_IDS.toolbarUtilityAction("create")}`,
@@ -80,7 +89,6 @@ export const selectors = {
   tasksTab: `~${MOBILE_E2E_IDS.toolbarTab("tasks")}`,
   recentTab: `~${MOBILE_E2E_IDS.toolbarTab("recent")}`,
   moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
-  legacyUpdateInfoOtaValue: "~mobile.update-info.ota",
   developerForceCloudToggle: `~${MOBILE_E2E_IDS.developerForceCloudToggle}`,
   taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]',
   taskQuickReply(replyId: string): string {
