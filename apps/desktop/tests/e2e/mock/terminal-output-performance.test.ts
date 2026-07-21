@@ -16,6 +16,24 @@ interface AppMetricsSnapshot {
   activeListenCounts: Record<string, number>;
 }
 
+interface TerminalPerfEvent {
+  stage: string;
+  event: string;
+  durationMs: number;
+  pendingChunks: number;
+  pendingBytes: number;
+}
+
+interface TerminalPerfSnapshot {
+  activeSessions: number;
+  maxFrameGapMs: number;
+  maxEventLoopDriftMs: number;
+  maxXtermBacklogMs: number;
+  pendingChunks: number;
+  pendingBytes: number;
+  latestEvent: TerminalPerfEvent | null;
+}
+
 interface PerfTask {
   id: string;
   prompt: string;
@@ -147,6 +165,59 @@ async function clearMetrics(client: WebDriverClient): Promise<void> {
   if (result !== "ok") {
     throw new Error(String(result));
   }
+}
+
+async function readTerminalPerf(client: WebDriverClient): Promise<TerminalPerfSnapshot> {
+  const snapshot = await client.executeSync(
+    `const perf = window.__KANNA_E2E__?.terminalOutputPerf;
+     if (!perf) return { __error: "missing terminalOutputPerf" };
+     return perf.snapshot();`,
+  );
+  if (!snapshot || typeof snapshot !== "object" || "__error" in snapshot) {
+    throw new Error(String((snapshot as { __error?: string } | null)?.__error ?? "invalid terminal perf snapshot"));
+  }
+  return snapshot as TerminalPerfSnapshot;
+}
+
+async function clearTerminalPerf(client: WebDriverClient): Promise<void> {
+  const result = await client.executeSync(
+    `const perf = window.__KANNA_E2E__?.terminalOutputPerf;
+     if (!perf) return "__error:missing terminalOutputPerf";
+     perf.clear();
+     return "ok";`,
+  );
+  if (result !== "ok") throw new Error(String(result));
+}
+
+async function waitForTerminalPerfStage(
+  client: WebDriverClient,
+  stage: string,
+  timeoutMs = 5_000,
+): Promise<TerminalPerfSnapshot> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: TerminalPerfSnapshot | null = null;
+  while (Date.now() < deadline) {
+    latest = await readTerminalPerf(client);
+    if (latest.latestEvent?.stage === stage) return latest;
+    await sleep(50);
+  }
+  throw new Error(`timed out waiting for terminal perf stage ${stage}: ${JSON.stringify(latest)}`);
+}
+
+async function readOutputSequences(
+  client: WebDriverClient,
+  sessionId: string,
+  label: string,
+): Promise<number[]> {
+  const lines = await client.executeSync<string[]>(
+    `return window.__KANNA_E2E__?.terminalBuffers?.lines(${JSON.stringify(sessionId)})?.slice(-100) ?? [];`,
+  );
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matcher = new RegExp(`${escaped} live output (\\d+)`);
+  return lines.flatMap((line) => {
+    const match = line.match(matcher);
+    return match ? [Number(match[1])] : [];
+  });
 }
 
 async function killSessionBestEffort(client: WebDriverClient, sessionId: string): Promise<void> {
@@ -281,5 +352,58 @@ describe("terminal output performance", () => {
 
     const afterFocus = await readMetrics(client);
     expect(afterFocus.activeListenCounts.terminal_output ?? 0).toBe(0);
+  });
+
+  it("classifies a blocked WebView event loop and resumes numbered output without loss", async () => {
+    const task = await createStreamingTask(client, {
+      repoId,
+      repoPath: testRepoPath,
+      prompt: "Perf Watchdog",
+    });
+    taskIds.push(task.id);
+
+    await waitForSessions(client, [task.id]);
+    await selectTask(client, task);
+    await waitForTerminalBufferText(client, task.id, "Perf Watchdog live output");
+    const healthy = await client.executeSync<TerminalPerfSnapshot>(
+      `const perf = window.__KANNA_E2E__?.terminalOutputPerf;
+       if (!perf?.beginEventLoopProbe || !perf?.endEventLoopProbe) {
+         throw new Error("terminal output event-loop probe unavailable");
+       }
+       perf.beginEventLoopProbe("visible");
+       perf.endEventLoopProbe();
+       return perf.snapshot();`,
+    );
+    expect(healthy.latestEvent).toBeNull();
+    expect(healthy.maxFrameGapMs).toBeLessThan(500);
+    const before = await readOutputSequences(client, task.id, "Perf Watchdog");
+    const beforeLast = before.at(-1);
+    expect(beforeLast).toBeTypeOf("number");
+
+    await client.executeSync(
+      `const perf = window.__KANNA_E2E__?.terminalOutputPerf;
+       perf.beginEventLoopProbe("visible");
+       const deadline = performance.now() + 750;
+       while (performance.now() < deadline) {}
+       perf.endEventLoopProbe();
+       return "unblocked";`,
+    );
+
+    const stalled = await waitForTerminalPerfStage(client, "event_loop");
+    expect(stalled.latestEvent?.durationMs).toBeGreaterThanOrEqual(500);
+    expect(stalled.latestEvent?.stage).not.toBe("outbound_queue");
+    expect(stalled.latestEvent?.stage).not.toBe("websocket_send");
+
+    await waitForTerminalBufferText(client, task.id, "Perf Watchdog live output");
+    await sleep(300);
+    const after = await readOutputSequences(client, task.id, "Perf Watchdog");
+    const resumed = after.filter((sequence) => sequence > (beforeLast ?? 0));
+    expect(resumed.length).toBeGreaterThan(0);
+    expect(resumed).toEqual(
+      Array.from(
+        { length: resumed.at(-1)! - (beforeLast ?? 0) },
+        (_, index) => (beforeLast ?? 0) + index + 1,
+      ),
+    );
   });
 });

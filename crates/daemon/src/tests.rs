@@ -1,22 +1,25 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use kanna_daemon::protocol::{self, Event, SessionStatus};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 use crate::client::{
-    cleanup_client_writer_registries, effective_terminal_size, SessionObservers, SessionSizes,
-    SessionWriters, TerminalEmulatorClients,
+    cleanup_client_writer_registries, effective_terminal_size, SessionSizes,
+    TerminalEmulatorClients,
 };
+use crate::fanout::{session_fanout, SessionFanouts, SubscriberKind};
 use crate::handoff::{
     blank_snapshot, parse_handoff_response, should_try_compat_handoff_after_error, HandoffEventV1,
     HandoffRequestError, HandoffSessionV1,
 };
 use crate::output::{
-    format_status_observation_log, should_mirror_output_to_recovery,
-    should_rebuild_recovery_session_on_live_terminal_transition,
+    classify_output_gap, format_status_observation_log, should_mirror_output_to_recovery,
+    should_rebuild_recovery_session_on_live_terminal_transition, DaemonOutputGapCause,
+    DAEMON_TERMINAL_PERF_STAGES,
 };
 use crate::paths::panic_log_path;
 
@@ -166,10 +169,9 @@ fn effective_terminal_size_uses_minimum_attached_client_dimensions() {
 
 #[tokio::test]
 async fn connection_drop_cleanup_removes_attached_and_observer_writers() {
-    let session_writers: SessionWriters = Arc::new(Mutex::new(HashMap::new()));
+    let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
     let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
-    let session_observers: SessionObservers = Arc::new(Mutex::new(HashMap::new()));
     let mut writers_to_drop = Vec::new();
 
     for idx in 0..64 {
@@ -179,12 +181,11 @@ async fn connection_drop_cleanup_removes_attached_and_observer_writers() {
         let writer_id = Arc::as_ptr(&writer) as usize;
         let session_id = format!("session-{}", idx % 4);
 
-        session_writers
-            .lock()
-            .await
-            .entry(session_id.clone())
-            .or_default()
-            .push(writer.clone());
+        let fanout = session_fanout(&fanouts, &session_id).await;
+        let mut fanout_state = fanout.state.lock().await;
+        fanout_state.register(&session_id, SubscriberKind::Attached, &writer, &[]);
+        fanout_state.register(&session_id, SubscriberKind::Observer, &writer, &[]);
+        drop(fanout_state);
         terminal_emulator_clients
             .lock()
             .await
@@ -197,45 +198,32 @@ async fn connection_drop_cleanup_removes_attached_and_observer_writers() {
             .entry(session_id.clone())
             .or_default()
             .insert(writer_id, (80, 24));
-        session_observers
-            .lock()
-            .await
-            .entry(session_id)
-            .or_default()
-            .push(writer.clone());
 
         writers_to_drop.push(writer);
     }
 
-    let attached_count: usize = session_writers.lock().await.values().map(Vec::len).sum();
-    let observer_count: usize = session_observers.lock().await.values().map(Vec::len).sum();
-    assert_eq!(attached_count, 64);
-    assert_eq!(observer_count, 64);
-
     for writer in &writers_to_drop {
         cleanup_client_writer_registries(
             writer,
-            &session_writers,
+            &fanouts,
             &terminal_emulator_clients,
             &session_sizes,
-            &session_observers,
         )
         .await;
     }
 
-    let attached_count: usize = session_writers.lock().await.values().map(Vec::len).sum();
-    assert_eq!(attached_count, 0);
+    for fanout in fanouts.lock().await.values() {
+        assert!(fanout.state.lock().await.is_empty());
+    }
     assert!(terminal_emulator_clients.lock().await.is_empty());
     assert!(session_sizes.lock().await.is_empty());
-    assert!(session_observers.lock().await.is_empty());
 }
 
 #[tokio::test]
 async fn connection_drop_cleanup_reports_remaining_effective_terminal_size() {
-    let session_writers: SessionWriters = Arc::new(Mutex::new(HashMap::new()));
+    let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
     let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
-    let session_observers: SessionObservers = Arc::new(Mutex::new(HashMap::new()));
 
     let (_large_client, large_server) = UnixStream::pair().expect("large stream pair");
     let (_large_read, large_write) = large_server.into_split();
@@ -252,10 +240,9 @@ async fn connection_drop_cleanup_reports_remaining_effective_terminal_size() {
 
     let remaining_sizes = cleanup_client_writer_registries(
         &small_writer,
-        &session_writers,
+        &fanouts,
         &terminal_emulator_clients,
         &session_sizes,
-        &session_observers,
     )
     .await;
 
@@ -270,6 +257,51 @@ fn panic_log_path_lives_under_daemon_dir() {
     assert_eq!(
         panic_log_path(Path::new("/tmp/kanna-daemon-test"), 42, 1234),
         PathBuf::from("/tmp/kanna-daemon-test/kanna-daemon-panic_42_1234.log")
+    );
+}
+
+#[test]
+fn output_gap_classifier_uses_monotonic_threshold_and_prior_blocker() {
+    let started = Instant::now();
+
+    assert_eq!(classify_output_gap(None, started, None), None);
+    assert_eq!(
+        classify_output_gap(Some(started), started + Duration::from_millis(1_900), None,),
+        None
+    );
+    assert_eq!(
+        classify_output_gap(
+            Some(started + Duration::from_millis(1_900)),
+            started + Duration::from_millis(4_000),
+            Some("attached_writer"),
+        ),
+        Some((
+            Duration::from_millis(2_100),
+            DaemonOutputGapCause::PriorStage("attached_writer"),
+        ))
+    );
+    assert_eq!(
+        classify_output_gap(Some(started), started + Duration::from_millis(2_000), None,),
+        Some((
+            Duration::from_millis(2_000),
+            DaemonOutputGapCause::PtySourceSilence,
+        ))
+    );
+}
+
+#[test]
+fn daemon_terminal_perf_stage_names_cover_every_output_boundary() {
+    assert_eq!(
+        DAEMON_TERMINAL_PERF_STAGES,
+        [
+            "mirror_output",
+            "detect_status",
+            "attached_writer",
+            "recovery_write",
+            "observer_write",
+            "snapshot_lock",
+            "snapshot_serialize",
+        ]
     );
 }
 
@@ -302,30 +334,52 @@ fn stream_output_prioritizes_live_delivery_before_recovery_persistence() {
 }
 
 #[test]
-fn attach_cutover_locks_session_writer_registry_before_client_writer() {
-    let source = include_str!("client.rs");
-    let cutover_body = source
-        .split("async fn finish_attach_cutover(")
+fn output_ingestion_never_awaits_subscriber_socket_progress() {
+    let source = include_str!("output.rs");
+    let chunk_body = source
+        .split("async fn handle_output_chunk(")
         .nth(1)
-        .expect("finish_attach_cutover function should exist");
-
-    let registry_lock_index = cutover_body
-        .find("let mut writers = session_writers.lock().await")
-        .expect("attach cutover should lock the session writer registry");
-    let writer_lock_index = cutover_body
-        .find("let mut writer_guard = writer.lock().await")
-        .expect("attach cutover should lock the client writer");
-    let write_initial_event_index = cutover_body
-        .find("write_event(&mut *writer_guard, initial_event)")
-        .expect("attach cutover should write the initial snapshot while holding the writer");
+        .expect("handle_output_chunk function should exist");
 
     assert!(
-        registry_lock_index < writer_lock_index,
-        "attach cutover must not hold a client writer while waiting for the session writer registry; stream_output takes those locks in registry -> writer order",
+        chunk_body.contains("state.enqueue(&line)"),
+        "live delivery must go through the non-blocking fanout enqueue",
     );
     assert!(
-        writer_lock_index < write_initial_event_index,
-        "attach cutover must hold the client writer until the initial snapshot is written so live output cannot precede the Snapshot response",
+        !chunk_body.contains("write_event"),
+        "the ingestion loop must never write to a subscriber socket directly; \
+         per-subscriber writer tasks own socket progress",
+    );
+}
+
+#[test]
+fn attach_cutover_holds_fanout_lock_across_snapshot_and_registration() {
+    let source = include_str!("connection.rs");
+    let attach_body = source
+        .split("Command::AttachSnapshot {")
+        .nth(1)
+        .expect("AttachSnapshot handler should exist");
+
+    let fanout_lock_index = attach_body
+        .find("let mut fanout_state = fanout.state.lock().await")
+        .expect("attach cutover should lock the session fanout");
+    let snapshot_index = attach_body
+        .find("session.snapshot(&session_id)")
+        .expect("attach cutover should take the authoritative snapshot");
+    let register_index = attach_body
+        .find("fanout_state.register(")
+        .expect("attach cutover should register the subscriber");
+    let unlock_index = attach_body
+        .find("drop(fanout_state)")
+        .expect("attach cutover should release the fanout lock explicitly");
+
+    assert!(
+        fanout_lock_index < snapshot_index
+            && snapshot_index < register_index
+            && register_index < unlock_index,
+        "the snapshot and subscriber registration must both happen under the \
+         session fanout lock so the ingestion loop (which holds it across \
+         mirror -> enqueue) cannot interleave a chunk between them",
     );
 }
 

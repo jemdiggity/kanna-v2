@@ -4,10 +4,9 @@ use std::sync::Arc;
 use kanna_daemon::recovery::{RecoveryManager, SeededRecoverySnapshot};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::client::{
-    LostHandoffSessions, SessionObservers, SessionSizes, SessionWriters, TerminalEmulatorClients,
-};
+use crate::client::{LostHandoffSessions, SessionSizes, TerminalEmulatorClients};
 use crate::connection::handle_connection;
+use crate::fanout::SessionFanouts;
 use crate::handoff::attempt_handoff;
 use crate::paths::{
     app_support_dir, daemon_data_dir, handle_cli_args, install_panic_hook, CliAction,
@@ -36,6 +35,7 @@ pub(crate) async fn run_daemon() {
         )
         .duplicate_to_stderr(flexi_logger::Duplicate::Info)
         .start();
+    kanna_daemon::terminal_perf::start_global_watchdog();
 
     let pid_path = dir.join("daemon.pid");
     let socket_path = kanna_runtime_defaults::socket_path(&dir);
@@ -49,10 +49,9 @@ pub(crate) async fn run_daemon() {
     }
 
     let sessions: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
-    let session_writers: SessionWriters = Arc::new(Mutex::new(HashMap::new()));
+    let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
     let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
-    let session_observers: SessionObservers = Arc::new(Mutex::new(HashMap::new()));
     let lost_handoff_sessions: LostHandoffSessions = Arc::new(Mutex::new(handoff_result.lost));
     let agent_sessions: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let recovery_manager = RecoveryManager::start().await;
@@ -207,10 +206,9 @@ pub(crate) async fn run_daemon() {
             Ok((stream, _addr)) => {
                 let sessions_clone = sessions.clone();
                 let broadcast_tx_clone = broadcast_tx.clone();
-                let writers_clone = session_writers.clone();
+                let fanouts_clone = fanouts.clone();
                 let terminal_clients_clone = terminal_emulator_clients.clone();
                 let sizes_clone = session_sizes.clone();
-                let observers_clone = session_observers.clone();
                 let lost_handoff_clone = lost_handoff_sessions.clone();
                 let recovery_clone = recovery_manager.clone();
                 let agent_sessions_clone = agent_sessions.clone();
@@ -219,10 +217,9 @@ pub(crate) async fn run_daemon() {
                         stream,
                         sessions_clone,
                         broadcast_tx_clone,
-                        writers_clone,
+                        fanouts_clone,
                         terminal_clients_clone,
                         sizes_clone,
-                        observers_clone,
                         lost_handoff_clone,
                         recovery_clone,
                         agent_sessions_clone,

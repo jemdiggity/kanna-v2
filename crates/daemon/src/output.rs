@@ -1,21 +1,84 @@
 use std::collections::VecDeque;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use kanna_daemon::{
     protocol::{self, Event, SessionStatus},
     recovery::RecoveryManager,
+    terminal_perf::{self, TerminalPerfContext, OUTPUT_GAP_THRESHOLD, STALL_THRESHOLD},
 };
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::client::{SessionObservers, SessionSizes, SessionWriters, TerminalEmulatorClients};
+use crate::client::{SessionSizes, TerminalEmulatorClients};
+use crate::fanout::{existing_session_fanout, EventLine, SessionFanout, SessionFanouts};
 use crate::session::{
     MirrorResult, SessionHandle, SessionManager, StreamControl, STATUS_DETECTION_THROTTLE_MS,
 };
-use crate::socket::write_event;
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
+const STAGE_MIRROR_OUTPUT: &str = "mirror_output";
+const STAGE_DETECT_STATUS: &str = "detect_status";
+const STAGE_RECOVERY_WRITE: &str = "recovery_write";
+
+// `attached_writer` and `observer_write` are emitted by the per-subscriber
+// writer tasks in `fanout.rs`; they no longer run inside the ingestion loop.
+#[cfg(test)]
+pub(crate) const DAEMON_TERMINAL_PERF_STAGES: [&str; 7] = [
+    STAGE_MIRROR_OUTPUT,
+    STAGE_DETECT_STATUS,
+    "attached_writer",
+    STAGE_RECOVERY_WRITE,
+    "observer_write",
+    "snapshot_lock",
+    "snapshot_serialize",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DaemonOutputGapCause {
+    PriorStage(&'static str),
+    PtySourceSilence,
+}
+
+pub(crate) fn classify_output_gap(
+    previous_read_at: Option<Instant>,
+    read_at: Instant,
+    previous_slow_stage: Option<&'static str>,
+) -> Option<(Duration, DaemonOutputGapCause)> {
+    let duration = read_at.saturating_duration_since(previous_read_at?);
+    if duration < OUTPUT_GAP_THRESHOLD {
+        return None;
+    }
+    Some((
+        duration,
+        previous_slow_stage
+            .map(DaemonOutputGapCause::PriorStage)
+            .unwrap_or(DaemonOutputGapCause::PtySourceSilence),
+    ))
+}
+
+fn perf_context(
+    session_id: &str,
+    stage: &'static str,
+    chunk: u64,
+    bytes: usize,
+) -> TerminalPerfContext {
+    let mut context = TerminalPerfContext::new("daemon", session_id, stage);
+    context.chunk = chunk;
+    context.bytes = bytes;
+    context
+}
+
+fn note_slow_stage(
+    started_at: Instant,
+    stage: &'static str,
+    previous_slow_stage: &mut Option<&'static str>,
+) {
+    if started_at.elapsed() >= STALL_THRESHOLD && previous_slow_stage.is_none() {
+        *previous_slow_stage = Some(stage);
+    }
+}
 
 pub(crate) fn should_mirror_output_to_recovery(_has_live_terminal_client: bool) -> bool {
     true
@@ -35,11 +98,10 @@ pub(crate) async fn stream_output(
     mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     stream_control: StreamControl,
     broadcast_tx: broadcast::Sender<String>,
-    session_writers: SessionWriters,
+    fanouts: SessionFanouts,
     terminal_emulator_clients: TerminalEmulatorClients,
     sessions: Arc<Mutex<SessionManager>>,
     session_sizes: SessionSizes,
-    session_observers: SessionObservers,
     recovery_manager: RecoveryManager,
     session: Arc<SessionHandle>,
 ) {
@@ -57,6 +119,8 @@ pub(crate) async fn stream_output(
     };
     let mut buf = [0u8; 4096];
     let mut chunk_count: usize = 0;
+    let mut previous_read_at = None;
+    let mut previous_slow_stage = None;
     let mut pending_input: VecDeque<Vec<u8>> = VecDeque::new();
     let mut pending_offset = 0usize;
     let mut status_interval =
@@ -168,7 +232,20 @@ pub(crate) async fn stream_output(
                             stream_control.mark_stopped();
                             return;
                         }
+                        let read_at = Instant::now();
                         chunk_count += 1;
+                        if let Some((duration, cause)) =
+                            classify_output_gap(previous_read_at, read_at, previous_slow_stage)
+                        {
+                            let mut context =
+                                perf_context(&session_id, "pty_read", chunk_count as u64, n);
+                            context.prior_stage = Some(match cause {
+                                DaemonOutputGapCause::PriorStage(stage) => stage,
+                                DaemonOutputGapCause::PtySourceSilence => "pty_source_silence",
+                            });
+                            terminal_perf::emit_gap(context, duration);
+                        }
+                        previous_read_at = Some(read_at);
                         if chunk_count <= 5 {
                             log::info!(
                                 "[stream] chunk session={} chunk={} bytes={}",
@@ -178,15 +255,14 @@ pub(crate) async fn stream_output(
                             );
                         }
                         let data = buf[..n].to_vec();
-                        handle_output_chunk(
+                        previous_slow_stage = handle_output_chunk(
                             &session_id,
                             &data,
+                            chunk_count as u64,
                             &session,
                             &broadcast_tx,
-                            &session_writers,
+                            &fanouts,
                             &terminal_emulator_clients,
-                            &session_sizes,
-                            &session_observers,
                             &recovery_manager,
                         )
                         .await;
@@ -207,6 +283,13 @@ pub(crate) async fn stream_output(
             }
 
             _ = status_interval.tick() => {
+                // A lagged subscriber that finishes draining while the PTY is
+                // quiet must not wait for the next chunk to resynchronize.
+                if let Some(fanout) = existing_session_fanout(&fanouts, &session_id).await {
+                    if fanout.state.lock().await.has_drained_lagged() {
+                        resync_drained_subscribers(&session_id, &session, &fanout).await;
+                    }
+                }
                 match session
                     .refresh_quiet_status(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS))
                     .await
@@ -273,41 +356,22 @@ pub(crate) async fn stream_output(
     let evt = Event::Exit {
         session_id: session_id.clone(),
         code: exit_code,
-        resume_session_id: resume_session_id.clone(),
+        resume_session_id,
         killed: false,
     };
     if let Ok(json) = serde_json::to_string(&evt) {
         let _ = broadcast_tx.send(json);
     }
     recovery_manager.end_session(&session_id).await;
-    let mut writers = session_writers.lock().await;
-    if let Some(vec) = writers.get(&session_id) {
-        for w in vec.iter() {
-            let _ = write_event(&mut *w.lock().await, &evt).await;
-        }
+    // Deliver Exit through every subscriber mailbox, then drop the fanout so
+    // writer tasks drain their queues and finish. A subscriber that is still
+    // lagging is disconnected instead; its client observes EOF, reconnects,
+    // and finds the session gone.
+    if let Some(fanout) = fanouts.lock().await.remove(&session_id) {
+        fanout.state.lock().await.deliver_final(&evt);
     }
-    writers.remove(&session_id);
-    drop(writers);
     terminal_emulator_clients.lock().await.remove(&session_id);
     session_sizes.lock().await.remove(&session_id);
-
-    let mut observers_guard = session_observers.lock().await;
-    if let Some(observer_list) = observers_guard.remove(&session_id) {
-        let obs_evt = Event::Exit {
-            session_id: session_id.clone(),
-            code: exit_code,
-            resume_session_id,
-            killed: false,
-        };
-        futures::future::join_all(observer_list.iter().map(|obs| {
-            let evt = obs_evt.clone();
-            let obs = obs.clone();
-            async move {
-                let _ = write_event(&mut *obs.lock().await, &evt).await;
-            }
-        }))
-        .await;
-    }
     log::info!(
         "[stream] exit session={} code={} chunks={}",
         session_id,
@@ -318,18 +382,23 @@ pub(crate) async fn stream_output(
     log::info!("[stream] end session={} chunks={}", session_id, chunk_count);
 }
 
+/// Mirrors one PTY chunk into the headless terminal and enqueues it to every
+/// subscriber mailbox. Never awaits client socket or WebSocket progress: live
+/// delivery is `try_send` into bounded per-subscriber mailboxes drained by
+/// dedicated writer tasks, and a subscriber whose mailbox overflows is
+/// disconnected for snapshot resync instead of delaying anyone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_output_chunk(
     session_id: &str,
     data: &[u8],
+    chunk: u64,
     session: &Arc<SessionHandle>,
     broadcast_tx: &broadcast::Sender<String>,
-    session_writers: &SessionWriters,
+    fanouts: &SessionFanouts,
     terminal_emulator_clients: &TerminalEmulatorClients,
-    session_sizes: &SessionSizes,
-    session_observers: &SessionObservers,
     recovery_manager: &RecoveryManager,
-) {
+) -> Option<&'static str> {
+    let mut slow_stage = None;
     let has_live_terminal_client = {
         let terminal_clients = terminal_emulator_clients.lock().await;
         !terminal_clients
@@ -337,7 +406,45 @@ pub(crate) async fn handle_output_chunk(
             .is_none_or(|client_ids| client_ids.is_empty())
     };
     let allow_terminal_replies = !has_live_terminal_client;
-    match session.mirror_output(data, allow_terminal_replies).await {
+
+    // The fanout lock spans (mirror -> enqueue) so the AttachSnapshot cutover
+    // (snapshot -> register), which takes the same lock, sees each chunk
+    // either fully in the snapshot or fully enqueued behind it.
+    let fanout = existing_session_fanout(fanouts, session_id).await;
+    let mut fanout_state = match fanout.as_ref() {
+        Some(fanout) => Some(fanout.state.lock().await),
+        None => None,
+    };
+
+    let mirror_started = Instant::now();
+    let mirror_operation = terminal_perf::global_monitor().begin(perf_context(
+        session_id,
+        STAGE_MIRROR_OUTPUT,
+        chunk,
+        data.len(),
+    ));
+    let mirror_result = session.mirror_output(data, allow_terminal_replies).await;
+    mirror_operation.finish();
+    note_slow_stage(mirror_started, STAGE_MIRROR_OUTPUT, &mut slow_stage);
+
+    let evt = Event::Output {
+        session_id: session_id.to_string(),
+        data: data.to_vec(),
+    };
+    let report = fanout_state.as_mut().and_then(|state| {
+        EventLine::serialize(&evt, chunk, data.len()).map(|line| state.enqueue(&line))
+    });
+    drop(fanout_state);
+    if let Some(report) = report {
+        terminal_perf::emit_events(report.newly_lagged);
+        if report.resync_ready {
+            if let Some(fanout) = fanout.as_ref() {
+                resync_drained_subscribers(session_id, session, fanout).await;
+            }
+        }
+    }
+
+    match mirror_result {
         Ok(MirrorResult { status, replies }) => {
             for reply in replies {
                 if session.enqueue_input(reply).is_err() {
@@ -347,12 +454,21 @@ pub(crate) async fn handle_output_chunk(
                     );
                 }
             }
+            let status_started = Instant::now();
+            let status_operation = terminal_perf::global_monitor().begin(perf_context(
+                session_id,
+                STAGE_DETECT_STATUS,
+                chunk,
+                data.len(),
+            ));
             if let Some(status) = status {
                 log_status_observation(session, session_id, "mirror_output").await;
                 emit_status_changed(session, broadcast_tx, session_id, status).await;
             } else {
                 log_status_observation(session, session_id, "mirror_output").await;
             }
+            status_operation.finish();
+            note_slow_stage(status_started, STAGE_DETECT_STATUS, &mut slow_stage);
         }
         Err(error) => {
             log::error!(
@@ -363,91 +479,54 @@ pub(crate) async fn handle_output_chunk(
         }
     }
 
-    let has_observers = {
-        let guard = session_observers.lock().await;
-        guard.get(session_id).is_some_and(|list| !list.is_empty())
-    };
-    let obs_data = if has_observers {
-        Some(data.to_vec())
-    } else {
-        None
-    };
-
-    let evt = Event::Output {
-        session_id: session_id.to_string(),
-        data: data.to_vec(),
-    };
-    let attached_writers = {
-        let writers = session_writers.lock().await;
-        writers.get(session_id).cloned().unwrap_or_default()
-    };
-    if !attached_writers.is_empty() {
-        let mut failed = Vec::new();
-        for (i, w) in attached_writers.iter().enumerate() {
-            if write_event(&mut *w.lock().await, &evt).await.is_err() {
-                failed.push(i);
-            }
-        }
-        if !failed.is_empty() {
-            let failed_ids: Vec<usize> = failed
-                .iter()
-                .map(|&i| Arc::as_ptr(&attached_writers[i]) as usize)
-                .collect();
-            let mut writers = session_writers.lock().await;
-            if let Some(vec) = writers.get_mut(session_id) {
-                vec.retain(|writer| !failed_ids.contains(&(Arc::as_ptr(writer) as usize)));
-            }
-            drop(writers);
-            let mut sizes = session_sizes.lock().await;
-            if let Some(client_sizes) = sizes.get_mut(session_id) {
-                for wid in &failed_ids {
-                    client_sizes.remove(wid);
-                }
-            }
-            drop(sizes);
-            let mut terminal_clients = terminal_emulator_clients.lock().await;
-            if let Some(client_ids) = terminal_clients.get_mut(session_id) {
-                for wid in &failed_ids {
-                    client_ids.remove(wid);
-                }
-                if client_ids.is_empty() {
-                    terminal_clients.remove(session_id);
-                }
-            }
-        }
-    }
-
     if should_mirror_output_to_recovery(has_live_terminal_client) {
         let sequence = recovery_manager.next_sequence(session_id);
+        let recovery_started = Instant::now();
+        let recovery_operation = terminal_perf::global_monitor().begin(perf_context(
+            session_id,
+            STAGE_RECOVERY_WRITE,
+            chunk,
+            data.len(),
+        ));
         recovery_manager
             .write_output(session_id, data, sequence)
             .await;
+        recovery_operation.finish();
+        note_slow_stage(recovery_started, STAGE_RECOVERY_WRITE, &mut slow_stage);
     }
 
-    if let Some(obs_data) = obs_data {
-        let mut observers_guard = session_observers.lock().await;
-        if let Some(observer_list) = observers_guard.get_mut(session_id) {
-            let obs_evt = Event::Output {
-                session_id: session_id.to_string(),
-                data: obs_data,
-            };
-            let results = futures::future::join_all(observer_list.iter().map(|obs| {
-                let evt = obs_evt.clone();
-                let obs = obs.clone();
-                async move { write_event(&mut *obs.lock().await, &evt).await }
-            }))
-            .await;
-            let mut i = 0;
-            observer_list.retain(|_| {
-                let ok = results[i].is_ok();
-                i += 1;
-                ok
-            });
-            if observer_list.is_empty() {
-                observers_guard.remove(session_id);
-            }
-        }
+    slow_stage
+}
+
+/// Resync every lagged-but-drained subscriber of this session from a fresh
+/// authoritative snapshot. The snapshot is taken and queued under the fanout
+/// lock so no chunk can interleave between them.
+async fn resync_drained_subscribers(
+    session_id: &str,
+    session: &Arc<SessionHandle>,
+    fanout: &Arc<SessionFanout>,
+) {
+    let mut fanout_state = fanout.state.lock().await;
+    if !fanout_state.has_drained_lagged() {
+        return;
     }
+    let snapshot = match session.snapshot(session_id).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            log::warn!(
+                "[fanout] resync snapshot not ready for session {}: {}; retrying on a later chunk",
+                session_id,
+                error
+            );
+            return;
+        }
+    };
+    let recovered = fanout_state.resync_drained(&Event::Snapshot {
+        session_id: session_id.to_string(),
+        snapshot,
+    });
+    drop(fanout_state);
+    terminal_perf::emit_events(recovered);
 }
 
 async fn emit_status_changed(

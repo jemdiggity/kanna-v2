@@ -89,6 +89,7 @@ async fn main() {
             .duplicate_to_stderr(flexi_logger::Duplicate::Info)
             .start();
     }
+    kanna_daemon::terminal_perf::start_global_watchdog();
 
     let relay_url = config.relay_url.trim().to_string();
     log::info!(

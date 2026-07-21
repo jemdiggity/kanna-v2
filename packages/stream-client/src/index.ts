@@ -61,9 +61,14 @@ export interface AgentStreamHandlers {
 
 export interface TerminalStreamHandlers {
   onSnapshot?(cols: number, rows: number, dataB64: string): void;
-  onOutput(dataB64: string): void;
+  onOutput(dataB64: string, metadata: TerminalOutputMetadata): void;
   onSessionExit?(code: number): void;
   onError?(code: string, message: string): void;
+}
+
+export interface TerminalOutputMetadata {
+  /** Local monotonic time at which the WebSocket frame reached dispatch. */
+  receivedAtMs: number;
 }
 
 export interface CompanionSnapshot {
@@ -101,6 +106,8 @@ export interface StreamClientOptions {
    * refresh. The client stops reconnecting; callers should surface an
    * auth-expired state and require the user to sign in again. */
   onAuthError?(): void;
+  /** Injectable local monotonic clock for terminal dispatch diagnostics. */
+  now?: () => number;
 }
 
 interface AgentAttachment {
@@ -140,6 +147,7 @@ function defaultFactory(url: string): WebSocketLike {
 export class StreamClient {
   private readonly options: StreamClientOptions;
   private readonly factory: WebSocketFactory;
+  private readonly now: () => number;
   private socket: WebSocketLike | null = null;
   private authed = false;
   private closed = false;
@@ -163,6 +171,7 @@ export class StreamClient {
   constructor(options: StreamClientOptions) {
     this.options = options;
     this.factory = options.webSocketFactory ?? defaultFactory;
+    this.now = options.now ?? (() => performance.now());
     this.connect();
   }
 
@@ -469,7 +478,9 @@ export class StreamClient {
         return;
       }
       case "term_output": {
-        this.terminalAttachment(frame.task_id)?.handlers.onOutput(frame.data_b64);
+        this.terminalAttachment(frame.task_id)?.handlers.onOutput(frame.data_b64, {
+          receivedAtMs: this.now(),
+        });
         return;
       }
       case "companion_snapshot": {

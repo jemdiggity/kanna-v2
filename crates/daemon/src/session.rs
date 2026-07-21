@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::headless_terminal::HeadlessTerminal;
 use crate::protocol::{AgentProvider, SessionInfo, SessionState, SessionStatus};
 use crate::pty::PtySession;
+use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
 use tokio::sync::{mpsc, Mutex};
 
 pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
@@ -235,8 +236,24 @@ impl SessionHandle {
 
     pub async fn snapshot(
         &self,
+        session_id: &str,
     ) -> Result<crate::protocol::TerminalSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-        self.state.lock().await.headless_terminal.snapshot()
+        let lock_operation = terminal_perf::global_monitor().begin(TerminalPerfContext::new(
+            "daemon",
+            session_id,
+            "snapshot_lock",
+        ));
+        let mut state = self.state.lock().await;
+        lock_operation.finish();
+
+        let serialize_operation = terminal_perf::global_monitor().begin(TerminalPerfContext::new(
+            "daemon",
+            session_id,
+            "snapshot_serialize",
+        ));
+        let snapshot = state.headless_terminal.snapshot();
+        serialize_operation.finish();
+        snapshot
     }
 
     pub async fn rows_cols(&self) -> (u16, u16) {

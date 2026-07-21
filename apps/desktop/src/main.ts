@@ -13,7 +13,7 @@ import {
 } from "./perf/taskSwitchPerf";
 import App from "./App.vue";
 import { createWindowWorkspace, parseWindowBootstrap, resolveWindowBootstrap } from "./windowWorkspace";
-import { e2eAppMetrics } from "./e2eAppMetrics";
+import { e2eAppMetrics, e2eTerminalOutputPerf } from "./e2eAppMetrics";
 import { e2eInvokeHistory } from "./e2eInvokeHistory";
 import {
   getSharedStreamClient,
@@ -267,6 +267,7 @@ try {
         clear: () => clearTaskSwitchPerfRecords(),
       },
       appMetrics: e2eAppMetrics,
+      terminalOutputPerf: e2eTerminalOutputPerf,
       invokes: e2eInvokeHistory,
       resetStreamClient: resetSharedStreamClientForTests,
       serverWork: e2eServerWork,

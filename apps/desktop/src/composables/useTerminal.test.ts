@@ -22,7 +22,7 @@ const streamClientMock = vi.hoisted(() => ({
 const eventListeners = new Map<string, ((event: any) => void)[]>();
 interface TerminalStreamHandlers {
   onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
-  onOutput: (dataB64: string) => void;
+  onOutput: (dataB64: string, metadata?: { receivedAtMs: number }) => void;
   onSessionExit?: (code: number) => void;
   onError?: (code: string, message: string) => void;
 }
@@ -427,7 +427,14 @@ describe("useTerminal", () => {
     expect(sendTermResize).toHaveBeenCalledWith("session-1", 100, 32);
 
     terminalHandlers?.onOutput(btoa("live over ksp"));
-    expect(terminal.write).toHaveBeenCalledWith(expect.any(Uint8Array));
+    expect(terminal.write).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      expect.any(Function),
+    );
+    const outputWrite = terminal.write.mock.calls.find(
+      ([data]) => data instanceof Uint8Array,
+    );
+    outputWrite?.[1]?.();
 
     wrapper.unmount();
     expect(detach).toHaveBeenCalledWith("session-1", "terminal");
@@ -2997,8 +3004,8 @@ describe("useTerminal", () => {
 
     terminalStreamHandlers.get("session-2")?.onOutput(btoa("streaming output"));
 
-    expect(terminals[0]?.write).not.toHaveBeenCalledWith(expect.any(Uint8Array));
-    expect(terminals[1]?.write).toHaveBeenCalledWith(expect.any(Uint8Array));
+    expect(terminals[0]?.write.mock.calls.some(([data]) => data instanceof Uint8Array)).toBe(false);
+    expect(terminals[1]?.write.mock.calls.some(([data]) => data instanceof Uint8Array)).toBe(true);
 
     first.unmount();
     second.unmount();

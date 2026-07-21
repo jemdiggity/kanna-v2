@@ -5,6 +5,10 @@ import { invoke } from "../invoke"
 import { listen } from "../listen"
 import { getAppErrorMessage } from "../appError"
 import { markTaskSwitchFirstOutput } from "../perf/taskSwitchPerf"
+import {
+  attachTerminalOutputPerf,
+  type TerminalOutputPerfHandle,
+} from "../perf/terminalOutputPerf"
 import { markDaemonReadyObserved } from "./daemonReadyState"
 import { onSharedStreamConnectionChange } from "./desktopStreamClient"
 import { loadSessionRecoveryState } from "./sessionRecoveryState"
@@ -72,6 +76,7 @@ export function createTerminalSessionLifecycle(params: {
     clipboardBridge: params.clipboardBridge,
     layout: params.layout,
   })
+  let outputPerf: TerminalOutputPerfHandle | null = null
 
   async function connectSession() {
     if (params.state.paused) return
@@ -134,13 +139,22 @@ export function createTerminalSessionLifecycle(params: {
             params.clipboardBridge.restoreTerminalModesFromSnapshot(vt)
             liveTerminal.write(vt)
           },
-          onOutput: (dataB64) => {
+          onOutput: (dataB64, metadata) => {
+            const perf = outputPerf
+            perf?.frameReceived(metadata?.receivedAtMs ?? performance.now(), dataB64.length)
             const liveTerminal = getLiveTerminal()
             if (!liveTerminal) return
             markTaskSwitchFirstOutput(params.sessionId)
+            const decodeStartedAt = performance.now()
             const bytes = base64ToBytes(dataB64)
+            perf?.recordDecode(performance.now() - decodeStartedAt, bytes.length)
             params.clipboardBridge.handleTerminalOutputControlSequences(bytes)
-            liveTerminal.write(bytes)
+            const completeWrite = perf?.beginXtermWrite(bytes.length)
+            if (completeWrite) {
+              liveTerminal.write(bytes, completeWrite)
+            } else {
+              liveTerminal.write(bytes)
+            }
           },
           onSessionExit: (code) => {
             params.state.attached = false
@@ -319,6 +333,7 @@ export function createTerminalSessionLifecycle(params: {
 
   async function startListening() {
     params.state.paused = false
+    outputPerf ??= attachTerminalOutputPerf(params.sessionId)
     params.state.connectionGeneration += 1
     const listeningGeneration = params.state.connectionGeneration
     const teardownId = `td-${params.sessionId}`
@@ -498,6 +513,8 @@ export function createTerminalSessionLifecycle(params: {
 
   function pause() {
     params.state.paused = true
+    outputPerf?.dispose()
+    outputPerf = null
     params.state.connectionGeneration += 1
     void params.inputQueue.flushQueuedInput()
     const shouldDetach = params.state.attached || params.state.connecting || params.state.hasAttachedOnce
@@ -586,10 +603,16 @@ export function createTerminalSessionLifecycle(params: {
     }
   }
 
+  function dispose() {
+    outputPerf?.dispose()
+    outputPerf = null
+    disposal.dispose()
+  }
+
   return {
     startListening,
     pause,
-    dispose: disposal.dispose,
+    dispose,
     redraw,
     ensureConnected,
   }
