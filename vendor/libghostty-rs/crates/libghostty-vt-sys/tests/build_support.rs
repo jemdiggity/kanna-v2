@@ -51,3 +51,11 @@ fn removes_only_generated_dynamic_library_aliases() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn build_script_tracks_cleanup_helper() {
+    assert!(
+        include_str!("../build.rs").contains("cargo:rerun-if-changed=build_support.rs"),
+        "build_support.rs changes must rerun the vendored Ghostty build"
+    );
+}

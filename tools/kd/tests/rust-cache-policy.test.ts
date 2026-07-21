@@ -10,9 +10,9 @@ import {
 } from "../src/runtime/rust-cache-policy";
 
 describe("rust cache policy", () => {
-  it("keeps Kanache opt-in and accepts only documented values", () => {
-    expect(parseRustCacheMode(undefined)).toEqual({ enabled: false });
-    expect(parseRustCacheMode("  ")).toEqual({ enabled: false });
+  it("enables Kanache by default and accepts the documented override values", () => {
+    expect(parseRustCacheMode(undefined)).toEqual({ enabled: true });
+    expect(parseRustCacheMode("  ")).toEqual({ enabled: true });
     expect(parseRustCacheMode("on")).toEqual({ enabled: true });
     expect(parseRustCacheMode("kanache")).toEqual({ enabled: true });
     expect(parseRustCacheMode("off")).toEqual({ enabled: false });
@@ -23,6 +23,7 @@ describe("rust cache policy", () => {
   });
 
   it.each([
+    [{ mode: undefined, platform: "darwin", ci: undefined }, { enabled: true }],
     [{ mode: "on", platform: "darwin", ci: undefined }, { enabled: true }],
     [{ mode: "kanache", platform: "darwin", ci: "  " }, { enabled: true }],
     [
