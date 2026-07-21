@@ -6,6 +6,7 @@ import {
   setDesktopServerClientHandlersForTests,
   updateDesktopServerClientHandlersForTests,
 } from "../services/desktopServerClient";
+import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -33,6 +34,8 @@ function createTaskCreationHarness() {
   const onAgentChoiceUsed = vi.fn(async () => {});
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
+  const remoteSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
+  const cloudOnlyRepoIds = new Set<string>();
   const toast = { warning: vi.fn(), error: vi.fn() };
   const store = {
     selectedRepoId: "repo-1",
@@ -64,7 +67,7 @@ function createTaskCreationHarness() {
     toast: toast as never,
     t: (key: string) => key,
     sidebarRepos: computed(() => [{ id: "repo-1" }]),
-    remoteSnapshot: computed(() => ({ repos: [], items: [] }) as never),
+    remoteSnapshot: computed(() => remoteSnapshot.value),
     mainPanelIsCloudTask: computed(() => false),
     selectedCloudRepoId,
     selectedCloudItemId,
@@ -75,7 +78,7 @@ function createTaskCreationHarness() {
     defaultBaseBranchName,
     repoDefaultBranchName,
     showAddRepoModal: ref(false),
-    isCloudOnlyRepoId: () => false,
+    isCloudOnlyRepoId: (repoId) => Boolean(repoId && cloudOnlyRepoIds.has(repoId)),
     cloudRepoRemoteUrl: () => null,
     onAgentChoiceUsed,
   });
@@ -92,6 +95,8 @@ function createTaskCreationHarness() {
     onAgentChoiceUsed,
     selectedCloudRepoId,
     selectedCloudItemId,
+    remoteSnapshot,
+    cloudOnlyRepoIds,
     toast,
   };
 }
@@ -160,6 +165,190 @@ describe("useAppTaskCreation", () => {
     defaultBranch.resolve("main");
     baseBranches.resolve(["origin/main"]);
     await openPromise;
+  });
+
+  it("hydrates cached repository options while refreshing them on reopen", async () => {
+    const { creation, showNewTaskModal, availablePipelines, defaultPipelineName, availableBaseBranches } =
+      createTaskCreationHarness();
+
+    await creation.openNewTaskModal();
+    showNewTaskModal.value = false;
+
+    const definitions = deferred<{
+      revision: string;
+      refName: string;
+      config: Record<string, never>;
+      defaultPipeline: string;
+      pipelines: string[];
+    }>();
+    const providers = deferred<["codex"]>();
+    const defaultBranch = deferred<string>();
+    const baseBranches = deferred<string[]>();
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: () => definitions.promise,
+      fetchRepoAgentProviders: () => providers.promise,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_default_branch") return defaultBranch.promise;
+      if (command === "git_list_base_branches") return baseBranches.promise;
+      return Promise.resolve("");
+    });
+
+    const reopenPromise = creation.openNewTaskModal();
+
+    expect(creation.newTaskOptionsLoading.value).toBe(true);
+    expect(creation.availableAgentProviders.value).toEqual([
+      "claude", "copilot", "codex", "opencode", "antigravity",
+    ]);
+    expect(availablePipelines.value).toEqual(["default"]);
+    expect(defaultPipelineName.value).toBe("default");
+    expect(availableBaseBranches.value).toEqual(["origin/main"]);
+
+    definitions.resolve({
+      revision: "refreshed-rev",
+      refName: "origin/trunk",
+      config: {},
+      defaultPipeline: "review",
+      pipelines: ["default", "review"],
+    });
+    providers.resolve(["codex"]);
+    defaultBranch.resolve("trunk");
+    baseBranches.resolve(["origin/trunk", "trunk"]);
+    await reopenPromise;
+
+    expect(creation.availableAgentProviders.value).toEqual(["codex"]);
+    expect(availablePipelines.value).toEqual(["default", "review"]);
+    expect(defaultPipelineName.value).toBe("review");
+    expect(availableBaseBranches.value).toEqual(["origin/trunk", "trunk"]);
+    expect(creation.newTaskOptionsLoading.value).toBe(false);
+  });
+
+  it("keeps cached repository options isolated by repository", async () => {
+    const {
+      creation,
+      store,
+      showNewTaskModal,
+      availablePipelines,
+      availableBaseBranches,
+    } = createTaskCreationHarness();
+
+    await creation.openNewTaskModal("repo-1");
+    showNewTaskModal.value = false;
+    store.repos.push({ id: "repo-2", path: "/repo-2" });
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "repo-2-rev",
+        refName: "origin/trunk",
+        config: {},
+        defaultPipeline: "review",
+        pipelines: ["default", "review"],
+      }),
+      fetchRepoAgentProviders: async (): Promise<["codex"]> => ["codex"],
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "git_default_branch") return "trunk";
+      if (command === "git_list_base_branches") return ["origin/trunk"];
+      return "";
+    });
+    await creation.openNewTaskModal("repo-2");
+    showNewTaskModal.value = false;
+
+    const definitions = deferred<{
+      revision: string;
+      refName: string;
+      config: Record<string, never>;
+      defaultPipeline: string;
+      pipelines: string[];
+    }>();
+    const providers = deferred<["claude"]>();
+    const defaultBranch = deferred<string>();
+    const baseBranches = deferred<string[]>();
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: () => definitions.promise,
+      fetchRepoAgentProviders: () => providers.promise,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_default_branch") return defaultBranch.promise;
+      if (command === "git_list_base_branches") return baseBranches.promise;
+      return Promise.resolve("");
+    });
+
+    const reopenRepoOne = creation.openNewTaskModal("repo-1");
+
+    expect(creation.availableAgentProviders.value).toEqual([
+      "claude", "copilot", "codex", "opencode", "antigravity",
+    ]);
+    expect(availablePipelines.value).toEqual(["default"]);
+    expect(availableBaseBranches.value).toEqual(["origin/main"]);
+
+    definitions.resolve({
+      revision: "repo-1-refreshed-rev",
+      refName: "origin/main",
+      config: {},
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    });
+    providers.resolve(["claude"]);
+    defaultBranch.resolve("main");
+    baseBranches.resolve(["origin/main", "main"]);
+    await reopenRepoOne;
+  });
+
+  it("hydrates cached remote branches while refreshing a cloud-only repository", async () => {
+    const {
+      creation,
+      store,
+      showNewTaskModal,
+      availableBaseBranches,
+      defaultBaseBranchName,
+      remoteSnapshot,
+      cloudOnlyRepoIds,
+    } = createTaskCreationHarness();
+    const cloudRepoId = "cloud:repo-cloud";
+    const cloudRepo = {
+      id: cloudRepoId,
+      path: "",
+      name: "repo-cloud",
+      default_branch: "main",
+      remote_url: "git@github.com:kanna/repo-cloud.git",
+      remote_url_hash: null,
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-07-21T00:00:00Z",
+      last_opened_at: "2026-07-21T00:00:00Z",
+    };
+    remoteSnapshot.value = { repos: [cloudRepo], items: [], terminalRefs: {} };
+    cloudOnlyRepoIds.add(cloudRepoId);
+    store.selectedRepoId = cloudRepoId;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "git_list_remote_base_branches") return ["origin/main"];
+      return "";
+    });
+
+    await creation.openNewTaskModal(cloudRepoId);
+    showNewTaskModal.value = false;
+
+    const refreshedBranches = deferred<string[]>();
+    remoteSnapshot.value = {
+      repos: [{ ...cloudRepo, default_branch: "trunk" }],
+      items: [],
+      terminalRefs: {},
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_list_remote_base_branches") return refreshedBranches.promise;
+      return Promise.resolve("");
+    });
+
+    const reopenPromise = creation.openNewTaskModal(cloudRepoId);
+
+    expect(availableBaseBranches.value).toEqual(["origin/main"]);
+    expect(defaultBaseBranchName.value).toBe("origin/main");
+
+    refreshedBranches.resolve(["origin/trunk", "trunk"]);
+    await reopenPromise;
+
+    expect(availableBaseBranches.value).toEqual(["origin/trunk", "trunk"]);
+    expect(defaultBaseBranchName.value).toBe("origin/trunk");
   });
 
   it("discards option results from a superseded repository load", async () => {
@@ -241,6 +430,43 @@ describe("useAppTaskCreation", () => {
     expect(availableBaseBranches.value).toEqual(["origin/trunk"]);
     expect(creation.availableAgentProviders.value).toEqual(["codex"]);
     expect(creation.newTaskOptionsLoading.value).toBe(false);
+
+    const refreshedDefinitions = deferred<{
+      revision: string;
+      refName: string;
+      config: Record<string, never>;
+      defaultPipeline: string;
+      pipelines: string[];
+    }>();
+    const refreshedProviders = deferred<[]>();
+    const refreshedDefaultBranch = deferred<string>();
+    const refreshedBaseBranches = deferred<string[]>();
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: () => refreshedDefinitions.promise,
+      fetchRepoAgentProviders: () => refreshedProviders.promise,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_default_branch") return refreshedDefaultBranch.promise;
+      if (command === "git_list_base_branches") return refreshedBaseBranches.promise;
+      return Promise.resolve("");
+    });
+
+    const thirdOpen = creation.openNewTaskModal("repo-1");
+
+    expect(availablePipelines.value).toEqual([]);
+    expect(availableBaseBranches.value).toEqual([]);
+
+    refreshedDefinitions.resolve({
+      revision: "repo-1-current-rev",
+      refName: "origin/main",
+      config: {},
+      defaultPipeline: "default",
+      pipelines: ["default"],
+    });
+    refreshedProviders.resolve([]);
+    refreshedDefaultBranch.resolve("main");
+    refreshedBaseBranches.resolve(["origin/main"]);
+    await thirdOpen;
   });
 
   it("does not report definition errors from a superseded repository load", async () => {

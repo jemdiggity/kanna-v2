@@ -32,6 +32,95 @@ async function git(repoPath: string, args: string[]): Promise<void> {
   await execFileAsync("git", ["-C", repoPath, ...args]);
 }
 
+async function holdNewTaskOptionRequests(
+  client: WebDriverClient,
+  repoId: string,
+  responses: Record<string, unknown> = {},
+): Promise<void> {
+  await client.executeSync(
+    `const originalFetch = globalThis.fetch;
+     const callOriginalFetch = originalFetch.bind(globalThis);
+     let releaseOptionRequests;
+     const optionRequestGate = new Promise((resolve) => { releaseOptionRequests = resolve; });
+     const heldPaths = new Set([
+       ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`)},
+       ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/agent-providers`)},
+     ]);
+     const responses = new Map(Object.entries(${JSON.stringify(responses)}));
+     const gate = {
+       originalFetch,
+       heldPaths,
+       requestsHeld: [],
+       released: false,
+       release() {
+         if (this.released) return;
+         this.released = true;
+         releaseOptionRequests();
+       },
+     };
+     window.__KANNA_NEW_TASK_OPTIONS_GATE__ = gate;
+     globalThis.fetch = async (input, init) => {
+       const url = typeof input === "string"
+         ? input
+         : input instanceof URL
+           ? input.href
+           : input.url;
+       const path = new URL(url, window.location.href).pathname;
+       if (heldPaths.has(path)) {
+         gate.requestsHeld.push(path);
+         await optionRequestGate;
+         if (responses.has(path)) {
+           return new Response(JSON.stringify(responses.get(path)), {
+             status: 200,
+             headers: { "content-type": "application/json" },
+           });
+         }
+       }
+       return callOriginalFetch(input, init);
+     };
+     return true;`,
+  );
+}
+
+async function releaseNewTaskOptionRequests(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `window.__KANNA_NEW_TASK_OPTIONS_GATE__?.release(); return true;`,
+  );
+}
+
+async function waitForHeldNewTaskOptionRequests(
+  client: WebDriverClient,
+  expectedPaths: string[],
+  timeoutMs = 5_000,
+): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  let heldPaths: string[] = [];
+
+  while (Date.now() < deadline) {
+    heldPaths = await client.executeSync<string[]>(
+      `return Array.from(window.__KANNA_NEW_TASK_OPTIONS_GATE__?.requestsHeld ?? []);`,
+    );
+    if (expectedPaths.every((path) => heldPaths.includes(path))) return heldPaths;
+    await sleep(50);
+  }
+
+  throw new Error(
+    `timed out waiting for held New Task option requests ${JSON.stringify(expectedPaths)}; held ${JSON.stringify(heldPaths)}`,
+  );
+}
+
+async function restoreNewTaskOptionRequests(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
+     if (gate) {
+       gate.release?.();
+       globalThis.fetch = gate.originalFetch;
+     }
+     delete window.__KANNA_NEW_TASK_OPTIONS_GATE__;
+     return true;`,
+  );
+}
+
 async function openNewTaskModal(client: WebDriverClient): Promise<void> {
   const modalResult = await callVueMethod(client, "keyboardActions.newTask");
   expect(modalResult).toBeNull();
@@ -396,48 +485,16 @@ describe("new task modal", () => {
   }
 
   it("renders an editable New Task modal while repository options are unresolved", async () => {
-    await client.executeSync(
-      `const originalFetch = globalThis.fetch;
-       const callOriginalFetch = originalFetch.bind(globalThis);
-       let releaseOptionRequests;
-       const optionRequestGate = new Promise((resolve) => { releaseOptionRequests = resolve; });
-       const heldPaths = new Set([
-         ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`)},
-         ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/agent-providers`)},
-       ]);
-       const gate = {
-         originalFetch,
-         heldPaths,
-         requestsHeld: [],
-         released: false,
-         release() {
-           if (this.released) return;
-           this.released = true;
-           releaseOptionRequests();
-         },
-       };
-       window.__KANNA_NEW_TASK_OPTIONS_GATE__ = gate;
-       globalThis.fetch = async (input, init) => {
-         const url = typeof input === "string"
-           ? input
-           : input instanceof URL
-             ? input.href
-             : input.url;
-         const path = new URL(url, window.location.href).pathname;
-         if (heldPaths.has(path)) {
-           gate.requestsHeld.push(path);
-           await optionRequestGate;
-         }
-         return callOriginalFetch(input, init);
-       };
-       return true;`,
-    );
+    const definitionsPath = `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`;
+    const providersPath = `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`;
+    await holdNewTaskOptionRequests(client, repoId);
 
     try {
       await client.executeSync(buildGlobalKeydownScript({ key: "N", meta: true, shift: true }));
 
       const loading = await client.waitForElement('[data-testid="task-options-loading"]', 5_000);
       expect(loading).toBeTruthy();
+      await waitForHeldNewTaskOptionRequests(client, [definitionsPath, providersPath]);
       const prompt = await client.waitForElement(".prompt-input", 2_000);
       await client.sendKeys(prompt, "Prompt remains editable while options load");
 
@@ -449,6 +506,8 @@ describe("new task modal", () => {
         agentDisabled: boolean;
         pipelineDisabled: boolean;
         baseBranchDisabled: boolean;
+        baseBranch: string;
+        baseBranchInvalid: boolean;
       }>(
         `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
          return {
@@ -459,24 +518,26 @@ describe("new task modal", () => {
            agentDisabled: document.querySelector(".agent-provider")?.disabled === true,
            pipelineDisabled: document.querySelector('[data-testid="pipeline-toggle"]')?.disabled === true,
            baseBranchDisabled: document.querySelector('[data-testid="base-branch-toggle"]')?.disabled === true,
+           baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
+           baseBranchInvalid: document.querySelector('[data-testid="base-branch-value"]')?.classList.contains("invalid") === true,
          };`,
       );
       expect(pendingState).toEqual({
         heading: "New Task",
         prompt: "Prompt remains editable while options load",
         requestsHeld: expect.arrayContaining([
-          `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`,
-          `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`,
+          definitionsPath,
+          providersPath,
         ]),
         createDisabled: true,
         agentDisabled: true,
         pipelineDisabled: true,
         baseBranchDisabled: true,
+        baseBranch: "Loading task options…",
+        baseBranchInvalid: false,
       });
 
-      await client.executeSync(
-        `window.__KANNA_NEW_TASK_OPTIONS_GATE__.release(); return true;`,
-      );
+      await releaseNewTaskOptionRequests(client);
       await client.waitForNoElement('[data-testid="task-options-loading"]', 10_000);
 
       const loadedState = await client.executeSync<{
@@ -520,19 +581,115 @@ describe("new task modal", () => {
       ) as Array<{ pipeline: string }>;
       expect(pipelineRows[0]?.pipeline).toBe("qa-review");
     } finally {
-      await client.executeSync(
-        `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
-         if (gate) {
-           gate.release?.();
-           globalThis.fetch = gate.originalFetch;
-         }
-         delete window.__KANNA_NEW_TASK_OPTIONS_GATE__;
-         return true;`,
-      ).catch(() => undefined);
+      await restoreNewTaskOptionRequests(client).catch(() => undefined);
       await client.executeSync(
         buildSelectorKeydownScript(".modal-overlay .modal", { key: "Escape" }),
       ).catch(() => undefined);
       await client.waitForNoElement(".modal-overlay", 5_000);
+    }
+  });
+
+  it("shows cached repository options immediately while a reopen refresh is held", async () => {
+    const definitionsPath = `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`;
+    const providersPath = `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`;
+    let optionRequestsHeld = false;
+    let trunkBranchCreated = false;
+
+    try {
+      await reloadApp(client);
+      await dismissStartupShortcutsModal(client);
+      await openNewTaskModal(client);
+      expect(await client.executeSync<string>(
+        `return document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "";`,
+      )).toBe("qa-review");
+      expect(await client.executeSync<string>(
+        `return document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "";`,
+      )).toBe("origin/main");
+      await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+      await client.waitForNoElement(".modal-overlay", 5_000);
+
+      await git(testRepoPath, ["branch", "trunk"]);
+      trunkBranchCreated = true;
+      await git(testRepoPath, ["push", "origin", "trunk"]);
+      await git(testRepoPath, ["remote", "set-head", "origin", "trunk"]);
+
+      await holdNewTaskOptionRequests(client, repoId, {
+        [definitionsPath]: {
+          revision: "refreshed-revision",
+          refName: "origin/trunk",
+          config: { pipeline: "release" },
+          defaultPipeline: "release",
+          pipelines: ["default", "qa-review", "release"],
+        },
+      });
+      optionRequestsHeld = true;
+      await client.executeSync(buildGlobalKeydownScript({ key: "N", meta: true, shift: true }));
+      await client.waitForElement('[data-testid="task-options-loading"]', 5_000);
+      await waitForHeldNewTaskOptionRequests(client, [definitionsPath, providersPath]);
+
+      const cachedState = await client.executeSync<{
+        requestsHeld: string[];
+        pipeline: string;
+        baseBranch: string;
+        baseBranchInvalid: boolean;
+      }>(
+        `const gate = window.__KANNA_NEW_TASK_OPTIONS_GATE__;
+         return {
+           requestsHeld: Array.from(gate?.requestsHeld ?? []),
+           pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
+           baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
+           baseBranchInvalid: document.querySelector('[data-testid="base-branch-value"]')?.classList.contains("invalid") === true,
+         };`,
+      );
+      expect(cachedState).toEqual({
+        requestsHeld: expect.arrayContaining([
+          definitionsPath,
+          providersPath,
+        ]),
+        pipeline: "qa-review",
+        baseBranch: "origin/main",
+        baseBranchInvalid: false,
+      });
+
+      await releaseNewTaskOptionRequests(client);
+      await client.waitForNoElement('[data-testid="task-options-loading"]', 10_000);
+      await client.waitForText('[data-testid="pipeline-value"]', "release", 5_000);
+      await client.waitForText('[data-testid="base-branch-value"]', "origin/trunk", 5_000);
+      await client.click(await client.waitForElement('[data-testid="pipeline-toggle"]', 2_000));
+      await client.click(await client.waitForElement('[data-testid="base-branch-toggle"]', 2_000));
+
+      const refreshedState = await client.executeSync<{
+        pipeline: string;
+        pipelineOptions: string[];
+        baseBranch: string;
+        baseBranchOptions: string[];
+      }>(
+        `return {
+           pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
+           pipelineOptions: Array.from(document.querySelectorAll('[data-testid^="pipeline-option-"]'))
+             .map((option) => option.textContent?.trim() ?? ""),
+           baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
+           baseBranchOptions: Array.from(document.querySelectorAll('[data-testid^="base-branch-option-"]'))
+             .map((option) => option.textContent?.trim() ?? ""),
+         };`,
+      );
+      expect(refreshedState).toEqual({
+        pipeline: "release",
+        pipelineOptions: expect.arrayContaining(["default", "qa-review", "release"]),
+        baseBranch: "origin/trunk",
+        baseBranchOptions: expect.arrayContaining(["origin/trunk", "trunk"]),
+      });
+    } finally {
+      if (optionRequestsHeld) {
+        await restoreNewTaskOptionRequests(client).catch(() => undefined);
+      }
+      await client.executeSync(buildGlobalKeydownScript({ key: "Escape" })).catch(() => undefined);
+      await client.waitForNoElement(".modal-overlay", 5_000);
+      if (trunkBranchCreated) {
+        await git(testRepoPath, ["remote", "set-head", "origin", "main"]).catch(() => undefined);
+        await git(testRepoPath, ["push", "origin", "--delete", "trunk"]).catch(() => undefined);
+        await git(testRepoPath, ["branch", "-D", "trunk"]).catch(() => undefined);
+      }
     }
   });
 

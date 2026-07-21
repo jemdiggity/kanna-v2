@@ -40,9 +40,26 @@ describe("NewTaskModal", () => {
 
     expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
     expect(wrapper.get('[data-testid="task-options-loading"]').text()).toBe("tasks.loadingOptions");
+    expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
     expect(wrapper.get('[data-testid="base-branch-toggle"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get(".btn-primary").attributes("disabled")).toBeDefined();
+  });
+
+  it("shows a neutral branch loading value before uncached options arrive", () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        optionsLoading: true,
+        availableAgentProviders: undefined,
+        pipelines: [],
+        baseBranches: [],
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    const branchValue = wrapper.get('[data-testid="base-branch-value"]');
+    expect(branchValue.text()).toBe("tasks.loadingOptions");
+    expect(branchValue.classes()).not.toContain("invalid");
   });
 
   it("uses the repository default pipeline after options load", async () => {
@@ -803,6 +820,7 @@ describe("NewTaskModal", () => {
 
     await flushPromises();
     expect(wrapper.get('[data-testid="base-branch-value"]').text()).toContain("tasks.baseBranchRequired");
+    expect(wrapper.get('[data-testid="base-branch-value"]').classes()).toContain("invalid");
 
     await wrapper.get("textarea").setValue("Ship invalid branch guard");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
@@ -854,5 +872,51 @@ describe("NewTaskModal", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-testid="base-branch-value"]').text()).toContain("origin/dev");
+  });
+
+  it("updates an automatically selected base branch when the refreshed default changes", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        baseBranches: ["origin/main", "main"],
+        defaultBaseBranch: "origin/main",
+        defaultBranchName: "main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
+
+    await wrapper.setProps({
+      baseBranches: ["origin/dev", "dev", "origin/main", "main"],
+      defaultBaseBranch: "origin/dev",
+      defaultBranchName: "dev",
+    });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/dev");
+  });
+
+  it("keeps a manually selected base branch when refreshed options still include it", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        baseBranches: ["origin/main", "main", "feature/task-base-branch"],
+        defaultBaseBranch: "origin/main",
+        defaultBranchName: "main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await wrapper.get('[data-testid="base-branch-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="base-branch-option-feature/task-base-branch"]').trigger("click");
+
+    await wrapper.setProps({
+      baseBranches: ["origin/dev", "dev", "origin/main", "main", "feature/task-base-branch"],
+      defaultBaseBranch: "origin/dev",
+      defaultBranchName: "dev",
+    });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("feature/task-base-branch");
   });
 });
