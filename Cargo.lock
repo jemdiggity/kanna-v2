@@ -2940,6 +2940,7 @@ dependencies = [
  "dirs",
  "flexi_logger",
  "futures-util",
+ "if-addrs",
  "jsonwebtoken",
  "kanna-agent-protocol",
  "kanna-daemon",
