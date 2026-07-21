@@ -45,6 +45,15 @@ interface UseAppTaskCreationOptions {
   onAgentChoiceUsed?: (choice: { provider: AgentProvider; executionType: AgentExecutionType }) => void | Promise<void>;
 }
 
+interface NewTaskOptionsSnapshot {
+  availableAgentProviders: AgentProvider[] | undefined;
+  availablePipelines: string[];
+  defaultPipelineName: string | undefined;
+  availableBaseBranches: string[];
+  defaultBaseBranchName: string | undefined;
+  repoDefaultBranchName: string | undefined;
+}
+
 export function useAppTaskCreation({
   store,
   toast,
@@ -71,6 +80,27 @@ export function useAppTaskCreation({
   const newTaskSubmissionPending = ref(false);
   let pendingNewTaskSubmit: Promise<void> | null = null;
   let newTaskOptionsLoadGeneration = 0;
+  const newTaskOptionsCache = new Map<string, NewTaskOptionsSnapshot>();
+
+  function applyNewTaskOptions(snapshot: NewTaskOptionsSnapshot) {
+    availableAgentProviders.value = snapshot.availableAgentProviders;
+    availablePipelines.value = snapshot.availablePipelines;
+    defaultPipelineName.value = snapshot.defaultPipelineName;
+    availableBaseBranches.value = snapshot.availableBaseBranches;
+    defaultBaseBranchName.value = snapshot.defaultBaseBranchName;
+    repoDefaultBranchName.value = snapshot.repoDefaultBranchName;
+  }
+
+  function clearNewTaskOptions() {
+    applyNewTaskOptions({
+      availableAgentProviders: undefined,
+      availablePipelines: [],
+      defaultPipelineName: undefined,
+      availableBaseBranches: [],
+      defaultBaseBranchName: undefined,
+      repoDefaultBranchName: undefined,
+    });
+  }
 
   function claimLocalTaskOwnership(repoId: string) {
     claimLocalTaskSelectionOwnership({
@@ -85,12 +115,12 @@ export function useAppTaskCreation({
     const loadGeneration = ++newTaskOptionsLoadGeneration;
     const targetRepoId = repoId ?? store.selectedRepoId ?? (sidebarRepos.value.length === 1 ? sidebarRepos.value[0]?.id : undefined);
     if (targetRepoId) store.selectedRepoId = targetRepoId;
-    availableAgentProviders.value = undefined;
-    availablePipelines.value = [];
-    defaultPipelineName.value = undefined;
-    availableBaseBranches.value = [];
-    defaultBaseBranchName.value = undefined;
-    repoDefaultBranchName.value = undefined;
+    const cachedOptions = targetRepoId ? newTaskOptionsCache.get(targetRepoId) : undefined;
+    if (cachedOptions) {
+      applyNewTaskOptions(cachedOptions);
+    } else {
+      clearNewTaskOptions();
+    }
     newTaskOptionsLoading.value = true;
     showNewTaskModal.value = true;
 
@@ -121,13 +151,17 @@ export function useAppTaskCreation({
           }),
         ]);
         if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
-        availableAgentProviders.value = repoAgentProviders;
-        availablePipelines.value = manifest?.pipelines ?? [];
-        defaultPipelineName.value = manifest?.defaultPipeline;
-        repoDefaultBranchName.value = defaultBranch || undefined;
-        availableBaseBranches.value = baseBranches;
-        defaultBaseBranchName.value =
-          getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined;
+        const snapshot: NewTaskOptionsSnapshot = {
+          availableAgentProviders: repoAgentProviders,
+          availablePipelines: manifest?.pipelines ?? [],
+          defaultPipelineName: manifest?.defaultPipeline,
+          availableBaseBranches: baseBranches,
+          defaultBaseBranchName:
+            getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined,
+          repoDefaultBranchName: defaultBranch || undefined,
+        };
+        newTaskOptionsCache.set(targetRepo.id, snapshot);
+        applyNewTaskOptions(snapshot);
       } else if (isCloudOnlyRepoId(targetRepoId)) {
         const cloudRepo = remoteSnapshot.value.repos.find((repo) => repo.id === targetRepoId);
         const remoteUrl = cloudRepo?.remote_url ?? null;
@@ -138,10 +172,17 @@ export function useAppTaskCreation({
             })
           : [];
         if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
-        repoDefaultBranchName.value = cloudRepo?.default_branch || undefined;
-        availableBaseBranches.value = baseBranches;
-        defaultBaseBranchName.value =
-          getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined;
+        const snapshot: NewTaskOptionsSnapshot = {
+          availableAgentProviders: undefined,
+          availablePipelines: [],
+          defaultPipelineName: undefined,
+          availableBaseBranches: baseBranches,
+          defaultBaseBranchName:
+            getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined,
+          repoDefaultBranchName: cloudRepo?.default_branch || undefined,
+        };
+        if (targetRepoId) newTaskOptionsCache.set(targetRepoId, snapshot);
+        applyNewTaskOptions(snapshot);
       }
     } finally {
       if (loadGeneration === newTaskOptionsLoadGeneration) {
