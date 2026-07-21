@@ -28,7 +28,10 @@ describe("staging remote task E2E smoke", () => {
     expect(status).toMatchObject({
       desktopId: harness.desktopId,
       desktopName: "Remote E2E Staging Desktop",
-      state: "running"
+      state: "running",
+      version: "0.0.69-staging.1",
+      environment: "staging",
+      serverVersion: "0.0.69-staging.1"
     });
 
     const task = await createScriptedTask(harness, {

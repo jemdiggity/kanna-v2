@@ -181,6 +181,11 @@ describe("release shipping", () => {
             expect(args).toContain("//:kanna_signed_dmg_staging_arm64");
             expect(args).toContain("//:kanna_updater_bundle_staging_arm64");
             expect(args).not.toContain("//:kanna_signed_dmg_release_arm64");
+            expect(readVersionFiles(repoRoot)).toEqual([
+              "1.2.4-staging.1\n",
+              '{\n  "version": "1.2.4-staging.1"\n}\n',
+              '[package]\nname = "kanna"\nversion = "1.2.4-staging.1"\n'
+            ]);
             return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "git" && args.join(" ") === "remote get-url origin") {
@@ -230,6 +235,11 @@ describe("release shipping", () => {
       expect(validationCall).toBeDefined();
       expect(signerCall).toBeDefined();
       expect(calls.indexOf(validationCall!)).toBeLessThan(calls.indexOf(signerCall!));
+      expect(readVersionFiles(repoRoot)).toEqual([
+        "1.2.3\n",
+        '{\n  "version": "1.2.3"\n}\n',
+        '[package]\nname = "kanna"\nversion = "1.2.3"\n'
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -795,6 +805,11 @@ describe("release shipping", () => {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "bazel" && args[0] === "build") {
+            expect(readVersionFiles(repoRoot)).toEqual([
+              "1.2.4\n",
+              '{\n  "version": "1.2.4"\n}\n',
+              '[package]\nname = "kanna"\nversion = "1.2.4"\n'
+            ]);
             return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "git" && args.join(" ") === "remote get-url origin") {
@@ -839,6 +854,11 @@ describe("release shipping", () => {
       expect(pushIndex).toBeGreaterThan(-1);
       expect(releaseCreateIndex).toBeGreaterThan(-1);
       expect(pushIndex).toBeLessThan(releaseCreateIndex);
+      expect(readVersionFiles(repoRoot)).toEqual([
+        "1.2.4\n",
+        '{\n  "version": "1.2.4"\n}\n',
+        '[package]\nname = "kanna"\nversion = "1.2.4"\n'
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

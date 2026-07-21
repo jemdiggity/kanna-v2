@@ -55,6 +55,9 @@ describe("staging remote E2E configuration", () => {
     expect(lines).toContain('firebase_project_id = "kanna-staging"');
     expect(lines).toContain('kanna_cli_path = "/tmp/repo/.build/debug/kanna-cli"');
     expect(lines).toContain('desktop_id = "remote-e2e-staging-test"');
+    expect(lines).toContain('version = "0.0.69-staging.1"');
+    expect(lines).toContain('environment = "staging"');
+    expect(lines.some((line) => line.startsWith("server_version = "))).toBe(false);
     expect(lines).not.toContain("firebase_auth_emulator_url");
     expect(lines).not.toContain("firebase_firestore_emulator_host");
   });

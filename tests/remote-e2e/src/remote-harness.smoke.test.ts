@@ -23,7 +23,10 @@ describe("remote task E2E harness", () => {
     expect(status).toMatchObject({
       desktopId: harness.desktopId,
       desktopName: "Remote E2E Desktop",
-      state: "running"
+      state: "running",
+      version: "remote-e2e",
+      environment: "development",
+      serverVersion: "remote-e2e"
     });
   });
 });

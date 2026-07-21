@@ -375,6 +375,9 @@ export function createRemoteTransport({
           state: "running",
           desktopId: "cloud",
           desktopName: "Kanna Cloud",
+          version: "cloud",
+          environment: "production",
+          serverVersion: "cloud",
           lanHost: "cloud",
           lanPort: 0,
           pairingCode: null
@@ -930,6 +933,9 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
   const state = getStringField(response, "state");
   const desktopId = getStringField(response, "desktopId");
   const desktopName = getStringField(response, "desktopName");
+  const version = getStringField(response, "version");
+  const environment = getStringField(response, "environment");
+  const serverVersion = getNullableStringField(response, "serverVersion");
   const lanHost = getStringField(response, "lanHost");
   const lanPort = getNumberField(response, "lanPort");
   const pairingCode = getNullableStringField(response, "pairingCode");
@@ -938,6 +944,8 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     state === null ||
     desktopId === null ||
     desktopName === null ||
+    version === null ||
+    environment === null ||
     lanHost === null ||
     lanPort === null
   ) {
@@ -951,6 +959,9 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     state,
     desktopId,
     desktopName,
+    version,
+    environment,
+    serverVersion,
     lanHost,
     lanPort,
     pairingCode

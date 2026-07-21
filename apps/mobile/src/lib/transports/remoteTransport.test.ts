@@ -363,11 +363,14 @@ describe("remote transport", () => {
     ]);
   });
 
-  it("fetches minimal status for the selected desktop through the remote invocation envelope", async () => {
+  it("preserves canonical status identity through the remote invocation envelope", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       state: "running",
       desktopId: "desktop-1",
       desktopName: "Studio Mac",
+      version: "0.0.69-staging.1",
+      environment: "staging",
+      serverVersion: "0.0.69-staging.1",
       lanHost: "10.0.0.2",
       lanPort: 48120,
       pairingCode: null
@@ -382,6 +385,9 @@ describe("remote transport", () => {
       state: "running",
       desktopId: "desktop-1",
       desktopName: "Studio Mac",
+      version: "0.0.69-staging.1",
+      environment: "staging",
+      serverVersion: "0.0.69-staging.1",
       lanHost: "10.0.0.2",
       lanPort: 48120,
       pairingCode: null

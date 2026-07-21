@@ -6,7 +6,7 @@ use super::process::find_sidecar;
 use super::{
     current_server_version, default_desktop_name, desktop_credential, escape_toml_string,
     file_sha256_hex, generate_device_token, local_server_port_for_cloud_env, resolved_db_path,
-    server_base_url, MobileServerState,
+    server_base_url, server_environment, MobileServerState,
 };
 use kanna_runtime_defaults::DesktopCloudEnvironment;
 use std::fs::{File, OpenOptions};
@@ -169,7 +169,7 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
         .unwrap_or_default();
 
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nversion = \"{}\"\nenvironment = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
@@ -180,6 +180,7 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
         escape_toml_string(&credential.desktop_secret),
         escape_toml_string(&state.desktop_name),
         escape_toml_string(current_server_version()),
+        escape_toml_string(server_environment(state.cloud_env)),
         firebase_config,
         local_server_port_for_cloud_env(state.cloud_env),
         escape_toml_string(&pairing_store_path.to_string_lossy()),
@@ -238,8 +239,12 @@ pub(super) fn server_config_matches_runtime(
             escape_toml_string(&credential.desktop_secret)
         ),
         format!(
-            "server_version = \"{}\"",
+            "version = \"{}\"",
             escape_toml_string(current_server_version())
+        ),
+        format!(
+            "environment = \"{}\"",
+            escape_toml_string(server_environment(cloud_env))
         ),
         format!(
             "firebase_project_id = \"{}\"",
@@ -395,12 +400,47 @@ mod tests {
             "desktop_secret = \"{}\"",
             credential.desktop_secret
         )));
-        assert!(config.contains(&format!(
-            "server_version = \"{}\"",
-            current_server_version()
-        )));
+        assert!(config.contains(&format!("version = \"{}\"", current_server_version())));
+        assert!(config.contains("environment = \"development\""));
         assert!(config.contains("db_path = \"/tmp/build.kanna/kanna-v2.db\""));
         assert!(config.contains("lan_port = 48120"));
+    }
+
+    #[test]
+    fn build_server_config_includes_build_metadata_for_each_environment() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_MOBILE_SERVER_PORT");
+            unset_env_var("KANNA_DB_NAME");
+            unset_env_var("KANNA_DB_PATH");
+        }
+
+        for (cloud_env, expected_environment, expected_port) in [
+            (None, "development", 48_120),
+            (
+                Some(DesktopCloudEnvironment::Production),
+                "production",
+                48_120,
+            ),
+            (Some(DesktopCloudEnvironment::Staging), "staging", 48_121),
+        ] {
+            let root = unique_test_root(expected_environment);
+            let state = MobileServerState {
+                status: "stopped".to_string(),
+                desktop_name: "Studio Mac".to_string(),
+                api_base_url: server_base_url(expected_port),
+                config_path: root.join("Kanna/server.toml"),
+                started: false,
+                cloud_env,
+            };
+
+            let config = build_server_config(&state).unwrap();
+
+            assert!(config.contains(&format!("version = \"{}\"", current_server_version())));
+            assert!(config.contains(&format!("environment = \"{expected_environment}\"")));
+            assert!(config.contains(&format!("lan_port = {expected_port}")));
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

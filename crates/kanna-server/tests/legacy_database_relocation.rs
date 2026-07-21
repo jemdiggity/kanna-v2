@@ -288,7 +288,8 @@ fn write_server_config(
          desktop_id = \"desktop-relocation-test\"\n\
          desktop_secret = \"desktop-secret\"\n\
          desktop_name = \"Relocation Test\"\n\
-         server_version = \"test-version\"\n\
+         version = \"test-version\"\n\
+         environment = \"development\"\n\
          lan_host = \"127.0.0.1\"\n\
          lan_port = {port}\n\
          pairing_store_path = \"{}\"\n",

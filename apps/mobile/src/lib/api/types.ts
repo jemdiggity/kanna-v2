@@ -4,6 +4,9 @@ export interface MobileServerStatus {
   state: string;
   desktopId: string;
   desktopName: string;
+  version: string;
+  environment: string;
+  serverVersion: string | null;
   lanHost: string;
   lanPort: number;
   pairingCode: string | null;

@@ -226,7 +226,8 @@ async function writeServerConfig(input: {
         `desktop_id = "${input.desktopId}"`,
         ...(input.desktopSecret ? [`desktop_secret = "${shellTomlString(input.desktopSecret)}"`] : []),
         `desktop_name = "${DESKTOP_NAME}"`,
-        `server_version = "remote-e2e"`,
+        `version = "remote-e2e"`,
+        `environment = "development"`,
         `lan_host = "${shellTomlString(input.lanHost)}"`,
         `lan_port = ${input.ports.server}`,
         `pairing_store_path = "${shellTomlString(join(input.daemonDir, "pairings.json"))}"`

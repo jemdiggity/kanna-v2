@@ -2141,7 +2141,8 @@ async fn task_file_route_maps_database_failure_to_internal_server_error() {
         desktop_id: "desktop-task-file-error".to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
         desktop_name: "Studio Mac".to_string(),
-        server_version: Some("test-version".to_string()),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         pairing_store_path: temp_dir
@@ -2463,7 +2464,8 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
         desktop_id: "desktop-local".to_string(),
         desktop_secret: None,
         desktop_name: "Studio Mac".to_string(),
-        server_version: Some("test-version".to_string()),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         pairing_store_path: PathBuf::from("/tmp/kanna-pairings-http-local.json")

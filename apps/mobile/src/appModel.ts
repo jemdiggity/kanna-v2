@@ -881,6 +881,9 @@ function createDisconnectedClient(): KannaClient {
       state: "stopped",
       desktopId: "none",
       desktopName: "No desktop",
+      version: "unavailable",
+      environment: "development",
+      serverVersion: null,
       lanHost: "none",
       lanPort: 0,
       pairingCode: null

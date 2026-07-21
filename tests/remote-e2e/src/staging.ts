@@ -88,7 +88,8 @@ export function stagingServerTomlLines(input: {
     `kanna_cli_path = "${shellTomlString(input.kannaCliPath)}"`,
     `desktop_id = "${shellTomlString(input.desktopId)}"`,
     `desktop_name = "${STAGING_DESKTOP_NAME}"`,
-    `server_version = "remote-e2e-staging"`,
+    `version = "0.0.69-staging.1"`,
+    `environment = "staging"`,
     `lan_host = "127.0.0.1"`,
     `lan_port = ${input.lanPort}`,
     `pairing_store_path = "${shellTomlString(input.pairingStorePath)}"`
