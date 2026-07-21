@@ -244,70 +244,84 @@ fn map_definition_lookup_error(error: crate::task_creator::DefinitionLookupError
     (status, error.to_string())
 }
 
+async fn run_blocking_http<T, F>(operation: F) -> Result<T, HttpError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, HttpError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("repository definition worker failed: {error}"),
+            )
+        })?
+}
+
 pub(super) async fn get_repo_kanna_definitions(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
 ) -> Result<Json<crate::task_creator::RepoKannaDefinitions>, HttpError> {
-    let repo = get_definition_repo(&state, &repo_id)?;
-    crate::task_creator::load_repo_kanna_definitions(&state.repo_definitions, &repo)
-        .map(Json)
-        .map_err(map_definition_lookup_error)
+    run_blocking_http(move || {
+        let repo = get_definition_repo(&state, &repo_id)?;
+        crate::task_creator::load_repo_kanna_definitions(&state.repo_definitions, &repo)
+            .map_err(map_definition_lookup_error)
+    })
+    .await
+    .map(Json)
 }
 
 pub(super) async fn get_repo_pipeline_definition(
     State(state): State<Arc<AppState>>,
     Path((repo_id, pipeline_name)): Path<(String, String)>,
 ) -> Result<Json<crate::task_creator::RevisionedPipelineDefinition>, HttpError> {
-    let repo = get_definition_repo(&state, &repo_id)?;
-    crate::task_creator::load_repo_pipeline_definition(
-        &state.repo_definitions,
-        &repo,
-        &pipeline_name,
-    )
+    run_blocking_http(move || {
+        let repo = get_definition_repo(&state, &repo_id)?;
+        crate::task_creator::load_repo_pipeline_definition(
+            &state.repo_definitions,
+            &repo,
+            &pipeline_name,
+        )
+        .map_err(map_definition_lookup_error)
+    })
+    .await
     .map(Json)
-    .map_err(map_definition_lookup_error)
 }
 
 pub(super) async fn get_repo_agent_definition(
     State(state): State<Arc<AppState>>,
     Path((repo_id, agent_selector)): Path<(String, String)>,
 ) -> Result<Json<crate::task_creator::RevisionedAgentDefinition>, HttpError> {
-    let repo = get_definition_repo(&state, &repo_id)?;
-    crate::task_creator::load_repo_agent_definition(&state.repo_definitions, &repo, &agent_selector)
-        .map(Json)
+    run_blocking_http(move || {
+        let repo = get_definition_repo(&state, &repo_id)?;
+        crate::task_creator::load_repo_agent_definition(
+            &state.repo_definitions,
+            &repo,
+            &agent_selector,
+        )
         .map_err(map_definition_lookup_error)
+    })
+    .await
+    .map(Json)
 }
 
 pub(super) async fn list_available_agent_providers(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
-) -> Result<Json<AvailableAgentProvidersResponse>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {e}"),
-        )
-    })?;
-    let repo = db
-        .get_repo(&repo_id)
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {e}"),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                format!("repo not found: {repo_id}"),
-            )
-        })?;
-    let providers = crate::task_creator::resolve_available_agent_providers(&repo)
-        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?
-        .into_iter()
-        .map(|(id, executable)| AvailableAgentProvider { id, executable })
-        .collect();
-    Ok(Json(AvailableAgentProvidersResponse { providers }))
+) -> Result<Json<AvailableAgentProvidersResponse>, HttpError> {
+    run_blocking_http(move || {
+        let repo = get_definition_repo(&state, &repo_id)?;
+        let providers =
+            crate::task_creator::resolve_available_agent_providers(&state.repo_definitions, &repo)
+                .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?
+                .into_iter()
+                .map(|(id, executable)| AvailableAgentProvider { id, executable })
+                .collect();
+        Ok(AvailableAgentProvidersResponse { providers })
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Debug, Serialize)]
@@ -482,4 +496,31 @@ fn normalize_branch_ref(value: &str) -> Option<String> {
             .unwrap_or(trimmed)
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod blocking_tests {
+    use super::run_blocking_http;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_definition_lookup_does_not_block_async_runtime() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let lookup = tokio::spawn(run_blocking_http(move || {
+            let _ = started_tx.send(());
+            release_rx.recv().unwrap();
+            Ok(())
+        }));
+
+        started_rx.await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_millis(1)),
+        )
+        .await
+        .expect("async runtime stayed responsive");
+        release_tx.send(()).unwrap();
+        lookup.await.unwrap().unwrap();
+    }
 }

@@ -33,6 +33,35 @@ export interface InitApi {
 const WORKTREE_SHELL_ENV_GENERATION_KEY = "worktreeShellEnvGeneration";
 const WORKTREE_SHELL_ENV_GENERATION = "2026-06-23-worktree-shell-env-v2";
 
+function createTrailingAsyncCoordinator(
+  run: () => Promise<void>,
+  onError: (error: unknown) => void,
+): () => void {
+  let running = false;
+  let trailing = false;
+
+  async function drain(): Promise<void> {
+    running = true;
+    do {
+      trailing = false;
+      try {
+        await run();
+      } catch (error) {
+        onError(error);
+      }
+    } while (trailing);
+    running = false;
+  }
+
+  return () => {
+    if (running) {
+      trailing = true;
+      return;
+    }
+    void drain();
+  };
+}
+
 interface DaemonSessionListEntry {
   session_id?: string;
   kind?: string;
@@ -350,18 +379,21 @@ export function createInitApi(
       );
     });
 
+    const refreshAfterKspStateChange = createTrailingAsyncCoordinator(
+      async () => {
+        const focusedSelection = resolveFocusedSelectionBeforeExternalRefresh();
+        await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+        await preserveFocusedTaskAfterExternalRefresh(focusedSelection);
+        console.debug("[store] refreshed snapshot after KSP state change");
+      },
+      (error) => {
+        console.error("[store] KSP state change handler failed:", error);
+      },
+    );
+
     if (isTauri) {
       getSharedStreamClient().then((client) => {
-        client.onStateChanged((scope) => {
-          void (async () => {
-            const focusedSelection = resolveFocusedSelectionBeforeExternalRefresh();
-            await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-            await preserveFocusedTaskAfterExternalRefresh(focusedSelection);
-            console.debug(`[store] refreshed snapshot after KSP state change: ${scope}`);
-          })().catch((error) => {
-            console.error("[store] KSP state change handler failed:", error);
-          });
-        });
+        client.onStateChanged(refreshAfterKspStateChange);
       }).catch((error) => {
         console.warn("[store] failed to subscribe to KSP state changes:", error);
       });

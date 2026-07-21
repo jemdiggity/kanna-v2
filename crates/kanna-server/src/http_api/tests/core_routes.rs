@@ -1,7 +1,8 @@
 use super::*;
 use rusqlite::Connection;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 fn pairing_create_request(peer: [u8; 4]) -> Request<Body> {
     let mut request = Request::post("/v1/pairing/sessions")
@@ -58,8 +59,8 @@ async fn list_repos_route_returns_repo_summaries() {
     );
 }
 
-#[tokio::test]
-async fn repo_agent_provider_route_uses_workspace_local_executables() {
+#[tokio::test(flavor = "current_thread")]
+async fn repo_agent_provider_route_stays_responsive_and_uses_workspace_local_executables() {
     use std::os::unix::fs::PermissionsExt;
 
     let unique = format!(
@@ -101,19 +102,73 @@ async fn repo_agent_provider_route_uses_workspace_local_executables() {
         .success());
     publish_test_origin_main(&repo_root);
 
-    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
             .unwrap();
     });
-    let response = app
-        .oneshot(
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let started_tx = Arc::new(StdMutex::new(Some(started_tx)));
+    let release = Arc::new((StdMutex::new(false), Condvar::new()));
+    state.repo_definitions.set_before_load(Arc::new({
+        let started_tx = Arc::clone(&started_tx);
+        let release = Arc::clone(&release);
+        move || {
+            if let Some(started_tx) = started_tx.lock().unwrap().take() {
+                let _ = started_tx.send(());
+            }
+            let (released, ready) = &*release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+        }
+    }));
+
+    let (watchdog_cancel_tx, watchdog_cancel_rx) = std::sync::mpsc::channel();
+    let watchdog = std::thread::spawn({
+        let release = Arc::clone(&release);
+        move || {
+            if watchdog_cancel_rx
+                .recv_timeout(Duration::from_millis(500))
+                .is_err()
+            {
+                let (released, ready) = &*release;
+                *released.lock().unwrap() = true;
+                ready.notify_all();
+            }
+        }
+    });
+    let started_at = Instant::now();
+    let request = tokio::spawn(
+        super::router(state).oneshot(
             Request::get("/v1/repos/repo-1/agent-providers")
                 .body(Body::empty())
                 .unwrap(),
+        ),
+    );
+    tokio::time::timeout(Duration::from_secs(1), started_rx)
+        .await
+        .expect("provider route should resolve definitions through the shared cache")
+        .unwrap();
+    let runtime_stayed_responsive = started_at.elapsed() < Duration::from_millis(100)
+        && tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_millis(1)),
         )
         .await
-        .unwrap();
+        .is_ok();
+    let (released, ready) = &*release;
+    *released.lock().unwrap() = true;
+    ready.notify_all();
 
+    let response = request.await.unwrap().unwrap();
+    watchdog_cancel_tx.send(()).unwrap();
+    watchdog.join().unwrap();
+
+    assert!(
+        runtime_stayed_responsive,
+        "provider definition lookup blocked the async runtime"
+    );
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
