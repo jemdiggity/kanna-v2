@@ -76,6 +76,20 @@ describe("preferences", () => {
     await client.waitForText(".prefs-panel", desktopId, 2_000);
   });
 
+  it("shows the mobile access pairing panel on the Mobile tab", async () => {
+    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.waitForNoElement(".prefs-panel", 2_000);
+
+    await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
+    await client.waitForElement(".prefs-panel", 2_000);
+
+    const mobileTab = await client.findElement('[data-testid="preferences-mobile-tab"]');
+    await client.click(mobileTab);
+
+    await client.waitForElement('[data-testid="mobile-access-panel"]', 2_000);
+    await client.waitForText(".prefs-panel", "Mobile Access", 2_000);
+  });
+
   it("persists app and terminal code theme preferences", async () => {
     await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);

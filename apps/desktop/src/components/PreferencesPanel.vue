@@ -59,11 +59,11 @@ const emit = defineEmits<{
   close: []
 }>()
 
-const activeTab = ref<'general' | 'account' | 'developer'>('general')
+const activeTab = ref<'general' | 'account' | 'mobile' | 'developer'>('general')
 
-const tabs: Array<'general' | 'account' | 'developer'> = isDev
-  ? ['general', 'account', 'developer']
-  : ['general', 'account']
+const tabs: Array<'general' | 'account' | 'mobile' | 'developer'> = isDev
+  ? ['general', 'account', 'mobile', 'developer']
+  : ['general', 'account', 'mobile']
 const mobileDesktopName = ref("This desktop")
 const mobileDesktopId = ref("")
 const mobileServerStatus = ref<MobileServerStatus>("stopped")
@@ -225,6 +225,12 @@ defineExpose({ cycleTab })
             :class="{ active: activeTab === 'account' }"
             @click="activeTab = 'account'"
           >Account</button>
+          <button
+            class="tab"
+            data-testid="preferences-mobile-tab"
+            :class="{ active: activeTab === 'mobile' }"
+            @click="activeTab = 'mobile'"
+          >Mobile</button>
           <button
             v-if="isDev"
             class="tab"
@@ -398,6 +404,17 @@ defineExpose({ cycleTab })
         </section>
       </div>
 
+      <div v-if="activeTab === 'mobile'" class="prefs-body">
+        <MobileAccessPanel
+          :desktop-name="mobileDesktopName"
+          :server-status="mobileServerStatus"
+          :pairing-code="pairingCode"
+          :pairing-payload="pairingPayload"
+          :expires-at-unix-ms="pairingExpiresAtUnixMs"
+          @start-pairing="startPairing"
+        />
+      </div>
+
       <div v-if="activeTab === 'developer'" class="prefs-body">
         <div class="pref-row">
           <label>Linger terminals after teardown</label>
@@ -407,15 +424,6 @@ defineExpose({ cycleTab })
             @change="emit('update', 'dev.lingerTerminals', ($event.target as HTMLInputElement).checked ? 'true' : 'false')"
           />
         </div>
-
-        <MobileAccessPanel
-          :desktop-name="mobileDesktopName"
-          :server-status="mobileServerStatus"
-          :pairing-code="pairingCode"
-          :pairing-payload="pairingPayload"
-          :expires-at-unix-ms="pairingExpiresAtUnixMs"
-          @start-pairing="startPairing"
-        />
       </div>
 
       <div class="prefs-footer">
