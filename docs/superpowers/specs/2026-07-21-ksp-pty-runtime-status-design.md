@@ -152,6 +152,13 @@ Idle-vs-unread semantics are untouched: all paths converge on the
 `/v1/tasks/{task_id}/activity/runtime-status` POST carrying `selected`, and
 `activity_for_runtime_status` remains the single decision point.
 
+**Fallback kill switch (dev/E2E only).** A `KANNA_DISABLE_LEGACY_STATUS_FALLBACK`
+environment flag (read once at store init, dev builds only) skips registering
+the legacy `status_changed` Tauri listener and the `syncTaskStatusesFromDaemon`
+poll. It exists so the E2E can prove the KSP path in isolation, and it is the
+mechanism that later becomes the fallback's removal (§6). Production behavior
+is unchanged when the flag is absent.
+
 ## 4. Required regression coverage
 
 - **stream-client boundary** (`packages/stream-client/src/stream-client.test.ts`):
@@ -171,12 +178,20 @@ Idle-vs-unread semantics are untouched: all paths converge on the
   `unread`; the setup-pending guard and closed-task guard still apply; a
   status arriving on both KSP and legacy paths applies once (second apply
   returns `activity: null`, no extra reload).
-- **E2E**: this crosses frontend/server/daemon boundaries, so per the repo's
-  E2E coverage expectation the change should add a desktop E2E if the harness
-  can drive a PTY status transition deterministically. If it cannot (live
-  provider CLI required, as with the completion-notify precedent), the
-  implementation must document why, what would make it testable, and the
-  narrower tests added instead.
+- **E2E (required, false-agent driven)**: the daemon status detector is
+  plain marker matching over the visible footer rows
+  (`crates/daemon/src/headless_terminal.rs:628` — `"esc to interrupt"` →
+  busy, `"do you want to allow"` → waiting, a `›`/`❯` prompt line → idle), so
+  no live provider CLI is needed. The E2E harness already spawns arbitrary
+  executables as daemon PTY sessions with an `agent_provider` tag
+  (`spawn_session` in `pty-session.test.ts`). Add a desktop E2E that spawns a
+  scripted false agent tagged `codex` which prints the busy marker, pauses
+  past the status-detection throttle, prints the waiting marker, then ends on
+  an idle prompt line — and asserts sidebar/task activity follows
+  working → (selected ? idle : unread) through the real daemon → kanna-server
+  → KSP → store path. To prove KSP is the carrier (not the fallbacks), the
+  E2E instance launches with the fallback kill switch (below) enabled. This
+  supersedes any standalone E2E-gap writeup.
 
 ## 5. Out of scope
 
