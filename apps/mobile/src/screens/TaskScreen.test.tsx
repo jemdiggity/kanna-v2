@@ -119,6 +119,10 @@ vi.mock("./TaskFilePreview", () => ({
   TaskFilePreview: "TaskFilePreview"
 }));
 
+vi.mock("./TaskDiffPreview", () => ({
+  TaskDiffPreview: "TaskDiffPreview"
+}));
+
 vi.mock("./VisualCompanionModal", () => ({
   VisualCompanionModal: "VisualCompanionModal"
 }));
@@ -175,6 +179,13 @@ interface RenderTaskScreenOptions {
   onRecoverTaskCreation?: () => void;
   agentStatus?: TaskTerminalStatus;
   onReadTaskFile?: (path: string) => Promise<{ path: string; content: string }>;
+  onReadTaskDiff?: () => Promise<{
+    taskId: string;
+    baseRef: string | null;
+    mergeBase: string | null;
+    patch: string;
+    truncated: boolean;
+  }>;
   taskId?: string;
   title?: string;
   prompt?: string;
@@ -215,6 +226,13 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onReadTaskFile = vi.fn().mockResolvedValue({
       path: "docs/spec.md",
       content: "# Spec"
+    }),
+    onReadTaskDiff = vi.fn().mockResolvedValue({
+      taskId: "task-1",
+      baseRef: "main",
+      mergeBase: "abc123",
+      patch: "",
+      truncated: false
     }),
     taskId = "task-1",
     title = "Task",
@@ -272,6 +290,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onResolveAgentPermission: vi.fn(),
     onRecoverTaskCreation,
     onReadTaskFile,
+    onReadTaskDiff,
     onCompanionOpenChange,
     onSendCompanionEvent
   }) as ElementNode;
@@ -504,6 +523,34 @@ describe("TaskScreen", () => {
     onSelect(action);
 
     expect(expectedCallback).toHaveBeenCalledOnce();
+  });
+
+  it("opens the diff preview from the view-diff task action and closes it", async () => {
+    const onReadTaskDiff = vi.fn().mockResolvedValue({
+      taskId: "task-1",
+      baseRef: "main",
+      mergeBase: "abc123",
+      patch: "diff --git a/x b/x",
+      truncated: false
+    });
+    let tree = renderTaskScreen({ onReadTaskDiff });
+    expect(findByType(tree, "TaskDiffPreview")).toBeNull();
+
+    pressByTestId(tree, "mobile.task-more-button");
+    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![0] as (
+      selectedAction: "view-diff"
+    ) => void;
+    onSelect("view-diff");
+    tree = renderTaskScreen({ onReadTaskDiff });
+
+    const diffPreview = findByType(tree, "TaskDiffPreview");
+    expect(diffPreview).not.toBeNull();
+    await (diffPreview?.props?.readDiff as () => Promise<unknown>)();
+    expect(onReadTaskDiff).toHaveBeenCalledOnce();
+
+    (diffPreview?.props?.onClose as () => void)();
+    tree = renderTaskScreen({ onReadTaskDiff });
+    expect(findByType(tree, "TaskDiffPreview")).toBeNull();
   });
 
   it("offers an unread visual companion action and opens its full-screen view", () => {

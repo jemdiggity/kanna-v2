@@ -542,6 +542,12 @@ function TaskDetailRoute({
           ? controller.readTaskFile(durableTaskId, path)
           : Promise.reject(new Error("Task creation is still in progress."));
       }}
+      onReadTaskDiff={(request) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        return durableTaskId
+          ? controller.readTaskDiff(durableTaskId, request)
+          : Promise.reject(new Error("Task creation is still in progress."));
+      }}
       onSendInput={(input) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) {

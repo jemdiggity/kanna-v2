@@ -130,6 +130,95 @@ describe("createLanTransport", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("fails closed instead of requesting the task diff without device credentials", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        taskId: "task-1",
+        baseRef: "main",
+        mergeBase: "abc",
+        patch: "",
+        truncated: false
+      })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.readTaskDiff("task/read")).rejects.toThrow(
+      /paired device|authenticated relay/i
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("passes the requested diff scope and mode as query parameters", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        taskId: "task-1",
+        baseRef: null,
+        mergeBase: null,
+        patch: "",
+        truncated: false
+      })
+    });
+    const transport = createLanTransport(
+      "http://127.0.0.1:48120",
+      fetchImpl,
+      undefined,
+      {
+        deviceCredentials: {
+          deviceId: "phone-1",
+          deviceSecret: "lan-secret"
+        }
+      }
+    );
+
+    await transport.readTaskDiff("task-1", { scope: "working", mode: "unstaged" });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/task-1/diff?scope=working&mode=unstaged",
+      expect.anything()
+    );
+  });
+
+  it("reads the task diff over LAN with paired device credential headers", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        taskId: "task-1",
+        baseRef: "main",
+        mergeBase: "abc123",
+        patch: "diff --git a/x b/x",
+        truncated: false
+      })
+    });
+    const transport = createLanTransport(
+      "http://127.0.0.1:48120",
+      fetchImpl,
+      undefined,
+      {
+        deviceCredentials: {
+          deviceId: "phone-1",
+          deviceSecret: "lan-secret"
+        }
+      }
+    );
+
+    await expect(transport.readTaskDiff("task/read")).resolves.toMatchObject({
+      patch: "diff --git a/x b/x"
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/task%2Fread/diff",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Kanna-Device-Id": "phone-1",
+          "X-Kanna-Device-Secret": "lan-secret"
+        })
+      })
+    );
+  });
+
   it("loads full task detail through the encoded LAN task route", async () => {
     const fullPrompt = `${"p".repeat(520)}END-OF-CANONICAL-PROMPT`;
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({

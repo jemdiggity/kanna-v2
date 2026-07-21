@@ -20,7 +20,11 @@ import {
   type CloudTaskIndex,
   type CloudTaskIndexError
 } from "./lib/firebase/taskIndex";
-import { createLanTransport, type FetchLike } from "./lib/transports/lanTransport";
+import {
+  createLanTransport,
+  type FetchLike,
+  type LanDeviceCredentials
+} from "./lib/transports/lanTransport";
 import {
   createRelayDesktopClient,
   type RelayDesktopClient
@@ -225,6 +229,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       forceCloud,
       getSelectedDesktopId: () => sessionStore.getState().selectedDesktopId,
       getTrustedDesktops: () => sessionStore.getState().trustedDesktops,
+      getMobileDeviceId: () => sessionStore.getState().mobileDeviceId,
       getMachineSourceDesktops: () => ({
         account: sessionStore.getState().accountDesktops,
         local: sessionStore.getState().liveLanDesktops
@@ -672,6 +677,7 @@ function createClientForMode({
   forceCloud,
   getSelectedDesktopId,
   getTrustedDesktops,
+  getMobileDeviceId,
   getMachineSourceDesktops,
   getLiveCloudTasks,
   getLiveCloudTasksUid,
@@ -695,6 +701,7 @@ function createClientForMode({
   forceCloud: boolean;
   getSelectedDesktopId(): string | null;
   getTrustedDesktops(): readonly TrustedDesktopRecord[];
+  getMobileDeviceId(): string | null;
   getMachineSourceDesktops(): {
     account: DesktopSummary[];
     local: DesktopSummary[];
@@ -804,6 +811,8 @@ function createClientForMode({
       fetchImpl,
       getSelectedDesktopId,
       getTrustedDesktopIds,
+      getLanDeviceCredentials: (desktopId) =>
+        lanDeviceCredentialsForDesktop(getTrustedDesktops, getMobileDeviceId, desktopId),
       onValidatedRoutesChanged: onTaskRoutesChanged
     });
 
@@ -841,6 +850,8 @@ function createClientForMode({
       getSelectedDesktopId,
       getTrustedDesktopIds: () =>
         getTrustedDesktops().map((desktop) => desktop.desktopId),
+      getLanDeviceCredentials: (desktopId) =>
+        lanDeviceCredentialsForDesktop(getTrustedDesktops, getMobileDeviceId, desktopId),
       onValidatedRoutesChanged: onTaskRoutesChanged
     });
     const sourceTrackingClient: KannaClient = {
@@ -902,6 +913,7 @@ function createDisconnectedClient(): KannaClient {
     closeTask: unavailable,
     sendTaskInput: unavailable,
     readTaskFile: unavailable,
+    readTaskDiff: unavailable,
     observeTaskTerminal(taskId, listener) {
       listener({
         type: "error",
@@ -940,12 +952,14 @@ function createTrustedLanFallbackClient({
   fetchImpl,
   getSelectedDesktopId,
   getTrustedDesktopIds,
+  getLanDeviceCredentials,
   onValidatedRoutesChanged
 }: {
   bonjourBrowser: BonjourBrowser;
   fetchImpl: FetchLike;
   getSelectedDesktopId(): string | null;
   getTrustedDesktopIds(): readonly string[];
+  getLanDeviceCredentials(desktopId: string): LanDeviceCredentials | null;
   onValidatedRoutesChanged(): void;
 }): {
   client: KannaClient;
@@ -989,8 +1003,12 @@ function createTrustedLanFallbackClient({
   const invalidatePendingValidatedRoutes = () => {
     if (pendingValidationCount > 0) invalidateValidatedRoutes();
   };
-  const clientForBaseUrl = (resolvedBaseUrl: string) =>
-    createKannaClient(createLanTransport(resolvedBaseUrl, fetchImpl));
+  const clientForBaseUrl = (resolvedBaseUrl: string, desktopId: string) =>
+    createKannaClient(
+      createLanTransport(resolvedBaseUrl, fetchImpl, undefined, {
+        deviceCredentials: getLanDeviceCredentials(desktopId)
+      })
+    );
   const resolveClient = async (desktopId: string | null) => {
     const trustedDesktopIds = desktopId
       ? getTrustedDesktopIds().filter((trustedId) => trustedId === desktopId)
@@ -1022,14 +1040,16 @@ function createTrustedLanFallbackClient({
       return createDisconnectedClient();
     }
     setValidatedBaseUrl(endpoint.desktopId, endpoint.baseUrl);
-    return clientForBaseUrl(endpoint.baseUrl);
+    return clientForBaseUrl(endpoint.baseUrl, endpoint.desktopId);
   };
   const currentClient = (desktopId: string | null) => {
     const cachedDesktopId = desktopId ?? lastValidatedDesktopId;
     const baseUrl = cachedDesktopId
       ? validatedBaseUrls.get(cachedDesktopId)
       : undefined;
-    return baseUrl ? clientForBaseUrl(baseUrl) : createDisconnectedClient();
+    return baseUrl && cachedDesktopId
+      ? clientForBaseUrl(baseUrl, cachedDesktopId)
+      : createDisconnectedClient();
   };
   const createResolvingClient = (desktopId: string | null): KannaClient => ({
     getStatus: async () => (await resolveClient(desktopId)).getStatus(),
@@ -1068,6 +1088,8 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).sendTaskInput(taskId, input),
     readTaskFile: async (taskId, path) =>
       (await resolveClient(desktopId)).readTaskFile(taskId, path),
+    readTaskDiff: async (taskId, request) =>
+      (await resolveClient(desktopId)).readTaskDiff(taskId, request),
     observeTaskTerminal: (taskId, listener) =>
       currentClient(desktopId).observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>
@@ -1108,9 +1130,22 @@ function createTrustedLanFallbackClient({
         return null;
       }
       const validatedBaseUrl = validatedBaseUrls.get(desktopId);
-      return validatedBaseUrl ? clientForBaseUrl(validatedBaseUrl) : null;
+      return validatedBaseUrl ? clientForBaseUrl(validatedBaseUrl, desktopId) : null;
     }
   };
+}
+
+function lanDeviceCredentialsForDesktop(
+  getTrustedDesktops: () => readonly TrustedDesktopRecord[],
+  getMobileDeviceId: () => string | null,
+  desktopId: string
+): LanDeviceCredentials | null {
+  const deviceId = getMobileDeviceId();
+  if (!deviceId) return null;
+  const deviceSecret = getTrustedDesktops().find(
+    (desktop) => desktop.desktopId === desktopId
+  )?.deviceSecret;
+  return deviceSecret ? { deviceId, deviceSecret } : null;
 }
 
 function hasTrustedLanPeer(
@@ -1251,6 +1286,7 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     closeTask: (taskId) => getClient().closeTask(taskId),
     sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
     readTaskFile: (taskId, path) => getClient().readTaskFile(taskId, path),
+    readTaskDiff: (taskId, request) => getClient().readTaskDiff(taskId, request),
     observeTaskTerminal: (taskId, listener) =>
       getClient().observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>

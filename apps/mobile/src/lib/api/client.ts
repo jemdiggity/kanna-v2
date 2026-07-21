@@ -15,6 +15,8 @@ import type {
   MobileServerStatus,
   TaskActionResponse,
   TaskActivityResponse,
+  TaskDiffContent,
+  TaskDiffRequest,
   TaskFileContent,
   TaskDetail,
   TaskSummary
@@ -98,6 +100,7 @@ export interface KannaTransport {
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
+  readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
   observeTaskTerminal(
     taskId: string,
     listener: (event: TaskTerminalStreamEvent) => void
@@ -134,6 +137,7 @@ export interface KannaClient {
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
+  readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
   observeTaskTerminal(
     taskId: string,
     listener: (event: TaskTerminalStreamEvent) => void
@@ -206,6 +210,7 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     closeTask: (taskId) => transport.closeTask(taskId),
     sendTaskInput: (taskId, input) => transport.sendTaskInput(taskId, input),
     readTaskFile: (taskId, path) => transport.readTaskFile(taskId, path),
+    readTaskDiff: (taskId, request) => transport.readTaskDiff(taskId, request),
     observeTaskTerminal: (taskId, listener) =>
       transport.observeTaskTerminal(taskId, listener),
     observeTaskAgent: (taskId, listener) =>

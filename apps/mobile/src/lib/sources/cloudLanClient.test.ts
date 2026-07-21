@@ -85,6 +85,13 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
       path: "docs/spec.md",
       content: "# Spec"
     }),
+    readTaskDiff: vi.fn().mockResolvedValue({
+      taskId: "task-1",
+      baseRef: "main",
+      mergeBase: "abc123",
+      patch: "diff --git a/x b/x",
+      truncated: false
+    }),
     observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
     observeTaskAgent: vi.fn(() => agentSubscription()),
     observeTaskCompanion: vi.fn(() => companionSubscription()),
@@ -1265,6 +1272,95 @@ describe("createCloudLanClient", () => {
       "cloud-duplicate",
       "docs/spec.md"
     );
+  });
+
+  it("prefers the paired LAN route for the task diff over the cloud fallback", async () => {
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({
+          id: "cloud-duplicate",
+          ownerDesktopId: "desktop-lan",
+          ownerLocalTaskId: "local-duplicate"
+        })
+      ])
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "local-duplicate" })
+      ]),
+      readTaskDiff: vi.fn().mockResolvedValue({
+        taskId: "local-duplicate",
+        baseRef: "main",
+        mergeBase: "abc123",
+        patch: "lan patch",
+        truncated: false
+      })
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRecentTasks();
+    await expect(client.readTaskDiff("cloud-duplicate")).resolves.toMatchObject({
+      patch: "lan patch"
+    });
+    expect(lan.readTaskDiff).toHaveBeenCalledWith("local-duplicate", undefined);
+    expect(cloud.readTaskDiff).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the authenticated cloud route when the LAN diff read fails", async () => {
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({
+          id: "cloud-duplicate",
+          ownerDesktopId: "desktop-lan",
+          ownerLocalTaskId: "local-duplicate"
+        })
+      ]),
+      readTaskDiff: vi.fn().mockResolvedValue({
+        taskId: "local-duplicate",
+        baseRef: "main",
+        mergeBase: "abc123",
+        patch: "cloud patch",
+        truncated: false
+      })
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "local-duplicate" })
+      ]),
+      readTaskDiff: vi.fn().mockRejectedValue(
+        new Error("Task diff requires a paired device or an authenticated relay connection.")
+      )
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRecentTasks();
+    await expect(client.readTaskDiff("cloud-duplicate")).resolves.toMatchObject({
+      patch: "cloud patch"
+    });
+    expect(cloud.readTaskDiff).toHaveBeenCalledWith("cloud-duplicate", undefined);
+  });
+
+  it("fails closed for a LAN-only task-diff route when the device is not paired for LAN reads", async () => {
+    const cloud = createClientMock();
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([task({ id: "lan-only" })]),
+      readTaskDiff: vi.fn().mockRejectedValue(
+        new Error("Task diff requires a paired device or an authenticated relay connection.")
+      )
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRecentTasks();
+    await expect(client.readTaskDiff("lan-only")).rejects.toThrow(
+      /paired device|authenticated relay/i
+    );
+    expect(cloud.readTaskDiff).not.toHaveBeenCalled();
   });
 
   it("fails closed for a LAN-only task-file route without an authenticated cloud capability", async () => {

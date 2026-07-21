@@ -159,6 +159,44 @@ describe("remote transport", () => {
     });
   });
 
+  it("routes cloud task diff reads to the owner desktop and encoded local task id", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      taskId: "local/task-1",
+      baseRef: "main",
+      mergeBase: "abc123",
+      patch: "diff --git a/x b/x",
+      truncated: false
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [{
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local/task-1",
+        ownerOnline: true
+      }]
+    });
+
+    await expect(transport.readTaskDiff("cloud-task-1")).resolves.toEqual({
+      taskId: "local/task-1",
+      baseRef: "main",
+      mergeBase: "abc123",
+      patch: "diff --git a/x b/x",
+      truncated: false
+    });
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/tasks/local%2Ftask-1/diff",
+      body: null
+    });
+  });
+
   it("reads task files from the selected desktop when no cloud route exists", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       path: "README.md",

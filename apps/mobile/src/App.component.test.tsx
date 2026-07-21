@@ -165,6 +165,7 @@ function createClientMock(): KannaClient {
     closeTask: vi.fn(),
     sendTaskInput: vi.fn(),
     readTaskFile: vi.fn(),
+    readTaskDiff: vi.fn(),
     observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
     observeTaskAgent: vi.fn(() => ({
       close: vi.fn(),

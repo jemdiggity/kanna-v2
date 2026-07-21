@@ -16,6 +16,8 @@ import type {
   RunRepoCommandResponse,
   TaskActionResponse,
   TaskActivityResponse,
+  TaskDiffContent,
+  TaskDiffRequest,
   TaskFileContent,
   TaskDetail,
   TaskSummary
@@ -48,11 +50,25 @@ export interface WebSocketLike {
 
 export type WebSocketFactory = (url: string) => WebSocketLike;
 
+export interface LanDeviceCredentials {
+  deviceId: string;
+  deviceSecret: string;
+}
+
 export function createLanTransport(
   baseUrl: string,
   fetchImpl: FetchLike,
-  createSocket: WebSocketFactory = (url) => new WebSocket(url) as unknown as WebSocketLike
+  createSocket: WebSocketFactory = (url) => new WebSocket(url) as unknown as WebSocketLike,
+  options: { deviceCredentials?: LanDeviceCredentials | null } = {}
 ): KannaTransport {
+  const deviceCredentials = options.deviceCredentials ?? null;
+  const credentialHeaders = (): Record<string, string> =>
+    deviceCredentials
+      ? {
+          "X-Kanna-Device-Id": deviceCredentials.deviceId,
+          "X-Kanna-Device-Secret": deviceCredentials.deviceSecret
+        }
+      : {};
   const request = async <T>(
     path: string,
     init?: {
@@ -62,7 +78,12 @@ export function createLanTransport(
       signal?: AbortSignal;
     }
   ): Promise<T> => {
-    const response = await fetchImpl(`${baseUrl}${path}`, init);
+    const response = await fetchImpl(
+      `${baseUrl}${path}`,
+      deviceCredentials
+        ? { ...init, headers: { ...credentialHeaders(), ...init?.headers } }
+        : init
+    );
     if (!response.ok) {
       throw new Error(`LAN request failed (${response.status}) for ${path}`);
     }
@@ -146,6 +167,21 @@ export function createLanTransport(
     readTaskFile: async (_taskId: string, _path: string): Promise<TaskFileContent> => {
       throw new Error(
         "Task file preview requires an authenticated relay connection."
+      );
+    },
+    readTaskDiff: (
+      taskId: string,
+      diffRequest?: TaskDiffRequest
+    ): Promise<TaskDiffContent> => {
+      if (!deviceCredentials) {
+        return Promise.reject(
+          new Error(
+            "Task diff requires a paired device or an authenticated relay connection. Re-pair this machine to view diffs over LAN."
+          )
+        );
+      }
+      return request<TaskDiffContent>(
+        `/v1/tasks/${encodeURIComponent(taskId)}/diff${buildTaskDiffQuery(diffRequest)}`
       );
     },
     observeTaskTerminal(taskId, listener) {
@@ -254,6 +290,11 @@ export function createLanTransport(
       } satisfies TaskCompanionSubscription;
     }
   };
+}
+
+export function buildTaskDiffQuery(request?: TaskDiffRequest): string {
+  if (!request) return "";
+  return `?scope=${encodeURIComponent(request.scope)}&mode=${encodeURIComponent(request.mode)}`;
 }
 
 function buildKspWebSocketUrl(baseUrl: string): string {

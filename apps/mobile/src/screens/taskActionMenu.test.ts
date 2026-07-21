@@ -31,17 +31,18 @@ describe("showTaskActionMenu", () => {
     expect(nativeMocks.actionSheet).toHaveBeenCalledWith(
       {
         title: "Task Actions",
-        options: ["Advance Stage", "Close Task", "Cancel"],
-        cancelButtonIndex: 2,
-        destructiveButtonIndex: 1
+        options: ["View Diff", "Advance Stage", "Close Task", "Cancel"],
+        cancelButtonIndex: 3,
+        destructiveButtonIndex: 2
       },
       expect.any(Function)
     );
   });
 
   it.each([
-    [0, "advance-stage"],
-    [1, "close-task"]
+    [0, "view-diff"],
+    [1, "advance-stage"],
+    [2, "close-task"]
   ] as const)("maps iOS index %s to %s", (index, action) => {
     const onSelect = vi.fn();
     showTaskActionMenu(onSelect);
@@ -55,7 +56,7 @@ describe("showTaskActionMenu", () => {
     expect(onSelect).toHaveBeenCalledWith(action);
   });
 
-  it.each([2, 99])("ignores cancel or invalid iOS index %s", (index) => {
+  it.each([3, 99])("ignores cancel or invalid iOS index %s", (index) => {
     const onSelect = vi.fn();
     const onDismiss = vi.fn();
     showTaskActionMenu(onSelect, onDismiss);
@@ -79,6 +80,7 @@ describe("showTaskActionMenu", () => {
       "Task Actions",
       undefined,
       [
+        expect.objectContaining({ text: "View Diff" }),
         expect.objectContaining({ text: "Advance Stage" }),
         expect.objectContaining({ text: "Close Task", style: "destructive" }),
         expect.objectContaining({ text: "Cancel", style: "cancel" })
@@ -89,7 +91,9 @@ describe("showTaskActionMenu", () => {
     const actions = nativeMocks.alert.mock.calls[0]![2]!;
     actions[0]!.onPress?.();
     actions[1]!.onPress?.();
+    actions[2]!.onPress?.();
     expect(onSelect.mock.calls).toEqual([
+      ["view-diff"],
       ["advance-stage"],
       ["close-task"]
     ]);
@@ -102,7 +106,7 @@ describe("showTaskActionMenu", () => {
     showTaskActionMenu(vi.fn(), onDismiss);
 
     const actions = nativeMocks.alert.mock.calls[0]![2]!;
-    actions[2]!.onPress?.();
+    actions[3]!.onPress?.();
     expect(onDismiss).toHaveBeenCalledOnce();
   });
 });

@@ -17,6 +17,8 @@ import type {
   RunRepoCommandResponse,
   TaskActionResponse,
   TaskActivityResponse,
+  TaskDiffContent,
+  TaskDiffRequest,
   TaskFileContent,
   TaskDetail,
   TaskSummary,
@@ -25,6 +27,7 @@ import {
   buildCloudTaskId,
   canonicalizeTaskActionId,
 } from "../api/taskIdentity";
+import { buildTaskDiffQuery } from "./lanTransport";
 
 export interface RemoteDesktopRecord {
   desktopId: string;
@@ -628,6 +631,14 @@ export function createRemoteTransport({
         "GET",
         (localTaskId) =>
           `/v1/tasks/${encodeURIComponent(localTaskId)}/files/content?path=${encodeURIComponent(path)}`,
+        null
+      ),
+    readTaskDiff: (taskId: string, diffRequest?: TaskDiffRequest) =>
+      requestTask<TaskDiffContent>(
+        taskId,
+        "GET",
+        (localTaskId) =>
+          `/v1/tasks/${encodeURIComponent(localTaskId)}/diff${buildTaskDiffQuery(diffRequest)}`,
         null
       ),
     observeTaskTerminal(

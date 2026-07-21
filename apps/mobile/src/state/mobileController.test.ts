@@ -195,6 +195,13 @@ function createClientMock(): ClientMock {
       path: "docs/spec.md",
       content: "# Spec"
     }),
+    readTaskDiff: vi.fn().mockResolvedValue({
+      taskId: "task-1",
+      baseRef: "main",
+      mergeBase: "abc123",
+      patch: "diff --git a/x b/x",
+      truncated: false
+    }),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
     closeTask: vi.fn().mockResolvedValue(undefined),
     observeTaskTerminal: vi.fn().mockImplementation((_taskId, listener) => {
@@ -371,6 +378,31 @@ describe("createMobileController", () => {
       trustedDesktop.lanEndpoints[0],
       expect.objectContaining({ baseUrl: "http://studio-old.local:48120" })
     ]);
+  });
+
+  it("keeps an existing device secret when a re-pair response omits one", async () => {
+    const store = createSessionStore();
+    store.setTrustedDesktops([
+      { ...trustedDesktop, deviceSecret: "existing-lan-secret" }
+    ]);
+    const pairingService = createPairingServiceMock();
+    const controller = createMobileController(
+      createClientMock(),
+      store,
+      undefined,
+      {
+        pairingService,
+        persistSessionContext: vi.fn().mockResolvedValue(undefined),
+        replaceClientForTrustChange: vi.fn()
+      }
+    );
+
+    await controller.pairMachineByPayload("pairing-payload");
+
+    expect(store.getState().trustedDesktops).toHaveLength(1);
+    expect(store.getState().trustedDesktops[0].deviceSecret).toBe(
+      "existing-lan-secret"
+    );
   });
 
   it("removes manual trust without deleting the account descriptor", async () => {
@@ -757,6 +789,19 @@ describe("createMobileController", () => {
       content: "# Spec"
     });
     expect(client.readTaskFile).toHaveBeenCalledWith("task-1", "docs/spec.md");
+    expect(store.getState().errorMessage).toBe("existing error");
+  });
+
+  it("reads the task diff through the client without mutating global errors", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    store.setErrorMessage("existing error");
+
+    await expect(controller.readTaskDiff("task-1")).resolves.toMatchObject({
+      patch: "diff --git a/x b/x"
+    });
+    expect(client.readTaskDiff).toHaveBeenCalledWith("task-1", undefined);
     expect(store.getState().errorMessage).toBe("existing error");
   });
 

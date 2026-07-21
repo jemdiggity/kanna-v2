@@ -12,6 +12,7 @@ import type {
   DesktopSummary,
   RepoSummary,
   TaskActionResponse,
+  TaskDiffContent,
   TaskFileContent,
   TaskSummary
 } from "../api/types";
@@ -1265,6 +1266,23 @@ export function createCloudLanClient(
         );
       }
       return route.client.readTaskFile(route.taskId, path);
+    },
+    readTaskDiff: async (taskId, request): Promise<TaskDiffContent> => {
+      const route = routeForTask(taskId);
+      if (route.source === "unavailable") {
+        throw new Error(route.message);
+      }
+      if (route.source === "lan") {
+        try {
+          return await route.client.readTaskDiff(route.taskId, request);
+        } catch (error) {
+          if (route.cloudFallbackTaskId) {
+            return cloud.readTaskDiff(route.cloudFallbackTaskId, request);
+          }
+          throw error;
+        }
+      }
+      return route.client.readTaskDiff(route.taskId, request);
     },
     observeTaskTerminal(
       taskId: string,

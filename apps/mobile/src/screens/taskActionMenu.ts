@@ -1,12 +1,13 @@
 import { ActionSheetIOS, Alert, Platform } from "react-native";
 
-export type TaskAction = "advance-stage" | "close-task";
+export type TaskAction = "view-diff" | "advance-stage" | "close-task";
 
 const TASK_ACTIONS: ReadonlyArray<{
   id: TaskAction;
   label: string;
   style?: "destructive";
 }> = [
+  { id: "view-diff", label: "View Diff" },
   { id: "advance-stage", label: "Advance Stage" },
   { id: "close-task", label: "Close Task", style: "destructive" }
 ];
