@@ -1264,6 +1264,70 @@ describe("createInitApi", () => {
     expect(state.selectedItemId.value).toBe("create:stable-current");
   });
 
+  it("coalesces KSP state change bursts into one active and one trailing refresh", async () => {
+    mockState.tauri = true;
+    const currentTask = mockState.makeItem({ id: "task-current" });
+    const currentSlot = makeReadyTaskSlot(currentTask, "create:stable-current");
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [currentTask];
+    state.taskUiSlots.value = [currentSlot];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = currentSlot.slot_id;
+
+    const finishRefreshes: Array<() => void> = [];
+    const reloadSnapshot = vi.fn(() => new Promise<void>((resolve) => {
+      finishRefreshes.push(resolve);
+    }));
+    const currentTaskSlot = computed(() => currentSlot);
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      selectedTaskId: computed(() => currentTask.id),
+      currentTaskSlot,
+      currentItem: computed(() => currentTask),
+      restoreSelection: vi.fn(),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+      windowWorkspace: {
+        onSharedInvalidation: vi.fn(async () => () => undefined),
+        persistSelection: vi.fn(async () => {}),
+      },
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const initApi = createInitApi(context, {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+    await flushAsync();
+
+    const stateChanged = mockState.stateChangedListeners[0];
+    stateChanged("tasks");
+    stateChanged("tasks");
+    stateChanged("tasks");
+    await vi.waitFor(() => expect(reloadSnapshot).toHaveBeenCalledTimes(1));
+
+    finishRefreshes[0]();
+    await vi.waitFor(() => expect(reloadSnapshot).toHaveBeenCalledTimes(2));
+    finishRefreshes[1]();
+    await flushAsync();
+
+    expect(reloadSnapshot).toHaveBeenCalledTimes(2);
+    expect(state.selectedItemId.value).toBe(currentSlot.slot_id);
+  });
+
   it("does not restore stale focus when selection changes during a KSP refresh", async () => {
     mockState.tauri = true;
     const previousTask = mockState.makeItem({ id: "task-previous" });
