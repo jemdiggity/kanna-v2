@@ -116,6 +116,46 @@ pub(crate) async fn handle_connection(
                 );
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
+            Some(Command::ObserveSnapshot { session_id }) => {
+                let Some(session) = session_handle(&sessions, &session_id).await else {
+                    let evt = error_event(
+                        Some(protocol::ErrorCode::SessionNotFound),
+                        format!("session not found: {}", session_id),
+                    );
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    continue;
+                };
+                // Atomic observer cutover: like AttachSnapshot, the snapshot
+                // and the registration happen under the session fanout lock
+                // the ingestion loop holds across (mirror -> enqueue), and
+                // the snapshot is the observer's first queued event — so a
+                // chunk is either fully inside the snapshot or delivered as
+                // Output strictly after it, never lost and never doubled.
+                let fanout = session_fanout(&fanouts, &session_id).await;
+                let mut fanout_state = fanout.state.lock().await;
+                let snapshot = match session.snapshot(&session_id).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        let (rows, cols) = session.rows_cols().await;
+                        log::warn!(
+                            "[observe_snapshot] snapshot not ready for session {}: {}; falling back to blank snapshot",
+                            session_id,
+                            error
+                        );
+                        blank_snapshot(rows, cols)
+                    }
+                };
+                fanout_state.register(
+                    &session_id,
+                    SubscriberKind::Observer,
+                    &writer,
+                    &[Event::Snapshot {
+                        session_id: session_id.clone(),
+                        snapshot,
+                    }],
+                );
+                drop(fanout_state);
+            }
             Some(Command::Unobserve { session_id }) => {
                 if let Some(fanout) =
                     crate::fanout::existing_session_fanout(&fanouts, &session_id).await
@@ -835,7 +875,7 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
 
-        Command::Observe { .. } | Command::Unobserve { .. } => {
+        Command::Observe { .. } | Command::ObserveSnapshot { .. } | Command::Unobserve { .. } => {
             // Handled in handle_connection before dispatch
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }

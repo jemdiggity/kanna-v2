@@ -593,7 +593,7 @@ async fn handle_connection(
         }) => {
             let response =
                 match prepare_session_observer(&context, &requester_peer_id, &session_id).await {
-                    Ok(daemon) => {
+                    Ok((daemon, initial_snapshot)) => {
                         write_json_line(
                             &mut stream,
                             &PeerResponse::ObserveSession {
@@ -602,7 +602,7 @@ async fn handle_connection(
                             },
                         )
                         .await?;
-                        stream_daemon_session(daemon, stream, session_id).await?;
+                        stream_daemon_session(daemon, stream, session_id, initial_snapshot).await?;
                         return Ok(());
                     }
                     Err(error) => PeerResponse::Error {

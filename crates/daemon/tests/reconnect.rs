@@ -45,6 +45,9 @@ enum Cmd {
     Observe {
         session_id: String,
     },
+    ObserveSnapshot {
+        session_id: String,
+    },
     Resize {
         session_id: String,
         cols: u16,
@@ -912,6 +915,28 @@ fn observe(conn: &mut ClientConn, session_id: &str) {
         session_id: session_id.to_string(),
     });
     wait_for_ok(conn, "observe");
+}
+
+/// Atomic observer cutover: the reply is the authoritative snapshot itself,
+/// queued ahead of all later output.
+fn observe_snapshot(conn: &mut ClientConn, session_id: &str) -> SnapshotPayload {
+    conn.send(&Cmd::ObserveSnapshot {
+        session_id: session_id.to_string(),
+    });
+    match conn.recv() {
+        Evt::Snapshot {
+            session_id: sid,
+            snapshot,
+        } => {
+            assert_eq!(sid, session_id);
+            snapshot
+        }
+        Evt::Error { message } => panic!("observe snapshot failed: {}", message),
+        other => panic!(
+            "expected Snapshot as the first observer event, got: {:?}",
+            other
+        ),
+    }
 }
 
 fn resize(conn: &mut ClientConn, session_id: &str, cols: u16, rows: u16) {
@@ -1949,6 +1974,88 @@ fn same_connection_reattach_discards_stale_backlog_behind_fresh_snapshot() {
     }
 
     cleanup_atomic_attach_dir(&dir);
+}
+
+/// Observer cutover must be atomic while output is actively flowing: the
+/// snapshot is the observer's first event, and every numbered line lands in
+/// exactly one of {snapshot, later Output} — no losses, no duplicates.
+#[test]
+fn observe_snapshot_cutover_partitions_live_output_exactly() {
+    let daemon = DaemonHandle::start();
+    let session_id = "sess-observe-cutover";
+    let mut control = daemon.connect();
+    spawn_shell_session(
+        &mut control,
+        session_id,
+        "i=0; while :; do i=$((i + 1)); printf 'CUT-%06d\\r\\n' \"$i\"; sleep 0.005; done",
+    );
+    wait_for_snapshot(&mut control, session_id, "CUT-");
+
+    // Register mid-stream so the cutover happens between live chunks.
+    let mut observer = daemon.connect();
+    let snapshot = observe_snapshot(&mut observer, session_id);
+
+    fn parse_numbers(text: &str) -> Vec<u64> {
+        let mut numbers = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("CUT-") {
+            let digits = &rest[start + 4..];
+            let end = digits
+                .char_indices()
+                .find(|(_, c)| !c.is_ascii_digit())
+                .map(|(i, _)| i)
+                .unwrap_or(digits.len());
+            // Only complete 6-digit numbers count; a trailing partial line
+            // (mid-write at the boundary) is resolved by the Output side.
+            if end == 6 {
+                numbers.push(digits[..6].parse::<u64>().unwrap());
+            }
+            rest = &digits[end..];
+        }
+        numbers
+    }
+
+    let snapshot_numbers = parse_numbers(&snapshot.vt);
+    let last_in_snapshot = *snapshot_numbers
+        .last()
+        .expect("snapshot should contain numbered output");
+
+    // Collect live output until well past the boundary.
+    let mut live = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let live_numbers = loop {
+        assert!(
+            Instant::now() < deadline,
+            "observer never received enough live output after the snapshot"
+        );
+        match observer.recv_with_timeout(Duration::from_millis(200)) {
+            Ok(Evt::Output { data, .. }) => {
+                live.extend_from_slice(&data);
+                let numbers = parse_numbers(&String::from_utf8_lossy(&live));
+                if numbers.len() >= 15 {
+                    break numbers;
+                }
+            }
+            Ok(Evt::Snapshot { .. }) => panic!("unexpected extra snapshot after observer cutover"),
+            Ok(_) | Err(_) => {}
+        }
+    };
+
+    // Exact partition at the boundary: live output continues at the very
+    // next number after the snapshot (nothing lost, nothing duplicated)
+    // and stays contiguous.
+    assert_eq!(
+        live_numbers[0],
+        last_in_snapshot + 1,
+        "snapshot ended at {last_in_snapshot}; live output must continue exactly there: {live_numbers:?}"
+    );
+    for window in live_numbers.windows(2) {
+        assert_eq!(
+            window[1],
+            window[0] + 1,
+            "live output after the cutover must stay contiguous: {live_numbers:?}"
+        );
+    }
 }
 
 #[test]

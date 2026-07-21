@@ -13,6 +13,16 @@
 //! in place with a fresh authoritative headless-terminal snapshot — the same
 //! snapshot-first contract every consumer already implements for attach and
 //! reattach — instead of disconnecting it and forcing reconnect churn.
+//!
+//! Memory bound: a subscriber's queued bytes never exceed
+//! `max(budget, one authoritative snapshot + initial status events)`.
+//! Snapshot lines are deliberately exempt from the budget — an authoritative
+//! snapshot larger than the budget must still be deliverable or resync would
+//! deadlock — but they are only ever queued into an *empty* mailbox: at
+//! registration (fresh mailbox) and at resync (which requires a fully
+//! drained backlog). A subscriber slower than snapshot-sized bursts
+//! therefore degrades to snapshot-paced delivery (lag -> drain -> fresh
+//! snapshot) without the exemption ever accumulating.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,10 +36,11 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::client::SessionWriter;
 
-/// Undelivered serialized bytes allowed per subscriber before it is treated
-/// as lagging. Sized so ordinary bursts of fast terminal output buffer
-/// through while a wedged consumer is bounded to a few MiB on top of the
-/// kernel socket buffers.
+/// Undelivered serialized bytes of live output allowed per subscriber before
+/// it is treated as lagging. Sized so ordinary bursts of fast terminal output
+/// buffer through while a wedged consumer is bounded to a few MiB on top of
+/// the kernel socket buffers. Authoritative snapshots are exempt but only
+/// enter an empty mailbox; see the module docs for the exact bound.
 pub(crate) const SUBSCRIBER_MAILBOX_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Test-only override so integration tests can trigger mailbox overflow
@@ -116,14 +127,14 @@ impl Subscriber {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    fn perf_context(&self, line: &EventLine) -> TerminalPerfContext {
+    fn perf_context(&self, line: &EventLine, budget: usize) -> TerminalPerfContext {
         let mut context =
             TerminalPerfContext::new("daemon", self.session_id.clone(), self.kind.write_stage());
         context.chunk = line.chunk;
         context.bytes = line.bytes;
         context.queue_available =
-            Some(mailbox_max_bytes().saturating_sub(self.pending_bytes.load(Ordering::Relaxed)));
-        context.queue_capacity = Some(mailbox_max_bytes());
+            Some(budget.saturating_sub(self.pending_bytes.load(Ordering::Relaxed)));
+        context.queue_capacity = Some(budget);
         context
     }
 
@@ -165,11 +176,24 @@ impl Subscriber {
 /// (snapshot -> register), which makes the snapshot-to-live cutover atomic:
 /// any chunk is either fully contained in the snapshot or fully enqueued
 /// behind it. The lock is never held across a client-progress await.
-#[derive(Default)]
 pub(crate) struct FanoutState {
+    /// Per-subscriber byte budget for live output; see the module docs for
+    /// the exact bound and the snapshot exemption.
+    budget: usize,
     streaming: bool,
     attached: Vec<Subscriber>,
     observers: Vec<Subscriber>,
+}
+
+impl Default for FanoutState {
+    fn default() -> Self {
+        Self {
+            budget: mailbox_max_bytes(),
+            streaming: false,
+            attached: Vec::new(),
+            observers: Vec::new(),
+        }
+    }
 }
 
 impl FanoutState {
@@ -218,6 +242,10 @@ impl FanoutState {
             writer: writer.clone(),
             writer_task,
         };
+        // Initial events (snapshot + status) enter a freshly created, empty
+        // mailbox: this is one of the two places the snapshot exemption from
+        // the byte budget applies (see the module docs), and it cannot
+        // accumulate because nothing else is queued yet.
         for event in initial_events {
             if let Some(line) = EventLine::serialize(event, 0, 0) {
                 let _ = subscriber.enqueue(line);
@@ -234,6 +262,7 @@ impl FanoutState {
     /// diagnostics to emit and whether any lagged subscriber has fully
     /// drained and is ready for a snapshot resync.
     pub(crate) fn enqueue(&mut self, line: &EventLine) -> EnqueueReport {
+        let budget = self.budget;
         let mut report = EnqueueReport::default();
         for list in [&mut self.attached, &mut self.observers] {
             let mut index = 0;
@@ -251,10 +280,10 @@ impl FanoutState {
                     continue;
                 }
                 let pending = subscriber.pending_bytes.load(Ordering::Relaxed);
-                if pending + line.line.len() > mailbox_max_bytes() {
+                if pending + line.line.len() > budget {
                     subscriber.lagged_since = Some(Instant::now());
                     report.newly_lagged.push(TerminalPerfEvent {
-                        context: subscriber.perf_context(line),
+                        context: subscriber.perf_context(line, budget),
                         kind: terminal_perf::TerminalPerfEventKind::Lag,
                         duration: Duration::ZERO,
                     });
@@ -288,6 +317,7 @@ impl FanoutState {
     /// diagnostics to emit. Call with the snapshot taken under the same
     /// fanout lock, after the current chunk was mirrored.
     pub(crate) fn resync_drained(&mut self, snapshot_event: &Event) -> Vec<TerminalPerfEvent> {
+        let budget = self.budget;
         let Some(line) = EventLine::serialize(snapshot_event, 0, 0) else {
             return Vec::new();
         };
@@ -297,6 +327,10 @@ impl FanoutState {
                 let Some(lagged_since) = subscriber.lagged_since else {
                     continue;
                 };
+                // The snapshot is exempt from the byte budget but only ever
+                // enters an empty mailbox (see the module docs): a drained
+                // backlog is the resync precondition, so queued bytes are
+                // bounded by the snapshot itself.
                 if subscriber.pending_bytes.load(Ordering::Relaxed) != 0 {
                     continue;
                 }
@@ -305,7 +339,7 @@ impl FanoutState {
                 }
                 subscriber.lagged_since = None;
                 recovered.push(TerminalPerfEvent {
-                    context: subscriber.perf_context(&line),
+                    context: subscriber.perf_context(&line, budget),
                     kind: terminal_perf::TerminalPerfEventKind::Recovered,
                     duration: lagged_since.elapsed(),
                 });
@@ -346,6 +380,26 @@ impl FanoutState {
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.attached.is_empty() && self.observers.is_empty()
+    }
+
+    #[cfg(test)]
+    fn with_budget_for_test(budget: usize) -> Self {
+        Self {
+            budget,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn pending_bytes_for_test(&self, kind: SubscriberKind, writer_id: usize) -> usize {
+        let list = match kind {
+            SubscriberKind::Attached => &self.attached,
+            SubscriberKind::Observer => &self.observers,
+        };
+        list.iter()
+            .find(|subscriber| subscriber.writer_id == writer_id)
+            .map(|subscriber| subscriber.pending_bytes.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     fn list_mut(&mut self, kind: SubscriberKind) -> &mut Vec<Subscriber> {
@@ -451,4 +505,146 @@ fn spawn_writer_task(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kanna_daemon::protocol::{SessionStatus, TerminalSnapshot};
+
+    fn test_writer() -> (SessionWriter, tokio::net::UnixStream) {
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+        let (_server_read, server_write) = server.into_split();
+        (Arc::new(Mutex::new(server_write)), client)
+    }
+
+    fn output_line(bytes: usize) -> EventLine {
+        EventLine::serialize(
+            &Event::Output {
+                session_id: "sess-budget".to_string(),
+                data: vec![b'x'; bytes],
+            },
+            1,
+            bytes,
+        )
+        .expect("serialize output line")
+    }
+
+    fn snapshot_event(vt_bytes: usize) -> Event {
+        Event::Snapshot {
+            session_id: "sess-budget".to_string(),
+            snapshot: TerminalSnapshot {
+                version: 1,
+                rows: 24,
+                cols: 80,
+                cursor_row: 0,
+                cursor_col: 0,
+                cursor_visible: true,
+                saved_at: 0,
+                sequence: 0,
+                vt: "S".repeat(vt_bytes),
+            },
+        }
+    }
+
+    /// The documented memory bound: live output never queues past the
+    /// budget (over-budget chunks mark the subscriber lagged and are
+    /// dropped), while an authoritative snapshot larger than the budget is
+    /// still deliverable — but only into an empty mailbox, so queued bytes
+    /// never exceed max(budget, one snapshot). Runs on the current-thread
+    /// runtime so the writer task cannot drain between assertions.
+    #[tokio::test]
+    async fn queued_bytes_obey_budget_with_snapshot_only_exemption() {
+        let (writer, _client) = test_writer();
+        let writer_id = Arc::as_ptr(&writer) as usize;
+        let mut state = FanoutState::with_budget_for_test(64);
+        state.register("sess-budget", SubscriberKind::Observer, &writer, &[]);
+
+        // A chunk whose serialized line exceeds the budget is never queued:
+        // the subscriber transitions to lagged with zero retained bytes.
+        let big_chunk = output_line(256);
+        assert!(big_chunk.line.len() > 64);
+        let report = state.enqueue(&big_chunk);
+        assert_eq!(report.newly_lagged.len(), 1);
+        assert_eq!(
+            state.pending_bytes_for_test(SubscriberKind::Observer, writer_id),
+            0
+        );
+
+        // While lagged, further chunks are dropped without growing the queue.
+        let report = state.enqueue(&big_chunk);
+        assert!(report.newly_lagged.is_empty());
+        assert!(report.resync_ready);
+        assert_eq!(
+            state.pending_bytes_for_test(SubscriberKind::Observer, writer_id),
+            0
+        );
+
+        // Deterministic resync: the drained subscriber accepts a snapshot
+        // far larger than the budget — the documented exemption — and the
+        // queue holds exactly that snapshot.
+        let snapshot = snapshot_event(64 * 1024);
+        let snapshot_line_len = EventLine::serialize(&snapshot, 0, 0)
+            .expect("serialize snapshot")
+            .line
+            .len();
+        let recovered = state.resync_drained(&snapshot);
+        assert_eq!(recovered.len(), 1);
+        let pending = state.pending_bytes_for_test(SubscriberKind::Observer, writer_id);
+        assert_eq!(pending, snapshot_line_len);
+        assert!(pending > 64, "the exemption must apply to the snapshot");
+
+        // The exemption cannot accumulate: with the snapshot still queued,
+        // the next over-budget chunk lags again instead of queueing.
+        let report = state.enqueue(&big_chunk);
+        assert_eq!(report.newly_lagged.len(), 1);
+        assert_eq!(
+            state.pending_bytes_for_test(SubscriberKind::Observer, writer_id),
+            snapshot_line_len
+        );
+    }
+
+    /// Registration queues its initial snapshot + status into a freshly
+    /// created empty mailbox — the other site of the snapshot exemption —
+    /// and live output beyond the budget still lags instead of queueing.
+    #[tokio::test]
+    async fn registration_initial_snapshot_enters_only_the_fresh_mailbox() {
+        let (writer, _client) = test_writer();
+        let writer_id = Arc::as_ptr(&writer) as usize;
+        let mut state = FanoutState::with_budget_for_test(64);
+
+        let snapshot = snapshot_event(16 * 1024);
+        let status = Event::StatusChanged {
+            session_id: "sess-budget".to_string(),
+            status: SessionStatus::Idle,
+            waiting_prompt_snippet: None,
+        };
+        let expected: usize = [&snapshot, &status]
+            .into_iter()
+            .map(|event| {
+                EventLine::serialize(event, 0, 0)
+                    .expect("serialize initial event")
+                    .line
+                    .len()
+            })
+            .sum();
+
+        state.register(
+            "sess-budget",
+            SubscriberKind::Attached,
+            &writer,
+            &[snapshot, status],
+        );
+        let pending = state.pending_bytes_for_test(SubscriberKind::Attached, writer_id);
+        assert_eq!(pending, expected);
+        assert!(pending > 64, "initial snapshot is exempt from the budget");
+
+        let report = state.enqueue(&output_line(256));
+        assert_eq!(report.newly_lagged.len(), 1);
+        assert_eq!(
+            state.pending_bytes_for_test(SubscriberKind::Attached, writer_id),
+            expected,
+            "over-budget live output must never queue on top of the snapshot"
+        );
+    }
 }

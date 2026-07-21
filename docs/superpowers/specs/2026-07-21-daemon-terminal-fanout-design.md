@@ -122,6 +122,33 @@ authoritative headless terminal:
   take the Exit event is disconnected (writer task aborted, write half shut
   down) so its client observes EOF instead of a silent dead stream.
 
+### Observer cutover: `ObserveSnapshot`
+
+The legacy observer flow (`Observe` then a separate `Snapshot` command on the
+same connection) had no atomic boundary: the plain `Snapshot` handler runs
+outside the fanout lock and writes its reply through the same socket writer
+the observer's mailbox task uses, so a chunk could be mirrored after the
+snapshot was taken yet win the writer lock before the snapshot reply —
+consumers that discard pre-snapshot output (relay) lose those bytes, and
+consumers that forward everything (task-transfer) reset over them. The
+`ObserveSnapshot` command closes this: under the session fanout lock it
+snapshots the authoritative terminal and registers the observer with that
+`Snapshot` event as its first queued mailbox message — the same atomic
+cutover attached writers get from `AttachSnapshot`. The relay
+(`observe_session`) and task-transfer observer paths both use it; the plain
+`Observe`/`Snapshot` commands remain for non-streaming uses.
+
+### Mailbox byte budget and the snapshot exemption
+
+A subscriber's queued bytes never exceed `max(budget, one authoritative
+snapshot + initial status events)`. Live output past the budget marks the
+subscriber lagged and is dropped; snapshot lines are exempt — an
+authoritative snapshot larger than the budget must remain deliverable or
+resync would deadlock — but they are only ever queued into an empty mailbox
+(fresh registration, or resync after a fully drained backlog), so the
+exemption cannot accumulate. A subscriber slower than snapshot-sized bursts
+degrades to snapshot-paced delivery while staying within the bound.
+
 ### Same-connection re-registration
 
 Replacing or removing a subscriber cancels its writer stream: the in-flight

@@ -193,6 +193,14 @@ pub enum Command {
     Observe {
         session_id: String,
     },
+    /// Atomic observer cutover: under the session's fanout lock, snapshot the
+    /// authoritative headless terminal and register this connection as a
+    /// passive observer whose first queued event is that `Event::Snapshot`.
+    /// There is no `Ok` reply — the snapshot is the reply, and every later
+    /// `Output` is ordered strictly after it. Failures reply `Event::Error`.
+    ObserveSnapshot {
+        session_id: String,
+    },
     Unobserve {
         session_id: String,
     },
@@ -845,6 +853,21 @@ mod tests {
         let decoded: Command = serde_json::from_str(&json).unwrap();
         match decoded {
             Command::Observe { session_id } => {
+                assert_eq!(session_id, "s1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_observe_snapshot_roundtrip() {
+        let cmd = Command::ObserveSnapshot {
+            session_id: "s1".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let decoded: Command = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Command::ObserveSnapshot { session_id } => {
                 assert_eq!(session_id, "s1");
             }
             _ => panic!("wrong variant"),

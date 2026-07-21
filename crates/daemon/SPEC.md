@@ -134,6 +134,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 |---------|--------|-------------|
 | `Spawn` | session_id, executable, args, cwd, env, cols, rows | Create PTY session |
 | `AttachSnapshot` | session_id, emulate_terminal | Snapshot current headless terminal and start/resume live output |
+| `ObserveSnapshot` | session_id | Atomically snapshot and register a passive observer; the `Snapshot` event is the reply and every later `Output` is ordered after it |
 | `Detach` | session_id | Stop receiving output |
 | `Input` | session_id, data (byte array) | Send keystrokes to PTY |
 | `Resize` | session_id, cols, rows | Update terminal dimensions |

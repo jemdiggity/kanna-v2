@@ -78,7 +78,7 @@ pub(super) async fn prepare_session_observer(
     context: &ListenerContext,
     requester_peer_id: &str,
     session_id: &str,
-) -> Result<DaemonConnection, RuntimeError> {
+) -> Result<(DaemonConnection, kanna_daemon::protocol::TerminalSnapshot), RuntimeError> {
     ensure_requester_peer_trusted(context, requester_peer_id).await?;
 
     let daemon_dir = context
@@ -86,15 +86,30 @@ pub(super) async fn prepare_session_observer(
         .as_ref()
         .ok_or_else(|| RuntimeError::Protocol("daemon directory is not configured".into()))?;
     let mut daemon = connect_daemon(daemon_dir).await?;
+    let snapshot = observe_session_snapshot(&mut daemon, session_id).await?;
+    Ok((daemon, snapshot))
+}
+
+/// Atomic observer cutover: the daemon snapshots the authoritative headless
+/// terminal and registers this connection as an observer in one step, with
+/// the snapshot as the first event — so every later `Output` is strictly
+/// after the snapshot and none precedes or is lost to it.
+async fn observe_session_snapshot(
+    daemon: &mut DaemonConnection,
+    session_id: &str,
+) -> Result<kanna_daemon::protocol::TerminalSnapshot, RuntimeError> {
     send_daemon_command(
-        &mut daemon,
-        &DaemonCommand::Observe {
+        daemon,
+        &DaemonCommand::ObserveSnapshot {
             session_id: session_id.to_owned(),
         },
     )
     .await?;
-    match read_daemon_event(&mut daemon).await? {
-        DaemonEvent::Ok => Ok(daemon),
+    match read_daemon_event(daemon).await? {
+        DaemonEvent::Snapshot {
+            session_id: event_session_id,
+            snapshot,
+        } if event_session_id == session_id => Ok(snapshot),
         DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
         other => Err(RuntimeError::Protocol(format!(
             "unexpected daemon observe response: {:?}",
@@ -318,11 +333,15 @@ pub(super) async fn stream_daemon_session(
     mut daemon: DaemonConnection,
     mut stream: TcpStream,
     session_id: String,
+    initial_snapshot: kanna_daemon::protocol::TerminalSnapshot,
 ) -> Result<(), RuntimeError> {
-    send_daemon_command(
-        &mut daemon,
-        &DaemonCommand::Snapshot {
+    // The cutover snapshot from ObserveSnapshot is forwarded first; the
+    // daemon guarantees every Output on this connection is ordered after it.
+    write_json_line(
+        &mut stream,
+        &PeerTerminalEvent::Snapshot {
             session_id: session_id.clone(),
+            snapshot: serde_json::to_value(initial_snapshot)?,
         },
     )
     .await?;
@@ -415,4 +434,124 @@ async fn read_daemon_event(daemon: &mut DaemonConnection) -> Result<DaemonEvent,
         ));
     }
     Ok(serde_json::from_str(line.trim())?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kanna_daemon::protocol::TerminalSnapshot;
+    use tokio::net::{TcpListener, UnixListener};
+
+    fn terminal_snapshot(vt: &str) -> TerminalSnapshot {
+        TerminalSnapshot {
+            version: 1,
+            rows: 24,
+            cols: 80,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            saved_at: 0,
+            sequence: 0,
+            vt: vt.to_string(),
+        }
+    }
+
+    /// The observer registers through the atomic ObserveSnapshot cutover and
+    /// the peer stream carries the snapshot first, then every later Output
+    /// in order, then the exit — nothing forwarded before the snapshot.
+    #[tokio::test]
+    async fn observer_stream_forwards_cutover_snapshot_before_output() {
+        let daemon_dir = std::env::temp_dir().join(format!(
+            "task-transfer-observe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+
+        let fake_daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept daemon connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read observe snapshot command");
+            assert!(
+                line.contains("ObserveSnapshot"),
+                "expected ObserveSnapshot command, got {line:?}"
+            );
+
+            let events = [
+                DaemonEvent::Snapshot {
+                    session_id: "sess-transfer".to_string(),
+                    snapshot: terminal_snapshot("CUTOVER"),
+                },
+                DaemonEvent::Output {
+                    session_id: "sess-transfer".to_string(),
+                    data: b"after-cutover".to_vec(),
+                },
+                DaemonEvent::Exit {
+                    session_id: "sess-transfer".to_string(),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+            ];
+            for event in events {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .expect("write daemon event");
+            }
+        });
+
+        let mut daemon = connect_daemon(&daemon_dir).await.expect("connect daemon");
+        let snapshot = observe_session_snapshot(&mut daemon, "sess-transfer")
+            .await
+            .expect("observe snapshot");
+        assert_eq!(snapshot.vt, "CUTOVER");
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind peer");
+        let addr = tcp.local_addr().expect("local addr");
+        let peer_reader = tokio::spawn(async move {
+            let (stream, _) = tcp.accept().await.expect("accept peer stream");
+            let mut reader = BufReader::new(stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.expect("read peer line") == 0 {
+                    break;
+                }
+                lines.push(line);
+            }
+            lines
+        });
+        let peer_stream = TcpStream::connect(addr).await.expect("connect peer");
+
+        stream_daemon_session(daemon, peer_stream, "sess-transfer".to_string(), snapshot)
+            .await
+            .expect("stream session");
+        fake_daemon.await.expect("fake daemon");
+        let lines = peer_reader.await.expect("peer reader");
+
+        let events: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| serde_json::from_str(line.trim()).expect("parse peer event"))
+            .collect();
+        assert_eq!(events.len(), 3, "peer events: {events:?}");
+        assert_eq!(events[0]["type"], "snapshot");
+        assert_eq!(events[0]["snapshot"]["vt"], "CUTOVER");
+        assert_eq!(events[1]["type"], "output");
+        assert_eq!(events[2]["type"], "exit");
+
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
 }

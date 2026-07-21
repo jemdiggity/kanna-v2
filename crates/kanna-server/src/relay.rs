@@ -214,27 +214,35 @@ pub(crate) async fn run_relay_loop(
                                         }
                                     };
 
-                                    // Send Observe command
+                                    // Atomic observer cutover: the reply to
+                                    // ObserveSnapshot is the authoritative
+                                    // snapshot itself, queued ahead of every
+                                    // later Output on this connection — no
+                                    // pre-snapshot Output to discard, no
+                                    // Output racing ahead of the snapshot.
                                     use kanna_daemon::protocol::{
                                         Command as DaemonCommand, Event as DaemonEvent,
                                     };
                                     match obs_daemon
-                                        .send_command(&DaemonCommand::Observe {
+                                        .send_command(&DaemonCommand::ObserveSnapshot {
                                             session_id: session_id.clone(),
                                         })
                                         .await
                                     {
-                                        Ok(DaemonEvent::Ok) => {
+                                        Ok(DaemonEvent::Snapshot { snapshot, .. }) => {
                                             // Send success response
                                             send_response(&sink, id, Ok(serde_json::Value::Null))
                                                 .await;
 
-                                            // Spawn background task to replay the current snapshot and
-                                            // forward later daemon events.
+                                            // Spawn background task to forward the cutover
+                                            // snapshot and then every later daemon event.
                                             let sink_clone = Arc::clone(&sink);
                                             let sid = session_id.clone();
                                             let handle = tokio::spawn(async move {
-                                                observer_loop(obs_daemon, &sid, sink_clone).await;
+                                                observer_loop(
+                                                    obs_daemon, &sid, sink_clone, snapshot,
+                                                )
+                                                .await;
                                             });
                                             observe_tasks.insert(session_id, handle);
                                         }
@@ -580,96 +588,25 @@ async fn send_relay_event(sink: &Arc<Mutex<relay_client::WsSink>>, event: RelayM
     }
 }
 
-enum ObserverStart {
-    Continue,
-    Stop,
-}
-
-async fn send_initial_snapshot_event(
-    daemon: &mut daemon_client::DaemonClient,
-    session_id: &str,
-    sink: &Arc<Mutex<relay_client::WsSink>>,
-) -> Option<ObserverStart> {
-    use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
-
-    let snapshot_result = daemon
-        .send_command(&DaemonCommand::Snapshot {
-            session_id: session_id.to_string(),
-        })
-        .await
-        .map_err(|error| format!("daemon snapshot error: {}", error));
-    let mut event = match snapshot_result {
-        Ok(event) => event,
-        Err(message) => {
-            return send_relay_event(sink, relay_error_event(session_id, message))
-                .await
-                .then_some(ObserverStart::Stop);
-        }
-    };
-
-    loop {
-        match event {
-            DaemonEvent::Snapshot { snapshot, .. } => {
-                return send_relay_event(sink, relay_snapshot_event(session_id, snapshot))
-                    .await
-                    .then_some(ObserverStart::Continue);
-            }
-            DaemonEvent::Exit {
-                session_id: sid,
-                code,
-                ..
-            } => {
-                return send_relay_event(sink, relay_exit_event(&sid, code))
-                    .await
-                    .then_some(ObserverStart::Stop);
-            }
-            DaemonEvent::Error {
-                code: Some(ErrorCode::SessionNotFound),
-                ..
-            } => return Some(ObserverStart::Continue),
-            DaemonEvent::Error { message, .. } => {
-                return send_relay_event(sink, relay_error_event(session_id, message))
-                    .await
-                    .then_some(ObserverStart::Stop);
-            }
-            DaemonEvent::Output { .. } | DaemonEvent::StatusChanged { .. } => {}
-            _ => {}
-        }
-
-        let read_result = daemon
-            .read_event()
-            .await
-            .map_err(|error| format!("daemon snapshot error: {}", error));
-        event = match read_result {
-            Ok(event) => event,
-            Err(message) => {
-                return send_relay_event(sink, relay_error_event(session_id, message))
-                    .await
-                    .then_some(ObserverStart::Stop);
-            }
-        };
-    }
-}
-
-/// Background task that reads daemon events from an Observe connection
-/// and forwards them as relay Event messages through the WebSocket.
+/// Background task that forwards the atomic cutover snapshot from
+/// `ObserveSnapshot` and then every later daemon event as relay Event
+/// messages through the WebSocket. Because the snapshot was queued ahead of
+/// live output on the same connection, ordering is exact: nothing is
+/// discarded before the snapshot and no Output precedes it.
 async fn observer_loop(
     mut daemon: daemon_client::DaemonClient,
     session_id: &str,
     sink: Arc<Mutex<relay_client::WsSink>>,
+    initial_snapshot: kanna_daemon::protocol::TerminalSnapshot,
 ) {
     use kanna_daemon::protocol::Event as DaemonEvent;
 
-    match send_initial_snapshot_event(&mut daemon, session_id, &sink).await {
-        Some(ObserverStart::Continue) => {}
-        Some(ObserverStart::Stop) => return,
-        None => {
-            log::info!(
-                "WebSocket closed while sending initial snapshot for {}",
-                session_id
-            );
-            return;
-        }
+    if !send_relay_event(&sink, relay_snapshot_event(session_id, initial_snapshot)).await {
+        log::info!(
+            "WebSocket closed while sending initial snapshot for {}",
+            session_id
+        );
+        return;
     }
 
     // We process daemon events in a two-phase pattern: first extract data
@@ -819,14 +756,15 @@ mod tests {
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             let mut line = String::new();
-            // observer_loop first requests the initial snapshot.
+            // The relay registers with the atomic ObserveSnapshot cutover;
+            // the reply is the snapshot itself, queued ahead of live output.
             reader
                 .read_line(&mut line)
                 .await
-                .expect("read snapshot command");
+                .expect("read observe snapshot command");
             assert!(
-                line.contains("Snapshot"),
-                "expected Snapshot command, got {line:?}"
+                line.contains("ObserveSnapshot"),
+                "expected ObserveSnapshot command, got {line:?}"
             );
 
             let events = [
@@ -886,10 +824,22 @@ mod tests {
         let (sink, _read) = ws.split();
         let sink = Arc::new(Mutex::new(sink));
 
-        let daemon = daemon_client::DaemonClient::connect(daemon_dir.to_str().unwrap())
+        let mut daemon = daemon_client::DaemonClient::connect(daemon_dir.to_str().unwrap())
             .await
             .expect("connect fake daemon");
-        observer_loop(daemon, "sess-observer", sink.clone()).await;
+        // Same flow as the observe_session handler: the ObserveSnapshot
+        // reply is the cutover snapshot, handed to the forwarding loop.
+        let initial_snapshot = match daemon
+            .send_command(&kanna_daemon::protocol::Command::ObserveSnapshot {
+                session_id: "sess-observer".to_string(),
+            })
+            .await
+            .expect("observe snapshot")
+        {
+            DaemonEvent::Snapshot { snapshot, .. } => snapshot,
+            other => panic!("expected Snapshot reply, got {other:?}"),
+        };
+        observer_loop(daemon, "sess-observer", sink.clone(), initial_snapshot).await;
         fake_daemon.await.expect("fake daemon");
         sink.lock().await.close().await.expect("close ws");
         let messages = relay_server.await.expect("relay server");
