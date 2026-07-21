@@ -39,14 +39,21 @@ directions freeze together.
 
 ### 1. Keep blocking definition resolution off the async runtime
 
-The repository-definition cache becomes asynchronous at its public boundary.
-Cache misses run `RepoDefinitions::resolve` through `tokio::task::spawn_blocking`.
-The three HTTP definition endpoints await the cache without executing Git or
-filesystem work on a Tokio worker.
+The three repository-definition HTTP endpoints run their complete lookup
+through `tokio::task::spawn_blocking`. This includes the SQLite repository
+lookup, cache access, `RepoDefinitions::resolve`, and definition reads, all of
+which can execute synchronous Git or filesystem operations. The endpoint
+handlers await the blocking task without executing that work on a Tokio worker.
 
-Join failures are converted into the existing `DefinitionLookupError::Other`
-path and retain the current HTTP status mapping. Successful and failed lookup
-semantics otherwise remain unchanged.
+The cache remains synchronous because every HTTP use of it is inside this
+blocking boundary. Keeping the entire definition operation together also
+protects cache hits whose requested pipeline or agent definition still needs
+to read data from Git objects.
+
+Loader panics are converted into the existing `DefinitionLookupError::Other`
+path, while blocking-task join failures map directly to the endpoint's internal
+server error response. Successful and failed lookup semantics otherwise remain
+unchanged.
 
 ### 2. Single-flight cache misses per repository
 
