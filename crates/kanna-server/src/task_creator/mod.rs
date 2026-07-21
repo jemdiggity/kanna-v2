@@ -83,6 +83,12 @@ impl std::fmt::Display for DefinitionLookupError {
     }
 }
 
+impl From<String> for DefinitionLookupError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RepoKannaDefinitions {

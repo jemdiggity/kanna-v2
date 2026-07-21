@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -67,7 +68,7 @@ struct TimedCache<K, V, E> {
 impl<K, V, E> TimedCache<K, V, E>
 where
     K: Clone + Eq + Hash,
-    E: Clone,
+    E: Clone + From<String>,
 {
     fn new(ttl: Duration) -> Self {
         Self {
@@ -105,7 +106,20 @@ where
             return flight.wait();
         }
 
-        let result = load().map(Arc::new);
+        let result = match catch_unwind(AssertUnwindSafe(load)) {
+            Ok(result) => result,
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic payload".to_string());
+                Err(E::from(format!(
+                    "repository definition loader panicked: {message}"
+                )))
+            }
+        }
+        .map(Arc::new);
         let returned = result.clone();
         let mut entries = self
             .entries
@@ -200,6 +214,11 @@ mod tests {
         }
 
         fn load<T>(&self, result: Result<T, String>) -> Result<T, String> {
+            self.hold();
+            result
+        }
+
+        fn hold(&self) {
             self.loads.fetch_add(1, Ordering::SeqCst);
             let mut state = self
                 .state
@@ -213,7 +232,6 @@ mod tests {
                     .wait(state)
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
-            result
         }
 
         fn wait_until_started(&self) {
@@ -301,10 +319,11 @@ mod tests {
         let cache = TimedCache::new(Duration::from_secs(30));
         let started = Instant::now();
 
-        let failed =
-            cache.get_or_try_insert_with("repo", started, || Err::<&str, _>("unavailable"));
+        let failed = cache.get_or_try_insert_with("repo", started, || {
+            Err::<&str, _>("unavailable".to_string())
+        });
         let recovered = cache
-            .get_or_try_insert_with("repo", started, || Ok::<_, &str>("revision-1"))
+            .get_or_try_insert_with("repo", started, || Ok::<_, String>("revision-1"))
             .unwrap();
 
         assert_eq!(failed.unwrap_err(), "unavailable");
@@ -391,5 +410,54 @@ mod tests {
         assert_eq!(errors, ["unavailable", "unavailable"]);
         assert_eq!(recovered.as_str(), "revision-1");
         assert_eq!(gate.loads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn concurrent_loader_panic_releases_waiters_and_later_request_retries() {
+        let cache = Arc::new(TimedCache::new(Duration::from_secs(30)));
+        let gate = Arc::new(LoaderGate::new());
+        let callers = Arc::new(Barrier::new(3));
+        let started = Instant::now();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+        for _ in 0..2 {
+            let cache = Arc::clone(&cache);
+            let gate = Arc::clone(&gate);
+            let callers = Arc::clone(&callers);
+            let result_tx = result_tx.clone();
+            std::thread::spawn(move || {
+                callers.wait();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cache.get_or_try_insert_with("repo", started, || -> Result<String, String> {
+                        gate.hold();
+                        panic!("definition loader panic")
+                    })
+                }));
+                result_tx.send(result).unwrap();
+            });
+        }
+        drop(result_tx);
+
+        callers.wait();
+        gate.wait_until_started();
+        gate.release();
+        let results: Vec<_> = (0..2)
+            .map(|_| {
+                result_rx
+                    .recv_timeout(Duration::from_millis(500))
+                    .expect("every shared-load caller completed after the panic")
+            })
+            .collect();
+        let recovered = cache
+            .get_or_try_insert_with("repo", started, || {
+                Ok::<_, String>("revision-1".to_string())
+            })
+            .unwrap();
+
+        for result in results {
+            let error = result.expect("loader panic was converted into a cache error");
+            assert!(error.unwrap_err().contains("definition loader panic"));
+        }
+        assert_eq!(recovered.as_str(), "revision-1");
     }
 }
