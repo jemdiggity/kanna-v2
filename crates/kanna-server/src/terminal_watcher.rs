@@ -129,7 +129,13 @@ async fn terminal_state_watcher_once(
         other => return Err(format!("unexpected daemon subscribe response: {:?}", other)),
     }
 
-    match daemon
+    // Once subscribed, this connection can receive unsolicited events at any
+    // time. Keep request/response commands on an unsubscribed control socket
+    // so an event can never be consumed as the List reply.
+    let mut control = daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|e| format!("daemon control connection failed: {}", e))?;
+    match control
         .send_command(&DaemonCommand::List)
         .await
         .map_err(|e| format!("daemon list failed: {}", e))?
@@ -328,13 +334,17 @@ mod tests {
             other => panic!("expected Subscribe command, got {other:?}"),
         }
         write_event(&mut write_half, &DaemonEvent::Ok).await;
+
+        let (control_stream, _) = listener.accept().await.unwrap();
+        let (control_read, mut control_write) = control_stream.into_split();
+        let mut control_reader = BufReader::new(control_read);
         line.clear();
-        reader.read_line(&mut line).await.unwrap();
+        control_reader.read_line(&mut line).await.unwrap();
         match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
             DaemonCommand::List => {}
             other => panic!("expected List command, got {other:?}"),
         }
-        write_event(&mut write_half, &DaemonEvent::SessionList { sessions }).await;
+        write_event(&mut control_write, &DaemonEvent::SessionList { sessions }).await;
         write_half
     }
 
@@ -825,6 +835,91 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(item.activity.as_deref(), Some("working"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_preserves_subscriber_event_interleaved_before_list_reply() {
+        let unique = unique_name("terminal-watcher-list-interleaved-status");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let (subscriber_stream, _) = listener.accept().await.unwrap();
+            let (subscriber_read, mut subscriber_write) = subscriber_stream.into_split();
+            let mut subscriber_reader = BufReader::new(subscriber_read);
+            let mut line = String::new();
+            subscriber_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::Subscribe
+            ));
+            write_event(&mut subscriber_write, &DaemonEvent::Ok).await;
+
+            let (control_stream, _) = listener.accept().await.unwrap();
+            let (control_read, mut control_write) = control_stream.into_split();
+            let mut control_reader = BufReader::new(control_read);
+            line.clear();
+            control_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+
+            // This unsolicited subscriber event arrives after Subscribe is
+            // acknowledged but before the independent List response.
+            write_event(
+                &mut subscriber_write,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    waiting_prompt_snippet: Some("Ready after reconciliation".to_string()),
+                },
+            )
+            .await;
+            write_event(
+                &mut control_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-child".to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: kanna_daemon::protocol::SessionStatus::Busy,
+                        kind: Default::default(),
+                    }],
+                },
+            )
+            .await;
+            write_event(&mut subscriber_write, &DaemonEvent::ShuttingDown).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config.clone()),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("unread"));
+        assert_eq!(
+            item.last_output_preview.as_deref(),
+            Some("Ready after reconciliation")
+        );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

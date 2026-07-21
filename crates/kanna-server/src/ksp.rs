@@ -1810,6 +1810,10 @@ async fn stream_terminal_once(
     attached_once: &mut bool,
     frame_tx: &mpsc::Sender<ServerFrame>,
 ) -> StreamRunEnd {
+    // AttachSnapshot queues Snapshot followed by its matching StatusChanged.
+    // Treat every snapshot as authoritative, while suppressing that duplicate
+    // and any later repeated edge with the same value.
+    let mut last_status = None;
     let send_error = |code: &'static str, message: String| {
         let frame_tx = frame_tx.clone();
         let task_id = task_id.to_string();
@@ -1874,11 +1878,7 @@ async fn stream_terminal_once(
             {
                 return StreamRunEnd::Done;
             }
-            if frame_tx
-                .send(ServerFrame::StatusChanged {
-                    task_id: task_id.to_string(),
-                    status: status_str(status).to_string(),
-                })
+            if send_terminal_status(frame_tx, task_id, status, &mut last_status)
                 .await
                 .is_err()
             {
@@ -1951,17 +1951,19 @@ async fn stream_terminal_once(
                 {
                     return StreamRunEnd::Done;
                 }
+                if send_terminal_status(frame_tx, task_id, snapshot.status, &mut last_status)
+                    .await
+                    .is_err()
+                {
+                    return StreamRunEnd::Done;
+                }
             }
             Ok(DaemonEvent::StatusChanged {
                 session_id: event_session,
                 status,
                 ..
             }) if event_session == session_id => {
-                if frame_tx
-                    .send(ServerFrame::StatusChanged {
-                        task_id: task_id.to_string(),
-                        status: status_str(status).to_string(),
-                    })
+                if send_terminal_status(frame_tx, task_id, status, &mut last_status)
                     .await
                     .is_err()
                 {
@@ -1985,6 +1987,26 @@ async fn stream_terminal_once(
             Ok(_) => {}
         }
     }
+}
+
+async fn send_terminal_status(
+    frame_tx: &mpsc::Sender<ServerFrame>,
+    task_id: &str,
+    status: SessionStatus,
+    last_status: &mut Option<SessionStatus>,
+) -> Result<(), ()> {
+    if *last_status == Some(status) {
+        return Ok(());
+    }
+    frame_tx
+        .send(ServerFrame::StatusChanged {
+            task_id: task_id.to_string(),
+            status: status_str(status).to_string(),
+        })
+        .await
+        .map_err(|_| ())?;
+    *last_status = Some(status);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3969,6 +3991,13 @@ mod tests {
                         vt: "busy snapshot".to_string(),
                     },
                 },
+                // AttachSnapshot registers the subscriber with both the
+                // authoritative snapshot and this initial status event.
+                DaemonEvent::StatusChanged {
+                    session_id: "daemon-terminal-status".to_string(),
+                    status: SessionStatus::Busy,
+                    waiting_prompt_snippet: None,
+                },
                 DaemonEvent::StatusChanged {
                     session_id: "another-session".to_string(),
                     status: SessionStatus::Idle,
@@ -4113,7 +4142,7 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
-                    status: SessionStatus::Idle,
+                    status: SessionStatus::Busy,
                     vt: "RESYNCED\n".to_string(),
                 },
             };
@@ -4229,6 +4258,13 @@ mod tests {
                 assert_eq!(decode(data_b64), b"RESYNCED\n");
             }
             other => panic!("expected mid-stream resync snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::StatusChanged { task_id, status } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(status, "busy");
+            }
+            other => panic!("expected resync terminal status, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
             ServerFrame::SessionExit { task_id, code } => {

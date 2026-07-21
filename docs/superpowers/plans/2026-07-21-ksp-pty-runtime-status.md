@@ -78,3 +78,28 @@
 
 - [x] Run focused Vitest, TypeScript, Rust test, fmt, and clippy checks.
 - [x] Inspect the final diff and commit without pushing or advancing the Kanna stage.
+
+### Task 10: Revision — preserve status across terminal lag resync
+
+- [x] Extend `terminal_stream_forwards_runtime_status` in `crates/kanna-server/src/ksp.rs` so the fake daemon sends the real attach sequence (`Snapshot(Busy)`, then the attach-time `StatusChanged(Busy)`) and assert KSP emits exactly `TermSnapshot`, one `StatusChanged(Busy)`, a later changed status, then exit.
+- [x] Add a real-daemon reconnect integration test proving `AttachSnapshot` delivers `Snapshot` followed by one matching initial `StatusChanged` event.
+- [x] Extend `terminal_stream_preserves_snapshot_and_split_multibyte_output_bytes` so a mid-stream resync snapshot carries `Busy` after the last delivered `Idle`, and assert its `StatusChanged(Busy)` follows the resync `TermSnapshot`.
+- [x] Run `cargo test -p kanna-server ksp::tests::terminal_stream_forwards_runtime_status ksp::tests::terminal_stream_preserves_snapshot_and_split_multibyte_output_bytes -- --nocapture` (or the two filters separately) and confirm RED: the attach status is duplicated and the resync status is absent.
+- [x] In `stream_terminal_once`, track the last status delivered for the attachment. Send the snapshot's status after every forwarded snapshot only when it differs from the last delivered status; initialize the tracker from the attach snapshot so the daemon's queued attach-time `StatusChanged` is suppressed without suppressing later transitions.
+- [x] Re-run the two focused KSP tests and confirm GREEN.
+
+### Task 11: Revision — make watcher list reconciliation response-safe
+
+- [x] Add a deterministic integration test in `crates/kanna-server/src/terminal_watcher.rs`: acknowledge `Subscribe`, accept `List` on a second daemon connection, send `StatusChanged(Idle)` with a waiting prompt on the subscriber before replying `SessionList(Busy)` on the control connection, then assert the list reconciliation occurred and the buffered event persisted the prompt and produced the final unread activity.
+- [x] Run the focused watcher test and confirm RED because the current subscribed connection consumes `StatusChanged` as the `List` response.
+- [x] Connect a dedicated control `DaemonClient` after subscribe and issue `List` on that unsubscribed connection, retaining the original connection exclusively for subscriber events.
+- [x] Update fake-daemon watcher helpers to model distinct subscriber and control sockets, then run all `terminal_watcher` tests and confirm GREEN.
+
+### Task 12: Revision verification and commit
+
+- [x] Run `pnpm test`.
+- [x] Run `(cd crates/daemon && cargo test -- --test-threads=1)`.
+- [x] Run `cargo test -p kanna-server`.
+- [x] Run `cargo fmt --all -- --check`.
+- [x] Run `cargo clippy -p kanna-daemon -p kanna-server --all-targets`.
+- [ ] Review `git diff`, commit the revision locally, and record successful stage completion through Kanna.

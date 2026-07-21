@@ -319,6 +319,21 @@ async fn fake_daemon_until_spawn(daemon_dir: PathBuf) -> DaemonCommand {
                     .expect("subscribe response should be written");
                 subscribers.push(write_half);
             }
+            DaemonCommand::List => {
+                write_half
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            serde_json::to_string(&DaemonEvent::SessionList {
+                                sessions: Vec::new(),
+                            })
+                            .unwrap()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("list response should be written");
+            }
             command @ (DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. }) => {
                 let session_id = match &command {
                     DaemonCommand::Spawn { session_id, .. }
