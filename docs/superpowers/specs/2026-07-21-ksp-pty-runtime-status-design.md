@@ -3,9 +3,11 @@
 Desktop sidebar activity (`working` italic / `unread` bold / `idle`) can stay
 `idle` while a PTY-mode agent (e.g. Codex) is visibly producing output in its
 terminal. This document confirms the gap, records the boundary decisions from
-brainstorming, and specifies the fix: KSP becomes the authoritative runtime
-status channel for attached PTY sessions, with the legacy Tauri event bridge
-retained only as a temporary fallback.
+brainstorming, and specifies the fix. Revision 2 (2026-07-22): KSP is the
+authoritative runtime status channel for attached PTY sessions, kanna-server
+applies status directly for sessions with no live KSP terminal attachment,
+and the legacy Tauri status path is removed outright together with its tests
+— no temporary fallback remains.
 
 ## 1. Confirmed gap
 
@@ -68,10 +70,9 @@ task is selected in some window and `unread` otherwise. The desktop supplies
    `ServerFrame::StatusChanged` (task-keyed, no protocol addition), and needs
    no daemon changes for the steady state.
 2. *Make `terminal_watcher` persist activity server-side for every session* —
-   rejected for this fix. It cannot preserve idle-vs-unread because `selected`
-   is client knowledge; moving selection tracking into kanna-server is a
-   larger boundary change. Noted as the eventual end state that would retire
-   the fallback entirely (see §6).
+   initially rejected because idle-vs-unread needs the client's `selected`
+   bit. Revision 2 adopts a scoped version for unattached sessions only,
+   where no selection knowledge is needed (see §2a).
 3. *A new `term_status` frame kind* — rejected; `status_changed` already
    exists and is task-scoped, and inventing a parallel frame would fork the
    status vocabulary.
@@ -105,13 +106,58 @@ emit one `status_changed` frame immediately after `term_snapshot`. Rejected
 alternative: a `List` round-trip per attach from kanna-server — extra daemon
 command on the hot attach path and racy against concurrent transitions.
 
-**Legacy listener fate.** The Tauri `status_changed` listener in
-`stores/init.ts` and the `syncTaskStatusesFromDaemon` poll stay, explicitly
-documented in code as a temporary fallback: they still cover sessions with no
-KSP attachment (background tasks whose terminals are not mounted). Double
-delivery is harmless — `apply_runtime_status` returns `activity: null` when
-nothing changes and the desktop skips the reload in that case
-(`sessions.ts:126`). Removal criteria in §6.
+**Legacy listener fate.** Revision 1 kept the Tauri `status_changed`
+listener and the `syncTaskStatusesFromDaemon` poll as a labeled temporary
+fallback for unattached sessions. Revision 2 removes them (see §2a).
+
+## 2a. Revision 2 decisions (remove the legacy path)
+
+**The gap full removal must close.** KSP status frames flow only to sessions
+with a live terminal attachment. Tasks whose terminals were never mounted
+(e.g. created via MCP/CLI and never clicked) would silently lose activity
+tracking if the legacy path were simply deleted.
+
+**Key observation: selection implies attachment.** A selected task's
+terminal is mounted and KSP-attached (`terminalSessionLifecycle`), so an
+unattached session is never the selected one. Therefore the server can apply
+runtime status for unattached sessions without any selection knowledge:
+`busy` → `working` (selection-independent anyway), and `idle`/`waiting`
+downgrades from `working` → `unread` — which is exactly what
+`activity_for_runtime_status` would decide with `selected: false`. No
+semantics change.
+
+**Two writers, disjoint domains.** The desktop client applies status for
+sessions it has attached (it owns the `selected` bit); `terminal_watcher`
+applies status only for sessions with no live KSP terminal attachment,
+consulting a process-global refcounted registry of attached terminal session
+ids maintained by the KSP stream lifecycle (KSP attachments are currently
+per-connection state only, `ksp.rs:486`; multiple windows/clients can attach
+the same session, hence a refcount, not a set). Attach/detach races leave
+only brief overlap windows; both writers converge through the same
+idempotent `activity_for_runtime_status` rules, and `busy` → `working` is
+identical from either writer.
+
+**Watcher reconciliation replaces the poll.** On every successful daemon
+subscribe, `terminal_watcher` issues a `List` command (session status is
+already in the reply, `crates/daemon/src/protocol.rs:315`) and applies each
+session's status through the same unattached-only rule. This covers
+transitions missed while kanna-server was down — the role the deleted
+desktop `list_sessions` poll used to play.
+
+**Last legacy consumer migrates.** `terminalLayout.ts` reconnect redraw
+settle (`waitForIdleStatus`, `terminalLayout.ts:77`) listens on the legacy
+Tauri event; it moves to the KSP status via the runtime-status sink
+generalized into a small per-session status bus (multiple subscribers, store
+sink + terminal layout).
+
+**Removed outright, with their tests:** the event-bridge `status_changed`
+emission (`daemon_lifecycle.rs:170`), the legacy-attach emission
+(`attachment.rs:189`, production-dead per the fanout design),
+`listen("status_changed")` in `stores/init.ts`, `syncTaskStatusesFromDaemon`
+and its `session_created` call site, and the legacy-path cases in
+`kanna.runtimeStatusSync.test.ts`. The Revision-1 kill-switch idea
+(`KANNA_DISABLE_LEGACY_STATUS_FALLBACK`) is dropped — there is nothing left
+to switch off.
 
 ## 3. Design
 
@@ -152,12 +198,15 @@ Idle-vs-unread semantics are untouched: all paths converge on the
 `/v1/tasks/{task_id}/activity/runtime-status` POST carrying `selected`, and
 `activity_for_runtime_status` remains the single decision point.
 
-**Fallback kill switch (dev/E2E only).** A `KANNA_DISABLE_LEGACY_STATUS_FALLBACK`
-environment flag (read once at store init, dev builds only) skips registering
-the legacy `status_changed` Tauri listener and the `syncTaskStatusesFromDaemon`
-poll. It exists so the E2E can prove the KSP path in isolation, and it is the
-mechanism that later becomes the fallback's removal (§6). Production behavior
-is unchanged when the flag is absent.
+**Server-side application for unattached sessions (Revision 2).**
+`terminal_watcher` gains the unattached-only status application from §2a:
+on `StatusChanged`, if the session has no live KSP terminal attachment
+(refcounted registry shared through `AppState`), resolve the task and apply
+`busy` → `working`, `idle`/`waiting` from `working` → `unread`, reusing the
+`activity_for_runtime_status` rules and publishing
+`StateChangeScope::Tasks` so all clients refresh — the same broadcast the
+HTTP endpoint uses (`task_activity.rs:91`). On subscribe it reconciles via
+daemon `List`. Waiting-prompt persistence is unchanged.
 
 ## 4. Required regression coverage
 
@@ -189,9 +238,20 @@ is unchanged when the flag is absent.
   past the status-detection throttle, prints the waiting marker, then ends on
   an idle prompt line — and asserts sidebar/task activity follows
   working → (selected ? idle : unread) through the real daemon → kanna-server
-  → KSP → store path. To prove KSP is the carrier (not the fallbacks), the
-  E2E instance launches with the fallback kill switch (below) enabled. This
+  → KSP → store path. With the legacy path removed there is no fallback to
+  mask the result: the selected/attached case exercises the client-applied
+  KSP path, and an unselected task with an unmounted terminal exercises the
+  server-side `terminal_watcher` path — the E2E should assert both. This
   supersedes any standalone E2E-gap writeup.
+- **terminal_watcher boundary** (Revision 2): unattached `busy` applies
+  `working`; unattached `idle` from `working` applies `unread`; a session
+  with a live attachment refcount is skipped; subscribe-time `List`
+  reconciliation applies statuses; refcount attach/detach lifecycle.
+- **status bus / terminal layout** (Revision 2): reconnect redraw settle
+  resolves from a KSP status delivery instead of the removed Tauri event.
+- **Legacy-path tests removed** (Revision 2): the `listen("status_changed")`
+  and `syncTaskStatusesFromDaemon` cases in `kanna.runtimeStatusSync.test.ts`
+  go away with the code they cover.
 
 ## 5. Out of scope
 
@@ -203,9 +263,8 @@ is unchanged when the flag is absent.
 
 ## 6. Fallback removal criteria
 
-The legacy Tauri `status_changed` listener and the `list_sessions` status
-poll can be deleted when kanna-server itself applies runtime status for
-sessions with no live KSP attachment — which requires the server to know
-per-window selection (or to defer the idle-vs-unread choice until read).
-Until then they are fallbacks, not the steady state, and must be labeled as
-such in code.
+Revision 1 predicted the fallback could be deleted once kanna-server applied
+runtime status for unattached sessions, and assumed that required per-window
+selection knowledge. §2a's observation (selection implies attachment) showed
+it does not. Revision 2 executes the removal: the legacy Tauri status
+emissions, listener, and poll are deleted rather than labeled.
