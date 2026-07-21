@@ -24,6 +24,32 @@ describe("createSessionStore", () => {
     expect(store.getState().taskCollectionStatus).toBe("error");
   });
 
+  it("allows only one pending task action at a time", () => {
+    const store = createSessionStore();
+
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.beginTaskAction("task-1", "close-task")).toBe(true);
+    expect(store.getState().pendingTaskAction).toEqual({
+      taskId: "task-1",
+      action: "close-task"
+    });
+
+    expect(store.beginTaskAction("task-1", "close-task")).toBe(false);
+    expect(store.beginTaskAction("task-1", "advance-stage")).toBe(false);
+    expect(store.beginTaskAction("task-2", "close-task")).toBe(false);
+
+    store.finishTaskAction("task-2", "close-task");
+    store.finishTaskAction("task-1", "advance-stage");
+    expect(store.getState().pendingTaskAction).toEqual({
+      taskId: "task-1",
+      action: "close-task"
+    });
+
+    store.finishTaskAction("task-1", "close-task");
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.beginTaskAction("task-1", "advance-stage")).toBe(true);
+  });
+
   it("preserves repository command ownership until the run settles", () => {
     const store = createSessionStore();
     store.selectRepo("repo-1");

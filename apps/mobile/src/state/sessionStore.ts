@@ -117,6 +117,13 @@ export type TaskCreationState =
       pendingTaskCreation: PendingTaskCreation;
     };
 
+export type TaskStageAction = "advance-stage" | "close-task";
+
+export interface PendingTaskAction {
+  taskId: string;
+  action: TaskStageAction;
+}
+
 export interface SessionState {
   mobileDeviceId: string | null;
   connectionMode: DesktopMode | null;
@@ -148,6 +155,7 @@ export interface SessionState {
   searchQuery: string;
   searchResults: TaskSummary[];
   selectedTaskId: string | null;
+  pendingTaskAction: PendingTaskAction | null;
   activeView: MobileView;
   pairingCode: string | null;
   isComposerOpen: boolean;
@@ -234,6 +242,8 @@ export interface SessionStore {
   setTaskActivity(taskId: string, activity: TaskActivity): void;
   setTaskPrompt(taskId: string, prompt: string): void;
   setSelectedTask(taskId: string | null): void;
+  beginTaskAction(taskId: string, action: TaskStageAction): boolean;
+  finishTaskAction(taskId: string, action: TaskStageAction): void;
   retagTaskIdentity(
     previousTaskId: string,
     nextTaskId: string,
@@ -309,6 +319,7 @@ export function createSessionStore(): SessionStore {
     searchQuery: "",
     searchResults: [],
     selectedTaskId: null,
+    pendingTaskAction: null,
     activeView: "tasks",
     pairingCode: null,
     isComposerOpen: false,
@@ -843,6 +854,20 @@ export function createSessionStore(): SessionStore {
         taskCompanionEventStatus:
           selectedTaskId === null ? "idle" : state.taskCompanionEventStatus
       };
+      publish();
+    },
+    beginTaskAction(taskId, action) {
+      if (state.pendingTaskAction) return false;
+      state = { ...state, pendingTaskAction: { taskId, action } };
+      publish();
+      return true;
+    },
+    finishTaskAction(taskId, action) {
+      const pending = state.pendingTaskAction;
+      if (!pending || pending.taskId !== taskId || pending.action !== action) {
+        return;
+      }
+      state = { ...state, pendingTaskAction: null };
       publish();
     },
     retagTaskIdentity(previousTaskId, nextTaskId, options) {

@@ -500,6 +500,12 @@ function TaskDetailRoute({
     return <View style={styles.taskPlaceholder} />;
   }
 
+  const pendingTaskAction =
+    state.pendingTaskAction &&
+    state.pendingTaskAction.taskId === resolveDurableTaskId(state, routeTaskId)
+      ? state.pendingTaskAction.action
+      : null;
+
   return (
     <TaskScreen
       e2eTaskSnapshotMarker={e2eTaskSnapshotMarker}
@@ -521,6 +527,7 @@ function TaskDetailRoute({
       companionEventStatus={state.taskCompanionEventStatus}
       quickReplies={quickReplies}
       quickRepliesHydrated={quickRepliesHydrated}
+      pendingTaskAction={pendingTaskAction}
       taskCreationPhase={resolveTaskCreationPhase(state, routeTaskId)}
       taskCreationErrorMessage={state.composerErrorMessage}
       onBack={() => navigation.goBack()}

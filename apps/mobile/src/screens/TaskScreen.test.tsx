@@ -88,6 +88,7 @@ vi.mock("react", async (importActual) => {
 });
 
 vi.mock("react-native", () => ({
+  ActivityIndicator: "ActivityIndicator",
   Keyboard: {
     addListener: vi.fn(() => ({ remove: vi.fn() })),
     dismiss: componentMocks.keyboardDismiss
@@ -203,6 +204,7 @@ interface RenderTaskScreenOptions {
   companionEventStatus?: "idle" | "sending" | "sent" | "error";
   onCompanionOpenChange?: (isOpen: boolean) => void;
   onSendCompanionEvent?: (...args: unknown[]) => void;
+  pendingTaskAction?: "advance-stage" | "close-task" | null;
 }
 
 function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
@@ -245,7 +247,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     companionErrorMessage = null,
     companionEventStatus = "idle",
     onCompanionOpenChange = vi.fn(),
-    onSendCompanionEvent = vi.fn()
+    onSendCompanionEvent = vi.fn(),
+    pendingTaskAction = null
   } = options;
 
   hookHarness.effectIndex = 0;
@@ -281,6 +284,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     companionEventStatus,
     quickReplies,
     quickRepliesHydrated,
+    pendingTaskAction,
     e2eTaskSnapshotMarker,
     onBack: vi.fn(),
     onAdvanceTaskStage: componentMocks.onAdvanceTaskStage,
@@ -552,6 +556,45 @@ describe("TaskScreen", () => {
     tree = renderTaskScreen({ onReadTaskDiff });
     expect(findByType(tree, "TaskDiffPreview")).toBeNull();
   });
+
+  it("keeps the plus button idle without a pending task action", () => {
+    const tree = renderTaskScreen({ agentType: "agent" });
+
+    const moreButton = findByTestId(tree, "mobile.task-more-button");
+    expect(moreButton?.props).toMatchObject({
+      accessibilityLabel: "Task actions",
+      disabled: false
+    });
+    expect(findByTestId(tree, "mobile.task-action-pending")).toBeNull();
+  });
+
+  it.each([
+    ["close-task", "Closing task"],
+    ["advance-stage", "Advancing task stage"]
+  ] as const)(
+    "shows a spinner and blocks the menu while %s is in flight",
+    (pendingTaskAction, accessibilityLabel) => {
+      const tree = renderTaskScreen({
+        agentType: "agent",
+        pendingTaskAction
+      });
+
+      const moreButton = findByTestId(tree, "mobile.task-more-button");
+      expect(moreButton?.props).toMatchObject({
+        accessibilityLabel,
+        accessibilityState: { busy: true, disabled: true },
+        disabled: true
+      });
+      expect(
+        findByTestId(tree, "mobile.task-action-pending")?.type
+      ).toBe("ActivityIndicator");
+      expect(findByTypeAndText(tree, "Text", "+")).toBeNull();
+
+      pressByTestId(tree, "mobile.task-more-button");
+
+      expect(componentMocks.showTaskActionMenu).not.toHaveBeenCalled();
+    }
+  );
 
   it("offers an unread visual companion action and opens its full-screen view", () => {
     const onCompanionOpenChange = vi.fn();

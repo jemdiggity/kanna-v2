@@ -18,6 +18,7 @@ export const MOBILE_E2E_IDS = {
   taskSnapshotMarker: "mobile.task-snapshot-marker",
   taskBackButton: "mobile.task-back-button",
   taskMoreButton: "mobile.task-more-button",
+  taskActionPendingSpinner: "mobile.task-action-pending",
   taskComposerChrome: "mobile.task-composer-chrome",
   taskInput: "mobile.task-input",
   taskSendButton: "mobile.task-send-button",
