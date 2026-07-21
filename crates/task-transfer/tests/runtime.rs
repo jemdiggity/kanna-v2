@@ -8,7 +8,8 @@ use kanna_task_transfer::runtime::{
 };
 use serde_json::json;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -256,37 +257,40 @@ async fn mdns_peers_can_discover_pair_and_transfer() {
     // discovery test for the scoped ResolvedService endpoint conversion.
     let temp = tempfile::tempdir().unwrap();
 
+    let secondary_id = unique_mdns_peer_id("peer-secondary-mdns");
+    let primary_id = unique_mdns_peer_id("peer-primary-mdns");
+
     let secondary = TransferRuntime::spawn(
-        RuntimeConfig::for_tests("peer-secondary-mdns", "Secondary", temp.path(), 0)
+        RuntimeConfig::for_tests(secondary_id.clone(), "Secondary", temp.path(), 0)
             .with_discovery_mode(DiscoveryMode::Mdns),
     )
     .await
     .unwrap();
 
     let primary = TransferRuntime::spawn(
-        RuntimeConfig::for_tests("peer-primary-mdns", "Primary", temp.path(), 0)
+        RuntimeConfig::for_tests(primary_id.clone(), "Primary", temp.path(), 0)
             .with_discovery_mode(DiscoveryMode::Mdns),
     )
     .await
     .unwrap();
 
-    let discovered = wait_for_peer(&primary, "peer-secondary-mdns").await;
+    let discovered = wait_for_peer(&primary, &secondary_id).await;
     assert!(!discovered.endpoint.is_empty());
-    wait_for_peer(&secondary, "peer-primary-mdns").await;
+    wait_for_peer(&secondary, &primary_id).await;
 
-    pair_peers(&primary, &secondary, "peer-secondary-mdns").await;
+    pair_peers(&primary, &secondary, &secondary_id).await;
 
     let preflight = primary
-        .prepare_transfer_preflight("peer-secondary-mdns", "task-source")
+        .prepare_transfer_preflight(&secondary_id, "task-source")
         .await
         .unwrap();
-    assert_eq!(preflight.source_peer_id, "peer-primary-mdns");
+    assert_eq!(preflight.source_peer_id, primary_id);
 
     primary
         .prepare_transfer_commit(
             &preflight.transfer_id,
             json!({
-                "target_peer_id": "peer-secondary-mdns",
+                "target_peer_id": secondary_id,
                 "task": {
                     "source_task_id": "task-source"
                 }
@@ -296,8 +300,73 @@ async fn mdns_peers_can_discover_pair_and_transfer() {
         .unwrap();
 
     let event = next_incoming_transfer_request(&secondary).await;
-    assert_eq!(event.source_peer_id, "peer-primary-mdns");
+    assert_eq!(event.source_peer_id, primary_id);
     assert_eq!(event.source_task_id, "task-source");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_mdns_test_runs_keep_their_peers_apart() {
+    // Regression coverage: mDNS service instance names are host- and
+    // LAN-global, so two concurrent suite runs (parallel worktree `./kd test
+    // rust` invocations on one machine) that register the same fixed instance
+    // name make one run's primary resolve the other run's secondary. The
+    // pairing request then parks in the foreign process until it fails with
+    // PeerRequestTimeout. Simulate two concurrent runs in one process; each
+    // exchange must pair and transfer with its own partner. This fails if the
+    // mDNS test peer ids stop being unique per spawn.
+    let (first, second) = tokio::join!(
+        isolated_mdns_exchange("task-source-a"),
+        isolated_mdns_exchange("task-source-b"),
+    );
+    assert_eq!(first, "task-source-a");
+    assert_eq!(second, "task-source-b");
+}
+
+async fn isolated_mdns_exchange(source_task_id: &str) -> String {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary_id = unique_mdns_peer_id("peer-secondary-mdns");
+    let primary_id = unique_mdns_peer_id("peer-primary-mdns");
+
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests(secondary_id.clone(), "Secondary", temp.path(), 0)
+            .with_discovery_mode(DiscoveryMode::Mdns),
+    )
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests(primary_id.clone(), "Primary", temp.path(), 0)
+            .with_discovery_mode(DiscoveryMode::Mdns),
+    )
+    .await
+    .unwrap();
+
+    wait_for_peer(&primary, &secondary_id).await;
+    wait_for_peer(&secondary, &primary_id).await;
+
+    pair_peers(&primary, &secondary, &secondary_id).await;
+
+    let preflight = primary
+        .prepare_transfer_preflight(&secondary_id, source_task_id)
+        .await
+        .unwrap();
+    assert_eq!(preflight.source_peer_id, primary_id);
+
+    primary
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": secondary_id,
+                "task": {
+                    "source_task_id": source_task_id
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let event = next_incoming_transfer_request(&secondary).await;
+    assert_eq!(event.source_peer_id, primary_id);
+    event.source_task_id
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1299,6 +1368,24 @@ fn trusted_peer_store_path(root: &Path, self_peer_id: &str) -> std::path::PathBu
         .join(format!("{}.json", URL_SAFE_NO_PAD.encode(self_peer_id)))
 }
 
+/// mDNS service instance names are visible to the whole host and LAN, not just
+/// this process. Fixed names collide with concurrent runs of this suite in
+/// other worktrees (or other machines on the same network), making discovery
+/// resolve a foreign process's endpoint and pairing requests park there until
+/// PeerRequestTimeout. Every spawned test peer gets a per-spawn unique id.
+fn unique_mdns_peer_id(prefix: &str) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    format!(
+        "{prefix}-{}-{nanos:x}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 async fn wait_for_peer(
     runtime: &TransferRuntime,
     peer_id: &str,
@@ -1306,7 +1393,10 @@ async fn wait_for_peer(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let peers = runtime.list_peers().await.unwrap();
-        if let Some(peer) = peers.into_iter().find(|peer| peer.peer_id == peer_id) {
+        if let Some(peer) = peers
+            .into_iter()
+            .find(|peer| peer.peer_id == peer_id && has_connectable_endpoint(peer))
+        {
             return peer;
         }
 
@@ -1316,6 +1406,21 @@ async fn wait_for_peer(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// mDNS resolution is eventually consistent: the first ServiceResolved event
+/// can carry only an AAAA record whose link-local address is scoped to the
+/// interface that happened to receive the announcement, not the interface
+/// that owns the address (observed on a multi-NIC host: en10's fe80 address
+/// scoped to en9). Connecting to such an endpoint black-holes until the peer
+/// request timeout. The A record for the same host arrives moments later and
+/// address sets only accumulate, so waiting for a same-host-connectable IPv4
+/// endpoint is deterministic and keeps pairing off the misscoped address.
+fn has_connectable_endpoint(peer: &kanna_task_transfer::protocol::DiscoveredPeer) -> bool {
+    peer.endpoint
+        .parse::<std::net::SocketAddr>()
+        .map(|addr| addr.is_ipv4())
+        .unwrap_or(false)
 }
 
 async fn next_incoming_transfer_request(
