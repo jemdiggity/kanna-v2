@@ -15,6 +15,7 @@ mod repo_commands;
 mod runtime;
 mod session_replacements;
 mod task_creator;
+mod task_diff;
 mod task_files;
 mod terminal_watcher;
 mod visual_companion;

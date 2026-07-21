@@ -6,6 +6,7 @@ mod e2e_mobile_controls;
 #[cfg(debug_assertions)]
 mod e2e_sql;
 mod ksp;
+mod lan_trust;
 mod operator_events;
 mod pairing;
 mod repo_commands;
@@ -21,6 +22,7 @@ mod task_actions;
 mod task_activity;
 mod task_agent_session;
 mod task_blockers;
+mod task_diff;
 mod task_files;
 mod task_input;
 mod task_logs;
