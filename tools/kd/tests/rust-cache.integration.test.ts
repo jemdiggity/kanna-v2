@@ -17,7 +17,10 @@ import {
   withRustCacheBuild
 } from "../src/runtime/rust-cache";
 import type { RustCacheRuntimeInput } from "../src/runtime/rust-cache";
-import { resolveKanachePaths } from "../src/runtime/rust-cache-policy";
+import {
+  KANACHE_REPOSITORY,
+  resolveKanachePaths
+} from "../src/runtime/rust-cache-policy";
 import { nodeCommandRunner } from "../src/runtime/process";
 
 interface IntegrationFixture {
@@ -33,6 +36,7 @@ interface IntegrationFixture {
 
 const roots: string[] = [];
 const describeMac = process.platform === "darwin" ? describe : describe.skip;
+const LEGACY_KANACHE_REVISION = "6107c7b533a77a0c7c190b75c0284e7501c6edbf";
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -65,10 +69,32 @@ fs.appendFileSync(log, JSON.stringify({ command: "kanache", args }) + "\\n");
 if (args[0] === "warm") {
   const donor = args[1];
   const destination = args[2];
+  const manifest = JSON.parse(fs.readFileSync(
+    path.join(donor, ".build", "cargo-build", ".kanache-manifest.json"),
+    "utf8"
+  ));
+  const requestedExclusions = [];
+  for (let index = 3; index < args.length; index += 1) {
+    if (args[index] === "--exclude-rust-input-root") {
+      requestedExclusions.push(args[index + 1]);
+    }
+  }
+  const recordedExclusions = manifest.rust_build_input_exclusions || [];
+  if (JSON.stringify(requestedExclusions) !== JSON.stringify(recordedExclusions)) {
+    process.stderr.write("Rust build-input exclusions mismatch\\n");
+    process.exit(28);
+  }
   const refused = new Set((process.env.FAKE_KANACHE_REFUSE || "").split(path.delimiter));
   if (refused.has(donor)) {
     process.stderr.write("configured donor refusal\\n");
     process.exit(23);
+  }
+  const expectedRustHash = process.env.FAKE_KANACHE_DESTINATION_RUST_HASH;
+  if (expectedRustHash) {
+    if (manifest.rust_build_inputs_blake3 !== expectedRustHash) {
+      process.stderr.write("Rust build-input hash mismatch\\n");
+      process.exit(27);
+    }
   }
   const buildRoot = path.join(destination, ".build", "cargo-build");
   if (fs.existsSync(buildRoot)) {
@@ -97,8 +123,10 @@ if (args[0] === "manifest" && args[1] === "begin") {
 if (args[0] === "manifest" && args[1] === "record") {
   const repo = args[2];
   const targets = [];
+  const exclusions = [];
   for (let index = 3; index < args.length; index += 1) {
     if (args[index] === "--target") targets.push(args[index + 1]);
+    if (args[index] === "--exclude-rust-input-root") exclusions.push(args[index + 1]);
   }
   const buildRoot = path.join(repo, ".build", "cargo-build");
   fs.mkdirSync(buildRoot, { recursive: true });
@@ -108,6 +136,7 @@ if (args[0] === "manifest" && args[1] === "record") {
       profiles: ["dev"],
       targets,
       extra_inputs: [],
+      rust_build_input_exclusions: exclusions,
       created_unix_nanos: Date.now() * 1000000
     })
   );
@@ -192,7 +221,9 @@ async function addWorktree(
 function writeDonor(
   fixture: IntegrationFixture,
   path: string,
-  createdUnixNanos: number
+  createdUnixNanos: number,
+  rustBuildInputsBlake3?: string,
+  includeExclusions = true
 ): void {
   const buildRoot = join(path, ".build", "cargo-build");
   mkdirSync(buildRoot, { recursive: true });
@@ -202,6 +233,10 @@ function writeDonor(
       profiles: ["dev"],
       targets: ["host", fixture.hostTarget],
       extra_inputs: [],
+      ...(rustBuildInputsBlake3 ? { rust_build_inputs_blake3: rustBuildInputsBlake3 } : {}),
+      ...(includeExclusions
+        ? { rust_build_input_exclusions: ["apps/desktop/src-tauri/binaries"] }
+        : {}),
       created_unix_nanos: createdUnixNanos
     })
   );
@@ -259,7 +294,8 @@ describeMac("Kanache Git worktree integration", () => {
     expect(result).toMatchObject({
       ok: true,
       outcome: "hit",
-      donor: canonicalAccepted
+      donor: canonicalAccepted,
+      matchingMode: "head"
     });
     expect(readFileSync(join(fixture.repo, ".build/cargo-build/published-from"), "utf8").trim())
       .toBe(canonicalAccepted);
@@ -269,6 +305,62 @@ describeMac("Kanache Git worktree integration", () => {
     expect(warmDonors).toEqual([canonicalRefused, canonicalAccepted]);
     expect(warmDonors).not.toContain(canonicalWrongHead);
     expect(warmDonors).not.toContain(canonicalForeignCandidate);
+    for (const entry of readProcessLog(fixture).filter((entry) => entry.args[0] === "warm")) {
+      expect(entry.args).toContain("--exclude-rust-input-root");
+      expect(entry.args).toContain("apps/desktop/src-tauri/binaries");
+    }
+  });
+
+  it("warms a true legacy exact-HEAD donor without requested exclusions", async () => {
+    const fixture = await createFixture();
+    const legacy = await addWorktree(fixture, "legacy-exact-head");
+    writeDonor(fixture, legacy, 10, undefined, false);
+
+    const canonicalLegacy = realpathSync(legacy);
+    const result = await warmRustCache(fixture.cache);
+
+    expect(result).toMatchObject({
+      ok: true,
+      outcome: "hit",
+      donor: canonicalLegacy,
+      matchingMode: "head"
+    });
+    const warm = readProcessLog(fixture).find((entry) => entry.args[0] === "warm");
+    expect(warm?.args[1]).toBe(canonicalLegacy);
+    expect(warm?.args).not.toContain("--exclude-rust-input-root");
+  });
+
+  it("offers a different-HEAD hash donor and excludes a different-HEAD legacy donor", async () => {
+    const fixture = await createFixture();
+    const hashed = await addWorktree(fixture, "hashed", "HEAD^");
+    const legacy = await addWorktree(fixture, "legacy", "HEAD^");
+    writeDonor(fixture, hashed, 20, "same-rust-inputs");
+    writeDonor(fixture, legacy, 10, undefined, false);
+
+    const canonicalHashed = realpathSync(hashed);
+    const canonicalLegacy = realpathSync(legacy);
+    const result = await warmRustCache({
+      ...fixture.cache,
+      env: {
+        ...fixture.env,
+        FAKE_KANACHE_DESTINATION_RUST_HASH: "same-rust-inputs"
+      }
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      outcome: "hit",
+      donor: canonicalHashed,
+      matchingMode: "input-hash"
+    });
+    const warmDonors = readProcessLog(fixture)
+      .filter((entry) => entry.args[0] === "warm")
+      .map((entry) => entry.args[1]);
+    expect(warmDonors).toEqual([canonicalHashed]);
+    expect(warmDonors).not.toContain(canonicalLegacy);
+    expect(readFileSync(resolveKanachePaths(fixture.home).events, "utf8")).toContain(
+      '"matchingMode":"input-hash"'
+    );
   });
 
   it("does not invoke Kanache or delete an existing destination", async () => {
@@ -323,7 +415,8 @@ describeMac("Kanache Git worktree integration", () => {
       )
     ).toMatchObject({
       profiles: ["dev"],
-      targets: expect.arrayContaining(["host", fixture.hostTarget])
+      targets: expect.arrayContaining(["host", fixture.hostTarget]),
+      rust_build_input_exclusions: ["apps/desktop/src-tauri/binaries"]
     });
     expect(readFileSync(join(fixture.repo, ".build/cargo-build/build-output"), "utf8"))
       .toBe("built\n");
@@ -337,7 +430,7 @@ it.skipIf(
   roots.push(root);
   const repo = join(root, "repo");
   const home = join(root, "home");
-  mkdirSync(join(repo, "src"), { recursive: true });
+  mkdirSync(join(repo, "native", "src"), { recursive: true });
   mkdirSync(join(repo, ".cargo"), { recursive: true });
   await run("git", ["init", "-b", "main"], { cwd: repo });
   await run("git", ["config", "user.email", "kd-tests@kanna.build"], { cwd: repo });
@@ -349,10 +442,14 @@ it.skipIf(
   );
   writeFileSync(
     join(repo, "Cargo.toml"),
+    '[workspace]\nmembers = ["native"]\nresolver = "3"\n'
+  );
+  writeFileSync(
+    join(repo, "native", "Cargo.toml"),
     '[package]\nname = "kanache-acceptance"\nversion = "0.1.0"\nedition = "2024"\n'
   );
   writeFileSync(
-    join(repo, "src", "main.rs"),
+    join(repo, "native", "src", "main.rs"),
     'fn main() { println!("real pinned Kanache acceptance"); }\n'
   );
   await run("cargo", ["generate-lockfile"], { cwd: repo });
@@ -374,6 +471,55 @@ it.skipIf(
     commit: head
   };
 
+  const legacyRoot = join(root, "legacy-kanache");
+  await run(
+    "cargo",
+    [
+      "install",
+      "--git",
+      KANACHE_REPOSITORY,
+      "--rev",
+      LEGACY_KANACHE_REVISION,
+      "--locked",
+      "--root",
+      legacyRoot
+    ],
+    { cwd: repo, env }
+  );
+  const legacyBinary = join(legacyRoot, "bin", "kanache");
+  await run("cargo", ["build"], { cwd: repo, env });
+  await run("cargo", ["build", "--target", hostTarget], { cwd: repo, env });
+  await run(
+    legacyBinary,
+    [
+      "manifest",
+      "record",
+      repo,
+      "--profile",
+      "dev",
+      "--target",
+      "host",
+      "--target",
+      hostTarget
+    ],
+    { cwd: repo, env }
+  );
+  const legacyManifest = JSON.parse(
+    readFileSync(join(repo, ".build/cargo-build/.kanache-manifest.json"), "utf8")
+  ) as Record<string, unknown>;
+  expect(legacyManifest).not.toHaveProperty("rust_build_inputs_blake3");
+  expect(legacyManifest).not.toHaveProperty("rust_build_input_exclusions");
+
+  const exactHeadSibling = join(root, "exact-head-sibling");
+  await run("git", ["worktree", "add", "--detach", exactHeadSibling, head], { cwd: repo });
+  const legacyWarm = await warmRustCache({ ...donorCache, repoRoot: exactHeadSibling });
+  expect(legacyWarm).toMatchObject({
+    outcome: "hit",
+    category: "warmed",
+    matchingMode: "head"
+  });
+  expect(existsSync(join(exactHeadSibling, ".build/cargo-build"))).toBe(true);
+
   const donorBuild = await withRustCacheBuild(
     donorCache,
     "all",
@@ -392,8 +538,15 @@ it.skipIf(
 
   const sibling = join(root, "sibling");
   await run("git", ["worktree", "add", "--detach", sibling, head], { cwd: repo });
+  writeFileSync(join(sibling, "web.ts"), "export const nonRustChange = true;\n");
+  await run("git", ["add", "web.ts"], { cwd: sibling });
+  await run("git", ["commit", "-m", "non-Rust-only change"], { cwd: sibling });
   const warm = await warmRustCache({ ...donorCache, repoRoot: sibling });
-  expect(warm).toMatchObject({ outcome: "hit", category: "warmed" });
+  expect(warm).toMatchObject({
+    outcome: "hit",
+    category: "warmed",
+    matchingMode: "input-hash"
+  });
   const siblingImplicitBuild = await nodeCommandRunner.run("cargo", ["build"], {
     cwd: sibling,
     env

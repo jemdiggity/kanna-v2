@@ -26,13 +26,14 @@ import {
   KANACHE_PROFILE,
   KANACHE_REPOSITORY,
   KANACHE_REVISION,
+  KANACHE_RUST_INPUT_EXCLUSIONS,
   parseKanacheManifest,
   parseWorktreeList,
   rankDonors,
   resolveRustCacheEligibility,
   resolveKanachePaths
 } from "./rust-cache-policy";
-import type { DonorCandidate } from "./rust-cache-policy";
+import type { DonorCandidate, RustCacheMatchingMode } from "./rust-cache-policy";
 
 export interface RustCacheEvent {
   timestamp: string;
@@ -40,6 +41,7 @@ export interface RustCacheEvent {
   commit: string;
   destination: string;
   donor?: string;
+  matchingMode?: RustCacheMatchingMode;
   layouts: string[];
   outcome: "hit" | "miss" | "recorded" | "record-miss";
   category: string;
@@ -61,6 +63,7 @@ export interface RustCacheOperationResult {
   outcome: "hit" | "miss" | "recorded" | "record-miss";
   category: string;
   donor?: string;
+  matchingMode?: RustCacheMatchingMode;
   message: string;
 }
 
@@ -505,7 +508,6 @@ export async function warmRustCache(
     for (const worktree of parseWorktreeList(worktrees.stdout)) {
       if (
         canonicalPath(worktree.path) === canonicalPath(input.repoRoot) ||
-        worktree.head !== fullCommit ||
         !validDonorFiles(worktree.path)
       ) {
         continue;
@@ -516,7 +518,20 @@ export async function warmRustCache(
         const manifest = parseKanacheManifest(
           readFileSync(join(worktree.path, ".build", "cargo-build", ".kanache-manifest.json"), "utf8")
         );
-        candidates.push({ ...worktree, manifest });
+        const matchingMode =
+          worktree.head === fullCommit
+            ? "head"
+            : manifest.rustBuildInputsBlake3
+              ? "input-hash"
+              : undefined;
+        if (matchingMode) {
+          candidates.push({
+            ...worktree,
+            path: canonicalPath(worktree.path),
+            manifest,
+            matchingMode
+          });
+        }
       } catch {
         // A malformed or incompatible donor is simply not eligible.
       }
@@ -530,6 +545,15 @@ export async function warmRustCache(
     for (const donor of donors) {
       const args = ["warm", donor.path, input.repoRoot, "--profile", KANACHE_PROFILE];
       for (const target of donor.manifest.targets) args.push("--target", target);
+      const legacyHeadFallback =
+        donor.matchingMode === "head" &&
+        !donor.manifest.rustBuildInputsBlake3 &&
+        donor.manifest.rustBuildInputExclusions === undefined;
+      if (!legacyHeadFallback) {
+        for (const exclusion of KANACHE_RUST_INPUT_EXCLUSIONS) {
+          args.push("--exclude-rust-input-root", exclusion);
+        }
+      }
       args.push("--strategy", "root");
 
       const freeBefore = availableBytes(input.repoRoot);
@@ -553,6 +577,7 @@ export async function warmRustCache(
         commit: fullCommit,
         destination: input.repoRoot,
         donor: donor.path,
+        matchingMode: donor.matchingMode,
         layouts: donor.manifest.targets,
         outcome: warmed.exitCode === 0 ? "hit" : "miss",
         category: warmed.exitCode === 0 ? "warmed" : "donor-refused",
@@ -565,7 +590,8 @@ export async function warmRustCache(
           outcome: "hit",
           category: "warmed",
           donor: donor.path,
-          message: `Warmed private Cargo artifacts from ${donor.path}.`
+          matchingMode: donor.matchingMode,
+          message: `Warmed private Cargo artifacts from ${donor.path} (${donor.matchingMode}).`
         };
       }
     }
@@ -639,6 +665,9 @@ export async function recordRustCache(
     const targets = layouts === "sidecars" ? [hostTarget] : [hostTarget, "host"].sort();
     const args = ["manifest", "record", input.repoRoot, "--profile", KANACHE_PROFILE];
     for (const target of targets) args.push("--target", target);
+    for (const exclusion of KANACHE_RUST_INPUT_EXCLUSIONS) {
+      args.push("--exclude-rust-input-root", exclusion);
+    }
     const started = performance.now();
     const result = await input.runner.run(binary, args, {
       cwd: input.repoRoot,

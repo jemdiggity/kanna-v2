@@ -86,6 +86,21 @@ describe("rust cache policy", () => {
   });
 
   it("accepts only Kanna dev manifests with no extra inputs", () => {
+    const current = parseKanacheManifest(
+      JSON.stringify({
+        profiles: ["dev"],
+        targets: ["aarch64-apple-darwin", "host"],
+        extra_inputs: [],
+        rust_build_inputs_blake3: "rust-input-identity",
+        rust_build_input_exclusions: ["apps/desktop/src-tauri/binaries"],
+        created_unix_nanos: 42
+      })
+    );
+    expect(current).toMatchObject({
+      targets: ["aarch64-apple-darwin", "host"],
+      rustBuildInputsBlake3: "rust-input-identity",
+      rustBuildInputExclusions: ["apps/desktop/src-tauri/binaries"]
+    });
     expect(
       parseKanacheManifest(
         JSON.stringify({
@@ -95,7 +110,12 @@ describe("rust cache policy", () => {
           created_unix_nanos: 42
         })
       )
-    ).toMatchObject({ targets: ["aarch64-apple-darwin", "host"] });
+    ).toEqual({
+      profiles: ["dev"],
+      targets: ["aarch64-apple-darwin", "host"],
+      extraInputs: [],
+      createdUnixNanos: 42
+    });
     expect(() =>
       parseKanacheManifest(
         JSON.stringify({
@@ -125,6 +145,7 @@ describe("rust cache policy", () => {
           {
             path: "/explicit",
             head: "abc",
+            matchingMode: "head",
             manifest: {
               profiles: ["dev"],
               targets: ["aarch64-apple-darwin"],
@@ -135,6 +156,7 @@ describe("rust cache policy", () => {
           {
             path: "/both-old",
             head: "abc",
+            matchingMode: "head",
             manifest: {
               profiles: ["dev"],
               targets: ["aarch64-apple-darwin", "host"],
@@ -145,6 +167,7 @@ describe("rust cache policy", () => {
           {
             path: "/host",
             head: "abc",
+            matchingMode: "head",
             manifest: {
               profiles: ["dev"],
               targets: ["host"],
@@ -155,6 +178,7 @@ describe("rust cache policy", () => {
           {
             path: "/both-new",
             head: "abc",
+            matchingMode: "head",
             manifest: {
               profiles: ["dev"],
               targets: ["aarch64-apple-darwin", "host"],
@@ -166,5 +190,24 @@ describe("rust cache policy", () => {
         "aarch64-apple-darwin"
       ).map((donor) => donor.path)
     ).toEqual(["/both-new", "/both-old", "/host", "/explicit"]);
+  });
+
+  it("breaks otherwise-equal donor rankings by path", () => {
+    expect(
+      rankDonors(
+        ["/zeta", "/alpha"].map((path) => ({
+          path,
+          head: "abc",
+          matchingMode: "head" as const,
+          manifest: {
+            profiles: ["dev"],
+            targets: ["host"],
+            extraInputs: [],
+            createdUnixNanos: 10
+          }
+        })),
+        "aarch64-apple-darwin"
+      ).map((donor) => donor.path)
+    ).toEqual(["/alpha", "/zeta"]);
   });
 });

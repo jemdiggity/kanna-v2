@@ -60,7 +60,8 @@ macOS-only tests deterministic on Linux CI.
 
 The cache may:
 
-- clone compatible Cargo intermediates from a clean, exact-`HEAD` worktree;
+- clone compatible Cargo intermediates from a clean worktree whose recorded
+  Rust build-input hash matches the destination, including across commits;
 - publish them into an absent, destination-private `.build/cargo-build`;
 - record donors only around bounded successful `kd` Rust workflows;
 - log local timing and APFS allocation deltas.
@@ -68,7 +69,8 @@ The cache may:
 It must not:
 
 - share a mutable Cargo build directory;
-- reuse across commits or repositories;
+- reuse across repositories or across commits with different or indeterminate
+  Rust build inputs;
 - replace or delete an existing destination build tree;
 - expose a donor while a supported workflow mutates one of its declared
   layouts;
@@ -81,7 +83,7 @@ The only accepted upstream is:
 
 ```text
 repository: https://github.com/jemdiggity/kanache
-revision:   6107c7b533a77a0c7c190b75c0284e7501c6edbf
+revision:   a8496326bc0a3551d3a2d78caa425ed474e816ae
 ```
 
 `kd` installs it with locked Cargo resolution into:
@@ -94,6 +96,24 @@ Installation uses a process-private temporary root, verifies `kanache
 --version`, and atomically publishes the version directory. Kanna never uses a
 floating ref or an arbitrary executable from `PATH`. A bootstrap failure is a
 cache miss and cannot fail the underlying build.
+
+Kanna passes the same generated-output exclusion to donor recording and every
+exclusion-aware warm attempt:
+
+```text
+--exclude-rust-input-root apps/desktop/src-tauri/binaries
+```
+
+That repository-relative directory contains final sidecars staged for Tauri,
+not reusable Rust inputs. Kanache validates the path, excludes it from both
+identities, and persists the sorted/deduplicated requested set as
+`rust_build_input_exclusions`. Warm requires the requested and recorded sets to
+match exactly. This preserves final-artifact privacy without ignoring any Rust
+source or build-script input outside the declared generated-output root.
+The sole fallback is a true legacy exact-`HEAD` manifest with neither
+`rust_build_inputs_blake3` nor `rust_build_input_exclusions`: kd omits the
+exclusion option so pinned Kanache compares the legacy manifest against an
+empty requested exclusion set. This fallback cannot cross commits.
 
 The public development surface is:
 
@@ -115,11 +135,27 @@ invoking Kanache:
 
 1. the candidate is not the destination after filesystem canonicalization;
 2. its canonical Git common directory equals the destination repository's;
-3. its full commit hash exactly equals the destination `HEAD`;
+3. its full commit hash exactly equals the destination `HEAD`, or its manifest
+   contains a nonempty `rust_build_inputs_blake3` identity;
 4. it contains a regular manifest and success marker beneath a non-symlinked
    private build root;
 5. its manifest declares profile `dev`, no extra inputs, and at least one
    supported host/Apple layout.
+
+The optional hash only admits a different-`HEAD` candidate to the Kanache
+boundary. Kanache computes the destination identity and remains authoritative
+for equality. A legacy manifest without `rust_build_inputs_blake3` is eligible
+only at exact `HEAD`; this also preserves the conservative behavior of pinned
+binaries and manifests that predate input-hash matching. A computed mismatch
+is always a refusal, including when the commits happen to be equal.
+
+Manifests predating `rust_build_input_exclusions` are also conservative: they
+accept only an empty requested exclusion set. For a true legacy manifest that
+also lacks `rust_build_inputs_blake3`, kd preserves the exact-`HEAD` fallback by
+requesting no exclusions. A hash-bearing manifest without the exclusions field
+does not qualify for that fallback and must be reseeded before kd can use it;
+this prevents a cross-commit warm from silently changing the hashed-input
+contract.
 
 Filesystem canonicalization is necessary on macOS because the same temporary
 path can appear as both `/var/...` and `/private/var/...`. The integration test
@@ -127,7 +163,8 @@ uses that real alias behavior and would reject every valid donor if identity
 were compared lexically.
 
 Candidates are ranked by reusable coverage: implicit host plus explicit host
-target, implicit host only, explicit target only, then newest manifest.
+target, implicit host only, explicit target only, then newest manifest, with
+the canonical worktree path as the deterministic final tie-breaker.
 Kanache remains the final authority for cleanliness, toolchain, lockfile,
 Rust flags, layouts, build-script inputs, locking, and atomic publication. If
 one candidate refuses, `kd` tries the next. It never combines multiple donors.
@@ -180,10 +217,13 @@ Warm and record attempts append JSON lines to:
 ~/Library/Caches/kanna/kanache/events.jsonl
 ```
 
-Events include repository identity, commit, destination, donor, layouts,
-outcome/category, wall time, and allocation delta. `./kd rust-cache status`
-shows the mode, pinned revision, installed binary, current manifest, and recent
-repository events. Malformed historical events are ignored with a warning.
+Events include repository identity, commit, destination, donor, matching mode
+(`head` or `input-hash`), layouts, outcome/category, wall time, and allocation
+delta. `./kd rust-cache status` shows the enablement mode, pinned revision,
+installed binary, current manifest, and recent repository events, including
+the matching mode on each donor attempt. Historical events without the new
+optional field remain readable; malformed JSON lines are ignored with a
+warning.
 
 ## Automated integration coverage
 
@@ -191,14 +231,19 @@ repository events. Malformed historical events are ignored with a warning.
 runner, real temporary Git repositories, and real linked worktrees. Only
 Kanache is replaced with a deterministic executable. The suite verifies:
 
-- exact-full-`HEAD` donor filtering;
+- exact-full-`HEAD` legacy donor eligibility with no requested exclusions;
+- different-`HEAD` donor eligibility only when the manifest contains a Rust
+  build-input hash, with legacy different-`HEAD` manifests excluded before the
+  binary is invoked;
 - canonical same-repository filtering, including a registered path redirected
   to a foreign Git common directory;
 - first-donor refusal and next-donor fallback;
 - atomic destination publication by the tool substitute;
 - no invocation or deletion when the destination exists;
 - real-process `manifest begin` → build → `manifest record` ordering and final
-  marker publication.
+  marker publication;
+- identical `apps/desktop/src-tauri/binaries` exclusions on warm and record,
+  with the recorded manifest persisting that exact set.
 
 Normal CI also compiles but skips a real-pinned-tool smoke. A developer can run
 it explicitly:
@@ -209,11 +254,14 @@ KANNA_REAL_KANACHE_ACCEPTANCE=1 \
   --maxWorkers=1
 ```
 
-That smoke bootstraps the exact pin, builds and records a tiny real Cargo donor,
-warms a sibling worktree, rebuilds it, and checks that final executables have
-different inodes. It is opt-in because it requires macOS/APFS, Git, the pinned
-Rust/Cargo toolchain, network access on first bootstrap, substantial compile
-time, and mutation of the user cache beneath `~/Library/Caches/kanna`. The fake
+That smoke first records a tiny real Cargo donor with pre-exclusion Kanache
+revision `6107c7b533a77a0c7c190b75c0284e7501c6edbf`, verifies its manifest has
+neither compatibility field, and warms an exact-`HEAD` sibling through the
+current pinned process using `head` mode. It then records with the current pin,
+adds a non-Rust-only commit in another sibling, warms it by input hash, rebuilds
+it, and checks that final executables have different inodes. It is opt-in
+because it requires macOS/APFS, Git, the pinned Rust/Cargo toolchain, network
+access on first bootstrap, and substantial compile time. The fake
 integration suite substitutes for orchestration correctness in ordinary CI;
 the real smoke covers the external tool boundary when explicitly requested.
 
@@ -223,7 +271,8 @@ The default-on rollout used a manual canary with:
 
 - macOS on APFS;
 - Kanna's pinned Rust/Cargo toolchain;
-- a clean 7–9 GiB donor and at least two fresh exact-`HEAD` Kanna worktrees;
+- one clean 7–9 GiB recorded donor at a recent main commit and a fresh Kanna
+  worktree with a TypeScript/mobile/docs-only commit;
 - no active dev, Cargo, or competing disk-heavy processes;
 - at least 20 GiB free disk for donor, cold control, and warmed destination;
 - the exact pinned Kanache revision above.
@@ -234,11 +283,19 @@ Suggested flow:
 export KANNA_RUST_CACHE=on
 ./kd test rust
 
-# In a fresh exact-HEAD sibling whose .build/cargo-build is absent:
+# In a clean sibling with only non-Rust changes and no .build/cargo-build:
 ./kd rust-cache warm
 ./kd rust-cache status
 ./kd build sidecars
 ```
+
+The status event for this canary must report `matchingMode: "input-hash"`.
+One clean recorded donor can seed all branches whose complete Rust build-input
+identity remains equal; a Rust package, lockfile, toolchain, Cargo config, or
+other hashed-input change is refused and cold-builds. Legacy donors without an
+input hash still require exact `HEAD`; true legacy manifests without an
+exclusions field warm there with an empty requested set, but must be reseeded
+to serve cross-commit worktrees.
 
 Capture a same-batch cold control and the warmed sibling. The rollout gates are:
 
@@ -268,6 +325,48 @@ Kanna's real and fake integration suites cover refusal, locking, publication,
 relocation, donor removal, and final-binary privacy; the pinned Kanache manifest
 validation remains authoritative for Cargo lockfile, feature, flag, target, and
 toolchain invalidation.
+
+The 2026-07-22 cross-commit canary against Kanache revision
+`8334129cc427517c07a67a9916976f7371c7754d` recorded a clean 9.77 GiB logical
+donor at Kanna commit `1e52b9cd` with Rust build-input identity `afa6ad7e` and
+both host layouts. A destination at `ae95f0f5`, whose only committed difference
+was a TypeScript file under `tools/kd`, was correctly offered that donor with
+`matchingMode: "input-hash"`, but Kanache refused it in 684 ms (0.82 seconds
+CLI wall time). The refused attempt consumed only a noisy 20 KiB APFS
+free-space delta and published no destination tree.
+
+Investigation found six ignored, generated sidecars beneath
+`apps/desktop/src-tauri/binaries` in the donor. Kanache's complete package-root
+hash includes those Tauri staging outputs because they live under the
+`kanna-desktop` Cargo package; a fresh pre-warm destination necessarily lacks
+them. Mirroring only those six files made a direct diagnostic warm succeed in
+4.463 seconds for 49,729 files, proving the mismatch, but that is not an
+acceptable workflow or rollout measurement: consuming donor final binaries
+would violate final-artifact privacy. Cross-commit default warming therefore
+remains blocked until Kanache can exclude caller-declared generated output
+roots (or provide an equivalent repo-agnostic mechanism) from both donor and
+destination Rust-input identity capture. The Kanna canary must then be rerun
+without copying or prebuilding final artifacts before this evidence can count
+as a rollout pass.
+
+The follow-up 2026-07-22 canary used merged Kanache revision
+`a8496326bc0a3551d3a2d78caa425ed474e816ae`. A clean detached main-tip donor at
+Kanna commit `1e52b9cd` recorded the explicit `aarch64-apple-darwin` layout with
+Rust identity `9250b1e5` and the sole exclusion
+`apps/desktop/src-tauri/binaries`; its Cargo tree was 9.70 GiB logical. A clean
+destination at `25abca75` differed only by one committed TypeScript file under
+`tools/kd` and had no Cargo tree before warming. `kd rust-cache warm` selected
+the donor with `matchingMode: "input-hash"` and published the 2.46 GiB logical
+explicit-target layout in 5.72 seconds (5,554 ms in the event). The event's
+APFS allocation delta was -5,349,376 bytes, meaning free space increased by a
+noisy 5.10 MiB during the sample; independent `df` samples likewise increased
+free space by 3.71 MiB. This is effectively zero physical growth and passes
+both the 30-second warm and 1 GiB allocation gates without copying or
+prebuilding destination final sidecars. The full `test rust` donor seed was
+also attempted but correctly withheld publication after unrelated,
+timing-sensitive daemon/desktop tests failed; the successful canary therefore
+used the supported bounded `build sidecars` producer and advertises only its
+explicit layout.
 
 These measurements establish the initial rollout, not permission to weaken the
 isolation model. A future regression in any gate is a reason to set

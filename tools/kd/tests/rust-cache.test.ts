@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync
@@ -266,8 +267,127 @@ describe("Kanache runtime", () => {
       commit: "abc1234"
     });
 
-    expect(result).toMatchObject({ ok: true, outcome: "hit", donor: second });
+    expect(result).toMatchObject({
+      ok: true,
+      outcome: "hit",
+      donor: realpathSync(second),
+      matchingMode: "head"
+    });
     expect(warmCalls).toHaveLength(2);
+    for (const args of warmCalls) {
+      expect(args).not.toContain("--exclude-rust-input-root");
+      expect(args).not.toContain("apps/desktop/src-tauri/binaries");
+    }
+    expect(
+      readFileSync(resolveKanachePaths(home).events, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .filter((event) => event.donor)
+        .map((event) => event.matchingMode)
+    ).toEqual(["head", "head"]);
+  });
+
+  it("offers different-HEAD hash manifests but excludes different-HEAD legacy manifests", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kd-kanache-input-hash-warm-"));
+    const home = join(root, "home");
+    const current = join(root, "current");
+    const hashed = join(root, "hashed");
+    const hashedAliasParent = join(root, "hashed-alias-parent");
+    const hashedAlias = `${hashedAliasParent}/../hashed`;
+    const legacy = join(root, "legacy");
+    mkdirSync(current, { recursive: true });
+    mkdirSync(hashedAliasParent, { recursive: true });
+    for (const path of [hashed, legacy]) {
+      mkdirSync(join(path, ".build", "cargo-build"), { recursive: true });
+      writeFileSync(join(path, ".build/cargo-build/.kanache-success"), "marker");
+    }
+    writeFileSync(
+      join(hashed, ".build/cargo-build/.kanache-manifest.json"),
+      JSON.stringify({
+        profiles: ["dev"],
+        targets: ["host", "aarch64-apple-darwin"],
+        extra_inputs: [],
+        rust_build_inputs_blake3: "same-rust-inputs",
+        created_unix_nanos: 20
+      })
+    );
+    writeFileSync(
+      join(legacy, ".build/cargo-build/.kanache-manifest.json"),
+      JSON.stringify({
+        profiles: ["dev"],
+        targets: ["host", "aarch64-apple-darwin"],
+        extra_inputs: [],
+        created_unix_nanos: 10
+      })
+    );
+
+    const binary = resolveKanachePaths(home).binary;
+    mkdirSync(join(binary, ".."), { recursive: true });
+    writeFileSync(binary, "fake");
+    const fullCommit = "abc1234000000000000000000000000000000000";
+    const donorCommit = "def5678000000000000000000000000000000000";
+    const warmCalls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (command === "git" && args.join(" ") === "worktree list --porcelain") {
+          return {
+            exitCode: 0,
+            stdout: [
+              `worktree ${current}`,
+              `HEAD ${fullCommit}`,
+              "",
+              `worktree ${hashedAlias}`,
+              `HEAD ${donorCommit}`,
+              "",
+              `worktree ${legacy}`,
+              `HEAD ${donorCommit}`,
+              ""
+            ].join("\n"),
+            stderr: ""
+          };
+        }
+        if (command === "git" && args.at(-1) === "--git-common-dir") {
+          return { exitCode: 0, stdout: join(root, ".git") + "\n", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse HEAD") {
+          return { exitCode: 0, stdout: `${fullCommit}\n`, stderr: "" };
+        }
+        if (command === "rustc") {
+          return { exitCode: 0, stdout: "host: aarch64-apple-darwin\n", stderr: "" };
+        }
+        if (command === binary) {
+          warmCalls.push(args);
+          mkdirSync(join(current, ".build", "cargo-build"), { recursive: true });
+          return { exitCode: 0, stdout: "warmed files=100 elapsed_ms=7\n", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+      }
+    };
+
+    const result = await warmRustCache({
+      repoRoot: current,
+      homeDir: home,
+      env: { KANNA_RUST_CACHE: "on" },
+      platform: "darwin",
+      runner,
+      commit: "abc1234"
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      outcome: "hit",
+      donor: realpathSync(hashed),
+      matchingMode: "input-hash"
+    });
+    expect(warmCalls).toHaveLength(1);
+    expect(warmCalls[0]?.[1]).toBe(realpathSync(hashed));
+    expect(warmCalls[0]?.[1]).not.toBe(legacy);
+    expect(warmCalls[0]).toContain("--exclude-rust-input-root");
+    expect(warmCalls[0]).toContain("apps/desktop/src-tauri/binaries");
+    expect(readFileSync(resolveKanachePaths(home).events, "utf8")).toContain(
+      '"matchingMode":"input-hash"'
+    );
   });
 
   it("cold-falls back without installing or deleting an existing destination", async () => {
@@ -323,7 +443,7 @@ describe("Kanache runtime", () => {
       "BUILD",
       "git status --porcelain=v1 --untracked-files=all",
       "rustc -vV",
-      `kanache manifest record ${cache.repoRoot} --profile dev --target aarch64-apple-darwin`
+      `kanache manifest record ${cache.repoRoot} --profile dev --target aarch64-apple-darwin --exclude-rust-input-root apps/desktop/src-tauri/binaries`
     ]);
   });
 
