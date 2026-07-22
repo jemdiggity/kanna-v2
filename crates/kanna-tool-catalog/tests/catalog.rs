@@ -52,17 +52,17 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         .expect("create task tool");
 
     assert_eq!(create_task["inputSchema"]["required"], json!(["prompt"]));
-    assert_eq!(
-        create_task["inputSchema"]["properties"]["allowed_tools"],
-        json!({ "type": "array", "items": { "type": "string" } })
-    );
+    let allowed_tools = &create_task["inputSchema"]["properties"]["allowed_tools"];
+    assert_eq!(allowed_tools["type"], json!("array"));
+    assert_eq!(allowed_tools["items"], json!({ "type": "string" }));
     assert!(
         create_task["inputSchema"]["properties"]["stage"].is_null(),
         "agent-facing create-task tool should not expose stage overrides"
     );
+    let agent = &create_task["inputSchema"]["properties"]["agent"];
     assert_eq!(
-        create_task["inputSchema"]["properties"]["agent"],
-        json!({ "type": "string" }),
+        agent["type"],
+        json!("string"),
         "create-task must expose the agent override so dispatchers can bind specialty agents"
     );
 
@@ -72,10 +72,69 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         .iter()
         .find(|tool| tool["name"] == "kanna_wait_task")
         .expect("wait task tool");
+    let until = &wait["inputSchema"]["properties"]["until"];
+    assert_eq!(until["type"], json!("string"));
+    assert_eq!(until["enum"], json!(["finished", "closed"]));
+}
+
+#[test]
+fn generated_schema_surfaces_descriptions_defaults_and_integer_bounds() {
+    let tools = bundled_catalog().tools_list_value();
+    let tools = tools.as_array().expect("tools array");
+
+    for tool in tools {
+        let properties = tool["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties object");
+        for (name, property) in properties {
+            assert!(
+                property["description"]
+                    .as_str()
+                    .is_some_and(|d| !d.is_empty()),
+                "{}.{name} must describe itself for agents",
+                tool["name"]
+            );
+        }
+    }
+
+    let wait = tools
+        .iter()
+        .find(|tool| tool["name"] == "kanna_wait_task")
+        .expect("wait task tool");
+    let timeout = &wait["inputSchema"]["properties"]["timeout_secs"];
+    assert_eq!(timeout["default"], json!(600));
+    assert_eq!(timeout["maximum"], json!(600));
+    let poll = &wait["inputSchema"]["properties"]["poll_secs"];
+    assert_eq!(poll["default"], json!(3));
+    assert_eq!(poll["minimum"], json!(1));
     assert_eq!(
-        wait["inputSchema"]["properties"]["until"],
-        json!({ "type": "string", "enum": ["finished", "closed"] })
+        wait["inputSchema"]["properties"]["until"]["default"],
+        json!("finished")
     );
+}
+
+#[test]
+fn generated_tools_mark_get_tools_read_only() {
+    let catalog = bundled_catalog();
+    let tools = catalog.tools_list_value();
+    let tools = tools.as_array().expect("tools array");
+
+    for (tool, def) in tools.iter().zip(&catalog.tools) {
+        if def.method == kanna_tool_catalog::Method::Get {
+            assert_eq!(
+                tool["annotations"],
+                json!({ "readOnlyHint": true }),
+                "{} is a GET tool and should carry a read-only hint",
+                def.name
+            );
+        } else {
+            assert!(
+                tool.get("annotations").is_none(),
+                "{} mutates state and should not claim read-only",
+                def.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -450,9 +509,33 @@ fn preserves_validation_error_strings() {
         ),
         Err("until must be finished or closed, got later".to_string())
     );
+    let unknown_tool = resolve_request(&catalog, "kanna_unknown", &json!({}))
+        .expect_err("unknown tool should fail");
+    assert!(unknown_tool.starts_with("unknown tool: kanna_unknown"));
+    assert!(
+        unknown_tool.contains("available tools: kanna_list_repos,"),
+        "unknown tool error should list available tools: {unknown_tool}"
+    );
+}
+
+#[test]
+fn type_mismatch_and_unknown_argument_errors_are_actionable() {
+    let catalog = bundled_catalog();
+
     assert_eq!(
-        resolve_request(&catalog, "kanna_unknown", &json!({})),
-        Err("unknown tool: kanna_unknown".to_string())
+        resolve_request(&catalog, "kanna_get_task", &json!({ "task_id": 7 })),
+        Err("task_id must be a string".to_string())
+    );
+
+    let unknown_arg = resolve_request(
+        &catalog,
+        "kanna_close_task",
+        &json!({ "task_id": "task-1", "force": true }),
+    )
+    .expect_err("unknown argument should fail");
+    assert_eq!(
+        unknown_arg,
+        "unknown argument: force (kanna_close_task accepts: task_id)"
     );
 }
 

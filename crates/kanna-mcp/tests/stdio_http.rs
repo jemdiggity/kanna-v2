@@ -192,6 +192,17 @@ fn tool_text(response: &Value) -> Value {
     serde_json::from_str(text).expect("tool json")
 }
 
+fn tool_error_text(response: &Value) -> &str {
+    assert_eq!(
+        response["result"]["isError"],
+        json!(true),
+        "tool failure should be an isError result: {response}"
+    );
+    response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool error text")
+}
+
 #[test]
 fn serve_hot_reloads_catalog_override_and_notifies_tools_changed() {
     let root = std::env::temp_dir().join(format!("kanna-mcp-stdio-reload-{}", std::process::id()));
@@ -440,7 +451,7 @@ fn serve_infers_create_task_repo_from_current_task_context() {
 }
 
 #[test]
-fn serve_reports_http_failures_as_mcp_errors() {
+fn serve_reports_http_failures_as_tool_error_results() {
     let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
         method: "GET",
         path: "/v1/repos",
@@ -462,10 +473,7 @@ fn serve_reports_http_failures_as_mcp_errors() {
     server.join().expect("fixture server");
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["id"], json!(9));
-    assert_eq!(responses[0]["error"]["code"], json!(-32603));
-    let message = responses[0]["error"]["message"]
-        .as_str()
-        .expect("error message");
+    let message = tool_error_text(&responses[0]);
     assert!(message.contains("GET /v1/repos failed with status 503"));
     assert!(
         message.contains("offline"),
@@ -508,10 +516,7 @@ fn serve_reports_server_error_bodies_for_failed_actions() {
     server.join().expect("fixture server");
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["id"], json!(10));
-    assert_eq!(responses[0]["error"]["code"], json!(-32603));
-    let message = responses[0]["error"]["message"]
-        .as_str()
-        .expect("error message");
+    let message = tool_error_text(&responses[0]);
     assert!(
         message.contains("POST /v1/tasks/task-1/actions/request-revision failed with status 500")
     );
@@ -522,7 +527,7 @@ fn serve_reports_server_error_bodies_for_failed_actions() {
 }
 
 #[test]
-fn serve_reports_tool_argument_errors_as_invalid_params() {
+fn serve_reports_tool_argument_errors_as_tool_error_results() {
     let (base_url_tx, base_url_rx) = mpsc::channel();
     let server = thread::spawn(move || {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
@@ -559,9 +564,8 @@ fn serve_reports_tool_argument_errors_as_invalid_params() {
     server.join().expect("fixture server");
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["id"], json!(11));
-    assert_eq!(responses[0]["error"]["code"], json!(-32602));
     assert_eq!(
-        responses[0]["error"]["message"],
-        json!("missing required argument: query")
+        tool_error_text(&responses[0]),
+        "missing required argument: query"
     );
 }

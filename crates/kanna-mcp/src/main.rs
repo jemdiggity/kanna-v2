@@ -69,16 +69,18 @@ fn mcp_error(id: Value, code: i64, message: impl Into<String>) -> Value {
     })
 }
 
-fn mcp_tool_error_code(message: &str) -> i64 {
-    if message.starts_with("missing required argument:")
-        || message.contains(" must be ")
-        || message.starts_with("repo_id is required")
-        || message == "status must be success or failure"
-    {
-        -32602
-    } else {
-        -32603
-    }
+/// Tool execution failures are returned as `isError` tool results rather than
+/// JSON-RPC errors so the calling agent reliably sees the message in-band and
+/// can self-correct. Only requests that never reached a tool (missing or
+/// unknown tool name) stay protocol-level errors, per the MCP spec.
+fn mcp_tool_error_result(id: Value, message: String) -> Value {
+    mcp_response(
+        id,
+        serde_json::json!({
+            "content": [{ "type": "text", "text": message }],
+            "isError": true
+        }),
+    )
 }
 
 type SharedCatalog = Arc<RwLock<Catalog>>;
@@ -131,7 +133,10 @@ async fn handle_mcp_request(message: Value, base_url: &str, catalog: &SharedCata
                         }]
                     }),
                 ),
-                Err(message) => mcp_error(id, mcp_tool_error_code(&message), message),
+                Err(message) if message.starts_with("unknown tool:") => {
+                    mcp_error(id, -32602, message)
+                }
+                Err(message) => mcp_tool_error_result(id, message),
             }
         }
         _ => mcp_error(id, -32601, format!("unknown method: {method}")),
@@ -586,6 +591,50 @@ mod tests {
 
         assert_eq!(response["error"]["code"], -32602);
         assert_eq!(response["error"]["message"], "missing tool name");
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_returns_protocol_error_listing_available_tools() {
+        let catalog = shared_bundled_catalog();
+        let response = handle_mcp_request(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "kanna_nonexistent", "arguments": {} }
+            }),
+            "http://127.0.0.1:48120",
+            &catalog,
+        )
+        .await;
+
+        assert_eq!(response["error"]["code"], -32602);
+        let message = response["error"]["message"].as_str().expect("message");
+        assert!(message.starts_with("unknown tool: kanna_nonexistent"));
+        assert!(message.contains("kanna_list_repos"));
+    }
+
+    #[tokio::test]
+    async fn tool_argument_errors_are_is_error_tool_results() {
+        let catalog = shared_bundled_catalog();
+        let response = handle_mcp_request(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "kanna_search_tasks", "arguments": {} }
+            }),
+            "http://127.0.0.1:48120",
+            &catalog,
+        )
+        .await;
+
+        assert!(response.get("error").is_none());
+        assert_eq!(response["result"]["isError"], json!(true));
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "missing required argument: query"
+        );
     }
 
     #[test]

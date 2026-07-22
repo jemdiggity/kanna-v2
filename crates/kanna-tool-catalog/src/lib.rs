@@ -26,6 +26,8 @@ pub struct ToolDef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParamDef {
     pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(rename = "type")]
     pub param_type: ParamType,
     pub required: bool,
@@ -159,11 +161,15 @@ impl Catalog {
             self.tools
                 .iter()
                 .map(|tool| {
-                    serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "name": tool.name,
                         "description": tool.description,
                         "inputSchema": input_schema(tool),
-                    })
+                    });
+                    if tool.method == Method::Get {
+                        entry["annotations"] = serde_json::json!({ "readOnlyHint": true });
+                    }
+                    entry
                 })
                 .collect(),
         )
@@ -188,6 +194,10 @@ fn input_schema(tool: &ToolDef) -> Value {
             ParamType::Object => serde_json::json!({ "type": "object" }),
         };
 
+        if let Some(description) = &param.description {
+            property["description"] = Value::String(description.clone());
+        }
+
         if let Some(enum_values) = &param.enum_values {
             property["enum"] = Value::Array(
                 enum_values
@@ -195,6 +205,18 @@ fn input_schema(tool: &ToolDef) -> Value {
                     .map(|value| Value::String(value.clone()))
                     .collect(),
             );
+        }
+
+        if let Some(default) = &param.default {
+            property["default"] = default.clone();
+        }
+        if param.param_type == ParamType::Integer {
+            if let Some(min) = param.min {
+                property["minimum"] = Value::Number(min.into());
+            }
+            if let Some(max) = param.max {
+                property["maximum"] = Value::Number(max.into());
+            }
         }
 
         properties.insert(param.name.clone(), property);
@@ -217,9 +239,15 @@ pub fn resolve_request(
     tool_name: &str,
     args: &Value,
 ) -> Result<ResolvedRequest, String> {
-    let tool = catalog
-        .find_tool(tool_name)
-        .ok_or_else(|| format!("unknown tool: {tool_name}"))?;
+    let tool = catalog.find_tool(tool_name).ok_or_else(|| {
+        let available = catalog
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("unknown tool: {tool_name} (available tools: {available})")
+    })?;
     reject_unknown_args(tool, args)?;
     let mut path = tool.path.clone();
     let mut body = Map::new();
@@ -328,7 +356,22 @@ fn reject_unknown_args(tool: &ToolDef, args: &Value) -> Result<(), String> {
     };
     for key in args_object.keys() {
         if !tool.params.iter().any(|param| param.name == *key) {
-            return Err(format!("unknown argument: {key}"));
+            let accepted = tool
+                .params
+                .iter()
+                .map(|param| param.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if accepted.is_empty() {
+                return Err(format!(
+                    "unknown argument: {key} ({} accepts no arguments)",
+                    tool.name
+                ));
+            }
+            return Err(format!(
+                "unknown argument: {key} ({} accepts: {accepted})",
+                tool.name
+            ));
         }
     }
     Ok(())
@@ -338,7 +381,7 @@ fn string_value(value: &Value, name: &str) -> Result<String, String> {
     value
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| format!("missing required argument: {name}"))
+        .ok_or_else(|| format!("{name} must be a string"))
 }
 
 fn integer_value(
