@@ -547,7 +547,7 @@ struct RequestWorker {
     task: JoinHandle<()>,
 }
 
-fn request_concurrency() -> usize {
+pub(crate) fn request_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(|parallelism| {
             parallelism

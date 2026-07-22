@@ -144,6 +144,7 @@ mod core_routes;
 mod create_task;
 mod e2e_sql_routes;
 mod input;
+mod relay_dispatch;
 mod repo_commands;
 mod repo_definitions;
 mod revision_status;

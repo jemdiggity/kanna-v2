@@ -4391,3 +4391,246 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
 }
+
+/// The advance-stage handler's prepare step resolves repository definitions
+/// (which runs `git fetch origin`) and forks the next workspace — synchronous
+/// git work that historically ran directly on a Tokio runtime worker. On the
+/// shared runtime that also carries every KSP terminal stream, that starved
+/// terminal output and input for the duration of the transition (frozen
+/// terminals, delayed echo — recovered only by detaching and reattaching the
+/// task's terminal). Run the real route on a current-thread runtime with a
+/// deliberately slow `git fetch origin` and require the runtime to stay
+/// responsive throughout: the blocking work must live on the blocking pool.
+#[tokio::test(flavor = "current_thread")]
+async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let _sidecar_guard = crate::test_sidecar_guard();
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-block-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nname: Reviewer\ndescription: Test review agent\nagent_provider: claude\n---\nReview task $TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    // A remote whose transport hangs: `git fetch origin` runs this ssh
+    // command, which sleeps well past the responsiveness threshold before
+    // failing. Definition resolution treats the failed fetch as a warning and
+    // continues from the local origin/main ref, so the route still succeeds.
+    let slow_ssh = repo_root.join("slow-ssh.sh");
+    std::fs::write(&slow_ssh, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&slow_ssh).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&slow_ssh, perms).unwrap();
+    }
+    assert!(Command::new("git")
+        .args(["remote", "add", "origin", "fakehost:definitions.git"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "core.sshCommand", &slow_ssh.to_string_lossy(),])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-advance-block-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let session_id = match command {
+                DaemonCommand::Kill { .. } => {
+                    let response = DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                DaemonCommand::Spawn { session_id, .. } => session_id,
+                DaemonCommand::SpawnAgent { session_id, .. } => session_id,
+                other => panic!("expected stage advance spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            break;
+        }
+    });
+
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-advance-block-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-advance-block-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "source-1",
+        "repo-1",
+        "Implement it",
+        Some("Implement it"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "source-1",
+        "task-source",
+        "default",
+        Some("{\"status\":\"success\",\"summary\":\"implemented\"}"),
+        "claude",
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let request = tokio::spawn(
+        app.oneshot(
+            Request::post("/v1/tasks/source-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+
+    // While the request (and its ~2s blocked `git fetch origin`) is in
+    // flight, this current-thread runtime must keep scheduling promptly. If
+    // the prepare step ran on the runtime thread, one of these short sleeps
+    // would stall for the full fetch duration.
+    let mut max_drift = Duration::ZERO;
+    let mut request = request;
+    let response = loop {
+        // Every wakeup measures how late the runtime was: a blocked runtime
+        // thread shows up as one interval far exceeding the 25ms sleep,
+        // whether the wakeup is the late sleep itself or the request
+        // completing behind it.
+        let sleep_started = Instant::now();
+        let finished = tokio::select! {
+            finished = &mut request => Some(finished),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => None,
+        };
+        let drift = sleep_started
+            .elapsed()
+            .saturating_sub(Duration::from_millis(25));
+        max_drift = max_drift.max(drift);
+        if let Some(finished) = finished {
+            break finished;
+        }
+    };
+    assert!(
+        max_drift < Duration::from_millis(750),
+        "stage advance prepare blocked the async runtime for {max_drift:?}"
+    );
+
+    let response = response.unwrap().unwrap();
+    if response.status() != StatusCode::OK {
+        daemon_server.abort();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        panic!(
+            "expected advance-stage to succeed, got {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    // The detached transition also runs blocking git/SQLite work; it must
+    // complete (and therefore must run off the runtime thread) while this
+    // current-thread test keeps polling.
+    let db = Db::open(&config.db_path).unwrap();
+    let source = wait_for_task_stage(&db, "source-1", "review").await;
+    assert_eq!(source.stage.as_deref(), Some("review"));
+
+    daemon_server.await.unwrap();
+    if created_sidecar {
+        let _ = std::fs::remove_file(&kanna_cli_path);
+    }
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
