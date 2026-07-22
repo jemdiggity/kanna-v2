@@ -1,8 +1,11 @@
 import { join } from "node:path";
 
 export const KANACHE_REPOSITORY = "https://github.com/jemdiggity/kanache";
-export const KANACHE_REVISION = "6107c7b533a77a0c7c190b75c0284e7501c6edbf";
+export const KANACHE_REVISION = "a8496326bc0a3551d3a2d78caa425ed474e816ae";
 export const KANACHE_PROFILE = "dev";
+export const KANACHE_RUST_INPUT_EXCLUSIONS = [
+  "apps/desktop/src-tauri/binaries"
+] as const;
 
 export interface KanachePaths {
   revision: string;
@@ -20,11 +23,16 @@ export interface KanacheManifestSummary {
   profiles: string[];
   targets: string[];
   extraInputs: unknown[];
+  rustBuildInputsBlake3?: string;
+  rustBuildInputExclusions?: string[];
   createdUnixNanos: number;
 }
 
+export type RustCacheMatchingMode = "head" | "input-hash";
+
 export interface DonorCandidate extends WorktreeEntry {
   manifest: KanacheManifestSummary;
+  matchingMode: RustCacheMatchingMode;
 }
 
 export function parseRustCacheMode(value: string | undefined): {
@@ -107,6 +115,23 @@ export function parseKanacheManifest(raw: string): KanacheManifestSummary {
     ? value.targets.filter((item): item is string => typeof item === "string")
     : [];
   const extraInputs = Array.isArray(value.extra_inputs) ? value.extra_inputs : [];
+  const rustBuildInputsBlake3 =
+    typeof value.rust_build_inputs_blake3 === "string" &&
+    value.rust_build_inputs_blake3.length > 0
+      ? value.rust_build_inputs_blake3
+      : undefined;
+  let rustBuildInputExclusions: string[] | undefined;
+  if ("rust_build_input_exclusions" in value) {
+    if (
+      !Array.isArray(value.rust_build_input_exclusions) ||
+      !value.rust_build_input_exclusions.every(
+        (item): item is string => typeof item === "string" && item.length > 0
+      )
+    ) {
+      throw new Error("Kanache donor has invalid Rust build-input exclusions.");
+    }
+    rustBuildInputExclusions = value.rust_build_input_exclusions;
+  }
 
   if (profiles.length !== 1 || profiles[0] !== KANACHE_PROFILE) {
     throw new Error("Kanache donor must contain only profile dev.");
@@ -130,6 +155,8 @@ export function parseKanacheManifest(raw: string): KanacheManifestSummary {
     profiles,
     targets: [...new Set(targets)].sort(),
     extraInputs,
+    ...(rustBuildInputsBlake3 ? { rustBuildInputsBlake3 } : {}),
+    ...(rustBuildInputExclusions ? { rustBuildInputExclusions } : {}),
     createdUnixNanos: created
   };
 }
@@ -149,6 +176,7 @@ export function rankDonors(
     .sort(
       (left, right) =>
         coverage(right, hostTarget) - coverage(left, hostTarget) ||
-        right.manifest.createdUnixNanos - left.manifest.createdUnixNanos
+        right.manifest.createdUnixNanos - left.manifest.createdUnixNanos ||
+        (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)
     );
 }
