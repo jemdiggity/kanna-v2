@@ -78,7 +78,18 @@ git/filesystem/SQLite work never executes on a runtime worker.
    shell out to git against the task worktree; they now run behind the same
    boundary.
 
-5. **Observability repair:** kanna-server's default log filter was
+5. **Dependent starts** (review follow-up): the manual close, parked-PR
+   completion, and unblock paths start dormant dependents inline in their
+   handlers. Dependent discovery (SQLite reads plus git blocker-branch
+   resolution), dormant-task preparation (`prepare_start_dormant_task_for_api`
+   resolves definitions and creates/merges the dependent worktree),
+   integration-task preparation and its blocker-restore rollback, and the
+   post-spawn stage-run/diagnostics bookkeeping all run behind the blocking
+   boundary now; daemon I/O and the best-effort log-don't-fail semantics of
+   the close path are unchanged. `block_task`/`unblock_task` handler sections
+   run behind the boundary as well.
+
+6. **Observability repair:** kanna-server's default log filter was
    `kanna_server=info`, which silently discarded every `terminal_perf`
    record the KSP backpressure tracing emits under the `kanna_daemon`
    target — production had zero server-side terminal diagnostics. The
@@ -97,6 +108,13 @@ git/filesystem/SQLite work never executes on a runtime worker.
   and the blocked one completes after release.
 - `relay_http_invoke_dispatch_rejects_when_saturated`: exhausted permits
   produce an immediate id-addressed 503.
+- `close_last_blocker_stays_responsive_while_dependent_prepare_blocks` and
+  `complete_pr_stage_stays_responsive_while_dependent_prepare_blocks`
+  (current-thread runtime, real routes, a dormant dependent whose definition
+  fetch is deliberately slow): red against the inline dependent start — the
+  runtime measured ~4.1s blocked on both paths — green with the boundary,
+  and the dependent still spawns on the blocker's branch tip after the
+  blocked fetch resolves.
 - Full `cargo test -p kanna-server` suite green.
 
 A full desktop E2E (human-visible echo latency across app + server + daemon
@@ -108,9 +126,9 @@ actually emitted, see 5) prove or disprove recurrence in production.
 
 ## Follow-ups
 
-- Route stage-transition definition resolution through the shared
-  single-flight `RepoDefinitionsCache` instead of direct
-  `RepoDefinitions::resolve` — transitions currently re-fetch per prepare.
+- Route stage-transition and dormant-start definition resolution through the
+  shared single-flight `RepoDefinitionsCache` instead of direct
+  `RepoDefinitions::resolve` — these paths currently re-fetch per prepare.
 - The relay `Command` invoke arm still dispatches inline (it is async daemon
   IO only, but head-of-line blocking applies).
 - Remaining pure-DB handlers still open SQLite on runtime workers; the 10s

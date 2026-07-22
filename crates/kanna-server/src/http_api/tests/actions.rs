@@ -4404,7 +4404,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
 #[tokio::test(flavor = "current_thread")]
 async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -4457,30 +4457,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
         .unwrap()
         .success());
 
-    // A remote whose transport hangs: `git fetch origin` runs this ssh
-    // command, which sleeps well past the responsiveness threshold before
-    // failing. Definition resolution treats the failed fetch as a warning and
-    // continues from the local origin/main ref, so the route still succeeds.
-    let slow_ssh = repo_root.join("slow-ssh.sh");
-    std::fs::write(&slow_ssh, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&slow_ssh).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&slow_ssh, perms).unwrap();
-    }
-    assert!(Command::new("git")
-        .args(["remote", "add", "origin", "fakehost:definitions.git"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["config", "core.sshCommand", &slow_ssh.to_string_lossy(),])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
+    super::add_slow_fetch_origin(&repo_root, 2);
 
     let daemon_dir = std::env::temp_dir().join(format!("kanna-http-advance-block-daemon-{unique}"));
     std::fs::create_dir_all(&daemon_dir).unwrap();
@@ -4579,34 +4556,15 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
 
     // While the request (and its ~2s blocked `git fetch origin`) is in
     // flight, this current-thread runtime must keep scheduling promptly. If
-    // the prepare step ran on the runtime thread, one of these short sleeps
-    // would stall for the full fetch duration.
-    let mut max_drift = Duration::ZERO;
-    let mut request = request;
-    let response = loop {
-        // Every wakeup measures how late the runtime was: a blocked runtime
-        // thread shows up as one interval far exceeding the 25ms sleep,
-        // whether the wakeup is the late sleep itself or the request
-        // completing behind it.
-        let sleep_started = Instant::now();
-        let finished = tokio::select! {
-            finished = &mut request => Some(finished),
-            _ = tokio::time::sleep(Duration::from_millis(25)) => None,
-        };
-        let drift = sleep_started
-            .elapsed()
-            .saturating_sub(Duration::from_millis(25));
-        max_drift = max_drift.max(drift);
-        if let Some(finished) = finished {
-            break finished;
-        }
-    };
+    // the prepare step ran on the runtime thread, one wakeup would stall for
+    // the full fetch duration.
+    let (response, max_drift) = super::await_measuring_runtime_drift(request).await;
     assert!(
         max_drift < Duration::from_millis(750),
         "stage advance prepare blocked the async runtime for {max_drift:?}"
     );
 
-    let response = response.unwrap().unwrap();
+    let response = response.unwrap();
     if response.status() != StatusCode::OK {
         daemon_server.abort();
         let status = response.status();
@@ -4633,4 +4591,457 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// Closing a task's last blocker starts its dormant dependents inline in the
+/// close handler. Dependent preparation resolves repository definitions
+/// (`git fetch origin`) and creates/merges the dependent worktree —
+/// synchronous git work that historically ran directly on a Tokio runtime
+/// worker and froze every KSP terminal stream for its duration. Run the real
+/// manual-close route on a current-thread runtime with a deliberately slow
+/// fetch and require the runtime to stay responsive throughout, then prove
+/// the dependent still lands once the blocked fetch resolves.
+#[tokio::test(flavor = "current_thread")]
+async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
+    use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let _sidecar_guard = crate::test_sidecar_guard();
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-unblock-block-{unique}"));
+    init_test_git_repo(&repo_root);
+
+    let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
+    let daemon_dir =
+        std::env::temp_dir().join(format!("kanna-http-close-unblock-block-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-close-unblock-block-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-close-unblock-block-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-a",
+        "repo-1",
+        "Build prerequisite",
+        Some("Prerequisite"),
+        "in progress",
+        "2026-07-01T00:00:00Z",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
+        .unwrap();
+    drop(db);
+
+    let blocker_worktree_path = commit_branch_change(
+        &repo_root,
+        "task-a-stage",
+        "blocker-output.txt",
+        "blocker output",
+    );
+    let blocker_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&blocker_worktree_path)
+        .output()
+        .unwrap();
+    assert!(blocker_head.status.success());
+    let blocker_head = String::from_utf8_lossy(&blocker_head.stdout)
+        .trim()
+        .to_string();
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Build on task A",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
+                        "blockerTaskIds": ["task-a"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dependent: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(dependent.worktree_path, None);
+
+    // Only now make definition fetches slow: the dormant dependent's
+    // preparation during the close is the blocked section under test.
+    super::add_slow_fetch_origin(&repo_root, 2);
+
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let expected_task_id = dependent.task_id.clone();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut spawned = Vec::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap() == 0 {
+                break;
+            }
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            match command {
+                DaemonCommand::Kill { .. } => {
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                DaemonCommand::Spawn { session_id, .. } => {
+                    assert_eq!(session_id, expected_task_id);
+                    spawned.push(session_id.clone());
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                    .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(session_id, expected_task_id);
+                    assert_eq!(params.agent_provider, AgentProvider::Claude);
+                    spawned.push(session_id.clone());
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                    .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                other => panic!("unexpected daemon command: {:?}", other),
+            }
+        }
+        spawned
+    });
+
+    let close_request = tokio::spawn(
+        app.oneshot(
+            Request::post("/v1/tasks/task-a/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let (close_response, max_drift) = super::await_measuring_runtime_drift(close_request).await;
+    assert!(
+        max_drift < Duration::from_millis(750),
+        "dependent start during manual close blocked the async runtime for {max_drift:?}"
+    );
+    assert_eq!(close_response.unwrap().status(), StatusCode::NO_CONTENT);
+
+    // The dependent still lands after the blocked fetch resolves: spawned
+    // once, worktree created on the blocker's branch tip.
+    let spawned = daemon_server.await.unwrap();
+    assert_eq!(spawned.len(), 1, "close should start the dependent once");
+    let db = Db::open(&config.db_path).unwrap();
+    let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
+    assert_eq!(dependent_item.activity.as_deref(), Some("working"));
+    let worktree_path = db
+        .get_task_worktree_path(&dependent.task_id)
+        .unwrap()
+        .expect("dependent worktree");
+    let dependent_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&worktree_path)
+        .output()
+        .unwrap();
+    assert!(dependent_head.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&dependent_head.stdout).trim(),
+        blocker_head
+    );
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    if created_test_sidecar {
+        let _ = std::fs::remove_file(&kanna_cli_path);
+    }
+}
+
+/// The parked-PR completion path (`complete-stage` at a manual pr stage with
+/// a PR url) optimistically starts dormant dependents inline in the handler.
+/// Same hazard and same requirement as the manual close: dependent
+/// preparation must not occupy the runtime, and the dependent must still
+/// land once its blocked definition fetch resolves.
+#[tokio::test(flavor = "current_thread")]
+async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
+    use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let _sidecar_guard = crate::test_sidecar_guard();
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-pr-optimistic-block-{unique}"));
+    init_test_git_repo(&repo_root);
+
+    let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
+    let daemon_dir =
+        std::env::temp_dir().join(format!("kanna-http-pr-optimistic-block-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-pr-optimistic-block-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-pr-optimistic-block-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-a",
+        "repo-1",
+        "Build prerequisite",
+        Some("Prerequisite"),
+        "pr",
+        "2026-07-01T00:00:00Z",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
+        .unwrap();
+    drop(db);
+
+    let blocker_worktree_path = commit_branch_change(
+        &repo_root,
+        "task-a-stage",
+        "blocker-output.txt",
+        "blocker output",
+    );
+    assert!(Command::new("git")
+        .args(["branch", "-m", "task-a-pr"])
+        .current_dir(&blocker_worktree_path)
+        .status()
+        .unwrap()
+        .success());
+    let db = Db::open(&config.db_path).unwrap();
+    db.upsert_worktree(
+        "wt-task-a",
+        "task-a",
+        &blocker_worktree_path.to_string_lossy(),
+        "task-a-stage",
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Build on task A",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
+                        "blockerTaskIds": ["task-a"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dependent: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(dependent.worktree_path, None);
+
+    // Only now make definition fetches slow: the dormant dependent's
+    // preparation during the parked-PR completion is the blocked section
+    // under test.
+    super::add_slow_fetch_origin(&repo_root, 2);
+
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let expected_task_id = dependent.task_id.clone();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut spawned = Vec::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap() == 0 {
+                break;
+            }
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            match command {
+                DaemonCommand::Kill { .. } => {
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                DaemonCommand::Spawn { session_id, .. } => {
+                    assert_eq!(session_id, expected_task_id);
+                    spawned.push(session_id.clone());
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                    .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(session_id, expected_task_id);
+                    assert_eq!(params.agent_provider, AgentProvider::Claude);
+                    spawned.push(session_id.clone());
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                    .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                other => panic!("unexpected daemon command: {:?}", other),
+            }
+        }
+        spawned
+    });
+
+    let complete_request = tokio::spawn(
+        app.oneshot(
+            Request::post("/v1/tasks/task-a/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "PR is ready",
+                        "metadata": { "pr_url": "https://github.com/acme/repo/pull/7" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ),
+    );
+    let (complete_response, max_drift) =
+        super::await_measuring_runtime_drift(complete_request).await;
+    assert!(
+        max_drift < Duration::from_millis(750),
+        "optimistic dependent start during pr completion blocked the async runtime for {max_drift:?}"
+    );
+    assert_eq!(complete_response.unwrap().status(), StatusCode::OK);
+
+    let spawned = daemon_server.await.unwrap();
+    assert_eq!(
+        spawned.len(),
+        1,
+        "pr-stage completion should start the dependent once"
+    );
+    let db = Db::open(&config.db_path).unwrap();
+    let blocker = db.get_pipeline_item("task-a").unwrap().unwrap();
+    assert!(blocker.closed_at.is_none());
+    assert_eq!(blocker.stage.as_deref(), Some("pr"));
+    let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
+    assert_eq!(dependent_item.base_ref.as_deref(), Some("task-a-pr"));
+    assert_eq!(dependent_item.activity.as_deref(), Some("working"));
+    assert!(db
+        .get_task_worktree_path(&dependent.task_id)
+        .unwrap()
+        .is_some());
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    if created_test_sidecar {
+        let _ = std::fs::remove_file(&kanna_cli_path);
+    }
 }

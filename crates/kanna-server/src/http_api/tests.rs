@@ -139,6 +139,64 @@ fn publish_test_origin_main(repo_root: &Path) {
         .success());
 }
 
+/// Give the repo a remote whose transport blocks: `git fetch origin` runs
+/// this ssh command, which sleeps well past the responsiveness threshold
+/// before failing. Definition resolution treats the failed fetch as a
+/// warning and continues from the local `origin/main` ref, so routes still
+/// succeed — the sleep only makes any on-runtime fetch observable as
+/// scheduler drift.
+fn add_slow_fetch_origin(repo_root: &Path, sleep_secs: u32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let slow_ssh = repo_root.join("slow-ssh.sh");
+    std::fs::write(
+        &slow_ssh,
+        format!("#!/bin/sh\nsleep {sleep_secs}\nexit 1\n"),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&slow_ssh).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&slow_ssh, perms).unwrap();
+    assert!(Command::new("git")
+        .args(["remote", "add", "origin", "fakehost:definitions.git"])
+        .current_dir(repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "core.sshCommand", &slow_ssh.to_string_lossy()])
+        .current_dir(repo_root)
+        .status()
+        .unwrap()
+        .success());
+}
+
+/// Await a spawned request on a current-thread runtime while measuring
+/// scheduler lateness: every wakeup's delay beyond the 25ms probe tick is
+/// runtime drift, whether the wakeup is the late tick itself or the request
+/// completing behind it. Synchronous work executed on the runtime thread
+/// shows up as one interval far exceeding the tick.
+async fn await_measuring_runtime_drift<T>(
+    mut request: tokio::task::JoinHandle<T>,
+) -> (T, std::time::Duration) {
+    use std::time::{Duration, Instant};
+
+    let tick = Duration::from_millis(25);
+    let mut max_drift = Duration::ZERO;
+    loop {
+        let started = Instant::now();
+        let finished = tokio::select! {
+            finished = &mut request => Some(finished),
+            _ = tokio::time::sleep(tick) => None,
+        };
+        let drift = started.elapsed().saturating_sub(tick);
+        max_drift = max_drift.max(drift);
+        if let Some(finished) = finished {
+            return (finished.expect("request task panicked"), max_drift);
+        }
+    }
+}
+
 mod actions;
 mod core_routes;
 mod create_task;
