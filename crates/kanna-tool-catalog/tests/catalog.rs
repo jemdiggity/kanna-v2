@@ -60,6 +60,11 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         create_task["inputSchema"]["properties"]["stage"].is_null(),
         "agent-facing create-task tool should not expose stage overrides"
     );
+    assert_eq!(
+        create_task["inputSchema"]["properties"]["agent"],
+        json!({ "type": "string" }),
+        "create-task must expose the agent override so dispatchers can bind specialty agents"
+    );
 
     let wait = tools
         .as_array()
@@ -343,6 +348,41 @@ fn resolves_expected_requests_for_every_bundled_tool() {
     assert_eq!(wait_spec.timeout_secs, 600);
     assert_eq!(wait_spec.poll_secs, 1);
     assert_eq!(wait_spec.until, WaitUntil::Closed);
+}
+
+#[test]
+fn create_task_maps_agent_override_into_the_request_body() {
+    let catalog = bundled_catalog();
+    let request = resolve_request(
+        &catalog,
+        "kanna_create_task",
+        &json!({
+            "repo_id": "repo-1",
+            "prompt": "Specialty review dispatched from task parent-1.",
+            "pipeline_name": "specialty-review",
+            "agent": "review-security",
+            "base_ref": "task-parent-1-2",
+            "parent_task_id": "parent-1",
+            "notify_task_id": "parent-1"
+        }),
+    )
+    .expect("dispatcher-style create-task call resolves");
+
+    assert_eq!(request.method, Method::Post);
+    assert_eq!(request.path, "/v1/tasks");
+    assert_eq!(
+        request.body,
+        json!({
+            "repoId": "repo-1",
+            "prompt": "Specialty review dispatched from task parent-1.",
+            "pipelineName": "specialty-review",
+            "agent": "review-security",
+            "baseRef": "task-parent-1-2",
+            "agentType": "pty",
+            "parentTaskId": "parent-1",
+            "notifyTaskId": "parent-1"
+        })
+    );
 }
 
 #[test]

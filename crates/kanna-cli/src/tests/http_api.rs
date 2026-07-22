@@ -328,6 +328,7 @@ async fn create_task_via_api_posts_default_agent_type_without_agent_provider_whe
         display_name: None,
         pipeline_name: None,
         base_ref: None,
+        agent: None,
         agent_provider: None,
         agent_type: None,
         model: None,
