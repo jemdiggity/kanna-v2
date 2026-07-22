@@ -93,6 +93,8 @@ export interface RemoteTransportDependencies {
   observeTaskAgent?: RemoteTaskAgentObserver;
   observeTaskCompanion?: RemoteTaskCompanionObserver;
   listCloudTasks?: () => Promise<CloudIndexedTaskSummary[]>;
+  desktopRepoWaitMs?: number;
+  desktopRepoRefreshIntervalMs?: number;
 }
 
 interface CloudTaskRoute {
@@ -111,6 +113,9 @@ type CloudIndexedTaskSummary = TaskSummary & {
   repoName?: string | null;
 };
 
+const DEFAULT_DESKTOP_REPO_WAIT_MS = 3_000;
+const DEFAULT_DESKTOP_REPO_REFRESH_INTERVAL_MS = 30_000;
+
 export function createRemoteTransport({
   listDesktopRecords,
   getSelectedDesktopId,
@@ -118,12 +123,18 @@ export function createRemoteTransport({
   observeTaskTerminal,
   observeTaskAgent,
   observeTaskCompanion,
-  listCloudTasks
+  listCloudTasks,
+  desktopRepoWaitMs = DEFAULT_DESKTOP_REPO_WAIT_MS,
+  desktopRepoRefreshIntervalMs = DEFAULT_DESKTOP_REPO_REFRESH_INTERVAL_MS
 }: RemoteTransportDependencies): KannaTransport {
   let cloudTaskRoutes = new Map<string, CloudTaskRoute>();
   const provisionalTaskRoutes = new Map<string, CloudTaskRoute>();
   let latestAcceptedCloudTasks: CloudIndexedTaskSummary[] = [];
   let latestCloudReadEpoch = 0;
+  const cloudRepoOwners = new Map<string, string>();
+  const desktopRepoSnapshots = new Map<string, RepoSummary[]>();
+  const desktopRepoFetchedAt = new Map<string, number>();
+  const desktopRepoReads = new Map<string, Promise<void>>();
 
   const taskRouteForId = (taskId: string): CloudTaskRoute | null =>
     provisionalTaskRoutes.get(taskId) ?? cloudTaskRoutes.get(taskId) ?? null;
@@ -215,8 +226,15 @@ export function createRemoteTransport({
         localRepoId: routeTask.ownerLocalRepoId ?? repoId
       };
     }
-    return requestedDesktopId
-      ? { desktopId: requestedDesktopId, localRepoId: repoId }
+    if (requestedDesktopId) {
+      return { desktopId: requestedDesktopId, localRepoId: repoId };
+    }
+    if (!cloudRepoOwners.has(repoId)) {
+      await listReachableDesktopRepos();
+    }
+    const ownerDesktopId = cloudRepoOwners.get(repoId);
+    return ownerDesktopId
+      ? { desktopId: ownerDesktopId, localRepoId: repoId }
       : null;
   };
 
@@ -244,6 +262,100 @@ export function createRemoteTransport({
         error
       );
     }
+  };
+
+  const rememberDesktopRepos = (desktopId: string, repos: RepoSummary[]) => {
+    forgetDesktopRepos(desktopId);
+    desktopRepoSnapshots.set(desktopId, repos);
+    for (const repo of repos) {
+      cloudRepoOwners.set(repo.id, desktopId);
+    }
+  };
+
+  const forgetDesktopRepos = (desktopId: string) => {
+    desktopRepoSnapshots.delete(desktopId);
+    desktopRepoFetchedAt.delete(desktopId);
+    for (const [repoId, ownerDesktopId] of cloudRepoOwners) {
+      if (ownerDesktopId === desktopId) {
+        cloudRepoOwners.delete(repoId);
+      }
+    }
+  };
+
+  const startDesktopRepoRead = (desktopId: string): Promise<void> => {
+    const inFlight = desktopRepoReads.get(desktopId);
+    if (inFlight) {
+      return inFlight;
+    }
+    const read = (async () => {
+      try {
+        const repos = parseRepoSummaries(
+          await requestDesktop<unknown>(desktopId, "GET", "/v1/repos", null)
+        );
+        rememberDesktopRepos(desktopId, repos);
+      } catch {
+        // Keep the last snapshot for this desktop; a transiently
+        // unreachable desktop's repos still merge from the cache below.
+      } finally {
+        desktopRepoFetchedAt.set(desktopId, Date.now());
+      }
+    })().finally(() => {
+      if (desktopRepoReads.get(desktopId) === read) {
+        desktopRepoReads.delete(desktopId);
+      }
+    });
+    desktopRepoReads.set(desktopId, read);
+    return read;
+  };
+
+  const refreshDesktopRepos = async (): Promise<void> => {
+    let records: RemoteDesktopRecord[];
+    try {
+      records = await listDesktopRecords();
+    } catch {
+      return;
+    }
+    const recordIds = new Set(records.map((record) => record.desktopId));
+    for (const desktopId of [...desktopRepoSnapshots.keys()]) {
+      if (!recordIds.has(desktopId)) {
+        forgetDesktopRepos(desktopId);
+      }
+    }
+    const now = Date.now();
+    await Promise.all(
+      records
+        .filter((record) => record.reachableViaRelay || record.online)
+        .filter((record) => {
+          if (desktopRepoReads.has(record.desktopId)) {
+            return true;
+          }
+          const fetchedAt = desktopRepoFetchedAt.get(record.desktopId);
+          return (
+            fetchedAt === undefined ||
+            now - fetchedAt >= desktopRepoRefreshIntervalMs
+          );
+        })
+        .map((record) => startDesktopRepoRead(record.desktopId))
+    );
+  };
+
+  // The cloud task index only carries repos that have open tasks, so repo
+  // listings additionally ask each reachable desktop for its full repo list
+  // through the relay. Every listing runs its own records pass so a desktop
+  // that becomes reachable later is fetched immediately; in-flight reads are
+  // tracked per desktop, so one hung desktop can neither trigger duplicate
+  // invocations nor block newly reachable desktops from being queried. The
+  // refresh interval throttles per fetched desktop, never a no-op pass.
+  // Reads that outlast the wait window finish in the background and land in
+  // the snapshot cache for the next listing.
+  const listReachableDesktopRepos = (): Promise<RepoSummary[]> => {
+    const collectDesktopRepos = () =>
+      [...desktopRepoSnapshots.values()].flat();
+    return awaitWithFallback(
+      refreshDesktopRepos().then(collectDesktopRepos),
+      desktopRepoWaitMs,
+      collectDesktopRepos
+    );
   };
 
   const request = async <T>(
@@ -404,11 +516,19 @@ export function createRemoteTransport({
       if (!listCloudTasks) {
         return request<RepoSummary[]>("GET", "/v1/repos", null);
       }
-      const tasks = await listFreshCloudTasks();
+      const [tasks, desktopRepos] = await Promise.all([
+        listFreshCloudTasks(),
+        listReachableDesktopRepos()
+      ]);
       const reposById = new Map<string, string>();
       for (const task of tasks) {
         if (!reposById.has(task.repoId)) {
           reposById.set(task.repoId, task.repoName?.trim() || task.repoId);
+        }
+      }
+      for (const repo of desktopRepos) {
+        if (!reposById.has(repo.id)) {
+          reposById.set(repo.id, repo.name);
         }
       }
       return Array.from(reposById, ([id, name]) => ({ id, name }));
@@ -977,6 +1097,43 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     lanPort,
     pairingCode
   };
+}
+
+function parseRepoSummaries(value: unknown): RepoSummary[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const repos: RepoSummary[] = [];
+  for (const entry of value) {
+    if (
+      isRecord(entry) &&
+      typeof entry.id === "string" &&
+      entry.id &&
+      typeof entry.name === "string"
+    ) {
+      repos.push({ id: entry.id, name: entry.name });
+    }
+  }
+  return repos;
+}
+
+function awaitWithFallback<T>(
+  read: Promise<T>,
+  waitMs: number,
+  fallback: () => T
+): Promise<T> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: T) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      }
+    };
+    const timer = setTimeout(() => settle(fallback()), waitMs);
+    read.then(settle, () => settle(fallback()));
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

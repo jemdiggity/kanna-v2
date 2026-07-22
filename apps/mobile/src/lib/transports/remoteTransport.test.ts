@@ -2009,6 +2009,276 @@ describe("remote transport", () => {
     expect(subscription.close).toHaveBeenCalled();
   });
 
+  it("includes task-less repos from reachable desktops in cloud repo listings", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue([
+      { id: "local-repo-1", name: "Repo One" },
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        },
+        {
+          desktopId: "desktop-offline",
+          displayName: "Offline Mac",
+          online: false,
+          reachableViaRelay: false,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "local-repo-1",
+          repoName: "Repo One",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1"
+        }
+      ]
+    });
+
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "local-repo-1", name: "Repo One" },
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+  });
+
+  it("reuses the desktop repo snapshot within the refresh interval", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue([
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => []
+    });
+
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetches repos from a desktop that becomes reachable after the first listing", async () => {
+    let online = false;
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue([
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          online,
+          reachableViaRelay: online,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => []
+    });
+
+    await expect(transport.listRepos()).resolves.toEqual([]);
+    expect(invokeDesktop).not.toHaveBeenCalled();
+
+    online = true;
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+  });
+
+  it("queries a newly reachable desktop while another desktop's repo read hangs", async () => {
+    const records = [
+      {
+        desktopId: "desktop-hung",
+        displayName: "Hung Mac",
+        online: true,
+        reachableViaRelay: true,
+        connectionMode: "internet" as const
+      }
+    ];
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>((request) => {
+      if (request.desktopId === "desktop-hung") {
+        return new Promise(() => {});
+      }
+      return Promise.resolve([{ id: "repo-healthy", name: "Healthy Repo" }]);
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => records,
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [],
+      desktopRepoWaitMs: 20
+    });
+
+    await expect(transport.listRepos()).resolves.toEqual([]);
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+
+    records.push({
+      desktopId: "desktop-healthy",
+      displayName: "Healthy Mac",
+      online: true,
+      reachableViaRelay: true,
+      connectionMode: "internet" as const
+    });
+
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-healthy", name: "Healthy Repo" }
+    ]);
+    expect(invokeDesktop).toHaveBeenCalledTimes(2);
+    expect(invokeDesktop).toHaveBeenLastCalledWith({
+      desktopId: "desktop-healthy",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+  });
+
+  it("routes task creation for a task-less repo to the desktop that owns it", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
+      if (request.path === "/v1/repos") {
+        return [{ id: "repo-empty", name: "Fresh Repo" }];
+      }
+      return { taskId: "local-task-9" };
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => []
+    });
+
+    await expect(
+      transport.createTask({ repoId: "repo-empty", prompt: "Ship it" })
+    ).resolves.toMatchObject({
+      taskId: "cloud:desktop-owner:repo-empty:local-task-9",
+      ownerDesktopId: "desktop-owner",
+      ownerLocalRepoId: "repo-empty",
+      ownerLocalTaskId: "local-task-9"
+    });
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks",
+      body: {
+        repoId: "repo-empty",
+        prompt: "Ship it"
+      }
+    });
+  });
+
+  it("keeps task-derived repos when desktop repo reads fail", async () => {
+    const invokeDesktop = vi
+      .fn<RemoteDesktopInvoker>()
+      .mockRejectedValue(new Error("desktop unreachable"));
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          repoName: "Repo One",
+          title: "Cloud task",
+          stage: "in progress"
+        }
+      ]
+    });
+
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-1", name: "Repo One" }
+    ]);
+  });
+
+  it("answers repo listings without waiting for a hung desktop repo read", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>(
+      () => new Promise(() => {})
+    );
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          online: true,
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          repoName: "Repo One",
+          title: "Cloud task",
+          stage: "in progress"
+        }
+      ],
+      desktopRepoWaitMs: 5
+    });
+
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-1", name: "Repo One" }
+    ]);
+  });
+
   it("serves cloud status and repo task collections without selecting a desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
     const transport = createRemoteTransport({

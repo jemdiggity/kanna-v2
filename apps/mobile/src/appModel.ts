@@ -77,6 +77,7 @@ interface AppModelOptions {
   taskIndex?: CloudTaskIndex;
   bonjourBrowser?: BonjourBrowser;
   enableE2eTrustSeed?: boolean;
+  desktopRepoWaitMs?: number;
   createRelayClient?: (input: {
     relayUrl: string;
     getIdToken(forceRefresh?: boolean): Promise<string | null>;
@@ -253,7 +254,8 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
         extraRelayUrl: extra?.relayUrl
       }),
-      taskIndex: options.taskIndex
+      taskIndex: options.taskIndex,
+      desktopRepoWaitMs: options.desktopRepoWaitMs
     });
   let activeClient = resolveClient(clientGeneration);
   const replaceActiveClient = () => {
@@ -689,6 +691,7 @@ function createClientForMode({
   onTaskRoutesChanged,
   relayUrl,
   taskIndex,
+  desktopRepoWaitMs,
 }: {
   authSession: MobileAuthSession;
   bonjourBrowser: BonjourBrowser;
@@ -722,6 +725,7 @@ function createClientForMode({
   onTaskRoutesChanged(): void;
   relayUrl: string | null;
   taskIndex?: CloudTaskIndex;
+  desktopRepoWaitMs?: number;
 }): ResolvedAppClient {
   const authState = authSession.getState();
   if (authState.status === "signedIn" && relayUrl) {
@@ -800,6 +804,7 @@ function createClientForMode({
         observeTaskAgent: relayClient.observeTaskAgent,
         observeTaskCompanion: relayClient.observeTaskCompanion,
         listCloudTasks: listCloudTasksForRouting,
+        desktopRepoWaitMs,
       }),
     );
     const getTrustedDesktopIds = () => Array.from(new Set([
