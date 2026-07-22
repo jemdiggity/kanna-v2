@@ -1381,6 +1381,52 @@ fn resolves_task_terminal_session_id_prefers_daemon_mapping_over_provider_uuid_r
 }
 
 #[test]
+fn provider_session_id_updates_the_completed_run_owned_by_a_replaced_terminal() {
+    let path = Db::test_db_path("provider-session-owning-run");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement provider resume",
+        Some("Provider resume"),
+        "review",
+        "2026-07-23 00:00:00",
+    )
+    .unwrap();
+    for (id, stage, status) in [
+        ("run-implement", "in progress", "succeeded"),
+        ("run-review", "review", "running"),
+    ] {
+        db.insert_stage_run(NewStageRun {
+            id,
+            task_id: "task-1",
+            stage,
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status,
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    }
+
+    assert!(db
+        .update_stage_run_provider_session_id("task-1", "codex-thread", true)
+        .unwrap());
+
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs[0].provider_session_id.as_deref(), Some("codex-thread"));
+    assert_eq!(runs[1].provider_session_id, None);
+}
+
+#[test]
 fn insert_pipeline_item_stores_stage_metadata() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");

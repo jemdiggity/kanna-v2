@@ -149,7 +149,7 @@ async fn process_event(
                 Ok(adapter) => adapter.provider_session_id(),
                 Err(poisoned) => poisoned.into_inner().provider_session_id(),
             };
-            if provider_session_id.is_some() {
+            if provider_session_id.is_some() && provider_session_id != record.provider_session_id {
                 record.provider_session_id = provider_session_id.clone();
                 provider_session_to_persist = provider_session_id;
             }
@@ -212,6 +212,14 @@ async fn process_event(
     if let Some(provider_session_id) = provider_session_to_persist {
         let mut sh = shared.lock().await;
         sh.journal.set_provider_session_id(&provider_session_id);
+        drop(sh);
+        broadcast_event(
+            broadcast_tx,
+            &kanna_daemon::protocol::Event::ProviderSessionChanged {
+                session_id: session_id.to_string(),
+                provider_session_id,
+            },
+        );
     }
 
     journal_and_fan_out(session_id, &shared, event).await;

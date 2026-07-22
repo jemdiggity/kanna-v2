@@ -214,6 +214,7 @@ fn spawn_params(cwd: &Path, executable: &Path, prompt: &str) -> AgentSpawnParams
         system_prompt: None,
         mcp_config_path: None,
         executable: Some(executable.to_string_lossy().to_string()),
+        resume_session_id: None,
     }
 }
 
@@ -390,6 +391,39 @@ fn idle_status_broadcast_carries_latest_assistant_text() {
 }
 
 #[test]
+fn headless_session_broadcasts_discovered_provider_session_id() {
+    let dir = temp_dir("provider-session-broadcast");
+    let script = write_script(&dir, "fake-agent.sh", STEERABLE_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Command::Subscribe);
+    assert!(matches!(subscriber.recv(), Event::Ok));
+
+    let mut control = daemon.connect();
+    control.send(&Command::SpawnAgent {
+        session_id: "agent-provider-session".to_string(),
+        params: spawn_params(&dir, &script, "do the thing"),
+    });
+    control.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    let event = subscriber.recv_until(|event| {
+        matches!(
+            event,
+            Event::ProviderSessionChanged { session_id, .. }
+                if session_id == "agent-provider-session"
+        )
+    });
+    assert!(matches!(
+        event,
+        Event::ProviderSessionChanged {
+            provider_session_id,
+            ..
+        } if provider_session_id == "fake-sess-1"
+    ));
+}
+
+#[test]
 fn spawn_attach_replay_and_steer() {
     let dir = temp_dir("steer");
     let script = write_script(&dir, "fake-agent.sh", STEERABLE_AGENT);
@@ -560,6 +594,33 @@ fn input_after_handoff_uses_persisted_provider_session_id() {
     let resumed = conn2.collect_agent_events_until(is_turn_completed);
     assert!(resumed.iter().any(|e| matches!(
         e,
+        AgentEvent::AssistantText { text, .. } if text == "resumed with persisted id"
+    )));
+}
+
+#[test]
+fn spawn_agent_with_resume_session_id_uses_resume_spawn() {
+    let dir = temp_dir("spawn-resume-id");
+    let script = write_script(&dir, "resume-id-agent.sh", RESUME_ID_ASSERTING_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+    let mut params = spawn_params(&dir, &script, "revision feedback");
+    params.resume_session_id = Some("fake-sess-persisted".to_string());
+
+    let mut conn = daemon.connect();
+    conn.send(&Command::SpawnAgent {
+        session_id: "agent-resume-spawn".to_string(),
+        params,
+    });
+    conn.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+    conn.send(&Command::AttachAgent {
+        session_id: "agent-resume-spawn".to_string(),
+        from_seq: 0,
+    });
+    conn.recv_until(|event| matches!(event, Event::AgentSnapshot { .. }));
+    let events = conn.collect_agent_events_until(is_turn_completed);
+
+    assert!(events.iter().any(|event| matches!(
+        event,
         AgentEvent::AssistantText { text, .. } if text == "resumed with persisted id"
     )));
 }

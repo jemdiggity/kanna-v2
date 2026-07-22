@@ -2455,6 +2455,64 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
 }
 
 #[test]
+fn build_agent_command_resumes_supported_providers() {
+    for (provider, expected) in [
+        (AgentProvider::Claude, "--resume 'resume-id'"),
+        (AgentProvider::Codex, "'codex' resume "),
+        (
+            AgentProvider::Opencode,
+            "run --interactive --session 'resume-id'",
+        ),
+        (AgentProvider::Copilot, "--resume='resume-id'"),
+        (AgentProvider::Antigravity, "--conversation 'resume-id'"),
+    ] {
+        let command = super::build_agent_command(
+            &provider,
+            provider.executable(),
+            "Address the review feedback.",
+            None,
+            Some("dontAsk"),
+            &[],
+            &[],
+            None,
+            None,
+            Some("Kanna preamble."),
+            None,
+            Some("/tmp/repo/.kanna-worktrees/task-1"),
+            Some(&ProviderSessionBinding::Resume("resume-id".to_string())),
+        );
+
+        assert!(
+            command.contains(expected),
+            "{provider:?} command did not contain {expected:?}: {command}"
+        );
+        assert!(command.contains("Address the review feedback."));
+    }
+}
+
+#[test]
+fn build_agent_command_assigns_copilot_session_id() {
+    let command = super::build_agent_command(
+        &AgentProvider::Copilot,
+        AgentProvider::Copilot.executable(),
+        "Implement the task.",
+        None,
+        Some("dontAsk"),
+        &[],
+        &[],
+        None,
+        None,
+        Some("Kanna preamble."),
+        None,
+        None,
+        Some(&ProviderSessionBinding::Assign("assigned-id".to_string())),
+    );
+
+    assert!(command.contains("--session-id='assigned-id'"));
+    assert!(!command.contains("--resume"));
+}
+
+#[test]
 fn build_kanna_preamble_renders_transition_specific_completion_guidance() {
     let auto = super::build_kanna_preamble(
         &AgentProvider::Claude,

@@ -225,7 +225,7 @@
     },
     {
       "name": "kanna_request_revision",
-      "description": "Request a revision on a Kanna task: resumes the target stage's previous agent session in its worktree when possible (Claude, with context intact), otherwise starts a fresh agent in a newly forked workspace. Kanna delivers the original task prompt alongside the revision prompt, so the prompt should focus on the required changes. Agent-requested revisions are budgeted per task: the response's revisionBudget reports rounds/limit, and once the budget is spent the request starts nothing and the task parks for its human (revisionBudget.exhausted) — report your findings and stop instead of retrying.",
+      "description": "Request a revision on a Kanna task: resumes the target stage's previous agent session in its existing worktree when Kanna has a supported provider handle, otherwise starts a fresh agent in a newly forked workspace. Kanna delivers the original task prompt alongside the revision prompt, so the prompt should focus on the required changes. Agent-requested revisions are budgeted per task: the response's revisionBudget reports rounds/limit, and once the budget is spent the request starts nothing and the task parks for its human (revisionBudget.exhausted) — report your findings and stop instead of retrying.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/request-revision",
       "response": "json",

@@ -2,10 +2,12 @@ use crate::{daemon_client, http_api, session_replacements};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-fn persist_exit_resume_session_id(
+fn persist_provider_session_id(
     state: &http_api::AppState,
     session_id: &str,
     resume_session_id: Option<&str>,
+    completed_only: bool,
+    update_current_task: bool,
 ) -> Result<(), String> {
     let Some(resume_session_id) = resume_session_id
         .map(str::trim)
@@ -21,8 +23,12 @@ fn persist_exit_resume_session_id(
     else {
         return Ok(());
     };
-    db.update_pipeline_item_agent_session_id(&task_id, Some(resume_session_id))
+    db.update_stage_run_provider_session_id(session_id, resume_session_id, completed_only)
         .map_err(|e| format!("db error: {e}"))?;
+    if update_current_task {
+        db.update_pipeline_item_agent_session_id(&task_id, Some(resume_session_id))
+            .map_err(|e| format!("db error: {e}"))?;
+    }
     state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
     Ok(())
 }
@@ -252,6 +258,24 @@ async fn terminal_state_watcher_once(
                     );
                 }
             }
+            DaemonEvent::ProviderSessionChanged {
+                session_id,
+                provider_session_id,
+            } => {
+                if let Err(error) = persist_provider_session_id(
+                    state,
+                    &session_id,
+                    Some(&provider_session_id),
+                    false,
+                    true,
+                ) {
+                    log::warn!(
+                        "failed to persist provider session id for {}: {}",
+                        session_id,
+                        error
+                    );
+                }
+            }
             DaemonEvent::Exit {
                 session_id,
                 code,
@@ -262,19 +286,23 @@ async fn terminal_state_watcher_once(
                 // self-describing — a leftover entry would swallow a future
                 // legitimate Exit for the same session id.
                 let replaced = replacements.consume(&session_id);
-                if replaced || killed {
-                    // Orchestrated kill (stage swap, rerun, close) — not the
-                    // agent finishing.
-                    continue;
-                }
-                if let Err(error) =
-                    persist_exit_resume_session_id(state, &session_id, resume_session_id.as_deref())
-                {
+                if let Err(error) = persist_provider_session_id(
+                    state,
+                    &session_id,
+                    resume_session_id.as_deref(),
+                    replaced || killed,
+                    !(replaced || killed),
+                ) {
                     log::warn!(
                         "failed to persist terminal resume session id for {}: {}",
                         session_id,
                         error
                     );
+                }
+                if replaced || killed {
+                    // Orchestrated kill (stage swap, rerun, close) — not the
+                    // agent finishing.
+                    continue;
                 }
                 let success = code == 0;
                 if let Err(error) =
@@ -298,7 +326,7 @@ async fn terminal_state_watcher_once(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::db::Db;
+    use crate::db::{Db, NewStageRun};
     use kanna_daemon::protocol::{
         Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState,
     };
@@ -561,6 +589,129 @@ mod tests {
         server.await.unwrap();
 
         assert_task_agent_session_id(&config, "019d99a5-aa94-7c73-b786-644cc095c037");
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_persists_killed_exit_resume_id_on_completed_stage_run() {
+        let unique = unique_name("terminal-watcher-killed-resume-session");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let db = Db::open(&config.db_path).unwrap();
+        db.insert_stage_run(NewStageRun {
+            id: "run-implement",
+            task_id: "task-child",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "succeeded",
+            result: None,
+            feedback: None,
+            session_id: Some("task-child"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-child"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::Exit {
+                    session_id: "task-child".to_string(),
+                    code: 137,
+                    resume_session_id: Some("codex-thread".to_string()),
+                    killed: true,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            expect_no_notification_connection(&listener).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config.clone()),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        let run = Db::open(&config.db_path)
+            .unwrap()
+            .latest_stage_run("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.provider_session_id.as_deref(), Some("codex-thread"));
+        assert_task_not_completed(&config);
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_persists_live_headless_provider_session_id() {
+        let unique = unique_name("terminal-watcher-live-provider-session");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let db = Db::open(&config.db_path).unwrap();
+        db.insert_stage_run(NewStageRun {
+            id: "run-implement",
+            task_id: "task-child",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("opencode"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-child"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-child"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::ProviderSessionChanged {
+                    session_id: "task-child".to_string(),
+                    provider_session_id: "opencode-session".to_string(),
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &http_api::AppState::new(config.clone()),
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let run = Db::open(&config.db_path)
+            .unwrap()
+            .latest_stage_run("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.provider_session_id.as_deref(), Some("opencode-session"));
+        assert_task_agent_session_id(&config, "opencode-session");
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

@@ -136,6 +136,9 @@ pub struct AgentSpawnParams {
     /// Optional absolute executable path; otherwise resolved from env PATH.
     #[serde(default)]
     pub executable: Option<String>,
+    /// Existing provider conversation to resume instead of starting fresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -282,6 +285,10 @@ pub enum Event {
         status: SessionStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         waiting_prompt_snippet: Option<String>,
+    },
+    ProviderSessionChanged {
+        session_id: String,
+        provider_session_id: String,
     },
     SessionCreated {
         session_id: String,
@@ -689,6 +696,27 @@ mod tests {
                 assert_eq!(snapshot.sequence, 0);
             }
             other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn provider_session_changed_roundtrips() {
+        let event = Event::ProviderSessionChanged {
+            session_id: "task-1".to_string(),
+            provider_session_id: "provider-thread".to_string(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: Event = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Event::ProviderSessionChanged {
+                session_id,
+                provider_session_id,
+            } => {
+                assert_eq!(session_id, "task-1");
+                assert_eq!(provider_session_id, "provider-thread");
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 

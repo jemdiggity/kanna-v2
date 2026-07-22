@@ -89,7 +89,7 @@ export interface StageRun {
   result: string | null;
   feedback: string | null;
   session_id: string | null;
-  /** The agent CLI's own session id (Claude --session-id/--resume UUID), assigned at spawn. */
+  /** The agent CLI's own session id, assigned by Kanna or discovered from provider output. */
   provider_session_id: string | null;
   /** Worktree the run executed in; revisions resume the provider session here. */
   cwd: string | null;

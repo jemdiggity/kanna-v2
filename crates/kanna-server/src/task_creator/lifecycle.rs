@@ -646,6 +646,7 @@ fn spawn_session_command(
             system_prompt,
             mcp_config_path,
             executable,
+            resume_session_id,
         } => DaemonCommand::SpawnAgent {
             session_id,
             params: AgentSpawnParams {
@@ -662,6 +663,7 @@ fn spawn_session_command(
                 system_prompt: Some(system_prompt),
                 mcp_config_path,
                 executable,
+                resume_session_id,
             },
         },
     }

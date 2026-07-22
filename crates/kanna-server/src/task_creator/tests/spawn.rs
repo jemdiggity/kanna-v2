@@ -37,6 +37,7 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
             system_prompt: "Kanna context".to_string(),
             mcp_config_path: None,
             executable: None,
+            resume_session_id: None,
         },
     };
 
@@ -108,6 +109,7 @@ async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
             system_prompt: "Kanna context".to_string(),
             mcp_config_path: None,
             executable: None,
+            resume_session_id: None,
         },
     };
 

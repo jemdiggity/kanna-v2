@@ -310,8 +310,8 @@ pub struct StageRun {
     pub result: Option<String>,
     pub feedback: Option<String>,
     pub session_id: Option<String>,
-    /// The agent CLI's own session id (e.g. the Claude `--session-id` /
-    /// `--resume` UUID), assigned at spawn time. Revisions resume from it.
+    /// The agent CLI's own session id, assigned by Kanna or discovered from
+    /// provider output. Revisions resume from it when supported.
     pub provider_session_id: Option<String>,
     /// Worktree the run executed in; a resumed revision reopens the provider
     /// session here (CLI transcripts are keyed by working directory).

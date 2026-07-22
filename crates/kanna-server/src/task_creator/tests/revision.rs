@@ -386,6 +386,14 @@ fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() 
 /// same committed tip — the state a task is in when the review agent
 /// requests a revision.
 fn init_resume_revision_fixture(label: &str, config: &Config) -> (std::path::PathBuf, Db) {
+    init_resume_revision_fixture_for_provider(label, config, "claude")
+}
+
+fn init_resume_revision_fixture_for_provider(
+    label: &str,
+    config: &Config,
+    provider: &str,
+) -> (std::path::PathBuf, Db) {
     let repo_root = init_git_repo(label);
     std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
@@ -401,7 +409,9 @@ fn init_resume_revision_fixture(label: &str, config: &Config) -> (std::path::Pat
     .unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/AGENT.md"),
-        "---\nname: implement\ndescription: Implements resumed revisions\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
+        format!(
+            "---\nname: implement\ndescription: Implements resumed revisions\nagent_provider: {provider}\n---\nImplement revision:\n$TASK_PROMPT"
+        ),
     )
     .unwrap();
     publish_origin_main(&repo_root, "publish resume revision definitions");
@@ -435,7 +445,7 @@ fn init_resume_revision_fixture(label: &str, config: &Config) -> (std::path::Pat
         "2026-07-04 07:00:00",
     )
     .unwrap();
-    db.update_test_pipeline_item_stage_context("review-task", "task-review", "qa", None, "claude")
+    db.update_test_pipeline_item_stage_context("review-task", "task-review", "qa", None, provider)
         .unwrap();
     let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
     db.insert_stage_run(NewStageRun {
@@ -444,7 +454,7 @@ fn init_resume_revision_fixture(label: &str, config: &Config) -> (std::path::Pat
         stage: "in progress",
         kind: "main",
         agent: Some("implement"),
-        agent_provider: Some("claude"),
+        agent_provider: Some(provider),
         model: None,
         status: "running",
         result: None,
@@ -600,6 +610,99 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     assert_eq!(agent_session_id.as_deref(), Some(RESUME_SESSION_UUID));
 
     let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn request_revision_resumes_supported_provider_sessions_in_their_worktree() {
+    for (provider, command_fragment) in [
+        ("codex", "test-provider-bin/codex' resume "),
+        ("opencode", "run --interactive --session"),
+        ("copilot", "--resume="),
+        ("antigravity", "--conversation"),
+    ] {
+        let label = format!("revision-resume-{provider}");
+        let config = test_config(&label);
+        let (repo_root, db) = init_resume_revision_fixture_for_provider(&label, &config, provider);
+        let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
+
+        let prepared = prepare_revision_task_for_api(
+            &db,
+            &config,
+            "review-task",
+            "in progress",
+            "Address the provider-neutral review feedback.",
+        )
+        .unwrap();
+
+        assert_eq!(prepared.agent_provider, provider);
+        assert!(prepared.forked_workspace().is_none());
+        assert_eq!(
+            prepared
+                .resumed_workspace()
+                .expect("supported provider should resume")
+                .branch,
+            "task-impl"
+        );
+        assert_eq!(prepared.cwd, impl_worktree.to_string_lossy());
+        assert_eq!(
+            prepared.provider_session_id.as_deref(),
+            Some(RESUME_SESSION_UUID)
+        );
+        assert_eq!(prepared.resumed_from_run_id.as_deref(), Some("run-impl"));
+        match &prepared.session {
+            PreparedSessionSpawn::Pty { args, .. } => {
+                let command = args.last().expect("shell command");
+                assert!(
+                    command.contains(command_fragment),
+                    "{provider} command did not contain {command_fragment:?}: {command}"
+                );
+                assert!(command.contains("Address the provider-neutral review feedback."));
+            }
+            PreparedSessionSpawn::Agent { .. } => panic!("expected PTY session for {provider}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+#[test]
+fn request_revision_resumes_supported_headless_provider_sessions() {
+    for provider in ["codex", "opencode"] {
+        let label = format!("revision-resume-headless-{provider}");
+        let config = test_config(&label);
+        let (repo_root, db) = init_resume_revision_fixture_for_provider(&label, &config, provider);
+        db.update_test_pipeline_item_agent_type("review-task", "agent")
+            .unwrap();
+
+        let prepared = prepare_revision_task_for_api(
+            &db,
+            &config,
+            "review-task",
+            "in progress",
+            "Continue the headless provider session.",
+        )
+        .unwrap();
+
+        assert!(prepared.forked_workspace().is_none());
+        assert_eq!(prepared.agent_provider, provider);
+        assert_eq!(
+            prepared.provider_session_id.as_deref(),
+            Some(RESUME_SESSION_UUID)
+        );
+        match &prepared.session {
+            PreparedSessionSpawn::Agent {
+                resume_session_id,
+                prompt,
+                ..
+            } => {
+                assert_eq!(resume_session_id.as_deref(), Some(RESUME_SESSION_UUID));
+                assert!(prompt.contains("Continue the headless provider session."));
+            }
+            PreparedSessionSpawn::Pty { .. } => panic!("expected headless session for {provider}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
 }
 
 #[tokio::test]

@@ -745,7 +745,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         resolve_agent_type(source_agent_type, provider_candidates[0])?;
     }
 
-    let (workspace, claude_resume, resumed_from_run_id) = match workspace_spec {
+    let (workspace, resume_session_id, resumed_from_run_id) = match workspace_spec {
         RunWorkspaceSpec::Fork {
             branch: fork_branch,
         } => {
@@ -866,7 +866,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             &worktree_path,
             &[],
             false,
-            claude_resume.as_deref(),
+            resume_session_id.as_deref(),
         )?;
         let session_id = db
             .resolve_task_terminal_session_id(task_id)
@@ -1143,11 +1143,10 @@ fn stage_environment_teardown(
         .unwrap_or_default()
 }
 
-/// Build the daemon spawn for a stage run's agent session. For Claude PTY
-/// sessions the returned string is the run's provider session id: a fresh
-/// spawn assigns a new UUID (`--session-id`) and a revision resume reopens
-/// `claude_resume` (`--resume`). Other providers/session types return `None`
-/// — their sessions have no Kanna-known resume handle on this path.
+/// Build the daemon spawn for a stage run's agent session. Providers with a
+/// caller-assigned PTY session id (Claude and Copilot) receive one on fresh
+/// spawn. Any provider with a recorded handle can receive a provider-native
+/// resume binding; headless providers pass it to the daemon adapter.
 #[allow(clippy::too_many_arguments)]
 fn build_prepared_session(
     provider: AgentProvider,
@@ -1168,7 +1167,7 @@ fn build_prepared_session(
     worktree_path: &str,
     setup: &[String],
     defer_headless_setup: bool,
-    claude_resume: Option<&str>,
+    resume_session_id: Option<&str>,
 ) -> Result<(PreparedSessionSpawn, Option<String>), String> {
     Ok(match agent_type {
         AgentSessionType::Pty => {
@@ -1197,19 +1196,20 @@ fn build_prepared_session(
                 }
                 provider.executable().to_string()
             };
-            let claude_session = match (provider, claude_resume) {
-                (AgentProvider::Claude, Some(session_id)) => Some(
-                    commands::ClaudeSessionBinding::Resume(session_id.to_string()),
-                ),
-                (AgentProvider::Claude, None) => Some(commands::ClaudeSessionBinding::Assign(
-                    worktree::generate_agent_session_uuid()?,
+            let provider_session = match (provider, resume_session_id) {
+                (_, Some(session_id)) => Some(commands::ProviderSessionBinding::Resume(
+                    session_id.to_string(),
                 )),
+                (AgentProvider::Claude | AgentProvider::Copilot, None) => {
+                    Some(commands::ProviderSessionBinding::Assign(
+                        worktree::generate_agent_session_uuid()?,
+                    ))
+                }
                 _ => None,
             };
-            let provider_session_id = claude_session.as_ref().map(|binding| match binding {
-                commands::ClaudeSessionBinding::Assign(session_id)
-                | commands::ClaudeSessionBinding::Resume(session_id) => session_id.clone(),
-            });
+            let provider_session_id = provider_session
+                .as_ref()
+                .map(|binding| binding.session_id().to_string());
             let preamble = build_kanna_preamble(
                 &provider,
                 task_id,
@@ -1231,7 +1231,7 @@ fn build_prepared_session(
                 Some(&preamble),
                 mcp_config_path.as_deref(),
                 Some(worktree_path),
-                claude_session.as_ref(),
+                provider_session.as_ref(),
             );
             let full_cmd = build_task_shell_command(
                 &agent_cmd,
@@ -1290,8 +1290,9 @@ fn build_prepared_session(
                     system_prompt,
                     mcp_config_path,
                     executable: headless_executable,
+                    resume_session_id: resume_session_id.map(str::to_string),
                 },
-                None,
+                resume_session_id.map(str::to_string),
             )
         }
     })

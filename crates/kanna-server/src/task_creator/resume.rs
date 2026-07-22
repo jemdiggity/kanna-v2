@@ -1,11 +1,11 @@
 //! Preconditions for resuming a previous stage run's agent-CLI session.
 //!
-//! Claude CLI transcripts are keyed by working directory
+//! Every provider resumes inside the worktree that owns the recorded run.
+//! Claude additionally keys CLI transcripts by working directory
 //! (`<config-dir>/projects/<cwd-slug>/<session-id>.jsonl`), so a revision can
-//! only resume a session inside the worktree the run originally executed in,
-//! and only while that worktree still holds exactly the task's committed tip.
-//! Every check here fails toward `false`/`None`: a failed precondition means
-//! the revision falls back to today's fresh-fork behavior, never an error.
+//! only resume there when the transcript still exists. Every check here fails
+//! toward `false`/`None`: a failed precondition means the revision falls back
+//! to the fresh-fork behavior, never an error.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

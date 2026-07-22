@@ -82,8 +82,8 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) completion_transition: PipelineStageTransition,
-    /// The agent CLI's own session id assigned at spawn (Claude PTY only);
-    /// recorded on the stage run so a later revision can resume it.
+    /// The agent CLI's own session id assigned or supplied at spawn; recorded
+    /// on the stage run so a later revision can resume it.
     pub(super) provider_session_id: Option<String>,
     pub(super) recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     pub(super) session: PreparedSessionSpawn,
@@ -116,6 +116,7 @@ pub(crate) enum PreparedSessionSpawn {
         system_prompt: String,
         mcp_config_path: Option<String>,
         executable: Option<String>,
+        resume_session_id: Option<String>,
     },
 }
 

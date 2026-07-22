@@ -132,6 +132,32 @@ impl Db {
         }
     }
 
+    /// Attach a provider-native resume handle to the most recent run owned by
+    /// a daemon terminal session. Orchestrated replacements use
+    /// `completed_only` so a delayed exit event cannot stamp the newly
+    /// spawned running stage that reuses the same durable terminal id.
+    pub fn update_stage_run_provider_session_id(
+        &self,
+        session_id: &str,
+        provider_session_id: &str,
+        completed_only: bool,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE stage_run
+             SET provider_session_id = ?1
+             WHERE id = (
+               SELECT id FROM stage_run
+               WHERE session_id = ?2
+                 AND provider_session_id IS NULL
+                 AND (?3 = 0 OR status != 'running')
+               ORDER BY datetime(started_at) DESC, id DESC
+               LIMIT 1
+             )",
+            (provider_session_id, session_id, completed_only),
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn finish_stage_run(
         &self,
         id: &str,

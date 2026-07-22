@@ -5,14 +5,21 @@ use kanna_agent_protocol::mcp::{
 use kanna_agent_protocol::prompt_with_system_prompt;
 use std::path::Path;
 
-/// How a Claude PTY spawn binds to the CLI's own session store: `Assign`
-/// starts a fresh conversation under a Kanna-chosen UUID (`--session-id`) so
-/// a later revision can resume it; `Resume` reopens a previous run's
-/// conversation (`--resume`). The desktop TS spawn path
-/// (`apps/desktop/src/stores/agentCommand.ts`) follows the same convention.
-pub(super) enum ClaudeSessionBinding {
+/// How a provider PTY spawn binds to the CLI's own session store. Providers
+/// that accept caller-assigned ids use `Assign` for fresh conversations;
+/// `Resume` reopens a previous run's conversation through provider-native
+/// command syntax.
+pub(super) enum ProviderSessionBinding {
     Assign(String),
     Resume(String),
+}
+
+impl ProviderSessionBinding {
+    pub(super) fn session_id(&self) -> &str {
+        match self {
+            Self::Assign(id) | Self::Resume(id) => id,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -29,7 +36,7 @@ pub(super) fn build_agent_command(
     kanna_preamble: Option<&str>,
     mcp_config_path: Option<&str>,
     worktree_path: Option<&str>,
-    claude_session: Option<&ClaudeSessionBinding>,
+    provider_session: Option<&ProviderSessionBinding>,
 ) -> String {
     let prompt_with_fallback = match provider {
         AgentProvider::Claude => prompt.to_string(),
@@ -75,11 +82,11 @@ pub(super) fn build_agent_command(
                     shell_single_quote(mcp_config_path)
                 ));
             }
-            match claude_session {
-                Some(ClaudeSessionBinding::Assign(session_id)) => {
+            match provider_session {
+                Some(ProviderSessionBinding::Assign(session_id)) => {
                     flags.push(format!("--session-id '{}'", shell_single_quote(session_id)));
                 }
-                Some(ClaudeSessionBinding::Resume(session_id)) => {
+                Some(ProviderSessionBinding::Resume(session_id)) => {
                     flags.push(format!("--resume '{}'", shell_single_quote(session_id)));
                 }
                 None => {}
@@ -92,6 +99,15 @@ pub(super) fn build_agent_command(
         }
         AgentProvider::Copilot => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
+            match provider_session {
+                Some(ProviderSessionBinding::Assign(session_id)) => {
+                    flags.push(format!("--session-id='{}'", shell_single_quote(session_id)))
+                }
+                Some(ProviderSessionBinding::Resume(session_id)) => {
+                    flags.push(format!("--resume='{}'", shell_single_quote(session_id)))
+                }
+                None => {}
+            }
             if let Some(mcp_config_path) = mcp_config_path {
                 flags.push(format!(
                     "--additional-mcp-config @'{}'",
@@ -119,7 +135,15 @@ pub(super) fn build_agent_command(
             if let Some(model) = model {
                 flags.push(format!("-m {}", model));
             }
-            format!("{executable} {} '{}'", flags.join(" "), escaped_prompt)
+            match provider_session {
+                Some(ProviderSessionBinding::Resume(session_id)) => format!(
+                    "{executable} resume {} '{}' '{}'",
+                    flags.join(" "),
+                    shell_single_quote(session_id),
+                    escaped_prompt
+                ),
+                _ => format!("{executable} {} '{}'", flags.join(" "), escaped_prompt),
+            }
         }
         AgentProvider::Opencode => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
@@ -131,6 +155,10 @@ pub(super) fn build_agent_command(
                 "run".to_string(),
                 "--interactive".to_string(),
             ];
+            if let Some(ProviderSessionBinding::Resume(session_id)) = provider_session {
+                parts.push("--session".to_string());
+                parts.push(format!("'{}'", shell_single_quote(session_id)));
+            }
             if let Some(env_prefix) = opencode_mcp_env_prefix(mcp_config_path) {
                 parts.insert(0, env_prefix);
             }
@@ -142,6 +170,12 @@ pub(super) fn build_agent_command(
         }
         AgentProvider::Antigravity => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
+            if let Some(ProviderSessionBinding::Resume(session_id)) = provider_session {
+                flags.push(format!(
+                    "--conversation '{}'",
+                    shell_single_quote(session_id)
+                ));
+            }
             if let Some(model) = model {
                 flags.push(format!("--model {}", model));
             }

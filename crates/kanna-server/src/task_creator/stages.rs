@@ -591,7 +591,10 @@ fn prepare_revision_resume(
         Some(run) => run,
         None => return fall_back("no stage run recorded a provider session"),
     };
-    if run.agent_provider.as_deref() != Some("claude") {
+    let Some(run_provider) = run.agent_provider.as_deref() else {
+        return fall_back("previous run recorded no provider");
+    };
+    if !provider_supports_resume(run_provider) {
         return fall_back("previous run's provider does not support resume");
     }
     let (Some(provider_session_id), Some(run_cwd)) =
@@ -619,7 +622,7 @@ fn prepare_revision_resume(
     let Some(resume_branch) = current_branch(&run_cwd) else {
         return fall_back("previous run's worktree has no checked-out branch");
     };
-    if !claude_transcript_exists(&run_cwd, &provider_session_id) {
+    if run_provider == "claude" && !claude_transcript_exists(&run_cwd, &provider_session_id) {
         return fall_back("no CLI transcript for the previous session");
     }
 
@@ -659,14 +662,14 @@ fn prepare_revision_resume(
         explicit_provider,
         source_task.agent_provider.as_deref(),
     )?;
-    // The stage's current definition must still resolve to a resumable
-    // Claude PTY session; a def that changed provider or session type since
-    // the recorded run cannot continue that run's conversation. Nothing was
-    // created on disk for the resume, so discarding it is safe.
-    if prepared.agent_provider != "claude"
+    // The stage's current definition must still resolve to the recorded
+    // provider and session. A definition that changed provider or session
+    // type cannot continue that conversation. Nothing was created on disk
+    // for the resume, so discarding it is safe.
+    if prepared.agent_provider != run_provider
         || prepared.provider_session_id.as_deref() != Some(provider_session_id.as_str())
     {
-        return fall_back("stage no longer resolves to a resumable Claude session");
+        return fall_back("stage no longer resolves to the recorded resumable session");
     }
     log::info!(
         "revision resumes task {task_id} stage '{}' from run {} in {}",
@@ -728,6 +731,13 @@ pub(crate) fn resolve_revision_budget(
         .task_revision_rounds(source_task_id)
         .map_err(|e| format!("db error: {}", e))?;
     Ok(RevisionBudget { rounds, limit })
+}
+
+fn provider_supports_resume(provider: &str) -> bool {
+    matches!(
+        provider,
+        "claude" | "codex" | "opencode" | "copilot" | "antigravity"
+    )
 }
 
 pub(crate) fn resolve_stage_transition(

@@ -39,7 +39,12 @@ pub async fn handle_spawn_agent(
     };
 
     let ctx = params_to_ctx(&params);
-    let mut spec = adapter.initial_spawn(&ctx);
+    let mut spec = match params.resume_session_id.as_deref() {
+        Some(provider_session_id) => {
+            adapter.resume_spawn(&ctx, provider_session_id, &params.prompt)
+        }
+        None => adapter.initial_spawn(&ctx),
+    };
     if let Some(executable) = &params.executable {
         spec.executable = executable.clone();
     }
@@ -52,6 +57,7 @@ pub async fn handle_spawn_agent(
     // spawn, or a seal-rejected retry, contaminate the winner's transcript.
     let shared = agent::shared_agent_state(&data_dir, &session_id);
     let initiating_prompt = params.prompt.clone();
+    let provider_session_id = params.resume_session_id.clone();
 
     // Reserve the id atomically: the existence check and the reservation
     // record land under one lock acquisition, so a concurrent SpawnAgent for
@@ -105,7 +111,7 @@ pub async fn handle_spawn_agent(
                 incarnation,
                 spawning: true,
                 reservation_is_initial: true,
-                provider_session_id: None,
+                provider_session_id,
                 status: SessionStatus::Busy,
                 last_assistant_prompt: None,
                 session_allowed_tools: HashSet::new(),

@@ -1,3 +1,4 @@
+use super::commands::ProviderSessionBinding;
 use super::definitions::PipelineStageTransition;
 use super::environment::resolve_binary_from_candidates_with_path_lookup;
 use super::lifecycle::spawn_prepared_task;
