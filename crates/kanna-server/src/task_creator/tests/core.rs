@@ -1,4 +1,6 @@
-use super::super::definitions::{AgentDefinition, PipelineDefinition, RepoDefinitions};
+use super::super::definitions::{
+    AgentDefinition, PipelineDefinition, PipelineStageTransition, RepoDefinitions,
+};
 use super::super::provider::resolve_agent_provider_with;
 use super::*;
 
@@ -936,6 +938,57 @@ fn missing_remote_custom_definitions_fall_back_only_to_compiled_builtins() {
 }
 
 #[test]
+fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-dispatch-builtins");
+    publish_origin_main(&repo_root, "publish empty dispatch definition source");
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let dispatch = definitions.pipeline("qa-dispatch").unwrap();
+    assert_eq!(dispatch.name.as_deref(), Some("qa-dispatch"));
+    let review = dispatch
+        .stages
+        .iter()
+        .find(|stage| stage.name == "review")
+        .expect("qa-dispatch review stage");
+    assert_eq!(review.agent.as_deref(), Some("qa-dispatcher"));
+    assert_eq!(review.policy.transition, PipelineStageTransition::Auto);
+
+    let specialty = definitions.pipeline("specialty-review").unwrap();
+    assert_eq!(specialty.stages.len(), 1);
+    let stage = &specialty.stages[0];
+    assert_eq!(stage.name, "review");
+    assert!(
+        stage.agent.is_none(),
+        "the dispatcher binds the specialty agent at task creation"
+    );
+    // Manual: both verdicts park the child unread — never auto-close — so
+    // the dispatcher uniformly collects the verdict and closes every child.
+    assert_eq!(stage.policy.transition, PipelineStageTransition::Manual);
+
+    for agent_name in [
+        "qa-dispatcher",
+        "review-ui",
+        "review-security",
+        "review-perf",
+        "review-concurrency",
+        "review-migration",
+        "review-compat",
+    ] {
+        assert_eq!(definitions.agent(agent_name).unwrap().name, agent_name);
+    }
+
+    // review-release is a Kanna repo-local specialty, not a compiled
+    // builtin: without a repo file it must not resolve.
+    let release_error = definitions.agent("review-release").unwrap_err();
+    assert!(
+        release_error.contains("compiled resource not found"),
+        "{release_error}"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
 fn remote_pipeline_tree_read_error_does_not_fall_back_to_compiled_default() {
     let repo_root = init_git_repo_without_provider_fixtures("definitions-pipeline-tree");
     let pipeline_path = repo_root.join(".kanna/pipelines/default.json");
@@ -1220,7 +1273,14 @@ fn pipeline_names_are_sorted_deduped_remote_and_compiled_union() {
 
     assert_eq!(
         definitions.pipeline_names().unwrap(),
-        vec!["alpha", "default", "qa", "zeta"]
+        vec![
+            "alpha",
+            "default",
+            "qa",
+            "qa-dispatch",
+            "specialty-review",
+            "zeta"
+        ]
     );
     let _ = std::fs::remove_dir_all(repo_root);
 }
@@ -2670,6 +2730,75 @@ fn prepare_task_uses_create_request_agent_selector() {
             let command = args.join(" ");
             assert!(command.contains("setup agent prompt"));
             assert!(!command.contains("implement agent prompt"));
+        }
+        _ => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_binds_specialty_agent_on_specialty_review_pipeline() {
+    // The QA dispatcher's fan-out path: a child task created on the builtin
+    // single-stage `specialty-review` pipeline, with the specialty agent
+    // bound through the create request's `agent` override.
+    let repo_root = init_git_repo("specialty-review-dispatch");
+    let config = test_config("specialty-review-dispatch");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "parent-1",
+        "repo-1",
+        "parent task under review",
+        None,
+        "review",
+        "2026-07-22 09:00:00",
+    )
+    .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Specialty review dispatched from task parent-1.".to_string(),
+            display_name: Some("Security Review".to_string()),
+            pipeline_name: Some("specialty-review".to_string()),
+            stage: None,
+            base_ref: None,
+            agent: Some("review-security".to_string()),
+            agent_provider: Some("codex".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            notify_task_id: Some("parent-1".to_string()),
+            parent_task_id: Some("parent-1".to_string()),
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(prepared.created_task.stage, "review");
+    assert_eq!(prepared.stage_agent.as_deref(), Some("review-security"));
+    assert_eq!(
+        prepared.completion_transition,
+        PipelineStageTransition::Manual
+    );
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(command.contains("specialty security review agent"));
+            assert!(command.contains("Specialty review dispatched from task parent-1."));
         }
         _ => panic!("expected pty session"),
     }
