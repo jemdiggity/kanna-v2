@@ -9,6 +9,7 @@ import {
   renderPathGrid,
   renderReferenceGrid,
   renderSessionStorePathGrid,
+  verifyMobileAltScreenScrollInput,
   verifyMobileEasedScrolling,
   verifyMobileTerminalSelection
 } from "./render.ts";
@@ -30,6 +31,8 @@ async function main(): Promise<void> {
     process.stdout.write("PASS terminal-safe-region\n");
     await verifyMobileEasedScrolling(browser);
     process.stdout.write("PASS mobile-eased-scrolling\n");
+    await verifyMobileAltScreenScrollInput(browser);
+    process.stdout.write("PASS mobile-alt-screen-scroll-input\n");
     await verifyMobileTerminalSelection(browser);
     process.stdout.write("PASS mobile-terminal-selection\n");
     for (const fixture of fixtures) {

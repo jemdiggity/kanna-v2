@@ -179,6 +179,7 @@ interface RenderTaskScreenOptions {
   taskCreationErrorMessage?: string | null;
   onRecoverTaskCreation?: () => void;
   agentStatus?: TaskTerminalStatus;
+  onSendTerminalInput?: (dataB64: string) => void;
   onReadTaskFile?: (path: string) => Promise<{ path: string; content: string }>;
   onReadTaskDiff?: () => Promise<{
     taskId: string;
@@ -225,6 +226,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     taskCreationErrorMessage = null,
     onRecoverTaskCreation = vi.fn(),
     agentStatus = "live",
+    onSendTerminalInput,
     onReadTaskFile = vi.fn().mockResolvedValue({
       path: "docs/spec.md",
       content: "# Spec"
@@ -290,6 +292,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onAdvanceTaskStage: componentMocks.onAdvanceTaskStage,
     onCloseTask: componentMocks.onCloseTask,
     onSendInput: componentMocks.onSendInput,
+    onSendTerminalInput,
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn(),
     onRecoverTaskCreation,
@@ -831,6 +834,17 @@ describe("TaskScreen", () => {
 
     expect(findByType(tree, "TerminalWebView")).not.toBeNull();
     expect(findByType(tree, "AgentMessageView")).toBeNull();
+  });
+
+  it("hands the terminal WebView the alt-screen scroll input callback", () => {
+    const onSendTerminalInput = vi.fn();
+    const tree = renderTaskScreen({ agentType: "pty", onSendTerminalInput });
+    const terminal = findByType(tree, "TerminalWebView");
+
+    expect(terminal?.props?.onTerminalInput).toBe(onSendTerminalInput);
+
+    (terminal?.props?.onTerminalInput as (dataB64: string) => void)("G1s8NjU7MTsxTQ==");
+    expect(onSendTerminalInput).toHaveBeenCalledWith("G1s8NjU7MTsxTQ==");
   });
 
   it("passes desktop PTY dimensions to the terminal WebView", () => {
