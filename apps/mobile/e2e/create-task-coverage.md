@@ -71,6 +71,16 @@ The narrower automated coverage is:
   part of its primary cloud read rather than a second authoritative miss, so a
   single logical refresh cannot exhaust the acknowledged slot's grace window.
 
+Keyboard interaction with the composer sheet (focusing the prompt input and
+scrolling the rest of the sheet while the software keyboard is up) has the same
+harness gap: it additionally needs a real simulator/device keyboard, which the
+current local-only Appium smoke does not drive deterministically. The sheet's
+scroll container carries the stable selector
+`mobile.create-task.sheet-scroll` so a future device smoke can scroll it, and
+`src/components/CreateTaskComposer.test.tsx` covers the structural contract in
+the meantime: the sheet is height-capped and its content lives in a
+`ScrollView` with `keyboardShouldPersistTaps="handled"`.
+
 The focused command also retains the editable drawer coverage in
 `src/components/CreateTaskComposer.test.tsx` and the stable recovery selector in
 `src/e2eTestIds.test.ts`:

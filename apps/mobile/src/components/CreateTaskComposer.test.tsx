@@ -8,6 +8,7 @@ vi.mock("react-native", () => ({
     OS: "ios"
   },
   Pressable: "Pressable",
+  ScrollView: "ScrollView",
   StyleSheet: {
     absoluteFill: "absoluteFill",
     create: <T extends Record<string, unknown>>(styles: T) => styles
@@ -155,6 +156,27 @@ describe("CreateTaskComposer", () => {
         zIndex: expect.any(Number)
       })
     );
+  });
+
+  it("keeps the sheet scrollable when the keyboard shrinks the visible area", () => {
+    const tree = renderComposer({ isOptionsExpanded: true });
+    const keyboardAvoider = findNodeByType(tree, "KeyboardAvoidingView");
+    const sheet = flattenChildren(keyboardAvoider?.props?.children)[1];
+    const sheetScroll = findNodeByTestId(tree, "mobile.create-task.sheet-scroll");
+
+    expect(sheet?.type).toBe("View");
+    expect(sheet?.props?.style).toEqual(
+      expect.objectContaining({
+        maxHeight: "100%"
+      })
+    );
+    expect(sheetScroll?.type).toBe("ScrollView");
+    expect(sheetScroll?.props?.keyboardShouldPersistTaps).toBe("handled");
+    expect(findNodeByText(sheetScroll as ElementNode, "New task")).not.toBeNull();
+    expect(findNodeByText(sheetScroll as ElementNode, "Create")).not.toBeNull();
+    expect(
+      findNodeByTestId(sheetScroll as ElementNode, "mobile.create-task.prompt")
+    ).not.toBeNull();
   });
 
   it("shows a compact selected repo and options summary by default", () => {
