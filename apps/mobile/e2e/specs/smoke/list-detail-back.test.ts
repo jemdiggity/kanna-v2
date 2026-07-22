@@ -6,11 +6,13 @@ import {
   exerciseListDetailBackFromOrigin,
   inspectTerminalWebView,
   openPtyFixtureTask,
+  performTaskDetailEdgeSwipeBack,
   PTY_SNAPSHOT_MIN_DECODED_BYTES,
   resolveRequiredPtyTerminalFixture,
   waitForRenderedPtyTerminal,
   waitForTaskTerminalLive
 } from "./list-detail-back.e2e";
+import { selectors } from "../../helpers/selectors";
 
 describe("origin-preserving list/detail/back", () => {
   it("returns to Activity after opening a task from Activity", async () => {
@@ -56,6 +58,52 @@ function createElement(exists: () => boolean, onClick?: () => void): FakeElement
     waitForDisplayed: vi.fn(async () => undefined)
   };
 }
+
+describe("performTaskDetailEdgeSwipeBack", () => {
+  it("drags from the native iOS left edge and waits for Tasks to replace TaskDetail", async () => {
+    let taskDetailVisible = true;
+    let tasksVisible = false;
+    const taskDetail = createElement(() => taskDetailVisible);
+    const tasksScreen = {
+      ...createElement(() => tasksVisible),
+      isDisplayed: vi.fn(async () => tasksVisible)
+    };
+    const driver = {
+      $: vi.fn(async (selector: string) =>
+        selector === selectors.taskDetailScreen ? taskDetail : tasksScreen
+      ),
+      execute: vi.fn(async () => {
+        taskDetailVisible = false;
+        tasksVisible = true;
+      }),
+      getWindowSize: vi.fn(async () => ({ width: 390, height: 844 })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) {
+          return;
+        }
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await performTaskDetailEdgeSwipeBack(driver as never);
+
+    expect(driver.execute).toHaveBeenCalledWith(
+      "mobile: dragFromToForDuration",
+      {
+        duration: 0.5,
+        fromX: 1,
+        fromY: 422,
+        toX: 293,
+        toY: 422
+      }
+    );
+    expect(driver.$).toHaveBeenCalledWith(selectors.taskDetailScreen);
+    expect(driver.$).toHaveBeenCalledWith(selectors.tasksScreen);
+    expect(taskDetail.isExisting).toHaveBeenCalled();
+    expect(tasksScreen.isExisting).toHaveBeenCalled();
+    expect(tasksScreen.isDisplayed).toHaveBeenCalled();
+  });
+});
 
 describe("ensureTaskListVisible", () => {
   it("backs out of persisted task detail before waiting for task rows", async () => {

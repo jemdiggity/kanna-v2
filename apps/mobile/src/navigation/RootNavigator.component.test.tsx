@@ -87,6 +87,56 @@ afterEach(async () => {
 });
 
 describe("RootNavigator", () => {
+  it("enables edge-only swipe back for task detail", async () => {
+    await act(async () => {
+      rendered = create(
+        <RootNavigator
+          controller={{} as never}
+          forceCloudEnabled={false}
+          initialState={{
+            index: 0,
+            key: "root",
+            routeNames: ["MainTabs"],
+            routes: [{ key: "main-tabs", name: "MainTabs" }],
+            stale: false,
+            type: "stack"
+          } as never}
+          onForceCloudChange={vi.fn()}
+          onOpenAccount={vi.fn()}
+          openMachinesRequestKey={0}
+          quickReplies={DEFAULT_TASK_QUICK_REPLIES}
+          quickRepliesHydrated
+          state={{
+            accountDesktops: [],
+            composerAgentProvider: "claude",
+            composerDesktopId: null,
+            composerErrorMessage: null,
+            composerPrompt: "",
+            composerRepoId: null,
+            isComposerOpen: false,
+            isComposerOptionsExpanded: false,
+            liveLanDesktops: [],
+            pendingTaskCreation: null,
+            repos: [],
+            selectedTaskId: null,
+            trustedDesktops: []
+          } as never}
+        />
+      );
+    });
+
+    const taskDetailScreen = rendered.root
+      .findAllByType("NativeStackScreen")
+      .find((screen) => screen.props.name === "TaskDetail");
+
+    expect(taskDetailScreen?.props.options).toMatchObject({
+      fullScreenGestureEnabled: false,
+      gestureDirection: "horizontal",
+      gestureEnabled: true,
+      headerShown: false
+    });
+  });
+
   it("gives navigation-managed surfaces the Kanna dark background", async () => {
     await act(async () => {
       rendered = create(

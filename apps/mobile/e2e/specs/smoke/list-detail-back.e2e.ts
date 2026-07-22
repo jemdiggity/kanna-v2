@@ -812,6 +812,38 @@ export async function exerciseListDetailBackFromOrigin(
   await ui.assertOrigin(origin);
 }
 
+export async function performTaskDetailEdgeSwipeBack(
+  driver: Browser
+): Promise<void> {
+  const { width, height } = await driver.getWindowSize();
+  const verticalMidpoint = Math.round(height * 0.5);
+
+  await driver.execute("mobile: dragFromToForDuration", {
+    duration: 0.5,
+    fromX: 1,
+    fromY: verticalMidpoint,
+    toX: Math.round(width * 0.75),
+    toY: verticalMidpoint
+  });
+
+  await driver.waitUntil(
+    async () => {
+      const taskDetail = await driver.$(selectors.taskDetailScreen);
+      const tasksScreen = await driver.$(selectors.tasksScreen);
+      if ((await taskDetail.isExisting()) || !(await tasksScreen.isExisting())) {
+        return false;
+      }
+      return tasksScreen.isDisplayed().catch(() => false);
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected left-edge swipe to dismiss TaskDetail and restore the Tasks list"
+    }
+  );
+}
+
 export async function runListDetailBackSmoke(
   driver: Browser,
   options: RunListDetailBackSmokeOptions = {}
@@ -859,6 +891,19 @@ export async function runListDetailBackSmoke(
   await backButton.click();
 
   await driver.pause(BACK_NAVIGATION_SETTLE_MS);
+  await waitForTaskRows(ui);
+
+  const tasksTab = await driver.$(selectors.tasksTab);
+  await tasksTab.click();
+  const tasksScreen = await driver.$(selectors.tasksScreen);
+  await tasksScreen.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+
+  await openPtyFixtureTask(ui, fixture.taskId);
+  const edgeSwipeTaskDetail = await driver.$(selectors.taskDetailScreen);
+  await edgeSwipeTaskDetail.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await waitForTaskTerminalLive(ui);
+  await waitForRenderedPtyTerminal(ui, fixture);
+  await performTaskDetailEdgeSwipeBack(driver);
   await waitForTaskRows(ui);
 
   await exerciseListDetailBackFromOrigin(
