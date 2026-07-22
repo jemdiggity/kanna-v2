@@ -5,6 +5,7 @@ import { AppError } from "../appError";
 import { resetDaemonReadyObservationForTests } from "./daemonReadyState";
 
 const markTaskSwitchFirstOutputMock = vi.hoisted(() => vi.fn());
+const forwardTerminalRuntimeStatusMock = vi.hoisted(() => vi.fn(async () => {}));
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const warningToastMock = vi.fn();
@@ -23,6 +24,7 @@ const eventListeners = new Map<string, ((event: any) => void)[]>();
 interface TerminalStreamHandlers {
   onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
   onOutput: (dataB64: string, metadata?: { receivedAtMs: number }) => void;
+  onStatus?: (status: string) => void;
   onSessionExit?: (code: number) => void;
   onError?: (code: string, message: string) => void;
 }
@@ -186,6 +188,11 @@ vi.mock("../perf/taskSwitchPerf", () => ({
   markTaskSwitchFirstOutput: (...args: unknown[]) => markTaskSwitchFirstOutputMock(...args),
 }));
 
+vi.mock("./terminalRuntimeStatusSink", () => ({
+  forwardTerminalRuntimeStatus: (...args: unknown[]) => forwardTerminalRuntimeStatusMock(...args),
+  subscribeTerminalRuntimeStatus: vi.fn(() => () => {}),
+}));
+
 vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
 }));
@@ -273,6 +280,7 @@ describe("useTerminal", () => {
     });
     terminals.length = 0;
     markTaskSwitchFirstOutputMock.mockReset();
+    forwardTerminalRuntimeStatusMock.mockReset();
     resetDaemonReadyObservationForTests();
     streamClientMock.getSharedStreamClient.mockReset();
     streamClientMock.onSharedStreamConnectionChange.mockReset();
@@ -281,6 +289,7 @@ describe("useTerminal", () => {
       attachTerminal: vi.fn((taskId: string, handlers: {
         onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
         onOutput: (dataB64: string) => void;
+        onStatus?: (status: string) => void;
         onSessionExit?: (code: number) => void;
         onError?: (code: string, message: string) => void;
       }) => {
@@ -3196,6 +3205,35 @@ describe("useTerminal", () => {
     expect(markTaskSwitchFirstOutputMock).toHaveBeenNthCalledWith(1, "session-1");
     expect(markTaskSwitchFirstOutputMock).toHaveBeenNthCalledWith(2, "session-1");
 
+    wrapper.unmount();
+  });
+
+  it("forwards KSP terminal status with the daemon session id", async () => {
+    installKspStreamClient();
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal("session-1");
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+    await wrapper.vm.startListening();
+
+    terminalStreamHandlers.get("session-1")?.onStatus?.("busy");
+
+    expect(forwardTerminalRuntimeStatusMock).toHaveBeenCalledWith("session-1", "busy");
     wrapper.unmount();
   });
 });

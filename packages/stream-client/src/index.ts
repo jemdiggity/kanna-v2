@@ -62,6 +62,7 @@ export interface AgentStreamHandlers {
 export interface TerminalStreamHandlers {
   onSnapshot?(cols: number, rows: number, dataB64: string): void;
   onOutput(dataB64: string, metadata: TerminalOutputMetadata): void;
+  onStatus?(status: string): void;
   onSessionExit?(code: number): void;
   onError?(code: string, message: string): void;
 }
@@ -456,6 +457,7 @@ export class StreamClient {
       }
       case "status_changed": {
         this.agentAttachment(frame.task_id)?.handlers.onStatus?.(frame.status);
+        this.terminalAttachment(frame.task_id)?.handlers.onStatus?.(frame.status);
         return;
       }
       case "state_changed": {

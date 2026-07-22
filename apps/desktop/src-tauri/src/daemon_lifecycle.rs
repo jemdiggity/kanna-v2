@@ -167,9 +167,6 @@ pub(crate) fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonStat
                             Some("HookEvent") => {
                                 let _ = app.emit("hook_event", &event);
                             }
-                            Some("StatusChanged") => {
-                                let _ = app.emit("status_changed", &event);
-                            }
                             Some("SessionCreated") => {
                                 let _ = app.emit("session_created", &event);
                             }

@@ -933,6 +933,7 @@ impl StreamConn {
     async fn shutdown(&mut self) {
         for ((task_id, kind), task) in self.attachments.drain() {
             task.abort();
+            let _ = task.await;
             if kind == StreamKind::Companion {
                 self.companion_tx.invalidate(&task_id);
             }
@@ -1262,6 +1263,7 @@ impl StreamConn {
             ClientFrame::Detach { task_id, kind } => {
                 if let Some(task) = self.attachments.remove(&(task_id.clone(), kind)) {
                     task.abort();
+                    let _ = task.await;
                 }
                 if kind == StreamKind::Terminal {
                     if let Some(control) = self.terminal_controls.remove(&task_id) {
@@ -1388,6 +1390,7 @@ impl StreamConn {
         // Replace any existing attachment for this (task, kind).
         if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
             existing.abort();
+            let _ = existing.await;
         }
         if kind == StreamKind::Companion {
             let key = (task_id.clone(), kind);
@@ -1423,6 +1426,7 @@ impl StreamConn {
         // Replace any existing attachment for this (task, kind).
         if let Some(existing) = self.attachments.remove(&(task_id.clone(), kind)) {
             existing.abort();
+            let _ = existing.await;
         }
 
         let frame_tx = self.frame_tx.clone();
@@ -1433,7 +1437,11 @@ impl StreamConn {
                 daemon_dir, task_id, session_id, from_seq, frame_tx,
             )),
             StreamKind::Terminal => {
-                tokio::spawn(stream_terminal(daemon_dir, task_id, session_id, frame_tx))
+                let lease = self.state.terminal_attachments().attach(session_id.clone());
+                tokio::spawn(async move {
+                    let _lease = lease;
+                    stream_terminal(daemon_dir, task_id, session_id, frame_tx).await;
+                })
             }
             StreamKind::Companion => unreachable!("companion attach handled above"),
         };
@@ -1929,6 +1937,22 @@ async fn stream_terminal_once(
                 )
                 .await
                 .is_err()
+                {
+                    return StreamRunEnd::Done;
+                }
+            }
+            Ok(DaemonEvent::StatusChanged {
+                session_id: event_session,
+                status,
+                ..
+            }) if event_session == session_id => {
+                if frame_tx
+                    .send(ServerFrame::StatusChanged {
+                        task_id: task_id.to_string(),
+                        status: status_str(status).to_string(),
+                    })
+                    .await
+                    .is_err()
                 {
                     return StreamRunEnd::Done;
                 }
@@ -3881,6 +3905,244 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_attachment_lease_brackets_attach_snapshot_and_stream_end() {
+        let unique = format!(
+            "ksp-terminal-lease-order-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let (attach_started_tx, attach_started_rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let session_id = "shell-terminal-lease-order";
+
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept attach connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read attach command");
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::AttachSnapshot { ref session_id, .. }
+                    if session_id == "shell-terminal-lease-order"
+            ));
+            attach_started_tx.send(()).unwrap();
+            reply_rx.await.unwrap();
+            for event in [
+                DaemonEvent::Snapshot {
+                    session_id: session_id.to_string(),
+                    snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                        version: 1,
+                        rows: 24,
+                        cols: 80,
+                        cursor_row: 0,
+                        cursor_col: 0,
+                        cursor_visible: true,
+                        saved_at: 0,
+                        sequence: 0,
+                        vt: String::new(),
+                    },
+                },
+                DaemonEvent::StatusChanged {
+                    session_id: session_id.to_string(),
+                    status: SessionStatus::Idle,
+                    waiting_prompt_snippet: None,
+                },
+                DaemonEvent::Exit {
+                    session_id: session_id.to_string(),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+            ] {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let mut config = test_config("ksp-terminal-lease-order", "KSP Lease Order");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        let state = Arc::new(AppState::new(config));
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+        let mut conn = StreamConn {
+            state: Arc::clone(&state),
+            frame_tx,
+            companion_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            companion_event_times: HashMap::new(),
+            authed: true,
+            auth_mode: AuthMode::AllowEmpty,
+        };
+
+        conn.attach(session_id.to_string(), StreamKind::Terminal, 0)
+            .await;
+        attach_started_rx.await.unwrap();
+        assert!(
+            state.terminal_attachments().is_attached(session_id),
+            "lease must be held while AttachSnapshot is in flight"
+        );
+
+        reply_tx.send(()).unwrap();
+        for _ in 0..3 {
+            outbound_rx.recv().await.expect("expected terminal frame");
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.terminal_attachments().is_attached(session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lease was not released at stream end");
+
+        daemon.await.unwrap();
+        conn.shutdown().await;
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_forwards_queued_initial_and_live_status_without_synthesis() {
+        let unique = format!(
+            "ksp-terminal-status-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let daemon_dir_string = daemon_dir.to_string_lossy().to_string();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir_string);
+        let _ = std::fs::remove_file(&socket_path);
+
+        let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = daemon_listener
+                .accept()
+                .await
+                .expect("accept daemon connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read attach snapshot command");
+            let command: DaemonCommand =
+                serde_json::from_str(line.trim()).expect("parse attach snapshot command");
+            assert!(matches!(
+                command,
+                DaemonCommand::AttachSnapshot { ref session_id, .. }
+                    if session_id == "daemon-terminal-status"
+            ));
+
+            let events = [
+                DaemonEvent::Snapshot {
+                    session_id: "daemon-terminal-status".to_string(),
+                    snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                        version: 1,
+                        rows: 24,
+                        cols: 80,
+                        cursor_row: 0,
+                        cursor_col: 0,
+                        cursor_visible: true,
+                        saved_at: 0,
+                        sequence: 0,
+                        vt: "busy snapshot".to_string(),
+                    },
+                },
+                // AttachSnapshot registers the subscriber with both the
+                // authoritative snapshot and this initial status event.
+                DaemonEvent::StatusChanged {
+                    session_id: "daemon-terminal-status".to_string(),
+                    status: SessionStatus::Busy,
+                    waiting_prompt_snippet: None,
+                },
+                DaemonEvent::StatusChanged {
+                    session_id: "another-session".to_string(),
+                    status: SessionStatus::Idle,
+                    waiting_prompt_snippet: None,
+                },
+                DaemonEvent::StatusChanged {
+                    session_id: "daemon-terminal-status".to_string(),
+                    status: SessionStatus::Waiting,
+                    waiting_prompt_snippet: None,
+                },
+                DaemonEvent::Exit {
+                    session_id: "daemon-terminal-status".to_string(),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+            ];
+            for event in events {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .expect("write daemon event");
+            }
+        });
+
+        let (frame_tx, mut frame_rx) = mpsc::channel(8);
+        let mut attached_once = false;
+        assert!(matches!(
+            stream_terminal_once(
+                &daemon_dir_string,
+                "task-status",
+                "daemon-terminal-status",
+                &mut attached_once,
+                &frame_tx,
+            )
+            .await,
+            StreamRunEnd::Done
+        ));
+
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::TermSnapshot { ref task_id, .. }) if task_id == "task-status"
+        ));
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::StatusChanged { ref task_id, ref status })
+                if task_id == "task-status" && status == "busy"
+        ));
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::StatusChanged { ref task_id, ref status })
+                if task_id == "task-status" && status == "waiting"
+        ));
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::SessionExit { ref task_id, code: 0 }) if task_id == "task-status"
+        ));
+        assert!(
+            frame_rx.try_recv().is_err(),
+            "other-session status was forwarded"
+        );
+
+        daemon.await.expect("fake daemon task failed");
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
     async fn terminal_stream_preserves_snapshot_and_split_multibyte_output_bytes() {
         let unique = format!(
             "ksp-terminal-bytes-{}-{}",
@@ -3935,6 +4197,11 @@ mod tests {
                     vt: "╭─界─╮\n".to_string(),
                 },
             };
+            let initial_status = DaemonEvent::StatusChanged {
+                session_id: "daemon-terminal-1".to_string(),
+                status: SessionStatus::Idle,
+                waiting_prompt_snippet: None,
+            };
             let output_prefix = DaemonEvent::Output {
                 session_id: "daemon-terminal-1".to_string(),
                 data: vec![0xf0, 0x9f],
@@ -3959,6 +4226,11 @@ mod tests {
                     vt: "RESYNCED\n".to_string(),
                 },
             };
+            let resync_status = DaemonEvent::StatusChanged {
+                session_id: "daemon-terminal-1".to_string(),
+                status: SessionStatus::Busy,
+                waiting_prompt_snippet: None,
+            };
             let exit = DaemonEvent::Exit {
                 session_id: "daemon-terminal-1".to_string(),
                 code: 0,
@@ -3968,9 +4240,11 @@ mod tests {
 
             for event in [
                 snapshot,
+                initial_status,
                 output_prefix,
                 output_suffix,
                 resync_snapshot,
+                resync_status,
                 exit,
             ] {
                 write_half
@@ -4043,6 +4317,13 @@ mod tests {
             other => panic!("expected terminal snapshot, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
+            ServerFrame::StatusChanged { task_id, status } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(status, "idle");
+            }
+            other => panic!("expected initial terminal status, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
             ServerFrame::TermOutput { task_id, data_b64 } => {
                 assert_eq!(task_id, "task-1");
                 assert_eq!(decode(data_b64), vec![0xf0, 0x9f]);
@@ -4064,6 +4345,13 @@ mod tests {
                 assert_eq!(decode(data_b64), b"RESYNCED\n");
             }
             other => panic!("expected mid-stream resync snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::StatusChanged { task_id, status } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(status, "busy");
+            }
+            other => panic!("expected resync terminal status, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
             ServerFrame::SessionExit { task_id, code } => {
@@ -4140,6 +4428,11 @@ mod tests {
                             vt: vt.to_string(),
                         },
                     },
+                    DaemonEvent::StatusChanged {
+                        session_id: "shell-wt-reattach-1".to_string(),
+                        status: SessionStatus::Idle,
+                        waiting_prompt_snippet: None,
+                    },
                     DaemonEvent::Output {
                         session_id: "shell-wt-reattach-1".to_string(),
                         data: format!("output {round}").into_bytes(),
@@ -4200,6 +4493,10 @@ mod tests {
             other => panic!("expected first snapshot, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
+            ServerFrame::StatusChanged { status, .. } => assert_eq!(status, "idle"),
+            other => panic!("expected first snapshot status, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
             ServerFrame::TermOutput { data_b64, .. } => {
                 assert_eq!(decode(data_b64), b"output 0");
             }
@@ -4213,6 +4510,10 @@ mod tests {
                 assert_eq!(decode(data_b64), b"after restart");
             }
             other => panic!("expected re-attach snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::StatusChanged { status, .. } => assert_eq!(status, "idle"),
+            other => panic!("expected re-attach snapshot status, got {other:?}"),
         }
         match recv_frame(&mut socket).await {
             ServerFrame::TermOutput { data_b64, .. } => {

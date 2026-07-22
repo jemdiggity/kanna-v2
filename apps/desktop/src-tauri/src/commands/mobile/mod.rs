@@ -1922,52 +1922,81 @@ mod tests {
         let listener = UnixListener::bind(socket_path).expect("fake daemon socket should bind");
         let expected_agent_provider = expected_agent_provider.to_string();
         tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let (stream, _) = listener
-                    .accept()
-                    .await
-                    .expect("daemon should accept connection");
-                let (read_half, mut write_half) = stream.into_split();
-                let mut reader = BufReader::new(read_half);
-                let mut line = String::new();
-                reader
-                    .read_line(&mut line)
-                    .await
-                    .expect("daemon command should be readable");
-                let command: serde_json::Value =
-                    serde_json::from_str(line.trim()).expect("daemon command should be JSON");
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.expect("daemon should accept connection");
+                        let expected_agent_provider = expected_agent_provider.clone();
+                        connections.spawn(async move {
+                            let (read_half, mut write_half) = stream.into_split();
+                            let mut reader = BufReader::new(read_half);
+                            let mut line = String::new();
+                            loop {
+                                line.clear();
+                                if reader
+                                    .read_line(&mut line)
+                                    .await
+                                    .expect("daemon command should be readable")
+                                    == 0
+                                {
+                                    return false;
+                                }
+                                let command: serde_json::Value = serde_json::from_str(line.trim())
+                                    .expect("daemon command should be JSON");
 
-                match command.get("type").and_then(|value| value.as_str()) {
-                    Some("Subscribe") => {
-                        write_half
-                            .write_all(b"{\"type\":\"Ok\"}\n")
-                            .await
-                            .expect("daemon subscribe response should be written");
+                                match command.get("type").and_then(|value| value.as_str()) {
+                                    Some("Subscribe") => {
+                                        write_half
+                                            .write_all(b"{\"type\":\"Ok\"}\n")
+                                            .await
+                                            .expect("daemon subscribe response should be written");
+                                    }
+                                    Some("List") => {
+                                        write_half
+                                            .write_all(b"{\"type\":\"SessionList\",\"sessions\":[]}\n")
+                                            .await
+                                            .expect("daemon list response should be written");
+                                    }
+                                    Some("Spawn") => {
+                                        assert_eq!(
+                                            command
+                                                .get("agent_provider")
+                                                .and_then(|value| value.as_str()),
+                                            Some(expected_agent_provider.as_str())
+                                        );
+                                        let session_id = command
+                                            .get("session_id")
+                                            .and_then(|value| value.as_str())
+                                            .expect("spawn should include session id");
+                                        write_half
+                                            .write_all(
+                                                format!(
+                                                    "{{\"type\":\"SessionCreated\",\"session_id\":{}}}\n",
+                                                    serde_json::to_string(session_id).unwrap()
+                                                )
+                                                .as_bytes(),
+                                            )
+                                            .await
+                                            .expect("daemon response should be written");
+                                        return true;
+                                    }
+                                    other => panic!(
+                                        "expected Subscribe, List, or Spawn command, got {other:?}"
+                                    ),
+                                }
+                            }
+                        });
                     }
-                    Some("Spawn") => {
-                        assert_eq!(
-                            command
-                                .get("agent_provider")
-                                .and_then(|value| value.as_str()),
-                            Some(expected_agent_provider.as_str())
-                        );
-                        let session_id = command
-                            .get("session_id")
-                            .and_then(|value| value.as_str())
-                            .expect("spawn should include session id");
-                        write_half
-                            .write_all(
-                                format!(
-                                    "{{\"type\":\"SessionCreated\",\"session_id\":{}}}\n",
-                                    serde_json::to_string(session_id).unwrap()
-                                )
-                                .as_bytes(),
-                            )
-                            .await
-                            .expect("daemon response should be written");
-                        break;
+                    completed = connections.join_next(), if !connections.is_empty() => {
+                        if completed
+                            .expect("daemon connection task should exist")
+                            .expect("daemon connection task should complete")
+                        {
+                            connections.abort_all();
+                            break;
+                        }
                     }
-                    other => panic!("expected Subscribe or Spawn command, got {other:?}"),
                 }
             }
         })

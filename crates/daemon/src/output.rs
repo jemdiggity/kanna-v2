@@ -12,7 +12,9 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::client::{SessionSizes, TerminalEmulatorClients};
-use crate::fanout::{existing_session_fanout, EventLine, SessionFanout, SessionFanouts};
+use crate::fanout::{
+    existing_session_fanout, EnqueueReport, EventLine, SessionFanout, SessionFanouts,
+};
 use crate::session::{
     MirrorResult, SessionHandle, SessionManager, StreamControl, STATUS_DETECTION_THROTTLE_MS,
 };
@@ -296,7 +298,14 @@ pub(crate) async fn stream_output(
                 {
                     Ok(Some(status)) => {
                         log_status_observation(&session, &session_id, "quiet_refresh").await;
-                        emit_status_changed(&session, &broadcast_tx, &session_id, status).await;
+                        emit_status_changed(
+                            &session,
+                            &broadcast_tx,
+                            &fanouts,
+                            &session_id,
+                            status,
+                        )
+                        .await;
                     }
                     Ok(None) => {
                         log_status_observation(&session, &session_id, "quiet_refresh").await;
@@ -463,7 +472,7 @@ pub(crate) async fn handle_output_chunk(
             ));
             if let Some(status) = status {
                 log_status_observation(session, session_id, "mirror_output").await;
-                emit_status_changed(session, broadcast_tx, session_id, status).await;
+                emit_status_changed(session, broadcast_tx, fanouts, session_id, status).await;
             } else {
                 log_status_observation(session, session_id, "mirror_output").await;
             }
@@ -521,10 +530,18 @@ async fn resync_drained_subscribers(
             return;
         }
     };
-    let recovered = fanout_state.resync_drained(&Event::Snapshot {
-        session_id: session_id.to_string(),
-        snapshot,
-    });
+    let recovery_events = [
+        Event::Snapshot {
+            session_id: session_id.to_string(),
+            snapshot,
+        },
+        Event::StatusChanged {
+            session_id: session_id.to_string(),
+            status: session.status().await,
+            waiting_prompt_snippet: None,
+        },
+    ];
+    let recovered = fanout_state.resync_drained(&recovery_events);
     drop(fanout_state);
     terminal_perf::emit_events(recovered);
 }
@@ -532,6 +549,7 @@ async fn resync_drained_subscribers(
 async fn emit_status_changed(
     session: &Arc<SessionHandle>,
     broadcast_tx: &broadcast::Sender<String>,
+    fanouts: &SessionFanouts,
     session_id: &str,
     status: SessionStatus,
 ) {
@@ -555,13 +573,34 @@ async fn emit_status_changed(
         None
     };
 
-    if let Ok(json) = serde_json::to_string(&Event::StatusChanged {
+    let event = Event::StatusChanged {
         session_id: session_id.to_string(),
         status,
         waiting_prompt_snippet,
-    }) {
+    };
+    if let Ok(json) = serde_json::to_string(&event) {
         let _ = broadcast_tx.send(json);
     }
+
+    if let Some(report) = fanout_status_changed(fanouts, session_id, &event).await {
+        terminal_perf::emit_events(report.newly_lagged);
+        if report.resync_ready {
+            if let Some(fanout) = existing_session_fanout(fanouts, session_id).await {
+                resync_drained_subscribers(session_id, session, &fanout).await;
+            }
+        }
+    }
+}
+
+pub(crate) async fn fanout_status_changed(
+    fanouts: &SessionFanouts,
+    session_id: &str,
+    event: &Event,
+) -> Option<EnqueueReport> {
+    let fanout = existing_session_fanout(fanouts, session_id).await?;
+    let line = EventLine::serialize(event, 0, 0)?;
+    let report = fanout.state.lock().await.enqueue(&line);
+    Some(report)
 }
 
 pub(crate) fn format_status_observation_log(

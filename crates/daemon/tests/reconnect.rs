@@ -77,7 +77,7 @@ enum Cmd {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum SessionStatus {
     Busy,
@@ -1124,6 +1124,33 @@ fn session_list_contains(sessions: &[Value], session_id: &str) -> bool {
 
 // ---- Tests ----
 
+#[test]
+fn attach_snapshot_delivers_snapshot_then_initial_status() {
+    let daemon = DaemonHandle::start();
+    let mut creator = daemon.connect();
+    spawn_echo_session(&mut creator, "sess-initial-status");
+
+    let mut attached = daemon.connect();
+    attached.send(&Cmd::AttachSnapshot {
+        session_id: "sess-initial-status".to_string(),
+        emulate_terminal: true,
+    });
+
+    match attached.recv() {
+        Evt::Snapshot { session_id, .. } => {
+            assert_eq!(session_id, "sess-initial-status");
+        }
+        other => panic!("expected initial Snapshot, got: {other:?}"),
+    }
+    match attached.recv() {
+        Evt::StatusChanged { session_id, status } => {
+            assert_eq!(session_id, "sess-initial-status");
+            assert_eq!(status, SessionStatus::Idle);
+        }
+        other => panic!("expected initial StatusChanged after Snapshot, got: {other:?}"),
+    }
+}
+
 /// Mimics the real Tauri flow: Spawn on shared conn, AttachSnapshot on dedicated conn,
 /// Input on shared conn, Output received on dedicated conn.
 #[test]
@@ -1854,6 +1881,13 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
             Ok(Evt::Snapshot { snapshot, .. }) if snapshot.vt.contains("FLOOD_DONE") => break,
             Ok(_) | Err(_) => {}
         }
+    }
+    match observer.recv() {
+        Evt::StatusChanged { session_id, status } => {
+            assert_eq!(session_id, "sess-overflowing-observer");
+            assert_eq!(status, SessionStatus::Idle);
+        }
+        other => panic!("expected current status after resync snapshot, got: {other:?}"),
     }
     wait_for_daemon_log(
         &daemon,

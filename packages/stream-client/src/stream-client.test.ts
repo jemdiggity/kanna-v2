@@ -270,6 +270,83 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("routes status changes to terminal attachments", () => {
+    const { client, socket } = connectedClient();
+    const statuses: string[] = [];
+    client.attachTerminal("task-pty", {
+      onOutput: () => {},
+      onStatus: (status) => statuses.push(status),
+    });
+
+    socket.receive({
+      type: "status_changed",
+      task_id: "task-pty",
+      status: "busy",
+    });
+
+    expect(statuses).toEqual(["busy"]);
+    client.close();
+  });
+
+  it("continues routing status changes to agent attachments", () => {
+    const { client, socket } = connectedClient();
+    const statuses: string[] = [];
+    client.attachAgent("task-agent", {
+      onSnapshot: () => {},
+      onEvent: () => {},
+      onStatus: (status) => statuses.push(status),
+    });
+
+    socket.receive({
+      type: "status_changed",
+      task_id: "task-agent",
+      status: "waiting",
+    });
+
+    expect(statuses).toEqual(["waiting"]);
+    client.close();
+  });
+
+  it("ignores terminal status changes when the optional handler is absent", () => {
+    const { client, socket } = connectedClient();
+    client.attachTerminal("task-pty", { onOutput: () => {} });
+
+    expect(() => {
+      socket.receive({
+        type: "status_changed",
+        task_id: "task-pty",
+        status: "idle",
+      });
+    }).not.toThrow();
+    client.close();
+  });
+
+  it("ignores status changes for tasks without an attachment", () => {
+    const { client, socket } = connectedClient();
+    const terminalStatus = vi.fn();
+    const agentStatus = vi.fn();
+    client.attachTerminal("task-attached", {
+      onOutput: () => {},
+      onStatus: terminalStatus,
+    });
+    client.attachAgent("task-attached", {
+      onSnapshot: () => {},
+      onEvent: () => {},
+      onStatus: agentStatus,
+    });
+
+    expect(() => {
+      socket.receive({
+        type: "status_changed",
+        task_id: "task-unattached",
+        status: "busy",
+      });
+    }).not.toThrow();
+    expect(terminalStatus).not.toHaveBeenCalled();
+    expect(agentStatus).not.toHaveBeenCalled();
+    client.close();
+  });
+
   it("stamps terminal output dispatch with the local monotonic clock", () => {
     const now = vi.fn(() => 1_234.5);
     const client = new StreamClient({

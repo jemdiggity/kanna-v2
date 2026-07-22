@@ -186,9 +186,6 @@ pub(super) async fn spawn_attached_stream_task(
                     exited_normally = true;
                     break;
                 }
-                Some("StatusChanged") => {
-                    let _ = app.emit("status_changed", &event);
-                }
                 _ => {}
             }
         }

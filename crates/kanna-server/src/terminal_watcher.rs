@@ -1,5 +1,6 @@
 use crate::{daemon_client, http_api, session_replacements};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 fn persist_exit_resume_session_id(
     state: &http_api::AppState,
@@ -46,6 +47,108 @@ fn persist_waiting_prompt(
     Ok(())
 }
 
+fn apply_unattached_runtime_status(
+    state: &http_api::AppState,
+    session_id: &str,
+    status: kanna_daemon::protocol::SessionStatus,
+) -> Result<(), String> {
+    if state.terminal_attachments().is_attached(session_id) {
+        return Ok(());
+    }
+
+    let db = crate::db::Db::open(&state.config().db_path)
+        .map_err(|error| format!("db error: {error}"))?;
+    let Some(task_id) = db
+        .resolve_pipeline_item_id(session_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(());
+    };
+    let Some(item) = db
+        .get_pipeline_item(&task_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(());
+    };
+    if item.closed_at.is_some() {
+        return Ok(());
+    }
+
+    let status = match status {
+        kanna_daemon::protocol::SessionStatus::Busy => "busy",
+        kanna_daemon::protocol::SessionStatus::Waiting => "waiting",
+        kanna_daemon::protocol::SessionStatus::Idle => "idle",
+    };
+    let Some(activity) = http_api::task_activity::activity_for_runtime_status(
+        item.activity.as_deref(),
+        status,
+        false,
+    ) else {
+        return Ok(());
+    };
+
+    db.update_pipeline_item_activity(&task_id, activity)
+        .map_err(|error| format!("db error: {error}"))?;
+    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    Ok(())
+}
+
+async fn reconcile_detached_terminal_status(
+    state: &http_api::AppState,
+    session_id: &str,
+) -> Result<(), String> {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+
+    // A new attachment may have acquired a lease after the final-drop
+    // notification was queued. In that case its snapshot owns reconciliation.
+    if state.terminal_attachments().is_attached(session_id) {
+        return Ok(());
+    }
+
+    let config = state.config();
+    let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|error| format!("daemon detach reconciliation connection failed: {error}"))?;
+    match daemon
+        .send_command(&DaemonCommand::List)
+        .await
+        .map_err(|error| format!("daemon detach reconciliation list failed: {error}"))?
+    {
+        DaemonEvent::SessionList { sessions } => {
+            if let Some(session) = sessions
+                .into_iter()
+                .find(|session| session.session_id == session_id)
+            {
+                // apply_unattached_runtime_status re-checks the lease after the
+                // daemon round-trip, closing a concurrent reattach race.
+                apply_unattached_runtime_status(state, session_id, session.status)?;
+            }
+            Ok(())
+        }
+        DaemonEvent::Error { message, .. } => Err(format!(
+            "daemon detach reconciliation list error: {message}"
+        )),
+        other => Err(format!(
+            "unexpected daemon detach reconciliation list response: {other:?}"
+        )),
+    }
+}
+
+pub(crate) async fn terminal_detach_reconciliation_loop(
+    state: Arc<http_api::AppState>,
+    mut detached: mpsc::UnboundedReceiver<String>,
+) {
+    while let Some(session_id) = detached.recv().await {
+        if let Err(error) = reconcile_detached_terminal_status(&state, &session_id).await {
+            log::warn!(
+                "failed to reconcile detached terminal status for {}: {}",
+                session_id,
+                error
+            );
+        }
+    }
+}
+
 pub(crate) async fn terminal_state_watcher_loop(
     state: Arc<http_api::AppState>,
     replacements: session_replacements::SessionReplacements,
@@ -83,6 +186,36 @@ async fn terminal_state_watcher_once(
         other => return Err(format!("unexpected daemon subscribe response: {:?}", other)),
     }
 
+    // Once subscribed, this connection can receive unsolicited events at any
+    // time. Keep request/response commands on an unsubscribed control socket
+    // so an event can never be consumed as the List reply.
+    let mut control = daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|e| format!("daemon control connection failed: {}", e))?;
+    match control
+        .send_command(&DaemonCommand::List)
+        .await
+        .map_err(|e| format!("daemon list failed: {}", e))?
+    {
+        DaemonEvent::SessionList { sessions } => {
+            for session in sessions {
+                if let Err(error) =
+                    apply_unattached_runtime_status(state, &session.session_id, session.status)
+                {
+                    log::warn!(
+                        "failed to reconcile terminal status for {}: {}",
+                        session.session_id,
+                        error
+                    );
+                }
+            }
+        }
+        DaemonEvent::Error { message, .. } => {
+            return Err(format!("daemon list error: {}", message));
+        }
+        other => return Err(format!("unexpected daemon list response: {:?}", other)),
+    }
+
     loop {
         match daemon
             .read_event()
@@ -91,12 +224,21 @@ async fn terminal_state_watcher_once(
         {
             DaemonEvent::StatusChanged {
                 session_id,
-                waiting_prompt_snippet: Some(prompt),
-                ..
+                status,
+                waiting_prompt_snippet,
             } => {
-                if let Err(error) = persist_waiting_prompt(state, &session_id, &prompt) {
+                if let Some(prompt) = waiting_prompt_snippet {
+                    if let Err(error) = persist_waiting_prompt(state, &session_id, &prompt) {
+                        log::warn!(
+                            "failed to persist waiting prompt for {}: {}",
+                            session_id,
+                            error
+                        );
+                    }
+                }
+                if let Err(error) = apply_unattached_runtime_status(state, &session_id, status) {
                     log::warn!(
-                        "failed to persist waiting prompt for {}: {}",
+                        "failed to apply terminal status for {}: {}",
                         session_id,
                         error
                     );
@@ -149,7 +291,9 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Db;
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState,
+    };
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -230,6 +374,13 @@ mod tests {
     }
 
     async fn expect_subscribe(listener: &UnixListener) -> tokio::net::unix::OwnedWriteHalf {
+        expect_subscribe_with_sessions(listener, Vec::new()).await
+    }
+
+    async fn expect_subscribe_with_sessions(
+        listener: &UnixListener,
+        sessions: Vec<SessionInfo>,
+    ) -> tokio::net::unix::OwnedWriteHalf {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -240,6 +391,17 @@ mod tests {
             other => panic!("expected Subscribe command, got {other:?}"),
         }
         write_event(&mut write_half, &DaemonEvent::Ok).await;
+
+        let (control_stream, _) = listener.accept().await.unwrap();
+        let (control_read, mut control_write) = control_stream.into_split();
+        let mut control_reader = BufReader::new(control_read);
+        line.clear();
+        control_reader.read_line(&mut line).await.unwrap();
+        match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
+            DaemonCommand::List => {}
+            other => panic!("expected List command, got {other:?}"),
+        }
+        write_event(&mut control_write, &DaemonEvent::SessionList { sessions }).await;
         write_half
     }
 
@@ -551,6 +713,367 @@ mod tests {
         assert!(
             !replacements.consume("task-child"),
             "legacy replacement entry should have been consumed"
+        );
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_applies_unattached_busy_as_working() {
+        let unique = unique_name("terminal-watcher-unattached-busy");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+        let mut state_changes = state.subscribe_state_changes();
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    waiting_prompt_snippet: None,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &state,
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("working"));
+        assert!(matches!(
+            state_changes.try_recv(),
+            Ok(kanna_agent_protocol::ServerFrame::StateChanged {
+                scope: kanna_agent_protocol::StateChangeScope::Tasks
+            })
+        ));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_applies_unattached_idle_from_working_as_unread() {
+        let unique = unique_name("terminal-watcher-unattached-idle");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .update_pipeline_item_activity("task-child", "working")
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    waiting_prompt_snippet: None,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &state,
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("unread"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_skips_attached_terminal_status() {
+        let unique = unique_name("terminal-watcher-attached");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+        let _attachment = state.terminal_attachments().attach("task-child");
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    waiting_prompt_snippet: None,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &state,
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("idle"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn final_detach_reconciliation_lists_once_and_applies_session_status() {
+        let unique = unique_name("terminal-detach-reconcile");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .update_pipeline_item_activity("task-child", "working")
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let detached = state
+            .terminal_attachments()
+            .take_detach_receiver()
+            .expect("detach receiver should be available");
+        let worker = tokio::spawn(terminal_detach_reconciliation_loop(
+            Arc::clone(&state),
+            detached,
+        ));
+        let attachment = state.terminal_attachments().attach("task-child");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("detach reconciliation did not connect")
+                .unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut write_half,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-child".to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: kanna_daemon::protocol::SessionStatus::Idle,
+                        kind: Default::default(),
+                    }],
+                },
+            )
+            .await;
+
+            assert!(timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err());
+        });
+
+        drop(attachment);
+        server.await.unwrap();
+        worker.abort();
+        let _ = worker.await;
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("unread"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn detach_reconciliation_is_skipped_while_refcount_is_positive() {
+        let unique = unique_name("terminal-detach-still-attached");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+        let _attachment = state.terminal_attachments().attach("task-child");
+
+        reconcile_detached_terminal_status(&state, "task-child")
+            .await
+            .unwrap();
+        assert!(timeout(Duration::from_millis(150), listener.accept())
+            .await
+            .is_err());
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("idle"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_reconciles_unattached_status_from_subscribe_time_list() {
+        let unique = unique_name("terminal-watcher-list-reconcile");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe_with_sessions(
+                &listener,
+                vec![SessionInfo {
+                    session_id: "task-child".to_string(),
+                    pid: 42,
+                    cwd: "/tmp".to_string(),
+                    state: SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    kind: Default::default(),
+                }],
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &http_api::AppState::new(config.clone()),
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("working"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_preserves_subscriber_event_interleaved_before_list_reply() {
+        let unique = unique_name("terminal-watcher-list-interleaved-status");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let (subscriber_stream, _) = listener.accept().await.unwrap();
+            let (subscriber_read, mut subscriber_write) = subscriber_stream.into_split();
+            let mut subscriber_reader = BufReader::new(subscriber_read);
+            let mut line = String::new();
+            subscriber_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::Subscribe
+            ));
+            write_event(&mut subscriber_write, &DaemonEvent::Ok).await;
+
+            let (control_stream, _) = listener.accept().await.unwrap();
+            let (control_read, mut control_write) = control_stream.into_split();
+            let mut control_reader = BufReader::new(control_read);
+            line.clear();
+            control_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+
+            // This unsolicited subscriber event arrives after Subscribe is
+            // acknowledged but before the independent List response.
+            write_event(
+                &mut subscriber_write,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    waiting_prompt_snippet: Some("Ready after reconciliation".to_string()),
+                },
+            )
+            .await;
+            write_event(
+                &mut control_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-child".to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: kanna_daemon::protocol::SessionStatus::Busy,
+                        kind: Default::default(),
+                    }],
+                },
+            )
+            .await;
+            write_event(&mut subscriber_write, &DaemonEvent::ShuttingDown).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config.clone()),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("unread"));
+        assert_eq!(
+            item.last_output_preview.as_deref(),
+            Some("Ready after reconciliation")
         );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
