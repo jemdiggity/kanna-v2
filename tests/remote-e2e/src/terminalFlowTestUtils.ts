@@ -97,6 +97,7 @@ export async function createScriptedTask(
     notifyTaskId?: string;
     prompt?: string;
     repoName?: string;
+    setupCommands?: string[];
     snapshotHistory?: ScriptedAgentOptions["snapshotHistory"];
     waitingPromptSnippet?: string;
   }
@@ -106,6 +107,7 @@ export async function createScriptedTask(
     `scripted-repo-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
   await writeScriptedRepo(repoPath, {
+    setupCommands: options.setupCommands,
     snapshotHistory: options.snapshotHistory,
   });
 
@@ -444,6 +446,13 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
   }
 
   private onEvent(event: TaskTerminalStreamEvent): void {
+    if (process.env.KANNA_E2E_DEBUG_TERMINAL_EVENTS === "1") {
+      const summary =
+        event.type === "snapshot" || event.type === "output"
+          ? JSON.stringify(Buffer.from(event.dataB64, "base64").toString("utf8").slice(0, 200))
+          : JSON.stringify(event);
+      console.log(`[collector ${this.taskId}] ${event.type} ${summary}`);
+    }
     switch (event.type) {
       case "snapshot": {
         const decoded = Buffer.from(event.dataB64, "base64").toString("utf8");
@@ -516,7 +525,7 @@ function snapshotMatches(
 
 async function writeScriptedRepo(
   repoPath: string,
-  options: ScriptedAgentOptions = {},
+  options: ScriptedAgentOptions & { setupCommands?: string[] } = {},
 ): Promise<void> {
   await mkdir(join(repoPath, ".kanna"), { recursive: true });
   await mkdir(join(repoPath, "bin"), { recursive: true });
@@ -525,7 +534,8 @@ async function writeScriptedRepo(
     JSON.stringify({
       setup: [
         "export PATH=\"$PWD/bin:$PATH\"",
-        "codex() { \"$PWD/bin/codex\" \"$@\"; }"
+        "codex() { \"$PWD/bin/codex\" \"$@\"; }",
+        ...(options.setupCommands ?? [])
       ],
       workspace: {
         path: {
@@ -537,7 +547,7 @@ async function writeScriptedRepo(
   await writeFile(join(repoPath, "README.md"), "# Remote E2E scripted repo\n");
   const codexPath = join(repoPath, "bin", "codex");
   await writeScriptedAgentBinary(codexPath, options);
-  await runCommand("git", ["init"], { cwd: repoPath, env: process.env });
+  await runCommand("git", ["init", "-b", "main"], { cwd: repoPath, env: process.env });
   await runCommand("git", ["config", "user.email", "remote-e2e@example.invalid"], {
     cwd: repoPath,
     env: process.env
@@ -548,6 +558,14 @@ async function writeScriptedRepo(
   });
   await runCommand("git", ["add", "."], { cwd: repoPath, env: process.env });
   await runCommand("git", ["commit", "-m", "Initial scripted repo"], {
+    cwd: repoPath,
+    env: process.env
+  });
+  // Repository definitions (.kanna/config.json, agents, pipelines) are read
+  // from refs/remotes/origin/<default_branch>, never the working tree. Without
+  // this ref the scripted repo's setup commands and workspace config would be
+  // silently ignored during task creation.
+  await runCommand("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], {
     cwd: repoPath,
     env: process.env
   });

@@ -97,15 +97,27 @@ describe("LAN task loop E2E", () => {
   });
 
   it("streams a deterministic PTY task over LAN and delivers LAN input to the PTY", async () => {
+    const setupCommand = "echo setup-ran-$((6*7))";
     const task = await createScriptedTask(harness, {
-      displayName: "LAN terminal task"
+      displayName: "LAN terminal task",
+      setupCommands: [setupCommand]
     });
     const transport = createLanClient(harness);
     const events = collectLanTerminalEvents(transport, task.taskId);
 
     try {
       await events.waitForReady();
-      await events.waitForOutput("SCRIPT_READY");
+      const output = await events.waitForOutput("SCRIPT_READY", 30_000);
+      // Repository setup must be visible in the mobile terminal stream: the
+      // banner, the echoed `$ command`, and the command's own output, all
+      // before the agent starts.
+      const bannerIndex = output.indexOf("Running startup...");
+      const commandIndex = output.indexOf(`$ ${setupCommand}`);
+      const outputIndex = output.indexOf("setup-ran-42", commandIndex + setupCommand.length + 2);
+      expect(bannerIndex).toBeGreaterThanOrEqual(0);
+      expect(commandIndex).toBeGreaterThan(bannerIndex);
+      expect(outputIndex).toBeGreaterThan(commandIndex);
+      expect(output.indexOf("SCRIPT_READY")).toBeGreaterThan(outputIndex);
       await events.waitForOutput("SCRIPT_HEARTBEAT");
 
       await transport.sendTaskInput(task.taskId, "hello from lan");
