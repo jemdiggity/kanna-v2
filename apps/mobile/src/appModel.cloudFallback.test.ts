@@ -1155,6 +1155,132 @@ describe("createAppModel cloud routing", () => {
     );
   });
 
+  it("supplements repos from a desktop that comes online while another desktop's repo read hangs", async () => {
+    const { authSession } = createMutableAuthSession(signedInState());
+    let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          desktopId: "desktop-hung",
+          displayName: "Hung Mac",
+          updatedAt: "2026-07-11T00:00:00.000Z"
+        },
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          updatedAt: "2026-07-11T00:00:00.000Z"
+        }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const invokeDesktop = vi.fn<RelayDesktopClient["invokeDesktop"]>(
+      (request) => {
+        if (request.desktopId === "desktop-hung") {
+          return new Promise(() => {});
+        }
+        if (request.method === "GET" && request.path === "/v1/repos") {
+          return Promise.resolve([{ id: "repo-fresh", name: "Fresh Repo" }]);
+        }
+        if (
+          request.method === "PUT" &&
+          /^\/v1\/tasks\/[0-9a-f]{32}$/.test(request.path)
+        ) {
+          return Promise.resolve({
+            taskId: "task-first",
+            repoId: "repo-fresh",
+            title: "First task",
+            stage: "in progress",
+            agentType: "pty"
+          });
+        }
+        return Promise.resolve(null);
+      }
+    );
+    const relayClient: RelayDesktopClient = {
+      close: vi.fn(),
+      invokeDesktop,
+      observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+      observeTaskAgent: vi.fn(() => ({
+        close: vi.fn(),
+        sendInput: vi.fn(),
+        sendPermission: vi.fn(),
+        interrupt: vi.fn()
+      })),
+      sendTaskInput: vi.fn().mockResolvedValue(undefined),
+      listActiveDesktopIds: vi
+        .fn<RelayDesktopClient["listActiveDesktopIds"]>()
+        .mockResolvedValueOnce(new Set(["desktop-hung"]))
+        .mockResolvedValue(new Set(["desktop-hung", "desktop-owner"]))
+    };
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-owner",
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: []
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([]),
+        createRelayClient: () => relayClient,
+        desktopRepoWaitMs: 25
+      }
+    });
+
+    await app.initialize();
+    pushCloudTasks?.([]);
+
+    // The hung desktop is online first: its /v1/repos read starts and never
+    // settles. When presence later marks desktop-owner online, the next repo
+    // supplement must still query it and surface its task-less repo.
+    await vi.waitFor(() => {
+      expect(app.sessionStore.getState().repos).toContainEqual({
+        id: "repo-fresh",
+        name: "Fresh Repo"
+      });
+    });
+
+    const hungRepoReads = invokeDesktop.mock.calls.filter(
+      ([request]) =>
+        request.desktopId === "desktop-hung" && request.path === "/v1/repos"
+    );
+    expect(hungRepoReads).toHaveLength(1);
+
+    app.sessionStore.selectRepo("repo-fresh");
+    app.controller.openComposer();
+    expect(app.sessionStore.getState().composerDesktopId).toBe("desktop-owner");
+    app.controller.updateComposerPrompt("Bootstrap the repo");
+    await app.controller.createTask();
+
+    expect(invokeDesktop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        desktopId: "desktop-owner",
+        method: "PUT",
+        body: expect.objectContaining({
+          repoId: "repo-fresh",
+          prompt: "Bootstrap the repo"
+        })
+      })
+    );
+    expect(app.sessionStore.getState().recentTasks).toContainEqual(
+      expect.objectContaining({
+        id: "cloud:desktop-owner:repo-fresh:task-first",
+        repoId: "repo-fresh"
+      })
+    );
+  });
+
   it("reconnects a signed-out app when a trusted desktop appears on Bonjour", async () => {
     const mutableBonjour = createMutableBonjourBrowser();
     const lan = createLanFixture(async () => []);

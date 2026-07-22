@@ -134,7 +134,7 @@ export function createRemoteTransport({
   const cloudRepoOwners = new Map<string, string>();
   const desktopRepoSnapshots = new Map<string, RepoSummary[]>();
   const desktopRepoFetchedAt = new Map<string, number>();
-  let desktopReposRefresh: Promise<void> | null = null;
+  const desktopRepoReads = new Map<string, Promise<void>>();
 
   const taskRouteForId = (taskId: string): CloudTaskRoute | null =>
     provisionalTaskRoutes.get(taskId) ?? cloudTaskRoutes.get(taskId) ?? null;
@@ -282,6 +282,32 @@ export function createRemoteTransport({
     }
   };
 
+  const startDesktopRepoRead = (desktopId: string): Promise<void> => {
+    const inFlight = desktopRepoReads.get(desktopId);
+    if (inFlight) {
+      return inFlight;
+    }
+    const read = (async () => {
+      try {
+        const repos = parseRepoSummaries(
+          await requestDesktop<unknown>(desktopId, "GET", "/v1/repos", null)
+        );
+        rememberDesktopRepos(desktopId, repos);
+      } catch {
+        // Keep the last snapshot for this desktop; a transiently
+        // unreachable desktop's repos still merge from the cache below.
+      } finally {
+        desktopRepoFetchedAt.set(desktopId, Date.now());
+      }
+    })().finally(() => {
+      if (desktopRepoReads.get(desktopId) === read) {
+        desktopRepoReads.delete(desktopId);
+      }
+    });
+    desktopRepoReads.set(desktopId, read);
+    return read;
+  };
+
   const refreshDesktopRepos = async (): Promise<void> => {
     let records: RemoteDesktopRecord[];
     try {
@@ -300,52 +326,36 @@ export function createRemoteTransport({
       records
         .filter((record) => record.reachableViaRelay || record.online)
         .filter((record) => {
+          if (desktopRepoReads.has(record.desktopId)) {
+            return true;
+          }
           const fetchedAt = desktopRepoFetchedAt.get(record.desktopId);
           return (
             fetchedAt === undefined ||
             now - fetchedAt >= desktopRepoRefreshIntervalMs
           );
         })
-        .map(async (record) => {
-          try {
-            const repos = parseRepoSummaries(
-              await requestDesktop<unknown>(
-                record.desktopId,
-                "GET",
-                "/v1/repos",
-                null
-              )
-            );
-            rememberDesktopRepos(record.desktopId, repos);
-          } catch {
-            // Keep the last snapshot for this desktop; a transiently
-            // unreachable desktop's repos still merge from the cache below.
-          } finally {
-            desktopRepoFetchedAt.set(record.desktopId, Date.now());
-          }
-        })
+        .map((record) => startDesktopRepoRead(record.desktopId))
     );
   };
 
   // The cloud task index only carries repos that have open tasks, so repo
   // listings additionally ask each reachable desktop for its full repo list
-  // through the relay. Every listing re-reads the desktop records so a
-  // desktop that becomes reachable later is fetched immediately — the
+  // through the relay. Every listing runs its own records pass so a desktop
+  // that becomes reachable later is fetched immediately; in-flight reads are
+  // tracked per desktop, so one hung desktop can neither trigger duplicate
+  // invocations nor block newly reachable desktops from being queried. The
   // refresh interval throttles per fetched desktop, never a no-op pass.
   // Reads that outlast the wait window finish in the background and land in
   // the snapshot cache for the next listing.
-  const listReachableDesktopRepos = async (): Promise<RepoSummary[]> => {
-    if (!desktopReposRefresh) {
-      desktopReposRefresh = refreshDesktopRepos().finally(() => {
-        desktopReposRefresh = null;
-      });
-    }
-    await awaitWithFallback(
-      desktopReposRefresh,
+  const listReachableDesktopRepos = (): Promise<RepoSummary[]> => {
+    const collectDesktopRepos = () =>
+      [...desktopRepoSnapshots.values()].flat();
+    return awaitWithFallback(
+      refreshDesktopRepos().then(collectDesktopRepos),
       desktopRepoWaitMs,
-      () => undefined
+      collectDesktopRepos
     );
-    return [...desktopRepoSnapshots.values()].flat();
   };
 
   const request = async <T>(
