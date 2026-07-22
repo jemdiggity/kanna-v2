@@ -1448,6 +1448,8 @@ async fn list_recent_tasks_route_returns_open_tasks_in_updated_order() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
+    let raw_tasks: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(raw_tasks[0]["repoName"], "Repo One");
     let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].id, "task-newer");

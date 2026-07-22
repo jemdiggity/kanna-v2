@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { assertSingleSubmittedTaskInput } from "../../helpers/relay-harness";
 import {
+  assertRecentTaskRowShowsRepoLabel,
   assertRelayTaskRowPresentation,
   inspectTaskFilePreviewWebView,
   openRelayFixtureTask,
@@ -14,6 +15,7 @@ import {
   verifyRelayVisualCompanionJourney,
   verifyRelayTaskActivityTransitions,
   verifyRelayTaskMarkedRead,
+  verifyRecentTabShowsRepoLabel,
   verifyTerminalMarkdownFileControls,
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
@@ -1033,5 +1035,63 @@ describe("relay task row presentation", () => {
       assertRelayTaskRowPresentation(row, taskRowExpectation),
     ).rejects.toThrow("unexpected content");
     expect(row.click).not.toHaveBeenCalled();
+  });
+});
+
+describe("recent task row repo label", () => {
+  const expectedRecentRowLabel = () =>
+    `${taskRowExpectation.title}. ${taskRowExpectation.repoLabel}. ` +
+    `${taskRowExpectation.stage}`;
+
+  it("accepts a recent row that announces the repo after the title", async () => {
+    await expect(
+      assertRecentTaskRowShowsRepoLabel(
+        createTaskRow(expectedRecentRowLabel()),
+        taskRowExpectation,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a recent row that omits the repo label", async () => {
+    await expect(
+      assertRecentTaskRowShowsRepoLabel(
+        createTaskRow(expectedTaskRowLabel()),
+        taskRowExpectation,
+      ),
+    ).rejects.toThrow("unexpected content");
+  });
+
+  it("checks the fixture row on the Recent tab and returns to the Tasks tab", async () => {
+    const calls: string[] = [];
+    const row = createTaskRow(expectedRecentRowLabel(), calls);
+    const recentTab = {
+      click: vi.fn(async () => {
+        calls.push("recentTab.click");
+      }),
+    };
+    const tasksTab = {
+      click: vi.fn(async () => {
+        calls.push("tasksTab.click");
+      }),
+    };
+    const ui = {
+      getRecentTab: vi.fn(async () => recentTab),
+      getTasksTab: vi.fn(async () => tasksTab),
+      getTaskRowById: vi.fn(async () => row),
+    };
+
+    await verifyRecentTabShowsRepoLabel(
+      ui as never,
+      "cloud:desktop:repo:task",
+      taskRowExpectation,
+    );
+
+    expect(ui.getTaskRowById).toHaveBeenCalledWith("cloud:desktop:repo:task");
+    expect(calls).toEqual([
+      "recentTab.click",
+      "waitForDisplayed",
+      "getAttribute:label",
+      "tasksTab.click",
+    ]);
   });
 });

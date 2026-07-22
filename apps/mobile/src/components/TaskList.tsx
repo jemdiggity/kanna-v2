@@ -1,6 +1,7 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
+import type { TaskSummary } from "../lib/api/types";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 import { buildTaskTreeRows, type TaskTreeRow } from "../screens/taskTreeRows";
@@ -16,6 +17,7 @@ interface TaskListProps {
   loading?: boolean;
   /** Nest subtasks under their visible parent (desktop sidebar parity). */
   nestSubtasks?: boolean;
+  repoLabelForTask?: (task: TaskSummary) => string | null;
   taskSlots: TaskUiSlot[];
   testID?: string;
   onOpenTask(taskId: string): void;
@@ -26,6 +28,7 @@ export function TaskList({
   errorLabel = null,
   loading = false,
   nestSubtasks = false,
+  repoLabelForTask,
   testID,
   taskSlots,
   onOpenTask
@@ -53,6 +56,8 @@ export function TaskList({
         const card = (
           <TaskCard
             isSubtask={depth > 0}
+            key={slot.slotId}
+            repoLabel={repoLabelForTask?.(task) ?? null}
             task={task}
             uiId={slot.slotId}
             onPress={() => onOpenTask(slot.slotId)}

@@ -142,6 +142,7 @@ interface RelayUi {
   getTaskDetailScreen(): Promise<RelayElement>;
   getTaskDetailActivity(): Promise<RelayElement>;
   getTaskMoreButton(): Promise<RelayElement>;
+  getRecentTab(): Promise<RelayElement>;
   getTaskRowById(taskId: string): Promise<RelayElement>;
   getTaskRows(): Promise<RelayElement[]>;
   getTasksTab(): Promise<RelayElement>;
@@ -461,6 +462,9 @@ function createRelayUi(driver: Browser): RelayUi {
     },
     async getTaskMoreButton() {
       return driver.$(selectors.taskMoreButton);
+    },
+    async getRecentTab() {
+      return driver.$(selectors.recentTab);
     },
     async getTaskRowById(taskId) {
       return driver.$(`~mobile.task-row.${taskId}`);
@@ -1257,6 +1261,42 @@ export async function assertRelayTaskRowPresentation(
   }
 }
 
+export async function assertRecentTaskRowShowsRepoLabel(
+  row: Pick<RelayElement, "getAttribute" | "getText">,
+  expected: RelayTaskRowExpectation,
+): Promise<void> {
+  const nativeLabel = await row.getAttribute("label").catch(() => null);
+  const label = nativeLabel?.trim() || (await row.getText()).trim();
+  const expectedLabel = [
+    expected.title,
+    expected.repoLabel,
+    expected.stage,
+    expected.waitingPromptSnippet === expected.title
+      ? null
+      : expected.waitingPromptSnippet,
+  ].filter(Boolean).join(". ");
+  if (label !== expectedLabel) {
+    throw new Error(
+      `Recent task row rendered unexpected content: ${JSON.stringify(label)}; ` +
+        `expected ${JSON.stringify(expectedLabel)}`,
+    );
+  }
+}
+
+export async function verifyRecentTabShowsRepoLabel(
+  ui: Pick<RelayUi, "getRecentTab" | "getTasksTab" | "getTaskRowById">,
+  taskId: string,
+  expected: RelayTaskRowExpectation,
+): Promise<void> {
+  const recentTab = await ui.getRecentTab();
+  await recentTab.click();
+  const row = await ui.getTaskRowById(taskId);
+  await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await assertRecentTaskRowShowsRepoLabel(row, expected);
+  const tasksTab = await ui.getTasksTab();
+  await tasksTab.click();
+}
+
 export async function openRelayFixtureTask(
   ui: Pick<RelayUi, "getTaskRowById">,
   taskId: string,
@@ -1482,6 +1522,7 @@ export async function runRelayTaskFlow(
   const exactTaskRow = await ui.getTaskRowById(options.fixture.taskId);
   await exactTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await assertRelayTaskRowPresentation(exactTaskRow, options.taskRow);
+  await verifyRecentTabShowsRepoLabel(ui, options.fixture.taskId, options.taskRow);
   await verifyRelayTaskActivityTransitions(
     ui,
     options.fixture.taskId,

@@ -248,6 +248,72 @@ describe("TasksScreen", () => {
     ).toEqual(["unread-1", "unread-2", "idle-1", "working-1"]);
   });
 
+  it("labels Recent tasks with their repo so similar titles stay distinguishable", () => {
+    if (!TasksScreen || !TaskList || !TaskCard) throw new Error("TasksScreen was not loaded");
+    const tasks = [
+      {
+        id: "task-cloud",
+        repoId: "repo-a",
+        repoName: "Cloud Repo",
+        title: "Fix login",
+        stage: "review"
+      },
+      {
+        id: "task-lan",
+        repoId: "repo-b",
+        title: "Fix login",
+        stage: "review"
+      },
+      {
+        id: "task-unknown",
+        repoId: "repo-unknown",
+        title: "Fix login",
+        stage: "review"
+      }
+    ];
+
+    const tree = TasksScreen({
+      heading: "Recent",
+      repos: [{ id: "repo-b", name: "Lan Repo" }],
+      selectedRepoId: null,
+      taskCollectionStatus: "ready",
+      taskSlots: projectTaskUiSlots(tasks, []),
+      onOpenTask: vi.fn(),
+      onSelectRepo: vi.fn()
+    }) as ElementNode;
+
+    const taskListProps = findElement(tree, TaskList)?.props;
+    const repoLabelForTask = taskListProps?.repoLabelForTask as (
+      task: (typeof tasks)[number]
+    ) => string | null;
+    expect(repoLabelForTask(tasks[0]!)).toBe("Cloud Repo");
+    expect(repoLabelForTask(tasks[1]!)).toBe("Lan Repo");
+    expect(repoLabelForTask(tasks[2]!)).toBe("repo-unknown");
+
+    const taskListTree = TaskList(taskListProps as never) as ElementNode;
+    const taskCard = findElement(taskListTree, TaskCard);
+    const cardTree = TaskCard(taskCard?.props as never) as ElementNode;
+    expect(textContent(cardTree)).toContain("Cloud Repo");
+  });
+
+  it("keeps repo labels off the repo-scoped Tasks view", () => {
+    if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
+    const tree = TasksScreen({
+      heading: "Tasks",
+      repos: [{ id: "repo-a", name: "Repo A" }],
+      selectedRepoId: "repo-a",
+      taskCollectionStatus: "ready",
+      taskSlots: projectTaskUiSlots(
+        [{ id: "task-a", repoId: "repo-a", title: "Task A", stage: "review" }],
+        []
+      ),
+      onOpenTask: vi.fn(),
+      onSelectRepo: vi.fn()
+    }) as ElementNode;
+
+    expect(findElement(tree, TaskList)?.props?.repoLabelForTask).toBeUndefined();
+  });
+
   it("orders repo tasks by creation time newest first without mutating input", () => {
     if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
     const tasks = [
