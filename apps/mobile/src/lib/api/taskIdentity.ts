@@ -61,6 +61,15 @@ export function buildCloudTaskId({
   return `cloud:${ownerDesktopId}:${localRepoId}:${ownerLocalTaskId}`;
 }
 
+// Cloud-sourced tasks carry a synthetic canonical id ("cloud:<desktop>:<repo>:<task>").
+// User-facing surfaces must show the desktop-local task id, matching the desktop app.
+export function displayTaskId(task: {
+  id: string;
+  ownerLocalTaskId?: string;
+}): string {
+  return task.ownerLocalTaskId?.trim() || task.id;
+}
+
 export function canonicalizeTaskActionId({
   canonicalTaskId,
   ownerDesktopId,

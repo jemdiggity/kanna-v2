@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import { LoadingText } from "../components/LoadingText";
+import { displayTaskId } from "../lib/api/taskIdentity";
 import type {
   TaskDiffContent,
   TaskDiffRequest,
@@ -211,6 +212,7 @@ export function TaskScreen({
       ? selectedFile
       : null;
   const isTitleExpanded = expandedTitleTaskId === task.id;
+  const expandedTaskId = displayTaskId(task);
   const expandedPrompt = task.prompt?.trim() ? task.prompt : task.title;
   const expandedPromptMaxHeight = Math.min(320, windowHeight * 0.45);
   const effectiveActivity =
@@ -504,7 +506,7 @@ export function TaskScreen({
           }
           accessibilityLabel={`${model.stageLabel}: ${
             isTitleExpanded
-              ? `${expandedPrompt}. Task ID: ${task.id}`
+              ? `${expandedPrompt}. Task ID: ${expandedTaskId}`
               : model.title
           }`}
           accessibilityRole="button"
@@ -552,7 +554,7 @@ export function TaskScreen({
                   style={styles.taskId}
                   testID={MOBILE_E2E_IDS.taskExpandedTaskId}
                 >
-                  {task.id}
+                  {expandedTaskId}
                 </Text>
               </View>
             </ScrollView>

@@ -195,6 +195,7 @@ interface RenderTaskScreenOptions {
     truncated: boolean;
   }>;
   taskId?: string;
+  ownerLocalTaskId?: string;
   title?: string;
   prompt?: string;
   quickReplies?: readonly TaskQuickReply[];
@@ -247,6 +248,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       truncated: false
     }),
     taskId = "task-1",
+    ownerLocalTaskId,
     title = "Task",
     prompt,
     quickReplies = DEFAULT_TASK_QUICK_REPLIES,
@@ -268,6 +270,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
   return TaskScreen({
     task: {
       id: taskId,
+      ownerLocalTaskId,
       repoId: "repo-1",
       title,
       prompt,
@@ -1370,6 +1373,35 @@ describe("TaskScreen", () => {
     });
     expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
       accessibilityLabel: `in progress: ${prompt}. Task ID: ${taskId}`,
+      accessibilityState: { expanded: true }
+    });
+  });
+
+  it("shows the desktop-local task ID for cloud-sourced tasks", () => {
+    const localTaskId = "019f6c9d6ed40000000120e4307b4591";
+    const taskId = `cloud:desktop-1:repo-1:${localTaskId}`;
+    const prompt = "Canonical full prompt";
+    let tree = renderTaskScreen({
+      taskId,
+      ownerLocalTaskId: localTaskId,
+      prompt
+    });
+
+    pressByTestId(tree, "mobile.task-title-button");
+    tree = renderTaskScreen({
+      taskId,
+      ownerLocalTaskId: localTaskId,
+      prompt
+    });
+
+    expect(findByTypeAndText(tree, "Text", taskId)).toBeNull();
+    expect(findByTypeAndText(tree, "Text", localTaskId)?.props).toMatchObject({
+      accessible: false,
+      children: localTaskId,
+      testID: "mobile.task-expanded-task-id"
+    });
+    expect(findByTestId(tree, "mobile.task-title-button")?.props).toMatchObject({
+      accessibilityLabel: `in progress: ${prompt}. Task ID: ${localTaskId}`,
       accessibilityState: { expanded: true }
     });
   });

@@ -371,6 +371,38 @@ export async function runHybridTaskFlow(
     options.fixture.cloudOnly.refreshedTitle
   );
 
+  // The expanded identity panel must show the desktop-local task id — matching
+  // the desktop app — even though the cloud snapshot task's canonical mobile id
+  // is the synthetic "cloud:<desktop>:<repo>:<task>" id.
+  const cloudOnlyRow = await driver.$(
+    `~mobile.task-row.${options.fixture.cloudOnly.taskId}`
+  );
+  await cloudOnlyRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await cloudOnlyRow.click();
+  await (await driver.$(selectors.taskDetailScreen)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+  await (await driver.$(selectors.taskTitleButton)).click();
+  const expandedTaskId = await driver.$(selectors.taskExpandedTaskId);
+  await expandedTaskId.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const expandedTaskIdText = (await expandedTaskId.getText()).trim();
+  if (expandedTaskIdText !== options.fixture.cloudOnly.localTaskId) {
+    throw new Error(
+      `Expected the expanded cloud task identity to show the desktop-local id ${options.fixture.cloudOnly.localTaskId}, got ${expandedTaskIdText}`
+    );
+  }
+  await (await driver.$(selectors.taskTitleButton)).click();
+  const cloudOnlyBackButton = await driver.$(selectors.taskBackButton);
+  await cloudOnlyBackButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await cloudOnlyBackButton.click();
+  const recentAfterCloudDetail = await driver.$(selectors.recentTab);
+  await recentAfterCloudDetail.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await recentAfterCloudDetail.click();
+  await waitForStableExactTaskRows(
+    driver,
+    options.fixture.expectedDisplayTaskIds
+  );
+
   // If the duplicate were accidentally routed through the relay, opening it
   // below would fail after this point. A healthy trusted-LAN route keeps the
   // exact cloud display id while streaming the local task's PTY.
