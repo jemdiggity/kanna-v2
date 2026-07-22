@@ -903,6 +903,51 @@ describe("createSessionStore", () => {
     expect(publishes).toBe(0);
   });
 
+  it("publishes when only relationship fields change on a refreshed task", () => {
+    const store = createSessionStore();
+    let publishes = 0;
+    store.subscribe(() => {
+      publishes += 1;
+    });
+
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Recent task",
+        stage: "in progress",
+        blockedByTaskIds: ["task-blocker"]
+      }
+    ]);
+    publishes = 0;
+
+    // Unblocking changes no other summary field; the list must still update.
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Recent task",
+        stage: "in progress",
+        blockedByTaskIds: []
+      }
+    ]);
+    expect(publishes).toBe(1);
+    expect(store.getState().recentTasks[0]?.blockedByTaskIds).toEqual([]);
+
+    store.setRecentTasks([
+      {
+        id: "task-2",
+        repoId: "repo-2",
+        title: "Recent task",
+        stage: "in progress",
+        blockedByTaskIds: [],
+        parentTaskId: "task-parent"
+      }
+    ]);
+    expect(publishes).toBe(2);
+    expect(store.getState().recentTasks[0]?.parentTaskId).toBe("task-parent");
+  });
+
   it("publishes when a task creation time is learned", () => {
     const store = createSessionStore();
     let publishes = 0;

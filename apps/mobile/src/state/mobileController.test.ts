@@ -873,6 +873,43 @@ describe("createMobileController", () => {
     await boundaryBootstrap;
   });
 
+  it("does not attach a session for a blocked task and attaches once unblocked", async () => {
+    const blockedTask: TaskSummary = {
+      id: "task-blocked",
+      repoId: "repo-1",
+      title: "Blocked task",
+      stage: "in progress",
+      blockedByTaskIds: ["task-blocker"]
+    };
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRecentTasks.mockResolvedValue([blockedTask]);
+    client.listRepoTasks.mockResolvedValue([blockedTask]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask(blockedTask.id);
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-blocked",
+      taskTerminalTaskId: null,
+      taskAgentTaskId: null
+    });
+    expect(client.observeTaskTerminal).not.toHaveBeenCalled();
+    expect(client.observeTaskAgent).not.toHaveBeenCalled();
+
+    const unblockedTask = { ...blockedTask, blockedByTaskIds: [] };
+    client.listRecentTasks.mockResolvedValue([unblockedTask]);
+    client.listRepoTasks.mockResolvedValue([unblockedTask]);
+    await controller.refresh();
+
+    expect(client.observeTaskTerminal).toHaveBeenCalledWith(
+      "task-blocked",
+      expect.any(Function)
+    );
+    expect(store.getState().taskTerminalTaskId).toBe("task-blocked");
+  });
+
   it("does not start a task stream when openTask cannot resolve the task", () => {
     const store = createSessionStore();
     const client = createClientMock();

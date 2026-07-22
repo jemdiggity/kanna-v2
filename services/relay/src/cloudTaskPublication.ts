@@ -133,6 +133,7 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
       destinationDesktopId: null,
     },
     blockedByTaskIds,
+    parentTaskId: optionalNullableString(task.parentTaskId, `${path}.parentTaskId`, 128),
     createdAt: requiredString(task.createdAt, `${path}.createdAt`, 64),
     updatedAt: requiredString(task.updatedAt, `${path}.updatedAt`, 64),
     closedAt: null,
@@ -273,6 +274,16 @@ function nullableString(value: unknown, field: string, maxLength: number): strin
     throw new Error(`${field} must be null or a string of at most ${maxLength} characters`);
   }
   return value;
+}
+
+// Missing on snapshots from older desktop publishers; treated as "no parent".
+function optionalNullableString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string | null {
+  if (value === undefined) return null;
+  return nullableString(value, field, maxLength);
 }
 
 function optionalNullableUnicodeString(

@@ -359,6 +359,17 @@ export function createSessionStore(): SessionStore {
       listener();
     }
   };
+  const areTaskIdListsEqual = (
+    left: readonly string[] | undefined,
+    right: readonly string[] | undefined
+  ) => {
+    const leftIds = left ?? [];
+    const rightIds = right ?? [];
+    return (
+      leftIds.length === rightIds.length &&
+      leftIds.every((id, index) => id === rightIds[index])
+    );
+  };
   const areTaskListsEqual = (
     left: readonly TaskSummary[],
     right: readonly TaskSummary[]
@@ -379,7 +390,9 @@ export function createSessionStore(): SessionStore {
         (task.activity ?? "idle") === (other.activity ?? "idle") &&
         (task.waitingPromptSnippet ?? null) ===
           (other.waitingPromptSnippet ?? null) &&
-        (task.agentType ?? null) === (other.agentType ?? null)
+        (task.agentType ?? null) === (other.agentType ?? null) &&
+        (task.parentTaskId ?? null) === (other.parentTaskId ?? null) &&
+        areTaskIdListsEqual(task.blockedByTaskIds, other.blockedByTaskIds)
       );
     });
   };

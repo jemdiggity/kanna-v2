@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type {
   TaskCreationPhase,
   TaskTerminalStatus
@@ -168,6 +169,11 @@ interface ElementNode {
 
 interface RenderTaskScreenOptions {
   agentType?: "agent" | "pty";
+  blockedByTaskIds?: string[];
+  blockerTasks?: Array<{
+    blockerTaskId: string;
+    task: { id: string; repoId: string; title: string; stage: string } | null;
+  }>;
   terminalDims?: { cols: number | null; rows: number | null };
   terminalOutputEpoch?: number;
   terminalOutputStart?: number;
@@ -215,6 +221,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
 
   const {
     agentType = "pty",
+    blockedByTaskIds,
+    blockerTasks,
     terminalDims = { cols: null, rows: null },
     terminalOutputEpoch = 1,
     terminalOutputStart = 0,
@@ -265,8 +273,10 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       prompt,
       stage: "in progress",
       agentType,
-      activity
+      activity,
+      blockedByTaskIds
     },
+    blockerTasks,
     terminalOutput: "terminal",
     terminalOutputEpoch,
     terminalOutputStart,
@@ -820,6 +830,58 @@ describe("TaskScreen", () => {
       "rev-1",
       event
     );
+  });
+
+  it("shows a blocked placeholder instead of a terminal for blocked tasks", () => {
+    const collectText = (
+      node: ElementNode | ElementNode[] | string | null | undefined
+    ): string => {
+      if (!node) return "";
+      if (typeof node === "string") return node;
+      if (Array.isArray(node)) return node.map(collectText).join("");
+      return collectText(node.props?.children ?? null);
+    };
+
+    const tree = renderTaskScreen({
+      blockedByTaskIds: ["kanache-task"],
+      blockerTasks: [
+        {
+          blockerTaskId: "kanache-task",
+          task: {
+            id: "kanache-task",
+            repoId: "repo-kanache",
+            title: "Rust-input-hash donor matching",
+            stage: "in progress"
+          }
+        }
+      ]
+    });
+
+    const placeholder = findByTestId(
+      tree,
+      MOBILE_E2E_IDS.taskBlockedPlaceholder
+    );
+    expect(placeholder).not.toBeNull();
+    const placeholderText = collectText(placeholder);
+    expect(placeholderText).toContain("Blocked");
+    expect(placeholderText).toContain("Waiting on 1 task:");
+    expect(placeholderText).toContain("Rust-input-hash donor matching");
+    expect(findByType(tree, "TerminalWebView")).toBeNull();
+    expect(findByType(tree, "AgentMessageView")).toBeNull();
+    expect(
+      findByTestId(tree, MOBILE_E2E_IDS.taskInput)?.props?.editable
+    ).toBe(false);
+  });
+
+  it("falls back to blocker ids when a blocker is not in the collections", () => {
+    const tree = renderTaskScreen({ blockedByTaskIds: ["task-elsewhere"] });
+    const placeholder = findByTestId(
+      tree,
+      MOBILE_E2E_IDS.taskBlockedPlaceholder
+    );
+
+    expect(placeholder).not.toBeNull();
+    expect(JSON.stringify(placeholder)).toContain("task-elsewhere");
   });
 
   it("routes agent tasks to the native agent message view", () => {

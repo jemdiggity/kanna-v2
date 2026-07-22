@@ -171,6 +171,100 @@ describe("mergeCloudAndLanTasks", () => {
     });
   });
 
+  it("prefers the LAN parent task id, including a null detachment", () => {
+    const cloudTask = task({
+      id: "cloud-X",
+      repoId: "cloud-repo",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "local-repo",
+      ownerLocalTaskId: "local-task"
+    });
+
+    const nested = mergeCloudAndLanTasks({
+      cloudTasks: [{ ...cloudTask, parentTaskId: null }],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [
+          {
+            ...task({ id: "local-task", repoId: "local-repo" }),
+            parentTaskId: "local-parent"
+          }
+        ]
+      }
+    });
+    expect(nested.tasks[0]?.parentTaskId).toBe("local-parent");
+
+    const detached = mergeCloudAndLanTasks({
+      cloudTasks: [{ ...cloudTask, parentTaskId: "local-parent" }],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [
+          {
+            ...task({ id: "local-task", repoId: "local-repo" }),
+            parentTaskId: null
+          }
+        ]
+      }
+    });
+    expect(detached.tasks[0]?.parentTaskId).toBeNull();
+
+    const legacyLan = mergeCloudAndLanTasks({
+      cloudTasks: [{ ...cloudTask, parentTaskId: "local-parent" }],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [task({ id: "local-task", repoId: "local-repo" })]
+      }
+    });
+    expect(legacyLan.tasks[0]?.parentTaskId).toBe("local-parent");
+  });
+
+  it("prefers the LAN blocker list, including an empty resolution", () => {
+    const cloudTask = task({
+      id: "cloud-X",
+      repoId: "cloud-repo",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "local-repo",
+      ownerLocalTaskId: "local-task"
+    });
+
+    const blocked = mergeCloudAndLanTasks({
+      cloudTasks: [{ ...cloudTask, blockedByTaskIds: [] }],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [
+          {
+            ...task({ id: "local-task", repoId: "local-repo" }),
+            blockedByTaskIds: ["local-blocker"]
+          }
+        ]
+      }
+    });
+    expect(blocked.tasks[0]?.blockedByTaskIds).toEqual(["local-blocker"]);
+
+    const unblocked = mergeCloudAndLanTasks({
+      cloudTasks: [{ ...cloudTask, blockedByTaskIds: ["local-blocker"] }],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [
+          {
+            ...task({ id: "local-task", repoId: "local-repo" }),
+            blockedByTaskIds: []
+          }
+        ]
+      }
+    });
+    expect(unblocked.tasks[0]?.blockedByTaskIds).toEqual([]);
+
+    const legacyLan = mergeCloudAndLanTasks({
+      cloudTasks: [{ ...cloudTask, blockedByTaskIds: ["local-blocker"] }],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [task({ id: "local-task", repoId: "local-repo" })]
+      }
+    });
+    expect(legacyLan.tasks[0]?.blockedByTaskIds).toEqual(["local-blocker"]);
+  });
+
   it("does not deduplicate the same local task id from another desktop", () => {
     const result = mergeCloudAndLanTasks({
       cloudTasks: [

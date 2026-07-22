@@ -54,6 +54,7 @@ export interface CloudTaskSnapshot {
     destinationDesktopId: string | null;
   };
   blockedByTaskIds: string[];
+  parentTaskId: string | null;
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;

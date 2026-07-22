@@ -159,6 +159,10 @@ export interface TaskSummary {
   ownerLocalTaskId?: string;
   ownerOnline?: boolean;
   activity?: TaskActivity | null;
+  /** Owner-local id of the parent task when this task is a subtask. */
+  parentTaskId?: string | null;
+  /** Owner-local ids of unresolved blockers; non-empty means blocked. */
+  blockedByTaskIds?: string[];
 }
 
 export interface TaskLatestRun {

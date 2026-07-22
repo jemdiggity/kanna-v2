@@ -66,6 +66,9 @@ pub struct TaskSummary {
     pub snippet: Option<String>,
     pub waiting_prompt_snippet: Option<String>,
     pub agent_type: Option<String>,
+    pub parent_task_id: Option<String>,
+    #[serde(default)]
+    pub blocked_by_task_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +97,9 @@ pub struct TaskDetail {
     /// orchestrators (e.g. the QA dispatcher) read a finished child's
     /// verdict from here after `kanna_wait_task` resolves.
     pub latest_run: Option<TaskLatestRun>,
+    pub parent_task_id: Option<String>,
+    #[serde(default)]
+    pub blocked_by_task_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -262,26 +268,45 @@ impl MobileApi {
 
     pub fn list_repo_tasks(&self, repo_id: &str) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
-        self._db
+        let items = self
+            ._db
             .list_pipeline_items(repo_id)
-            .map(|items| items.into_iter().map(map_task_summary).collect())
-            .map_err(|e| format!("db error: {}", e))
+            .map_err(|e| format!("db error: {}", e))?;
+        self.map_task_summaries(items)
     }
 
     pub fn list_recent_tasks(&self) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
-        self._db
+        let items = self
+            ._db
             .list_recent_pipeline_items()
-            .map(|items| items.into_iter().map(map_task_summary).collect())
-            .map_err(|e| format!("db error: {}", e))
+            .map_err(|e| format!("db error: {}", e))?;
+        self.map_task_summaries(items)
     }
 
     pub fn search_tasks(&self, query: &str) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
-        self._db
+        let items = self
+            ._db
             .search_pipeline_items(query)
-            .map(|items| items.into_iter().map(map_task_summary).collect())
-            .map_err(|e| format!("db error: {}", e))
+            .map_err(|e| format!("db error: {}", e))?;
+        self.map_task_summaries(items)
+    }
+
+    fn map_task_summaries(
+        &self,
+        items: Vec<crate::db::PipelineItem>,
+    ) -> Result<Vec<TaskSummary>, String> {
+        items
+            .into_iter()
+            .map(|item| {
+                let blocked_by_task_ids = self
+                    ._db
+                    .list_open_task_blocker_ids(&item.id)
+                    .map_err(|e| format!("db error: {}", e))?;
+                Ok(map_task_summary(item, blocked_by_task_ids))
+            })
+            .collect()
     }
 
     pub fn get_task(&self, task_or_branch_id: &str) -> Result<Option<TaskDetail>, String> {
@@ -312,11 +337,16 @@ impl MobileApi {
             ._db
             .latest_stage_run(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
+        let blocked_by_task_ids = self
+            ._db
+            .list_open_task_blocker_ids(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
         Ok(Some(map_task_detail(
             item,
             repo.as_ref(),
             worktree_path,
             latest_run,
+            blocked_by_task_ids,
         )))
     }
 }
@@ -405,7 +435,10 @@ impl AddRepoError {
     }
 }
 
-fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
+fn map_task_summary(
+    item: crate::db::PipelineItem,
+    blocked_by_task_ids: Vec<String>,
+) -> TaskSummary {
     let prompt = item.prompt.clone();
     let title = item
         .display_name
@@ -424,6 +457,8 @@ fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
         snippet: waiting_prompt_snippet.clone(),
         waiting_prompt_snippet,
         agent_type: item.agent_type,
+        parent_task_id: item.parent_task_id,
+        blocked_by_task_ids,
     }
 }
 
@@ -432,6 +467,7 @@ fn map_task_detail(
     repo: Option<&crate::db::Repo>,
     worktree_path: Option<String>,
     latest_run: Option<crate::db::StageRun>,
+    blocked_by_task_ids: Vec<String>,
 ) -> TaskDetail {
     let prompt = item.prompt.clone();
     let title = item
@@ -485,6 +521,8 @@ fn map_task_detail(
         commits_behind: git_state.commits_behind,
         dirty: git_state.dirty,
         latest_run: latest_run.map(map_task_latest_run),
+        parent_task_id: item.parent_task_id,
+        blocked_by_task_ids,
     }
 }
 
@@ -991,6 +1029,125 @@ mod tests {
             tasks[0].waiting_prompt_snippet.as_deref(),
             Some("Latest agent output preview")
         );
+    }
+
+    #[test]
+    fn task_summaries_expose_unresolved_blocker_ids() {
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: Db::test_db_path("task-summary-blockers"),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+        };
+
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (id, stage) in [
+            ("task-blocked", "in progress"),
+            ("task-open-blocker", "in progress"),
+            ("task-resolved-blocker", "pr"),
+        ] {
+            db.insert_test_pipeline_item(id, "repo-1", "work", None, stage, "2026-04-17 09:00:00")
+                .unwrap();
+        }
+        db.update_test_pipeline_item_pr_url(
+            "task-resolved-blocker",
+            "https://github.com/kanna/kanna/pull/9",
+        )
+        .unwrap();
+        db.insert_task_blocker("task-blocked", "task-open-blocker")
+            .unwrap();
+        db.insert_task_blocker("task-blocked", "task-resolved-blocker")
+            .unwrap();
+
+        let api = super::MobileApi::new(config, db);
+        let tasks = api.list_repo_tasks("repo-1").unwrap();
+        let blocked = tasks.iter().find(|task| task.id == "task-blocked").unwrap();
+
+        assert_eq!(blocked.blocked_by_task_ids, vec!["task-open-blocker"]);
+
+        let detail = api.get_task("task-blocked").unwrap().unwrap();
+        assert_eq!(detail.blocked_by_task_ids, vec!["task-open-blocker"]);
+        let serialized = serde_json::to_value(&detail).unwrap();
+        assert_eq!(
+            serialized["blockedByTaskIds"],
+            serde_json::json!(["task-open-blocker"])
+        );
+    }
+
+    #[test]
+    fn task_summaries_expose_the_parent_task_id() {
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: Db::test_db_path("task-summary-parent"),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+        };
+
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-parent",
+            "repo-1",
+            "parent work",
+            Some("Parent"),
+            "in progress",
+            "2026-04-17 09:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-child",
+            "repo-1",
+            "child work",
+            Some("Child"),
+            "in progress",
+            "2026-04-17 10:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_parent("task-child", Some("task-parent"))
+            .unwrap();
+
+        let api = super::MobileApi::new(config, db);
+        let tasks = api.list_repo_tasks("repo-1").unwrap();
+        let parent_by_id: std::collections::HashMap<_, _> = tasks
+            .iter()
+            .map(|task| (task.id.as_str(), task.parent_task_id.clone()))
+            .collect();
+
+        assert_eq!(
+            parent_by_id.get("task-child"),
+            Some(&Some("task-parent".to_string()))
+        );
+        assert_eq!(parent_by_id.get("task-parent"), Some(&None));
+
+        let serialized =
+            serde_json::to_value(tasks.iter().find(|task| task.id == "task-child").unwrap())
+                .unwrap();
+        assert_eq!(serialized["parentTaskId"], "task-parent");
     }
 
     #[test]

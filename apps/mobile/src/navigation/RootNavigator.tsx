@@ -35,6 +35,7 @@ import { AccountBadge } from "../components/AccountBadge";
 import { CreateTaskComposer } from "../components/CreateTaskComposer";
 import { FloatingToolbar } from "../components/FloatingToolbar";
 import { resolveMobileTerminalGeometry } from "../mobileTerminalGeometry";
+import { resolveBlockerTasks } from "../lib/api/taskIdentity";
 import { MachinesScreen } from "../screens/MachinesScreen";
 import { MoreScreen } from "../screens/MoreScreen";
 import { filterCommandAvailableRepos } from "../screens/repoCommandPresentation";
@@ -508,6 +509,7 @@ function TaskDetailRoute({
 
   return (
     <TaskScreen
+      blockerTasks={resolveBlockerTasks(task, visibleTasks(state))}
       e2eTaskSnapshotMarker={e2eTaskSnapshotMarker}
       task={task}
       terminalErrorMessage={state.taskTerminalErrorMessage}
@@ -708,16 +710,19 @@ function resolveSelectedTask(state: SessionState) {
     : null;
 }
 
-function resolveTask(state: SessionState, taskId: string) {
-  const tasks = [
+function visibleTasks(state: SessionState) {
+  return [
     ...new Map(
       [...state.repoTasks, ...state.recentTasks, ...state.searchResults].map(
         (task) => [task.id, task] as const
       )
     ).values()
   ];
+}
+
+function resolveTask(state: SessionState, taskId: string) {
   const slot = taskUiSlotForSelection(
-    projectTaskUiSlots(tasks, state.taskUiSlots),
+    projectTaskUiSlots(visibleTasks(state), state.taskUiSlots),
     taskId
   );
   return slot ? taskUiSlotToTaskSummary(slot) : null;

@@ -95,6 +95,9 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.taskCreationRecoverButton).toBe(
       "mobile.task-creation.recover"
     );
+    expect(MOBILE_E2E_IDS.taskBlockedPlaceholder).toBe(
+      "mobile.task-blocked-placeholder"
+    );
     expect(MOBILE_E2E_IDS.createTaskCancelButton).toBe(
       "mobile.create-task.cancel"
     );
@@ -112,6 +115,10 @@ describe("MOBILE_E2E_IDS", () => {
     );
     expect(MOBILE_E2E_IDS.moreCommandGroup("configure")).toBe(
       "mobile.more.command-group.configure"
+    );
+    expect(MOBILE_E2E_IDS.taskListItem("task-1")).toBe("mobile.task-row.task-1");
+    expect(MOBILE_E2E_IDS.taskListSubtaskRow("task-1")).toBe(
+      "mobile.task-row.task-1.subtask"
     );
   });
 });

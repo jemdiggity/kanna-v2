@@ -19,6 +19,7 @@ import type {
   TaskFileContent,
   TaskSummary
 } from "../lib/api/types";
+import { isTaskBlocked, type BlockerTaskRef } from "../lib/api/taskIdentity";
 import type {
   TaskCompanionEventStatus,
   TaskCompanionStatus,
@@ -55,6 +56,7 @@ import { getTerminalBottomInset } from "./terminalSafeArea";
 
 interface TaskScreenProps {
   task: TaskSummary;
+  blockerTasks?: readonly BlockerTaskRef[];
   e2eTaskSnapshotMarker?: string;
   terminalOutput: string;
   terminalOutputEpoch: number;
@@ -105,6 +107,7 @@ function preserveExpandedTextSelection(): void {
 
 export function TaskScreen({
   task,
+  blockerTasks = [],
   e2eTaskSnapshotMarker,
   terminalOutput,
   terminalOutputEpoch,
@@ -178,6 +181,15 @@ export function TaskScreen({
   }
   const { height: windowHeight } = useWindowDimensions();
   const isAgentTask = task.agentType === "agent";
+  const isBlocked = isTaskBlocked(task);
+  // Callers pass resolved blocker summaries; fall back to bare ids so the
+  // placeholder stays truthful when a blocker is not in the collections.
+  const blockedRefs: readonly BlockerTaskRef[] = blockerTasks.length
+    ? blockerTasks
+    : (task.blockedByTaskIds ?? []).map((blockerTaskId) => ({
+        blockerTaskId,
+        task: null
+      }));
   const previewScopeRef = useRef({
     isAgentTask,
     revision: 0,
@@ -205,11 +217,13 @@ export function TaskScreen({
     task.activity === "working" || task.activity === "unread"
       ? task.activity
       : "idle";
-  const isComposerDisabled = isAgentTask
-    ? taskCreationPhase !== "idle" ||
-      agentStatus === "connecting" ||
-      agentStatus === "error"
-    : model.isComposerDisabled;
+  const isComposerDisabled =
+    isBlocked ||
+    (isAgentTask
+      ? taskCreationPhase !== "idle" ||
+        agentStatus === "connecting" ||
+        agentStatus === "error"
+      : model.isComposerDisabled);
   const isAnimatedCreation =
     taskCreationPhase === "pending" || taskCreationPhase === "recovering";
   const isAnimatedTerminalConnection =
@@ -387,6 +401,35 @@ export function TaskScreen({
                   <Text style={styles.taskCreationRecoverLabel}>Recover task</Text>
                 </Pressable>
               ) : null}
+            </View>
+          </View>
+        ) : isBlocked ? (
+          <View style={styles.terminalSkeleton}>
+            <View style={styles.skeletonLineWide} />
+            <View style={styles.skeletonLineMid} />
+            <View style={styles.skeletonLineShort} />
+            <View
+              style={styles.terminalOverlay}
+              testID={MOBILE_E2E_IDS.taskBlockedPlaceholder}
+            >
+              <Text style={styles.terminalOverlayLabel}>Blocked</Text>
+              <Text style={styles.blockedDetail}>
+                {blockedRefs.length === 1
+                  ? "Waiting on 1 task:"
+                  : `Waiting on ${blockedRefs.length} tasks:`}
+              </Text>
+              {blockedRefs.map((blocker) => (
+                <Text
+                  key={blocker.blockerTaskId}
+                  numberOfLines={2}
+                  style={styles.blockedTaskTitle}
+                >
+                  {blocker.task?.title ?? blocker.blockerTaskId}
+                </Text>
+              ))}
+              <Text style={styles.blockedDetail}>
+                The agent starts when its blockers finish.
+              </Text>
             </View>
           </View>
         ) : task.agentType === "agent" ? (
@@ -718,6 +761,19 @@ const styles = StyleSheet.create({
     color: "#D6A5A5",
     fontSize: 12,
     maxWidth: 280,
+    textAlign: "center"
+  },
+  blockedDetail: {
+    color: "#93A7C8",
+    fontSize: 13,
+    maxWidth: 300,
+    textAlign: "center"
+  },
+  blockedTaskTitle: {
+    color: "#E6EDF8",
+    fontSize: 14,
+    fontWeight: "600",
+    maxWidth: 300,
     textAlign: "center"
   },
   taskCreationRecoverButton: {

@@ -245,11 +245,31 @@ describe("cloud task index", () => {
       agentProvider: "claude",
       agentType: "agent",
       activity: "working",
+      parentTaskId: null,
+      blockedByTaskIds: [],
       ownerDesktopId: "desktop-1",
       ownerLocalRepoId: "local-repo-1",
       ownerLocalTaskId: "task-1",
       ownerOnline: false,
     });
+  });
+
+  it("carries unresolved blocker ids and defaults them to empty", () => {
+    expect(
+      mapCloudTaskSnapshot({
+        ...legacySnapshot,
+        blockedByTaskIds: ["task-blocker-1", "task-blocker-2"],
+      }).blockedByTaskIds,
+    ).toEqual(["task-blocker-1", "task-blocker-2"]);
+    expect(mapCloudTaskSnapshot(legacySnapshot).blockedByTaskIds).toEqual([]);
+  });
+
+  it("carries the owner-local parent task id and defaults it to null", () => {
+    expect(
+      mapCloudTaskSnapshot({ ...legacySnapshot, parentTaskId: "task-parent" })
+        .parentTaskId,
+    ).toBe("task-parent");
+    expect(mapCloudTaskSnapshot(legacySnapshot).parentTaskId).toBeNull();
   });
 
   const legacySnapshot = {
