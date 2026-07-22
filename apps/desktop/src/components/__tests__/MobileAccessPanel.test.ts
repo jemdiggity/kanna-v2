@@ -36,7 +36,7 @@ describe("MobileAccessPanel", () => {
     expect(wrapper.get('[data-testid="mobile-access-panel"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="mobile-access-status"]').text()).toBe("Online");
     expect(wrapper.get('[data-testid="mobile-access-pairing-code"]').text()).toBe("123456");
-    expect(wrapper.get('[data-testid="mobile-access-start-pairing"]').text()).toMatch(/start pairing/i);
+    expect(wrapper.get('[data-testid="mobile-access-start-pairing"]').text()).toBe("Refresh");
   });
 
   it("renders the QR generated from the same session as the short code", async () => {
@@ -72,10 +72,12 @@ describe("MobileAccessPanel", () => {
 
     await flushPromises();
     expect(wrapper.find('[data-testid="mobile-access-pairing-code"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="mobile-access-start-pairing"]').text()).toBe("Refresh");
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(wrapper.find('[data-testid="mobile-access-pairing-code"]').exists()).toBe(false);
     expect(wrapper.text()).toContain("No pairing session active");
+    expect(wrapper.get('[data-testid="mobile-access-start-pairing"]').text()).toBe("Start pairing");
     vi.useRealTimers();
   });
 });
