@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from "react";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
+import { showTaskActionMenu, type TaskAction } from "../screens/taskActionMenu";
 import { DEFAULT_TASK_QUICK_REPLIES } from "../screens/taskQuickReplies";
 import {
   act,
   create,
   type ReactTestRenderer
 } from "react-test-renderer";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KannaClient } from "../lib/api/client";
 import type { TaskSummary } from "../lib/api/types";
 import {
@@ -21,7 +23,14 @@ import { buildInitialNavigationState } from "./navigationState";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const navigationHarness = vi.hoisted(() => ({
-  onStateChange: null as ((state: unknown) => void) | null
+  onStateChange: null as ((state: unknown) => void) | null,
+  applyStackAction: null as
+    | ((action: {
+        type: string;
+        name: string;
+        params?: { taskId?: string };
+      }) => void)
+    | null
 }));
 
 vi.mock("@expo/vector-icons", () => ({
@@ -30,6 +39,10 @@ vi.mock("@expo/vector-icons", () => ({
 
 vi.mock("react-native", () => ({
   ActivityIndicator: "ActivityIndicator",
+  Keyboard: {
+    addListener: vi.fn(() => ({ remove: vi.fn() })),
+    dismiss: vi.fn()
+  },
   Pressable: "Pressable",
   ScrollView: "ScrollView",
   StyleSheet: {
@@ -37,6 +50,7 @@ vi.mock("react-native", () => ({
   },
   Text: "Text",
   TextInput: "TextInput",
+  useWindowDimensions: () => ({ height: 800, width: 390 }),
   View: "View"
 }));
 
@@ -66,17 +80,26 @@ vi.mock("@react-navigation/native", async () => {
       return ReactModule.createElement(ReactModule.Fragment, null, children);
     },
     StackActions: {
-      popTo: vi.fn(),
-      push: vi.fn(),
-      replace: vi.fn()
+      popTo: (name: string, params?: object) => ({ type: "POP_TO", name, params }),
+      push: (name: string, params?: object) => ({ type: "PUSH", name, params }),
+      replace: (name: string, params?: object) => ({ type: "REPLACE", name, params })
     },
     useFocusEffect: (effect: () => void | (() => void)) => {
       ReactModule.useEffect(effect, [effect]);
     },
     useIsFocused: () => true,
     useNavigationContainerRef: () => ReactModule.useRef({
-      dispatch: vi.fn(),
-      getRootState: vi.fn(() => ({ index: 0, routes: [] })),
+      dispatch: vi.fn((action: {
+        type: string;
+        name: string;
+        params?: { taskId?: string };
+      }) => {
+        navigationHarness.applyStackAction?.(action);
+      }),
+      getRootState: vi.fn(() => ({
+        index: 0,
+        routes: [{ key: "maintabs", name: "MainTabs" }]
+      })),
       isReady: vi.fn(() => true)
     }).current
   };
@@ -91,9 +114,43 @@ vi.mock("@react-navigation/native-stack", async () => {
         const screens = ReactModule.Children.toArray(children) as Array<
           React.ReactElement<{ component: React.ComponentType; name: string }>
         >;
-        const mainTabs = screens.find((screen) => screen.props.name === "MainTabs");
-        if (!mainTabs) return null;
-        return ReactModule.createElement(mainTabs.props.component);
+        const [route, setRoute] = ReactModule.useState<{
+          name: string;
+          params?: { taskId?: string };
+        }>({ name: "MainTabs", params: undefined });
+
+        ReactModule.useEffect(() => {
+          navigationHarness.applyStackAction = (action) => {
+            if (
+              action.type === "PUSH" ||
+              action.type === "REPLACE" ||
+              action.type === "POP_TO"
+            ) {
+              setRoute({ name: action.name, params: action.params });
+            }
+          };
+          return () => {
+            navigationHarness.applyStackAction = null;
+          };
+        }, []);
+
+        const active =
+          screens.find((screen) => screen.props.name === route.name) ??
+          screens.find((screen) => screen.props.name === "MainTabs");
+        if (!active) return null;
+        const navigation = {
+          canGoBack: () => route.name !== "MainTabs",
+          goBack: () => setRoute({ name: "MainTabs", params: undefined }),
+          setParams: (params: { taskId?: string }) =>
+            setRoute((current) => ({
+              ...current,
+              params: { ...current.params, ...params }
+            }))
+        };
+        return ReactModule.createElement(active.props.component, {
+          navigation,
+          route: { key: route.name, name: route.name, params: route.params }
+        });
       },
       Screen
     })
@@ -178,8 +235,25 @@ vi.mock("../components/CreateTaskComposer", () => ({
 }));
 vi.mock("../screens/MachinesScreen", () => ({ MachinesScreen: "MachinesScreen" }));
 vi.mock("../screens/SearchScreen", () => ({ SearchScreen: "SearchScreen" }));
-vi.mock("../screens/TaskScreen", () => ({ TaskScreen: "TaskScreen" }));
 vi.mock("../screens/taskActionMenu", () => ({ showTaskActionMenu: vi.fn() }));
+vi.mock("../screens/AgentMessageView", () => ({
+  AgentMessageView: "AgentMessageView"
+}));
+vi.mock("../screens/QuickReplySendControl", () => ({
+  QuickReplySendControl: "QuickReplySendControl"
+}));
+vi.mock("../screens/TaskDiffPreview", () => ({
+  TaskDiffPreview: "TaskDiffPreview"
+}));
+vi.mock("../screens/TaskFilePreview", () => ({
+  TaskFilePreview: "TaskFilePreview"
+}));
+vi.mock("../screens/TerminalWebView", () => ({
+  TerminalWebView: "TerminalWebView"
+}));
+vi.mock("../screens/VisualCompanionModal", () => ({
+  VisualCompanionModal: "VisualCompanionModal"
+}));
 
 let RootNavigator: typeof import("./RootNavigator").default | null = null;
 let controller: MobileController | null = null;
@@ -250,7 +324,15 @@ function createClientMock(): KannaClient {
     }),
     listRepoTasks: vi.fn().mockResolvedValue([]),
     listRecentTasks: vi.fn().mockResolvedValue([]),
-    searchTasks: vi.fn().mockResolvedValue([])
+    searchTasks: vi.fn().mockResolvedValue([]),
+    markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
+    advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-1" }),
+    closeTask: vi.fn().mockResolvedValue(undefined),
+    observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+    observeTaskCompanion: vi.fn(() => ({
+      close: vi.fn(),
+      sendEvent: vi.fn(() => true)
+    }))
   } as unknown as KannaClient;
 }
 
@@ -475,5 +557,155 @@ describe("RootNavigator More integration", () => {
       selectedRepoId: "repo-2",
       repoCommandStatus: "ready"
     });
+  });
+});
+
+describe("RootNavigator task action integration", () => {
+  const task: TaskSummary = {
+    id: "task-1",
+    repoId: "repo-1",
+    title: "Close me from the plus menu",
+    stage: "in progress"
+  };
+
+  function pressByTestId(testID: string): void {
+    if (!rendered) throw new Error("navigator is not rendered");
+    const onPress = rendered.root.find(
+      (node) => node.props.testID === testID
+    ).props.onPress as () => void;
+    onPress();
+  }
+
+  function findByTestId(testID: string) {
+    if (!rendered) throw new Error("navigator is not rendered");
+    return rendered.root.find((node) => node.props.testID === testID);
+  }
+
+  function countByTestId(testID: string): number {
+    if (!rendered) return 0;
+    return rendered.root.findAll(
+      (node) => node.props.testID === testID
+    ).length;
+  }
+
+  async function openTaskDetailAndCaptureMenu(
+    client: KannaClient,
+    store: SessionStore
+  ): Promise<(action: TaskAction) => void> {
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    await act(async () => {
+      pressByTestId("mobile.task-row.task-1");
+      await flushMicrotasks();
+    });
+    expect(findByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toBeDefined();
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    expect(showTaskActionMenu).toHaveBeenCalledTimes(1);
+    return vi.mocked(showTaskActionMenu).mock.calls[0][0];
+  }
+
+  beforeEach(() => {
+    vi.mocked(showTaskActionMenu).mockClear();
+  });
+
+  it("closes a task exactly once from the + menu, shows the spinner, and blocks duplicates until success", async () => {
+    const close = createDeferred<void>();
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks)
+      .mockResolvedValueOnce([task])
+      .mockResolvedValue([]);
+    vi.mocked(client.listRepoTasks)
+      .mockResolvedValueOnce([task])
+      .mockResolvedValue([]);
+    vi.mocked(client.closeTask).mockReturnValue(close.promise);
+    const store = createSessionStore();
+    const selectAction = await openTaskDetailAndCaptureMenu(client, store);
+
+    await act(async () => {
+      selectAction("close-task");
+      await flushMicrotasks();
+    });
+
+    expect(client.closeTask).toHaveBeenCalledTimes(1);
+    expect(client.closeTask).toHaveBeenCalledWith("task-1");
+    expect(store.getState().pendingTaskAction).toEqual({
+      taskId: "task-1",
+      action: "close-task"
+    });
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled).toBe(true);
+    expect(
+      findByTestId(MOBILE_E2E_IDS.taskActionPendingSpinner).type
+    ).toBe("ActivityIndicator");
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    expect(showTaskActionMenu).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      selectAction("close-task");
+      selectAction("advance-stage");
+      await flushMicrotasks();
+    });
+    expect(client.closeTask).toHaveBeenCalledTimes(1);
+    expect(client.advanceTaskStage).not.toHaveBeenCalled();
+
+    close.resolve();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.getState().selectedTaskId).toBeNull();
+    expect(countByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toBe(0);
+  });
+
+  it("re-enables task actions after a failed close", async () => {
+    const close = createDeferred<void>();
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValue([task]);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([task]);
+    vi.mocked(client.closeTask).mockReturnValueOnce(close.promise);
+    const store = createSessionStore();
+    const selectAction = await openTaskDetailAndCaptureMenu(client, store);
+
+    await act(async () => {
+      selectAction("close-task");
+      await flushMicrotasks();
+    });
+    expect(client.closeTask).toHaveBeenCalledTimes(1);
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled).toBe(true);
+
+    close.reject(new Error("daemon unavailable"));
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.getState().errorMessage).toBe("daemon unavailable");
+    expect(findByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toBeDefined();
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled).toBe(false);
+    expect(countByTestId(MOBILE_E2E_IDS.taskActionPendingSpinner)).toBe(0);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    expect(showTaskActionMenu).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      vi.mocked(showTaskActionMenu).mock.calls[1][0]("close-task");
+      await flushMicrotasks();
+    });
+    expect(client.closeTask).toHaveBeenCalledTimes(2);
   });
 });
