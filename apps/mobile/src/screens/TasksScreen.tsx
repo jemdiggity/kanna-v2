@@ -1,7 +1,7 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import type { RepoSummary } from "../lib/api/types";
+import type { RepoSummary, TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
 import { orderActivityTasks } from "./activityTaskOrder";
 import { taskCreationTimestamp } from "./taskTreeRows";
@@ -39,6 +39,11 @@ export function TasksScreen({
   onOpenTask
 }: TasksScreenProps) {
   const isRecentView = heading === "Recent";
+  const repoNamesById = new Map(repos.map((repo) => [repo.id, repo.name]));
+  const recentTaskRepoLabel = (task: TaskSummary): string =>
+    task.repoName?.trim() ||
+    repoNamesById.get(task.repoId)?.trim() ||
+    task.repoId;
   const scopedTaskSlots = !isRecentView && selectedRepoId
     ? taskSlots.filter(
         (slot) => taskUiSlotToTaskSummary(slot).repoId === selectedRepoId
@@ -103,6 +108,7 @@ export function TasksScreen({
             taskCollectionStatus === "loading" && displayedTaskSlots.length === 0
           }
           nestSubtasks
+          repoLabelForTask={isRecentView ? recentTaskRepoLabel : undefined}
           taskSlots={displayedTaskSlots}
           onOpenTask={onOpenTask}
         />

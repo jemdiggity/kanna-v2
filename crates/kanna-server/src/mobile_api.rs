@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::db::{Db, NewRepo, NewStageRun};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -58,6 +59,7 @@ pub struct MobileApi {
 pub struct TaskSummary {
     pub id: String,
     pub repo_id: String,
+    pub repo_name: Option<String>,
     pub title: String,
     pub prompt: Option<String>,
     pub stage: Option<String>,
@@ -268,34 +270,38 @@ impl MobileApi {
 
     pub fn list_repo_tasks(&self, repo_id: &str) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
+        let repo_names = self.repo_names_by_id()?;
         let items = self
             ._db
             .list_pipeline_items(repo_id)
             .map_err(|e| format!("db error: {}", e))?;
-        self.map_task_summaries(items)
+        self.map_task_summaries(items, &repo_names)
     }
 
     pub fn list_recent_tasks(&self) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
+        let repo_names = self.repo_names_by_id()?;
         let items = self
             ._db
             .list_recent_pipeline_items()
             .map_err(|e| format!("db error: {}", e))?;
-        self.map_task_summaries(items)
+        self.map_task_summaries(items, &repo_names)
     }
 
     pub fn search_tasks(&self, query: &str) -> Result<Vec<TaskSummary>, String> {
         record_orphaned_initialized_tasks(&self._db)?;
+        let repo_names = self.repo_names_by_id()?;
         let items = self
             ._db
             .search_pipeline_items(query)
             .map_err(|e| format!("db error: {}", e))?;
-        self.map_task_summaries(items)
+        self.map_task_summaries(items, &repo_names)
     }
 
     fn map_task_summaries(
         &self,
         items: Vec<crate::db::PipelineItem>,
+        repo_names: &HashMap<String, String>,
     ) -> Result<Vec<TaskSummary>, String> {
         items
             .into_iter()
@@ -304,9 +310,17 @@ impl MobileApi {
                     ._db
                     .list_open_task_blocker_ids(&item.id)
                     .map_err(|e| format!("db error: {}", e))?;
-                Ok(map_task_summary(item, blocked_by_task_ids))
+                let repo_name = repo_names.get(&item.repo_id).cloned();
+                Ok(map_task_summary(item, repo_name, blocked_by_task_ids))
             })
             .collect()
+    }
+
+    fn repo_names_by_id(&self) -> Result<HashMap<String, String>, String> {
+        self._db
+            .list_repos_for_maintenance()
+            .map(|repos| repos.into_iter().map(|repo| (repo.id, repo.name)).collect())
+            .map_err(|e| format!("db error: {}", e))
     }
 
     pub fn get_task(&self, task_or_branch_id: &str) -> Result<Option<TaskDetail>, String> {
@@ -437,6 +451,7 @@ impl AddRepoError {
 
 fn map_task_summary(
     item: crate::db::PipelineItem,
+    repo_name: Option<String>,
     blocked_by_task_ids: Vec<String>,
 ) -> TaskSummary {
     let prompt = item.prompt.clone();
@@ -449,6 +464,7 @@ fn map_task_summary(
     TaskSummary {
         id: item.id,
         repo_id: item.repo_id,
+        repo_name,
         title,
         prompt,
         stage: item.stage,
@@ -928,7 +944,9 @@ mod tests {
 
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].id, "task-newer");
+        assert_eq!(tasks[0].repo_name.as_deref(), Some("Repo One"));
         assert_eq!(tasks[1].id, "task-older");
+        assert_eq!(tasks[1].repo_name.as_deref(), Some("Repo One"));
     }
 
     #[test]
@@ -980,6 +998,7 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "task-repo-1");
         assert_eq!(tasks[0].repo_id, "repo-1");
+        assert_eq!(tasks[0].repo_name.as_deref(), Some("Repo One"));
     }
 
     #[test]

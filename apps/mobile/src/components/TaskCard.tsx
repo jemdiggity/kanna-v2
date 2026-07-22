@@ -9,6 +9,7 @@ interface TaskCardProps {
   task: TaskSummary;
   uiId?: string;
   isSubtask?: boolean;
+  repoLabel?: string | null;
   onPress(): void;
 }
 
@@ -16,6 +17,7 @@ export function TaskCard({
   task,
   uiId = task.id,
   isSubtask = false,
+  repoLabel = null,
   onPress
 }: TaskCardProps) {
   const model = buildTaskListItemModel(task);
@@ -24,6 +26,7 @@ export function TaskCard({
     isSubtask ? "Subtask" : null,
     blocked ? "Blocked" : null,
     model.title,
+    repoLabel,
     model.stageLabel,
     model.waitingPromptSnippet
   ]
@@ -50,6 +53,11 @@ export function TaskCard({
       testID={MOBILE_E2E_IDS.taskListItem(uiId)}
       onPress={onPress}
     >
+      {repoLabel ? (
+        <Text numberOfLines={1} style={styles.repoLabel}>
+          {repoLabel}
+        </Text>
+      ) : null}
       <View style={styles.row}>
         <Text numberOfLines={2} style={[styles.title, titleActivityStyle]}>
           {model.title}
@@ -97,6 +105,14 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
     justifyContent: "space-between"
+  },
+  repoLabel: {
+    color: "#7E93B4",
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.4,
+    marginBottom: -4,
+    textTransform: "uppercase"
   },
   title: {
     color: "#F3F7FF",

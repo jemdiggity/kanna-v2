@@ -179,6 +179,29 @@ describe("TaskCard", () => {
     );
   });
 
+  it("renders an opt-in repo label and announces it after the title", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Current title",
+        stage: "review",
+        waitingPromptSnippet: "Please confirm the final UI."
+      },
+      repoLabel: "kanna-7",
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    const repoLabel = findTextNodeByCompleteText(tree, "kanna-7");
+    expect(repoLabel).not.toBeNull();
+    expect(repoLabel?.props?.numberOfLines).toBe(1);
+    expect(tree.props?.accessibilityLabel).toBe(
+      "Current title. kanna-7. review. Please confirm the final UI."
+    );
+  });
+
   it("renders a normalized multiline prompt only once in text and accessibility", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
 
