@@ -10,8 +10,12 @@ and the legacy Tauri status path is removed outright together with its tests
 — no temporary fallback remains. Revision 3 (2026-07-22): the attach-gap
 race is closed by an explicit ownership and reconciliation design — a
 selected-client repair rule in `activity_for_runtime_status`, attach-time
-snapshot-status replay as the guaranteed repair point, and one-shot detach
-reconciliation (§2a).
+status replay as the guaranteed repair point, and one-shot detach
+reconciliation (§2a). Revision 4 (2026-07-22): the steady-state carrier is
+specified — live `StatusChanged` is enqueued into the daemon's attached
+fanout, the existing attach-time queued `StatusChanged` is the sole initial
+mechanism (the `TerminalSnapshot.status` duplicate is withdrawn), and lag
+resync restores status via a `[Snapshot, StatusChanged]` pair (§2b).
 
 ## 1. Confirmed gap
 
@@ -70,9 +74,13 @@ task is selected in some window and `unread` otherwise. The desktop supplies
 
 1. *Forward `StatusChanged` inside `stream_terminal_once`* — chosen. Status
    rides the same dedicated daemon connection that proves the attachment is
-   live, mirrors the existing agent-stream behavior, reuses the existing
-   `ServerFrame::StatusChanged` (task-keyed, no protocol addition), and needs
-   no daemon changes for the steady state.
+   live, mirrors the existing agent-stream behavior, and reuses the existing
+   `ServerFrame::StatusChanged` (task-keyed, no protocol addition).
+   Revision 4 correction: the original claim that this needs "no daemon
+   changes for the steady state" was false — live `StatusChanged` reaches
+   only `Subscribe` consumers today, never the attached fanout that
+   `stream_terminal_once`'s connection reads. §2b specifies the actual
+   carrier.
 2. *Make `terminal_watcher` persist activity server-side for every session* —
    initially rejected because idle-vs-unread needs the client's `selected`
    bit. Revision 2 adopts a scoped version for unattached sessions only,
@@ -101,14 +109,17 @@ store applies it. No duplicated mapping logic in the component layer.
 
 **Initial status on attach.** `StatusChanged` is edge-triggered; a client
 that attaches to an already-busy session would see nothing until the next
-transition (e.g. desktop relaunch mid-Codex-run). The daemon already tracks
-per-session `SessionStatus` (it serves it in `List`). Extend the attach
-snapshot payload (`TerminalSnapshot`, `crates/daemon/src/protocol.rs:54`) with
-`#[serde(default)] status: SessionStatus` (default `Idle` preserves
-mixed-version decode during daemon handoff), and have `stream_terminal_once`
-emit one `status_changed` frame immediately after `term_snapshot`. Rejected
-alternative: a `List` round-trip per attach from kanna-server — extra daemon
-command on the hot attach path and racy against concurrent transitions.
+transition (e.g. desktop relaunch mid-Codex-run). Revision 4: the daemon
+*already* solves this — `AttachSnapshot` registers the attached subscriber
+with initial events `[Snapshot, StatusChanged(current)]`
+(`crates/daemon/src/connection.rs:591-601`), ordered on the same queue. That
+existing queued event is the sole initial-status mechanism. The Revision-1
+proposal to add `TerminalSnapshot.status` plus a KSP-synthesized frame after
+`term_snapshot` is withdrawn: it duplicated the queued event through a
+second encoding. Rejected alternatives: `TerminalSnapshot.status` (duplicate
+mechanism), and a `List` round-trip per attach from kanna-server (extra
+daemon command on the hot attach path, racy against concurrent
+transitions).
 
 **Legacy listener fate.** Revision 1 kept the Tauri `status_changed`
 listener and the `syncTaskStatusesFromDaemon` poll as a labeled temporary
@@ -159,9 +170,9 @@ authority, not just by attachment:
    `working` → `idle`. Unselected reports keep `working` → `unread` only,
    and the watcher always applies with `selected: false`, so only a client
    showing the task to the user can perform the repair.
-3. *Attach is the guaranteed repair point.* The mandatory initial
-   snapshot-status frame after `term_snapshot` (§2, "Initial status on
-   attach") means every attach replays the session's current status through
+3. *Attach is the guaranteed repair point.* The initial
+   `StatusChanged(current)` the daemon queues with every attach snapshot
+   (§2b) means every attach replays the session's current status through
    the selected client's POST — any watcher misfire during the gap is
    repaired as soon as the attach lands, with no timers and no polling.
 4. *Detach triggers one-shot reconciliation.* A status change can also land
@@ -190,6 +201,57 @@ registry of attached terminal session ids maintained by the KSP stream
 lifecycle (KSP attachments are per-connection state only, `ksp.rs:486`;
 multiple windows/clients can attach the same session, hence a refcount, not
 a set).
+
+## 2b. Revision 4: the steady-state status carrier
+
+**Verified baseline facts.** Three delivery paths exist in the daemon and
+only one of them reaches an attached terminal connection:
+
+- `AttachSnapshot` registers the attached subscriber with initial events
+  `[Snapshot, StatusChanged(current)]` on the session fanout queue
+  (`connection.rs:591-601`) — initial status already arrives on the
+  attached connection.
+- Live transitions go through `emit_status_changed` (`output.rs`), which
+  sends **only** on `broadcast_tx` to `Subscribe` consumers. The attached
+  fanout receives `Output`/`Snapshot`/`Exit` but never a live
+  `StatusChanged`, and `stream_terminal_once` never subscribes. Without a
+  daemon change, KSP would forward exactly one initial status and then go
+  silent — and since the attachment registry makes the watcher skip
+  attached sessions, live busy/idle changes would be lost entirely.
+- Lag recovery (`resync_drained_subscribers`, `output.rs:504`) re-queues
+  only a `Snapshot`. Status frames dropped while a subscriber was lagged
+  are never restored.
+
+**Chosen carrier: the attached-session fanout.** `emit_status_changed`
+additionally enqueues the `StatusChanged` event into the session's fanout,
+so every attached terminal connection receives live transitions on the same
+queue as `Output` — in causal order with the output that produced the
+status flip, governed by the same lag accounting. Rejected alternative: a
+second `Subscribe` connection per KSP terminal stream — it doubles daemon
+connections per stream, `Subscribe` is a lossy lifecycle broadcast with no
+per-subscriber lag recovery, and cross-connection delivery loses ordering
+with `Output`/`Snapshot` resyncs.
+
+**Lag/resync restores status.** `resync_drained_subscribers` re-queues
+`[Snapshot, StatusChanged(current)]` — the same pair `AttachSnapshot`
+queues — so a drained-lagged subscriber recovers both terminal content and
+current status atomically. Every recovery point (attach, lag resync)
+restates current status; interleaved live events are last-writer-wins with
+idempotent application downstream.
+
+**One initial mechanism, no duplicates.** The queued
+`StatusChanged(current)` in the attach/resync initial events is the only
+initial-status mechanism. `TerminalSnapshot` stays a pure terminal-content
+payload (no `status` field), and KSP synthesizes nothing: `stream_terminal_once`
+simply forwards every `StatusChanged` it receives — initial, live, and
+resync — as `ServerFrame::StatusChanged`. Implementations that added
+`TerminalSnapshot.status` and a KSP-emitted frame after `term_snapshot`
+must revert those in favor of this single path.
+
+**Ownership.** The daemon owns status delivery symmetry (attach, live,
+resync all speak `StatusChanged` on the fanout); kanna-server owns
+forwarding and the unattached-session application (§2a); the selected
+client owns repair (§2a). No layer synthesizes status it did not receive.
 
 **Watcher reconciliation replaces the poll.** On every successful daemon
 subscribe, `terminal_watcher` issues a `List` command (session status is
@@ -220,17 +282,20 @@ to switch off.
 In `stream_terminal_once`'s event loop, add a `StatusChanged` arm matching
 the session id, forwarding `ServerFrame::StatusChanged { task_id,
 status: status_str(status) }` — identical shape to the agent-stream arm at
-`ksp.rs:1722`. After a successful `AttachSnapshot` reply, send the snapshot's
-`status` as a `status_changed` frame directly after the `term_snapshot`
-frame.
+`ksp.rs:1722`. KSP synthesizes no status frames: the daemon's queued initial
+event, live fanout events, and resync events (§2b) all arrive through this
+one arm — attach ordering (`term_snapshot` then `status_changed`) falls out
+of the daemon's initial-event queue order.
 
 ### daemon (`crates/daemon`)
 
-`TerminalSnapshot` gains `#[serde(default)] pub status: SessionStatus`,
-populated wherever attach/observe snapshots are built from live session
-state. No new events, no behavior change for existing consumers (serde
-default on decode; extra field ignored by old decoders is not a concern for
-JSON, and new decoders of old producers get `Idle`).
+Per §2b: `emit_status_changed` additionally enqueues the `StatusChanged`
+event into the session's attached fanout (ordered with `Output`), and
+`resync_drained_subscribers` re-queues `[Snapshot, StatusChanged(current)]`
+instead of `Snapshot` alone. The `AttachSnapshot` initial-event pair is
+already in place (`connection.rs:591-601`) and is unchanged.
+`TerminalSnapshot` gains no fields; a previously added `status` field and
+any KSP-side synthesis must be reverted.
 
 ### stream-client (`packages/stream-client/src/index.ts`)
 
@@ -278,11 +343,17 @@ rule, closing the stream-end → watcher-takeover window (§2a point 4).
   does not throw; a frame for an unattached task is a no-op.
 - **kanna-server KSP boundary** (`ksp.rs` tests module, existing fake-daemon
   stream tests): a daemon `StatusChanged` mid terminal stream produces a
-  client-visible `status_changed` frame; the initial frame after
-  `term_snapshot` carries the snapshot status; status for a different session
-  id is not forwarded.
-- **daemon serde**: `TerminalSnapshot` round-trip with and without the
-  `status` field (default `Idle`).
+  client-visible `status_changed` frame; the queued initial `StatusChanged`
+  after the attach `Snapshot` is forwarded in order after `term_snapshot`;
+  status for a different session id is not forwarded; KSP emits no
+  synthesized status frames.
+- **daemon fanout/connection/output boundary** (Revision 4): a live
+  `StatusChanged` is enqueued to the attached session fanout in causal
+  order relative to the `Output` that produced it; `AttachSnapshot` initial
+  events remain `[Snapshot, StatusChanged(current)]`; a drained-lagged
+  subscriber's resync queues `[Snapshot, StatusChanged(current)]` and
+  restores status missed during the drain; `Subscribe` broadcast delivery
+  is unchanged.
 - **desktop activity integration** (`apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts`
   boundary): a KSP terminal `busy` drives activity to `working`; `idle` while
   the task is selected yields `idle`; `idle` while unselected yields
@@ -323,13 +394,22 @@ rule, closing the stream-end → watcher-takeover window (§2a point 4).
     current status.
   - Gap-repair integration (`kanna.runtimeStatusSync.test.ts` boundary):
     simulate the full ordering — selected task `working`, watcher applies
-    `unread` during an attach gap, client attach replays snapshot status
-    `idle` with `selected: true` — and assert final activity is `idle`.
+    `unread` during an attach gap, client attach delivers the queued
+    initial `StatusChanged(idle)` applied with `selected: true` — and
+    assert final activity is `idle`.
   - E2E (desktop PTY harness): force the selected task through an
     initial-attach or reconnect gap while the false agent transitions
     busy → idle (e.g. start the false agent before the terminal mounts, or
     drop and re-establish the stream mid-run) and assert the final sidebar
     activity is `idle`, not `unread`.
+- **E2E carrier assertions** (Revision 4, required — only a real
+  false-agent daemon → kanna-server → KSP → desktop flow proves the
+  cross-process wiring): an *attached, live* busy → idle transition updates
+  activity without any reattach (proves the fanout carrier, not just the
+  attach-time initial event); and a lag/reconnect reconciliation case —
+  after a dropped or lagged stream re-establishes, the client converges to
+  the session's current status via the resync `[Snapshot, StatusChanged]`
+  pair.
 - **status bus / terminal layout** (Revision 2): reconnect redraw settle
   resolves from a KSP status delivery instead of the removed Tauri event.
 - **Legacy-path tests removed** (Revision 2): the `listen("status_changed")`
