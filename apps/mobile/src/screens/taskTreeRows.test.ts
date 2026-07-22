@@ -142,6 +142,44 @@ describe("buildTaskTreeRows", () => {
     ]);
   });
 
+  it("nests each child under its own desktop's parent when owner-local parent ids collide", () => {
+    // Owner-local ids are unique only per desktop: two desktops can both
+    // hold a parent with local id "task-p". Each child must nest under the
+    // parent from its own desktop even when the foreign parent appears
+    // first in the collection.
+    const rows = buildTaskTreeRows(slots([
+      task({
+        id: "cloud-d1-parent",
+        ownerDesktopId: "desktop-1",
+        ownerLocalTaskId: "task-p"
+      }),
+      task({
+        id: "cloud-d2-parent",
+        ownerDesktopId: "desktop-2",
+        ownerLocalTaskId: "task-p"
+      }),
+      task({
+        id: "cloud-d2-child",
+        ownerDesktopId: "desktop-2",
+        ownerLocalTaskId: "task-c2",
+        parentTaskId: "task-p"
+      }),
+      task({
+        id: "cloud-d1-child",
+        ownerDesktopId: "desktop-1",
+        ownerLocalTaskId: "task-c1",
+        parentTaskId: "task-p"
+      })
+    ]));
+
+    expect(rowIds(rows)).toEqual([
+      ["cloud-d1-parent", 0],
+      ["cloud-d1-child", 1],
+      ["cloud-d2-parent", 0],
+      ["cloud-d2-child", 1]
+    ]);
+  });
+
   it("keeps creating slots top-level", () => {
     const creating = buildCreatingTaskUiSlot({
       slotId: "slot-creating",

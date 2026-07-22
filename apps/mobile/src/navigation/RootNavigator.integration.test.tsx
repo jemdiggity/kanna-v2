@@ -8,6 +8,7 @@ import {
   type ReactTestRenderer
 } from "react-test-renderer";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { KannaClient } from "../lib/api/client";
 import type { TaskSummary } from "../lib/api/types";
 import {
@@ -441,6 +442,83 @@ describe("RootNavigator task collection integration", () => {
       )
     ).toBeDefined();
     expect(visibleText()).toContain("Loaded from the desktop");
+  });
+
+  // E2E coverage note (repo policy): the parent/child hierarchy is not yet
+  // covered by an Appium simulator run. The smoke harness is local/human-only
+  // (simulator + built app) and seeds from apps/desktop/tests/e2e/seed.sql,
+  // whose self-contained schema and fixtures do not yet include
+  // parent_task_id, so a device spec cannot be authored and verified from a
+  // headless environment. Making it feasible requires (1) a parent/child
+  // fixture pair in seed.sql and (2) a smoke spec asserting
+  // MOBILE_E2E_IDS.taskListSubtaskRow(childId) renders after the parent row —
+  // both testIDs already ship in the task list for exactly that assertion.
+  // Until then, this test is the substitute: it drives real client summaries
+  // through the controller, session store, RootNavigator, and TaskList to the
+  // rendered hierarchy.
+  it("renders a subtask indented beneath its parent from client summaries", async () => {
+    // The child is newer than the parent, so a flat newest-first list would
+    // render it first; nesting must pull it beneath its parent instead.
+    const parent: TaskSummary = {
+      id: "task-parent",
+      repoId: "repo-1",
+      title: "Parent feature work",
+      stage: "in progress",
+      createdAt: "2026-07-20 08:00:00"
+    };
+    const child: TaskSummary = {
+      id: "task-child",
+      repoId: "repo-1",
+      title: "Child implementation",
+      stage: "in progress",
+      createdAt: "2026-07-21 08:00:00",
+      parentTaskId: "task-parent"
+    };
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValue([parent, child]);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([parent, child]);
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    const subtaskRow = rendered!.root.find(
+      (node) =>
+        node.props.testID === MOBILE_E2E_IDS.taskListSubtaskRow("task-child")
+    );
+    expect(subtaskRow).toBeDefined();
+    // The child's card renders inside the indented subtask wrapper.
+    expect(
+      subtaskRow.findAll(
+        (node) => node.props.testID === MOBILE_E2E_IDS.taskListItem("task-child")
+      )
+    ).toHaveLength(1);
+    // Depth-first render order places the parent row before its nested child.
+    const rowOrder = rendered!.root
+      .findAll((node) => {
+        const testID = node.props.testID;
+        return (
+          testID === MOBILE_E2E_IDS.taskListItem("task-parent") ||
+          testID === MOBILE_E2E_IDS.taskListItem("task-child")
+        );
+      })
+      .map((node) => node.props.testID);
+    expect(rowOrder).toEqual([
+      MOBILE_E2E_IDS.taskListItem("task-parent"),
+      MOBILE_E2E_IDS.taskListItem("task-child")
+    ]);
+    // The parent renders as a plain top-level row.
+    expect(
+      rendered!.root.findAll(
+        (node) =>
+          node.props.testID === MOBILE_E2E_IDS.taskListSubtaskRow("task-parent")
+      )
+    ).toHaveLength(0);
   });
 
   it("renders a static error when the initial collection read fails", async () => {

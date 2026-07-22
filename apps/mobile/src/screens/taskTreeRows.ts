@@ -47,25 +47,38 @@ function compareCreatedAtAscending(left: TaskSummary, right: TaskSummary): numbe
 export function buildTaskTreeRows(
   slots: readonly TaskUiSlot[]
 ): TaskTreeRow[] {
-  const slotsByLocalTaskId = new Map<string, TaskUiSlot>();
+  // Owner-local ids are only unique per desktop, so a mixed collection can
+  // hold the same local id from several desktops. Keep every candidate and
+  // pick the compatible one per child below.
+  const slotsByLocalTaskId = new Map<string, ReadyTaskUiSlot[]>();
   for (const slot of slots) {
     const localTaskId = slotLocalTaskId(slot);
-    if (localTaskId !== null && !slotsByLocalTaskId.has(localTaskId)) {
-      slotsByLocalTaskId.set(localTaskId, slot);
-    }
+    if (localTaskId === null || slot.state !== "ready") continue;
+    const candidates = slotsByLocalTaskId.get(localTaskId) ?? [];
+    candidates.push(slot);
+    slotsByLocalTaskId.set(localTaskId, candidates);
   }
 
   const resolveParent = (slot: TaskUiSlot): TaskUiSlot | null => {
     if (slot.state !== "ready") return null;
     const parentTaskId = slot.task.parentTaskId;
     if (!parentTaskId || parentTaskId === slotLocalTaskId(slot)) return null;
-    const parent = slotsByLocalTaskId.get(parentTaskId);
-    if (!parent || parent.slotId === slot.slotId || parent.state !== "ready") {
-      return null;
-    }
-    if (parent.task.repoId !== slot.task.repoId) return null;
-    if (!sameTaskDesktop(parent.task, slot.task)) return null;
-    return parent;
+    const candidates = (slotsByLocalTaskId.get(parentTaskId) ?? []).filter(
+      (parent) =>
+        parent.slotId !== slot.slotId &&
+        parent.task.repoId === slot.task.repoId &&
+        sameTaskDesktop(parent.task, slot.task)
+    );
+    // An exact desktop match beats an undefined-owner wildcard candidate.
+    return (
+      candidates.find(
+        (parent) =>
+          parent.task.ownerDesktopId !== undefined &&
+          parent.task.ownerDesktopId === slot.task.ownerDesktopId
+      ) ??
+      candidates[0] ??
+      null
+    );
   };
 
   const childrenByParentSlotId = new Map<string, ReadyTaskUiSlot[]>();
