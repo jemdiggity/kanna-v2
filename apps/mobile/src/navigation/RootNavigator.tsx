@@ -252,7 +252,12 @@ export default function RootNavigator({
             <RootStack.Screen
               component={TaskDetailRoute}
               name="TaskDetail"
-              options={{ headerShown: false }}
+              options={{
+                fullScreenGestureEnabled: false,
+                gestureDirection: "horizontal",
+                gestureEnabled: true,
+                headerShown: false
+              }}
             />
             <RootStack.Screen
               component={SearchRoute}
