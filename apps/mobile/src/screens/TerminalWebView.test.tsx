@@ -138,6 +138,7 @@ async function renderTerminalWebView(input: {
   bottomInset?: number;
   onConsolePress?: () => void;
   onOpenFile?: (path: string, line?: number) => void;
+  onTerminalInput?: (dataB64: string) => void;
 }): Promise<ElementNode> {
   resetRenderState();
   const { TerminalWebView } = await import("./TerminalWebView");
@@ -152,7 +153,8 @@ async function renderTerminalWebView(input: {
     fullscreen: input.fullscreen,
     bottomInset: input.bottomInset,
     onConsolePress: input.onConsolePress,
-    onOpenFile: input.onOpenFile
+    onOpenFile: input.onOpenFile,
+    onTerminalInput: input.onTerminalInput
   }) as ElementNode;
   lastTree = tree;
 
@@ -309,6 +311,25 @@ describe("TerminalWebView", () => {
     for (const call of onOpenFile.mock.calls) {
       expect(call).toEqual(["README.md"]);
     }
+  });
+
+  it("forwards validated alt-screen scroll input frames to the PTY callback", async () => {
+    const onTerminalInput = vi.fn();
+    const webView = await renderTerminalWebView({ onTerminalInput });
+    const send = (payload: unknown) => {
+      (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: { data: JSON.stringify(payload) }
+      } as WebViewMessageEvent);
+    };
+
+    send({ type: "terminal-input", dataB64: "G1s8NjU7MTsxTQ==" });
+    send({ type: "terminal-input", dataB64: "" });
+    send({ type: "terminal-input", dataB64: 42 });
+    send({ type: "terminal-input", dataB64: "A".repeat(9_000) });
+    send({ type: "terminal-input" });
+
+    expect(onTerminalInput).toHaveBeenCalledOnce();
+    expect(onTerminalInput).toHaveBeenCalledWith("G1s8NjU7MTsxTQ==");
   });
 
   it("preserves unrelated terminal message handling", async () => {

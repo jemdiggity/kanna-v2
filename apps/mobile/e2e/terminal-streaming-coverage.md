@@ -232,3 +232,51 @@ that missing Appium journey:
 Physical-device automation remains prohibited for this lane; human on-device
 review can supplement these checks but is not a substitute for the missing
 deterministic simulator fixture and helpers above.
+
+## Alternate-screen scroll input (Claude fullscreen TUIs)
+
+Claude Code ≥ 2.1.89 renders on the alternate screen buffer, which has no
+scrollback, so mobile touch scrolling is forwarded to the desktop PTY as
+terminal input instead of moving local xterm scrollback. Coverage for that
+path is layered:
+
+- `tests/tui-fidelity/src/render.ts` (`verifyMobileAltScreenScrollInput`,
+  run by `pnpm test:tui-fidelity`) drives the repository's real bundled
+  xterm inside a touch-enabled Chromium context. It enters the alternate
+  screen with button-event mouse tracking and SGR encoding exactly like
+  Claude's fullscreen TUI, performs drags in both directions, and asserts
+  the exact `terminal-input` bridge payloads: three identical SGR wheel-down
+  reports for a three-cell upward drag, wheel-up reports for the reverse,
+  and `ESC[B` arrow-key fallbacks once the TUI disables mouse tracking. It
+  also proves alternate-screen drags never touch `scrollToLine` or move the
+  xterm viewport, and that after `?1049l` drags return to local scrollback
+  scrolling with zero bridge input.
+- `src/navigation/RootNavigator.terminalInput.integration.test.tsx` mounts
+  the real `TaskDetail` route against a real `mobileController`,
+  `createKannaClient`, and `createLanTransport` with a scripted KSP socket.
+  It proves the `TaskScreen` `onSendTerminalInput` wiring resolves the
+  durable task id, routes through the active terminal subscription, and
+  lands on the KSP socket as a `term_input` frame with the exact base64
+  payload, ordered after the terminal `attach`; empty payloads are dropped.
+- `src/screens/TaskScreen.test.tsx` and `src/screens/TerminalWebView.test.tsx`
+  pin the component seams (`onTerminalInput` pass-through and bridge-message
+  validation), and `src/lib/transports/{lanTransport,relayClient}.test.ts`
+  pin `sendInput` → `term_input` on both transports. The server side of
+  `term_input` → daemon PTY input is covered by `crates/kanna-server`'s KSP
+  tests and predates this feature (desktop typing uses the same frame).
+
+A committed simulator/device flow for this path is blocked by the same
+missing deterministic PTY fixture described above, with one addition: the
+fixture must run an *alternate-screen* program with mouse tracking. Driving
+a real Claude session from automation is not permitted, and OpenCode's TUI
+renders inline (normal buffer), so no permitted real agent exercises the
+alternate-screen path deterministically. The flow was validated once
+manually during development: an ad-hoc Appium journey against a worktree
+dev stack — with the task's daemon session replaced by a scripted
+alternate-screen TUI that logs received bytes — showed a native 262px
+simulator drag scrolling the TUI by exactly 15 rows and exactly 15 wheel
+mouse reports arriving at the desktop PTY. Turning that into committed
+coverage needs the test-only synthetic terminal-session fixture path above
+(spawn an arbitrary command such as a scripted alt-screen TUI under a
+task's daemon session id); once that exists, the smoke can assert the
+drag-to-PTY loop end to end without any agent CLI.

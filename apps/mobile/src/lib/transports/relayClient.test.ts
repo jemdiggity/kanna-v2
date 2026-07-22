@@ -363,6 +363,16 @@ describe("createRelayDesktopClient", () => {
       { type: "exit", taskId: "task-1", code: 0 }
     ]);
 
+    subscription.sendInput?.("G1s8NjU7MTsxTQ==");
+    await flushPromises();
+    expect(socket.send).toHaveBeenLastCalledWith(
+      JSON.stringify({
+        type: "term_input",
+        task_id: "task-1",
+        data_b64: "G1s8NjU7MTsxTQ=="
+      })
+    );
+
     subscription.close();
     await flushPromises();
     expect(socket.send).toHaveBeenLastCalledWith(

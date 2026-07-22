@@ -320,6 +320,294 @@ export async function verifyMobileEasedScrolling(browser: Browser): Promise<void
   }
 }
 
+interface MobileAltScreenScrollResult {
+  altScreenActive: boolean;
+  mouseTrackingDragUpPayload: string;
+  mouseTrackingDragDownPayload: string;
+  arrowFallbackPayload: string;
+  altScrollToLineTargets: number[];
+  altViewportYBefore: number;
+  altViewportYAfter: number;
+  normalBufferAfterExit: boolean;
+  normalBufferPayload: string;
+  normalScrollToLineTargets: number[];
+  normalViewportYBefore: number;
+  normalViewportYAfter: number;
+}
+
+/**
+ * Regression coverage for Claude-style fullscreen TUIs: the real bundled
+ * xterm runtime, in a touch-enabled Chromium context, must convert vertical
+ * drags on the alternate screen buffer into PTY input posted over the
+ * ReactNativeWebView bridge — SGR wheel reports while the TUI's negotiated
+ * mouse tracking is active, arrow-key fallback once it is not — while
+ * normal-buffer drags keep scrolling local scrollback without emitting any
+ * bridge input.
+ */
+export async function verifyMobileAltScreenScrollInput(browser: Browser): Promise<void> {
+  const context = await browser.newContext({
+    viewport: VIEWPORT,
+    hasTouch: true
+  });
+  let page: Page | null = null;
+  try {
+    page = await context.newPage();
+    await page.setContent(await buildInstrumentedMobileDocument(), { waitUntil: "load" });
+    await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
+    await page.evaluate((dims) => window.__setTerminalDims(dims), {
+      cols: MOBILE_SCROLL_COLS,
+      rows: MOBILE_SCROLL_ROWS
+    });
+    await page.waitForFunction(
+      ({ cols, rows }) => {
+        const term = window.__kannaTerminals[0];
+        return term?.cols === cols && term.rows === rows;
+      },
+      { cols: MOBILE_SCROLL_COLS, rows: MOBILE_SCROLL_ROWS }
+    );
+
+    // Seed real normal-buffer scrollback first so the post-exit phase can
+    // prove local scrollback scrolling still works.
+    const scrollbackLines = Array.from(
+      { length: MOBILE_SCROLL_LINE_COUNT },
+      (_, index) => `alt-scroll-history-${String(index + 1).padStart(3, "0")}`
+    ).join("\r\n") + "\r\n";
+    await callHook(page, "__replaceTerminalState", { text: scrollbackLines });
+    await page.waitForTimeout(120);
+
+    // Enter the alternate screen exactly like Claude Code's fullscreen TUI:
+    // alt buffer plus button-event mouse tracking with SGR encoding.
+    const altScreenEntry =
+      "\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[2J\x1b[H" +
+      Array.from({ length: MOBILE_SCROLL_ROWS - 1 }, (_, index) => `ALT ROW ${index + 1}`).join("\r\n");
+    await callHook(page, "__appendTerminalChunk", {
+      chunksB64: [Buffer.from(altScreenEntry, "latin1").toString("base64")]
+    });
+    await page.waitForFunction(
+      () => window.__kannaTerminals[0]?.buffer.active.type === "alternate"
+    );
+    await page.addScriptTag({
+      content: "globalThis.__name = (target) => target;"
+    });
+
+    const result = await page.evaluate(async (): Promise<MobileAltScreenScrollResult> => {
+      const term = window.__kannaTerminals[0];
+      const screen = document.querySelector<HTMLElement>(".xterm-screen");
+      if (!term || !screen) {
+        throw new Error("mobile alt-screen gesture elements were not available");
+      }
+      const terminalScreen = screen;
+
+      function touchAt(clientX: number, clientY: number) {
+        return {
+          identifier: 1,
+          target: terminalScreen,
+          clientX,
+          clientY,
+          pageX: clientX,
+          pageY: clientY,
+          screenX: clientX,
+          screenY: clientY,
+          radiusX: 1,
+          radiusY: 1,
+          rotationAngle: 0,
+          force: 1
+        };
+      }
+
+      function dispatchTouch(
+        type: "touchstart" | "touchmove" | "touchend",
+        touches: ReturnType<typeof touchAt>[],
+        changedTouches: ReturnType<typeof touchAt>[] = touches
+      ) {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        Object.defineProperties(event, {
+          touches: {
+            configurable: true,
+            value: Object.assign(touches, { item: Array.prototype.at })
+          },
+          targetTouches: {
+            configurable: true,
+            value: Object.assign(touches, { item: Array.prototype.at })
+          },
+          changedTouches: {
+            configurable: true,
+            value: Object.assign(changedTouches, { item: Array.prototype.at })
+          }
+        });
+        terminalScreen.dispatchEvent(event);
+      }
+
+      function drag(fromY: number, toY: number, clientX: number) {
+        const start = touchAt(clientX, fromY);
+        const end = touchAt(clientX, toY);
+        dispatchTouch("touchstart", [start]);
+        dispatchTouch("touchmove", [end]);
+        dispatchTouch("touchend", [], [end]);
+      }
+
+      function collectBridgeInput(): string {
+        const payload = window.__kannaBridgeMessages
+          .map((message) => JSON.parse(message) as { type?: string; dataB64?: string })
+          .filter((message) => message.type === "terminal-input")
+          .map((message) => atob(message.dataB64 ?? ""))
+          .join("");
+        window.__kannaBridgeMessages.length = 0;
+        return payload;
+      }
+
+      async function writeTerminal(data: string): Promise<void> {
+        await new Promise<void>((resolve) => term.write(data, resolve));
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 40));
+      }
+
+      const buffer = term.buffer.active;
+      const rect = terminalScreen.getBoundingClientRect();
+      const cellHeight = rect.height / term.rows;
+      const dragPx = 3 * cellHeight + 2;
+      const clientX = Math.round(rect.left + 200);
+      const startY = Math.round(rect.top + cellHeight * 12);
+
+      const altScrollToLineTargets: number[] = [];
+      const originalScrollToLine = term.scrollToLine.bind(term);
+      term.scrollToLine = (line: number) => {
+        altScrollToLineTargets.push(line);
+        originalScrollToLine(line);
+      };
+
+      const altScreenActive = buffer.type === "alternate";
+      const altViewportYBefore = buffer.viewportY;
+      window.__kannaBridgeMessages.length = 0;
+
+      drag(startY, startY - dragPx, clientX);
+      const mouseTrackingDragUpPayload = collectBridgeInput();
+
+      drag(startY - dragPx, startY, clientX);
+      const mouseTrackingDragDownPayload = collectBridgeInput();
+
+      // The TUI turns mouse tracking off: desktop parity is xterm's built-in
+      // wheel-to-arrow-key fallback for alternate-screen apps.
+      await writeTerminal("\x1b[?1002l\x1b[?1006l");
+      drag(startY, startY - dragPx, clientX);
+      const arrowFallbackPayload = collectBridgeInput();
+      const altViewportYAfter = buffer.viewportY;
+      const altScrollTargets = [...altScrollToLineTargets];
+
+      // Leave the alternate screen: drags must return to local scrollback
+      // scrolling with no bridge input. The viewport sits at the scrollback
+      // bottom, so drag downward to scroll up into history, then let the
+      // 80ms smooth scroll settle before sampling the viewport.
+      await writeTerminal("\x1b[?1049l");
+      const normalBufferAfterExit = term.buffer.active.type === "normal";
+      altScrollToLineTargets.length = 0;
+      const normalViewportYBefore = term.buffer.active.viewportY;
+      window.__kannaBridgeMessages.length = 0;
+      drag(startY, startY + dragPx, clientX);
+      const normalBufferPayload = collectBridgeInput();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 220));
+      term.scrollToLine = originalScrollToLine;
+
+      return {
+        altScreenActive,
+        mouseTrackingDragUpPayload,
+        mouseTrackingDragDownPayload,
+        arrowFallbackPayload,
+        altScrollToLineTargets: altScrollTargets,
+        altViewportYBefore,
+        altViewportYAfter,
+        normalBufferAfterExit,
+        normalBufferPayload,
+        normalScrollToLineTargets: [...altScrollToLineTargets],
+        normalViewportYBefore,
+        normalViewportYAfter: term.buffer.active.viewportY
+      };
+    });
+
+    if (!result.altScreenActive) {
+      throw new Error("mobile alt-screen scroll fixture did not enter the alternate buffer");
+    }
+    assertRepeatedMouseWheelReports(
+      "mobile alt-screen drag up",
+      result.mouseTrackingDragUpPayload,
+      65,
+      3
+    );
+    assertRepeatedMouseWheelReports(
+      "mobile alt-screen drag down",
+      result.mouseTrackingDragDownPayload,
+      64,
+      3
+    );
+    if (result.arrowFallbackPayload !== "\x1b[B".repeat(3)) {
+      throw new Error(
+        "mobile alt-screen drag without mouse tracking did not emit 3 arrow-key fallbacks " +
+        `(${JSON.stringify(result.arrowFallbackPayload)})`
+      );
+    }
+    if (result.altScrollToLineTargets.length !== 0) {
+      throw new Error(
+        "mobile alt-screen drags requested scrollback targets " +
+        JSON.stringify(result.altScrollToLineTargets)
+      );
+    }
+    if (result.altViewportYAfter !== result.altViewportYBefore) {
+      throw new Error(
+        `mobile alt-screen drags moved the xterm viewport ` +
+        `(${result.altViewportYBefore} -> ${result.altViewportYAfter})`
+      );
+    }
+    if (!result.normalBufferAfterExit) {
+      throw new Error("mobile terminal did not return to the normal buffer after ?1049l");
+    }
+    if (result.normalBufferPayload !== "") {
+      throw new Error(
+        "mobile normal-buffer drag leaked bridge input " +
+        JSON.stringify(result.normalBufferPayload)
+      );
+    }
+    if (result.normalScrollToLineTargets.length === 0) {
+      throw new Error("mobile normal-buffer drag after alt-screen exit did not scroll scrollback");
+    }
+    if (result.normalViewportYAfter === result.normalViewportYBefore) {
+      throw new Error(
+        `mobile normal-buffer drag did not move the xterm viewport ` +
+        `(stuck at ${result.normalViewportYBefore})`
+      );
+    }
+  } finally {
+    try {
+      await page?.close();
+    } finally {
+      await context.close();
+    }
+  }
+}
+
+function assertRepeatedMouseWheelReports(
+  label: string,
+  payload: string,
+  buttonCode: 64 | 65,
+  expectedCount: number
+): void {
+  const reportPattern = new RegExp(`^\\x1b\\[<${buttonCode};(\\d+);(\\d+)M`);
+  const first = reportPattern.exec(payload);
+  if (!first) {
+    throw new Error(`${label} did not emit SGR wheel reports (${JSON.stringify(payload)})`);
+  }
+  const report = first[0];
+  if (payload !== report.repeat(expectedCount)) {
+    throw new Error(
+      `${label} expected ${expectedCount} identical ${JSON.stringify(report)} reports, ` +
+      `got ${JSON.stringify(payload)}`
+    );
+  }
+  const col = Number.parseInt(first[1], 10);
+  const row = Number.parseInt(first[2], 10);
+  if (col < 1 || col > MOBILE_SCROLL_COLS || row < 1 || row > MOBILE_SCROLL_ROWS) {
+    throw new Error(`${label} reported out-of-bounds coordinates (${col};${row})`);
+  }
+}
+
 export async function verifyMobileTerminalSelection(browser: Browser): Promise<void> {
   const context = await browser.newContext({
     viewport: VIEWPORT,
@@ -969,6 +1257,7 @@ declare global {
       rows: number;
       buffer: {
         active: {
+          type: "normal" | "alternate";
           baseY: number;
           viewportY: number;
           getLine: (row: number) =>

@@ -67,6 +67,7 @@ export interface MobileController {
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
+  sendTaskTerminalInput(taskId: string, dataB64: string): void;
   sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
   interruptTaskAgent(taskId: string): void;
   setTaskCompanionOpen(taskId: string, isOpen: boolean): void;
@@ -2230,6 +2231,13 @@ export function createMobileController(
       } catch (error) {
         fail(error);
       }
+    },
+
+    sendTaskTerminalInput(taskId, dataB64) {
+      if (!dataB64 || activeTaskTerminal?.taskId !== taskId) {
+        return;
+      }
+      activeTaskTerminal.subscription.sendInput?.(dataB64);
     },
 
     sendTaskAgentPermission(taskId, requestId, decision) {

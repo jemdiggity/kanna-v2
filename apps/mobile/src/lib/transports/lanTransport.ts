@@ -211,6 +211,9 @@ export function createLanTransport(
       return {
         close() {
           client.close();
+        },
+        sendInput(dataB64: string) {
+          client.sendTermInput(taskId, dataB64);
         }
       } satisfies TaskTerminalSubscription;
     },

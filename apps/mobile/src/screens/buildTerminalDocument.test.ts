@@ -62,6 +62,7 @@ class StubTerminal {
   translateToStringCalls: Array<{ index: number; trimRight: boolean | undefined }> = [];
   buffer = {
     active: {
+      type: "normal" as "normal" | "alternate",
       baseY: 100,
       viewportY: 100,
       length: 101,
@@ -111,8 +112,16 @@ class StubTerminal {
       char: { width: 9, height: 18 }
     }
   };
+  wheelEvents: Array<{
+    clientX: number;
+    clientY: number;
+    deltaMode: number;
+    deltaY: number;
+  }> = [];
   private scrollListeners: Array<(viewportY: number) => void> = [];
   private selectionListeners: Array<() => void> = [];
+  private dataListeners: Array<(data: string) => void> = [];
+  private binaryListeners: Array<(data: string) => void> = [];
 
   constructor(options: {
     cols: number;
@@ -160,6 +169,60 @@ class StubTerminal {
     scrollableElement.append(screen);
     xterm.append(viewport, scrollableElement);
     root.append(xterm);
+    // Mirror real xterm: wheel events reaching the terminal element are
+    // encoded as SGR mouse-wheel reports when the alternate buffer is active.
+    xterm.addEventListener("wheel", (event) => {
+      const wheel = event as unknown as {
+        clientX: number;
+        clientY: number;
+        deltaMode: number;
+        deltaY: number;
+      };
+      this.wheelEvents.push({
+        clientX: wheel.clientX,
+        clientY: wheel.clientY,
+        deltaMode: wheel.deltaMode,
+        deltaY: wheel.deltaY
+      });
+      if (this.buffer.active.type !== "alternate") {
+        return;
+      }
+      const code = wheel.deltaY < 0 ? 64 : 65;
+      const report = `\u001b[<${code};1;1M`.repeat(Math.abs(Math.round(wheel.deltaY)));
+      if (report) {
+        this.emitData(report);
+      }
+    });
+  }
+
+  onData(listener: (data: string) => void): { dispose(): void } {
+    this.dataListeners.push(listener);
+    return {
+      dispose: () => {
+        this.dataListeners = this.dataListeners.filter(
+          (candidate) => candidate !== listener
+        );
+      }
+    };
+  }
+
+  onBinary(listener: (data: string) => void): { dispose(): void } {
+    this.binaryListeners.push(listener);
+    return {
+      dispose: () => {
+        this.binaryListeners = this.binaryListeners.filter(
+          (candidate) => candidate !== listener
+        );
+      }
+    };
+  }
+
+  emitData(data: string): void {
+    for (const listener of this.dataListeners) listener(data);
+  }
+
+  emitBinary(data: string): void {
+    for (const listener of this.binaryListeners) listener(data);
   }
 
   onScroll(listener: (viewportY: number) => void): { dispose(): void } {
@@ -1050,6 +1113,95 @@ describe("buildTerminalDocument", () => {
     expect(terminal.scrollToLineCalls).toEqual([77, 76]);
     expect(viewport.scrollLeft).toBe(12);
     expect(laterMove.defaultPrevented).toBe(true);
+  });
+
+  it("replays alt-screen vertical drags as forwarded wheel input instead of scrollback scrolling", () => {
+    const { terminal, viewport, window, messages } = createExecutedTerminalDocument();
+    terminal.buffer.active.type = "alternate";
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    const touchMove = createTouchEvent(window, "touchmove", [
+      { clientX: 220, clientY: 195 }
+    ]);
+    viewport.dispatchEvent(touchMove);
+
+    // 45px of upward drag over 18px cells forwards 2 whole wheel-down lines,
+    // one per-click wheel event each.
+    expect(terminal.scrollToLineCalls).toEqual([]);
+    expect(terminal.wheelEvents).toEqual([
+      expect.objectContaining({ deltaMode: 1, deltaY: 1 }),
+      expect.objectContaining({ deltaMode: 1, deltaY: 1 })
+    ]);
+    const inputs = messages
+      .map((message) => JSON.parse(message) as { type: string; dataB64?: string })
+      .filter((message) => message.type === "terminal-input");
+    expect(inputs).toHaveLength(1);
+    expect(
+      Buffer.from(inputs[0].dataB64 ?? "", "base64").toString("latin1")
+    ).toBe("\u001b[<65;1;1M\u001b[<65;1;1M");
+    expect(touchMove.defaultPrevented).toBe(true);
+  });
+
+  it("accumulates sub-cell alt-screen drags and forwards opposite directions as wheel up", () => {
+    const { terminal, viewport, window, messages } = createExecutedTerminalDocument();
+    terminal.buffer.active.type = "alternate";
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 250 }])
+    );
+    expect(terminal.wheelEvents).toEqual([]);
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 262 }])
+    );
+    expect(terminal.wheelEvents).toEqual([
+      expect.objectContaining({ deltaMode: 1, deltaY: -1 })
+    ]);
+    const inputs = messages
+      .map((message) => JSON.parse(message) as { type: string; dataB64?: string })
+      .filter((message) => message.type === "terminal-input");
+    expect(inputs).toHaveLength(1);
+    expect(
+      Buffer.from(inputs[0].dataB64 ?? "", "base64").toString("latin1")
+    ).toBe("\u001b[<64;1;1M");
+  });
+
+  it("keeps normal-buffer drags on local scrollback without forwarding PTY input", () => {
+    const { terminal, viewport, window, messages } = createExecutedTerminalDocument();
+    terminal.scrollToLine(76);
+    terminal.scrollToLineCalls = [];
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 195 }])
+    );
+
+    expect(terminal.scrollToLineCalls).toEqual([79]);
+    expect(terminal.wheelEvents).toEqual([]);
+    const inputs = messages
+      .map((message) => JSON.parse(message) as { type: string })
+      .filter((message) => message.type === "terminal-input");
+    expect(inputs).toEqual([]);
+  });
+
+  it("ignores terminal data emitted outside an alt-screen scroll dispatch", () => {
+    const { terminal, messages } = createExecutedTerminalDocument();
+    terminal.buffer.active.type = "alternate";
+
+    terminal.emitData("\u001b[?1u");
+    terminal.emitBinary(" ");
+
+    const inputs = messages
+      .map((message) => JSON.parse(message) as { type: string })
+      .filter((message) => message.type === "terminal-input");
+    expect(inputs).toEqual([]);
   });
 
   it("keeps the outer safe-region inset while public xterm scroll positions change", () => {

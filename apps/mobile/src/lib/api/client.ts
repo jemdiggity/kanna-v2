@@ -36,6 +36,10 @@ export type TaskTerminalStreamEvent =
 
 export interface TaskTerminalSubscription {
   close(): void;
+  /** Raw PTY bytes (base64) written to the task's terminal, e.g. scroll
+   * sequences replayed from the mobile terminal view. Optional because some
+   * transports are read-only. */
+  sendInput?(dataB64: string): void;
 }
 
 export type TaskAgentStreamEvent =
