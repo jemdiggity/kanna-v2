@@ -133,7 +133,7 @@ export function createRemoteTransport({
   let latestCloudReadEpoch = 0;
   const cloudRepoOwners = new Map<string, string>();
   const desktopRepoSnapshots = new Map<string, RepoSummary[]>();
-  let desktopReposRefreshedAt: number | null = null;
+  const desktopRepoFetchedAt = new Map<string, number>();
   let desktopReposRefresh: Promise<void> | null = null;
 
   const taskRouteForId = (taskId: string): CloudTaskRoute | null =>
@@ -274,6 +274,7 @@ export function createRemoteTransport({
 
   const forgetDesktopRepos = (desktopId: string) => {
     desktopRepoSnapshots.delete(desktopId);
+    desktopRepoFetchedAt.delete(desktopId);
     for (const [repoId, ownerDesktopId] of cloudRepoOwners) {
       if (ownerDesktopId === desktopId) {
         cloudRepoOwners.delete(repoId);
@@ -294,9 +295,17 @@ export function createRemoteTransport({
         forgetDesktopRepos(desktopId);
       }
     }
+    const now = Date.now();
     await Promise.all(
       records
         .filter((record) => record.reachableViaRelay || record.online)
+        .filter((record) => {
+          const fetchedAt = desktopRepoFetchedAt.get(record.desktopId);
+          return (
+            fetchedAt === undefined ||
+            now - fetchedAt >= desktopRepoRefreshIntervalMs
+          );
+        })
         .map(async (record) => {
           try {
             const repos = parseRepoSummaries(
@@ -311,6 +320,8 @@ export function createRemoteTransport({
           } catch {
             // Keep the last snapshot for this desktop; a transiently
             // unreachable desktop's repos still merge from the cache below.
+          } finally {
+            desktopRepoFetchedAt.set(record.desktopId, Date.now());
           }
         })
     );
@@ -318,26 +329,22 @@ export function createRemoteTransport({
 
   // The cloud task index only carries repos that have open tasks, so repo
   // listings additionally ask each reachable desktop for its full repo list
-  // through the relay. Reads that outlast the wait window finish in the
-  // background and land in the snapshot cache for the next listing.
+  // through the relay. Every listing re-reads the desktop records so a
+  // desktop that becomes reachable later is fetched immediately — the
+  // refresh interval throttles per fetched desktop, never a no-op pass.
+  // Reads that outlast the wait window finish in the background and land in
+  // the snapshot cache for the next listing.
   const listReachableDesktopRepos = async (): Promise<RepoSummary[]> => {
-    const now = Date.now();
-    const isFresh =
-      desktopReposRefreshedAt !== null &&
-      now - desktopReposRefreshedAt < desktopRepoRefreshIntervalMs;
-    if (!isFresh && !desktopReposRefresh) {
+    if (!desktopReposRefresh) {
       desktopReposRefresh = refreshDesktopRepos().finally(() => {
-        desktopReposRefreshedAt = Date.now();
         desktopReposRefresh = null;
       });
     }
-    if (desktopReposRefresh) {
-      await awaitWithFallback(
-        desktopReposRefresh,
-        desktopRepoWaitMs,
-        () => undefined
-      );
-    }
+    await awaitWithFallback(
+      desktopReposRefresh,
+      desktopRepoWaitMs,
+      () => undefined
+    );
     return [...desktopRepoSnapshots.values()].flat();
   };
 

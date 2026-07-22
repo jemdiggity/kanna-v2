@@ -2089,6 +2089,42 @@ describe("remote transport", () => {
     expect(invokeDesktop).toHaveBeenCalledTimes(1);
   });
 
+  it("fetches repos from a desktop that becomes reachable after the first listing", async () => {
+    let online = false;
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue([
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [
+        {
+          desktopId: "desktop-owner",
+          displayName: "Owner Mac",
+          online,
+          reachableViaRelay: online,
+          connectionMode: "internet"
+        }
+      ],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => []
+    });
+
+    await expect(transport.listRepos()).resolves.toEqual([]);
+    expect(invokeDesktop).not.toHaveBeenCalled();
+
+    online = true;
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-empty", name: "Fresh Repo" }
+    ]);
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/repos",
+      body: null
+    });
+  });
+
   it("routes task creation for a task-less repo to the desktop that owns it", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>(async (request) => {
       if (request.path === "/v1/repos") {
