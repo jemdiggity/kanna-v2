@@ -4,7 +4,7 @@
 
 **Goal:** Make KSP the authoritative runtime-status channel for attached PTY sessions while preserving the server-side selected-task idle/unread policy.
 
-**Architecture:** Add live status to daemon terminal snapshots and attached-session fanout, forward initial and edge-triggered PTY status through KSP, and apply attached status through the desktop store. Track live KSP terminal attachments in a shared refcounted registry; the server watcher applies the same runtime-status policy with `selected=false` only when a session is unattached, including subscribe-time `List` reconciliation. Remove the legacy Tauri event and desktop poll entirely.
+**Architecture:** Deliver initial, live, and lag-resync status through the daemon's ordered attached-session fanout as `StatusChanged` events, forward PTY status through KSP without synthesis, and apply attached status through the desktop store. Track live KSP terminal attachments in a shared refcounted registry; the server watcher applies the same runtime-status policy with `selected=false` only when a session is unattached, including subscribe-time and final-detach `List` reconciliation. Remove the legacy Tauri event and desktop poll entirely.
 
 **Tech Stack:** Rust/Serde/Tokio, TypeScript/Vue/Pinia, Vitest, Cargo test/clippy/fmt.
 
@@ -12,8 +12,8 @@
 
 ## File Structure
 
-- Modify `crates/daemon/src/protocol.rs`, `session.rs`, and terminal snapshot constructors: carry a backward-compatible `SessionStatus` in snapshots and test old/new JSON.
-- Modify `crates/kanna-server/src/ksp.rs`: emit initial and live PTY `status_changed` frames and add fake-daemon regression coverage.
+- Modify daemon fanout and output handling: queue `StatusChanged` behind causal output and pair it with snapshots at attach and lag resync.
+- Modify `crates/kanna-server/src/ksp.rs`: forward daemon-received initial, live, and resync PTY `status_changed` frames without synthesis.
 - Modify `packages/stream-client/src/index.ts` and `stream-client.test.ts`: route status to terminal and agent attachments safely.
 - Create `crates/kanna-server/src/terminal_attachments.rs` and modify `AppState`, KSP, and `terminal_watcher`: refcount attached sessions and apply status server-side only when unattached.
 - Modify `apps/desktop/src/composables/terminalRuntimeStatusSink.ts` and `terminalLayout.ts`: provide a KSP-fed per-session status bus for the store and reconnect settling.
@@ -103,3 +103,58 @@
 - [x] Run `cargo fmt --all -- --check`.
 - [x] Run `cargo clippy -p kanna-daemon -p kanna-server --all-targets`.
 - [ ] Review `git diff`, commit the revision locally, and record successful stage completion through Kanna.
+
+### Task 13: Revision 3 — selected attach-gap repair rule
+
+- [x] Add table-driven unit tests in `crates/kanna-server/src/http_api/task_activity.rs` proving `idle` and `waiting` with `selected=true` repair `unread` to `idle`, the same statuses with `selected=false` leave `unread` unchanged, and `busy` still maps every non-working activity to `working` while leaving `working` unchanged.
+- [x] Run `cargo test -p kanna-server http_api::task_activity::tests:: -- --test-threads=1` and confirm RED because selected `unread` currently returns `None`.
+- [x] Change only the `idle | waiting` branch of `activity_for_runtime_status`: selected reports map both `working` and `unread` to `idle`; unselected reports retain only `working` to `unread`.
+- [x] Re-run the focused task-activity tests and confirm GREEN.
+
+### Task 14: Revision 3 — final-detach notification and reconciliation
+
+- [x] Add `terminal_attachments` tests proving the first of two lease drops emits no notification, the final drop emits exactly one session id, and the notification is not duplicated.
+- [x] Run `cargo test -p kanna-server terminal_attachments::tests:: -- --test-threads=1` and confirm RED because the registry has no final-detach notification surface.
+- [x] Give `TerminalAttachments` a shared unbounded final-detach sender and a single receiver obtained during server startup; keep the synchronous refcount mutation in `TerminalAttachmentLease::drop`, sending only after the count reaches zero.
+- [x] Add terminal-watcher tests with a fake daemon proving one final-detach notification causes exactly one `DaemonCommand::List`, filters the matching `SessionInfo`, and applies its status through `apply_unattached_runtime_status`; prove no command or activity change occurs while another lease remains.
+- [x] Run the focused detach-reconciliation tests and confirm RED before adding the worker.
+- [x] Implement `terminal_detach_reconciliation_loop` and a one-shot helper in `crates/kanna-server/src/terminal_watcher.rs`; connect with `DaemonClient`, issue `List`, filter by session id, and rely on `apply_unattached_runtime_status` to re-check that the session is still unattached before writing.
+- [x] Start the reconciliation worker beside `terminal_state_watcher_loop` in `crates/kanna-server/src/main.rs`, then re-run the focused attachment and watcher tests and confirm GREEN.
+
+### Task 15: Revision 3 — ownership ordering coverage
+
+- [x] Add a KSP test in `crates/kanna-server/src/ksp.rs` whose fake daemon blocks before replying to `AttachSnapshot`; assert `state.terminal_attachments().is_attached(session_id)` is already true while the command is in flight, then close the stream and assert the lease is released.
+- [x] Run the focused KSP test and confirm it passes against the intended lease placement or exposes any ordering defect before further changes.
+- [x] Retain lease acquisition outside the spawned stream future and its lifetime across all reconnect attempts; make only the minimal lifecycle adjustment if the new ordering test exposes a defect.
+- [x] Re-run the focused KSP and existing attached-watcher skip tests.
+
+### Task 16: Revision 3 — desktop and real-app gap repair
+
+- [x] Add an integration case in `apps/desktop/src/stores/kanna.runtimeStatusSync.test.ts` that starts selected/working, simulates an unattached watcher write to `unread`, forwards the queued initial `idle`, and expects the selected client report to end at `idle`.
+- [x] Run the focused desktop test and confirm RED, then update the test server policy to match `activity_for_runtime_status` revision 3 and re-run to confirm GREEN.
+- [x] Extend `apps/desktop/tests/e2e/real/pty-runtime-status.test.ts` so a false agent completes before its terminal mounts, then attach and assert queued current status converges from `unread` to `idle`.
+- [x] Start the worktree app only through `./kd dev up`; run the PTY runtime-status E2E, inspect `./kd dev log` on failure, and stop the app after the E2E passes.
+
+### Task 17: Revision 3 — verification and PR update
+
+- [x] Run focused kanna-server tests for `task_activity`, `terminal_attachments`, `terminal_watcher`, and the new KSP ordering case with `--test-threads=1`.
+- [x] Run the focused desktop runtime-status Vitest file and the real-app PTY runtime-status E2E.
+- [x] Run `pnpm test`.
+- [x] Run `(cd crates/daemon && cargo test -- --test-threads=1)`; isolate the one host-pressure timeout and confirm it passes alone.
+- [ ] Run `git diff --check`, review the final diff, commit the revision, update `origin/task-ab611644` to the approved revision-3 base, and force-push `feat/ksp-pty-runtime-status` with `--force-with-lease` to update PR #886.
+
+### Task 18: Revision 4 — one authoritative daemon status carrier
+
+- [x] Add or revise daemon tests proving live `StatusChanged` follows the causal `Output` on the attached fanout, attach initial events remain exactly `[Snapshot, StatusChanged(current)]`, resync queues that same pair and restores a status missed during drain, and the existing `Subscribe` broadcast remains unchanged.
+- [x] Run the focused daemon tests and confirm the resync case is RED because resync currently queues only `Snapshot`.
+- [x] Remove `TerminalSnapshot.status`, its serde tests, and every snapshot constructor assignment; retain `fanout_status_changed`, and change drained-subscriber resync to enqueue `[Snapshot, StatusChanged(session.status())]` under the fanout lock.
+- [x] Replace the KSP snapshot-synthesis coverage with a fake-daemon test that sends queued initial `Snapshot` then `StatusChanged`, asserts that exact frame order, and proves no additional synthesized status frame appears; retain live and resync forwarding coverage through received daemon events.
+- [x] Run the focused and full daemon/server suites plus `pnpm --dir packages/stream-client test`, isolating the documented host-pressure timeout.
+
+### Task 19: Revision 4 — real-app carrier and recovery coverage
+
+- [x] Extend the PTY runtime-status E2E with an attached live busy→idle transition that completes without reattach, proving the fanout steady-state carrier.
+- [x] Add a dropped stream recovery case that re-establishes the terminal and converges to the daemon's current status via the queued attach pair.
+- [x] Run the desktop runtime-status integration test and the PTY runtime-status E2E through `./kd dev up`, then stop the worktree app.
+- [x] Run `pnpm test` plus the requested serial daemon suite, isolating the documented transient PTY timeout and confirming the affected test passes alone.
+- [ ] Inspect the final diff, commit, rebase onto Revision 4 commit `a2ec0585`, and force-push PR #886 with lease protection.

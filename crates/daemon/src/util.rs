@@ -12,7 +12,6 @@ pub(crate) fn recovery_snapshot_to_terminal_snapshot(
         cursor_visible: snapshot.cursor_visible,
         saved_at: snapshot.saved_at,
         sequence: snapshot.sequence,
-        status: protocol::SessionStatus::Idle,
         vt: snapshot.serialized,
     }
 }

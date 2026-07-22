@@ -166,6 +166,18 @@ async fn main() {
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
     let session_replacements = http_state.session_replacements();
+    let detached_terminals = http_state
+        .terminal_attachments()
+        .take_detach_receiver()
+        .expect("terminal detach reconciliation receiver should only be taken at startup");
+    let terminal_detach_state = Arc::clone(&http_state);
+    tokio::spawn(async move {
+        terminal_watcher::terminal_detach_reconciliation_loop(
+            terminal_detach_state,
+            detached_terminals,
+        )
+        .await;
+    });
     let terminal_state = Arc::clone(&http_state);
     tokio::spawn(async move {
         terminal_watcher::terminal_state_watcher_loop(terminal_state, session_replacements).await;

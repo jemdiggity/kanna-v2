@@ -313,12 +313,19 @@ impl FanoutState {
     }
 
     /// Resync every lagged subscriber whose backlog has fully drained by
-    /// queueing a fresh authoritative snapshot, and return the recovery
-    /// diagnostics to emit. Call with the snapshot taken under the same
-    /// fanout lock, after the current chunk was mirrored.
-    pub(crate) fn resync_drained(&mut self, snapshot_event: &Event) -> Vec<TerminalPerfEvent> {
+    /// queueing fresh authoritative recovery events, and return the recovery
+    /// diagnostics to emit. Call with the snapshot and current status taken
+    /// under the same fanout lock, after the current chunk was mirrored.
+    pub(crate) fn resync_drained(&mut self, events: &[Event]) -> Vec<TerminalPerfEvent> {
         let budget = self.budget;
-        let Some(line) = EventLine::serialize(snapshot_event, 0, 0) else {
+        let lines: Option<Vec<_>> = events
+            .iter()
+            .map(|event| EventLine::serialize(event, 0, 0))
+            .collect();
+        let Some(lines) = lines else {
+            return Vec::new();
+        };
+        let Some(perf_line) = lines.first() else {
             return Vec::new();
         };
         let mut recovered = Vec::new();
@@ -334,12 +341,16 @@ impl FanoutState {
                 if subscriber.pending_bytes.load(Ordering::Relaxed) != 0 {
                     continue;
                 }
-                if subscriber.enqueue(line.clone()).is_err() {
+                if lines
+                    .iter()
+                    .try_for_each(|line| subscriber.enqueue(line.clone()))
+                    .is_err()
+                {
                     continue;
                 }
                 subscriber.lagged_since = None;
                 recovered.push(TerminalPerfEvent {
-                    context: subscriber.perf_context(&line, budget),
+                    context: subscriber.perf_context(perf_line, budget),
                     kind: terminal_perf::TerminalPerfEventKind::Recovered,
                     duration: lagged_since.elapsed(),
                 });
@@ -542,7 +553,6 @@ mod tests {
                 cursor_visible: true,
                 saved_at: 0,
                 sequence: 0,
-                status: SessionStatus::Idle,
                 vt: "S".repeat(vt_bytes),
             },
         }
@@ -555,7 +565,7 @@ mod tests {
     /// never exceed max(budget, one snapshot). Runs on the current-thread
     /// runtime so the writer task cannot drain between assertions.
     #[tokio::test]
-    async fn queued_bytes_obey_budget_with_snapshot_only_exemption() {
+    async fn drained_lag_resync_queues_snapshot_and_current_status_pair() {
         let (writer, _client) = test_writer();
         let writer_id = Arc::as_ptr(&writer) as usize;
         let mut state = FanoutState::with_budget_for_test(64);
@@ -581,19 +591,31 @@ mod tests {
             0
         );
 
-        // Deterministic resync: the drained subscriber accepts a snapshot
-        // far larger than the budget — the documented exemption — and the
-        // queue holds exactly that snapshot.
+        // Deterministic resync: the drained subscriber accepts an
+        // authoritative snapshot plus current status. The pair may be larger
+        // than the budget but enters only this empty recovery mailbox.
         let snapshot = snapshot_event(64 * 1024);
         let snapshot_line_len = EventLine::serialize(&snapshot, 0, 0)
             .expect("serialize snapshot")
             .line
             .len();
-        let recovered = state.resync_drained(&snapshot);
+        let status = Event::StatusChanged {
+            session_id: "sess-budget".to_string(),
+            status: SessionStatus::Waiting,
+            waiting_prompt_snippet: Some("Waiting after lag".to_string()),
+        };
+        let status_line_len = EventLine::serialize(&status, 0, 0)
+            .expect("serialize status")
+            .line
+            .len();
+        let recovered = state.resync_drained(&[snapshot, status]);
         assert_eq!(recovered.len(), 1);
         let pending = state.pending_bytes_for_test(SubscriberKind::Observer, writer_id);
-        assert_eq!(pending, snapshot_line_len);
-        assert!(pending > 64, "the exemption must apply to the snapshot");
+        assert_eq!(pending, snapshot_line_len + status_line_len);
+        assert!(
+            pending > 64,
+            "the exemption must apply to the recovery pair"
+        );
 
         // The exemption cannot accumulate: with the snapshot still queued,
         // the next over-budget chunk lags again instead of queueing.
@@ -601,7 +623,7 @@ mod tests {
         assert_eq!(report.newly_lagged.len(), 1);
         assert_eq!(
             state.pending_bytes_for_test(SubscriberKind::Observer, writer_id),
-            snapshot_line_len
+            snapshot_line_len + status_line_len
         );
     }
 

@@ -185,7 +185,6 @@ pub(crate) fn blank_snapshot(rows: u16, cols: u16) -> protocol::TerminalSnapshot
         cursor_visible: true,
         saved_at: 0,
         sequence: 0,
-        status: protocol::SessionStatus::Idle,
         vt: String::new(),
     }
 }

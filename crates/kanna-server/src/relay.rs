@@ -682,7 +682,6 @@ mod tests {
             cursor_visible: true,
             saved_at: 0,
             sequence: 0,
-            status: kanna_daemon::protocol::SessionStatus::Idle,
             vt: "restored".to_string(),
         };
 
@@ -733,7 +732,6 @@ mod tests {
                 cursor_visible: true,
                 saved_at: 0,
                 sequence: 0,
-                status: kanna_daemon::protocol::SessionStatus::Idle,
                 vt: vt.to_string(),
             }
         }

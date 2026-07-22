@@ -166,7 +166,7 @@ describe("PTY runtime status over KSP", () => {
     return sessionId;
   }
 
-  it("maps false Codex footer status to selected idle and unselected unread", async () => {
+  it("delivers attached live busy-to-idle status without reattaching", async () => {
     const selectedTaskId = await createFalseAgentTask("Selected false Codex runtime status");
     await callVueMethod(client, "loadItems", repoId);
     await selectTaskAndWait(client, selectedTaskId);
@@ -177,6 +177,10 @@ describe("PTY runtime status over KSP", () => {
     await waitForDaemonStatus(client, selectedTaskId, "waiting");
     await waitForActivity(client, selectedTaskId, "idle");
     await waitForDaemonStatus(client, selectedTaskId, "idle");
+    expect(await client.executeSync<boolean>(
+      `return window.__KANNA_E2E__?.terminalBuffers?.sessionIds?.()
+        .includes(${JSON.stringify(selectedTaskId)}) ?? false;`,
+    )).toBe(true);
 
     const otherTaskId = `other-task-${randomUUID()}`;
     await execDb(
@@ -202,5 +206,55 @@ describe("PTY runtime status over KSP", () => {
     await waitForActivity(client, unselectedTaskId, "working");
     await waitForActivity(client, unselectedTaskId, "unread");
     await waitForDaemonStatus(client, unselectedTaskId, "idle");
+
+    // The task began and finished before its terminal ever mounted. Its first
+    // attach queues the current idle status and repairs watcher unread.
+    await selectTaskAndWait(client, unselectedTaskId);
+    await waitForTerminalRegistration(client, unselectedTaskId);
+    await waitForActivity(client, unselectedTaskId, "idle");
+  }, 45_000);
+
+  it("replays current idle status after a dropped stream reconnects", async () => {
+    const reconnectTaskId = await createFalseAgentTask("Reconnect false Codex runtime status");
+    const otherTaskId = `reconnect-other-${randomUUID()}`;
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item
+        (id, repo_id, prompt, stage, branch, agent_type, agent_provider, activity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [otherTaskId, repoId, "Reconnect gap other task", "in progress", otherTaskId, "agent", "codex", "idle"],
+    );
+    await waitForTaskCreated(client, "Reconnect gap other task");
+    await callVueMethod(client, "loadItems", repoId);
+    await selectTaskAndWait(client, reconnectTaskId);
+    await waitForTerminalRegistration(client, reconnectTaskId);
+    await startFalseAgent(client, reconnectTaskId);
+    await waitForDaemonStatus(client, reconnectTaskId, "busy");
+    await waitForActivity(client, reconnectTaskId, "working");
+
+    // Explicitly detach the terminal stream, then close the shared KSP socket.
+    // The server awaits attachment-task cancellation before handling the next
+    // frame. The false agent then finishes while no terminal stream can carry
+    // its idle status to the selected client.
+    await client.executeSync(
+      `return window.__KANNA_E2E__.terminalStreams.detach(${JSON.stringify(reconnectTaskId)});`,
+    );
+    await client.executeSync("window.__KANNA_E2E__.resetStreamClient?.();");
+    await selectTaskAndWait(client, otherTaskId);
+    await waitForDaemonStatus(client, reconnectTaskId, "idle");
+
+    // Reloading constructs a fresh KSP client after the dropped socket.
+    // AttachSnapshot's queued StatusChanged(Idle) is replayed with
+    // selected=true and repairs either a missed working state or a
+    // conservative watcher unread state.
+    await client.executeSync(
+      "window.__KANNA_E2E__.ready = false; location.reload();",
+    );
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+    await callVueMethod(client, "loadItems", repoId);
+    await selectTaskAndWait(client, reconnectTaskId);
+    await waitForTerminalRegistration(client, reconnectTaskId);
+    await waitForActivity(client, reconnectTaskId, "idle");
   }, 45_000);
 });

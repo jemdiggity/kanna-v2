@@ -130,7 +130,6 @@ struct SnapshotPayload {
     cursor_row: u16,
     cursor_col: u16,
     cursor_visible: bool,
-    status: SessionStatus,
     vt: String,
 }
 
@@ -1137,20 +1136,16 @@ fn attach_snapshot_delivers_snapshot_then_initial_status() {
         emulate_terminal: true,
     });
 
-    let snapshot_status = match attached.recv() {
-        Evt::Snapshot {
-            session_id,
-            snapshot,
-        } => {
+    match attached.recv() {
+        Evt::Snapshot { session_id, .. } => {
             assert_eq!(session_id, "sess-initial-status");
-            snapshot.status
         }
         other => panic!("expected initial Snapshot, got: {other:?}"),
-    };
+    }
     match attached.recv() {
         Evt::StatusChanged { session_id, status } => {
             assert_eq!(session_id, "sess-initial-status");
-            assert_eq!(status, snapshot_status);
+            assert_eq!(status, SessionStatus::Idle);
         }
         other => panic!("expected initial StatusChanged after Snapshot, got: {other:?}"),
     }
@@ -1886,6 +1881,13 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
             Ok(Evt::Snapshot { snapshot, .. }) if snapshot.vt.contains("FLOOD_DONE") => break,
             Ok(_) | Err(_) => {}
         }
+    }
+    match observer.recv() {
+        Evt::StatusChanged { session_id, status } => {
+            assert_eq!(session_id, "sess-overflowing-observer");
+            assert_eq!(status, SessionStatus::Idle);
+        }
+        other => panic!("expected current status after resync snapshot, got: {other:?}"),
     }
     wait_for_daemon_log(
         &daemon,

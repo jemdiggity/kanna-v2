@@ -1810,10 +1810,6 @@ async fn stream_terminal_once(
     attached_once: &mut bool,
     frame_tx: &mpsc::Sender<ServerFrame>,
 ) -> StreamRunEnd {
-    // AttachSnapshot queues Snapshot followed by its matching StatusChanged.
-    // Treat every snapshot as authoritative, while suppressing that duplicate
-    // and any later repeated edge with the same value.
-    let mut last_status = None;
     let send_error = |code: &'static str, message: String| {
         let frame_tx = frame_tx.clone();
         let task_id = task_id.to_string();
@@ -1860,7 +1856,6 @@ async fn stream_terminal_once(
     match attach_reply {
         Ok(DaemonEvent::Snapshot { snapshot, .. }) => {
             *attached_once = true;
-            let status = snapshot.status;
             let frame = ServerFrame::TermSnapshot {
                 task_id: task_id.to_string(),
                 cols: snapshot.cols,
@@ -1875,12 +1870,6 @@ async fn stream_terminal_once(
             )
             .await
             .is_err()
-            {
-                return StreamRunEnd::Done;
-            }
-            if send_terminal_status(frame_tx, task_id, status, &mut last_status)
-                .await
-                .is_err()
             {
                 return StreamRunEnd::Done;
             }
@@ -1951,19 +1940,17 @@ async fn stream_terminal_once(
                 {
                     return StreamRunEnd::Done;
                 }
-                if send_terminal_status(frame_tx, task_id, snapshot.status, &mut last_status)
-                    .await
-                    .is_err()
-                {
-                    return StreamRunEnd::Done;
-                }
             }
             Ok(DaemonEvent::StatusChanged {
                 session_id: event_session,
                 status,
                 ..
             }) if event_session == session_id => {
-                if send_terminal_status(frame_tx, task_id, status, &mut last_status)
+                if frame_tx
+                    .send(ServerFrame::StatusChanged {
+                        task_id: task_id.to_string(),
+                        status: status_str(status).to_string(),
+                    })
                     .await
                     .is_err()
                 {
@@ -1987,26 +1974,6 @@ async fn stream_terminal_once(
             Ok(_) => {}
         }
     }
-}
-
-async fn send_terminal_status(
-    frame_tx: &mpsc::Sender<ServerFrame>,
-    task_id: &str,
-    status: SessionStatus,
-    last_status: &mut Option<SessionStatus>,
-) -> Result<(), ()> {
-    if *last_status == Some(status) {
-        return Ok(());
-    }
-    frame_tx
-        .send(ServerFrame::StatusChanged {
-            task_id: task_id.to_string(),
-            status: status_str(status).to_string(),
-        })
-        .await
-        .map_err(|_| ())?;
-    *last_status = Some(status);
-    Ok(())
 }
 
 #[cfg(test)]
@@ -3022,7 +2989,6 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
-                    status: SessionStatus::Idle,
                     vt: String::new(),
                 },
             };
@@ -3939,7 +3905,119 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_stream_forwards_runtime_status() {
+    async fn terminal_attachment_lease_brackets_attach_snapshot_and_stream_end() {
+        let unique = format!(
+            "ksp-terminal-lease-order-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let (attach_started_tx, attach_started_rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let session_id = "shell-terminal-lease-order";
+
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept attach connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read attach command");
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::AttachSnapshot { ref session_id, .. }
+                    if session_id == "shell-terminal-lease-order"
+            ));
+            attach_started_tx.send(()).unwrap();
+            reply_rx.await.unwrap();
+            for event in [
+                DaemonEvent::Snapshot {
+                    session_id: session_id.to_string(),
+                    snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                        version: 1,
+                        rows: 24,
+                        cols: 80,
+                        cursor_row: 0,
+                        cursor_col: 0,
+                        cursor_visible: true,
+                        saved_at: 0,
+                        sequence: 0,
+                        vt: String::new(),
+                    },
+                },
+                DaemonEvent::StatusChanged {
+                    session_id: session_id.to_string(),
+                    status: SessionStatus::Idle,
+                    waiting_prompt_snippet: None,
+                },
+                DaemonEvent::Exit {
+                    session_id: session_id.to_string(),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+            ] {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let mut config = test_config("ksp-terminal-lease-order", "KSP Lease Order");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        let state = Arc::new(AppState::new(config));
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+        let mut conn = StreamConn {
+            state: Arc::clone(&state),
+            frame_tx,
+            companion_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            companion_event_times: HashMap::new(),
+            authed: true,
+            auth_mode: AuthMode::AllowEmpty,
+        };
+
+        conn.attach(session_id.to_string(), StreamKind::Terminal, 0)
+            .await;
+        attach_started_rx.await.unwrap();
+        assert!(
+            state.terminal_attachments().is_attached(session_id),
+            "lease must be held while AttachSnapshot is in flight"
+        );
+
+        reply_tx.send(()).unwrap();
+        for _ in 0..3 {
+            outbound_rx.recv().await.expect("expected terminal frame");
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.terminal_attachments().is_attached(session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lease was not released at stream end");
+
+        daemon.await.unwrap();
+        conn.shutdown().await;
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_forwards_queued_initial_and_live_status_without_synthesis() {
         let unique = format!(
             "ksp-terminal-status-{}-{}",
             std::process::id(),
@@ -3987,7 +4065,6 @@ mod tests {
                         cursor_visible: true,
                         saved_at: 0,
                         sequence: 0,
-                        status: SessionStatus::Busy,
                         vt: "busy snapshot".to_string(),
                     },
                 },
@@ -4117,9 +4194,13 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
-                    status: SessionStatus::Idle,
                     vt: "╭─界─╮\n".to_string(),
                 },
+            };
+            let initial_status = DaemonEvent::StatusChanged {
+                session_id: "daemon-terminal-1".to_string(),
+                status: SessionStatus::Idle,
+                waiting_prompt_snippet: None,
             };
             let output_prefix = DaemonEvent::Output {
                 session_id: "daemon-terminal-1".to_string(),
@@ -4142,9 +4223,13 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
-                    status: SessionStatus::Busy,
                     vt: "RESYNCED\n".to_string(),
                 },
+            };
+            let resync_status = DaemonEvent::StatusChanged {
+                session_id: "daemon-terminal-1".to_string(),
+                status: SessionStatus::Busy,
+                waiting_prompt_snippet: None,
             };
             let exit = DaemonEvent::Exit {
                 session_id: "daemon-terminal-1".to_string(),
@@ -4155,9 +4240,11 @@ mod tests {
 
             for event in [
                 snapshot,
+                initial_status,
                 output_prefix,
                 output_suffix,
                 resync_snapshot,
+                resync_status,
                 exit,
             ] {
                 write_half
@@ -4338,9 +4425,13 @@ mod tests {
                             cursor_visible: true,
                             saved_at: 0,
                             sequence: 0,
-                            status: SessionStatus::Idle,
                             vt: vt.to_string(),
                         },
+                    },
+                    DaemonEvent::StatusChanged {
+                        session_id: "shell-wt-reattach-1".to_string(),
+                        status: SessionStatus::Idle,
+                        waiting_prompt_snippet: None,
                     },
                     DaemonEvent::Output {
                         session_id: "shell-wt-reattach-1".to_string(),
@@ -4632,7 +4723,6 @@ mod tests {
                     cursor_visible: true,
                     saved_at: 0,
                     sequence: 0,
-                    status: SessionStatus::Idle,
                     vt: "shell prompt".to_string(),
                 },
             },

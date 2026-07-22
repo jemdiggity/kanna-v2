@@ -34,15 +34,11 @@ pub(crate) fn activity_for_runtime_status(
                 Some("working")
             }
         }
-        "idle" | "waiting" => {
-            if current_activity != Some("working") {
-                None
-            } else if selected {
-                Some("idle")
-            } else {
-                Some("unread")
-            }
-        }
+        "idle" | "waiting" => match (selected, current_activity) {
+            (true, Some("working" | "unread")) => Some("idle"),
+            (false, Some("working")) => Some("unread"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -129,4 +125,53 @@ pub(super) async fn mark_task_read(
         task_id,
         activity: Some("idle".to_string()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::activity_for_runtime_status;
+
+    #[test]
+    fn selected_idle_repairs_unread_to_idle() {
+        assert_eq!(
+            activity_for_runtime_status(Some("unread"), "idle", true),
+            Some("idle")
+        );
+    }
+
+    #[test]
+    fn selected_waiting_repairs_unread_to_idle() {
+        assert_eq!(
+            activity_for_runtime_status(Some("unread"), "waiting", true),
+            Some("idle")
+        );
+    }
+
+    #[test]
+    fn unselected_idle_or_waiting_does_not_rewrite_unread() {
+        for status in ["idle", "waiting"] {
+            assert_eq!(
+                activity_for_runtime_status(Some("unread"), status, false),
+                None,
+                "status={status}"
+            );
+        }
+    }
+
+    #[test]
+    fn busy_transitions_are_selection_independent() {
+        for selected in [false, true] {
+            for current in [None, Some("idle"), Some("unread")] {
+                assert_eq!(
+                    activity_for_runtime_status(current, "busy", selected),
+                    Some("working"),
+                    "current={current:?} selected={selected}"
+                );
+            }
+            assert_eq!(
+                activity_for_runtime_status(Some("working"), "busy", selected),
+                None
+            );
+        }
+    }
 }

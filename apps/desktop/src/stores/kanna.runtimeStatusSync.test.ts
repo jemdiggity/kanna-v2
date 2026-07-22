@@ -428,8 +428,12 @@ describe("kanna runtime status reconciliation", () => {
         let activity: PipelineItem["activity"] | null = null;
         if (input.status === "busy" && item.activity !== "working") {
           activity = "working";
-        } else if ((input.status === "idle" || input.status === "waiting") && item.activity === "working") {
-          activity = input.selected ? "idle" : "unread";
+        } else if (input.status === "idle" || input.status === "waiting") {
+          if (input.selected && (item.activity === "working" || item.activity === "unread")) {
+            activity = "idle";
+          } else if (!input.selected && item.activity === "working") {
+            activity = "unread";
+          }
         }
         if (activity) {
           await mockState.updatePipelineItemActivityMock(expect.anything(), taskId, activity);
@@ -510,6 +514,30 @@ describe("kanna runtime status reconciliation", () => {
       "task-1",
       "unread",
     );
+  });
+
+  it("repairs watcher unread from an attach gap with queued selected idle status", async () => {
+    const store = await createStore();
+    await store.selectRepo("repo-1");
+    await store.selectItem("task-1");
+    await flushStore();
+    mockState.pipelineItems[0]!.activity = "working";
+
+    // During an initial/reconnect gap the server-side watcher has no lease
+    // and conservatively applies the unattached working -> unread rule.
+    mockState.pipelineItems[0]!.activity = "unread";
+
+    // AttachSnapshot queues StatusChanged(current) after the snapshot. The
+    // selected client replays that idle status and repairs the gap write.
+    await forwardTerminalRuntimeStatus("task-1", "idle");
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "task-1",
+      "idle",
+    );
+    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
   it("keeps the pending-setup guard on KSP terminal idle status", async () => {

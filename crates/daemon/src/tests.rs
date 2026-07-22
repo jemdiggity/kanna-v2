@@ -12,7 +12,7 @@ use crate::client::{
     cleanup_client_writer_registries, effective_terminal_size, SessionSizes,
     TerminalEmulatorClients,
 };
-use crate::fanout::{session_fanout, SessionFanouts, SubscriberKind};
+use crate::fanout::{session_fanout, EventLine, SessionFanouts, SubscriberKind};
 use crate::handoff::{
     blank_snapshot, parse_handoff_response, should_try_compat_handoff_after_error, HandoffEventV1,
     HandoffRequestError, HandoffSessionV1,
@@ -34,7 +34,6 @@ fn sample_snapshot() -> protocol::TerminalSnapshot {
         cursor_visible: true,
         saved_at: 0,
         sequence: 0,
-        status: protocol::SessionStatus::Idle,
         vt: "hello".to_string(),
     }
 }
@@ -255,7 +254,7 @@ async fn connection_drop_cleanup_reports_remaining_effective_terminal_size() {
 }
 
 #[tokio::test]
-async fn live_status_changes_reach_attached_terminal_subscribers() {
+async fn live_status_changes_follow_the_output_that_produced_them() {
     let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
     let (client, server) = UnixStream::pair().expect("stream pair");
     let (_read_half, write_half) = server.into_split();
@@ -267,6 +266,13 @@ async fn live_status_changes_reach_attached_terminal_subscribers() {
         .await
         .register("status-session", SubscriberKind::Attached, &writer, &[]);
 
+    let output = Event::Output {
+        session_id: "status-session".to_string(),
+        data: b"working\n".to_vec(),
+    };
+    let output_line = EventLine::serialize(&output, 1, b"working\n".len()).unwrap();
+    fanout.state.lock().await.enqueue(&output_line);
+
     let event = Event::StatusChanged {
         session_id: "status-session".to_string(),
         status: SessionStatus::Waiting,
@@ -276,12 +282,23 @@ async fn live_status_changes_reach_attached_terminal_subscribers() {
 
     let (client_read, _client_write) = client.into_split();
     let mut reader = BufReader::new(client_read);
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+    let mut output_json = String::new();
+    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut output_json))
+        .await
+        .expect("attached terminal should receive output")
+        .expect("read output line");
+    assert!(matches!(
+        serde_json::from_str::<Event>(output_json.trim()).expect("parse output event"),
+        Event::Output { ref session_id, ref data }
+            if session_id == "status-session" && data == b"working\n"
+    ));
+
+    let mut status_json = String::new();
+    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut status_json))
         .await
         .expect("attached terminal should receive status")
         .expect("read status line");
-    let received: Event = serde_json::from_str(line.trim()).expect("parse status event");
+    let received: Event = serde_json::from_str(status_json.trim()).expect("parse status event");
     assert!(matches!(
         received,
         Event::StatusChanged {

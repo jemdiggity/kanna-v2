@@ -530,10 +530,18 @@ async fn resync_drained_subscribers(
             return;
         }
     };
-    let recovered = fanout_state.resync_drained(&Event::Snapshot {
-        session_id: session_id.to_string(),
-        snapshot,
-    });
+    let recovery_events = [
+        Event::Snapshot {
+            session_id: session_id.to_string(),
+            snapshot,
+        },
+        Event::StatusChanged {
+            session_id: session_id.to_string(),
+            status: session.status().await,
+            waiting_prompt_snippet: None,
+        },
+    ];
+    let recovered = fanout_state.resync_drained(&recovery_events);
     drop(fanout_state);
     terminal_perf::emit_events(recovered);
 }
