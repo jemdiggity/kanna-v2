@@ -341,7 +341,7 @@ export async function assertPtyTerminalFixtureAvailable(
   return { expectedTitle, promptEndSentinel, taskId: fixture.taskId };
 }
 
-async function smokeElementText(element: SmokeElement): Promise<string> {
+export async function smokeElementText(element: SmokeElement): Promise<string> {
   const text = await element.getText?.().catch(() => "");
   if (text?.trim()) return text;
   for (const attribute of ["label", "value", "name"] as const) {
