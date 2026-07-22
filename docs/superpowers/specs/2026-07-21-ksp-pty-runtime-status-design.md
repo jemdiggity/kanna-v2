@@ -7,7 +7,11 @@ brainstorming, and specifies the fix. Revision 2 (2026-07-22): KSP is the
 authoritative runtime status channel for attached PTY sessions, kanna-server
 applies status directly for sessions with no live KSP terminal attachment,
 and the legacy Tauri status path is removed outright together with its tests
-— no temporary fallback remains.
+— no temporary fallback remains. Revision 3 (2026-07-22): the attach-gap
+race is closed by an explicit ownership and reconciliation design — a
+selected-client repair rule in `activity_for_runtime_status`, attach-time
+snapshot-status replay as the guaranteed repair point, and one-shot detach
+reconciliation (§2a).
 
 ## 1. Confirmed gap
 
@@ -122,25 +126,70 @@ with a live terminal attachment. Tasks whose terminals were never mounted
 (e.g. created via MCP/CLI and never clicked) would silently lose activity
 tracking if the legacy path were simply deleted.
 
-**Key observation: selection implies attachment.** A selected task's
-terminal is mounted and KSP-attached (`terminalSessionLifecycle`), so an
-unattached session is never the selected one. Therefore the server can apply
-runtime status for unattached sessions without any selection knowledge:
-`busy` → `working` (selection-independent anyway), and `idle`/`waiting`
-downgrades from `working` → `unread` — which is exactly what
-`activity_for_runtime_status` would decide with `selected: false`. No
-semantics change.
+**Key observation: selection implies attachment — in steady state only.** A
+selected task's terminal is mounted and KSP-attached
+(`terminalSessionLifecycle`), so in steady state an unattached session is
+never the selected one, and the server can apply runtime status for
+unattached sessions without selection knowledge: `busy` → `working`
+(selection-independent anyway), and `idle`/`waiting` downgrades from
+`working` → `unread` — what `activity_for_runtime_status` decides with
+`selected: false`.
 
-**Two writers, disjoint domains.** The desktop client applies status for
-sessions it has attached (it owns the `selected` bit); `terminal_watcher`
-applies status only for sessions with no live KSP terminal attachment,
-consulting a process-global refcounted registry of attached terminal session
-ids maintained by the KSP stream lifecycle (KSP attachments are currently
-per-connection state only, `ksp.rs:486`; multiple windows/clients can attach
-the same session, hence a refcount, not a set). Attach/detach races leave
-only brief overlap windows; both writers converge through the same
-idempotent `activity_for_runtime_status` rules, and `busy` → `working` is
-identical from either writer.
+**The attach-gap race (Revision 3).** The steady-state claim is false during
+initial attach and reconnect gaps: between selecting a task and the KSP
+attach completing (or while a dropped stream re-attaches), the registry
+refcount is zero. An `idle`/`waiting` event landing in that gap makes the
+watcher apply `working` → `unread` for a task the user is actively viewing —
+and under the pre-Revision-3 rules that state was unrepairable, because
+`activity_for_runtime_status` returns `None` for `idle`/`waiting` whenever
+current activity is not `working` (`task_activity.rs:37-45`): the selected
+client's post-attach status replay could not turn `unread` back into `idle`.
+
+**Ownership and reconciliation (Revision 3).** Ownership is asymmetric by
+authority, not just by attachment:
+
+1. *The watcher is a conservative writer.* It may only apply
+   `busy` → `working` and `working` → `unread`, and only for sessions with
+   no live attachment refcount. Its worst-case misfire is an over-eager
+   `unread` on a selected task caught in an attach gap — never a lost
+   `working` and never a wrong `idle`.
+2. *The selected client is the authority and the repairer.*
+   `activity_for_runtime_status` gains one rule: `idle`/`waiting` with
+   `selected: true` maps `unread` → `idle` in addition to
+   `working` → `idle`. Unselected reports keep `working` → `unread` only,
+   and the watcher always applies with `selected: false`, so only a client
+   showing the task to the user can perform the repair.
+3. *Attach is the guaranteed repair point.* The mandatory initial
+   snapshot-status frame after `term_snapshot` (§2, "Initial status on
+   attach") means every attach replays the session's current status through
+   the selected client's POST — any watcher misfire during the gap is
+   repaired as soon as the attach lands, with no timers and no polling.
+4. *Detach triggers one-shot reconciliation.* A status change can also land
+   in the symmetric window between a stream ending and the watcher taking
+   over (an idle prompt emits no further output, so the daemon will not
+   re-emit). When a session's attachment refcount drops to zero,
+   kanna-server immediately queries that session's current status (daemon
+   `List`) and applies it through the unattached rule — event-driven, no
+   periodic poll.
+
+Ordering guarantee: the attachment lease is acquired before the
+`AttachSnapshot` round-trip begins and released when the stream task ends,
+so the watcher's skip window brackets the client's entire ownership span;
+events falling in either boundary window are covered by reconciliation
+points 3 and 4.
+
+Repair-rule side effect (accepted): selecting an `unread` task whose live
+session sits at an idle prompt now clears the bold state at attach time
+rather than after the 1s mark-read debounce — the user is looking at the
+task, so clearing is consistent with existing mark-read intent.
+Completion-driven `unread` (daemon `Exit` boundary) is unaffected: an exited
+session has no live status stream left to replay.
+
+**Registry.** `terminal_watcher` consults a process-global refcounted
+registry of attached terminal session ids maintained by the KSP stream
+lifecycle (KSP attachments are per-connection state only, `ksp.rs:486`;
+multiple windows/clients can attach the same session, hence a refcount, not
+a set).
 
 **Watcher reconciliation replaces the poll.** On every successful daemon
 subscribe, `terminal_watcher` issues a `List` command (session status is
@@ -200,19 +249,26 @@ JSON, and new decoders of old producers get `Idle`).
   sessions without a live KSP attachment are covered by the server-side
   application below.
 
-Idle-vs-unread semantics are untouched: all paths converge on the
-`/v1/tasks/{task_id}/activity/runtime-status` POST carrying `selected`, and
-`activity_for_runtime_status` remains the single decision point.
+Idle-vs-unread semantics stay at the existing boundary: all paths converge
+on the `/v1/tasks/{task_id}/activity/runtime-status` POST carrying
+`selected`, and `activity_for_runtime_status` remains the single decision
+point. Revision 3 adds exactly one rule there: `idle`/`waiting` with
+`selected: true` also maps `unread` → `idle` (the attach-gap repair, §2a).
 
 **Server-side application for unattached sessions (Revision 2).**
 `terminal_watcher` gains the unattached-only status application from §2a:
 on `StatusChanged`, if the session has no live KSP terminal attachment
 (refcounted registry shared through `AppState`), resolve the task and apply
 `busy` → `working`, `idle`/`waiting` from `working` → `unread`, reusing the
-`activity_for_runtime_status` rules and publishing
+`activity_for_runtime_status` rules with `selected: false` and publishing
 `StateChangeScope::Tasks` so all clients refresh — the same broadcast the
 HTTP endpoint uses (`task_activity.rs:91`). On subscribe it reconciles via
 daemon `List`. Waiting-prompt persistence is unchanged.
+
+**Detach reconciliation (Revision 3).** When a session's attachment
+refcount drops to zero, kanna-server performs a one-shot daemon `List` for
+that session and applies its current status through the same unattached
+rule, closing the stream-end → watcher-takeover window (§2a point 4).
 
 ## 4. Required regression coverage
 
@@ -254,6 +310,26 @@ daemon `List`. Waiting-prompt persistence is unchanged.
   `working`; unattached `idle` from `working` applies `unread`; a session
   with a live attachment refcount is skipped; subscribe-time `List`
   reconciliation applies statuses; refcount attach/detach lifecycle.
+- **Attach-gap race** (Revision 3, required — cross-process asynchronous
+  lifecycle behavior):
+  - `task_activity` rules: `idle`/`waiting` + `selected` + current `unread`
+    → `idle` (repair); `idle`/`waiting` + unselected + current `unread` →
+    `None` (watcher misfires stay repairable only by a selected client);
+    `busy` transitions unchanged.
+  - Watcher/registry ordering: a `StatusChanged` arriving while the lease is
+    held is skipped by the watcher; the lease is acquired before the
+    `AttachSnapshot` round-trip and released at stream end; refcount-zero
+    triggers the one-shot detach reconciliation and it applies the session's
+    current status.
+  - Gap-repair integration (`kanna.runtimeStatusSync.test.ts` boundary):
+    simulate the full ordering — selected task `working`, watcher applies
+    `unread` during an attach gap, client attach replays snapshot status
+    `idle` with `selected: true` — and assert final activity is `idle`.
+  - E2E (desktop PTY harness): force the selected task through an
+    initial-attach or reconnect gap while the false agent transitions
+    busy → idle (e.g. start the false agent before the terminal mounts, or
+    drop and re-establish the stream mid-run) and assert the final sidebar
+    activity is `idle`, not `unread`.
 - **status bus / terminal layout** (Revision 2): reconnect redraw settle
   resolves from a KSP status delivery instead of the removed Tauri event.
 - **Legacy-path tests removed** (Revision 2): the `listen("status_changed")`
