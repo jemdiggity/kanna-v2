@@ -1,5 +1,6 @@
 mod analytics;
 mod backup;
+mod blocking;
 mod desktop;
 #[cfg(debug_assertions)]
 mod e2e_mobile_controls;

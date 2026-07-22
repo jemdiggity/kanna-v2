@@ -80,6 +80,12 @@ pub(crate) async fn run_relay_loop(
 
         // Track observer tasks per session_id
         let mut observe_tasks: HashMap<String, JoinHandle<()>> = HashMap::new();
+        // HTTP invokes dispatch off the read loop; this caps how many run at
+        // once so a burst cannot exhaust the blocking pool. Mirrors the KSP
+        // request worker's CPU-aware concurrency.
+        let invoke_permits = Arc::new(tokio::sync::Semaphore::new(
+            crate::ksp::request_concurrency(),
+        ));
         let mut keepalive = RelayKeepalive::new();
         let mut publisher = PublisherState::new();
         let mut ping_interval = tokio::time::interval(RELAY_PING_INTERVAL);
@@ -362,22 +368,17 @@ pub(crate) async fn run_relay_loop(
                             RelayInvoke::Http { method, path, body } => {
                                 log::info!("HTTP invoke #{}: {} {}", id, method, path);
 
-                                let invoke_response = http_api::dispatch_authenticated_http_invoke(
+                                if let Err(e) = dispatch_relay_http_invoke(
                                     Arc::clone(&http_state),
-                                    &method,
-                                    &path,
+                                    Arc::clone(&sink),
+                                    Arc::clone(&invoke_permits),
+                                    id,
+                                    method,
+                                    path,
                                     body,
                                 )
-                                .await;
-                                let response = RelayMessage::Response {
-                                    id,
-                                    data: None,
-                                    error: invoke_response.error,
-                                    status: Some(invoke_response.status),
-                                    body: invoke_response.body,
-                                };
-
-                                if let Err(e) = send_relay_response_message(&sink, response).await {
+                                .await
+                                {
                                     log::error!("{}", e);
                                     break;
                                 }
@@ -504,6 +505,66 @@ async fn send_response(
     if let Err(e) = send_relay_response_message(sink, response).await {
         log::error!("Failed to send response: {}", e);
     }
+}
+
+/// Dispatch a relay HTTP invoke off the read loop, driven from the blocking
+/// pool: invoke handlers can run synchronous git/SQLite work (task lifecycle
+/// preparation), which must not occupy a runtime worker or stall relay
+/// message processing. Responses are id-addressed, so completion order does
+/// not matter. Returns `Err` only when the saturation response could not be
+/// written to the relay sink (the caller reconnects).
+pub(crate) async fn dispatch_relay_http_invoke(
+    http_state: Arc<http_api::AppState>,
+    sink: Arc<Mutex<relay_client::WsSink>>,
+    invoke_permits: Arc<tokio::sync::Semaphore>,
+    id: relay_client::RelayId,
+    method: String,
+    path: String,
+    body: serde_json::Value,
+) -> Result<(), String> {
+    let permit = match Arc::clone(&invoke_permits).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            let response = RelayMessage::Response {
+                id,
+                data: None,
+                error: Some("desktop is busy; too many concurrent requests".to_string()),
+                status: Some(503),
+                body: None,
+            };
+            return send_relay_response_message(&sink, response).await;
+        }
+    };
+    tokio::spawn(async move {
+        let _permit = permit;
+        let handle = tokio::runtime::Handle::current();
+        let dispatched = tokio::task::spawn_blocking(move || {
+            handle.block_on(http_api::dispatch_authenticated_http_invoke(
+                http_state, &method, &path, body,
+            ))
+        })
+        .await;
+        let response = match dispatched {
+            Ok(invoke_response) => RelayMessage::Response {
+                id,
+                data: None,
+                error: invoke_response.error,
+                status: Some(invoke_response.status),
+                body: invoke_response.body,
+            },
+            Err(join_error) => RelayMessage::Response {
+                id,
+                data: None,
+                error: Some(format!("invoke worker failed: {join_error}")),
+                status: Some(500),
+                body: None,
+            },
+        };
+        if let Err(e) = send_relay_response_message(&sink, response).await {
+            log::error!("{}", e);
+        }
+    });
+    Ok(())
 }
 
 async fn send_relay_response_message(

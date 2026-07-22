@@ -31,16 +31,22 @@ pub(super) async fn get_task_diff(
     let request = TaskDiffRequest::parse(query.scope.as_deref(), query.mode.as_deref())
         .map_err(map_task_diff_error)?;
 
-    let db = Db::open(&state.config().db_path).map_err(|error| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {error}"),
-        )
-    })?;
+    // Reading a task diff shells out to git against the task worktree —
+    // seconds of synchronous work on large branches that must not occupy a
+    // runtime worker.
+    super::blocking::run_handler_blocking("task diff read", move || {
+        let db = Db::open(&state.config().db_path).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {error}"),
+            )
+        })?;
 
-    crate::task_diff::read_task_diff(&db, &task_id, request)
-        .map(Json)
-        .map_err(map_task_diff_error)
+        crate::task_diff::read_task_diff(&db, &task_id, request)
+            .map(Json)
+            .map_err(map_task_diff_error)
+    })
+    .await
 }
 
 fn map_task_diff_error(error: TaskDiffError) -> (StatusCode, String) {

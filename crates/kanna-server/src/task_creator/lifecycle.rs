@@ -78,7 +78,12 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(
     prepared: PreparedTaskSpawn,
 ) -> Result<crate::mobile_api::CreateTaskResponse, String> {
     let created = spawn_prepared_task_for_api(daemon, prepared.clone()).await?;
-    record_spawned_stage_run(db_path, &prepared)?;
+    // Spawn bookkeeping is a synchronous SQLite write; several callers run on
+    // the shared runtime, so keep it on the blocking pool.
+    let record_db_path = db_path.to_string();
+    tokio::task::spawn_blocking(move || record_spawned_stage_run(&record_db_path, &prepared))
+        .await
+        .map_err(|join_error| format!("stage run record worker failed: {join_error}"))??;
     Ok(created)
 }
 
@@ -90,14 +95,19 @@ pub(crate) async fn spawn_prepared_task_for_api_with_diagnostics(
     match spawn_prepared_task_for_api_recording_stage_run(db_path, daemon, prepared.clone()).await {
         Ok(created) => Ok(created),
         Err(err) => {
-            let db = Db::open(db_path)
-                .map_err(|open_err| format!("{err}; diagnostics failed: db error: {open_err}"))?;
-            record_prepared_task_spawn_failure(&db, &prepared, &err)
-                .map_err(|record_err| format!("{err}; diagnostics failed: {record_err}"))?;
-            Err(format!(
-                "task {} failed to spawn: {err}",
-                prepared.created_task.task_id
-            ))
+            let record_db_path = db_path.to_string();
+            let spawn_err = err.clone();
+            let task_id = prepared.created_task.task_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let db = Db::open(&record_db_path).map_err(|open_err| {
+                    format!("{spawn_err}; diagnostics failed: db error: {open_err}")
+                })?;
+                record_prepared_task_spawn_failure(&db, &prepared, &spawn_err)
+                    .map_err(|record_err| format!("{spawn_err}; diagnostics failed: {record_err}"))
+            })
+            .await
+            .map_err(|join_error| format!("spawn diagnostics worker failed: {join_error}"))??;
+            Err(format!("task {task_id} failed to spawn: {err}"))
         }
     }
 }

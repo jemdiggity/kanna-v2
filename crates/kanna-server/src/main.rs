@@ -79,9 +79,15 @@ async fn main() {
     // does), duplicated to stderr. The desktop app spawns this sidecar with
     // null stdio, so stderr-only logging would discard everything — the file
     // is the durable record of stage transitions and revision decisions.
-    // RUST_LOG overrides the default filter.
+    // RUST_LOG overrides the default filter. `kanna_daemon=warn` must stay in
+    // the default: the KSP terminal path emits its `terminal_perf`
+    // stall/backpressure records under the shared `kanna_daemon` target, and
+    // a `kanna_server`-only filter silently discards the diagnostics that
+    // pinpoint terminal freezes.
     let _ = std::fs::create_dir_all(&config.daemon_dir);
-    if let Ok(logger) = flexi_logger::Logger::try_with_env_or_str("kanna_server=info") {
+    if let Ok(logger) =
+        flexi_logger::Logger::try_with_env_or_str("kanna_server=info,kanna_daemon=warn")
+    {
         let _ = logger
             .log_to_file(
                 flexi_logger::FileSpec::default()
