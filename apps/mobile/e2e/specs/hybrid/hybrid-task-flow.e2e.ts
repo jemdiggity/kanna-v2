@@ -3,6 +3,7 @@ import type { MobileHybridFixture } from "../../helpers/relay-harness";
 import { extractTaskRowId, selectors } from "../../helpers/selectors";
 import {
   openPtyFixtureTask,
+  smokeElementText,
   waitForTaskTerminalLive
 } from "../smoke/list-detail-back.e2e";
 import { openProfileSheet } from "../smoke/profile-connection.e2e";
@@ -369,6 +370,100 @@ export async function runHybridTaskFlow(
     driver,
     options.fixture,
     options.fixture.cloudOnly.refreshedTitle
+  );
+
+  // The expanded identity panel must show the desktop-local task id — matching
+  // the desktop app — even though the cloud snapshot task's canonical mobile id
+  // is the synthetic "cloud:<desktop>:<repo>:<task>" id.
+  const cloudOnlyRow = await driver.$(
+    `~mobile.task-row.${options.fixture.cloudOnly.taskId}`
+  );
+  await cloudOnlyRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await cloudOnlyRow.click();
+  await (await driver.$(selectors.taskDetailScreen)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+  // The freshly opened detail can briefly render the previously selected task,
+  // and title expansion is keyed by task id — clicking early expands the wrong
+  // task. Settle on the cloud-only collapsed title before expanding.
+  await driver.waitUntil(
+    async () => {
+      const collapsedTitle = await driver.$(selectors.taskDetailTitle);
+      return (
+        (await collapsedTitle.isExisting()) &&
+        (await smokeElementText(collapsedTitle)).includes(
+          options.fixture.cloudOnly.refreshedTitle
+        )
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected the collapsed cloud-only detail title " +
+        `${JSON.stringify(options.fixture.cloudOnly.refreshedTitle)} before expanding`
+    }
+  );
+  // While expanded, iOS consolidates the accessible title chip into a single
+  // XCUITest element without exposing the child prompt/task-id text nodes, so
+  // assert the expanded identity through the chip's accessibility label
+  // ("<stage>: <prompt>. Task ID: <id>"). The suffix check also proves the
+  // synthetic canonical cloud id is not the displayed identity — a canonical
+  // display would end with "Task ID: cloud:…". The loop taps the chip whenever
+  // it observes it collapsed, which also recovers the expansion that TaskScreen
+  // intentionally resets if the rendered task id changes mid-flight.
+  const expandedIdentitySuffix =
+    `. Task ID: ${options.fixture.cloudOnly.localTaskId}`;
+  let lastTitleChipLabel: string | null = null;
+  try {
+    await driver.waitUntil(
+      async () => {
+        const titleButton = await driver.$(selectors.taskTitleButton);
+        if (!(await titleButton.isExisting())) {
+          lastTitleChipLabel = null;
+          // The detail popped back to the list; reopen the cloud-only task.
+          const row = await driver.$(
+            `~mobile.task-row.${options.fixture.cloudOnly.taskId}`
+          );
+          if (await row.isExisting()) {
+            await row.click();
+          }
+          return false;
+        }
+        const label =
+          (await titleButton.getAttribute("label").catch(() => null)) ?? "";
+        lastTitleChipLabel = label;
+        if (!label.includes(". Task ID: ")) {
+          await titleButton.click();
+          return false;
+        }
+        return label.endsWith(expandedIdentitySuffix);
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg:
+          "Expected the expanded cloud task identity to show the desktop-local id " +
+          `${JSON.stringify(options.fixture.cloudOnly.localTaskId)} instead of the ` +
+          `canonical ${JSON.stringify(options.fixture.cloudOnly.taskId)}`
+      }
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${message}; last observed title chip label ` +
+      JSON.stringify(lastTitleChipLabel)
+    );
+  }
+  const cloudOnlyBackButton = await driver.$(selectors.taskBackButton);
+  await cloudOnlyBackButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await cloudOnlyBackButton.click();
+  const recentAfterCloudDetail = await driver.$(selectors.recentTab);
+  await recentAfterCloudDetail.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await recentAfterCloudDetail.click();
+  await waitForStableExactTaskRows(
+    driver,
+    options.fixture.expectedDisplayTaskIds
   );
 
   // If the duplicate were accidentally routed through the relay, opening it

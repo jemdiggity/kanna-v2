@@ -299,6 +299,7 @@ export function assertSingleSubmittedTaskInput(
 
 export interface MobileHybridFixture {
   cloudOnly: {
+    localTaskId: string;
     refreshedTitle: string;
     taskId: string;
     title: string;
@@ -439,6 +440,7 @@ export async function startMobileRelayHarness(
     };
     const hybridFixture: MobileHybridFixture = {
       cloudOnly: {
+        localTaskId: HYBRID_CLOUD_ONLY_LOCAL_TASK_ID,
         refreshedTitle: HYBRID_CLOUD_ONLY_REFRESHED_TITLE,
         taskId: cloudOnlyTaskId,
         title: HYBRID_CLOUD_ONLY_TITLE

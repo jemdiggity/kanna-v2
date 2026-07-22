@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { TaskSummary } from "./types";
 import {
+  buildCloudTaskId,
+  displayTaskId,
   isTaskBlocked,
   resolveBlockerTasks,
   sameTaskDesktop,
@@ -75,5 +77,25 @@ describe("resolveBlockerTasks", () => {
 
   it("returns empty for a task with no blockers", () => {
     expect(resolveBlockerTasks(task({ id: "a" }), [])).toEqual([]);
+  });
+});
+describe("displayTaskId", () => {
+  it("prefers the desktop-local task id for cloud-sourced tasks", () => {
+    const cloudId = buildCloudTaskId({
+      ownerDesktopId: "desktop-1",
+      localRepoId: "repo-1",
+      ownerLocalTaskId: "task-local"
+    });
+
+    expect(displayTaskId({ id: cloudId, ownerLocalTaskId: "task-local" })).toBe(
+      "task-local"
+    );
+  });
+
+  it("falls back to the canonical id when no local id is present", () => {
+    expect(displayTaskId({ id: "task-lan" })).toBe("task-lan");
+    expect(displayTaskId({ id: "task-lan", ownerLocalTaskId: "  " })).toBe(
+      "task-lan"
+    );
   });
 });

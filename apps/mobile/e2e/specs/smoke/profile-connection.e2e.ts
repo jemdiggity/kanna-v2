@@ -223,9 +223,14 @@ export async function assertRepositoryCommandJourney(
   }
 
   const marker = await (await ui.getTaskSnapshotMarker()).getAttribute("label");
-  if (!marker?.split("\n").some((entry) => entry.startsWith(`${taskId}:`))) {
+  // The expanded panel shows the desktop-local task id; snapshot marker entries
+  // are keyed by the canonical id, which for cloud tasks is
+  // "cloud:<desktop>:<repo>:<local-task-id>".
+  const matchesDisplayedTask = (entry: string) =>
+    entry.startsWith(`${taskId}:`) || entry.includes(`:${taskId}:`);
+  if (!marker?.split("\n").some(matchesDisplayedTask)) {
     throw new Error(
-      `Expected canonical task ${taskId} in refreshed task snapshot, got ${marker ?? "<missing>"}`
+      `Expected task ${taskId} in refreshed task snapshot, got ${marker ?? "<missing>"}`
     );
   }
   await (await ui.getTaskBackButton()).click();
