@@ -161,6 +161,14 @@ export interface TaskSummary {
   activity?: TaskActivity | null;
 }
 
+export interface TaskLatestRun {
+  stage: string;
+  kind: string;
+  status: string;
+  summary?: string | null;
+  finishedAt?: string | null;
+}
+
 export interface TaskDetail extends TaskSummary {
   pipelineName?: string | null;
   stageTransition?: string | null;
@@ -171,4 +179,5 @@ export interface TaskDetail extends TaskSummary {
   commitsAhead?: number;
   commitsBehind?: number;
   dirty?: boolean;
+  latestRun?: TaskLatestRun | null;
 }
