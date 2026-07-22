@@ -263,7 +263,8 @@ const releaseShipInputSchema = z.object({
   production: z.boolean().default(false),
   release: z.boolean().default(false),
   dryRun: z.boolean().default(false),
-  rollbackTo: z.string().optional()
+  rollbackTo: z.string().optional(),
+  branch: z.string().optional()
 });
 
 const releasePromoteInputSchema = z.object({
@@ -1998,6 +1999,9 @@ export const taskDefinitions = [
       if (parsed.rollbackTo && !parsed.staging) {
         return { ok: false, message: "release ship --rollback-to requires --staging." };
       }
+      if (parsed.branch && !parsed.staging) {
+        return { ok: false, message: "release ship --branch requires --staging (it records the RC's source branch)." };
+      }
       const bump = parsed.major ? "major" : parsed.minor ? "minor" : "patch";
       const archLabels = [
         ...(parsed.arm64 ? ["arm64" as const] : []),
@@ -2013,6 +2017,7 @@ export const taskDefinitions = [
         release: parsed.release,
         dryRun: parsed.dryRun,
         rollbackTo: parsed.rollbackTo,
+        sourceBranch: parsed.branch,
         env: context.env,
         runner: nodeCommandRunner
       });

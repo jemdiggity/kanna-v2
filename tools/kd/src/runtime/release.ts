@@ -16,6 +16,7 @@ export interface ReleaseShipInput {
   dryRun: boolean;
   rollbackTo?: string;
   promoteFrom?: string;
+  sourceBranch?: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
 }
@@ -241,15 +242,65 @@ export function nextSeriesPatchVersion(tagsOutput: string, series: ReleaseSeries
   return `${series.major}.${series.minor}.${Math.max(...patches) + 1}`;
 }
 
-async function resolveStagingBaseVersion(input: ReleaseShipInput): Promise<string> {
-  const branch = await mustRun(input.runner, "git", ["rev-parse", "--abbrev-ref", "HEAD"], input.repoRoot, input.env);
-  const series = parseReleaseBranchSeries(branch);
-  if (!series) {
+interface StagingContext {
+  baseVersion: string;
+  sourceBranch: string;
+}
+
+async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingContext> {
+  const requested = input.sourceBranch?.trim();
+  let branchName: string;
+  if (requested) {
+    if (requested !== "main" && !parseReleaseBranchSeries(requested)) {
+      throw new Error(`Invalid --branch ${requested}. Expected main or release/X.Y.`);
+    }
+    branchName = requested;
+  } else {
+    const currentBranch = await mustRun(input.runner, "git", ["rev-parse", "--abbrev-ref", "HEAD"], input.repoRoot, input.env);
+    branchName = parseReleaseBranchSeries(currentBranch) ? currentBranch : "main";
+  }
+
+  if (branchName === "main") {
     const sourceVersion = readCurrentVersion(input.repoRoot);
-    return bumpVersion(sourceVersion, input.bump);
+    return { baseVersion: bumpVersion(sourceVersion, input.bump), sourceBranch: "main" };
+  }
+
+  const series = parseReleaseBranchSeries(branchName);
+  if (!series) {
+    throw new Error(`Invalid release branch: ${branchName}`);
+  }
+  const branchRefs = await mustRun(input.runner, "git", ["ls-remote", "origin", `refs/heads/${branchName}`], input.repoRoot, input.env);
+  const branchSha = branchRefs.trim().split(/\s+/)[0] ?? "";
+  if (!branchSha) {
+    throw new Error(`${branchName} does not exist on origin. Cut it first (kd release cut).`);
+  }
+  await mustRun(input.runner, "git", ["fetch", "origin", branchName], input.repoRoot, input.env);
+  const contained = await input.runner.run("git", ["merge-base", "--is-ancestor", branchSha, "HEAD"], {
+    cwd: input.repoRoot,
+    env: input.env
+  });
+  if (contained.exitCode !== 0) {
+    throw new Error(
+      `${branchName} tip (${branchSha}) is not contained in HEAD. Merge or rebase the branch into this worktree before shipping its RC.`
+    );
   }
   const tags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${series.major}.${series.minor}.*`], input.repoRoot, input.env);
-  return nextSeriesPatchVersion(tags, series);
+  return { baseVersion: nextSeriesPatchVersion(tags, series), sourceBranch: branchName };
+}
+
+const SOURCE_BRANCH_TRAILER = "Source-Branch:";
+
+export function parseSourceBranch(rawView: string): string | null {
+  try {
+    const parsed = JSON.parse(rawView) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const body = (parsed as { body?: unknown }).body;
+    if (typeof body !== "string") return null;
+    const match = /^Source-Branch:[ \t]*(\S+)[ \t]*$/m.exec(body);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export interface PromotionVersions {
@@ -286,11 +337,61 @@ interface ResolvedPromotion {
   pushBranch: string;
 }
 
+// Shared promotion-base semantics for promote and status. An RC promotes to its
+// series branch only when the branch tip is exactly the RC commit (active
+// stabilization, or the cut-at-RC-commit escape). An RC recorded as built from
+// the series branch never falls back to main. Everything else — including a
+// dormant series branch left behind by an earlier release — is a main RC and
+// must match origin/main exactly.
+interface PromotionBaseDecision {
+  pushBranch: string | null;
+  reason: string | null;
+}
+
+export function decidePromotionBase(args: {
+  rcLabel: string;
+  seriesBranch: string;
+  branchSha: string | null;
+  sourceBranch: string | null;
+  commit: string;
+  originMain: string | null;
+}): PromotionBaseDecision {
+  if (args.branchSha && args.branchSha === args.commit) {
+    return { pushBranch: args.seriesBranch, reason: null };
+  }
+  if (args.sourceBranch && args.sourceBranch !== "main") {
+    if (!args.branchSha) {
+      return {
+        pushBranch: null,
+        reason:
+          `${args.rcLabel} was built from ${args.sourceBranch}, but the branch no longer exists on origin. ` +
+          `Push it back at the RC commit (git push origin ${args.commit}:refs/heads/${args.sourceBranch}) and rerun.`
+      };
+    }
+    return {
+      pushBranch: null,
+      reason:
+        `${args.sourceBranch} (${args.branchSha}) has advanced past ${args.rcLabel} (${args.commit}). ` +
+        `Ship a fresh staging RC from ${args.sourceBranch}, soak it, then promote that build.`
+    };
+  }
+  if (args.originMain !== args.commit) {
+    return {
+      pushBranch: null,
+      reason:
+        `origin/main (${args.originMain ?? "unknown"}) has advanced past ${args.rcLabel} (${args.commit}). ` +
+        `Cut a release branch at the RC commit (git push origin ${args.commit}:refs/heads/${args.seriesBranch}) to keep promoting it, ` +
+        "or ship a fresh staging RC from main, soak it, and promote that build."
+    };
+  }
+  return { pushBranch: "main", reason: null };
+}
+
 async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): Promise<ResolvedPromotion> {
   const { stagingTag, productionVersion } = parsePromotionVersions(promoteFrom);
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
-  const view = await input.runner.run("gh", ["release", "view", stagingTag, "--repo", repoSlug, "--json", "targetCommitish"], {
+  const view = await input.runner.run("gh", ["release", "view", stagingTag, "--repo", repoSlug, "--json", "targetCommitish,body"], {
     cwd: input.repoRoot,
     env: input.env
   });
@@ -298,6 +399,7 @@ async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): P
     throw new Error(`Staging prerelease not found: ${stagingTag}`);
   }
   const commit = parseTargetCommitish(view.stdout);
+  const sourceBranch = parseSourceBranch(view.stdout);
 
   const existingTags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${productionVersion}`], input.repoRoot, input.env);
   if (existingTags.trim().length > 0) {
@@ -313,27 +415,19 @@ async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): P
 
   const seriesBranch = releaseSeriesBranch(releaseSeriesFromVersion(productionVersion));
   const branchRefs = await mustRun(input.runner, "git", ["ls-remote", "origin", `refs/heads/${seriesBranch}`], input.repoRoot, input.env);
-  const branchSha = branchRefs.trim().split(/\s+/)[0] ?? "";
-  if (branchSha) {
-    if (branchSha !== commit) {
-      throw new Error(
-        `${seriesBranch} (${branchSha}) has advanced past ${stagingTag} (${commit}). ` +
-          `Ship a fresh staging RC from ${seriesBranch}, soak it, then promote that build.`
-      );
-    }
-    return { version: productionVersion, pushBranch: seriesBranch };
+  const branchSha = branchRefs.trim().split(/\s+/)[0] || null;
+
+  let originMain: string | null = null;
+  if (!(branchSha && branchSha === commit) && !(sourceBranch && sourceBranch !== "main")) {
+    await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
+    originMain = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
   }
 
-  await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
-  const originMain = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
-  if (originMain !== commit) {
-    throw new Error(
-      `origin/main (${originMain}) has advanced past ${stagingTag} (${commit}). ` +
-        `Cut a release branch at the RC commit (git push origin ${commit}:refs/heads/${seriesBranch}) to keep promoting it, ` +
-        "or ship a fresh staging RC from main, soak it, and promote that build."
-    );
+  const decision = decidePromotionBase({ rcLabel: stagingTag, seriesBranch, branchSha, sourceBranch, commit, originMain });
+  if (!decision.pushBranch) {
+    throw new Error(decision.reason ?? `Cannot promote ${stagingTag}.`);
   }
-  return { version: productionVersion, pushBranch: "main" };
+  return { version: productionVersion, pushBranch: decision.pushBranch };
 }
 
 interface GithubAsset {
@@ -537,12 +631,15 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
 
   let version: string;
   let pushBranch = "main";
+  let stagingSourceBranch = "main";
   if (input.promoteFrom) {
     const promotion = await resolvePromotion(input, input.promoteFrom);
     version = promotion.version;
     pushBranch = promotion.pushBranch;
   } else if (environment === "staging") {
-    version = await resolveNextStagingVersion(input, await resolveStagingBaseVersion(input));
+    const stagingContext = await resolveStagingContext(input);
+    stagingSourceBranch = stagingContext.sourceBranch;
+    version = await resolveNextStagingVersion(input, stagingContext.baseVersion);
   } else {
     const sourceVersion = readCurrentVersion(input.repoRoot);
     version = bumpVersion(sourceVersion, input.bump);
@@ -595,7 +692,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   const notes = input.release && environment === "production"
     ? await mustRun(input.runner, "gh", ["api", `repos/${releaseRepoSlug(remoteUrl)}/releases/generate-notes`, "-X", "POST", "-f", `tag_name=v${version}`, "-f", `target_commitish=${pushBranch}`, "--jq", ".body"], input.repoRoot, input.env)
     : environment === "staging"
-      ? `Staging updater manifest for v${version}`
+      ? `Staging updater manifest for v${version}\n\n${SOURCE_BRANCH_TRAILER} ${stagingSourceBranch}`
       : `Dry-run updater manifest for v${version}`;
   const pubDate = new Date().toISOString();
   writeLatestJson(latestJson, version, notes, pubDate, platforms);
@@ -649,15 +746,18 @@ export interface ReleaseCutResult {
 }
 
 export async function cutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseCutResult> {
-  const sourceVersion = readCurrentVersion(input.repoRoot);
-  const targetVersion = bumpVersion(sourceVersion, input.bump);
+  await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
+  const commit = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
+  // The caller's worktree can be stale (Kanna task worktrees fork from older
+  // commits), so the series must come from the same commit the branch will
+  // point at — origin/main — not from the local VERSION file.
+  const sourceVersion = await mustRun(input.runner, "git", ["show", "origin/main:VERSION"], input.repoRoot, input.env);
+  const targetVersion = bumpVersion(sourceVersion.trim(), input.bump);
   const branch = releaseSeriesBranch(releaseSeriesFromVersion(targetVersion));
   const existing = await mustRun(input.runner, "git", ["ls-remote", "origin", `refs/heads/${branch}`], input.repoRoot, input.env);
   if (existing.trim().length > 0) {
     throw new Error(`${branch} already exists on origin. Ship RCs from it, or cut the next series with a different bump.`);
   }
-  await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
-  const commit = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
   await mustRun(input.runner, "git", ["push", "origin", `${commit}:refs/heads/${branch}`], input.repoRoot, input.env);
   return { branch, version: targetVersion, commit };
 }
@@ -670,7 +770,7 @@ export interface ReleaseStatusInput {
 
 export interface ReleaseStatusResult {
   production: { version: string; tag: string; publishedAt: string } | null;
-  staging: { version: string; tag: string; commit: string | null; commitsBehindMain: number | null } | null;
+  staging: { version: string; tag: string; commit: string | null; sourceBranch: string | null; commitsBehindMain: number | null } | null;
   releaseBranch: { name: string; commit: string } | null;
   commitsOnMainSinceProduction: number | null;
   promotable: boolean;
@@ -739,7 +839,8 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
       if (version) {
         const tag = stagingTag(version);
         let commit: string | null = null;
-        const stagingView = await input.runner.run("gh", ["release", "view", tag, "--repo", repoSlug, "--json", "targetCommitish"], {
+        let sourceBranch: string | null = null;
+        const stagingView = await input.runner.run("gh", ["release", "view", tag, "--repo", repoSlug, "--json", "targetCommitish,body"], {
           cwd: input.repoRoot,
           env: input.env
         });
@@ -749,11 +850,13 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
           } catch {
             commit = null;
           }
+          sourceBranch = parseSourceBranch(stagingView.stdout);
         }
         staging = {
           version,
           tag,
           commit,
+          sourceBranch,
           commitsBehindMain: commit ? await countCommits(input, `${commit}..origin/main`) : null
         };
       }
@@ -774,8 +877,18 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
   }
 
   const commitsOnMainSinceProduction = production ? await countCommits(input, `${production.tag}..origin/main`) : null;
-  const promotionBase = releaseBranch ? releaseBranch.commit : originMain;
-  const promotable = staging !== null && staging.commit !== null && staging.commit === promotionBase;
+  let promotable = false;
+  if (staging?.commit) {
+    const decision = decidePromotionBase({
+      rcLabel: staging.tag,
+      seriesBranch: releaseSeriesBranch(releaseSeriesFromVersion(staging.version)),
+      branchSha: releaseBranch?.commit ?? null,
+      sourceBranch: staging.sourceBranch,
+      commit: staging.commit,
+      originMain
+    });
+    promotable = decision.pushBranch !== null;
+  }
   return {
     production,
     staging,

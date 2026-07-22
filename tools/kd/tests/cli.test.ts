@@ -676,6 +676,10 @@ describe("kd CLI", () => {
       taskId: "release.cut",
       input: { minor: true }
     });
+    expect(parseCliArgs(["release", "ship", "--staging", "--release", "--branch", "release/1.3"])).toEqual({
+      taskId: "release.ship",
+      input: { staging: true, release: true, branch: "release/1.3" }
+    });
     expect(parseCliArgs(["release", "status"])).toEqual({
       taskId: "release.status",
       input: {}

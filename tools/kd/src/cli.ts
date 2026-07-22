@@ -349,6 +349,15 @@ function parseFlagInput(
       index += 1;
       continue;
     }
+    if (arg === "--branch") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--branch requires a value");
+      }
+      input.branch = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--key-path") {
       const value = rest[index + 1];
       if (!value) {
@@ -633,7 +642,7 @@ const helpTopics: Record<string, string[]> = {
     "  build desktop",
     "  build sidecars",
     "  rust-cache warm|status",
-    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
     "  release cut [--major|--minor|--patch]",
     "  release status",
@@ -953,13 +962,13 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd release <command>",
     "",
     "Commands:",
-    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
     "  release cut [--major|--minor|--patch]",
     "  release status"
   ],
   "release ship": [
-    "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
+    "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "",
     "Build, sign, notarize, and optionally publish a Kanna release.",
     "Use --staging --rollback-to <version> to repoint the staging channel manifest without building."

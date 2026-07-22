@@ -49,15 +49,23 @@ channel. Instead it names the pattern and closes the loop:
    promoted at most once).
 3. `HEAD` equals the prerelease's recorded `targetCommitish` (you release what
    you validated, from a checkout of it).
-4. The RC's *promotion base* still equals that commit. When the series branch
-   `release/X.Y` exists on origin, the base is that branch's tip and the version
-   bump is pushed there; otherwise the base is `origin/main` and the bump is
-   pushed to main (the simple no-branch flow).
+4. The RC's *promotion base* still equals that commit. The base is resolved
+   from the RC's recorded provenance (`kd release status` applies the same
+   rules when reporting promotability):
+   - If `release/X.Y` exists on origin with its tip exactly at the RC commit,
+     the RC promotes to the branch and the version bump is pushed there. This
+     covers active branch stabilization and the cut-at-RC-commit escape below.
+   - Otherwise, an RC recorded as built from `release/X.Y` (the
+     `Source-Branch:` trailer in its prerelease notes) refuses — the branch
+     advanced or was deleted. It never silently falls back to main.
+   - Otherwise the RC is a main RC: `origin/main` must still equal the commit
+     and the bump is pushed to main. A dormant `release/X.Y` left behind by an
+     earlier release does **not** capture later main RCs in the same series.
 
-Guard 4's no-branch form means main must not have advanced past the RC. When it
-has, the error message offers the standard escape: cut `release/X.Y` at the RC
-commit and promote again — the branch, not main, then has to match. Do not
-weaken guard 3; promoting a commit nobody soaked recreates the original problem.
+When main has advanced past a main RC, the error offers the standard escape:
+cut `release/X.Y` at the RC commit and promote again — the branch, not main,
+then has to match. Do not weaken guard 3; promoting a commit nobody soaked
+recreates the original problem.
 
 `--dry-run` runs the same preflight and production-identity build without
 publishing, for rehearsing a promotion.
@@ -70,12 +78,18 @@ for ambitious work, and stabilization happens on a branch that only accepts
 bugfixes.
 
 - **Cut.** `kd release cut [--major|--minor|--patch]` (default `--minor`)
-  computes the next series from `VERSION` and pushes `release/X.Y` at
-  `origin/main`'s tip. Cutting is the feature freeze — for that branch only.
-- **RCs from the branch.** Ship staging from a clean checkout of `release/X.Y`.
-  On a release branch, the RC base version is derived from the branch series
-  (`X.Y.0`, or one past the highest released `vX.Y.Z` tag), not from `VERSION`
-  bump flags — RC names can't drift from the branch they came from.
+  computes the next series from the `VERSION` file at `origin/main` — not the
+  caller's worktree, which in a Kanna task can be stale — and pushes
+  `release/X.Y` at `origin/main`'s tip, so the branch name and its tip can
+  never disagree. Cutting is the feature freeze — for that branch only.
+- **RCs from the branch.** Ship staging from a clean checkout of `release/X.Y`,
+  or — from a Kanna task worktree, which always runs on a `task-*` branch even
+  when the task is based on the release branch — pass `--branch release/X.Y`
+  explicitly. Ship verifies the branch exists and its tip is contained in HEAD,
+  derives the RC base version from the branch series (`X.Y.0`, or one past the
+  highest released `vX.Y.Z` tag) instead of `VERSION` bump flags, and records
+  the provenance as a `Source-Branch:` trailer in the prerelease notes — RC
+  names and promotion bases can't drift from the branch the RC came from.
 - **Bugfixes flow forward, then back.** Fixes land on main first through the
   normal task pipeline and merge master, then get cherry-picked onto
   `release/X.Y` (never fixed only on the branch, or the next release regresses).
@@ -130,8 +144,10 @@ about a build that already proved itself, not a project.
   MCP `release_promote` — implemented as a promotion preflight feeding the
   existing `shipRelease` production path (`promoteFrom` on `ReleaseShipInput`),
   so publish behavior cannot drift from `kd release ship --release`.
-- `kd release ship` is unchanged; staging ships are how candidates are cut, and
-  they become branch-aware automatically when run from a `release/X.Y` checkout.
+- `kd release ship` stays the way candidates are cut. It becomes branch-aware
+  automatically on a `release/X.Y` checkout, and takes
+  `--branch main|release/X.Y` to declare RC provenance explicitly from Kanna
+  task worktrees (which always run on `task-*` branches).
 
 The shipping agent (`.kanna/tasks/ship/agent.md`) owns the process end to end:
 cutting branches, shipping RCs, applying release-candidate backports
@@ -144,12 +160,20 @@ rule.
 
 ## Test coverage
 
-Runtime behavior is covered in `tools/kd/tests/release.test.ts` (promotion happy
-path ordering, each preflight refusal, status shapes) and CLI/MCP wiring in
-`tools/kd/tests/cli.test.ts` and `tools/kd/tests/mcp-tools.test.ts`, using the
-same fake `CommandRunner` seam as the existing ship tests. A true E2E (real
-Bazel signing/notarization, GitHub releases, updater install) is not regularly
-runnable for the same reasons documented at the top of `release.test.ts` for
-`release ship`; it would need a hermetic release backend with small signed
-fixtures and a local updater manifest server. The command-boundary tests keep the
-regression guard at the same seam the existing release tooling uses.
+Runtime behavior is covered in `tools/kd/tests/release.test.ts` at the
+command-runner seam (the boundary where kd invokes git/gh/bazel), including the
+provenance regressions: a `task-*` worktree shipping a `release/X.Y` RC via
+`--branch` (series versioning, no reliance on the local branch name, recorded
+`Source-Branch:` trailer), a stale task worktree refused when the branch tip is
+not contained in HEAD, a main RC that stays promotable — and pushes main — when
+a dormant same-series release branch exists, a release-branch RC that still
+promotes to its branch, refusals when a provenance branch advanced or was
+deleted, and `release cut` deriving the series from `origin/main:VERSION`
+rather than a stale local worktree. CLI/MCP wiring lives in
+`tools/kd/tests/cli.test.ts` and `tools/kd/tests/mcp-tools.test.ts`. A true E2E
+(real Bazel signing/notarization, GitHub releases, updater install) is not
+regularly runnable for the same reasons documented at the top of
+`release.test.ts` for `release ship`; it would need a hermetic release backend
+with small signed fixtures and a local updater manifest server. The
+command-boundary integration tests keep the regression guard at the same seam
+the existing release tooling uses.

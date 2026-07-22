@@ -77,7 +77,7 @@ This means the tag always lands on main. If the build needs hotfixes before rele
 
 When staging `--release` is used:
 
-1. The next version is computed as `bump(VERSION)-staging.N`, where `N` is one higher than existing remote staging tags for that base version. On a `release/X.Y` checkout the base version instead derives from the branch series (`X.Y.0`, or one past the highest released `vX.Y.Z` tag) — bump flags are ignored there
+1. The next version is computed as `bump(VERSION)-staging.N`, where `N` is one higher than existing remote staging tags for that base version. For a release-branch RC — a `release/X.Y` checkout, or any worktree shipping with `--branch release/X.Y` — the base version instead derives from the branch series (`X.Y.0`, or one past the highest released `vX.Y.Z` tag) and bump flags are ignored; the ship refuses if the branch tip is not contained in HEAD, and it records the RC's source branch as a `Source-Branch:` trailer in the prerelease notes
 2. Version files are temporarily synced to that full prerelease version for the build, then restored
 3. A new immutable GitHub prerelease tagged `vX.Y.Z-staging.N` is created with the DMGs, updater bundles, signatures, and a copy of `latest-staging.json`
 4. The fixed `desktop-staging` release is kept as a pointer-only channel and receives only `latest-staging.json`
@@ -87,7 +87,7 @@ Rollback uses `./kd release ship --staging --rollback-to X.Y.Z-staging.N`: it do
 
 Staging prereleases double as release candidates (see `docs/specs/release-candidates.md`). When `./kd release promote X.Y.Z-staging.N` is used:
 
-1. The prerelease's recorded commit is looked up, and promotion refuses unless HEAD and the promotion base still equal it, `vX.Y.Z` does not already exist, and the worktree is clean. The promotion base is the `release/X.Y` branch tip when that branch exists on origin, otherwise `origin/main` — and the version bump commit is pushed to that same base
+1. The prerelease's recorded commit is looked up, and promotion refuses unless HEAD and the promotion base still equal it, `vX.Y.Z` does not already exist, and the worktree is clean. The promotion base follows the RC's provenance: `release/X.Y` when its tip is exactly the RC commit; an RC recorded (via its `Source-Branch:` trailer) as built from `release/X.Y` refuses if the branch advanced or was deleted; otherwise the RC is a main RC and `origin/main` must match — a dormant `release/X.Y` from an earlier release does not block promoting later main RCs in the same series. The version bump commit is pushed to the resolved base
 2. That exact commit is rebuilt with production identity (staging artifacts are a different bundle id and cannot be re-signed)
 3. The normal production publish runs with the version fixed to `X.Y.Z`: version files committed, tag pushed, GitHub release created, `latest.json` uploaded
 
@@ -98,7 +98,7 @@ Staging prereleases double as release candidates (see `docs/specs/release-candid
 When the user is stabilizing a release (or asks to start), the flow is:
 
 1. **Cut** — `./kd release cut` (default `--minor`; `--major`/`--patch` when asked) pushes `release/X.Y` at `origin/main`'s tip. Cutting is the feature freeze for that series; main stays open.
-2. **Ship RCs from the branch** — check out `release/X.Y` cleanly and run `./kd release ship --staging --release`. While the branch is being soaked, do not ship staging from main: the staging channel is the soak channel, and a main build would repoint it away from the RC.
+2. **Ship RCs from the branch** — run `./kd release ship --staging --release --branch release/X.Y`. You are usually on a `task-*` worktree branch, so pass `--branch` explicitly; branch-name auto-detection only works on a literal `release/X.Y` checkout. The ship refuses if the branch tip is not contained in HEAD — merge the branch in first. While the branch is being soaked, do not ship staging from main: the staging channel is the soak channel, and a main build would repoint it away from the RC.
 3. **Backport bugfixes** — release-candidate bugs are fixed on main first (normal task pipeline + merge master), then applied to the branch:
    ```bash
    git fetch origin
@@ -127,6 +127,7 @@ Options:
 - `--release` — tag, push, and create GitHub release after building
 - `--dry-run` — build and sign only, skip notarization and release
 - `--rollback-to <version>` — staging only; repoint `desktop-staging/latest-staging.json` to a manifest copied from an immutable prerelease
+- `--branch main|release/X.Y` — staging only; declare the RC's source branch explicitly. Required for release-branch RCs shipped from a Kanna task worktree, which runs on a `task-*` branch that auto-detection cannot use
 
 ## After running
 
