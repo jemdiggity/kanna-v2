@@ -98,6 +98,9 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.createTaskCancelButton).toBe(
       "mobile.create-task.cancel"
     );
+    expect(MOBILE_E2E_IDS.createTaskSheetScroll).toBe(
+      "mobile.create-task.sheet-scroll"
+    );
     expect(MOBILE_E2E_IDS.toolbarUtilityAction("create")).toBe(
       "mobile.toolbar.utility.create"
     );

@@ -89,6 +89,7 @@ export const MOBILE_E2E_IDS = {
   machineRemoveButton(desktopId: string): string {
     return `mobile.machine.${desktopId}.remove`;
   },
+  createTaskSheetScroll: "mobile.create-task.sheet-scroll",
   createTaskPromptInput: "mobile.create-task.prompt",
   createTaskCancelButton: "mobile.create-task.cancel",
   createTaskSubmitButton: "mobile.create-task.submit",

@@ -5,6 +5,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -90,139 +91,145 @@ export function CreateTaskComposer({
           onPress={onClose}
         />
         <View style={styles.sheet}>
-          <Text style={styles.eyebrow}>New task</Text>
-          <Text numberOfLines={1} style={styles.title}>
-            {selectedRepo ? selectedRepo.name : "Choose a repo"}
-          </Text>
-
-          <Pressable
-            style={styles.optionsSummary}
-            testID={MOBILE_E2E_IDS.createTaskOptionsToggle}
-            onPress={onToggleOptions}
+          <ScrollView
+            contentContainerStyle={styles.sheetContent}
+            keyboardShouldPersistTaps="handled"
+            testID={MOBILE_E2E_IDS.createTaskSheetScroll}
           >
-            <View>
-              <Text style={styles.optionsTitle}>Options</Text>
-              <Text style={styles.optionsValue} numberOfLines={1}>
-                {selectedDesktopLabel} · {selectedAgentLabel}
-              </Text>
-            </View>
-            <Text style={styles.optionsChevron}>
-              {isOptionsExpanded ? "Hide" : "Edit"}
+            <Text style={styles.eyebrow}>New task</Text>
+            <Text numberOfLines={1} style={styles.title}>
+              {selectedRepo ? selectedRepo.name : "Choose a repo"}
             </Text>
-          </Pressable>
 
-          {isOptionsExpanded ? (
-            <View style={styles.optionsPanel}>
-              <View style={styles.optionSection}>
-                <Text style={styles.optionLabel}>Machine</Text>
-                <View style={styles.choiceGroup}>
-                  {desktops.map((desktop) => {
-                    const selected = desktop.id === selectedDesktop?.id;
-                    return (
-                      <Pressable
-                        key={desktop.id}
-                        accessibilityState={{ selected }}
-                        style={[
-                          styles.choiceOption,
-                          selected ? styles.choiceOptionSelected : null
-                        ]}
-                        testID={MOBILE_E2E_IDS.createTaskMachineOption(desktop.id)}
-                        onPress={() => onSelectDesktop(desktop.id)}
-                      >
-                        <Text
-                          numberOfLines={1}
-                          style={[
-                            styles.choiceOptionLabel,
-                            selected ? styles.choiceOptionLabelSelected : null
-                          ]}
-                        >
-                          {desktop.name}
-                        </Text>
-                        <Text
-                          style={[
-                            styles.choiceOptionMeta,
-                            selected ? styles.choiceOptionMetaSelected : null
-                          ]}
-                        >
-                          {desktop.online ? "Online" : "Offline"}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-
-              <View style={styles.optionSection}>
-                <Text style={styles.optionLabel}>Agent</Text>
-                <View style={styles.choiceGroup}>
-                  {AGENT_OPTIONS.map((option) => {
-                    const selected = option.provider === selectedAgentProvider;
-                    return (
-                      <Pressable
-                        key={option.provider}
-                        accessibilityState={{ selected }}
-                        style={[
-                          styles.choiceOption,
-                          selected ? styles.choiceOptionSelected : null
-                        ]}
-                        testID={MOBILE_E2E_IDS.createTaskAgentOption(option.provider)}
-                        onPress={() => onSelectAgentProvider(option.provider)}
-                      >
-                        <Text
-                          style={[
-                            styles.choiceOptionLabel,
-                            selected ? styles.choiceOptionLabelSelected : null
-                          ]}
-                        >
-                          {option.label}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-            </View>
-          ) : null}
-
-          {!selectedDesktop && !errorMessage ? (
-            <Text style={styles.helperText}>Choose a machine before creating.</Text>
-          ) : null}
-
-          <TextInput
-            multiline
-            onChangeText={onChangePrompt}
-            placeholder="Describe the task"
-            placeholderTextColor="#6A7E9D"
-            style={styles.input}
-            testID={MOBILE_E2E_IDS.createTaskPromptInput}
-            value={prompt}
-          />
-
-          {errorMessage ? (
-            <Text style={styles.errorText} testID={MOBILE_E2E_IDS.createTaskError}>
-              {errorMessage}
-            </Text>
-          ) : null}
-
-          <View style={styles.actions}>
             <Pressable
-              style={styles.secondaryButton}
-              testID={MOBILE_E2E_IDS.createTaskCancelButton}
-              onPress={onClose}
+              style={styles.optionsSummary}
+              testID={MOBILE_E2E_IDS.createTaskOptionsToggle}
+              onPress={onToggleOptions}
             >
-              <Text style={styles.secondaryLabel}>Cancel</Text>
-            </Pressable>
-            <Pressable
-              disabled={!canSubmit}
-              style={[styles.primaryButton, !canSubmit ? styles.primaryButtonDisabled : null]}
-              testID={MOBILE_E2E_IDS.createTaskSubmitButton}
-              onPress={canSubmit ? onSubmit : undefined}
-            >
-              <Text style={styles.primaryLabel}>
-                Create
+              <View>
+                <Text style={styles.optionsTitle}>Options</Text>
+                <Text style={styles.optionsValue} numberOfLines={1}>
+                  {selectedDesktopLabel} · {selectedAgentLabel}
+                </Text>
+              </View>
+              <Text style={styles.optionsChevron}>
+                {isOptionsExpanded ? "Hide" : "Edit"}
               </Text>
             </Pressable>
-          </View>
+
+            {isOptionsExpanded ? (
+              <View style={styles.optionsPanel}>
+                <View style={styles.optionSection}>
+                  <Text style={styles.optionLabel}>Machine</Text>
+                  <View style={styles.choiceGroup}>
+                    {desktops.map((desktop) => {
+                      const selected = desktop.id === selectedDesktop?.id;
+                      return (
+                        <Pressable
+                          key={desktop.id}
+                          accessibilityState={{ selected }}
+                          style={[
+                            styles.choiceOption,
+                            selected ? styles.choiceOptionSelected : null
+                          ]}
+                          testID={MOBILE_E2E_IDS.createTaskMachineOption(desktop.id)}
+                          onPress={() => onSelectDesktop(desktop.id)}
+                        >
+                          <Text
+                            numberOfLines={1}
+                            style={[
+                              styles.choiceOptionLabel,
+                              selected ? styles.choiceOptionLabelSelected : null
+                            ]}
+                          >
+                            {desktop.name}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.choiceOptionMeta,
+                              selected ? styles.choiceOptionMetaSelected : null
+                            ]}
+                          >
+                            {desktop.online ? "Online" : "Offline"}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+
+                <View style={styles.optionSection}>
+                  <Text style={styles.optionLabel}>Agent</Text>
+                  <View style={styles.choiceGroup}>
+                    {AGENT_OPTIONS.map((option) => {
+                      const selected = option.provider === selectedAgentProvider;
+                      return (
+                        <Pressable
+                          key={option.provider}
+                          accessibilityState={{ selected }}
+                          style={[
+                            styles.choiceOption,
+                            selected ? styles.choiceOptionSelected : null
+                          ]}
+                          testID={MOBILE_E2E_IDS.createTaskAgentOption(option.provider)}
+                          onPress={() => onSelectAgentProvider(option.provider)}
+                        >
+                          <Text
+                            style={[
+                              styles.choiceOptionLabel,
+                              selected ? styles.choiceOptionLabelSelected : null
+                            ]}
+                          >
+                            {option.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              </View>
+            ) : null}
+
+            {!selectedDesktop && !errorMessage ? (
+              <Text style={styles.helperText}>Choose a machine before creating.</Text>
+            ) : null}
+
+            <TextInput
+              multiline
+              onChangeText={onChangePrompt}
+              placeholder="Describe the task"
+              placeholderTextColor="#6A7E9D"
+              style={styles.input}
+              testID={MOBILE_E2E_IDS.createTaskPromptInput}
+              value={prompt}
+            />
+
+            {errorMessage ? (
+              <Text style={styles.errorText} testID={MOBILE_E2E_IDS.createTaskError}>
+                {errorMessage}
+              </Text>
+            ) : null}
+
+            <View style={styles.actions}>
+              <Pressable
+                style={styles.secondaryButton}
+                testID={MOBILE_E2E_IDS.createTaskCancelButton}
+                onPress={onClose}
+              >
+                <Text style={styles.secondaryLabel}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                disabled={!canSubmit}
+                style={[styles.primaryButton, !canSubmit ? styles.primaryButtonDisabled : null]}
+                testID={MOBILE_E2E_IDS.createTaskSubmitButton}
+                onPress={canSubmit ? onSubmit : undefined}
+              >
+                <Text style={styles.primaryLabel}>
+                  Create
+                </Text>
+              </Pressable>
+            </View>
+          </ScrollView>
         </View>
       </KeyboardAvoidingView>
     </Modal>
@@ -240,11 +247,15 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     elevation: 1,
+    flexShrink: 1,
+    maxHeight: "100%",
+    zIndex: 1
+  },
+  sheetContent: {
     gap: 14,
     paddingBottom: 36,
     paddingHorizontal: 20,
-    paddingTop: 18,
-    zIndex: 1
+    paddingTop: 18
   },
   eyebrow: {
     color: "#A9B8D1",
