@@ -112,6 +112,11 @@ fallback for unattached sessions. Revision 2 removes them (see §2a).
 
 ## 2a. Revision 2 decisions (remove the legacy path)
 
+**Authorization.** The original task text required retaining the legacy
+Tauri listener as a temporary fallback; the operator explicitly superseded
+that on 2026-07-22 with the directive "we should remove the legacy code and
+its corresponding tests". Revision 2 executes that directive.
+
 **The gap full removal must close.** KSP status frames flow only to sessions
 with a live terminal attachment. Tasks whose terminals were never mounted
 (e.g. created via MCP/CLI and never clicked) would silently lose activity
@@ -191,8 +196,9 @@ JSON, and new decoders of old producers get `Idle`).
 - The store (`stores/init.ts` / `stores/sessions.ts`) registers the sink at
   init: resolve the item with `resolveTaskItemForDaemonSession`, then call
   the existing `applyTaskRuntimeStatus`. The legacy `listen("status_changed")`
-  block remains directly below it with a comment marking it as the temporary
-  fallback for unattached sessions.
+  block and the `syncTaskStatusesFromDaemon` poll are deleted per §2a;
+  sessions without a live KSP attachment are covered by the server-side
+  application below.
 
 Idle-vs-unread semantics are untouched: all paths converge on the
 `/v1/tasks/{task_id}/activity/runtime-status` POST carrying `selected`, and
@@ -225,8 +231,9 @@ daemon `List`. Waiting-prompt persistence is unchanged.
   boundary): a KSP terminal `busy` drives activity to `working`; `idle` while
   the task is selected yields `idle`; `idle` while unselected yields
   `unread`; the setup-pending guard and closed-task guard still apply; a
-  status arriving on both KSP and legacy paths applies once (second apply
-  returns `activity: null`, no extra reload).
+  status applied twice during a client/server writer overlap window (§2a)
+  converges idempotently (second apply returns `activity: null`, no extra
+  reload).
 - **E2E (required, false-agent driven)**: the daemon status detector is
   plain marker matching over the visible footer rows
   (`crates/daemon/src/headless_terminal.rs:628` — `"esc to interrupt"` →
