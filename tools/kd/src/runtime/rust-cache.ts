@@ -545,8 +545,14 @@ export async function warmRustCache(
     for (const donor of donors) {
       const args = ["warm", donor.path, input.repoRoot, "--profile", KANACHE_PROFILE];
       for (const target of donor.manifest.targets) args.push("--target", target);
-      for (const exclusion of KANACHE_RUST_INPUT_EXCLUSIONS) {
-        args.push("--exclude-rust-input-root", exclusion);
+      const legacyHeadFallback =
+        donor.matchingMode === "head" &&
+        !donor.manifest.rustBuildInputsBlake3 &&
+        donor.manifest.rustBuildInputExclusions === undefined;
+      if (!legacyHeadFallback) {
+        for (const exclusion of KANACHE_RUST_INPUT_EXCLUSIONS) {
+          args.push("--exclude-rust-input-root", exclusion);
+        }
       }
       args.push("--strategy", "root");
 

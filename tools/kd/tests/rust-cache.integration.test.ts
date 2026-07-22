@@ -17,7 +17,10 @@ import {
   withRustCacheBuild
 } from "../src/runtime/rust-cache";
 import type { RustCacheRuntimeInput } from "../src/runtime/rust-cache";
-import { resolveKanachePaths } from "../src/runtime/rust-cache-policy";
+import {
+  KANACHE_REPOSITORY,
+  resolveKanachePaths
+} from "../src/runtime/rust-cache-policy";
 import { nodeCommandRunner } from "../src/runtime/process";
 
 interface IntegrationFixture {
@@ -33,6 +36,7 @@ interface IntegrationFixture {
 
 const roots: string[] = [];
 const describeMac = process.platform === "darwin" ? describe : describe.skip;
+const LEGACY_KANACHE_REVISION = "6107c7b533a77a0c7c190b75c0284e7501c6edbf";
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -307,6 +311,25 @@ describeMac("Kanache Git worktree integration", () => {
     }
   });
 
+  it("warms a true legacy exact-HEAD donor without requested exclusions", async () => {
+    const fixture = await createFixture();
+    const legacy = await addWorktree(fixture, "legacy-exact-head");
+    writeDonor(fixture, legacy, 10, undefined, false);
+
+    const canonicalLegacy = realpathSync(legacy);
+    const result = await warmRustCache(fixture.cache);
+
+    expect(result).toMatchObject({
+      ok: true,
+      outcome: "hit",
+      donor: canonicalLegacy,
+      matchingMode: "head"
+    });
+    const warm = readProcessLog(fixture).find((entry) => entry.args[0] === "warm");
+    expect(warm?.args[1]).toBe(canonicalLegacy);
+    expect(warm?.args).not.toContain("--exclude-rust-input-root");
+  });
+
   it("offers a different-HEAD hash donor and excludes a different-HEAD legacy donor", async () => {
     const fixture = await createFixture();
     const hashed = await addWorktree(fixture, "hashed", "HEAD^");
@@ -447,6 +470,55 @@ it.skipIf(
     runner: nodeCommandRunner,
     commit: head
   };
+
+  const legacyRoot = join(root, "legacy-kanache");
+  await run(
+    "cargo",
+    [
+      "install",
+      "--git",
+      KANACHE_REPOSITORY,
+      "--rev",
+      LEGACY_KANACHE_REVISION,
+      "--locked",
+      "--root",
+      legacyRoot
+    ],
+    { cwd: repo, env }
+  );
+  const legacyBinary = join(legacyRoot, "bin", "kanache");
+  await run("cargo", ["build"], { cwd: repo, env });
+  await run("cargo", ["build", "--target", hostTarget], { cwd: repo, env });
+  await run(
+    legacyBinary,
+    [
+      "manifest",
+      "record",
+      repo,
+      "--profile",
+      "dev",
+      "--target",
+      "host",
+      "--target",
+      hostTarget
+    ],
+    { cwd: repo, env }
+  );
+  const legacyManifest = JSON.parse(
+    readFileSync(join(repo, ".build/cargo-build/.kanache-manifest.json"), "utf8")
+  ) as Record<string, unknown>;
+  expect(legacyManifest).not.toHaveProperty("rust_build_inputs_blake3");
+  expect(legacyManifest).not.toHaveProperty("rust_build_input_exclusions");
+
+  const exactHeadSibling = join(root, "exact-head-sibling");
+  await run("git", ["worktree", "add", "--detach", exactHeadSibling, head], { cwd: repo });
+  const legacyWarm = await warmRustCache({ ...donorCache, repoRoot: exactHeadSibling });
+  expect(legacyWarm).toMatchObject({
+    outcome: "hit",
+    category: "warmed",
+    matchingMode: "head"
+  });
+  expect(existsSync(join(exactHeadSibling, ".build/cargo-build"))).toBe(true);
 
   const donorBuild = await withRustCacheBuild(
     donorCache,

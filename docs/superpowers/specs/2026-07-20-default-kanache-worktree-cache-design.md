@@ -98,7 +98,7 @@ floating ref or an arbitrary executable from `PATH`. A bootstrap failure is a
 cache miss and cannot fail the underlying build.
 
 Kanna passes the same generated-output exclusion to donor recording and every
-warm attempt:
+exclusion-aware warm attempt:
 
 ```text
 --exclude-rust-input-root apps/desktop/src-tauri/binaries
@@ -110,6 +110,10 @@ identities, and persists the sorted/deduplicated requested set as
 `rust_build_input_exclusions`. Warm requires the requested and recorded sets to
 match exactly. This preserves final-artifact privacy without ignoring any Rust
 source or build-script input outside the declared generated-output root.
+The sole fallback is a true legacy exact-`HEAD` manifest with neither
+`rust_build_inputs_blake3` nor `rust_build_input_exclusions`: kd omits the
+exclusion option so pinned Kanache compares the legacy manifest against an
+empty requested exclusion set. This fallback cannot cross commits.
 
 The public development surface is:
 
@@ -146,10 +150,12 @@ binaries and manifests that predate input-hash matching. A computed mismatch
 is always a refusal, including when the commits happen to be equal.
 
 Manifests predating `rust_build_input_exclusions` are also conservative: they
-accept only an empty requested exclusion set. Because Kanna always requests its
-generated sidecar root, an old exact-`HEAD` donor can reach Kanache through the
-legacy candidate path but is refused until a clean bounded build records a new
-manifest with the matching exclusion set.
+accept only an empty requested exclusion set. For a true legacy manifest that
+also lacks `rust_build_inputs_blake3`, kd preserves the exact-`HEAD` fallback by
+requesting no exclusions. A hash-bearing manifest without the exclusions field
+does not qualify for that fallback and must be reseeded before kd can use it;
+this prevents a cross-commit warm from silently changing the hashed-input
+contract.
 
 Filesystem canonicalization is necessary on macOS because the same temporary
 path can appear as both `/var/...` and `/private/var/...`. The integration test
@@ -225,7 +231,7 @@ warning.
 runner, real temporary Git repositories, and real linked worktrees. Only
 Kanache is replaced with a deterministic executable. The suite verifies:
 
-- exact-full-`HEAD` legacy donor eligibility;
+- exact-full-`HEAD` legacy donor eligibility with no requested exclusions;
 - different-`HEAD` donor eligibility only when the manifest contains a Rust
   build-input hash, with legacy different-`HEAD` manifests excluded before the
   binary is invoked;
@@ -248,12 +254,14 @@ KANNA_REAL_KANACHE_ACCEPTANCE=1 \
   --maxWorkers=1
 ```
 
-That smoke bootstraps the exact pin, builds and records a tiny real Cargo donor,
-adds a non-Rust-only commit in a sibling worktree, warms it by input hash,
-rebuilds it, and checks that final executables have different inodes. It is
-opt-in because it requires macOS/APFS, Git, the pinned Rust/Cargo toolchain,
-network access on first bootstrap, substantial compile time, and mutation of
-the user cache beneath `~/Library/Caches/kanna`. The fake
+That smoke first records a tiny real Cargo donor with pre-exclusion Kanache
+revision `6107c7b533a77a0c7c190b75c0284e7501c6edbf`, verifies its manifest has
+neither compatibility field, and warms an exact-`HEAD` sibling through the
+current pinned process using `head` mode. It then records with the current pin,
+adds a non-Rust-only commit in another sibling, warms it by input hash, rebuilds
+it, and checks that final executables have different inodes. It is opt-in
+because it requires macOS/APFS, Git, the pinned Rust/Cargo toolchain, network
+access on first bootstrap, and substantial compile time. The fake
 integration suite substitutes for orchestration correctness in ordinary CI;
 the real smoke covers the external tool boundary when explicitly requested.
 
@@ -285,7 +293,9 @@ The status event for this canary must report `matchingMode: "input-hash"`.
 One clean recorded donor can seed all branches whose complete Rust build-input
 identity remains equal; a Rust package, lockfile, toolchain, Cargo config, or
 other hashed-input change is refused and cold-builds. Legacy donors without an
-input hash still require exact `HEAD`.
+input hash still require exact `HEAD`; true legacy manifests without an
+exclusions field warm there with an empty requested set, but must be reseeded
+to serve cross-commit worktrees.
 
 Capture a same-batch cold control and the warmed sibling. The rollout gates are:
 

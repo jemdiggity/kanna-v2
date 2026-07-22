@@ -183,3 +183,53 @@ Expected: all commands exit 0.
 - [x] **Step 2: Review the final diff and repository state**
 
 Confirm the pinned revision is merged on Kanache `main`, legacy manifests remain exact-HEAD-only, every attempted donor event has the appropriate matching mode, docs match behavior, and no unrelated files changed.
+
+### Task 6: Restore true legacy exact-HEAD warming
+
+**Files:**
+- Modify: `tools/kd/tests/rust-cache.test.ts`
+- Modify: `tools/kd/tests/rust-cache.integration.test.ts`
+- Modify: `tools/kd/src/runtime/rust-cache.ts`
+- Modify: `docs/superpowers/specs/2026-07-20-default-kanache-worktree-cache-design.md`
+- Modify: `AGENTS.md` (`CLAUDE.md` is its symlink)
+
+- [x] **Step 1: Add failing legacy compatibility coverage**
+
+Add a runtime assertion that an exact-HEAD manifest with neither
+`rust_build_inputs_blake3` nor `rust_build_input_exclusions` is invoked without
+`--exclude-rust-input-root`. Extend the opt-in real acceptance fixture to
+record a donor with pre-exclusion Kanache revision
+`6107c7b533a77a0c7c190b75c0284e7501c6edbf`, assert both fields are absent,
+and warm an exact-HEAD sibling through kd's pinned Kanache process.
+
+- [x] **Step 2: Run the focused tests and verify RED**
+
+Run:
+
+```bash
+pnpm --dir tools/kd exec vitest run tests/rust-cache.test.ts tests/rust-cache.integration.test.ts --maxWorkers=1
+KANNA_REAL_KANACHE_ACCEPTANCE=1 pnpm --dir tools/kd exec vitest run tests/rust-cache.integration.test.ts --maxWorkers=1
+```
+
+Expected: the legacy argument assertion fails and the real legacy warm is
+refused because kd requests an exclusion that the manifest cannot authorize.
+
+- [x] **Step 3: Implement the manifest-aware argument fallback**
+
+Skip `KANACHE_RUST_INPUT_EXCLUSIONS` only when the donor uses `head` mode and
+its parsed manifest has neither `rustBuildInputsBlake3` nor
+`rustBuildInputExclusions`. Append the exclusions in every other case. Keep
+candidate classification, ranking, event matching modes, and all
+exclusion-aware input-hash behavior unchanged.
+
+- [x] **Step 4: Update the design contract**
+
+Document that a true legacy exact-HEAD donor is warmed with an empty requested
+exclusion set, while different-HEAD donors still require a hash and modern
+exclusion-aware manifests still require the exact recorded exclusion set.
+
+- [x] **Step 5: Run the complete reviewer verification set**
+
+Run the two focused Vitest commands above, `pnpm --dir tools/kd typecheck`,
+`pnpm test`, `cd crates/daemon && cargo test -- --test-threads=1`, and
+`git diff --check`.

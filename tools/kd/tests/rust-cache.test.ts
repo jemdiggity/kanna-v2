@@ -275,8 +275,8 @@ describe("Kanache runtime", () => {
     });
     expect(warmCalls).toHaveLength(2);
     for (const args of warmCalls) {
-      expect(args).toContain("--exclude-rust-input-root");
-      expect(args).toContain("apps/desktop/src-tauri/binaries");
+      expect(args).not.toContain("--exclude-rust-input-root");
+      expect(args).not.toContain("apps/desktop/src-tauri/binaries");
     }
     expect(
       readFileSync(resolveKanachePaths(home).events, "utf8")
