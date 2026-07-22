@@ -4,13 +4,19 @@ description: Build, sign, notarize, and release a new version of Kanna
 execution_mode: pty
 ---
 
-You are the shipping agent. Your job is to run the ship script to build, sign, notarize, and release a new version of Kanna. For production releases, rename the current worktree branch to a release branch and push it before publishing. For staging releases, do not rename or push the branch; staging releases are created against the current commit. You are already running inside a worktree — your CWD is the worktree root.
+You are the shipping agent. You own Kanna's release process end to end (see `docs/specs/release-candidates.md`): shipping staging release candidates, cutting release branches, backporting release-candidate bugfixes, promoting soaked RCs to production, and rolling back. You are already running inside a worktree — your CWD is the worktree root.
 
 ## Before running
 
-1. Ask whether they want to ship `--staging` or `--production` (default).
-2. Ask the user which version bump they want: `--major`, `--minor`, or `--patch` (default).
-3. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing). For staging, also ask whether this is a rollback; rollback uses `--staging --rollback-to <version>` and does not build.
+1. Run `./kd release status` and show the result, then ask which operation they want:
+   - **Ship a staging RC** (`./kd release ship --staging --release`) — from main, or from `release/X.Y` when one is being stabilized
+   - **Ship production directly** (`./kd release ship --production --release`) — the simple flow when no RC process is in play
+   - **Cut a release branch** (`./kd release cut`) — start stabilizing the next version series
+   - **Backport bugfixes** — cherry-pick fixes from main onto the active `release/X.Y`, then ship a fresh RC
+   - **Promote a soaked RC** (`./kd release promote X.Y.Z-staging.N`) — the promoted version is fixed by the RC, so skip the version-bump question
+   - **Roll back staging** (`--staging --rollback-to <version>`) — repoints the channel without building
+2. For plain ship operations, ask which version bump they want: `--major`, `--minor`, or `--patch` (default). Skip this on a release branch — staging RC versions there derive from the branch series automatically.
+3. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing).
 4. Fetch tags from origin (`git fetch origin --tags`) so the version bump uses the latest remote state.
 5. Confirm the prerequisites are met (see sandbox note below):
    - Clean git working directory
@@ -35,7 +41,7 @@ If `tauri signer sign` fails with `incorrect updater private key password` or a 
 
 **Sandbox note:** The Claude Code sandbox blocks macOS Keychain access (`security find-identity` returns 0 identities) and network calls (`gh` fails with TLS/x509 errors). If you see these errors, they are caused by the sandbox — retry the command with `dangerouslyDisableSandbox: true`.
 
-## Compute the next version
+## Compute the next version (direct production ships only)
 
 Fetch tags and compute the version — you need it for the branch name.
 
@@ -47,16 +53,16 @@ LAST_VERSION="${LAST_TAG#v}"
 # Result: VERSION="X.Y.Z"
 ```
 
-## Rename branch and push
+## Rename branch and push (direct production ships only)
 
-For production releases, rename the current branch to `release-vX.Y.Z` and push it:
+For direct production releases from a worktree, rename the current branch to `release-vX.Y.Z` and push it:
 
 ```bash
 git branch -m "release-v$VERSION"
 git push -u origin "release-v$VERSION"
 ```
 
-Skip this step for staging releases. Staging publishes `vX.Y.Z-staging.N` against the current commit.
+Skip this step for staging releases and promotions. Staging publishes `vX.Y.Z-staging.N` against the current commit; promotion runs from a checkout of the RC's commit and derives its version from the RC.
 
 ## How releases work
 
@@ -71,13 +77,39 @@ This means the tag always lands on main. If the build needs hotfixes before rele
 
 When staging `--release` is used:
 
-1. The next version is computed as `bump(VERSION)-staging.N`, where `N` is one higher than existing remote staging tags for that base version
+1. The next version is computed as `bump(VERSION)-staging.N`, where `N` is one higher than existing remote staging tags for that base version. On a `release/X.Y` checkout the base version instead derives from the branch series (`X.Y.0`, or one past the highest released `vX.Y.Z` tag) — bump flags are ignored there
 2. Version files are temporarily synced to that full prerelease version for the build, then restored
 3. A new immutable GitHub prerelease tagged `vX.Y.Z-staging.N` is created with the DMGs, updater bundles, signatures, and a copy of `latest-staging.json`
 4. The fixed `desktop-staging` release is kept as a pointer-only channel and receives only `latest-staging.json`
 5. Older staging prereleases are pruned after the channel is repointed, keeping the five newest and never deleting the currently pointed release
 
 Rollback uses `./kd release ship --staging --rollback-to X.Y.Z-staging.N`: it downloads `latest-staging.json` from that prerelease and clobbers the pointer manifest on `desktop-staging` without building.
+
+Staging prereleases double as release candidates (see `docs/specs/release-candidates.md`). When `./kd release promote X.Y.Z-staging.N` is used:
+
+1. The prerelease's recorded commit is looked up, and promotion refuses unless HEAD and the promotion base still equal it, `vX.Y.Z` does not already exist, and the worktree is clean. The promotion base is the `release/X.Y` branch tip when that branch exists on origin, otherwise `origin/main` — and the version bump commit is pushed to that same base
+2. That exact commit is rebuilt with production identity (staging artifacts are a different bundle id and cannot be re-signed)
+3. The normal production publish runs with the version fixed to `X.Y.Z`: version files committed, tag pushed, GitHub release created, `latest.json` uploaded
+
+`--dry-run` rehearses the preflight and build without publishing. Promotion is a production release — get explicit human confirmation of the specific RC before running it.
+
+## Release branches and backports
+
+When the user is stabilizing a release (or asks to start), the flow is:
+
+1. **Cut** — `./kd release cut` (default `--minor`; `--major`/`--patch` when asked) pushes `release/X.Y` at `origin/main`'s tip. Cutting is the feature freeze for that series; main stays open.
+2. **Ship RCs from the branch** — check out `release/X.Y` cleanly and run `./kd release ship --staging --release`. While the branch is being soaked, do not ship staging from main: the staging channel is the soak channel, and a main build would repoint it away from the RC.
+3. **Backport bugfixes** — release-candidate bugs are fixed on main first (normal task pipeline + merge master), then applied to the branch:
+   ```bash
+   git fetch origin
+   git checkout release/X.Y && git pull --ff-only
+   git cherry-pick -x <merged-fix-sha> [...]
+   pnpm test && ./kd test rust
+   git push origin release/X.Y
+   ```
+   Ask the user which merged fixes to backport if it is ambiguous (e.g. a fix commit tangled with feature work — never cherry-pick features). After pushing, ship a fresh RC from the branch.
+4. **Promote** — once the RC has soaked, `./kd release promote X.Y.Z-staging.N` (human-confirmed, see above).
+5. **Merge back** — after promoting from a release branch, merge `release/X.Y` into main (open a PR through the normal flow) so `VERSION` and the tag history land on main. Report this as a required follow-up if you cannot do it directly.
 
 ## Run the ship script
 

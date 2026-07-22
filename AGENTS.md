@@ -251,6 +251,9 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd release ship --release  # tag, publish, and upload updater manifest
 ./kd release ship --staging --release  # publish immutable staging prerelease and repoint desktop-staging/latest-staging.json
 ./kd release ship --staging --rollback-to 1.2.4-staging.3  # repoint staging channel to an existing prerelease manifest
+./kd release status          # show production release, staging pointer, release branch, and whether staging is promotable
+./kd release cut             # cut release/X.Y from origin/main to stabilize the next series (default --minor)
+./kd release promote 1.2.4-staging.3  # promote a soaked staging RC into the production release of the same commit
 
 # Cloud deploy
 ./kd cloud deploy --staging     # deploy Firebase cloud services to staging
@@ -630,6 +633,8 @@ Current E2E status: notify has server boundary coverage with a fake daemon asser
 ## Versioning
 
 Single `VERSION` file is the source of truth for packaged app versioning. Production `kd release ship --release` updates `VERSION`, `tauri.conf.json`, and Rust package metadata, commits them, tags `vX.Y.Z`, and publishes a per-version GitHub release. Staging ships do not persist version bumps: each `--staging` ship builds with `X.Y.Z-staging.N`, publishes an immutable prerelease tagged `vX.Y.Z-staging.N`, uploads a manifest copy there, and then clobbers only `latest-staging.json` on the pointer release tagged `desktop-staging`. Development builds may include separate branch/worktree metadata in the UI, but that metadata is not the packaged version. Package.json versions are all `0.0.0` (meaningless). The desktop app reads `VERSION` at compile time via `build.rs`.
+
+Staging prereleases double as release candidates: `X.Y.Z-staging.N` is candidate `N` for production `X.Y.Z`, and soaking it as a daily driver is the validation step. `kd release status` shows the production release, the staging channel pointer, the series release branch when one is cut, and how far each lags `origin/main`; `kd release promote X.Y.Z-staging.N` rebuilds the soaked candidate's exact commit with production identity and publishes it as `vX.Y.Z` (it refuses if the prerelease is missing, `vX.Y.Z` already exists, or HEAD/the promotion base no longer match the candidate's commit). Stabilization uses trunk-based short-lived release branches: `kd release cut` pushes `release/X.Y` at `origin/main`; staging RCs shipped from that branch derive their versions from the branch series instead of `VERSION` bump flags; bugfixes land on main first and are cherry-picked onto the branch; promotion pushes the version bump to the branch (else to main when no branch exists) and is followed by merging the branch back into main. While a release branch is being soaked, do not ship staging from main — the single staging channel is the soak channel. Promoting to production requires an explicit human request, like the mobile OTA production rule. See `docs/specs/release-candidates.md`.
 
 ## Common Pitfalls
 

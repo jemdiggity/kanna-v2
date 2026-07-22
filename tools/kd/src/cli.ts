@@ -505,6 +505,19 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "release" && command === "ship") {
     return { taskId: "release.ship", input: parseFlagInput(rest, {}) };
   }
+  if (group === "release" && command === "promote") {
+    const [version, ...flags] = rest;
+    if (!version || version.startsWith("--")) {
+      throw new Error("release promote requires a staging version, e.g. kd release promote 1.2.4-staging.3");
+    }
+    return { taskId: "release.promote", input: { version, ...parseFlagInput(flags, {}) } };
+  }
+  if (group === "release" && command === "cut") {
+    return { taskId: "release.cut", input: parseFlagInput(rest, {}) };
+  }
+  if (group === "release" && command === "status") {
+    return { taskId: "release.status", input: {} };
+  }
   if (group === "cloud" && command === "deploy") {
     return { taskId: "cloud.deploy", input: parseFlagInput(rest, { staging: false, production: false, relay: false }) };
   }
@@ -621,6 +634,9 @@ const helpTopics: Record<string, string[]> = {
     "  build sidecars",
     "  rust-cache warm|status",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
+    "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "  release cut [--major|--minor|--patch]",
+    "  release status",
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
@@ -937,13 +953,35 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd release <command>",
     "",
     "Commands:",
-    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]"
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
+    "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "  release cut [--major|--minor|--patch]",
+    "  release status"
   ],
   "release ship": [
     "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
     "",
     "Build, sign, notarize, and optionally publish a Kanna release.",
     "Use --staging --rollback-to <version> to repoint the staging channel manifest without building."
+  ],
+  "release promote": [
+    "Usage: kd release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "",
+    "Promote a soaked staging prerelease (e.g. 1.2.4-staging.3) into the production release of the same commit.",
+    "Rebuilds that exact commit with production identity, then tags, publishes, and repoints the updater manifest.",
+    "Requires the checkout and origin/main to still be at the staging build's commit. --dry-run rehearses without publishing."
+  ],
+  "release cut": [
+    "Usage: kd release cut [--major|--minor|--patch]",
+    "",
+    "Cut a release/X.Y stabilization branch from origin/main for the next version series (default: --minor).",
+    "The branch takes bugfix cherry-picks only; staging RCs shipped from it version themselves as X.Y.Z-staging.N."
+  ],
+  "release status": [
+    "Usage: kd release status",
+    "",
+    "Show the latest production release, the staging channel pointer, its release branch (if cut), and lag vs origin/main.",
+    "Reports the promote command when the staging build is at its promotion base and ready to release."
   ],
   cloud: [
     "Usage: kd cloud <command>",

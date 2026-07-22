@@ -170,13 +170,17 @@ function alphaBounds(png: DecodedPng): AlphaBounds {
 }
 
 describe("kd release workflow", () => {
-  it("instructs the shipping agent to ask for staging or production", () => {
+  it("instructs the shipping agent to pick an operation from release status", () => {
     const shipAgent = readFileSync(resolve(repoRoot, ".kanna/tasks/ship/agent.md"), "utf8");
 
-    expect(shipAgent).toContain("Ask whether they want to ship `--staging` or `--production`");
+    expect(shipAgent).toContain("./kd release status");
     expect(shipAgent).toContain("./kd release ship [OPTIONS]");
-    expect(shipAgent).toContain("`--staging`");
-    expect(shipAgent).toContain("`--production`");
+    expect(shipAgent).toContain("--staging");
+    expect(shipAgent).toContain("--production");
+    expect(shipAgent).toContain("./kd release promote");
+    expect(shipAgent).toContain("./kd release cut");
+    expect(shipAgent).toContain("Backport bugfixes");
+    expect(shipAgent).toContain("git cherry-pick -x");
   });
 
   it("uses the VERSION file as the source of truth for the target version", () => {

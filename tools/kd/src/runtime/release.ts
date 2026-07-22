@@ -1,4 +1,5 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
 
@@ -14,6 +15,7 @@ export interface ReleaseShipInput {
   release: boolean;
   dryRun: boolean;
   rollbackTo?: string;
+  promoteFrom?: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
 }
@@ -195,6 +197,143 @@ async function resolveNextStagingVersion(input: ReleaseShipInput, baseVersion: s
   const tags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${baseVersion}-staging.*`], input.repoRoot, input.env);
   const highest = Math.max(0, ...parseExistingStagingNumbers(tags, baseVersion));
   return `${baseVersion}-staging.${highest + 1}`;
+}
+
+export interface ReleaseSeries {
+  major: number;
+  minor: number;
+}
+
+export function releaseSeriesFromVersion(version: string): ReleaseSeries {
+  const match = /^(\d+)\.(\d+)\.\d+/.exec(version.replace(/^v/, ""));
+  const major = Number.parseInt(match?.[1] ?? "", 10);
+  const minor = Number.parseInt(match?.[2] ?? "", 10);
+  if (Number.isNaN(major) || Number.isNaN(minor)) {
+    throw new Error(`Invalid version: ${version}`);
+  }
+  return { major, minor };
+}
+
+export function releaseSeriesBranch(series: ReleaseSeries): string {
+  return `release/${series.major}.${series.minor}`;
+}
+
+export function parseReleaseBranchSeries(branchName: string): ReleaseSeries | null {
+  const match = /^release\/(\d+)\.(\d+)$/.exec(branchName.trim());
+  if (!match) return null;
+  const major = Number.parseInt(match[1] ?? "", 10);
+  const minor = Number.parseInt(match[2] ?? "", 10);
+  if (Number.isNaN(major) || Number.isNaN(minor)) return null;
+  return { major, minor };
+}
+
+export function nextSeriesPatchVersion(tagsOutput: string, series: ReleaseSeries): string {
+  const pattern = new RegExp(`^(?:refs/tags/)?v${series.major}\\.${series.minor}\\.(\\d+)(?:\\^\\{\\})?$`);
+  const patches: number[] = [];
+  for (const line of tagsOutput.split(/\r?\n/)) {
+    const ref = line.trim().split(/\s+/).at(-1) ?? "";
+    const match = pattern.exec(ref);
+    if (!match) continue;
+    const value = Number.parseInt(match[1] ?? "", 10);
+    if (!Number.isNaN(value)) patches.push(value);
+  }
+  if (patches.length === 0) return `${series.major}.${series.minor}.0`;
+  return `${series.major}.${series.minor}.${Math.max(...patches) + 1}`;
+}
+
+async function resolveStagingBaseVersion(input: ReleaseShipInput): Promise<string> {
+  const branch = await mustRun(input.runner, "git", ["rev-parse", "--abbrev-ref", "HEAD"], input.repoRoot, input.env);
+  const series = parseReleaseBranchSeries(branch);
+  if (!series) {
+    const sourceVersion = readCurrentVersion(input.repoRoot);
+    return bumpVersion(sourceVersion, input.bump);
+  }
+  const tags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${series.major}.${series.minor}.*`], input.repoRoot, input.env);
+  return nextSeriesPatchVersion(tags, series);
+}
+
+export interface PromotionVersions {
+  stagingVersion: string;
+  stagingTag: string;
+  productionVersion: string;
+}
+
+export function parsePromotionVersions(promoteFrom: string): PromotionVersions {
+  const stagingVersion = promoteFrom.trim().replace(/^v/, "");
+  const match = /^(\d+\.\d+\.\d+)-staging\.\d+$/.exec(stagingVersion);
+  const productionVersion = match?.[1];
+  if (!productionVersion) {
+    throw new Error(`Invalid staging version to promote: ${promoteFrom}. Expected X.Y.Z-staging.N (a staging prerelease version).`);
+  }
+  return { stagingVersion, stagingTag: `v${stagingVersion}`, productionVersion };
+}
+
+function parseTargetCommitish(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed === "object" && parsed !== null && "targetCommitish" in parsed) {
+      const commit = (parsed as { targetCommitish?: unknown }).targetCommitish;
+      if (typeof commit === "string" && commit.trim().length > 0) return commit.trim();
+    }
+  } catch {
+    // Fall through to the shared error below for unparseable gh output.
+  }
+  throw new Error(`Could not read targetCommitish from gh release view output: ${raw}`);
+}
+
+interface ResolvedPromotion {
+  version: string;
+  pushBranch: string;
+}
+
+async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): Promise<ResolvedPromotion> {
+  const { stagingTag, productionVersion } = parsePromotionVersions(promoteFrom);
+  const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+  const repoSlug = releaseRepoSlug(remoteUrl);
+  const view = await input.runner.run("gh", ["release", "view", stagingTag, "--repo", repoSlug, "--json", "targetCommitish"], {
+    cwd: input.repoRoot,
+    env: input.env
+  });
+  if (view.exitCode !== 0) {
+    throw new Error(`Staging prerelease not found: ${stagingTag}`);
+  }
+  const commit = parseTargetCommitish(view.stdout);
+
+  const existingTags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${productionVersion}`], input.repoRoot, input.env);
+  if (existingTags.trim().length > 0) {
+    throw new Error(`Production tag v${productionVersion} already exists. ${stagingTag} was already promoted, or the next version needs a fresh staging RC.`);
+  }
+
+  const head = await mustRun(input.runner, "git", ["rev-parse", "HEAD"], input.repoRoot, input.env);
+  if (head !== commit) {
+    throw new Error(
+      `HEAD (${head}) is not the commit ${stagingTag} was built from (${commit}). Check out that commit and rerun.`
+    );
+  }
+
+  const seriesBranch = releaseSeriesBranch(releaseSeriesFromVersion(productionVersion));
+  const branchRefs = await mustRun(input.runner, "git", ["ls-remote", "origin", `refs/heads/${seriesBranch}`], input.repoRoot, input.env);
+  const branchSha = branchRefs.trim().split(/\s+/)[0] ?? "";
+  if (branchSha) {
+    if (branchSha !== commit) {
+      throw new Error(
+        `${seriesBranch} (${branchSha}) has advanced past ${stagingTag} (${commit}). ` +
+          `Ship a fresh staging RC from ${seriesBranch}, soak it, then promote that build.`
+      );
+    }
+    return { version: productionVersion, pushBranch: seriesBranch };
+  }
+
+  await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
+  const originMain = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
+  if (originMain !== commit) {
+    throw new Error(
+      `origin/main (${originMain}) has advanced past ${stagingTag} (${commit}). ` +
+        `Cut a release branch at the RC commit (git push origin ${commit}:refs/heads/${seriesBranch}) to keep promoting it, ` +
+        "or ship a fresh staging RC from main, soak it, and promote that build."
+    );
+  }
+  return { version: productionVersion, pushBranch: "main" };
 }
 
 interface GithubAsset {
@@ -385,6 +524,9 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   if (input.rollbackTo) {
     return rollbackStagingRelease(input, input.rollbackTo);
   }
+  if (input.promoteFrom && environment !== "production") {
+    throw new Error("Promotion ships a production release; it cannot target staging.");
+  }
   if (input.release && input.archLabels.length !== 2) {
     throw new Error("updater releases must include both arm64 and x86_64 artifacts");
   }
@@ -393,11 +535,18 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   if (!existsSync(input.env.TAURI_PRIVATE_KEY_PATH)) throw new Error(`Tauri updater private key not found: ${input.env.TAURI_PRIVATE_KEY_PATH}`);
   await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
 
-  const sourceVersion = readCurrentVersion(input.repoRoot);
-  const baseVersion = bumpVersion(sourceVersion, input.bump);
-  const version = environment === "staging"
-    ? await resolveNextStagingVersion(input, baseVersion)
-    : baseVersion;
+  let version: string;
+  let pushBranch = "main";
+  if (input.promoteFrom) {
+    const promotion = await resolvePromotion(input, input.promoteFrom);
+    version = promotion.version;
+    pushBranch = promotion.pushBranch;
+  } else if (environment === "staging") {
+    version = await resolveNextStagingVersion(input, await resolveStagingBaseVersion(input));
+  } else {
+    const sourceVersion = readCurrentVersion(input.repoRoot);
+    version = bumpVersion(sourceVersion, input.bump);
+  }
 
   const bazelArgs = [input.dryRun ? "-c" : "--config=notarize", input.dryRun ? "opt" : "-c", ...(input.dryRun ? [] : ["opt"])];
   const targets = input.archLabels.flatMap((label) => [bazelTargetForLabel(label, input.dryRun, environment), updaterBundleTargetForLabel(label, environment)]);
@@ -444,7 +593,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
 
   const latestJson = join(releaseDir, environment === "staging" ? STAGING_MANIFEST_NAME : "latest.json");
   const notes = input.release && environment === "production"
-    ? await mustRun(input.runner, "gh", ["api", `repos/${releaseRepoSlug(remoteUrl)}/releases/generate-notes`, "-X", "POST", "-f", `tag_name=v${version}`, "-f", "target_commitish=main", "--jq", ".body"], input.repoRoot, input.env)
+    ? await mustRun(input.runner, "gh", ["api", `repos/${releaseRepoSlug(remoteUrl)}/releases/generate-notes`, "-X", "POST", "-f", `tag_name=v${version}`, "-f", `target_commitish=${pushBranch}`, "--jq", ".body"], input.repoRoot, input.env)
     : environment === "staging"
       ? `Staging updater manifest for v${version}`
       : `Dry-run updater manifest for v${version}`;
@@ -478,10 +627,161 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     await mustRun(input.runner, "git", ["add", "-f", "VERSION", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock"], input.repoRoot, input.env);
     await mustRun(input.runner, "git", ["commit", "-m", `release: v${version}`], input.repoRoot, input.env);
     await mustRun(input.runner, "git", ["tag", `v${version}`], input.repoRoot, input.env);
-    await mustRun(input.runner, "git", ["push", "origin", "HEAD:main", `v${version}`], input.repoRoot, input.env);
+    await mustRun(input.runner, "git", ["push", "origin", `HEAD:${pushBranch}`, `v${version}`], input.repoRoot, input.env);
     await mustRun(input.runner, "gh", ["release", "create", `v${version}`, ...dmgPaths, ...updaterPaths, "--title", `Kanna v${version}`, "--notes", notes], input.repoRoot, input.env);
     await mustRun(input.runner, "gh", ["release", "upload", `v${version}`, latestJson, "--clobber"], input.repoRoot, input.env);
   }
 
   return { version, dmgPaths, updaterPaths, latestJson };
+}
+
+export interface ReleaseCutInput {
+  repoRoot: string;
+  bump: ReleaseBump;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+}
+
+export interface ReleaseCutResult {
+  branch: string;
+  version: string;
+  commit: string;
+}
+
+export async function cutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseCutResult> {
+  const sourceVersion = readCurrentVersion(input.repoRoot);
+  const targetVersion = bumpVersion(sourceVersion, input.bump);
+  const branch = releaseSeriesBranch(releaseSeriesFromVersion(targetVersion));
+  const existing = await mustRun(input.runner, "git", ["ls-remote", "origin", `refs/heads/${branch}`], input.repoRoot, input.env);
+  if (existing.trim().length > 0) {
+    throw new Error(`${branch} already exists on origin. Ship RCs from it, or cut the next series with a different bump.`);
+  }
+  await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
+  const commit = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
+  await mustRun(input.runner, "git", ["push", "origin", `${commit}:refs/heads/${branch}`], input.repoRoot, input.env);
+  return { branch, version: targetVersion, commit };
+}
+
+export interface ReleaseStatusInput {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+}
+
+export interface ReleaseStatusResult {
+  production: { version: string; tag: string; publishedAt: string } | null;
+  staging: { version: string; tag: string; commit: string | null; commitsBehindMain: number | null } | null;
+  releaseBranch: { name: string; commit: string } | null;
+  commitsOnMainSinceProduction: number | null;
+  promotable: boolean;
+  promoteCommand: string | null;
+}
+
+function parseProductionReleaseView(raw: string): { tag: string; publishedAt: string } | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const record = parsed as { tagName?: unknown; publishedAt?: unknown };
+    if (typeof record.tagName !== "string" || record.tagName.length === 0) return null;
+    return { tag: record.tagName, publishedAt: typeof record.publishedAt === "string" ? record.publishedAt : "" };
+  } catch {
+    return null;
+  }
+}
+
+function parseManifestVersion(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const version = (parsed as { version?: unknown }).version;
+    return typeof version === "string" && version.length > 0 ? version : null;
+  } catch {
+    return null;
+  }
+}
+
+async function countCommits(input: ReleaseStatusInput, range: string): Promise<number | null> {
+  const result = await input.runner.run("git", ["rev-list", "--count", range], { cwd: input.repoRoot, env: input.env });
+  if (result.exitCode !== 0) return null;
+  const count = Number.parseInt(result.stdout.trim(), 10);
+  return Number.isNaN(count) ? null : count;
+}
+
+export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseStatusResult> {
+  const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+  const repoSlug = releaseRepoSlug(remoteUrl);
+  await mustRun(input.runner, "git", ["fetch", "--tags", "origin", "main"], input.repoRoot, input.env);
+  const originMain = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
+
+  let production: ReleaseStatusResult["production"] = null;
+  const productionView = await input.runner.run("gh", ["release", "view", "--repo", repoSlug, "--json", "tagName,publishedAt"], {
+    cwd: input.repoRoot,
+    env: input.env
+  });
+  if (productionView.exitCode === 0) {
+    const parsed = parseProductionReleaseView(productionView.stdout);
+    if (parsed) {
+      production = { version: parsed.tag.replace(/^v/, ""), tag: parsed.tag, publishedAt: parsed.publishedAt };
+    }
+  }
+
+  let staging: ReleaseStatusResult["staging"] = null;
+  const manifestDir = mkdtempSync(join(tmpdir(), "kanna-release-status-"));
+  try {
+    const download = await input.runner.run(
+      "gh",
+      ["release", "download", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--pattern", STAGING_MANIFEST_NAME, "--dir", manifestDir, "--clobber"],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    const manifestPath = join(manifestDir, STAGING_MANIFEST_NAME);
+    if (download.exitCode === 0 && existsSync(manifestPath)) {
+      const version = parseManifestVersion(readFileSync(manifestPath, "utf8"));
+      if (version) {
+        const tag = stagingTag(version);
+        let commit: string | null = null;
+        const stagingView = await input.runner.run("gh", ["release", "view", tag, "--repo", repoSlug, "--json", "targetCommitish"], {
+          cwd: input.repoRoot,
+          env: input.env
+        });
+        if (stagingView.exitCode === 0) {
+          try {
+            commit = parseTargetCommitish(stagingView.stdout);
+          } catch {
+            commit = null;
+          }
+        }
+        staging = {
+          version,
+          tag,
+          commit,
+          commitsBehindMain: commit ? await countCommits(input, `${commit}..origin/main`) : null
+        };
+      }
+    }
+  } finally {
+    rmSync(manifestDir, { recursive: true, force: true });
+  }
+
+  let releaseBranch: ReleaseStatusResult["releaseBranch"] = null;
+  if (staging) {
+    const branchName = releaseSeriesBranch(releaseSeriesFromVersion(staging.version));
+    const branchRefs = await input.runner.run("git", ["ls-remote", "origin", `refs/heads/${branchName}`], {
+      cwd: input.repoRoot,
+      env: input.env
+    });
+    const branchSha = branchRefs.exitCode === 0 ? branchRefs.stdout.trim().split(/\s+/)[0] ?? "" : "";
+    if (branchSha) releaseBranch = { name: branchName, commit: branchSha };
+  }
+
+  const commitsOnMainSinceProduction = production ? await countCommits(input, `${production.tag}..origin/main`) : null;
+  const promotionBase = releaseBranch ? releaseBranch.commit : originMain;
+  const promotable = staging !== null && staging.commit !== null && staging.commit === promotionBase;
+  return {
+    production,
+    staging,
+    releaseBranch,
+    commitsOnMainSinceProduction,
+    promotable,
+    promoteCommand: promotable && staging ? `kd release promote ${staging.version}` : null
+  };
 }
