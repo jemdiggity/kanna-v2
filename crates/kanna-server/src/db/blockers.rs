@@ -67,6 +67,26 @@ impl Db {
         )
     }
 
+    /// Ids of blockers that are still unresolved, for surfacing why a task
+    /// is blocked. Keep the resolution predicate in sync with
+    /// `count_open_task_blockers` above.
+    pub fn list_open_task_blocker_ids(
+        &self,
+        blocked_item_id: &str,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT blocker.blocker_item_id
+             FROM task_blocker blocker
+             JOIN pipeline_item blocker_item ON blocker_item.id = blocker.blocker_item_id
+             WHERE blocker.blocked_item_id = ?
+               AND blocker_item.closed_at IS NULL
+               AND NOT (blocker_item.stage = 'pr' AND blocker_item.pr_url IS NOT NULL)
+             ORDER BY blocker.blocker_item_id",
+        )?;
+        let rows = stmt.query_map([blocked_item_id], |row| row.get(0))?;
+        rows.collect()
+    }
+
     pub fn list_tasks_blocked_by(
         &self,
         blocker_item_id: &str,

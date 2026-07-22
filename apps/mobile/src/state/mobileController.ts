@@ -29,6 +29,7 @@ import type {
   SessionStore
 } from "./sessionStore";
 import type { PersistedSessionContext } from "./sessionPersistence";
+import { isTaskBlocked } from "../lib/api/taskIdentity";
 import {
   buildCreatingTaskUiSlot,
   taskUiSlotForSelection,
@@ -994,6 +995,18 @@ export function createMobileController(
       return;
     }
     loadSelectedTaskPrompt(taskId);
+    if (isTaskBlocked(task)) {
+      // A blocked task has no agent session to attach; the task screen
+      // renders the blocked placeholder instead. Collection refreshes
+      // re-enter here, so attachment starts as soon as the task unblocks.
+      if (activeTaskTerminal || activeTaskAgent || activeTaskCompanion) {
+        stopTaskSession();
+        store.clearTaskTerminal();
+        store.clearTaskAgent();
+        store.clearTaskCompanion();
+      }
+      return;
+    }
     if (task.agentType === "agent") {
       startTaskAgent(taskId);
     } else {

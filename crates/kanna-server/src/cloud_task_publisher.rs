@@ -47,6 +47,7 @@ struct CloudTaskSnapshot {
     agent: CloudAgentSnapshot,
     transfer: CloudTransferSnapshot,
     blocked_by_task_ids: Vec<String>,
+    parent_task_id: Option<String>,
     created_at: String,
     updated_at: String,
     closed_at: Option<String>,
@@ -196,6 +197,7 @@ fn map_task(
             destination_desktop_id: None,
         },
         blocked_by_task_ids: blocked_by_task_ids.into_iter().take(100).collect(),
+        parent_task_id: truncate_option(item.parent_task_id, 128),
         created_at,
         updated_at,
         closed_at: item.closed_at,
@@ -460,6 +462,18 @@ mod tests {
             json["tasks"][0]["agent"],
             serde_json::json!({"provider":"codex","type":"pty"})
         );
+        assert_eq!(json["tasks"][0]["parentTaskId"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn snapshot_mapping_publishes_parent_task_id() {
+        let mut source = ui_snapshot("idle");
+        source.entries[0].items[0].parent_task_id = Some("task-parent".into());
+
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["tasks"][0]["parentTaskId"], "task-parent");
     }
 
     #[test]

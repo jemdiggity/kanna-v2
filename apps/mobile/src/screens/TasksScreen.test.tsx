@@ -328,6 +328,74 @@ describe("TasksScreen", () => {
     expect(findElement(tree, TaskList)?.props?.testID).toBeUndefined();
   });
 
+  it("nests subtasks under their parent with an indented, test-tagged row", () => {
+    if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
+    const collectElements = (
+      node: ElementNode,
+      type: unknown,
+      out: ElementNode[] = []
+    ): ElementNode[] => {
+      if (node.type === type) out.push(node);
+      for (const child of flattenChildren(node.props?.children)) {
+        if (typeof child !== "string") collectElements(child, type, out);
+      }
+      return out;
+    };
+    const findByTestID = (
+      node: ElementNode,
+      testID: string
+    ): ElementNode | null => {
+      if (node.props?.testID === testID) return node;
+      for (const child of flattenChildren(node.props?.children)) {
+        if (typeof child === "string") continue;
+        const match = findByTestID(child, testID);
+        if (match) return match;
+      }
+      return null;
+    };
+
+    const tree = TasksScreen({
+      heading: "Tasks",
+      repos: [{ id: "repo-a", name: "Repo A" }],
+      selectedRepoId: "repo-a",
+      taskCollectionStatus: "ready",
+      taskSlots: projectTaskUiSlots([
+        {
+          id: "parent",
+          repoId: "repo-a",
+          title: "Parent task",
+          stage: "in progress",
+          createdAt: "2026-07-16 08:00:00"
+        },
+        {
+          id: "child",
+          repoId: "repo-a",
+          title: "Child task",
+          stage: "in progress",
+          parentTaskId: "parent",
+          createdAt: "2026-07-18 08:00:00"
+        }
+      ], []),
+      onOpenTask: vi.fn(),
+      onSelectRepo: vi.fn()
+    }) as ElementNode;
+
+    const listProps = findElement(tree, TaskList)?.props;
+    expect(listProps?.nestSubtasks).toBe(true);
+
+    const renderedList = TaskList(listProps as never) as ElementNode;
+    const cards = collectElements(renderedList, TaskCard);
+    expect(cards.map((card) => (card.props?.task as { id: string }).id)).toEqual([
+      "parent",
+      "child"
+    ]);
+    expect(cards[0]?.props?.isSubtask).toBe(false);
+    expect(cards[1]?.props?.isSubtask).toBe(true);
+    expect(
+      findByTestID(renderedList, MOBILE_E2E_IDS.taskListSubtaskRow("child"))
+    ).not.toBeNull();
+  });
+
   it("opens an acknowledged task through its stable UI slot id", () => {
     if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
     const onOpenTask = vi.fn();

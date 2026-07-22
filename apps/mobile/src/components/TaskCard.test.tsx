@@ -111,6 +111,37 @@ describe("TaskCard", () => {
     expect(tree.props.accessibilityLabel).not.toBe("mobile.task-row.task-1");
   });
 
+  it("shows a blocked badge and announces it for blocked tasks", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+
+    const blockedTree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Waiting task",
+        stage: "in progress",
+        blockedByTaskIds: ["task-blocker"]
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+    expect(textContent(blockedTree)).toContain("blocked");
+    expect(
+      (blockedTree.props as Record<string, unknown>).accessibilityLabel
+    ).toContain("Blocked");
+
+    const unblockedTree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Waiting task",
+        stage: "in progress",
+        blockedByTaskIds: []
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+    expect(textContent(unblockedTree)).not.toContain("blocked");
+  });
+
   it("renders only the title, stage, and waiting prompt text", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
 

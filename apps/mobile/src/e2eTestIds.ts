@@ -30,6 +30,7 @@ export const MOBILE_E2E_IDS = {
   agentMessageReady: "mobile.agent-message-ready",
   terminalOverlay: "mobile.terminal-overlay",
   taskCreationRecoverButton: "mobile.task-creation.recover",
+  taskBlockedPlaceholder: "mobile.task-blocked-placeholder",
   terminalInspection: "mobile.terminal-inspection",
   visualCompanionButton: "mobile.visual-companion.button",
   visualCompanionUnread: "mobile.visual-companion.unread",
@@ -135,6 +136,9 @@ export const MOBILE_E2E_IDS = {
   },
   taskListItem(taskId: string): string {
     return `mobile.task-row.${taskId}`;
+  },
+  taskListSubtaskRow(taskId: string): string {
+    return `mobile.task-row.${taskId}.subtask`;
   },
   taskQuickReply(replyId: string): string {
     return `mobile.quick-reply.${replyId}`;

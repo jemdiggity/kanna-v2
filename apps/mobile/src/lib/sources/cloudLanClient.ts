@@ -146,6 +146,14 @@ export function mergeCloudAndLanTasks({
       if (lanTask.agentType !== null && lanTask.agentType !== undefined) {
         mergedTask.agentType = lanTask.agentType;
       }
+      // LAN is fresher; null/empty are meaningful (parent detached, blockers
+      // resolved), so only an absent field falls back to the cloud snapshot.
+      if (lanTask.parentTaskId !== undefined) {
+        mergedTask.parentTaskId = lanTask.parentTaskId;
+      }
+      if (lanTask.blockedByTaskIds !== undefined) {
+        mergedTask.blockedByTaskIds = lanTask.blockedByTaskIds;
+      }
       tasks.push(mergedTask);
       usedDisplayTaskIds.add(cloudTask.id);
       routes.set(
@@ -267,6 +275,12 @@ function mergeCloudWithPreservedLanProjection(
       preservedTask.agentType !== undefined
     ) {
       mergedTask.agentType = preservedTask.agentType;
+    }
+    if (preservedTask.parentTaskId !== undefined) {
+      mergedTask.parentTaskId = preservedTask.parentTaskId;
+    }
+    if (preservedTask.blockedByTaskIds !== undefined) {
+      mergedTask.blockedByTaskIds = preservedTask.blockedByTaskIds;
     }
     return mergedTask;
   };

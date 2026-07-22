@@ -84,6 +84,25 @@ describe("cloud task publication validation", () => {
     )).toThrow(/waitingPromptSnippet/);
   });
 
+  it("normalizes missing parent task ids and bounds present ones", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ parentTaskId: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.parentTaskId).toBeNull();
+
+    const nested = validateCloudTaskPublication(
+      publication([task({ parentTaskId: "task-parent" })]),
+      "desktop-1",
+    );
+    expect(nested.tasks[0]?.parentTaskId).toBe("task-parent");
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({ parentTaskId: "x".repeat(129) })]),
+      "desktop-1",
+    )).toThrow(/parentTaskId/);
+  });
+
   it("rejects malformed, cross-desktop, duplicate, and oversized publications", () => {
     expect(() => validateCloudTaskPublication(null, "desktop-1")).toThrow(/object/);
     expect(() => validateCloudTaskPublication(publication([

@@ -1,9 +1,10 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
-import type { RepoSummary, TaskSummary } from "../lib/api/types";
+import type { RepoSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
 import { orderActivityTasks } from "./activityTaskOrder";
+import { taskCreationTimestamp } from "./taskTreeRows";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
 import type { TaskCollectionStatus } from "../state/sessionStore";
@@ -16,19 +17,6 @@ interface TasksScreenProps {
   taskSlots: TaskUiSlot[];
   onSelectRepo(repoId: string): void;
   onOpenTask(taskId: string): void;
-}
-
-const sqliteTimestampPattern =
-  /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
-
-function taskCreationTimestamp(task: TaskSummary): number | null {
-  const value = task.createdAt?.trim();
-  if (!value) return null;
-  const normalized = sqliteTimestampPattern.test(value)
-    ? `${value.replace(" ", "T")}Z`
-    : value;
-  const timestamp = Date.parse(normalized);
-  return Number.isNaN(timestamp) ? null : timestamp;
 }
 
 function sortTaskSlotsNewestFirst(taskSlots: readonly TaskUiSlot[]): TaskUiSlot[] {
@@ -114,6 +102,7 @@ export function TasksScreen({
           loading={
             taskCollectionStatus === "loading" && displayedTaskSlots.length === 0
           }
+          nestSubtasks
           taskSlots={displayedTaskSlots}
           onOpenTask={onOpenTask}
         />

@@ -29,6 +29,8 @@ export interface CloudTaskSnapshot {
   status?: string;
   repo: { cloudRepoId: string; name: string };
   agent?: { provider?: string | null; type?: string | null } | null;
+  parentTaskId?: string | null;
+  blockedByTaskIds?: string[];
   createdAt: string;
   updatedAt: string;
   closedAt?: string | null;
@@ -273,12 +275,22 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
       name: requiredString(value.repo.name, "repo.name"),
     },
     agent: parseCloudTaskAgent(value.agent),
+    parentTaskId: optionalNullableString(value.parentTaskId),
+    blockedByTaskIds: parseCloudTaskBlockerIds(value.blockedByTaskIds),
     createdAt,
     updatedAt,
     closedAt: value.closedAt === null
       ? null
       : normalizeCloudTimestamp(value.closedAt) ?? undefined,
   };
+}
+
+function parseCloudTaskBlockerIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((entry) => {
+    const id = optionalString(entry);
+    return id ? [id] : [];
+  });
 }
 
 function parseCloudTaskAgent(value: unknown): CloudTaskSnapshot["agent"] {
@@ -325,6 +337,8 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),
     activity: normalizeTaskActivity(snapshot.activity),
+    parentTaskId: snapshot.parentTaskId ?? null,
+    blockedByTaskIds: snapshot.blockedByTaskIds ?? [],
     ownerDesktopId: snapshot.ownerDesktopId,
     ...(snapshot.localRepoId
       ? { ownerLocalRepoId: snapshot.localRepoId }

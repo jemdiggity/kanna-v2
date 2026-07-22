@@ -1,14 +1,21 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskUiSlot } from "../state/taskUiSlots";
 import { taskUiSlotToTaskSummary } from "../state/taskUiSlots";
+import { buildTaskTreeRows, type TaskTreeRow } from "../screens/taskTreeRows";
 import { TaskCard } from "./TaskCard";
 import { LoadingText } from "./LoadingText";
+
+const SUBTASK_INDENT = 16;
+const MAX_SUBTASK_INDENT_DEPTH = 3;
 
 interface TaskListProps {
   emptyLabel: string;
   errorLabel?: string | null;
   loading?: boolean;
+  /** Nest subtasks under their visible parent (desktop sidebar parity). */
+  nestSubtasks?: boolean;
   taskSlots: TaskUiSlot[];
   testID?: string;
   onOpenTask(taskId: string): void;
@@ -18,6 +25,7 @@ export function TaskList({
   emptyLabel,
   errorLabel = null,
   loading = false,
+  nestSubtasks = false,
   testID,
   taskSlots,
   onOpenTask
@@ -34,17 +42,39 @@ export function TaskList({
     );
   }
 
+  const rows: TaskTreeRow[] = nestSubtasks
+    ? buildTaskTreeRows(taskSlots)
+    : taskSlots.map((slot) => ({ slot, depth: 0 }));
+
   return (
     <View collapsable={false} style={styles.list} testID={testID}>
-      {taskSlots.map((slot) => {
+      {rows.map(({ slot, depth }) => {
         const task = taskUiSlotToTaskSummary(slot);
-        return (
+        const card = (
           <TaskCard
-            key={slot.slotId}
+            isSubtask={depth > 0}
             task={task}
             uiId={slot.slotId}
             onPress={() => onOpenTask(slot.slotId)}
           />
+        );
+        if (depth === 0) {
+          return <React.Fragment key={slot.slotId}>{card}</React.Fragment>;
+        }
+        return (
+          <View
+            key={slot.slotId}
+            style={[
+              styles.subtaskRow,
+              {
+                marginLeft:
+                  Math.min(depth, MAX_SUBTASK_INDENT_DEPTH) * SUBTASK_INDENT
+              }
+            ]}
+            testID={MOBILE_E2E_IDS.taskListSubtaskRow(slot.slotId)}
+          >
+            {card}
+          </View>
         );
       })}
     </View>
@@ -54,6 +84,11 @@ export function TaskList({
 const styles = StyleSheet.create({
   list: {
     gap: 12
+  },
+  subtaskRow: {
+    borderLeftColor: "#2E4368",
+    borderLeftWidth: 2,
+    paddingLeft: 10
   },
   emptyCard: {
     alignItems: "center",
