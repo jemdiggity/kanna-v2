@@ -197,6 +197,8 @@ export function buildTerminalDocument({
       const FILE_LINK_GESTURE_COOLDOWN_MS = 450;
       const DOUBLE_TAP_MAX_DELAY_MS = 300;
       const DOUBLE_TAP_MAX_DISTANCE_PX = 24;
+      // WheelEvent.DOM_DELTA_LINE; xterm consumes line-mode deltas verbatim.
+      const WHEEL_DELTA_LINE_MODE = 1;
       const term = new TerminalCtor({
         cols: TERMINAL_COLS,
         fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
@@ -244,12 +246,27 @@ export function buildTerminalDocument({
       let lastTap = null;
       let selectionAnchor = null;
       let selectionMode = false;
+      let altScreenScrollCapture = null;
 
       term.loadAddon(fitAddon);
       term.open(root);
       term.onScroll(() => {
         if (!selectionMode) {
           stickyToBottom = isNearBottom();
+        }
+      });
+      term.onData((data) => {
+        if (altScreenScrollCapture) {
+          altScreenScrollCapture.push(new TextEncoder().encode(data));
+        }
+      });
+      term.onBinary((data) => {
+        if (altScreenScrollCapture) {
+          const bytes = new Uint8Array(data.length);
+          for (let index = 0; index < data.length; index += 1) {
+            bytes[index] = data.charCodeAt(index) & 0xff;
+          }
+          altScreenScrollCapture.push(bytes);
         }
       });
       term.onSelectionChange(() => {
@@ -816,7 +833,8 @@ export function buildTerminalDocument({
             x: touch.clientX,
             y: touch.clientY,
             scrollLeft: viewport.scrollLeft,
-            terminalScrollLine: term.buffer.active.viewportY
+            terminalScrollLine: term.buffer.active.viewportY,
+            altScreenForwardedPx: 0
           };
         }, { passive: true, capture: true });
 
@@ -888,13 +906,20 @@ export function buildTerminalDocument({
           }
 
           if (touchScroll.axis === "vertical") {
-            const { height } = cellDimensions();
-            const targetLine = Math.round(clamp(
-              touchScroll.terminalScrollLine + deltaY / height,
-              0,
-              term.buffer.active.baseY
-            ));
-            term.scrollToLine(targetLine);
+            if (isAlternateScreen()) {
+              forwardAltScreenDrag(touch, deltaY);
+            } else {
+              // Track consumed drag distance so entering the alternate screen
+              // mid-gesture only forwards movement made after the switch.
+              touchScroll.altScreenForwardedPx = deltaY;
+              const { height } = cellDimensions();
+              const targetLine = Math.round(clamp(
+                touchScroll.terminalScrollLine + deltaY / height,
+                0,
+                term.buffer.active.baseY
+              ));
+              term.scrollToLine(targetLine);
+            }
           } else {
             viewport.scrollLeft = touchScroll.scrollLeft + deltaX;
           }
@@ -942,6 +967,82 @@ export function buildTerminalDocument({
           lastTap = null;
           suppressTerminalFileLinkActivation();
         }, { passive: true, capture: true });
+      }
+
+      function isAlternateScreen() {
+        const buffer = term.buffer && term.buffer.active;
+        return Boolean(buffer && buffer.type === "alternate");
+      }
+
+      // The alternate screen buffer has no scrollback, so drags cannot move
+      // xterm's own viewport. Fullscreen TUIs (Claude Code) own scrolling
+      // there: replay the drag as wheel events so xterm encodes them into
+      // whatever the TUI negotiated (mouse reports, arrow-key fallback) and
+      // forward the resulting bytes to the desktop PTY.
+      function forwardAltScreenDrag(touch, deltaY) {
+        const { height } = cellDimensions();
+        if (!height) {
+          return;
+        }
+        const pendingPx = deltaY - touchScroll.altScreenForwardedPx;
+        const lines = Math.trunc(pendingPx / height);
+        if (lines === 0) {
+          return;
+        }
+        touchScroll.altScreenForwardedPx += lines * height;
+        dispatchAltScreenWheel(lines, touch);
+      }
+
+      function dispatchAltScreenWheel(lines, touch) {
+        const screen = root.querySelector(".xterm-screen");
+        if (!screen) {
+          return;
+        }
+        const rect = screen.getBoundingClientRect();
+        const clientX = clamp(touch.clientX, rect.left, Math.max(rect.left, rect.right - 1));
+        const clientY = clamp(touch.clientY, rect.top, Math.max(rect.top, rect.bottom - 1));
+        const captured = [];
+        altScreenScrollCapture = captured;
+        try {
+          // One event per line: xterm encodes each wheel event as a single
+          // per-click report, so magnitude must come from repetition.
+          for (let line = 0; line < Math.abs(lines); line += 1) {
+            screen.dispatchEvent(new WheelEvent("wheel", {
+              bubbles: true,
+              cancelable: true,
+              clientX,
+              clientY,
+              deltaMode: WHEEL_DELTA_LINE_MODE,
+              deltaY: lines < 0 ? -1 : 1
+            }));
+          }
+        } finally {
+          altScreenScrollCapture = null;
+        }
+        postTerminalInput(captured);
+      }
+
+      function postTerminalInput(chunks) {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+        let byteLength = 0;
+        for (const chunk of chunks) {
+          byteLength += chunk.length;
+        }
+        if (byteLength === 0) {
+          return;
+        }
+        let binary = "";
+        for (const chunk of chunks) {
+          for (let index = 0; index < chunk.length; index += 1) {
+            binary += String.fromCharCode(chunk[index]);
+          }
+        }
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: "terminal-input",
+          dataB64: btoa(binary)
+        }));
       }
 
       function isNearBottom() {

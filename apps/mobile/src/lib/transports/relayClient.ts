@@ -372,6 +372,9 @@ export function createRelayDesktopClient({
       return {
         close() {
           client.detach(taskId, "terminal");
+        },
+        sendInput(dataB64: string) {
+          client.sendTermInput(taskId, dataB64);
         }
       } satisfies TaskTerminalSubscription;
     },

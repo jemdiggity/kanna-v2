@@ -87,6 +87,7 @@ interface TaskScreenProps {
   onReadTaskFile(path: string): Promise<TaskFileContent>;
   onReadTaskDiff(request: TaskDiffRequest): Promise<TaskDiffContent>;
   onSendInput(input: string): void;
+  onSendTerminalInput?(dataB64: string): void;
   onStopAgent(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
   onRecoverTaskCreation(): void;
@@ -131,6 +132,7 @@ export function TaskScreen({
   onReadTaskFile,
   onReadTaskDiff,
   onSendInput,
+  onSendTerminalInput,
   onStopAgent,
   onResolveAgentPermission,
   onRecoverTaskCreation,
@@ -411,6 +413,7 @@ export function TaskScreen({
             onOpenFile={(path, line) => {
               setSelectedFile({ path, line, previewRevision });
             }}
+            onTerminalInput={onSendTerminalInput}
           />
         ) : (
           <View style={styles.terminalSkeleton}>

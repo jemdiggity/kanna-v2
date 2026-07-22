@@ -561,6 +561,12 @@ function TaskDetailRoute({
           void controller.sendTaskInput(durableTaskId, input);
         }
       }}
+      onSendTerminalInput={(dataB64) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) {
+          controller.sendTaskTerminalInput(durableTaskId, dataB64);
+        }
+      }}
       onStopAgent={() => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) controller.interruptTaskAgent(durableTaskId);

@@ -516,6 +516,37 @@ describe("createLanTransport", () => {
     expect(socket.close).toHaveBeenCalledTimes(1);
   });
 
+  it("sends alt-screen scroll bytes as term_input frames over the LAN KSP route", () => {
+    const fetchImpl = vi.fn<FetchLike>();
+    const sent: ClientFrame[] = [];
+    const socket: WebSocketLike = {
+      send: vi.fn((payload: string) => {
+        sent.push(JSON.parse(payload) as ClientFrame);
+      }),
+      close: vi.fn(),
+      onopen: null,
+      onclose: null,
+      onerror: null,
+      onmessage: null
+    };
+    const transport = createLanTransport(
+      "http://127.0.0.1:48120",
+      fetchImpl,
+      vi.fn(() => socket)
+    );
+
+    const subscription = transport.observeTaskTerminal("task-1", () => {});
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" } satisfies ServerFrame) });
+    subscription.sendInput?.("G1s8NjU7MTsxTQ==");
+
+    expect(sent).toEqual([
+      { type: "auth" },
+      { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
+      { type: "term_input", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" }
+    ]);
+  });
+
   it("observes agent events over the LAN KSP websocket route", () => {
     const fetchImpl = vi.fn<FetchLike>();
     const sent: ClientFrame[] = [];

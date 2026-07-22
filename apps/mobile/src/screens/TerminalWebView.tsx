@@ -30,11 +30,13 @@ interface TerminalWebViewProps {
   bottomInset?: number;
   onConsolePress?: () => void;
   onOpenFile?: (path: string, line?: number) => void;
+  onTerminalInput?: (dataB64: string) => void;
 }
 
 const ENABLE_E2E_TERMINAL_INSPECTION =
   process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1";
 const MAX_TERMINAL_SELECTION_LENGTH = 2_300_000;
+const MAX_TERMINAL_INPUT_LENGTH = 8_192;
 
 function clearTerminalSelectionScript(): string {
   return "window.__clearTerminalSelection(); true;";
@@ -97,7 +99,8 @@ export function TerminalWebView({
   fullscreen = false,
   bottomInset,
   onConsolePress,
-  onOpenFile
+  onOpenFile,
+  onTerminalInput
 }: TerminalWebViewProps) {
   const webViewRef = useRef<TerminalWebViewHandle>(null);
   const bridgeReadyRef = useRef(false);
@@ -245,6 +248,7 @@ export function TerminalWebView({
       path?: unknown;
       line?: unknown;
       text?: unknown;
+      dataB64?: unknown;
     };
 
     try {
@@ -324,6 +328,17 @@ export function TerminalWebView({
       setTerminalSelection(payload.text);
       setSelectionCopyError(null);
       setSelectionCopyPending(false);
+      return;
+    }
+
+    if (payload.type === "terminal-input") {
+      if (
+        typeof payload.dataB64 === "string" &&
+        payload.dataB64.length > 0 &&
+        payload.dataB64.length <= MAX_TERMINAL_INPUT_LENGTH
+      ) {
+        onTerminalInput?.(payload.dataB64);
+      }
       return;
     }
 

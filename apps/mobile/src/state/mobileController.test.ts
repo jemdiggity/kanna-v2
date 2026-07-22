@@ -50,6 +50,7 @@ function createTerminalSubscriptionMock(): {
   return {
     subscription: {
       close: vi.fn(),
+      sendInput: vi.fn(),
       setListener(nextListener) {
         listener = nextListener;
       }
@@ -5898,6 +5899,33 @@ describe("createMobileController", () => {
       expect(client.sendTaskInput).toHaveBeenCalledWith("task-1", input);
     }
   );
+
+  it("forwards alt-screen terminal scroll bytes to the active terminal stream", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    controller.sendTaskTerminalInput("task-1", "G1s8NjU7MTsxTQ==");
+
+    expect(client.__terminalStream.subscription.sendInput).toHaveBeenCalledWith(
+      "G1s8NjU7MTsxTQ=="
+    );
+  });
+
+  it("drops terminal scroll bytes addressed to a task without the active terminal stream", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    controller.sendTaskTerminalInput("task-other", "G1s8NjU7MTsxTQ==");
+    controller.sendTaskTerminalInput("task-1", "");
+
+    expect(client.__terminalStream.subscription.sendInput).not.toHaveBeenCalled();
+  });
 
   it("sends agent task input as plain text through the active agent stream", async () => {
     const store = createSessionStore();
