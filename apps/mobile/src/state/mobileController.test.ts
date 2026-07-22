@@ -5965,6 +5965,100 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks).toEqual([]);
   });
 
+  it("ignores duplicate close requests while one is already in flight", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    let resolveClose: () => void = () => undefined;
+    vi.mocked(client.closeTask).mockImplementation(
+      () => new Promise<void>((resolve) => {
+        resolveClose = resolve;
+      })
+    );
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+
+    const firstClose = controller.closeDesktopTask("task-1");
+    const duplicateClose = controller.closeDesktopTask("task-1");
+
+    expect(store.getState().pendingTaskAction).toEqual({
+      taskId: "task-1",
+      action: "close-task"
+    });
+
+    await duplicateClose;
+    expect(client.closeTask).toHaveBeenCalledTimes(1);
+
+    resolveClose();
+    await firstClose;
+
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(client.closeTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks stage advancement while a close is in flight and recovers after failure", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    let rejectClose: (error: Error) => void = () => undefined;
+    vi.mocked(client.closeTask).mockImplementation(
+      () => new Promise<void>((_resolve, reject) => {
+        rejectClose = reject;
+      })
+    );
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+
+    const pendingClose = controller.closeDesktopTask("task-1");
+    await expect(
+      controller.advanceDesktopTaskStage("task-1")
+    ).resolves.toBeNull();
+    expect(client.advanceTaskStage).not.toHaveBeenCalled();
+
+    rejectClose(new Error("daemon unavailable"));
+    await pendingClose;
+
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.getState().errorMessage).toBe("daemon unavailable");
+
+    await controller.advanceDesktopTaskStage("task-1");
+    expect(client.advanceTaskStage).toHaveBeenCalledWith("task-1");
+  });
+
+  it("ignores duplicate stage advancement while one is already in flight", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    let resolveAdvance: (response: { taskId: string }) => void = () => undefined;
+    vi.mocked(client.advanceTaskStage).mockImplementation(
+      () => new Promise((resolve) => {
+        resolveAdvance = resolve;
+      })
+    );
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+
+    const firstAdvance = controller.advanceDesktopTaskStage("task-1");
+    const duplicateAdvance = controller.advanceDesktopTaskStage("task-1");
+
+    expect(store.getState().pendingTaskAction).toEqual({
+      taskId: "task-1",
+      action: "advance-stage"
+    });
+
+    await expect(duplicateAdvance).resolves.toBeNull();
+    expect(client.advanceTaskStage).toHaveBeenCalledTimes(1);
+
+    resolveAdvance({ taskId: "task-pr" });
+    await firstAdvance;
+
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(client.advanceTaskStage).toHaveBeenCalledTimes(1);
+  });
+
   it("advances the selected task stage and opens the replacement task", async () => {
     const store = createSessionStore();
     const client = createClientMock();

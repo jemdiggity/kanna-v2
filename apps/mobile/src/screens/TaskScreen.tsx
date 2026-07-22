@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Keyboard,
   Pressable,
   ScrollView,
@@ -22,6 +23,7 @@ import type {
   TaskCompanionEventStatus,
   TaskCompanionStatus,
   TaskCreationPhase,
+  TaskStageAction,
   TaskTerminalStatus
 } from "../state/sessionStore";
 import type {
@@ -78,6 +80,7 @@ interface TaskScreenProps {
   companionEventStatus?: TaskCompanionEventStatus;
   quickReplies: readonly TaskQuickReply[];
   quickRepliesHydrated: boolean;
+  pendingTaskAction?: TaskStageAction | null;
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
@@ -121,6 +124,7 @@ export function TaskScreen({
   companionEventStatus = "idle",
   quickReplies,
   quickRepliesHydrated,
+  pendingTaskAction = null,
   onBack,
   onAdvanceTaskStage,
   onCloseTask,
@@ -256,7 +260,11 @@ export function TaskScreen({
     Keyboard.dismiss();
   };
   const sendDraftInput = () => submitInput(composerSnapshotRef.current.draftInput);
+  const isTaskActionPending = pendingTaskAction !== null;
   const openTaskActionMenu = () => {
+    if (isTaskActionPending) {
+      return;
+    }
     showTaskActionMenu((action: TaskAction) => {
       switch (action) {
         case "view-diff":
@@ -553,13 +561,32 @@ export function TaskScreen({
             </Pressable>
           ) : null}
           <Pressable
-            accessibilityLabel="Task actions"
+            accessibilityLabel={
+              pendingTaskAction === "close-task"
+                ? "Closing task"
+                : pendingTaskAction === "advance-stage"
+                  ? "Advancing task stage"
+                  : "Task actions"
+            }
             accessibilityRole="button"
+            accessibilityState={{
+              busy: isTaskActionPending,
+              disabled: isTaskActionPending
+            }}
+            disabled={isTaskActionPending}
             style={styles.plusButton}
             testID={MOBILE_E2E_IDS.taskMoreButton}
             onPress={openTaskActionMenu}
           >
-            <Text style={styles.plusButtonLabel}>+</Text>
+            {isTaskActionPending ? (
+              <ActivityIndicator
+                color="#E8F1FF"
+                size="small"
+                testID={MOBILE_E2E_IDS.taskActionPendingSpinner}
+              />
+            ) : (
+              <Text style={styles.plusButtonLabel}>+</Text>
+            )}
           </Pressable>
         </View>
 

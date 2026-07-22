@@ -2156,6 +2156,9 @@ export function createMobileController(
     },
 
     async advanceDesktopTaskStage(taskId) {
+      if (!store.beginTaskAction(taskId, "advance-stage")) {
+        return null;
+      }
       try {
         const sourceTask = findTask(taskId);
         const ownerDesktopId =
@@ -2197,6 +2200,8 @@ export function createMobileController(
       } catch (error) {
         fail(error);
         return null;
+      } finally {
+        store.finishTaskAction(taskId, "advance-stage");
       }
     },
 
@@ -2270,6 +2275,9 @@ export function createMobileController(
     },
 
     async closeDesktopTask(taskId) {
+      if (!store.beginTaskAction(taskId, "close-task")) {
+        return;
+      }
       try {
         await client.closeTask(taskId);
         pendingTaskIdentities.delete(taskId);
@@ -2284,6 +2292,8 @@ export function createMobileController(
         reconcileSelectedTaskRead();
       } catch (error) {
         fail(error);
+      } finally {
+        store.finishTaskAction(taskId, "close-task");
       }
     },
 

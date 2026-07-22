@@ -1,6 +1,7 @@
 import { ActionSheetIOS, Alert, Platform } from "react-native";
+import type { TaskStageAction } from "../state/sessionStore";
 
-export type TaskAction = "view-diff" | "advance-stage" | "close-task";
+export type TaskAction = "view-diff" | TaskStageAction;
 
 const TASK_ACTIONS: ReadonlyArray<{
   id: TaskAction;
