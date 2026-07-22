@@ -384,7 +384,12 @@ impl RepoDefinitions {
             .snapshot
             .list_direct_entries(path)
             .map_err(|error| definition_error(&self.snapshot, path, error))?;
-        let mut names = BTreeSet::from(["default".to_string(), "qa".to_string()]);
+        let mut names = BTreeSet::from([
+            "default".to_string(),
+            "qa".to_string(),
+            "qa-dispatch".to_string(),
+            "specialty-review".to_string(),
+        ]);
         for entry in entries {
             let Some(name) = entry.strip_suffix(".json") else {
                 continue;
@@ -678,6 +683,12 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
             Some(include_str!("../../../../.kanna/pipelines/default.json"))
         }
         ".kanna/pipelines/qa.json" => Some(include_str!("../../../../.kanna/pipelines/qa.json")),
+        ".kanna/pipelines/qa-dispatch.json" => Some(include_str!(
+            "../../../../.kanna/pipelines/qa-dispatch.json"
+        )),
+        ".kanna/pipelines/specialty-review.json" => Some(include_str!(
+            "../../../../.kanna/pipelines/specialty-review.json"
+        )),
         ".kanna/agents/agent-factory/AGENT.md" => Some(include_str!(
             "../../../../.kanna/agents/agent-factory/AGENT.md"
         )),
@@ -706,6 +717,9 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
             "../../../../.kanna/agents/pipeline-factory/AGENT.md"
         )),
         ".kanna/agents/pr/AGENT.md" => Some(include_str!("../../../../.kanna/agents/pr/AGENT.md")),
+        ".kanna/agents/qa-dispatcher/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/qa-dispatcher/AGENT.md"
+        )),
         ".kanna/agents/pr/flavors/draft-pr/AGENT.md" => Some(include_str!(
             "../../../../.kanna/agents/pr/flavors/draft-pr/AGENT.md"
         )),
@@ -714,6 +728,24 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         )),
         ".kanna/agents/review/AGENT.md" => {
             Some(include_str!("../../../../.kanna/agents/review/AGENT.md"))
+        }
+        ".kanna/agents/review-compat/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/review-compat/AGENT.md"
+        )),
+        ".kanna/agents/review-concurrency/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/review-concurrency/AGENT.md"
+        )),
+        ".kanna/agents/review-migration/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/review-migration/AGENT.md"
+        )),
+        ".kanna/agents/review-perf/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/review-perf/AGENT.md"
+        )),
+        ".kanna/agents/review-security/AGENT.md" => Some(include_str!(
+            "../../../../.kanna/agents/review-security/AGENT.md"
+        )),
+        ".kanna/agents/review-ui/AGENT.md" => {
+            Some(include_str!("../../../../.kanna/agents/review-ui/AGENT.md"))
         }
         ".kanna/agents/setup/AGENT.md" => {
             Some(include_str!("../../../../.kanna/agents/setup/AGENT.md"))

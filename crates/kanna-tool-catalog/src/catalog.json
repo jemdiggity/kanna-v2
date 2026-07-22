@@ -83,7 +83,7 @@
     },
     {
       "name": "kanna_create_task",
-      "description": "Create a new Kanna task. When called from a Kanna task session, repo_id defaults to the current task's repo.",
+      "description": "Create a new Kanna task. When called from a Kanna task session, repo_id defaults to the current task's repo. `agent` optionally names an agent definition (e.g. a specialty review agent) to run the task's first stage with, overriding the pipeline stage's own agent binding.",
       "method": "POST",
       "path": "/v1/tasks",
       "response": "json",
@@ -92,6 +92,7 @@
         { "name": "prompt", "type": "string", "required": true, "location": "body" },
         { "name": "display_name", "type": "string", "required": false, "location": "body", "key": "displayName" },
         { "name": "pipeline_name", "type": "string", "required": false, "location": "body", "key": "pipelineName" },
+        { "name": "agent", "type": "string", "required": false, "location": "body" },
         { "name": "base_ref", "type": "string", "required": false, "location": "body", "key": "baseRef" },
         { "name": "agent_provider", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
         { "name": "agent_type", "type": "string", "required": false, "location": "body", "key": "agentType", "default": "pty" },

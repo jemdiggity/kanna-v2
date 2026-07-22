@@ -1,0 +1,38 @@
+{
+  "$schema": "./schema.json",
+  "name": "qa-dispatch",
+  "description": "Implementation (commit as post) -> dispatched specialty reviews -> PR flow",
+  "stages": [
+    {
+      "name": "in progress",
+      "description": "Agent implements the task, then commits as the stage's tail work",
+      "agent": "implement",
+      "prompt": "$TASK_PROMPT",
+      "policy": { "transition": "manual", "revision_transition": "auto" },
+      "post": {
+        "name": "commit",
+        "agent": "commit",
+        "prompt": "Commit the relevant work for this task before QA review. Original task: $TASK_PROMPT"
+      }
+    },
+    {
+      "name": "review",
+      "description": "QA dispatcher selects the specialty reviews this branch needs, fans them out as child tasks, and aggregates their verdicts",
+      "agent": "qa-dispatcher",
+      "prompt": "Dispatch the specialty reviews needed for branch $BRANCH against base $BASE_REF, then aggregate their verdicts into one review decision. Original task: $TASK_PROMPT.",
+      "policy": { "transition": "auto" }
+    },
+    {
+      "name": "pr",
+      "description": "Agent creates a GitHub PR after dispatched QA passes",
+      "agent": "pr",
+      "prompt": "Create a PR for the QA-approved work on branch $BRANCH.",
+      "policy": { "transition": "manual" },
+      "post": {
+        "name": "approve",
+        "agent": "approve",
+        "prompt": "Approve the PR for branch $BRANCH after PR creation and signal the merge master. Previous result: $PREV_RESULT"
+      }
+    }
+  ]
+}

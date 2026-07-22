@@ -230,6 +230,11 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         base_ref: Option<String>,
 
+        /// Agent definition name to run the task's first stage with,
+        /// overriding the pipeline stage's own agent binding
+        #[arg(long)]
+        agent: Option<String>,
+
         /// Optional agent provider override
         #[arg(long)]
         agent_provider: Option<String>,

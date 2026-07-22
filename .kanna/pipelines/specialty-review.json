@@ -1,0 +1,13 @@
+{
+  "$schema": "./schema.json",
+  "name": "specialty-review",
+  "description": "Single-stage pipeline for specialty review child tasks; the dispatcher binds the specialty agent at creation",
+  "stages": [
+    {
+      "name": "review",
+      "description": "Specialty reviewer inspects the dispatched branch and records a PASS/FAIL verdict, then parks until the dispatcher collects the verdict and closes the child",
+      "prompt": "$TASK_PROMPT",
+      "policy": { "transition": "manual" }
+    }
+  ]
+}

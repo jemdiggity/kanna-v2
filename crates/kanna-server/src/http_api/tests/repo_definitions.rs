@@ -337,7 +337,15 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     assert_eq!(manifest["defaultPipeline"], "remote-qa");
     assert_eq!(
         manifest["pipelines"],
-        json!(["default", "qa", "release.v2", "remote-qa", "zeta"])
+        json!([
+            "default",
+            "qa",
+            "qa-dispatch",
+            "release.v2",
+            "remote-qa",
+            "specialty-review",
+            "zeta"
+        ])
     );
     assert_eq!(
         manifest
@@ -457,7 +465,10 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(manifest["refName"], "origin/main");
     assert_eq!(manifest["config"], json!({}));
     assert_eq!(manifest["defaultPipeline"], "default");
-    assert_eq!(manifest["pipelines"], json!(["default", "qa"]));
+    assert_eq!(
+        manifest["pipelines"],
+        json!(["default", "qa", "qa-dispatch", "specialty-review"])
+    );
 
     let (status, pipeline) =
         json_response(&app, "/v1/repos/repo-1/kanna-definitions/pipelines/default").await;

@@ -90,6 +90,20 @@ pub struct TaskDetail {
     pub commits_ahead: i64,
     pub commits_behind: i64,
     pub dirty: bool,
+    /// The task's most recent stage run, when one exists. Fan-out
+    /// orchestrators (e.g. the QA dispatcher) read a finished child's
+    /// verdict from here after `kanna_wait_task` resolves.
+    pub latest_run: Option<TaskLatestRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLatestRun {
+    pub stage: String,
+    pub kind: String,
+    pub status: String,
+    pub summary: Option<String>,
+    pub finished_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,7 +308,16 @@ impl MobileApi {
             ._db
             .get_task_worktree_path(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
-        Ok(Some(map_task_detail(item, repo.as_ref(), worktree_path)))
+        let latest_run = self
+            ._db
+            .latest_stage_run(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
+        Ok(Some(map_task_detail(
+            item,
+            repo.as_ref(),
+            worktree_path,
+            latest_run,
+        )))
     }
 }
 
@@ -408,6 +431,7 @@ fn map_task_detail(
     item: crate::db::PipelineItem,
     repo: Option<&crate::db::Repo>,
     worktree_path: Option<String>,
+    latest_run: Option<crate::db::StageRun>,
 ) -> TaskDetail {
     let prompt = item.prompt.clone();
     let title = item
@@ -460,6 +484,30 @@ fn map_task_detail(
         commits_ahead: git_state.commits_ahead,
         commits_behind: git_state.commits_behind,
         dirty: git_state.dirty,
+        latest_run: latest_run.map(map_task_latest_run),
+    }
+}
+
+fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {
+    let summary = run
+        .result
+        .as_deref()
+        .and_then(|result| serde_json::from_str::<serde_json::Value>(result).ok())
+        .and_then(|result| {
+            result
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        // Orphaned-workspace runs store a plain-text result instead of the
+        // `{status, summary, metadata}` verdict JSON; pass it through as-is.
+        .or_else(|| run.result.clone());
+    TaskLatestRun {
+        stage: run.stage,
+        kind: run.kind,
+        status: run.status,
+        summary,
+        finished_at: run.finished_at,
     }
 }
 
@@ -995,6 +1043,95 @@ mod tests {
         let detail = api.get_task("task-stored").unwrap().unwrap();
 
         assert_eq!(detail.stage_transition.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn get_task_surfaces_latest_stage_run_verdict() {
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: Db::test_db_path("task-detail-latest-run"),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-no-runs",
+            "repo-1",
+            "no runs yet",
+            None,
+            "in progress",
+            "2026-07-22 09:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-reviewed",
+            "repo-1",
+            "specialty review child",
+            Some("Security Review"),
+            "review",
+            "2026-07-22 09:05:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-1",
+            task_id: "task-reviewed",
+            stage: "review",
+            kind: "main",
+            agent: Some("review-security"),
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-reviewed"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        db.finish_latest_running_stage_run(
+            "task-reviewed",
+            "failed",
+            Some(
+                &serde_json::json!({
+                    "status": "failure",
+                    "summary": "FAIL: token echoed to the daemon log",
+                    "metadata": null,
+                })
+                .to_string(),
+            ),
+            Some("FAIL: token echoed to the daemon log"),
+        )
+        .unwrap();
+
+        let api = super::MobileApi::new(config, db);
+
+        let detail = api.get_task("task-no-runs").unwrap().unwrap();
+        assert_eq!(detail.latest_run, None);
+
+        let detail = api.get_task("task-reviewed").unwrap().unwrap();
+        let latest_run = detail.latest_run.expect("latest run");
+        assert_eq!(latest_run.stage, "review");
+        assert_eq!(latest_run.kind, "main");
+        assert_eq!(latest_run.status, "failed");
+        assert_eq!(
+            latest_run.summary.as_deref(),
+            Some("FAIL: token echoed to the daemon log")
+        );
+        assert!(latest_run.finished_at.is_some());
     }
 
     #[test]
