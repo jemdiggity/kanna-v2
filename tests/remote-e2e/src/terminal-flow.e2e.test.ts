@@ -93,6 +93,49 @@ describe("remote task terminal flow E2E", () => {
     }
   }, 45_000);
 
+  it("shows repository setup commands and their live output in the mobile terminal stream", async () => {
+    // The command text and its output are distinct strings so this proves the
+    // terminal shows both the echoed `$ command` line and what it printed.
+    const setupCommand = "echo setup-ran-$((6*7))";
+    const setupOutput = "setup-ran-42";
+    const task = await createScriptedTask(harness, {
+      displayName: "Visible setup output task",
+      setupCommands: [setupCommand]
+    });
+    // Attach immediately after the create response, exactly like the mobile
+    // app does when it auto-connects to a freshly created task.
+    const events = collectTerminalEvents(harness, task.taskId);
+
+    try {
+      const output = await waitForTerminalOutput(events, "SCRIPT_READY", 30_000);
+      const bannerIndex = output.indexOf("Running startup...");
+      const commandIndex = output.indexOf(`$ ${setupCommand}`);
+      const outputIndex = output.indexOf(setupOutput, commandIndex + setupCommand.length + 2);
+      const agentIndex = output.indexOf("SCRIPT_READY");
+      expect(bannerIndex).toBeGreaterThanOrEqual(0);
+      expect(commandIndex).toBeGreaterThan(bannerIndex);
+      expect(outputIndex).toBeGreaterThan(commandIndex);
+      expect(agentIndex).toBeGreaterThan(outputIndex);
+    } finally {
+      events.close();
+    }
+
+    // A client that attaches after setup finished (app reopened mid-task)
+    // must still see the setup scrollback in the hydration snapshot.
+    const lateEvents = collectTerminalEvents(harness, task.taskId);
+    try {
+      const snapshot = await lateEvents.waitForSnapshot({
+        minEncodedChars: 0,
+        sentinel: setupOutput
+      });
+      const decoded = Buffer.from(snapshot.dataB64, "base64").toString("utf8");
+      expect(decoded).toContain("Running startup...");
+      expect(decoded).toContain(`$ ${setupCommand}`);
+    } finally {
+      lateEvents.close();
+    }
+  }, 60_000);
+
   it("sends remote input to the agent PTY and rejects input after exit", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Terminal input task"
