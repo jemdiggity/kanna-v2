@@ -95,10 +95,11 @@ async fn wait_for_server_port_to_close(port: u16, attempts: usize) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::mobile::tests::{free_loopback_port, process_is_running};
+    use crate::commands::mobile::tests::process_is_running;
     use std::os::unix::process::ExitStatusExt;
     use std::process::Stdio;
     use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::{Child, Command};
 
     #[test]
@@ -108,8 +109,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn stop_server_on_port_escalates_to_sigkill_when_sigterm_is_ignored() {
-        let port = free_loopback_port();
-        let mut child = start_sigterm_ignoring_listener(port).await;
+        let (mut child, port) = start_sigterm_ignoring_listener().await;
         let child_pid = child.id().expect("listener should have pid");
 
         stop_server_on_port(port)
@@ -138,45 +138,47 @@ mod tests {
         drop(rebound);
     }
 
-    async fn start_sigterm_ignoring_listener(port: u16) -> Child {
+    async fn start_sigterm_ignoring_listener() -> (Child, u16) {
         let script = r#"
 import signal
 import socket
-import sys
 import time
 
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", int(sys.argv[1])))
+sock.bind(("127.0.0.1", 0))
 sock.listen(1)
+print(sock.getsockname()[1], flush=True)
 while True:
     time.sleep(1)
 "#;
-        let mut child = Command::new("python3")
+        let mut command = Command::new("python3");
+        command
             .arg("-c")
             .arg(script)
-            .arg(port.to_string())
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command
             .spawn()
             .expect("python3 should start SIGTERM-ignoring listener");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while tokio::time::Instant::now() < deadline {
-            if let Some(status) = child
-                .try_wait()
-                .expect("listener status should be readable")
-            {
-                panic!("SIGTERM-ignoring listener exited early with {status}");
-            }
-            if !server_pids_on_port(port).await.unwrap().is_empty() {
-                return child;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        panic!("timed out waiting for SIGTERM-ignoring listener on port {port}");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("listener stdout should be piped");
+        let mut lines = BufReader::new(stdout).lines();
+        let ready = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
+        let port = match ready {
+            Ok(Ok(Some(line))) => line
+                .trim()
+                .parse::<u16>()
+                .expect("listener should report a valid port"),
+            Ok(Ok(None)) => panic!("listener closed stdout before reporting its port"),
+            Ok(Err(error)) => panic!("failed to read listener port: {error}"),
+            Err(_) => panic!("timed out waiting for listener port"),
+        };
+        (child, port)
     }
 }
