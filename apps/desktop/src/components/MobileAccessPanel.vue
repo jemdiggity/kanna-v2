@@ -26,6 +26,9 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
 const pairingQrUrl = ref<string | null>(null);
 const pairingQrError = ref<string | null>(null);
 const pairingExpired = ref(false);
+const pairingActionLabel = computed(() =>
+  props.pairingCode && !pairingExpired.value ? "Refresh" : "Start pairing"
+);
 let qrGeneration = 0;
 let expiryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -122,7 +125,7 @@ onBeforeUnmount(() => {
         data-testid="mobile-access-start-pairing"
         @click="emit('start-pairing')"
       >
-        Start pairing
+        {{ pairingActionLabel }}
       </button>
     </div>
   </section>
