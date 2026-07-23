@@ -947,6 +947,7 @@ mod tests {
     fn transfer_sidecar_env_defaults_daemon_dir_when_env_is_missing() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::unset("KANNA_DAEMON_DIR");
+        let _transfer_root = EnvVarGuard::unset("KANNA_TRANSFER_ROOT");
         let temp = TestTempDir::new();
 
         let env = build_transfer_sidecar_env(temp.path(), Some("Jeremy's MacBook Pro"))
@@ -966,6 +967,7 @@ mod tests {
     fn transfer_sidecar_env_forwards_mobile_server_port_for_peer_actions() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::set("KANNA_MOBILE_SERVER_PORT", "48129");
+        let _transfer_root = EnvVarGuard::unset("KANNA_TRANSFER_ROOT");
         let temp = TestTempDir::new();
 
         let env = build_transfer_sidecar_env(temp.path(), Some("Jeremy's MacBook Pro"))
@@ -981,6 +983,7 @@ mod tests {
     fn transfer_sidecar_env_uses_staging_bundle_mobile_server_port_without_env() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::unset("KANNA_MOBILE_SERVER_PORT");
+        let _transfer_root = EnvVarGuard::unset("KANNA_TRANSFER_ROOT");
         let temp = TestTempDir::new();
 
         let env = build_transfer_sidecar_env_for_bundle_identifier(

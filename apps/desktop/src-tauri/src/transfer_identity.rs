@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn creates_and_persists_transfer_identity_when_missing() {
         let temp = TestTempDir::new();
-        let transfer_root = resolve_transfer_root(temp.path());
+        let transfer_root = resolve_transfer_root_with_override(temp.path(), None);
 
         let identity = load_or_create_transfer_identity_for_root(&transfer_root)
             .expect("missing transfer identity should be created");
