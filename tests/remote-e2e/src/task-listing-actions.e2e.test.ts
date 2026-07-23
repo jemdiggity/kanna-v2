@@ -153,7 +153,13 @@ describe("remote task listing, creation, and actions E2E", () => {
     const advanceTask = await createScriptedTask(harness, {
       displayName: "Remote advance task"
     });
-    await setPipelineDefinition(harness, advanceTask.taskId, "remote-linear-manual", LINEAR_MANUAL_PIPELINE);
+    await setPipelineDefinition(
+      harness,
+      advanceTask.taskId,
+      "remote-linear-manual",
+      LINEAR_MANUAL_PIPELINE,
+      "manual"
+    );
 
     const advanceResponse = asActionResponse(await invokeDesktop(
       harness,
@@ -189,7 +195,13 @@ describe("remote task listing, creation, and actions E2E", () => {
     const successTask = await createScriptedTask(harness, {
       displayName: "Remote complete success task"
     });
-    await setPipelineDefinition(harness, successTask.taskId, "remote-linear-auto", LINEAR_AUTO_PIPELINE);
+    await setPipelineDefinition(
+      harness,
+      successTask.taskId,
+      "remote-linear-auto",
+      LINEAR_AUTO_PIPELINE,
+      "auto"
+    );
     const successResponse = asActionResponse(await invokeDesktop(
       harness,
       "POST",
@@ -211,7 +223,13 @@ describe("remote task listing, creation, and actions E2E", () => {
     const failureTask = await createScriptedTask(harness, {
       displayName: "Remote complete failure task"
     });
-    await setPipelineDefinition(harness, failureTask.taskId, "remote-linear-auto", LINEAR_AUTO_PIPELINE);
+    await setPipelineDefinition(
+      harness,
+      failureTask.taskId,
+      "remote-linear-auto",
+      LINEAR_AUTO_PIPELINE,
+      "auto"
+    );
     const failureResponse = asActionResponse(await invokeDesktop(
       harness,
       "POST",
@@ -357,14 +375,24 @@ async function setPipelineDefinition(
   harness: RemoteHarness,
   taskId: string,
   pipelineName: string,
-  pipelineDefinition: string
+  pipelineDefinition: string,
+  completionTransition: "manual" | "auto"
 ): Promise<void> {
-  const rowsAffected = await executeSql(
+  const taskRowsAffected = await executeSql(
     harness,
     "UPDATE pipeline_item SET pipeline = ?1, pipeline_def = ?2 WHERE id = ?3",
     [pipelineName, pipelineDefinition, taskId]
   );
-  expect(rowsAffected).toBe(1);
+  expect(taskRowsAffected).toBe(1);
+
+  const runRowsAffected = await executeSql(
+    harness,
+    `UPDATE stage_run
+        SET completion_transition = ?1
+      WHERE task_id = ?2 AND kind = 'main' AND status = 'running'`,
+    [completionTransition, taskId]
+  );
+  expect(runRowsAffected).toBe(1);
 }
 
 async function waitForTaskStage(harness: RemoteHarness, taskId: string, stage: string): Promise<void> {
