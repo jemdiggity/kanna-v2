@@ -60,6 +60,13 @@ an actual Claude session. Tests reach Vue internals via
 and the `--ignored` Rust integration tests drive real agent CLIs. Run them
 deliberately, not as part of routine iteration.
 
+The live CLI compatibility suite includes a two-process conversation-resume
+contract for Claude, Codex, OpenCode, Copilot, and Antigravity. Each provider
+must recover a random nonce from the first process after the second process
+resumes its native session ID. Missing binaries and recognized authentication
+failures are reported as explicit skips; a rejected resume command, empty
+turn, or lost nonce fails.
+
 ## The E2E coverage expectation
 
 Any behavior that crosses component or system boundaries (UI flows,

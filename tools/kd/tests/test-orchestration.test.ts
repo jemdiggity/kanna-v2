@@ -20,12 +20,14 @@ const expectedLiveCliContractTests = [
   "opencode-exec-json.test.ts",
   "opencode-flags.test.ts",
   "output.test.ts",
+  "provider-resume.test.ts",
   "settings.test.ts",
 ];
 
 const expectedOfflineCliContractTests = [
   "agent-flavor-contracts.test.ts",
   "claude-helper.test.ts",
+  "provider-resume-helper.test.ts",
 ];
 
 interface PackageManifest {
@@ -213,7 +215,8 @@ describe("test orchestration", () => {
 
     const offlineTests = readdirSync(cliContractOfflineTestsDir)
       .filter((name) => name.endsWith(".test.ts"));
-    const externalRunnerImport = /from\s+["'][^"']*\/helpers\/(?:claude|copilot|codex|opencode)["']/;
+    const externalRunnerImport =
+      /from\s+["'][^"']*\/helpers\/(?:antigravity|claude|copilot|codex|opencode)["']/;
 
     for (const name of offlineTests) {
       const source = readFileSync(resolve(cliContractOfflineTestsDir, name), "utf8");
@@ -251,7 +254,13 @@ describe("test orchestration", () => {
     expect(guard).toContain('process.env.KANNA_RUN_LIVE_AGENT_CLI_CONTRACTS !== "1"');
     expect(guard).toContain("Live agent CLI compatibility tests are disabled");
 
-    for (const helper of ["claude.ts", "copilot.ts", "codex.ts", "opencode.ts"]) {
+    for (const helper of [
+      "antigravity.ts",
+      "claude.ts",
+      "copilot.ts",
+      "codex.ts",
+      "opencode.ts",
+    ]) {
       const source = readFileSync(
         resolve(repoRoot, "tests/cli-contract/helpers", helper),
         "utf8",
