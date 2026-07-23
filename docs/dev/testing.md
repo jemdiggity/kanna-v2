@@ -2,15 +2,16 @@
 
 ## Canonical verification
 
-Every change should pass these two before it is considered done:
+Every change should pass the local gate before it is considered done:
 
 ```sh
-pnpm test        # turbo-run JS/TS suites across the workspace
-./kd test rust   # Rust workspace tests
+./kd test ci     # pnpm test, Rust, then Remote E2E; sequential and fail-fast
 ```
 
 Plus the static checks: `pnpm exec tsc --noEmit`, `cargo clippy`,
 `cargo fmt --all` (Rust formatter is pinned by `rust-toolchain.toml`).
+For focused iteration, each phase remains available as `pnpm test`,
+`./kd test rust`, and `./kd test remote-e2e`.
 
 ## Test taxonomy
 
@@ -22,7 +23,7 @@ Plus the static checks: `pnpm exec tsc --noEmit`, `cargo clippy`,
 | CLI contract (offline) | `tests/cli-contract/tests/offline/` | `pnpm test` | — |
 | CLI contract (live) | `tests/cli-contract/tests/live/` | `pnpm test:agent-cli-compat` | installed + authenticated agent CLIs; consumes quota |
 | TUI fidelity | `tests/tui-fidelity/` | `pnpm test:tui-fidelity` | live/process-heavy |
-| Remote E2E | `tests/remote-e2e/` | `pnpm test:remote-e2e` | see `docs/2026-07-09-remote-e2e-layer-c-d-runbook.md` |
+| Remote E2E | `tests/remote-e2e/` | `./kd test remote-e2e` | included in `./kd test ci`; see `docs/2026-07-09-remote-e2e-layer-c-d-runbook.md` |
 | Desktop E2E | `apps/desktop/tests/e2e/` | `cd apps/desktop && pnpm test:e2e` | a running worktree dev instance (below) |
 | Claude-CLI Rust integration | `apps/desktop/src-tauri/tests/` | `cargo test --test agent_cli_integration -- --ignored --nocapture` | `claude` in PATH |
 | Mobile Appium E2E | `apps/mobile` | `pnpm --dir apps/mobile run test:e2e:smoke` (+ `:preflight`) | local simulator; device variants are human-run |
@@ -56,9 +57,10 @@ an actual Claude session. Tests reach Vue internals via
 
 ### Live suites cost real quota
 
-`pnpm test:agent-cli-compat`, `pnpm test:remote-e2e`, `pnpm test:tui-fidelity`,
-and the `--ignored` Rust integration tests drive real agent CLIs. Run them
-deliberately, not as part of routine iteration.
+`pnpm test:agent-cli-compat`, `pnpm test:tui-fidelity`, and the `--ignored`
+Rust integration tests drive real agent CLIs. Run them deliberately, not as
+part of routine iteration. The default Remote E2E phase is emulator-backed
+and uses the scripted agent, so it is safe for the local gate.
 
 ## The E2E coverage expectation
 

@@ -94,12 +94,11 @@ never start those by hand.
 ## Verify your setup
 
 ```sh
-pnpm test           # canonical JS/TS test suite (turbo across the workspace)
-./kd test rust      # canonical Rust test suite
+./kd test ci        # canonical local gate: pnpm, Rust, then Remote E2E
 ```
 
-Both should pass on a clean checkout. See [Testing](testing.md) for the rest of
-the taxonomy (E2E, live agent suites, mobile).
+It should pass on a clean checkout. See [Testing](testing.md) for focused
+commands and the rest of the taxonomy (live agent suites, mobile).
 
 ## Developing Kanna in Kanna
 
