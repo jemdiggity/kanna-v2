@@ -92,7 +92,7 @@ describe("LAN task loop E2E", () => {
     expect(expiresInMs).toBeLessThanOrEqual(305_000);
 
     await expect(transport.getStatus()).resolves.toMatchObject({
-      pairingCode: pairing.code
+      pairingCode: null
     });
   });
 
