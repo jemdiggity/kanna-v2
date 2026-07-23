@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import {
+  listAntigravityConversationIds,
+  runAntigravityPrint,
+} from "../../helpers/antigravity";
 import { isClaudeUnavailable, runClaude } from "../../helpers/claude";
 import { runCodexExec, runCodexExecResume } from "../../helpers/codex";
 import { runCopilot } from "../../helpers/copilot";
@@ -14,6 +18,7 @@ import {
   providerUnavailableReason,
   recallPrompt,
   rememberPrompt,
+  selectNewConversationId,
 } from "../../helpers/provider-resume";
 
 function diagnostic(provider: string, stdout: string, stderr: string): string {
@@ -187,4 +192,42 @@ describe("live provider conversation resume", () => {
       diagnostic("OpenCode resumed turn", resumed.stdout, resumed.stderr),
     ).toContain(nonce);
   }, 240_000);
+
+  it("Antigravity resumes a separately launched conversation by conversation ID", async ({ skip }) => {
+    const nonce = createResumeNonce("antigravity");
+    const before = await listAntigravityConversationIds();
+
+    let first;
+    try {
+      first = await runAntigravityPrint(rememberPrompt(nonce));
+    } catch (error) {
+      const reason = providerUnavailableReason(String(error));
+      if (reason) skip(reason);
+      throw error;
+    }
+    const firstUnavailable = providerUnavailableReason(`${first.stdout}\n${first.stderr}`);
+    if (firstUnavailable) skip(firstUnavailable);
+    expect(
+      first.exitCode,
+      diagnostic("Antigravity initial turn", first.stdout, first.stderr),
+    ).toBe(0);
+
+    const after = await listAntigravityConversationIds();
+    const sessionId = selectNewConversationId(before, after);
+    const resumed = await runAntigravityPrint(recallPrompt(), {
+      conversationId: sessionId,
+    });
+    const resumedUnavailable = providerUnavailableReason(
+      `${resumed.stdout}\n${resumed.stderr}`,
+    );
+    if (resumedUnavailable) skip(resumedUnavailable);
+    expect(
+      resumed.exitCode,
+      diagnostic("Antigravity resumed turn", resumed.stdout, resumed.stderr),
+    ).toBe(0);
+    expect(
+      resumed.stdout,
+      diagnostic("Antigravity resumed turn", resumed.stdout, resumed.stderr),
+    ).toContain(nonce);
+  }, 320_000);
 });
