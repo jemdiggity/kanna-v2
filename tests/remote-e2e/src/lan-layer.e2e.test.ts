@@ -78,7 +78,7 @@ describe("LAN task loop E2E", () => {
     const transport = createLanClient(harness);
     const before = Date.now();
 
-    const pairing = await transport.createPairingSession();
+    const pairing = await harness.createDesktopPairingSession();
     const expiresInMs = pairing.expiresAtUnixMs - before;
 
     expect(pairing).toMatchObject({
