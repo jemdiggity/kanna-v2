@@ -47,12 +47,9 @@ describe("remote desktop credential auth and discovery E2E", () => {
   }, 30_000);
 
   it("publishes Buffy-owned desktop credentials and reconnects kanna-server with desktop secret relay auth", async () => {
-    const localPairing = asPairingSession(await harness.client.invokeDesktop({
-      desktopId: harness.desktopId,
-      method: "POST",
-      path: "/v1/pairing/sessions",
-      body: null
-    }));
+    const localPairing = asPairingSession(
+      await harness.createDesktopPairingSession()
+    );
     expect(localPairing).toMatchObject({
       desktopId: harness.desktopId,
       desktopName: DESKTOP_NAME

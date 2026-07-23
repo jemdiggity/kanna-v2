@@ -19,6 +19,10 @@ import {
   stagingServerTomlLines,
   type StagingBuffyCredentials
 } from "./staging";
+import {
+  createDesktopPairingSession as requestDesktopPairingSession,
+  type DesktopPairingSession
+} from "./desktopPairing";
 import { writeScriptedAgentBinary } from "./scriptedAgent";
 import type { RelayDesktopClient } from "../../../apps/mobile/src/lib/transports/relayClient";
 
@@ -34,6 +38,7 @@ export interface RemoteHarnessOptions {
 
 export interface RemoteHarness {
   client: RelayDesktopClient;
+  createDesktopPairingSession(): Promise<DesktopPairingSession>;
   desktopId: string;
   lanBaseUrl: string;
   repoRoot: string;
@@ -437,6 +442,8 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
 
     const harness: RemoteHarness = {
       client,
+      createDesktopPairingSession: () =>
+        requestDesktopPairingSession(`http://127.0.0.1:${ports.server}`),
       desktopId,
       lanBaseUrl: `http://127.0.0.1:${ports.server}`,
       repoRoot,
