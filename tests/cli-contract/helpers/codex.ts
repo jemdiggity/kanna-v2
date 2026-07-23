@@ -100,6 +100,46 @@ export async function runCodexExec(opts: {
   return { stdout, stderr, exitCode, lines, duration: Date.now() - start };
 }
 
+/**
+ * Resume an existing Codex thread through the headless JSON contract.
+ */
+export async function runCodexExecResume(opts: {
+  sessionId: string;
+  prompt: string;
+  flags?: string[];
+  cwd?: string;
+  timeoutMs?: number;
+}): Promise<CodexResult> {
+  const binary = await findCodexBinary();
+  const args = [
+    "exec",
+    "resume",
+    opts.sessionId,
+    ...(opts.flags || []),
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--json",
+    opts.prompt,
+  ];
+
+  const start = Date.now();
+  const result = await runCodexRaw(args, {
+    cwd: opts.cwd ?? "/tmp",
+    timeoutMs: opts.timeoutMs ?? 120_000,
+  });
+  const lines: Array<Record<string, unknown>> = [];
+  for (const line of result.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      lines.push(JSON.parse(trimmed));
+    } catch {
+      // Not JSON — skip.
+    }
+  }
+
+  return { ...result, lines, duration: Date.now() - start };
+}
+
 export async function runCodexRaw(args: string[], opts?: {
   cwd?: string;
   env?: NodeJS.ProcessEnv;

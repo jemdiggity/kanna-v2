@@ -81,6 +81,16 @@ export async function runOpenCodeRaw(args: string[], opts?: {
   });
 }
 
+export async function isOpenCodeProviderAuthenticated(): Promise<boolean> {
+  const result = await runOpenCodeRaw(["auth", "list"]);
+  const plain = `${result.stdout}\n${result.stderr}`.replace(
+    // eslint-disable-next-line no-control-regex
+    /\u001b\[[0-9;]*m/g,
+    "",
+  );
+  return /(?:^|\n)●\s+opencode(?:\s|$)/i.test(plain);
+}
+
 export async function runOpenCodeJson(opts: {
   prompt: string;
   flags?: string[];

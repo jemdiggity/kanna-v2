@@ -1,9 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { isClaudeUnavailable, runClaude } from "../../helpers/claude";
+import { runCodexExec, runCodexExecResume } from "../../helpers/codex";
 import { runCopilot } from "../../helpers/copilot";
 import {
+  isOpenCodeProviderAuthenticated,
+  runOpenCodeJson,
+} from "../../helpers/opencode";
+import {
   createResumeNonce,
+  extractCodexThreadId,
+  extractOpenCodeSessionId,
   providerUnavailableReason,
   recallPrompt,
   rememberPrompt,
@@ -92,6 +99,92 @@ describe("live provider conversation resume", () => {
     expect(
       resumed.stdout,
       diagnostic("Copilot resumed turn", resumed.stdout, resumed.stderr),
+    ).toContain(nonce);
+  }, 240_000);
+
+  it("Codex resumes a separately launched conversation by thread ID", async ({ skip }) => {
+    const nonce = createResumeNonce("codex");
+
+    let first;
+    try {
+      first = await runCodexExec({
+        prompt: rememberPrompt(nonce),
+        timeoutMs: 120_000,
+      });
+    } catch (error) {
+      const reason = providerUnavailableReason(String(error));
+      if (reason) skip(reason);
+      throw error;
+    }
+    const firstUnavailable = providerUnavailableReason(`${first.stdout}\n${first.stderr}`);
+    if (firstUnavailable) skip(firstUnavailable);
+    expect(
+      first.exitCode,
+      diagnostic("Codex initial turn", first.stdout, first.stderr),
+    ).toBe(0);
+    const sessionId = extractCodexThreadId(first.lines);
+
+    const resumed = await runCodexExecResume({
+      sessionId,
+      prompt: recallPrompt(),
+      timeoutMs: 120_000,
+    });
+    const resumedUnavailable = providerUnavailableReason(
+      `${resumed.stdout}\n${resumed.stderr}`,
+    );
+    if (resumedUnavailable) skip(resumedUnavailable);
+    expect(
+      resumed.exitCode,
+      diagnostic("Codex resumed turn", resumed.stdout, resumed.stderr),
+    ).toBe(0);
+    expect(
+      resumed.stdout,
+      diagnostic("Codex resumed turn", resumed.stdout, resumed.stderr),
+    ).toContain(nonce);
+  }, 240_000);
+
+  it("OpenCode resumes a separately launched conversation by session ID", async ({ skip }) => {
+    const nonce = createResumeNonce("opencode");
+
+    if (!(await isOpenCodeProviderAuthenticated())) {
+      skip("OpenCode provider is not authenticated");
+    }
+
+    let first;
+    try {
+      first = await runOpenCodeJson({
+        prompt: rememberPrompt(nonce),
+        timeoutMs: 120_000,
+      });
+    } catch (error) {
+      const reason = providerUnavailableReason(String(error));
+      if (reason) skip(reason);
+      throw error;
+    }
+    const firstUnavailable = providerUnavailableReason(`${first.stdout}\n${first.stderr}`);
+    if (firstUnavailable) skip(firstUnavailable);
+    expect(
+      first.exitCode,
+      diagnostic("OpenCode initial turn", first.stdout, first.stderr),
+    ).toBe(0);
+    const sessionId = extractOpenCodeSessionId(first.lines);
+
+    const resumed = await runOpenCodeJson({
+      prompt: recallPrompt(),
+      flags: ["--session", sessionId],
+      timeoutMs: 120_000,
+    });
+    const resumedUnavailable = providerUnavailableReason(
+      `${resumed.stdout}\n${resumed.stderr}`,
+    );
+    if (resumedUnavailable) skip(resumedUnavailable);
+    expect(
+      resumed.exitCode,
+      diagnostic("OpenCode resumed turn", resumed.stdout, resumed.stderr),
+    ).toBe(0);
+    expect(
+      resumed.stdout,
+      diagnostic("OpenCode resumed turn", resumed.stdout, resumed.stderr),
     ).toContain(nonce);
   }, 240_000);
 });
