@@ -58,7 +58,7 @@ import {
   listStagingRelayActiveDesktopIds,
   type StagingRelayActiveDesktopIdsInput
 } from "../runtime/staging-relay";
-import { shipRelease } from "../runtime/release";
+import { cutReleaseBranch, releaseStatus, shipRelease } from "../runtime/release";
 import {
   beginRustCacheBuild,
   getRustCacheStatus,
@@ -263,8 +263,24 @@ const releaseShipInputSchema = z.object({
   production: z.boolean().default(false),
   release: z.boolean().default(false),
   dryRun: z.boolean().default(false),
-  rollbackTo: z.string().optional()
+  rollbackTo: z.string().optional(),
+  branch: z.string().optional()
 });
+
+const releasePromoteInputSchema = z.object({
+  version: z.string(),
+  arm64: z.boolean().default(false),
+  x86_64: z.boolean().default(false),
+  dryRun: z.boolean().default(false)
+});
+
+const releaseCutInputSchema = z.object({
+  major: z.boolean().default(false),
+  minor: z.boolean().default(false),
+  patch: z.boolean().default(false)
+});
+
+const releaseStatusInputSchema = z.object({});
 
 const cloudDeployInputSchema = z.object({
   staging: z.boolean().default(false),
@@ -1983,6 +1999,9 @@ export const taskDefinitions = [
       if (parsed.rollbackTo && !parsed.staging) {
         return { ok: false, message: "release ship --rollback-to requires --staging." };
       }
+      if (parsed.branch && !parsed.staging) {
+        return { ok: false, message: "release ship --branch requires --staging (it records the RC's source branch)." };
+      }
       const bump = parsed.major ? "major" : parsed.minor ? "minor" : "patch";
       const archLabels = [
         ...(parsed.arm64 ? ["arm64" as const] : []),
@@ -1998,6 +2017,64 @@ export const taskDefinitions = [
         release: parsed.release,
         dryRun: parsed.dryRun,
         rollbackTo: parsed.rollbackTo,
+        sourceBranch: parsed.branch,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+      return { ok: true, message: formatJsonResult(result), data: result };
+    }
+  },
+  {
+    id: "release.promote",
+    description: "Promote a soaked staging prerelease into the production release of the exact same commit.",
+    inputSchema: releasePromoteInputSchema,
+    execute: async (_context, input) => {
+      const parsed = releasePromoteInputSchema.parse(input);
+      const archLabels = [
+        ...(parsed.arm64 ? ["arm64" as const] : []),
+        ...(parsed.x86_64 ? ["x86_64" as const] : [])
+      ];
+      const context = await resolveDefaultContext(process.env);
+      const result = await shipRelease({
+        repoRoot: context.repoRoot,
+        bump: "patch",
+        archLabels: archLabels.length > 0 ? archLabels : ["arm64", "x86_64"],
+        environment: "production",
+        release: !parsed.dryRun,
+        dryRun: parsed.dryRun,
+        promoteFrom: parsed.version,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+      return { ok: true, message: formatJsonResult(result), data: result };
+    }
+  },
+  {
+    id: "release.cut",
+    description: "Cut a release/X.Y stabilization branch from origin/main for the next version series.",
+    inputSchema: releaseCutInputSchema,
+    execute: async (_context, input) => {
+      const parsed = releaseCutInputSchema.parse(input);
+      const bump = parsed.major ? "major" : parsed.patch ? "patch" : "minor";
+      const context = await resolveDefaultContext(process.env);
+      const result = await cutReleaseBranch({
+        repoRoot: context.repoRoot,
+        bump,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+      return { ok: true, message: formatJsonResult(result), data: result };
+    }
+  },
+  {
+    id: "release.status",
+    description: "Show the production release, the staging channel pointer, and whether staging is promotable.",
+    inputSchema: releaseStatusInputSchema,
+    execute: async (_context, input) => {
+      releaseStatusInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      const result = await releaseStatus({
+        repoRoot: context.repoRoot,
         env: context.env,
         runner: nodeCommandRunner
       });

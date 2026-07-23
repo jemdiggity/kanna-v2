@@ -7,7 +7,14 @@ import type { CommandRunner } from "../src/runtime/process";
 import {
   bazelTargetForLabel,
   createUpdaterBundle,
+  cutReleaseBranch,
+  nextSeriesPatchVersion,
+  parsePromotionVersions,
+  parseReleaseBranchSeries,
   releaseAssetName,
+  releaseSeriesBranch,
+  releaseSeriesFromVersion,
+  releaseStatus,
   shipRelease,
   updaterAssetName,
   updaterBundleTargetForLabel,
@@ -174,6 +181,9 @@ describe("release shipping", () => {
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
+          if (command === "git" && args.join(" ") === "rev-parse --abbrev-ref HEAD") {
+            return { exitCode: 0, stdout: "main\n", stderr: "" };
+          }
           if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4-staging.*") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
@@ -245,6 +255,197 @@ describe("release shipping", () => {
     }
   });
 
+  it("derives staging RC versions from the release branch series instead of VERSION", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64"]);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git status --porcelain") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git rev-parse --abbrev-ref HEAD") {
+            return { exitCode: 0, stdout: "release/1.3\n", stderr: "" };
+          }
+          if (key === "git ls-remote origin refs/heads/release/1.3") {
+            return { exitCode: 0, stdout: "branchsha\trefs/heads/release/1.3\n", stderr: "" };
+          }
+          if (key === "git fetch origin release/1.3") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git merge-base --is-ancestor branchsha HEAD") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git ls-remote --tags origin v1.3.*") {
+            return { exitCode: 0, stdout: "sha1\trefs/tags/v1.3.0\nsha2\trefs/tags/v1.3.0-staging.9\n", stderr: "" };
+          }
+          if (key === "git ls-remote --tags origin v1.3.1-staging.*") {
+            return { exitCode: 0, stdout: "sha3\trefs/tags/v1.3.1-staging.2\n", stderr: "" };
+          }
+          if (key === "git remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "build") {
+            expect(readVersionFiles(repoRoot)[0]).toBe("1.3.1-staging.3\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "cquery") {
+            return { exitCode: 0, stdout: `${outputs.get(args[3] ?? "") ?? ""}\n`, stderr: "" };
+          }
+          if (command === "sh" && args[0] === "-c") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "pnpm") {
+            const signedBundlePath = args.at(-1);
+            expect(typeof signedBundlePath).toBe("string");
+            writeFileSync(`${signedBundlePath}.sig`, "staging signature\n", "utf8");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+        }
+      };
+
+      const result = await shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: ["arm64"],
+        release: false,
+        dryRun: true,
+        environment: "staging",
+        env: releaseEnv(privateKeyPath),
+        runner
+      });
+
+      expect(result.version).toBe("1.3.1-staging.3");
+      expect(readVersionFiles(repoRoot)[0]).toBe("1.2.3\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("versions and records a release-branch RC shipped from a task worktree via --branch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64"]);
+      const branchSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git status --porcelain") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git ls-remote origin refs/heads/release/1.3") {
+            return { exitCode: 0, stdout: `${branchSha}\trefs/heads/release/1.3\n`, stderr: "" };
+          }
+          if (key === "git fetch origin release/1.3") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === `git merge-base --is-ancestor ${branchSha} HEAD`) {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git ls-remote --tags origin v1.3.*") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git ls-remote --tags origin v1.3.0-staging.*") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "build") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "cquery") {
+            return { exitCode: 0, stdout: `${outputs.get(args[3] ?? "") ?? ""}\n`, stderr: "" };
+          }
+          if (command === "sh" && args[0] === "-c") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "pnpm") {
+            const signedBundlePath = args.at(-1);
+            expect(typeof signedBundlePath).toBe("string");
+            writeFileSync(`${signedBundlePath}.sig`, "staging signature\n", "utf8");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+        }
+      };
+
+      const result = await shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: ["arm64"],
+        release: false,
+        dryRun: true,
+        environment: "staging",
+        sourceBranch: "release/1.3",
+        env: releaseEnv(privateKeyPath),
+        runner
+      });
+
+      // The Kanna task worktree branch (task-*) is never consulted: no
+      // rev-parse --abbrev-ref call, series versioning from release/1.3, and
+      // the manifest notes record the RC's source branch.
+      expect(result.version).toBe("1.3.0-staging.1");
+      expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "rev-parse --abbrev-ref HEAD")).toBe(false);
+      const manifest = JSON.parse(readFileSync(result.latestJson, "utf8")) as { notes?: string };
+      expect(manifest.notes).toContain("Source-Branch: release/1.3");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a --branch RC when the release branch tip is not contained in HEAD", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const branchSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git status --porcelain") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git ls-remote origin refs/heads/release/1.3") {
+            return { exitCode: 0, stdout: `${branchSha}\trefs/heads/release/1.3\n`, stderr: "" };
+          }
+          if (key === "git fetch origin release/1.3") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === `git merge-base --is-ancestor ${branchSha} HEAD`) {
+            return { exitCode: 1, stdout: "", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+        }
+      };
+
+      await expect(shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: ["arm64"],
+        release: false,
+        dryRun: true,
+        environment: "staging",
+        sourceBranch: "release/1.3",
+        env: releaseEnv(privateKeyPath),
+        runner
+      })).rejects.toThrow(/release\/1\.3 tip .* is not contained in HEAD/);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+      expect(readVersionFiles(repoRoot)[0]).toBe("1.2.3\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("publishes staging as an immutable prerelease, then repoints desktop-staging", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
@@ -267,6 +468,9 @@ describe("release shipping", () => {
           }
           if (command === "git" && args.join(" ") === "remote get-url origin") {
             return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (command === "git" && args.join(" ") === "rev-parse --abbrev-ref HEAD") {
+            return { exitCode: 0, stdout: "main\n", stderr: "" };
           }
           if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4-staging.*") {
             return {
@@ -307,7 +511,7 @@ describe("release shipping", () => {
               "--title",
               "Kanna Staging v1.2.4-staging.5",
               "--notes",
-              "Staging updater manifest for v1.2.4-staging.5",
+              "Staging updater manifest for v1.2.4-staging.5\n\nSource-Branch: main",
               "--target",
               "1234567890abcdef",
               "--prerelease",
@@ -405,6 +609,9 @@ describe("release shipping", () => {
           calls.push({ command, args, options });
           if (command === "git" && args.join(" ") === "status --porcelain") return { exitCode: 0, stdout: "", stderr: "" };
           if (command === "git" && args.join(" ") === "remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          if (command === "git" && args.join(" ") === "rev-parse --abbrev-ref HEAD") {
+            return { exitCode: 0, stdout: "main\n", stderr: "" };
+          }
           if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4-staging.*") {
             return {
               exitCode: 0,
@@ -859,6 +1066,674 @@ describe("release shipping", () => {
         '{\n  "version": "1.2.4"\n}\n',
         '[package]\nname = "kanna"\nversion = "1.2.4"\n'
       ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("release promotion", () => {
+  const STAGING_COMMIT = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+
+  function promoteRunner(overrides: Partial<Record<string, { exitCode: number; stdout: string; stderr: string }>>, repoRoot: string, outputs: Map<string, string>, calls: CommandCall[]): CommandRunner {
+    return {
+      async run(command, args, options) {
+        calls.push({ command, args, options });
+        const key = `${command} ${args.join(" ")}`;
+        for (const [prefix, result] of Object.entries(overrides)) {
+          if (key.startsWith(prefix) && result) return result;
+        }
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "remote get-url origin") {
+          return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+        }
+        if (command === "gh" && args.join(" ").startsWith("release view v1.2.4-staging.3")) {
+          return { exitCode: 0, stdout: `{"targetCommitish":"${STAGING_COMMIT}"}\n`, stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse HEAD") {
+          return { exitCode: 0, stdout: `${STAGING_COMMIT}\n`, stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "fetch origin main") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse origin/main") {
+          return { exitCode: 0, stdout: `${STAGING_COMMIT}\n`, stderr: "" };
+        }
+        if (command === "bazel" && args[0] === "build") {
+          expect(args).toContain("//:kanna_notarized_dmg_release_arm64");
+          expect(args).not.toContain("//:kanna_notarized_dmg_staging_arm64");
+          expect(readVersionFiles(repoRoot)).toEqual([
+            "1.2.4\n",
+            '{\n  "version": "1.2.4"\n}\n',
+            '[package]\nname = "kanna"\nversion = "1.2.4"\n'
+          ]);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "bazel" && args[0] === "cquery") {
+          return { exitCode: 0, stdout: `${outputs.get(args[3] ?? "") ?? ""}\n`, stderr: "" };
+        }
+        if (command === "sh" && args[0] === "-c") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "pnpm") {
+          const signedBundlePath = args.at(-1);
+          expect(typeof signedBundlePath).toBe("string");
+          writeFileSync(`${signedBundlePath}.sig`, "signature\n");
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 0, stdout: command === "gh" && args[0] === "api" ? "release notes\n" : "", stderr: "" };
+      }
+    };
+  }
+
+  function promoteInput(repoRoot: string, privateKeyPath: string, runner: CommandRunner): ReleaseShipInput {
+    return {
+      repoRoot,
+      bump: "patch",
+      archLabels: ["arm64", "x86_64"],
+      environment: "production",
+      release: true,
+      dryRun: false,
+      promoteFrom: "1.2.4-staging.3",
+      env: releaseEnv(privateKeyPath),
+      runner
+    };
+  }
+
+  it("parses staging versions into promotion versions", () => {
+    expect(parsePromotionVersions("1.2.4-staging.3")).toEqual({
+      stagingVersion: "1.2.4-staging.3",
+      stagingTag: "v1.2.4-staging.3",
+      productionVersion: "1.2.4"
+    });
+    expect(parsePromotionVersions("v1.2.4-staging.10").productionVersion).toBe("1.2.4");
+    expect(() => parsePromotionVersions("1.2.4")).toThrow(/Invalid staging version/);
+    expect(() => parsePromotionVersions("1.2.4-rc.1")).toThrow(/Invalid staging version/);
+  });
+
+  it("promotes a staging prerelease into a production release of the same commit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({}, repoRoot, outputs, calls);
+
+      const result = await shipRelease(promoteInput(repoRoot, privateKeyPath, runner));
+
+      expect(result.version).toBe("1.2.4");
+      expect(result.dmgPaths).toEqual([
+        join(repoRoot, ".build", "release", "Kanna_1.2.4_arm64.dmg"),
+        join(repoRoot, ".build", "release", "Kanna_1.2.4_x86_64.dmg")
+      ]);
+      const promoteViewIndex = calls.findIndex((call) => call.command === "gh" && call.args.join(" ").startsWith("release view v1.2.4-staging.3"));
+      const buildIndex = calls.findIndex((call) => call.command === "bazel" && call.args[0] === "build");
+      const pushIndex = calls.findIndex((call) => call.command === "git" && call.args.join(" ") === "push origin HEAD:main v1.2.4");
+      const releaseCreateIndex = calls.findIndex((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "create");
+      expect(promoteViewIndex).toBeGreaterThan(-1);
+      expect(buildIndex).toBeGreaterThan(promoteViewIndex);
+      expect(pushIndex).toBeGreaterThan(buildIndex);
+      expect(releaseCreateIndex).toBeGreaterThan(pushIndex);
+      expect(calls.find((call) => call.command === "gh" && call.args[1] === "create")?.args).toContain("v1.2.4");
+      expect(readVersionFiles(repoRoot)).toEqual([
+        "1.2.4\n",
+        '{\n  "version": "1.2.4"\n}\n',
+        '[package]\nname = "kanna"\nversion = "1.2.4"\n'
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to promote when the staging prerelease does not exist", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "gh release view v1.2.4-staging.3": { exitCode: 1, stdout: "", stderr: "release not found" }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(/Staging prerelease not found: v1\.2\.4-staging\.3/);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to promote a version whose production tag already exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "git ls-remote --tags origin v1.2.4": { exitCode: 0, stdout: `${STAGING_COMMIT}\trefs/tags/v1.2.4\n`, stderr: "" }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(/Production tag v1\.2\.4 already exists/);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to promote when origin/main has advanced past the staging build", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const originalFiles = readVersionFiles(repoRoot);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "git rev-parse origin/main": { exitCode: 0, stdout: "ffffffffffffffffffffffffffffffffffffffff\n", stderr: "" }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(/origin\/main .* has advanced past v1\.2\.4-staging\.3/);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+      expect(readVersionFiles(repoRoot)).toEqual(originalFiles);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to promote when HEAD is not the staging build's commit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "git rev-parse HEAD": { exitCode: 0, stdout: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n", stderr: "" }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(/is not the commit v1\.2\.4-staging\.3 was built from/);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("promotes from a release branch and pushes the version bump there", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "git ls-remote origin refs/heads/release/1.2": {
+          exitCode: 0,
+          stdout: `${STAGING_COMMIT}\trefs/heads/release/1.2\n`,
+          stderr: ""
+        }
+      }, repoRoot, outputs, calls);
+
+      const result = await shipRelease(promoteInput(repoRoot, privateKeyPath, runner));
+
+      expect(result.version).toBe("1.2.4");
+      expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "push origin HEAD:release/1.2 v1.2.4")).toBe(true);
+      expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "fetch origin main")).toBe(false);
+      const notesCall = calls.find((call) => call.command === "gh" && call.args[0] === "api");
+      expect(notesCall?.args).toContain("target_commitish=release/1.2");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to promote a release-branch RC when the branch has advanced past it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "gh release view v1.2.4-staging.3": {
+          exitCode: 0,
+          stdout: `{"targetCommitish":"${STAGING_COMMIT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: release/1.2"}\n`,
+          stderr: ""
+        },
+        "git ls-remote origin refs/heads/release/1.2": {
+          exitCode: 0,
+          stdout: "ffffffffffffffffffffffffffffffffffffffff\trefs/heads/release/1.2\n",
+          stderr: ""
+        }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(/release\/1\.2 .* has advanced past v1\.2\.4-staging\.3/);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+      expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "fetch origin main")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("promotes a main RC to main even when a dormant same-series release branch exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "gh release view v1.2.4-staging.3": {
+          exitCode: 0,
+          stdout: `{"targetCommitish":"${STAGING_COMMIT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: main"}\n`,
+          stderr: ""
+        },
+        "git ls-remote origin refs/heads/release/1.2": {
+          exitCode: 0,
+          stdout: "dddddddddddddddddddddddddddddddddddddddd\trefs/heads/release/1.2\n",
+          stderr: ""
+        }
+      }, repoRoot, outputs, calls);
+
+      const result = await shipRelease(promoteInput(repoRoot, privateKeyPath, runner));
+
+      expect(result.version).toBe("1.2.4");
+      expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "push origin HEAD:main v1.2.4")).toBe(true);
+      const notesCall = calls.find((call) => call.command === "gh" && call.args[0] === "api");
+      expect(notesCall?.args).toContain("target_commitish=main");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to promote a release-branch RC whose branch was deleted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = promoteRunner({
+        "gh release view v1.2.4-staging.3": {
+          exitCode: 0,
+          stdout: `{"targetCommitish":"${STAGING_COMMIT}","body":"Staging updater manifest for v1.2.4-staging.3\\n\\nSource-Branch: release/1.2"}\n`,
+          stderr: ""
+        }
+      }, repoRoot, new Map(), calls);
+
+      await expect(shipRelease(promoteInput(repoRoot, privateKeyPath, runner))).rejects.toThrow(/was built from release\/1\.2, but the branch no longer exists/);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects promotion aimed at the staging environment", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const runner = promoteRunner({}, repoRoot, new Map(), []);
+      await expect(shipRelease({
+        ...promoteInput(repoRoot, privateKeyPath, runner),
+        environment: "staging"
+      })).rejects.toThrow(/cannot target staging/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("release series", () => {
+  it("derives series and branch names from versions", () => {
+    expect(releaseSeriesFromVersion("1.2.4")).toEqual({ major: 1, minor: 2 });
+    expect(releaseSeriesFromVersion("v1.2.4-staging.3")).toEqual({ major: 1, minor: 2 });
+    expect(releaseSeriesBranch({ major: 1, minor: 2 })).toBe("release/1.2");
+    expect(() => releaseSeriesFromVersion("nope")).toThrow(/Invalid version/);
+  });
+
+  it("parses release branch names", () => {
+    expect(parseReleaseBranchSeries("release/1.2")).toEqual({ major: 1, minor: 2 });
+    expect(parseReleaseBranchSeries("main")).toBeNull();
+    expect(parseReleaseBranchSeries("release/1.2.3")).toBeNull();
+    expect(parseReleaseBranchSeries("feature/release/1.2")).toBeNull();
+  });
+
+  it("computes the next patch version for a series from released tags", () => {
+    expect(nextSeriesPatchVersion("", { major: 1, minor: 3 })).toBe("1.3.0");
+    const tags = [
+      "sha1\trefs/tags/v1.3.0",
+      "sha2\trefs/tags/v1.3.0^{}",
+      "sha3\trefs/tags/v1.3.2",
+      "sha4\trefs/tags/v1.3.0-staging.4",
+      "sha5\trefs/tags/v1.4.0"
+    ].join("\n");
+    expect(nextSeriesPatchVersion(tags, { major: 1, minor: 3 })).toBe("1.3.3");
+  });
+});
+
+describe("release cut", () => {
+  const MAIN_SHA = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+
+  function cutRunner(existingBranchOutput: string, calls: CommandCall[]): CommandRunner {
+    return {
+      async run(command, args, options) {
+        calls.push({ command, args, options });
+        const key = `${command} ${args.join(" ")}`;
+        if (key === "git ls-remote origin refs/heads/release/1.3") {
+          return { exitCode: 0, stdout: existingBranchOutput, stderr: "" };
+        }
+        if (key === "git fetch origin main") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key === "git rev-parse origin/main") {
+          return { exitCode: 0, stdout: `${MAIN_SHA}\n`, stderr: "" };
+        }
+        if (key === "git show origin/main:VERSION") {
+          return { exitCode: 0, stdout: "1.2.3\n", stderr: "" };
+        }
+        if (command === "git" && args[0] === "push") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+      }
+    };
+  }
+
+  it("cuts the next series branch from origin/main", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const result = await cutReleaseBranch({ repoRoot, bump: "minor", env: {}, runner: cutRunner("", calls) });
+
+      expect(result).toEqual({ branch: "release/1.3", version: "1.3.0", commit: MAIN_SHA });
+      expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `push origin ${MAIN_SHA}:refs/heads/release/1.3`)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("derives the series from origin/main VERSION, not the stale local worktree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git fetch origin main") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git rev-parse origin/main") {
+            return { exitCode: 0, stdout: `${MAIN_SHA}\n`, stderr: "" };
+          }
+          if (key === "git show origin/main:VERSION") {
+            return { exitCode: 0, stdout: "1.4.7\n", stderr: "" };
+          }
+          if (key === "git ls-remote origin refs/heads/release/1.5") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "git" && args[0] === "push") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+        }
+      };
+
+      // Local worktree VERSION is 1.2.3, but the branch is pushed at
+      // origin/main whose VERSION is 1.4.7 — the series must follow the latter.
+      const result = await cutReleaseBranch({ repoRoot, bump: "minor", env: {}, runner });
+
+      expect(result).toEqual({ branch: "release/1.5", version: "1.5.0", commit: MAIN_SHA });
+      expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `push origin ${MAIN_SHA}:refs/heads/release/1.5`)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to cut a series branch that already exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner = cutRunner(`${MAIN_SHA}\trefs/heads/release/1.3\n`, calls);
+
+      await expect(cutReleaseBranch({ repoRoot, bump: "minor", env: {}, runner })).rejects.toThrow(/release\/1\.3 already exists/);
+      expect(calls.some((call) => call.command === "git" && call.args[0] === "push")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("release status", () => {
+  const MAIN_COMMIT = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+
+  it("reports production, staging pointer, and promotability", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (key === "git fetch --tags origin main") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git rev-parse origin/main") {
+            return { exitCode: 0, stdout: `${MAIN_COMMIT}\n`, stderr: "" };
+          }
+          if (key === "gh release view --repo jemdiggity/kanna --json tagName,publishedAt") {
+            return { exitCode: 0, stdout: '{"tagName":"v1.2.3","publishedAt":"2026-07-01T00:00:00Z"}\n', stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "download") {
+            const dirIndex = args.indexOf("--dir");
+            const dir = args[dirIndex + 1];
+            expect(typeof dir).toBe("string");
+            writeFileSync(join(dir ?? "", "latest-staging.json"), '{"version":"1.2.4-staging.3"}\n');
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "gh release view v1.2.4-staging.3 --repo jemdiggity/kanna --json targetCommitish,body") {
+            return { exitCode: 0, stdout: `{"targetCommitish":"${MAIN_COMMIT}"}\n`, stderr: "" };
+          }
+          if (key === `git rev-list --count ${MAIN_COMMIT}..origin/main`) {
+            return { exitCode: 0, stdout: "0\n", stderr: "" };
+          }
+          if (key === "git rev-list --count v1.2.3..origin/main") {
+            return { exitCode: 0, stdout: "12\n", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+        }
+      };
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner });
+
+      expect(result).toEqual({
+        production: { version: "1.2.3", tag: "v1.2.3", publishedAt: "2026-07-01T00:00:00Z" },
+        staging: { version: "1.2.4-staging.3", tag: "v1.2.4-staging.3", commit: MAIN_COMMIT, sourceBranch: null, commitsBehindMain: 0 },
+        releaseBranch: null,
+        commitsOnMainSinceProduction: 12,
+        promotable: true,
+        promoteCommand: "kd release promote 1.2.4-staging.3"
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a stale staging pointer as not promotable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const staleCommit = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+      const runner: CommandRunner = {
+        async run(command, args) {
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (key === "git fetch --tags origin main") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git rev-parse origin/main") {
+            return { exitCode: 0, stdout: `${MAIN_COMMIT}\n`, stderr: "" };
+          }
+          if (key === "gh release view --repo jemdiggity/kanna --json tagName,publishedAt") {
+            return { exitCode: 0, stdout: '{"tagName":"v1.2.3","publishedAt":"2026-07-01T00:00:00Z"}\n', stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "download") {
+            const dirIndex = args.indexOf("--dir");
+            writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), '{"version":"1.2.4-staging.3"}\n');
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "gh release view v1.2.4-staging.3 --repo jemdiggity/kanna --json targetCommitish,body") {
+            return { exitCode: 0, stdout: `{"targetCommitish":"${staleCommit}"}\n`, stderr: "" };
+          }
+          if (key === `git rev-list --count ${staleCommit}..origin/main`) {
+            return { exitCode: 0, stdout: "7\n", stderr: "" };
+          }
+          if (key === "git rev-list --count v1.2.3..origin/main") {
+            return { exitCode: 0, stdout: "19\n", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+        }
+      };
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner });
+
+      expect(result.staging).toEqual({ version: "1.2.4-staging.3", tag: "v1.2.4-staging.3", commit: staleCommit, sourceBranch: null, commitsBehindMain: 7 });
+      expect(result.promotable).toBe(false);
+      expect(result.promoteCommand).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the release branch tip as the promotion base when one exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const rcCommit = "cccccccccccccccccccccccccccccccccccccccc";
+      const runner: CommandRunner = {
+        async run(command, args) {
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (key === "git fetch --tags origin main") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git rev-parse origin/main") {
+            return { exitCode: 0, stdout: `${MAIN_COMMIT}\n`, stderr: "" };
+          }
+          if (key === "gh release view --repo jemdiggity/kanna --json tagName,publishedAt") {
+            return { exitCode: 1, stdout: "", stderr: "no production release" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "download") {
+            const dirIndex = args.indexOf("--dir");
+            writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), '{"version":"1.3.0-staging.2"}\n');
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "gh release view v1.3.0-staging.2 --repo jemdiggity/kanna --json targetCommitish,body") {
+            return { exitCode: 0, stdout: `{"targetCommitish":"${rcCommit}"}\n`, stderr: "" };
+          }
+          if (key === "git ls-remote origin refs/heads/release/1.3") {
+            return { exitCode: 0, stdout: `${rcCommit}\trefs/heads/release/1.3\n`, stderr: "" };
+          }
+          if (key === `git rev-list --count ${rcCommit}..origin/main`) {
+            return { exitCode: 0, stdout: "5\n", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+        }
+      };
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner });
+
+      expect(result.releaseBranch).toEqual({ name: "release/1.3", commit: rcCommit });
+      expect(result.staging?.commitsBehindMain).toBe(5);
+      expect(result.promotable).toBe(true);
+      expect(result.promoteCommand).toBe("kd release promote 1.3.0-staging.2");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a main RC promotable when a dormant same-series release branch exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const dormantCommit = "dddddddddddddddddddddddddddddddddddddddd";
+      const runner: CommandRunner = {
+        async run(command, args) {
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (key === "git fetch --tags origin main") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git rev-parse origin/main") {
+            return { exitCode: 0, stdout: `${MAIN_COMMIT}\n`, stderr: "" };
+          }
+          if (key === "gh release view --repo jemdiggity/kanna --json tagName,publishedAt") {
+            return { exitCode: 0, stdout: '{"tagName":"v1.3.0","publishedAt":"2026-07-10T00:00:00Z"}\n', stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "download") {
+            const dirIndex = args.indexOf("--dir");
+            writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), '{"version":"1.3.1-staging.1"}\n');
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "gh release view v1.3.1-staging.1 --repo jemdiggity/kanna --json targetCommitish,body") {
+            return {
+              exitCode: 0,
+              stdout: `{"targetCommitish":"${MAIN_COMMIT}","body":"Staging updater manifest for v1.3.1-staging.1\\n\\nSource-Branch: main"}\n`,
+              stderr: ""
+            };
+          }
+          if (key === "git ls-remote origin refs/heads/release/1.3") {
+            return { exitCode: 0, stdout: `${dormantCommit}\trefs/heads/release/1.3\n`, stderr: "" };
+          }
+          if (key === `git rev-list --count ${MAIN_COMMIT}..origin/main`) {
+            return { exitCode: 0, stdout: "0\n", stderr: "" };
+          }
+          if (key === "git rev-list --count v1.3.0..origin/main") {
+            return { exitCode: 0, stdout: "9\n", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
+        }
+      };
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner });
+
+      expect(result.staging?.sourceBranch).toBe("main");
+      expect(result.releaseBranch).toEqual({ name: "release/1.3", commit: dormantCommit });
+      expect(result.promotable).toBe(true);
+      expect(result.promoteCommand).toBe("kd release promote 1.3.1-staging.1");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns empty channels when no releases exist yet", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const runner: CommandRunner = {
+        async run(command, args) {
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "git remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (key === "git fetch --tags origin main") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (key === "git rev-parse origin/main") {
+            return { exitCode: 0, stdout: `${MAIN_COMMIT}\n`, stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: "not found" };
+        }
+      };
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner });
+
+      expect(result).toEqual({
+        production: null,
+        staging: null,
+        releaseBranch: null,
+        commitsOnMainSinceProduction: null,
+        promotable: false,
+        promoteCommand: null
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
