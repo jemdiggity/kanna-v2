@@ -53,6 +53,28 @@ prerelease tagged `vX.Y.Z-staging.N`, and repoints only `latest-staging.json`
 on the `desktop-staging` pointer release. Roll back by repointing:
 `./kd release ship --staging --rollback-to <version>`.
 
+### Local release environment
+
+`kd release ship` and `kd release promote` load optional release defaults from
+`.env.release.local` in the primary repository checkout. The same file is used
+from every linked worktree. Explicitly exported environment variables override
+file values.
+
+Store notarization credentials in macOS Keychain:
+
+```sh
+xcrun notarytool store-credentials kanna-notarization
+```
+
+Then create the ignored local file with only the profile name:
+
+```dotenv
+APPLE_KEYCHAIN_PROFILE=kanna-notarization
+```
+
+Keep the file mode at `0600`. Do not store an Apple app-specific password in
+the file.
+
 ## Cloud services
 
 ```sh

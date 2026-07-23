@@ -11,6 +11,7 @@ target/
 *.sqlite
 *.sqlite-journal
 .DS_Store
+/.env.release.local
 .turbo/
 .vscode/
 .kanna-worktrees/
