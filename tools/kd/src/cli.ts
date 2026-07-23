@@ -536,6 +536,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
+  if (group === "test" && command === "ci") {
+    return { taskId: "test.ci", input: {} };
+  }
   if (group === "test" && command === "rust") {
     return { taskId: "test.rust", input: {} };
   }
@@ -649,6 +652,7 @@ const helpTopics: Record<string, string[]> = {
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
+    "  test ci",
     "  test rust",
     "  test app-update-bundle",
     "  test cloud-emulator",
@@ -1031,6 +1035,11 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
     "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]"
+  ],
+  "test ci": [
+    "Usage: kd test ci",
+    "",
+    "Run canonical local verification sequentially: pnpm, Rust, then Remote E2E."
   ],
   "test rust": [
     "Usage: kd test rust",
