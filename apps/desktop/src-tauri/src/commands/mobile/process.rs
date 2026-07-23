@@ -74,10 +74,13 @@ fn signal_process(pid: i32, signal: i32) -> Result<(), String> {
     if rc == 0 {
         Ok(())
     } else {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
         Err(format!(
             "failed to signal stale kanna-server process {}: {}",
-            pid,
-            std::io::Error::last_os_error()
+            pid, error
         ))
     }
 }
@@ -105,6 +108,12 @@ mod tests {
     #[test]
     fn parse_lsof_pids_ignores_non_pid_lines() {
         assert_eq!(parse_lsof_pids("123\nnot-a-pid\n456\n"), vec![123, 456]);
+    }
+
+    #[test]
+    fn signal_process_treats_an_already_exited_process_as_stopped() {
+        signal_process(i32::MAX, libc::SIGTERM)
+            .expect("a process that no longer exists should already count as stopped");
     }
 
     #[tokio::test(flavor = "current_thread")]

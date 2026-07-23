@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn loads_existing_transfer_identity_from_app_data() {
         let temp = TestTempDir::new();
-        let transfer_root = resolve_transfer_root(temp.path());
+        let transfer_root = resolve_transfer_root_with_override(temp.path(), None);
         let path = transfer_identity_path_for_root(&transfer_root);
         std::fs::create_dir_all(path.parent().expect("identity path should have parent"))
             .expect("identity directory should be created");
