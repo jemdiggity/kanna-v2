@@ -140,6 +140,18 @@ pub fn recv_fds(socket: RawFd, count: usize) -> io::Result<Vec<RawFd>> {
         std::ptr::copy_nonoverlapping(libc::CMSG_DATA(cmsg), fds.as_mut_ptr() as *mut u8, fds_size);
     }
 
+    // Received fds enter this process inheritable (macOS has no
+    // MSG_CMSG_CLOEXEC). Mark them close-on-exec immediately so adopted PTY
+    // masters never leak into children spawned by the adopting daemon.
+    for &fd in &fds {
+        if let Err(error) = crate::fd::set_cloexec(fd) {
+            for &open_fd in &fds {
+                unsafe { libc::close(open_fd) };
+            }
+            return Err(error);
+        }
+    }
+
     Ok(fds)
 }
 
@@ -234,6 +246,36 @@ mod tests {
             for &fd in &received {
                 libc::close(fd);
             }
+        }
+    }
+
+    #[test]
+    fn test_received_fds_are_close_on_exec() {
+        let (s1, s2) = socketpair();
+
+        let mut pipe_fds = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let (pipe_read, pipe_write) = (pipe_fds[0], pipe_fds[1]);
+
+        send_fds(s1, &[pipe_read]).unwrap();
+        let received = recv_fds(s2, 1).unwrap();
+        assert_eq!(received.len(), 1);
+
+        // Adopted fds (e.g. handoff PTY masters) must never leak into
+        // children spawned by the receiving daemon.
+        let flags = unsafe { libc::fcntl(received[0], libc::F_GETFD) };
+        assert!(flags >= 0, "fcntl(F_GETFD) failed");
+        assert!(
+            flags & libc::FD_CLOEXEC != 0,
+            "received fd should be close-on-exec"
+        );
+
+        unsafe {
+            libc::close(s1);
+            libc::close(s2);
+            libc::close(pipe_read);
+            libc::close(pipe_write);
+            libc::close(received[0]);
         }
     }
 

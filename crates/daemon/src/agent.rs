@@ -373,13 +373,7 @@ impl AgentHandoffFds {
 
 /// Duplicate an fd with close-on-exec so it never leaks into spawned
 /// children.
-pub fn dup_cloexec(fd: std::os::unix::io::RawFd) -> std::io::Result<std::os::unix::io::RawFd> {
-    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-    if dup < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(dup)
-}
+pub use crate::fd::dup_cloexec;
 
 /// Resolve an executable name against the spawn env's PATH (falling back to
 /// the daemon's own PATH). Absolute/relative paths pass through.

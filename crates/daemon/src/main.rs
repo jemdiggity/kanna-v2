@@ -4,6 +4,7 @@ mod bench;
 mod client;
 mod connection;
 mod fanout;
+mod fd;
 mod fd_transfer;
 mod handoff;
 mod headless_terminal;

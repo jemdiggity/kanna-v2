@@ -135,6 +135,22 @@ impl PtySession {
             return Err(io::Error::last_os_error().into());
         }
 
+        // Mark both ends close-on-exec immediately: the daemon forks/execs
+        // many children (other sessions' shells, the recovery sidecar,
+        // headless agents), and an inherited master fd keeps the pty
+        // allocated in the kernel's global pool for the child's lifetime.
+        // The child below gets its stdio via dup2, which clears the flag on
+        // the duplicates, so the exec'd session child still owns its tty.
+        if let Err(error) =
+            crate::fd::set_cloexec(master_fd).and_then(|_| crate::fd::set_cloexec(slave_fd))
+        {
+            unsafe {
+                libc::close(master_fd);
+                libc::close(slave_fd);
+            }
+            return Err(error.into());
+        }
+
         // Set initial size
         let ws = libc::winsize {
             ws_row: rows,
@@ -270,19 +286,13 @@ impl PtySession {
     pub fn try_clone_reader(
         &self,
     ) -> Result<Box<dyn Read + Send>, Box<dyn std::error::Error + Send + Sync>> {
-        let new_fd = unsafe { libc::dup(self.master_fd.as_raw_fd()) };
-        if new_fd < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
+        let new_fd = crate::fd::dup_cloexec(self.master_fd.as_raw_fd())?;
         let file = unsafe { std::fs::File::from_raw_fd(new_fd) };
         Ok(Box::new(file))
     }
 
     pub fn try_clone_io_fd(&self) -> io::Result<OwnedFd> {
-        let new_fd = unsafe { libc::dup(self.master_fd.as_raw_fd()) };
-        if new_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let new_fd = crate::fd::dup_cloexec(self.master_fd.as_raw_fd())?;
         set_nonblocking(new_fd)?;
         Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
     }
@@ -290,10 +300,7 @@ impl PtySession {
     /// Clone the master fd for writing (e.g. kitty keyboard responses).
     #[allow(dead_code)]
     pub fn try_clone_writer(&self) -> Result<OwnedFd, Box<dyn std::error::Error + Send + Sync>> {
-        let new_fd = unsafe { libc::dup(self.master_fd.as_raw_fd()) };
-        if new_fd < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
+        let new_fd = crate::fd::dup_cloexec(self.master_fd.as_raw_fd())?;
         Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
     }
 
@@ -359,11 +366,26 @@ impl PtySession {
         unsafe { libc::kill(self.child_pid, 0) == 0 }
     }
 
-    /// Send SIGKILL to the child. Reaping is the caller's responsibility
-    /// (see `SessionHandle::kill`): a blocking `waitpid` here can hang forever
-    /// when the child is stuck exiting inside the kernel, wedging the daemon
-    /// connection that issued the kill.
+    /// Send SIGKILL to the child's whole process group. Reaping is the
+    /// caller's responsibility (see `SessionHandle::kill`): a blocking
+    /// `waitpid` here can hang forever when the child is stuck exiting inside
+    /// the kernel, wedging the daemon connection that issued the kill.
+    ///
+    /// The spawned child called `setsid()`, so `child_pid` is its process
+    /// group leader. Killing only the direct child (typically a shell)
+    /// orphans its descendants — agent CLIs that then live forever, keep the
+    /// PTY slave open (blocking master-EOF cleanup), and pin every PTY master
+    /// they inherited. Kill the group so the whole session tree dies; fall
+    /// back to the single pid if the group is already gone.
     pub fn kill(&mut self) -> io::Result<()> {
+        let ret = unsafe { libc::kill(-self.child_pid, libc::SIGKILL) };
+        if ret == 0 {
+            return Ok(());
+        }
+        // Group kill can fail when the group is already gone (ESRCH) or when
+        // its only remaining member is a zombie awaiting reap (macOS reports
+        // EPERM for that). Fall back to the direct child pid so kill never
+        // regresses below the old single-pid behavior.
         let ret = unsafe { libc::kill(self.child_pid, libc::SIGKILL) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
@@ -536,5 +558,196 @@ mod tests {
             output.contains("||"),
             "unexpected PTY env output: {output:?}"
         );
+    }
+
+    fn read_pty_output_until(
+        session: &PtySession,
+        predicate: impl Fn(&str) -> bool,
+        timeout: std::time::Duration,
+    ) -> String {
+        let mut reader = session
+            .try_clone_reader()
+            .expect("reader clone should succeed");
+        let mut output = Vec::new();
+        let deadline = std::time::Instant::now() + timeout;
+        let mut buf = [0u8; 256];
+        while std::time::Instant::now() < deadline {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    output.extend_from_slice(&buf[..n]);
+                    if predicate(&String::from_utf8_lossy(&output)) {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("should capture PTY output: {error}"),
+            }
+        }
+        String::from_utf8_lossy(&output).to_string()
+    }
+
+    #[test]
+    fn spawn_marks_pty_master_and_clones_close_on_exec() {
+        let session = PtySession::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 5".to_string()],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        )
+        .expect("spawn should succeed");
+
+        let cloexec = |fd: std::os::unix::io::RawFd| {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0, "fcntl(F_GETFD) failed");
+            flags & libc::FD_CLOEXEC != 0
+        };
+        assert!(
+            cloexec(session.master_raw_fd()),
+            "master fd must be close-on-exec"
+        );
+        let io_fd = session.try_clone_io_fd().expect("io clone should succeed");
+        assert!(
+            cloexec(std::os::unix::io::AsRawFd::as_raw_fd(&io_fd)),
+            "io clone must be close-on-exec"
+        );
+
+        let mut session = session;
+        session.kill().expect("kill should succeed");
+        while session.try_wait().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn spawn_fd_lister() -> PtySession {
+        PtySession::spawn(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "ls /dev/fd; echo FD_LIST_DONE".to_string(),
+            ],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        )
+        .expect("fd lister spawn should succeed")
+    }
+
+    fn read_fd_set(session: &PtySession) -> std::collections::BTreeSet<u32> {
+        let output = read_pty_output_until(
+            session,
+            |text| text.contains("FD_LIST_DONE"),
+            std::time::Duration::from_secs(5),
+        );
+        assert!(
+            output.contains("FD_LIST_DONE"),
+            "fd listing should complete: {output:?}"
+        );
+        output
+            .split_whitespace()
+            .filter_map(|token| token.parse::<u32>().ok())
+            .collect()
+    }
+
+    fn kill_and_reap(mut session: PtySession) {
+        session.kill().expect("kill should succeed");
+        while session.try_wait().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn spawned_children_do_not_inherit_prior_sessions_pty_masters() {
+        // Control: what a child sees with no other session alive. The test
+        // harness may hold its own inheritable fds; calibrate against them
+        // instead of assuming a fixed stdio-only baseline.
+        let control = spawn_fd_lister();
+        let control_fds = read_fd_set(&control);
+        kill_and_reap(control);
+
+        // Session A holds a PTY master (and an io-dup) open in this (the
+        // daemon's) process.
+        let session_a = PtySession::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        )
+        .expect("session A spawn should succeed");
+        let _io_dup = session_a
+            .try_clone_io_fd()
+            .expect("io clone should succeed");
+
+        // Session B must see exactly the control fd set. Before the
+        // FD_CLOEXEC fix it inherited session A's master (and every other
+        // daemon-held master), pinning those ptys in the kernel's global
+        // pool for its lifetime.
+        let session_b = spawn_fd_lister();
+        let b_fds = read_fd_set(&session_b);
+        let leaked: Vec<u32> = b_fds.difference(&control_fds).copied().collect();
+        assert!(
+            leaked.is_empty(),
+            "child spawned while session A is alive should not inherit extra fds, got {leaked:?} beyond control set {control_fds:?}"
+        );
+
+        kill_and_reap(session_a);
+        kill_and_reap(session_b);
+    }
+
+    #[test]
+    fn kill_terminates_descendant_processes() {
+        // The shell backgrounds a grandchild; non-interactive sh has no job
+        // control, so the grandchild stays in the session's process group.
+        let mut session = PtySession::spawn(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "sleep 300 & echo GRANDCHILD_PID $!; wait".to_string(),
+            ],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        )
+        .expect("spawn should succeed");
+
+        let output = read_pty_output_until(
+            &session,
+            |text| text.contains("GRANDCHILD_PID "),
+            std::time::Duration::from_secs(5),
+        );
+        let grandchild: libc::pid_t = output
+            .split("GRANDCHILD_PID ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|token| token.parse().ok())
+            .unwrap_or_else(|| panic!("grandchild pid should be printed: {output:?}"));
+
+        session.kill().expect("kill should succeed");
+        while session.try_wait().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // The grandchild must die with the session's process group instead of
+        // being orphaned to launchd (where it would pin PTYs forever).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let alive = unsafe { libc::kill(grandchild, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild {grandchild} should be killed with the session's process group"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }
