@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { parseEnv } from "node:util";
 import type { CommandRunner } from "./process";
 
@@ -12,7 +12,20 @@ export interface LoadReleaseEnvironmentInput {
 }
 
 function validateDotenv(source: string, envPath: string): void {
+  let pendingQuote: "'" | '"' | undefined;
+  let pendingLine = 0;
+
   for (const [index, line] of source.split(/\r?\n/).entries()) {
+    if (pendingQuote) {
+      const closingIndex = findClosingQuote(line, pendingQuote, 0);
+      if (closingIndex < 0) {
+        continue;
+      }
+      assertOnlyCommentFollows(line.slice(closingIndex + 1), envPath, index + 1);
+      pendingQuote = undefined;
+      continue;
+    }
+
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) {
       continue;
@@ -21,28 +34,66 @@ function validateDotenv(source: string, envPath: string): void {
     if (!assignment) {
       throw new Error(`Invalid dotenv assignment at ${envPath}:${index + 1}`);
     }
-    const value = assignment[1] ?? "";
+    const value = (assignment[1] ?? "").trimStart();
     const quote = value[0];
-    if ((quote === '"' || quote === "'") && !value.slice(1).endsWith(quote)) {
-      throw new Error(`Unterminated quoted value at ${envPath}:${index + 1}`);
+    if (quote !== '"' && quote !== "'") {
+      continue;
     }
+    const closingIndex = findClosingQuote(value, quote, 1);
+    if (closingIndex < 0) {
+      pendingQuote = quote;
+      pendingLine = index + 1;
+      continue;
+    }
+    assertOnlyCommentFollows(value.slice(closingIndex + 1), envPath, index + 1);
+  }
+
+  if (pendingQuote) {
+    throw new Error(`Unterminated quoted value at ${envPath}:${pendingLine}`);
+  }
+}
+
+function findClosingQuote(value: string, quote: "'" | '"', start: number): number {
+  for (let index = start; index < value.length; index += 1) {
+    if (value[index] !== quote) {
+      continue;
+    }
+    let precedingBackslashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) {
+      precedingBackslashes += 1;
+    }
+    if (precedingBackslashes % 2 === 0) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function assertOnlyCommentFollows(value: string, envPath: string, line: number): void {
+  const trailing = value.trim();
+  if (trailing && !trailing.startsWith("#")) {
+    throw new Error(`Unexpected content after quoted value at ${envPath}:${line}`);
   }
 }
 
 async function resolvePrimaryRepoRoot(input: LoadReleaseEnvironmentInput): Promise<string> {
   const result = await input.runner.run(
     "git",
-    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ["worktree", "list", "--porcelain"],
     { cwd: input.repoRoot, env: input.env }
   );
   if (result.exitCode !== 0) {
-    throw new Error(result.stderr.trim() || "Failed to resolve the Git common directory.");
+    throw new Error(result.stderr.trim() || "Failed to list Git worktrees.");
   }
-  const commonDir = result.stdout.trim();
-  if (!commonDir) {
-    throw new Error("Git returned an empty common directory.");
+  const primaryRoot = result.stdout
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("worktree "))
+    ?.slice("worktree ".length)
+    .trim();
+  if (!primaryRoot) {
+    throw new Error("Git returned no primary worktree.");
   }
-  return dirname(commonDir);
+  return primaryRoot;
 }
 
 export async function loadReleaseEnvironment(

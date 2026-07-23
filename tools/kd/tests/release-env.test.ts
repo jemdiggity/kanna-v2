@@ -1,19 +1,23 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { loadReleaseEnvironment } from "../src/runtime/release-env";
-import type { CommandRunner } from "../src/runtime/process";
+import { nodeCommandRunner, type CommandRunner } from "../src/runtime/process";
 
-function gitCommonDirRunner(commonDir: string, exitCode = 0): CommandRunner {
+const execFileAsync = promisify(execFile);
+
+function gitWorktreeListRunner(primaryRoot: string, exitCode = 0): CommandRunner {
   return {
     async run(command, args, options) {
       expect(command).toBe("git");
-      expect(args).toEqual(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+      expect(args).toEqual(["worktree", "list", "--porcelain"]);
       expect(options?.cwd).toBeDefined();
       return {
         exitCode,
-        stdout: exitCode === 0 ? `${commonDir}\n` : "",
+        stdout: exitCode === 0 ? `worktree ${primaryRoot}\nHEAD abc123\nbranch refs/heads/main\n\n` : "",
         stderr: exitCode === 0 ? "" : "not a git repository"
       };
     }
@@ -34,7 +38,7 @@ describe("release environment", () => {
     const env = await loadReleaseEnvironment({
       repoRoot: worktree,
       env: { PATH: "/usr/bin" },
-      runner: gitCommonDirRunner(join(primary, ".git"))
+      runner: gitWorktreeListRunner(primary)
     });
 
     expect(env.APPLE_KEYCHAIN_PROFILE).toBe("kanna-notarization");
@@ -50,7 +54,7 @@ describe("release environment", () => {
     const env = await loadReleaseEnvironment({
       repoRoot: root,
       env: { APPLE_KEYCHAIN_PROFILE: "shell-profile" },
-      runner: gitCommonDirRunner(join(root, ".git"))
+      runner: gitWorktreeListRunner(root)
     });
 
     expect(env.APPLE_KEYCHAIN_PROFILE).toBe("shell-profile");
@@ -64,7 +68,7 @@ describe("release environment", () => {
     const env = await loadReleaseEnvironment({
       repoRoot: root,
       env: inherited,
-      runner: gitCommonDirRunner(join(root, ".git"))
+      runner: gitWorktreeListRunner(root)
     });
 
     expect(env).toEqual(inherited);
@@ -81,7 +85,7 @@ describe("release environment", () => {
       loadReleaseEnvironment({
         repoRoot: root,
         env: {},
-        runner: gitCommonDirRunner(join(root, ".git"))
+        runner: gitWorktreeListRunner(root)
       })
     ).rejects.toThrow(envPath);
   });
@@ -96,7 +100,7 @@ describe("release environment", () => {
       loadReleaseEnvironment({
         repoRoot: root,
         env: {},
-        runner: gitCommonDirRunner(join(root, ".git"))
+        runner: gitWorktreeListRunner(root)
       })
     ).rejects.toThrow(envPath);
   });
@@ -106,8 +110,48 @@ describe("release environment", () => {
       loadReleaseEnvironment({
         repoRoot: "/not-a-repo",
         env: {},
-        runner: gitCommonDirRunner("", 128)
+        runner: gitWorktreeListRunner("", 128)
       })
     ).rejects.toThrow("not a git repository");
+  });
+
+  it("accepts Node dotenv comments and multiline quoted values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    await mkdir(join(root, ".git"));
+    await writeFile(
+      join(root, ".env.release.local"),
+      'APPLE_KEYCHAIN_PROFILE="profile" # local profile\nRELEASE_NOTES="line one\nline two"\n'
+    );
+
+    const env = await loadReleaseEnvironment({
+      repoRoot: root,
+      env: {},
+      runner: gitWorktreeListRunner(root)
+    });
+
+    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("profile");
+    expect(env.RELEASE_NOTES).toBe("line one\nline two");
+  });
+
+  it("resolves the primary checkout from a real linked worktree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-git-"));
+    const primary = join(root, "repo");
+    const worktree = join(root, "worktree");
+    await execFileAsync("git", ["init", "--initial-branch=main", primary]);
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: primary });
+    await execFileAsync("git", ["config", "user.name", "Kanna Test"], { cwd: primary });
+    await writeFile(join(primary, "README.md"), "fixture\n");
+    await execFileAsync("git", ["add", "README.md"], { cwd: primary });
+    await execFileAsync("git", ["commit", "-m", "fixture"], { cwd: primary });
+    await execFileAsync("git", ["worktree", "add", "-b", "feature", worktree], { cwd: primary });
+    await writeFile(join(primary, ".env.release.local"), "APPLE_KEYCHAIN_PROFILE=real-profile\n");
+
+    const env = await loadReleaseEnvironment({
+      repoRoot: worktree,
+      env: {},
+      runner: nodeCommandRunner
+    });
+
+    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("real-profile");
   });
 });
