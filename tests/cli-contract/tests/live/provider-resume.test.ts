@@ -1,0 +1,97 @@
+import { randomUUID } from "node:crypto";
+import { describe, expect, it } from "vitest";
+import { isClaudeUnavailable, runClaude } from "../../helpers/claude";
+import { runCopilot } from "../../helpers/copilot";
+import {
+  createResumeNonce,
+  providerUnavailableReason,
+  recallPrompt,
+  rememberPrompt,
+} from "../../helpers/provider-resume";
+
+function diagnostic(provider: string, stdout: string, stderr: string): string {
+  const output = `${stdout}\n${stderr}`.trim().slice(-2_000);
+  return `${provider} live resume output:\n${output}`;
+}
+
+describe("live provider conversation resume", () => {
+  it("Claude resumes a separately launched conversation by session ID", async ({ skip }) => {
+    const nonce = createResumeNonce("claude");
+    const sessionId = randomUUID();
+
+    let first;
+    try {
+      first = await runClaude({
+        prompt: rememberPrompt(nonce),
+        flags: ["--session-id", sessionId, "--permission-mode", "dontAsk"],
+        timeoutMs: 120_000,
+      });
+    } catch (error) {
+      const reason = providerUnavailableReason(String(error));
+      if (reason) skip(reason);
+      throw error;
+    }
+    if (isClaudeUnavailable(first)) skip("Claude authentication unavailable");
+    expect(
+      first.exitCode,
+      diagnostic("Claude initial turn", first.stdout, first.stderr),
+    ).toBe(0);
+
+    const resumed = await runClaude({
+      prompt: recallPrompt(),
+      flags: ["--resume", sessionId, "--permission-mode", "dontAsk"],
+      timeoutMs: 120_000,
+    });
+    if (isClaudeUnavailable(resumed)) skip("Claude authentication unavailable");
+    expect(
+      resumed.exitCode,
+      diagnostic("Claude resumed turn", resumed.stdout, resumed.stderr),
+    ).toBe(0);
+    expect(
+      resumed.stdout,
+      diagnostic("Claude resumed turn", resumed.stdout, resumed.stderr),
+    ).toContain(nonce);
+  }, 240_000);
+
+  it("Copilot resumes a separately launched conversation by session ID", async ({ skip }) => {
+    const nonce = createResumeNonce("copilot");
+    const sessionId = randomUUID();
+
+    let first;
+    try {
+      first = await runCopilot({
+        prompt: rememberPrompt(nonce),
+        flags: [`--session-id=${sessionId}`],
+        timeoutMs: 120_000,
+      });
+    } catch (error) {
+      const reason = providerUnavailableReason(String(error));
+      if (reason) skip(reason);
+      throw error;
+    }
+    const firstUnavailable = providerUnavailableReason(`${first.stdout}\n${first.stderr}`);
+    if (firstUnavailable) skip(firstUnavailable);
+    expect(
+      first.exitCode,
+      diagnostic("Copilot initial turn", first.stdout, first.stderr),
+    ).toBe(0);
+
+    const resumed = await runCopilot({
+      prompt: recallPrompt(),
+      flags: [`--resume=${sessionId}`],
+      timeoutMs: 120_000,
+    });
+    const resumedUnavailable = providerUnavailableReason(
+      `${resumed.stdout}\n${resumed.stderr}`,
+    );
+    if (resumedUnavailable) skip(resumedUnavailable);
+    expect(
+      resumed.exitCode,
+      diagnostic("Copilot resumed turn", resumed.stdout, resumed.stderr),
+    ).toBe(0);
+    expect(
+      resumed.stdout,
+      diagnostic("Copilot resumed turn", resumed.stdout, resumed.stderr),
+    ).toContain(nonce);
+  }, 240_000);
+});
