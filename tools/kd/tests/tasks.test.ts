@@ -10,7 +10,8 @@ import {
   executeMobileDeviceDoctorWithContext,
   executeMobileDeviceRunWithContext,
   executeProductionMobileUpWithContext,
-  listStagingRelayActiveDesktopIds
+  listStagingRelayActiveDesktopIds,
+  loadReleaseTaskEnvironment
 } from "../src/tasks/registry";
 import type { CommandRunner } from "../src/runtime/process";
 
@@ -27,6 +28,34 @@ describe("task executors", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("loads repo-local defaults underneath inherited release variables", async () => {
+    const primary = await mkdtemp(join(tmpdir(), "kanna-release-task-"));
+    const worktree = join(primary, ".kanna-worktrees", "task-123");
+    await mkdir(worktree, { recursive: true });
+    await writeFile(
+      join(primary, ".env.release.local"),
+      "APPLE_KEYCHAIN_PROFILE=file-profile\nRELEASE_DEFAULT=file\n"
+    );
+    const runner: CommandRunner = {
+      async run(command, args) {
+        expect(command).toBe("git");
+        expect(args).toEqual(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+        return { exitCode: 0, stdout: `${join(primary, ".git")}\n`, stderr: "" };
+      }
+    };
+
+    const env = await loadReleaseTaskEnvironment(
+      {
+        repoRoot: worktree,
+        env: { APPLE_KEYCHAIN_PROFILE: "shell-profile" }
+      },
+      runner
+    );
+
+    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("shell-profile");
+    expect(env.RELEASE_DEFAULT).toBe("file");
   });
 
   it("authenticates staging relay active-desktop lookup with the Firebase id token", async () => {

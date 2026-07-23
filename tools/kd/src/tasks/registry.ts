@@ -59,6 +59,7 @@ import {
   type StagingRelayActiveDesktopIdsInput
 } from "../runtime/staging-relay";
 import { cutReleaseBranch, releaseStatus, shipRelease } from "../runtime/release";
+import { loadReleaseEnvironment } from "../runtime/release-env";
 import {
   beginRustCacheBuild,
   getRustCacheStatus,
@@ -350,6 +351,17 @@ async function resolveDefaultContext(env: NodeJS.ProcessEnv, options: ResolveDef
     dbOverride: options.dbOverride,
     daemonDirOverride: options.daemonDirOverride,
     transferRootOverride: options.transferRootOverride
+  });
+}
+
+export async function loadReleaseTaskEnvironment(
+  context: Pick<KdContext, "repoRoot" | "env">,
+  runner: CommandRunner
+): Promise<NodeJS.ProcessEnv> {
+  return loadReleaseEnvironment({
+    repoRoot: context.repoRoot,
+    env: context.env,
+    runner
   });
 }
 
@@ -2009,6 +2021,7 @@ export const taskDefinitions = [
       ];
       const environment = parsed.staging ? "staging" : "production";
       const context = await resolveDefaultContext(process.env);
+      const releaseEnv = await loadReleaseTaskEnvironment(context, nodeCommandRunner);
       const result = await shipRelease({
         repoRoot: context.repoRoot,
         bump,
@@ -2018,7 +2031,7 @@ export const taskDefinitions = [
         dryRun: parsed.dryRun,
         rollbackTo: parsed.rollbackTo,
         sourceBranch: parsed.branch,
-        env: context.env,
+        env: releaseEnv,
         runner: nodeCommandRunner
       });
       return { ok: true, message: formatJsonResult(result), data: result };
@@ -2035,6 +2048,7 @@ export const taskDefinitions = [
         ...(parsed.x86_64 ? ["x86_64" as const] : [])
       ];
       const context = await resolveDefaultContext(process.env);
+      const releaseEnv = await loadReleaseTaskEnvironment(context, nodeCommandRunner);
       const result = await shipRelease({
         repoRoot: context.repoRoot,
         bump: "patch",
@@ -2043,7 +2057,7 @@ export const taskDefinitions = [
         release: !parsed.dryRun,
         dryRun: parsed.dryRun,
         promoteFrom: parsed.version,
-        env: context.env,
+        env: releaseEnv,
         runner: nodeCommandRunner
       });
       return { ok: true, message: formatJsonResult(result), data: result };
