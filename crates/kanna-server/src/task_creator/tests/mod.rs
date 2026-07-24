@@ -62,6 +62,23 @@ async fn spawn_fake_daemon_session_created_once(
     })
 }
 
+/// Fake daemon that accepts one connection, reads the first command, and
+/// never replies — the wedged-daemon shape from the 2026-07-24 outage. The
+/// connection stays open so the client observes a stall, not an EOF.
+async fn spawn_fake_daemon_read_then_stall(daemon_dir: String) -> tokio::task::JoinHandle<()> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, _write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        std::future::pending::<()>().await;
+    })
+}
+
 fn test_config(label: &str) -> Config {
     Config {
         relay_url: "wss://relay.example".to_string(),
