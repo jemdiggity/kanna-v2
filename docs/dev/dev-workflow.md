@@ -65,9 +65,8 @@ Grouped highlights — run `./kd` for the full surface (task ids live in
 ```sh
 ./kd build desktop           # workspace build
 ./kd build sidecars          # sidecar-only build + staging
-./kd test ci                 # canonical local gate: pnpm, Rust, Remote E2E
-pnpm test                    # focused JS/TS suite
-./kd test rust               # focused Rust suite
+pnpm test                    # canonical JS/TS suite
+./kd test rust               # canonical Rust suite
 ```
 
 ### Mobile

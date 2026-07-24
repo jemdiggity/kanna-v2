@@ -587,13 +587,6 @@ describe("kd CLI", () => {
   });
 
   it("parses cloud test commands", () => {
-    expect(parseCliArgs(["test", "ci"])).toEqual({
-      taskId: "test.ci",
-      input: {},
-    });
-    expect(getTaskDefinition("test.ci").description).toBe(
-      "Run canonical local verification sequentially.",
-    );
     expect(parseCliArgs(["test", "rust"])).toEqual({
       taskId: "test.rust",
       input: {},

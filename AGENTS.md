@@ -259,18 +259,17 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd cloud deploy --staging     # deploy Firebase cloud services to staging
 ./kd cloud deploy --production  # deploy Firebase cloud services to production
 
-# Canonical local verification
-./kd test ci                  # pnpm, Rust, then Remote E2E; sequential and fail-fast
-
-# Focused suites
+# Canonical automated verification
 pnpm test
 ./kd test rust
-./kd test remote-e2e
+
+# Package-specific unit tests
 cd packages/core && pnpm test
 
-# Explicit live/process-heavy suites outside the local gate
+# Explicit live/process-heavy suites
 # Requires installed and authenticated agent CLIs and may consume quota:
 pnpm test:agent-cli-compat
+pnpm test:remote-e2e
 pnpm test:tui-fidelity
 
 # Rust integration tests (needs claude in PATH)

@@ -17,7 +17,6 @@ import {
 import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
 import { selectPreferredLanAddress } from "../runtime/lan-address";
-import { executeLocalCi } from "../runtime/local-ci";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
 import { resolveKdEnvironment } from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
@@ -2133,19 +2132,6 @@ export const taskDefinitions = [
         data: plan
       };
     }
-  },
-  {
-    id: "test.ci",
-    description: "Run canonical local verification sequentially.",
-    inputSchema: emptyInputSchema,
-    execute: async () => {
-      const context = await resolveDefaultContext(process.env);
-      return executeLocalCi({
-        repoRoot: context.repoRoot,
-        env: context.env,
-        runner: nodeCommandRunner,
-      });
-    },
   },
   {
     id: "test.rust",

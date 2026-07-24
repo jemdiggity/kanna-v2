@@ -51,8 +51,7 @@ that crosses component or system boundaries must have E2E coverage.
 - **kd wiring** — `kd test remote-e2e [--dev|--staging]`, `kd doctor
   --remote`, `kd dev up --remote`; staging-relay active-desktop verification
   helpers in `tools/kd`.
-- **Local verification** — `./kd test ci` includes the Layer B dev harness;
-  Layer A remains covered by the workspace `pnpm test` phase.
+- **CI** — `.github/workflows/remote-e2e.yml` (Layer A + Layer B dev).
 - **E2E SQL route** — `KANNA_E2E_TEST_SQL=1`, loopback-only route in
   `kanna-server` for DB assertions from tests (with 404/403 regression
   coverage).
@@ -78,7 +77,7 @@ that crosses component or system boundaries must have E2E coverage.
 
 | Env | Firebase | Relay | Desktop server | Identity | Automation |
 |-----|----------|-------|----------------|----------|------------|
-| **dev** | emulators (auth/firestore/functions), emulator-seed | local relay from `services/relay` on a harness port | worktree `kanna-server`, generated `server.toml` | emulator Buffy (`upvote.sieve.7t@icloud.com` / `password123`, uid `Bax9TJvOWm5bbl0Aq4nXg3XmkTCu`) | full, headless, local gate |
+| **dev** | emulators (auth/firestore/functions), emulator-seed | local relay from `services/relay` on a harness port | worktree `kanna-server`, generated `server.toml` | emulator Buffy (`upvote.sieve.7t@icloud.com` / `password123`, uid `Bax9TJvOWm5bbl0Aq4nXg3XmkTCu`) | full, headless, CI |
 | **staging** | `kanna-staging` | `wss://relay-staging.kanna.build` | worktree `kanna-server` with `KANNA_CLOUD_ENV=staging` | staging Buffy + `KANNA_E2E_DEVICE_TOKEN=staging-buffy-device-token` (provisioned via `provision-staging-buffy-user.mjs`) | headless smoke automatable when creds present; full mobile-UI run human-gated on a physical iPhone |
 
 Reuse existing config surfaces only: `server.toml` (`relay_url`,
@@ -168,14 +167,14 @@ Status key: ✅ landed.
   Network permission, symptom→cause map). Never physical-device Appium from
   automation.
 
-## 6. kd + local verification
+## 6. kd + CI
 
 All entry points stay on the canonical `kd` surface: `kd test remote-e2e
 [--dev|--staging]`, `kd doctor --remote [--staging]`, `kd dev up --remote`.
-`kd test ci` runs dev Layer A and Layer B locally after the JavaScript and Rust
-phases. Staging smoke remains an explicit human invocation when credentials are
-available. Layer C and Layer D remain optional local lanes; physical-device
-execution remains human-gated.
+The path-filtered pull-request workflow runs dev Layer A and Layer B. The
+staging smoke runs on the scheduled and manually dispatched workflow when
+credentials are available. Layer C and Layer D remain optional runner lanes,
+not normal pull-request CI; physical-device execution remains human-gated.
 
 ## 7. Acceptance criteria (v2)
 

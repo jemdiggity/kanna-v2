@@ -14,6 +14,21 @@ export interface CommandRunner {
   ) => Promise<CommandResult>;
 }
 
+export async function findExecutable(
+  runner: CommandRunner,
+  name: string
+): Promise<string | undefined> {
+  const result = process.platform === "win32"
+    ? await runner.run("where.exe", [name])
+    : await runner.run("/bin/sh", ["-c", 'command -v -- "$1"', "kanna-doctor", name]);
+
+  if (result.exitCode !== 0) return undefined;
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+}
+
 export const nodeCommandRunner: CommandRunner = {
   run(command, args, options) {
     return new Promise((resolve, reject) => {

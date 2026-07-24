@@ -1,4 +1,9 @@
+#[cfg(any(target_os = "linux", test))]
+use std::collections::BTreeSet;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::path::PathBuf;
+#[cfg(not(target_os = "linux"))]
 use tokio::process::Command;
 
 pub(super) fn find_sidecar(name: &str) -> Result<PathBuf, String> {
@@ -49,6 +54,7 @@ pub(super) async fn stop_server_on_port(port: u16) -> Result<(), String> {
     wait_for_server_port_to_close(port, 20).await
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(super) async fn server_pids_on_port(port: u16) -> Result<Vec<i32>, String> {
     let output = Command::new("/usr/sbin/lsof")
         .args(["-nP", "-ti", &format!("TCP:{port}"), "-sTCP:LISTEN"])
@@ -60,6 +66,104 @@ pub(super) async fn server_pids_on_port(port: u16) -> Result<Vec<i32>, String> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(parse_lsof_pids(&stdout))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn server_pids_on_port(port: u16) -> Result<Vec<i32>, String> {
+    tokio::task::spawn_blocking(move || linux_server_pids_on_port(Path::new("/proc"), port))
+        .await
+        .map_err(|error| format!("failed to inspect kanna-server port owner: {error}"))?
+}
+
+#[cfg(target_os = "linux")]
+fn linux_server_pids_on_port(proc_root: &Path, port: u16) -> Result<Vec<i32>, String> {
+    let mut socket_inodes = BTreeSet::new();
+    let mut found_socket_table = false;
+    for table_name in ["tcp", "tcp6"] {
+        let table_path = proc_root.join("net").join(table_name);
+        match std::fs::read_to_string(&table_path) {
+            Ok(table) => {
+                found_socket_table = true;
+                socket_inodes.extend(listening_socket_inodes(&table, port));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect kanna-server port owner: could not read {}: {}",
+                    table_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+    if !found_socket_table {
+        return Err(format!(
+            "failed to inspect kanna-server port owner: no TCP socket table under {}",
+            proc_root.display()
+        ));
+    }
+    if socket_inodes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let process_entries = std::fs::read_dir(proc_root).map_err(|error| {
+        format!(
+            "failed to inspect kanna-server port owner: could not read {}: {}",
+            proc_root.display(),
+            error
+        )
+    })?;
+    let mut pids = BTreeSet::new();
+    for process_entry in process_entries.flatten() {
+        let Some(pid) = process_entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fd_entries) = std::fs::read_dir(process_entry.path().join("fd")) else {
+            continue;
+        };
+        for fd_entry in fd_entries.flatten() {
+            let Ok(target) = std::fs::read_link(fd_entry.path()) else {
+                continue;
+            };
+            let Some(inode) = socket_inode_from_link(&target) else {
+                continue;
+            };
+            if socket_inodes.contains(&inode) {
+                pids.insert(pid);
+                break;
+            }
+        }
+    }
+    Ok(pids.into_iter().collect())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn listening_socket_inodes(table: &str, port: u16) -> BTreeSet<u64> {
+    let port_hex = format!("{port:04X}");
+    table
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let local_port = fields.get(1)?.rsplit_once(':')?.1;
+            let state = *fields.get(3)?;
+            let inode = fields.get(9)?.parse::<u64>().ok()?;
+            (local_port.eq_ignore_ascii_case(&port_hex) && state == "0A").then_some(inode)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn socket_inode_from_link(target: &std::path::Path) -> Option<u64> {
+    target
+        .to_str()?
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
 }
 
 fn parse_lsof_pids(output: &str) -> Vec<i32> {
@@ -108,6 +212,21 @@ mod tests {
     #[test]
     fn parse_lsof_pids_ignores_non_pid_lines() {
         assert_eq!(parse_lsof_pids("123\nnot-a-pid\n456\n"), vec![123, 456]);
+    }
+
+    #[test]
+    fn parses_listening_socket_inodes_for_the_requested_linux_port() {
+        let table = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:12D9 00000000:0000 0A 00000000:00000000 00:00000000 00000000  501        0 12345 1
+   1: 0100007F:12DA 00000000:0000 0A 00000000:00000000 00:00000000 00000000  501        0 23456 1
+   2: 0100007F:12D9 00000000:0000 01 00000000:00000000 00:00000000 00000000  501        0 34567 1
+";
+
+        assert_eq!(
+            listening_socket_inodes(table, 4825),
+            std::collections::BTreeSet::from([12345])
+        );
     }
 
     #[test]

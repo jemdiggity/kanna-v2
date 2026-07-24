@@ -20,7 +20,6 @@ describe("MCP tool registry", () => {
       "cloud_deploy",
       "cloud_relay_provision",
       "pages_build_schema",
-      "test_ci",
       "test_app_update_bundle",
       "test_remote_e2e",
       "emulators_up",

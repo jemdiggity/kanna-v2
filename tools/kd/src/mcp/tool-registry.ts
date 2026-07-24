@@ -25,7 +25,6 @@ const exposedTools = [
   ["cloud_deploy", "cloud.deploy"],
   ["cloud_relay_provision", "cloud.relay-provision"],
   ["pages_build_schema", "pages.build-schema"],
-  ["test_ci", "test.ci"],
   ["test_app_update_bundle", "test.app-update-bundle"],
   ["test_remote_e2e", "test.remote-e2e"],
   ["emulators_up", "emulators.up"],
