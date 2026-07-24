@@ -135,6 +135,7 @@ pub async fn adopt_agent_session(
         info.session_id, info.pid, record.provider
     ));
     let session_id = info.session_id.clone();
+    let pid = info.pid;
     agents.lock().await.insert(info.session_id, record);
-    start_agent_readers(session_id, stdout, stderr, agents, broadcast_tx);
+    start_agent_readers(session_id, pid, stdout, stderr, agents, broadcast_tx);
 }

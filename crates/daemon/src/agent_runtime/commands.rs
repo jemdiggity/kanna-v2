@@ -114,6 +114,7 @@ pub async fn handle_spawn_agent(
 
     start_agent_readers(
         session_id.clone(),
+        spawned.pid,
         spawned.stdout,
         spawned.stderr,
         agents,
@@ -317,6 +318,7 @@ pub async fn handle_agent_input(
                     }
                     start_agent_readers(
                         session_id.clone(),
+                        spawned.pid,
                         spawned.stdout,
                         spawned.stderr,
                         agents.clone(),
