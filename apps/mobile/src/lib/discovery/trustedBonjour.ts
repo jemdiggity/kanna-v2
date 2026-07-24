@@ -65,8 +65,12 @@ async function validateTrustedService(
 
   const baseUrl = `http://${service.host}:${service.port}`;
   const status = await fetchStatus(baseUrl, fetchImpl, probeTimeoutMs);
-  return status?.desktopId === desktopId
-    ? { baseUrl, desktopId, displayName: service.name }
+  const displayName =
+    typeof status?.desktopName === "string"
+      ? status.desktopName.trim()
+      : "";
+  return status?.desktopId === desktopId && displayName
+    ? { baseUrl, desktopId, displayName }
     : null;
 }
 
@@ -85,7 +89,10 @@ async function fetchStatus(
   baseUrl: string,
   fetchImpl: FetchLike,
   timeoutMs = 5_000
-): Promise<{ desktopId?: string } | null> {
+): Promise<{
+  desktopId?: unknown;
+  desktopName?: unknown;
+} | null> {
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
@@ -102,7 +109,9 @@ async function fetchStatus(
       return null;
     }
     const body = await response.json();
-    return body && typeof body === "object" ? (body as { desktopId?: string }) : null;
+    return body && typeof body === "object"
+      ? (body as { desktopId?: unknown; desktopName?: unknown })
+      : null;
   } catch {
     return null;
   } finally {

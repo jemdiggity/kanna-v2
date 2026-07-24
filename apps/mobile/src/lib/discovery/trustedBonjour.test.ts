@@ -12,10 +12,13 @@ describe("trusted Bonjour discovery", () => {
     const fetchImpl = vi.fn(async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ desktopId: "desktop-1" })
+      json: async () => ({
+        desktopId: "desktop-1",
+        desktopName: "  Gu’s MacBook Pro  "
+      })
     }));
     const service: BonjourService = {
-      name: "Studio Mac",
+      name: "desktop-1",
       type: "_kanna-mobile._tcp.",
       host: "studio.local",
       port: 48120,
@@ -32,7 +35,7 @@ describe("trusted Bonjour discovery", () => {
     ).resolves.toEqual({
       baseUrl: "http://studio.local:48120",
       desktopId: "desktop-1",
-      displayName: "Studio Mac"
+      displayName: "Gu’s MacBook Pro"
     });
   });
 
@@ -83,11 +86,38 @@ describe("trusted Bonjour discovery", () => {
     ).resolves.toBeNull();
   });
 
+  it("rejects a trusted service when status has no usable desktop name", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        desktopId: "desktop-1",
+        desktopName: "   "
+      })
+    }));
+
+    await expect(resolveTrustedBonjourEndpoint({
+      fetchImpl,
+      services: [{
+        name: "desktop-1",
+        type: "_kanna-mobile._tcp.",
+        host: "studio.local",
+        port: 48120,
+        txt: { desktopId: "desktop-1" }
+      }],
+      trustedDesktopIds,
+      preferredDesktopId: null
+    })).resolves.toBeNull();
+  });
+
   it("accepts a Bonjour endpoint whose desktop id is trusted by the account", async () => {
     const fetchImpl = vi.fn(async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ desktopId: "desktop-cloud" })
+      json: async () => ({
+        desktopId: "desktop-cloud",
+        desktopName: "Cloud Mac"
+      })
     }));
 
     const endpoint = await resolveTrustedBonjourEndpoint({
@@ -111,7 +141,8 @@ describe("trusted Bonjour discovery", () => {
       ok: true,
       status: 200,
       json: async () => ({
-        desktopId: input.includes("first.local") ? "desktop-1" : "desktop-2"
+        desktopId: input.includes("first.local") ? "desktop-1" : "desktop-2",
+        desktopName: input.includes("first.local") ? "First Mac" : "Second Mac"
       })
     }));
 
