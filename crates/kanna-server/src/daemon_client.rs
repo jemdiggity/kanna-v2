@@ -1,11 +1,23 @@
 use kanna_daemon::protocol::{Command, Event};
 use std::path::Path;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+/// Bound on one command round-trip. Daemon commands answer in well under a
+/// second when healthy; an unbounded await turns a wedged daemon into
+/// silently parked work — on 2026-07-24 every stage transition vanished
+/// mid-flight awaiting a Kill response that never came, with nothing
+/// logged. Generous so that a merely-busy daemon never trips it.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct DaemonClient {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: tokio::net::unix::OwnedWriteHalf,
+    /// Set after a timeout: the response to the timed-out command may still
+    /// arrive and would pair with the wrong request, so the connection is
+    /// unusable.
+    poisoned: bool,
 }
 
 pub struct DaemonClientReader {
@@ -30,6 +42,7 @@ impl DaemonClient {
         Ok(Self {
             reader: BufReader::new(read_half),
             writer: write_half,
+            poisoned: false,
         })
     }
 
@@ -37,14 +50,32 @@ impl DaemonClient {
         &mut self,
         cmd: &Command,
     ) -> Result<Event, Box<dyn std::error::Error>> {
+        if self.poisoned {
+            return Err(
+                "daemon connection unusable after an earlier command timeout; reconnect".into(),
+            );
+        }
         let json = serde_json::to_string(cmd)?;
-        self.writer.write_all(json.as_bytes()).await?;
-        self.writer.write_all(b"\n").await?;
-        self.writer.flush().await?;
-        let mut line = String::new();
-        self.reader.read_line(&mut line).await?;
-        let event: Event = serde_json::from_str(line.trim())?;
-        Ok(event)
+        let round_trip = async {
+            self.writer.write_all(json.as_bytes()).await?;
+            self.writer.write_all(b"\n").await?;
+            self.writer.flush().await?;
+            let mut line = String::new();
+            self.reader.read_line(&mut line).await?;
+            let event: Event = serde_json::from_str(line.trim())?;
+            Ok(event)
+        };
+        match tokio::time::timeout(COMMAND_TIMEOUT, round_trip).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.poisoned = true;
+                Err(format!(
+                    "daemon command timed out after {}s (daemon wedged or overloaded)",
+                    COMMAND_TIMEOUT.as_secs()
+                )
+                .into())
+            }
+        }
     }
 
     pub async fn read_event(&mut self) -> Result<Event, Box<dyn std::error::Error>> {
