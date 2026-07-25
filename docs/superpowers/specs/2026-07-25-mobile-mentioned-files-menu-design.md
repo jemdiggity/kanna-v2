@@ -4,7 +4,7 @@
 
 Replace the mobile terminal's horizontal file-link strips with a task action that exposes a bounded, reverse-chronological list of files mentioned in PTY output. The `+` menu shows `Mentioned Files (n)`, where `n` is the number of distinct detected path tokens retained for the task, capped as `20+`. Selecting the action opens a dedicated native list. Direct taps on file paths inside xterm remain available.
 
-Detection must stay out of the terminal's hot path. The WebView incrementally examines only newly appended or recently changed normal-buffer rows after writes settle. It does not rescan a fixed terminal tail after every update. Filesystem validation and bare-filename lookup run on the task owner only after the user opens the list or directly taps a file mention.
+Detection must stay out of the terminal's hot path. After writes settle, the WebView incrementally examines newly appended normal-buffer rows, a bounded tail when existing normal rows are redrawn, and the bounded alternate buffer while a full-screen terminal application is active. It does not rescan an unbounded terminal tail after every update. Filesystem validation and bare-filename lookup run on the task owner only after the user opens the list or directly taps a file mention.
 
 ## Problem
 
@@ -72,13 +72,13 @@ The detector restores the desktop-style conservative file-token grammar instead 
 
 ### Initial attach and replacement
 
-After a terminal snapshot is written, the detector performs one bounded backward scan of the normal buffer. It examines at most the newest 1,000 physical rows and stops early after finding the overflow sentinel beyond the 20 retained distinct tokens. This reconstructs recent history after reconnect without traversing the full 10,000-row scrollback.
+After a terminal snapshot is written, the detector performs one bounded backward reconstruction. When the alternate buffer is active, it scans that no-scrollback buffer first, newest row first, and then examines at most the newest 1,000 physical rows of the normal buffer. Otherwise it scans only the bounded normal-buffer tail. It stops early after finding the overflow sentinel beyond the 20 retained distinct tokens. This reconstructs recent history after reconnect without traversing the full 10,000-row normal scrollback while still retaining filenames visible in a full-screen terminal redraw.
 
 ### Appends
 
-After an append finishes parsing, the detector records the previous and current normal-buffer lengths. It queues a coalesced scan after 200 milliseconds of inactivity. The pending range begins two physical rows before the earliest append boundary, allowing tokens split across the prior line tail or changed by wrapping to be reconsidered. Multiple writes within the debounce window merge into one range.
+After an append finishes parsing, the detector records the previous and current normal-buffer lengths and queues a coalesced scan after 200 milliseconds of inactivity. When the normal buffer grows, the pending range begins two physical rows before the earliest append boundary, allowing tokens split across the prior line tail or changed by wrapping to be reconsidered. When output rewrites existing normal rows without growing scrollback, the scan is capped to the newest 200 physical rows. Multiple writes within the debounce window merge into one bounded range.
 
-The detector scans the normal buffer even when an alternate-screen application is active. If the normal buffer did not change, it performs no scan, so filenames painted by full-screen TUIs do not enter agent mention history.
+While the alternate buffer is active, each settled batch also scans the complete alternate buffer. Xterm alternate buffers have no scrollback, so this scan is bounded by the visible terminal row count and captures filenames painted or repainted by full-screen agent TUIs. Normal-buffer rows are scanned at the same time only if the write also changed normal-buffer length; otherwise the preserved normal history is left untouched. Recorded entries form an MRU mention history, so a later redraw can add or refresh a mention but erasing a row does not erase an earlier mention.
 
 The detector stores entries in MRU order keyed by the parsed path token without line or column suffixes. A newer occurrence replaces the retained line number and moves the entry to the front. It posts a `terminal-file-mentions` bridge message only when the ordered bounded history or overflow state changes.
 
@@ -220,8 +220,9 @@ Execute the real generated document under happy-dom with the xterm stub and asse
 - a twenty-first token produces overflow without growing the bridge payload;
 - initial reconstruction is bounded to 1,000 rows and stops early after overflow;
 - append detection reads only the merged delta range plus overlap;
+- normal-buffer redraws without scrollback growth scan at most the newest 200 rows;
 - rapid writes coalesce into one scan;
-- alternate-screen-only writes do not change normal-buffer history;
+- alternate-screen redraws enter mention history through the bounded no-scrollback buffer without rescanning unchanged normal scrollback;
 - unchanged history does not emit another bridge message;
 - direct xterm activation still sends one mention.
 

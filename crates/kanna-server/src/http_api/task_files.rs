@@ -43,9 +43,25 @@ pub(super) async fn resolve_task_file_mentions(
     Json(request): Json<ResolveTaskFileMentionsRequest>,
 ) -> Result<Json<TaskFileMentionResolution>, (StatusCode, String)> {
     require_authenticated_task_file_access(access)?;
-    let db = open_db(&state)?;
 
-    crate::task_files::resolve_task_file_mentions(&db, &task_id, request.mentions)
+    super::blocking::run_handler_blocking("task file mention resolution", move || {
+        resolve_task_file_mentions_sync(&state, &task_id, request.mentions)
+    })
+    .await
+}
+
+fn resolve_task_file_mentions_sync(
+    state: &AppState,
+    task_id: &str,
+    mentions: Vec<TaskFileMention>,
+) -> Result<Json<TaskFileMentionResolution>, (StatusCode, String)> {
+    #[cfg(test)]
+    if let Some(hook) = &state.task_file_resolution_hook {
+        hook();
+    }
+
+    let db = open_db(state)?;
+    crate::task_files::resolve_task_file_mentions(&db, task_id, mentions)
         .map(Json)
         .map_err(map_task_file_error)
 }
