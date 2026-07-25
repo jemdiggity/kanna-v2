@@ -1,6 +1,6 @@
 use super::daemon::{
-    advance_owner_task_stage, close_owner_task, prepare_session_observer, resize_daemon_session,
-    send_daemon_input, stream_daemon_session,
+    advance_owner_task_stage, close_owner_task, mark_owner_task_read, prepare_session_observer,
+    resize_daemon_session, send_daemon_input, stream_daemon_session,
 };
 use super::discovery::PeerDiscovery;
 use super::events::{
@@ -656,6 +656,17 @@ async fn handle_connection(
             task_id,
         }) => match advance_owner_task_stage(&context, &requester_peer_id, &task_id).await {
             Ok(()) => PeerResponse::AdvanceTaskStage { request_id },
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::MarkTaskRead {
+            request_id,
+            requester_peer_id,
+            task_id,
+        }) => match mark_owner_task_read(&context, &requester_peer_id, &task_id).await {
+            Ok(()) => PeerResponse::MarkTaskRead { request_id },
             Err(error) => PeerResponse::Error {
                 request_id,
                 message: error.to_string(),

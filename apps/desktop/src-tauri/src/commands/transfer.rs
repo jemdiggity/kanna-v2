@@ -220,6 +220,28 @@ pub async fn advance_transfer_peer_task_stage(
 }
 
 #[tauri::command]
+pub async fn mark_transfer_peer_task_read(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::TransferServiceState>,
+    peer_id: String,
+    task_id: String,
+) -> Result<Value, String> {
+    let mut guard = state.lock().await;
+    ensure_client(&app, &mut guard).await?;
+    let (result, dead) = {
+        let client = guard
+            .as_mut()
+            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
+        let result = client.mark_peer_task_read(peer_id, task_id).await;
+        (result, client.is_dead())
+    };
+    if dead {
+        *guard = None;
+    }
+    result
+}
+
+#[tauri::command]
 pub async fn start_peer_pairing(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,

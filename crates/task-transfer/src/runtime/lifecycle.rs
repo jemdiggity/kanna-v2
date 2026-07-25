@@ -359,6 +359,33 @@ impl TransferRuntime {
             other => Err(unexpected_peer_response("advance-stage", &other)),
         }
     }
+
+    pub async fn mark_peer_task_read(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let request_id = self.next_request_id("mark-read");
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::MarkTaskRead {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    task_id: task_id.to_owned(),
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::MarkTaskRead {
+                request_id: response_request_id,
+            } if response_request_id == request_id => Ok(()),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("mark-read", &other)),
+        }
+    }
 }
 
 impl Drop for TransferRuntime {
