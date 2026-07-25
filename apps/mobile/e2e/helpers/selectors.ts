@@ -100,6 +100,10 @@ export function machineRowSelector(desktopId: string): string {
   return `~${MOBILE_E2E_IDS.machineRow(desktopId)}`;
 }
 
+export function machineNameSelector(desktopId: string): string {
+  return `~${MOBILE_E2E_IDS.machineName(desktopId)}`;
+}
+
 export function machineRowsXPath(desktopId: string): string {
   return `//*[@name="${MOBILE_E2E_IDS.machineName(desktopId)}"]`;
 }

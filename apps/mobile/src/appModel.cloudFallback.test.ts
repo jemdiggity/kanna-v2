@@ -117,11 +117,12 @@ function createTrustedPersistence() {
 }
 
 function createLanFixture(
-  listRecentTasks: () => Promise<TaskSummary[]>
+  listRecentTasks: () => Promise<TaskSummary[]>,
+  displayName = "LAN Mac"
 ): { bonjourBrowser: ReturnType<typeof createStaticBonjourBrowser>; fetchImpl: FetchLike } {
   const bonjourBrowser = createStaticBonjourBrowser([
     {
-      name: "LAN Mac",
+      name: "desktop-lan",
       type: "_kanna-mobile._tcp.",
       host: "desktop.lan",
       port: 48120,
@@ -137,7 +138,7 @@ function createLanFixture(
       return response({
         state: "running",
         desktopId: "desktop-lan",
-        desktopName: "LAN Mac",
+        desktopName: displayName,
         lanHost: "0.0.0.0",
         lanPort: 48120,
         pairingCode: null
@@ -145,7 +146,7 @@ function createLanFixture(
     }
     if (url.endsWith("/v1/desktops")) {
       return response([
-        { id: "desktop-lan", name: "LAN Mac", online: true, mode: "lan" }
+        { id: "desktop-lan", name: displayName, online: true, mode: "lan" }
       ]);
     }
     if (url.endsWith("/v1/repos")) {
@@ -1283,7 +1284,7 @@ describe("createAppModel cloud routing", () => {
 
   it("reconnects a signed-out app when a trusted desktop appears on Bonjour", async () => {
     const mutableBonjour = createMutableBonjourBrowser();
-    const lan = createLanFixture(async () => []);
+    const lan = createLanFixture(async () => [], "Gu’s MacBook Pro");
     const { authSession } = createMutableAuthSession({ status: "signedOut" });
     const app = createAppModel({
       authSession,
@@ -1300,7 +1301,7 @@ describe("createAppModel cloud routing", () => {
     expect(app.sessionStore.getState().connectionState).toBe("idle");
 
     mutableBonjour.setServices([{
-      name: "LAN Mac",
+      name: "desktop-lan",
       type: "_kanna-mobile._tcp.",
       host: "desktop.lan",
       port: 48120,
@@ -1310,7 +1311,11 @@ describe("createAppModel cloud routing", () => {
     await vi.waitFor(() => {
       expect(app.sessionStore.getState().connectionState).toBe("connected");
       expect(app.sessionStore.getState().liveLanDesktops).toEqual([
-        expect.objectContaining({ id: "desktop-lan", online: true })
+        expect.objectContaining({
+          id: "desktop-lan",
+          name: "Gu’s MacBook Pro",
+          online: true
+        })
       ]);
     });
   });

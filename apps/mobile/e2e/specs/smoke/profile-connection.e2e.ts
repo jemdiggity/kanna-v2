@@ -6,8 +6,9 @@ import type {
 import { resolveMobileAppEnvironment } from "../../../src/mobileEnvironment";
 import { claimPairingPayloadThroughDeepLink } from "../../helpers/trust-seed";
 import {
-  machineRemoveButtonSelector,
+  machineNameSelector,
   machineOriginSelector,
+  machineRemoveButtonSelector,
   machineRowSelector,
   machineRowsXPath,
   selectors
@@ -47,6 +48,7 @@ interface ProfileMachinesUi {
   getPairingCodeInput(): Promise<ProfileMachinesElement>;
   getPairingError(): Promise<ProfileMachinesElement>;
   getPairingSubmit(): Promise<ProfileMachinesElement>;
+  getMachineName(desktopId: string): Promise<ProfileMachinesElement>;
   getMachineRow(desktopId: string): Promise<ProfileMachinesElement>;
   getMachineRows(desktopId: string): Promise<ProfileMachinesElement[]>;
   getMachineOrigin(
@@ -97,6 +99,8 @@ function createProfileMachinesUi(driver: Browser): ProfileMachinesUi {
     getPairingCodeInput: async () => driver.$(selectors.machinePairingCodeInput),
     getPairingError: async () => driver.$(selectors.machinePairingError),
     getPairingSubmit: async () => driver.$(selectors.machinePairingSubmit),
+    getMachineName: async (desktopId) =>
+      driver.$(machineNameSelector(desktopId)),
     getMachineRow: async (desktopId) => driver.$(machineRowSelector(desktopId)),
     getMachineRows: async (desktopId) =>
       Array.from(await driver.$$(machineRowsXPath(desktopId))),
@@ -336,6 +340,32 @@ export async function assertMachineOrigins(
       timeoutMsg:
         `Expected one ${desktopId} row with origins ${JSON.stringify(origins)}; ` +
         `last observed ${observedRows} rows and ${JSON.stringify(observedOrigins)}`
+    }
+  );
+}
+
+export async function assertMachineDisplayName(
+  ui: Pick<ProfileMachinesUi, "getMachineName" | "waitUntil">,
+  desktopId: string,
+  expectedDisplayName: string
+): Promise<void> {
+  await (await ui.getMachineName(desktopId)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+  let observedDisplayName = "";
+  await ui.waitUntil(
+    async () => {
+      observedDisplayName = (
+        await (await ui.getMachineName(desktopId)).getText()
+      ).trim();
+      return observedDisplayName === expectedDisplayName;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected ${desktopId} to render as ${JSON.stringify(expectedDisplayName)}; ` +
+        `last observed ${JSON.stringify(observedDisplayName)}`
     }
   );
 }
@@ -640,6 +670,11 @@ export async function runProfileDisconnectedConnectionSmoke(
     account: false,
     manual: true
   });
+  await assertMachineDisplayName(
+    ui,
+    options.desktopId,
+    options.hybridFixture.desktop.displayName
+  );
   await openPairingSheet(ui);
   await assertPairingSheetFresh(ui, codePairing.code);
   await (await driver.$(selectors.machinePairingClose)).click();
@@ -685,6 +720,11 @@ export async function runProfileDisconnectedConnectionSmoke(
     account: false,
     manual: true
   });
+  await assertMachineDisplayName(
+    ui,
+    options.desktopId,
+    options.hybridFixture.desktop.displayName
+  );
 
   await (await driver.$(selectors.machinesBackButton)).click();
   await options.waitForAppReady(selectors.accountButton);

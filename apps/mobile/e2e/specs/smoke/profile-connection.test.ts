@@ -3,6 +3,7 @@ import type { Browser } from "webdriverio";
 import { waitForExpoAppReady } from "../../run";
 import {
   assertBuildInfoJourney,
+  assertMachineDisplayName,
   assertMachineOrigins,
   assertPairingFailure,
   assertPairingSheetFresh,
@@ -266,6 +267,32 @@ describe("Profile to Machines smoke helpers", () => {
     }, "desktop-e2e", { account: true, manual: true });
 
     expect(row.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("waits for a stable-ID machine row to render its friendly desktop name", async () => {
+    const names = ["desktop-lan", "Gu’s MacBook Pro"];
+    const machineName = {
+      ...createElement(),
+      getText: vi.fn(async () => names.shift() ?? "Gu’s MacBook Pro")
+    };
+    const waitUntil = vi.fn(async (
+      condition: () => Promise<boolean>,
+      options: FakeWaitUntilOptions
+    ) => {
+      if (!(await condition()) && !(await condition())) {
+        throw new Error(options.timeoutMsg);
+      }
+    });
+
+    await assertMachineDisplayName({
+      getMachineName: async () => machineName,
+      waitUntil
+    }, "desktop-lan", "Gu’s MacBook Pro");
+
+    expect(machineName.waitForDisplayed).toHaveBeenCalledWith({
+      timeout: 30_000
+    });
+    expect(machineName.getText).toHaveBeenCalledTimes(2);
   });
 
   it("removes only the manual origin while retaining a dual-origin row", async () => {
