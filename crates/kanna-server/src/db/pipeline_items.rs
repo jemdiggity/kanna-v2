@@ -843,24 +843,6 @@ impl Db {
         rows.collect()
     }
 
-    /// Stage transition into a freshly forked workspace: the task's current
-    /// branch moves with the stage.
-    pub fn update_pipeline_item_stage_and_branch(
-        &self,
-        id: &str,
-        stage: &str,
-        branch: &str,
-    ) -> Result<(), rusqlite::Error> {
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item SET stage = ?, branch = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
-            (stage, branch, id),
-        )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        Ok(())
-    }
-
     pub fn get_pipeline_item_pr_branch(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
         self.conn
             .query_row(

@@ -217,19 +217,112 @@ impl Db {
         Ok(())
     }
 
-    /// Roll back a stage run that was inserted before daemon spawn but never
-    /// became the task's active stage. Task close changes pending rows to
-    /// cancelled, so both pre-start states are eligible.
-    pub fn delete_unstarted_stage_run(&self, id: &str) -> Result<(), rusqlite::Error> {
-        let changed = self.conn.execute(
-            "DELETE FROM stage_run
-             WHERE id = ?1 AND status IN ('pending', 'cancelled')",
-            [id],
-        )?;
-        if changed == 0 {
+    /// Land a daemon-created stage session as one atomic ownership change.
+    /// Updating the task first acquires SQLite's write lock while proving the
+    /// task is still open; close therefore cannot interleave between the
+    /// guarded task update, worktree ownership, and starting the exact run.
+    pub fn land_stage_run(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        stage: &str,
+        branch: Option<&str>,
+        worktree: Option<(&str, &str, &str)>,
+    ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let task_changed = match branch {
+            Some(branch) => transaction.execute(
+                "UPDATE pipeline_item
+                 SET stage = ?2,
+                     branch = ?3,
+                     activity = 'working',
+                     activity_changed_at = datetime('now'),
+                     agent_session_id = (
+                       SELECT provider_session_id
+                       FROM stage_run
+                       WHERE id = ?4 AND task_id = ?1
+                     ),
+                     updated_at = datetime('now')
+                 WHERE id = ?1 AND closed_at IS NULL",
+                (task_id, stage, branch, run_id),
+            )?,
+            None => transaction.execute(
+                "UPDATE pipeline_item
+                     SET stage = ?2,
+                     activity = 'working',
+                     activity_changed_at = datetime('now'),
+                     agent_session_id = (
+                       SELECT provider_session_id
+                       FROM stage_run
+                       WHERE id = ?3 AND task_id = ?1
+                     ),
+                     updated_at = datetime('now')
+                 WHERE id = ?1 AND closed_at IS NULL",
+                (task_id, stage, run_id),
+            )?,
+        };
+        if task_changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        Ok(())
+
+        if let Some((worktree_id, worktree_path, worktree_branch)) = worktree {
+            transaction.execute(
+                "INSERT INTO worktree (id, pipeline_item_id, path, branch)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET
+                   pipeline_item_id = excluded.pipeline_item_id,
+                   path = excluded.path,
+                   branch = excluded.branch",
+                (worktree_id, task_id, worktree_path, worktree_branch),
+            )?;
+        }
+
+        let run_changed = transaction.execute(
+            "UPDATE stage_run
+             SET status = 'running'
+             WHERE id = ?1 AND task_id = ?2 AND status = 'pending'",
+            (run_id, task_id),
+        )?;
+        if run_changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        transaction.commit()
+    }
+
+    /// Roll back a stage run that was inserted before daemon spawn but never
+    /// became the task's active stage. Task close changes pending rows to
+    /// cancelled, so both pre-start states are eligible. A provider event can
+    /// arrive between close and rollback, so deleting the run and restoring
+    /// the newest surviving main run's handle must be one transaction.
+    pub fn delete_unstarted_stage_run_and_restore_provider_session_id(
+        &self,
+        id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let task_id = transaction.query_row(
+            "DELETE FROM stage_run
+             WHERE id = ?1 AND status IN ('pending', 'cancelled')
+             RETURNING task_id",
+            [id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let task_changed = transaction.execute(
+            "UPDATE pipeline_item
+             SET agent_session_id = (
+                   SELECT provider_session_id
+                   FROM stage_run
+                   WHERE task_id = ?1 AND kind = 'main'
+                   ORDER BY datetime(started_at) DESC, rowid DESC
+                   LIMIT 1
+                 ),
+                 updated_at = datetime('now')
+             WHERE id = ?1",
+            [&task_id],
+        )?;
+        if task_changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        transaction.commit()
     }
 
     /// Finish the task's most recent `running` run, returning its kind so

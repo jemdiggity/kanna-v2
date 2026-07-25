@@ -335,81 +335,30 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     }
 
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    if db
-        .get_pipeline_item(&task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .map(|item| item.closed_at.is_some())
-        .unwrap_or(true)
+    let worktree_id = format!("wt-{task_id}");
+    let (branch, worktree) = match &prepared.workspace {
+        PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => (
+            Some(workspace.branch.as_str()),
+            Some((
+                worktree_id.as_str(),
+                workspace.worktree_path.as_str(),
+                workspace.branch.as_str(),
+            )),
+        ),
+        PreparedRunWorkspace::Current => (None, None),
+    };
+    if let Err(error) = db.land_stage_run(&task_id, &run_id, &prepared.next_stage, branch, worktree)
     {
-        if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
-            log::warn!("failed to clean up stale stage session {session_id}: {error}");
+        if let Err(kill_error) = kill_session_replacing(daemon, replacements, &session_id).await {
+            log::warn!("failed to clean up unlanded stage session {session_id}: {kill_error}");
         }
-        return Err(rollback_closed_stage_spawn(
-            db_path,
-            &run_id,
-            &prepared,
-            format!("task {task_id} closed before stage transition landed"),
-        ));
+        let message = format!("task {task_id} stage transition could not land: {error}");
+        return Err(if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+            rollback_closed_stage_spawn(db_path, &run_id, &prepared, message)
+        } else {
+            fail_prepared_stage_spawn(db_path, &run_id, &prepared, message)
+        });
     }
-    match &prepared.workspace {
-        PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => {
-            if let Err(error) = db.update_pipeline_item_stage_and_branch(
-                &task_id,
-                &prepared.next_stage,
-                &workspace.branch,
-            ) {
-                if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
-                    if let Err(kill_error) =
-                        kill_session_replacing(daemon, replacements, &session_id).await
-                    {
-                        log::warn!(
-                            "failed to clean up stale stage session {session_id}: {kill_error}"
-                        );
-                    }
-                    return Err(rollback_closed_stage_spawn(
-                        db_path,
-                        &run_id,
-                        &prepared,
-                        format!("task {task_id} closed before stage transition landed"),
-                    ));
-                }
-                return Err(format!("db error: {}", error));
-            }
-            db.upsert_worktree(
-                &format!("wt-{task_id}"),
-                &task_id,
-                &workspace.worktree_path,
-                &workspace.branch,
-            )
-            .map_err(|e| format!("db error: {}", e))?;
-        }
-        PreparedRunWorkspace::Current => {
-            if let Err(error) = db.update_pipeline_item_stage(&task_id, &prepared.next_stage) {
-                if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
-                    if let Err(kill_error) =
-                        kill_session_replacing(daemon, replacements, &session_id).await
-                    {
-                        log::warn!(
-                            "failed to clean up stale stage session {session_id}: {kill_error}"
-                        );
-                    }
-                    return Err(rollback_closed_stage_spawn(
-                        db_path,
-                        &run_id,
-                        &prepared,
-                        format!("task {task_id} closed before stage transition landed"),
-                    ));
-                }
-                return Err(format!("db error: {}", error));
-            }
-        }
-    }
-    db.update_pipeline_item_activity(&task_id, "working")
-        .map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_agent_session_id(&task_id, prepared.provider_session_id.as_deref())
-        .map_err(|e| format!("db error: {}", e))?;
-    db.start_stage_run(&run_id)
-        .map_err(|e| format!("db error: {}", e))?;
 
     spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
 
@@ -442,7 +391,7 @@ fn rollback_closed_stage_spawn(
     error: String,
 ) -> String {
     let rollback_error = match Db::open(db_path)
-        .and_then(|db| db.delete_unstarted_stage_run(run_id))
+        .and_then(|db| db.delete_unstarted_stage_run_and_restore_provider_session_id(run_id))
     {
         Ok(()) => error,
         Err(db_error) => format!("{error}; failed to roll back unstarted stage run: {db_error}"),

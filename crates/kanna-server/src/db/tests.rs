@@ -1490,6 +1490,203 @@ fn provider_session_id_reports_when_owning_main_run_is_current() {
 }
 
 #[test]
+fn deleting_closed_unstarted_run_restores_previous_main_provider_session() {
+    let path = Db::test_db_path("rollback-unstarted-provider-session");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement provider resume",
+        Some("Provider resume"),
+        "review",
+        "2026-07-23 00:00:00",
+    )
+    .unwrap();
+    for (id, stage, status, provider_session_id) in [
+        (
+            "run-implement",
+            "in progress",
+            "succeeded",
+            Some("provider-implement"),
+        ),
+        ("run-review", "review", "pending", None),
+    ] {
+        db.insert_stage_run(NewStageRun {
+            id,
+            task_id: "task-1",
+            stage,
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status,
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id,
+            cwd: Some("/tmp/task-1"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    }
+
+    db.close_pipeline_item("task-1").unwrap();
+    assert!(
+        db.update_stage_run_provider_session_id("run-review", "provider-abandoned")
+            .unwrap()
+            .changed
+    );
+    db.delete_unstarted_stage_run_and_restore_provider_session_id("run-review")
+        .unwrap();
+
+    let task_handle: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT agent_session_id FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(task_handle.as_deref(), Some("provider-implement"));
+    assert_eq!(
+        db.list_stage_runs_for_task("task-1")
+            .unwrap()
+            .iter()
+            .map(|run| run.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["run-implement"]
+    );
+}
+
+#[test]
+fn landing_stage_run_on_closed_task_does_not_reinsert_worktree_or_mutate_stage() {
+    let path = Db::test_db_path("land-stage-run-closed-task");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement provider resume",
+        Some("Provider resume"),
+        "in progress",
+        "2026-07-23 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-review",
+        task_id: "task-1",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "pending",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.upsert_worktree("wt-task-1", "task-1", "/tmp/task-1", "task-1")
+        .unwrap();
+    db.close_pipeline_item("task-1").unwrap();
+    db.delete_worktree_rows_for_task("task-1").unwrap();
+
+    let error = db
+        .land_stage_run(
+            "task-1",
+            "run-review",
+            "review",
+            Some("task-1-1"),
+            Some(("wt-task-1", "/tmp/task-1-1", "task-1-1")),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, rusqlite::Error::QueryReturnedNoRows));
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.stage.as_deref(), Some("in progress"));
+    let worktree_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM worktree WHERE pipeline_item_id = 'task-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(worktree_count, 0);
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "cancelled"
+    );
+}
+
+#[test]
+fn landing_stage_run_preserves_provider_handle_discovered_after_spawn() {
+    let path = Db::test_db_path("land-stage-run-provider-event");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement provider resume",
+        Some("Provider resume"),
+        "in progress",
+        "2026-07-23 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-review",
+        task_id: "task-1",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "pending",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    assert!(
+        db.update_stage_run_provider_session_id("run-review", "provider-review")
+            .unwrap()
+            .changed
+    );
+
+    db.land_stage_run(
+        "task-1",
+        "run-review",
+        "review",
+        Some("task-1-1"),
+        Some(("wt-task-1", "/tmp/task-1-1", "task-1-1")),
+    )
+    .unwrap();
+
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.stage.as_deref(), Some("review"));
+    let task_handle: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT agent_session_id FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(task_handle.as_deref(), Some("provider-review"));
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[test]
 fn insert_pipeline_item_stores_stage_metadata() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");
