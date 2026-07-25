@@ -10,6 +10,8 @@ interface UseRemoteTaskReadDwellOptions {
 
 interface RemoteSelectionObservation {
   itemId: string;
+  ownerDesktopId: string;
+  ownerLocalTaskId: string;
   activityRevision: number;
 }
 
@@ -43,14 +45,21 @@ export function useRemoteTaskReadDwell({
 
       pendingItemId = null;
       const activityRevision = task.item.activity_revision;
+      const remoteRef = task.terminal.remoteRef;
       observedSelection.value = (
         task.owner.kind !== "local"
+        && remoteRef
         && task.item.activity === "unread"
         && typeof activityRevision === "number"
         && Number.isSafeInteger(activityRevision)
         && activityRevision >= 0
       )
-        ? { itemId, activityRevision }
+        ? {
+            itemId,
+            ownerDesktopId: remoteRef.ownerDesktopId,
+            ownerLocalTaskId: remoteRef.ownerLocalTaskId,
+            activityRevision,
+          }
         : null;
     },
     { flush: "sync", immediate: true },
@@ -62,6 +71,12 @@ export function useRemoteTaskReadDwell({
       if (!observation || selectedItemId.value !== observation.itemId) return;
       const task = workspaceTasksByItemId.value.get(observation.itemId);
       if (!task || task.owner.kind === "local" || task.item.activity !== "unread") return;
+      const remoteRef = task.terminal.remoteRef;
+      if (
+        !remoteRef
+        || remoteRef.ownerDesktopId !== observation.ownerDesktopId
+        || remoteRef.ownerLocalTaskId !== observation.ownerLocalTaskId
+      ) return;
       if (task.item.activity_revision !== observation.activityRevision) return;
       await markTaskRead(task, observation.activityRevision);
     },
