@@ -10,7 +10,9 @@ The Appium flow begins signed out and exercises these contracts in order:
 
 - creates a real server pairing session, enters its code through the React
   Native sheet, claims it over discovered Bonjour HTTP, and observes persisted
-  manual trust;
+  manual trust; the server advertises its stable desktop ID as the Bonjour
+  instance name, while the Machines UI must render the distinct human-readable
+  `/v1/status.desktopName`;
 - removes that manual-only row through the confirmation UI;
 - submits a wrong six-character code, verifies recovery copy and usable code
   input, expires a new real server session through a loopback/debug-only
@@ -18,8 +20,9 @@ The Appium flow begins signed out and exercises these contracts in order:
 - creates another real server session and injects its versioned QR payload as
   the simulator's scanned value, then claims it through the same
   `pairMachineByPayload`/Bonjour/server endpoint used by the camera callback;
-- terminates and reactivates the app to prove the trusted machine survives
-  AsyncStorage reload;
+- terminates and reactivates the app to prove the trusted machine and its
+  human-readable server name survive AsyncStorage reload plus a fresh Bonjour
+  inventory refresh;
 - signs into the Auth emulator and requires one row for the desktop with both
   Account and Paired origins;
 - requires LAN metadata for the account/LAN duplicate, disables only direct
