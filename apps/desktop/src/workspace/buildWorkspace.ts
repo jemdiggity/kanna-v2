@@ -240,32 +240,45 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
   const remoteTaskIds = existing.remoteTaskIds.includes(candidate.item.id)
     ? existing.remoteTaskIds
     : [...existing.remoteTaskIds, candidate.item.id];
-  const bestRoute = chooseBestRoute([...sources]);
-  const routeItem = !existing.localTaskId && candidate.source.kind === bestRoute.kind
-    ? candidate.item
-    : existing.item;
+  const candidateRoute = terminalRouteFor(candidate);
+  if (
+    existing.localTaskId
+    || routePrecedence(candidateRoute) <= routePrecedence(existing.terminal)
+  ) {
+    return {
+      ...existing,
+      remoteTaskIds,
+      sources,
+    };
+  }
+
   return {
     ...existing,
-    id: existing.localTaskId ? existing.id : routeItem.id,
-    item: routeItem,
+    id: candidate.item.id,
+    item: candidate.item,
+    owner: {
+      kind: "remote",
+      id: candidate.source.terminalRef?.ownerDesktopId ?? "unknown",
+    },
     remoteTaskIds,
     sources,
-    terminal: bestRoute,
-    reachability: existing.reachability === "local" ? "local" : bestRoute.kind === "none" ? "unknown" : "reachable",
-    capabilities: existing.localTaskId
-      ? existing.capabilities
-      : capabilitiesForRoute(bestRoute),
+    terminal: candidateRoute,
+    reachability: candidateRoute.kind === "none" ? "unknown" : "reachable",
+    capabilities: capabilitiesFor(candidate),
   };
 }
 
-function chooseBestRoute(sources: WorkspaceTaskSource[]): WorkspaceTerminalRoute {
-  const local = sources.find((source) => source.kind === "local");
-  if (local) return { kind: "local", localSessionId: local.taskId };
-  const lan = sources.find((source) => source.kind === "lan" && source.terminalRef);
-  if (lan?.terminalRef) return { kind: "lan", remoteRef: lan.terminalRef };
-  const cloud = sources.find((source) => source.kind === "cloud" && source.terminalRef);
-  if (cloud?.terminalRef) return { kind: "cloud", remoteRef: cloud.terminalRef };
-  return { kind: "none" };
+function routePrecedence(route: WorkspaceTerminalRoute): number {
+  switch (route.kind) {
+    case "local":
+      return 3;
+    case "lan":
+      return 2;
+    case "cloud":
+      return 1;
+    case "none":
+      return 0;
+  }
 }
 
 function terminalRouteFor(candidate: Candidate): WorkspaceTerminalRoute {
@@ -285,13 +298,6 @@ function capabilitiesFor(candidate: Candidate): WorkspaceCapabilities {
   const isLocal = candidate.source.kind === "local";
   const hasTerminal = isLocal || Boolean(candidate.source.terminalRef);
   const isReachable = isLocal || Boolean(candidate.source.terminalRef);
-  return buildCapabilities({ isLocal, hasTerminal, isReachable });
-}
-
-function capabilitiesForRoute(route: WorkspaceTerminalRoute): WorkspaceCapabilities {
-  const isLocal = route.kind === "local";
-  const hasTerminal = route.kind !== "none";
-  const isReachable = route.kind !== "none";
   return buildCapabilities({ isLocal, hasTerminal, isReachable });
 }
 

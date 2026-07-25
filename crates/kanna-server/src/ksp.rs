@@ -3088,6 +3088,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_dispatch_marks_tasks_read_with_revision_and_legacy_null_bodies() {
+        let unique = format!(
+            "ksp-mark-read-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut config = test_config(&unique, "KSP Mark Read");
+        config.db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One")
+            .expect("insert repo");
+        for task_id in ["task-revision", "task-legacy"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-1",
+                "task prompt",
+                Some("Task"),
+                "in progress",
+                "2026-07-25 01:00:00",
+            )
+            .expect("insert task");
+            db.update_pipeline_item_activity(task_id, "unread")
+                .expect("mark task unread");
+        }
+        let state = Arc::new(AppState::new(config.clone()));
+        let (frame_tx, mut frame_rx) = mpsc::channel(2);
+
+        dispatch_ksp_request(
+            Arc::clone(&state),
+            frame_tx.clone(),
+            KspRequest {
+                id: 41,
+                method: "POST".into(),
+                path: "/v1/tasks/task-revision/actions/mark-read".into(),
+                body: Some(serde_json::json!({
+                    "expectedActivityRevision": 1,
+                })),
+            },
+        )
+        .await;
+        dispatch_ksp_request(
+            state,
+            frame_tx,
+            KspRequest {
+                id: 42,
+                method: "POST".into(),
+                path: "/v1/tasks/task-legacy/actions/mark-read".into(),
+                body: None,
+            },
+        )
+        .await;
+
+        for (expected_id, expected_task_id) in [(41, "task-revision"), (42, "task-legacy")] {
+            match frame_rx.recv().await.expect("mark-read response") {
+                ServerFrame::Response { id, status, body } => {
+                    assert_eq!(id, expected_id);
+                    assert_eq!(status, 200);
+                    assert_eq!(
+                        body,
+                        Some(serde_json::json!({
+                            "taskId": expected_task_id,
+                            "activity": "idle",
+                        }))
+                    );
+                }
+                other => panic!("expected Response, got {other:?}"),
+            }
+        }
+
+        for task_id in ["task-revision", "task-legacy"] {
+            let item = db
+                .get_pipeline_item(task_id)
+                .expect("read task")
+                .expect("task exists");
+            assert_eq!(item.activity.as_deref(), Some("idle"));
+            assert_eq!(item.activity_revision, 2);
+        }
+    }
+
+    #[tokio::test]
     async fn ksp_request_cannot_create_pairing_session() {
         let url = serve_test_router().await;
         let mut socket = ws_connect(&url).await;

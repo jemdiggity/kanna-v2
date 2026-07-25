@@ -64,6 +64,7 @@ describe("mapDesktopCloudTasks", () => {
         displayName: null,
         stage: "in progress",
         activity: "working",
+        activityRevision: 9,
         status: "active",
         repo: {
           cloudRepoId: "repo-1",
@@ -99,6 +100,7 @@ describe("mapDesktopCloudTasks", () => {
         last_output_preview: "Ready for review",
         agent_provider: "codex",
         agent_type: "agent",
+        activity_revision: 9,
       },
     ]);
     expect(snapshot.terminalRefs["cloud:repo-1:task-1"]).toEqual({
@@ -107,6 +109,21 @@ describe("mapDesktopCloudTasks", () => {
       ownerLocalTaskId: "task-1",
       transport: "cloud",
     });
+  });
+
+  it("maps the running-post flag so remote tasks show the transition-in-flight indicator", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({ hasRunningPost: true }),
+      remoteTaskSnapshot({
+        cloudTaskId: "remote-repo-id:task-2",
+        ownerLocalTaskId: "task-2",
+      }),
+    ]);
+
+    expect(snapshot.items).toMatchObject([
+      { id: "cloud:remote-repo-id:task-1", has_running_post: 1 },
+      { id: "cloud:remote-repo-id:task-2", has_running_post: 0 },
+    ]);
   });
 
   it("preserves OpenCode as the cloud task agent provider", () => {

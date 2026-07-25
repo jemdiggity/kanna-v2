@@ -38,7 +38,9 @@ struct CloudTaskSnapshot {
     display_name: Option<String>,
     stage: String,
     activity: String,
+    activity_revision: i64,
     status: String,
+    has_running_post: bool,
     repo: CloudRepoSnapshot,
     branch: Option<String>,
     base_ref: Option<String>,
@@ -174,7 +176,9 @@ fn map_task(
         display_name: truncate_option(item.display_name, 512),
         stage: truncate(&item.stage, 64),
         activity: truncate(&item.activity, 32),
+        activity_revision: item.activity_revision,
         status: status.into(),
+        has_running_post: item.has_running_post != 0,
         repo: CloudRepoSnapshot {
             cloud_repo_id: repo.id.clone(),
             name: truncate(&repo.name, 256),
@@ -398,6 +402,7 @@ mod tests {
                     agent_type: Some("pty".into()),
                     agent_provider: "codex".into(),
                     activity: activity.into(),
+                    activity_revision: 7,
                     activity_changed_at: Some("2026-07-14 01:02:03".into()),
                     unread_at: None,
                     port_offset: None,
@@ -444,6 +449,8 @@ mod tests {
             "Implement publication\nwith detail"
         );
         assert_eq!(json["tasks"][0]["activity"], "working");
+        assert_eq!(json["tasks"][0]["activityRevision"], 7);
+        assert_eq!(json["tasks"][0]["hasRunningPost"], false);
         assert_eq!(json["tasks"][0]["waitingPromptSnippet"], "Ready for review");
         assert_eq!(json["tasks"][0]["status"], "blocked");
         assert_eq!(
@@ -463,6 +470,17 @@ mod tests {
             serde_json::json!({"provider":"codex","type":"pty"})
         );
         assert_eq!(json["tasks"][0]["parentTaskId"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn snapshot_mapping_publishes_running_post_flag() {
+        let mut source = ui_snapshot("working");
+        source.entries[0].items[0].has_running_post = 1;
+
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["tasks"][0]["hasRunningPost"], true);
     }
 
     #[test]
@@ -658,5 +676,33 @@ mod tests {
             state.next_step(now + Duration::from_secs(18)),
             PublisherStep::Publish(_)
         ));
+    }
+
+    #[test]
+    fn publisher_reconciles_latest_snapshot_after_timeout_and_disconnect() {
+        let now = Instant::now();
+        let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
+        let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        let mut state = PublisherState::new();
+        state.on_authenticated();
+        state.observe(idle);
+
+        let PublisherStep::Publish(abandoned) = state.next_step(now) else {
+            panic!("expected abandoned publication")
+        };
+        state.observe(working.clone());
+        assert!(matches!(
+            state.next_step(now + Duration::from_secs(16)),
+            PublisherStep::Wait
+        ));
+
+        state.on_disconnected();
+        state.on_authenticated();
+        let PublisherStep::Publish(reconnected) = state.next_step(now + Duration::from_secs(16))
+        else {
+            panic!("expected reconnect reconciliation")
+        };
+        assert_ne!(reconnected.id, abandoned.id);
+        assert_eq!(reconnected.snapshot.fingerprint(), working.fingerprint(),);
     }
 }

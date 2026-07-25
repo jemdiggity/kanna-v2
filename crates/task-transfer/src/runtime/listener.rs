@@ -1,6 +1,6 @@
 use super::daemon::{
-    advance_owner_task_stage, close_owner_task, prepare_session_observer, read_owner_task_file,
-    resize_daemon_session, send_daemon_input, stream_daemon_session,
+    advance_owner_task_stage, close_owner_task, mark_owner_task_read, prepare_session_observer,
+    read_owner_task_file, resize_daemon_session, send_daemon_input, stream_daemon_session,
 };
 use super::discovery::PeerDiscovery;
 use super::events::{
@@ -672,6 +672,66 @@ async fn handle_connection(
                 path,
                 content,
             },
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::MarkTaskRead {
+            request_id,
+            requester_peer_id,
+            sealed_payload,
+        }) => match async {
+            let requester_peer = context
+                .discovery
+                .list_peers(&context.self_peer_id)
+                .await?
+                .into_iter()
+                .find(|peer| peer.peer_id == requester_peer_id)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol(format!(
+                        "requester peer {} is not currently discovered",
+                        requester_peer_id
+                    ))
+                })?;
+            ensure_peer_is_trusted_for(
+                &context.registry_root,
+                &context.self_peer_id,
+                &requester_peer_id,
+                &requester_peer.public_key,
+            )?;
+            let requester_public_key = parse_public_key(&requester_peer.public_key)?;
+            let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
+            let payload = open_json(&identity, &requester_public_key, &sealed_payload)?;
+            let task_id = payload
+                .get("task_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol("mark-read payload missing task_id".into())
+                })?;
+            let expected_activity_revision = payload
+                .get("expected_activity_revision")
+                .and_then(Value::as_i64)
+                .filter(|revision| *revision >= 0)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol(
+                        "mark-read payload missing expected_activity_revision".into(),
+                    )
+                })?;
+            mark_owner_task_read(
+                &context,
+                &requester_peer_id,
+                task_id,
+                expected_activity_revision,
+            )
+            .await?;
+            Ok::<PeerResponse, RuntimeError>(PeerResponse::MarkTaskRead {
+                request_id: request_id.clone(),
+            })
+        }
+        .await
+        {
+            Ok(response) => response,
             Err(error) => PeerResponse::Error {
                 request_id,
                 message: error.to_string(),

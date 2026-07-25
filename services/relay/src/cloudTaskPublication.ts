@@ -16,13 +16,30 @@ export interface ValidatedCloudTaskPublication {
   tasks: CloudTaskDocument[];
 }
 
+export interface CloudTaskPublicationGeneration {
+  session: number;
+  sequence: number;
+}
+
 export interface CloudTaskPublicationStore {
   reconcile(input: {
     userId: string;
     desktopId: string;
+    generation: CloudTaskPublicationGeneration;
     displayName: string;
     tasks: CloudTaskDocument[];
   }): Promise<void>;
+}
+
+export interface CloudTaskPublicationSessionStore extends CloudTaskPublicationStore {
+  beginSession(input: {
+    userId: string;
+    desktopId: string;
+  }): Promise<number>;
+}
+
+export interface CloudTaskPublicationFaultInjection {
+  afterGenerationClaim?(generation: CloudTaskPublicationGeneration): Promise<void>;
 }
 
 export interface TaskReconciliationPlan {
@@ -95,6 +112,10 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     throw new Error(`${path}.status is invalid`);
   }
   if (task.closedAt !== null) throw new Error(`${path}.closedAt must be null for an open task`);
+  const activityRevision = optionalNonNegativeInteger(
+    task.activityRevision,
+    `${path}.activityRevision`,
+  );
 
   return {
     localRepoId,
@@ -110,7 +131,9 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     displayName: nullableString(task.displayName, `${path}.displayName`, 512),
     stage: requiredString(task.stage, `${path}.stage`, 64),
     activity: requiredString(task.activity, `${path}.activity`, 32),
+    ...(activityRevision === undefined ? {} : { activityRevision }),
     status,
+    hasRunningPost: optionalBoolean(task.hasRunningPost, `${path}.hasRunningPost`),
     repo: {
       cloudRepoId: requiredString(repo.cloudRepoId, `${path}.repo.cloudRepoId`, 128),
       name: requiredString(repo.name, `${path}.repo.name`, 256),
@@ -169,34 +192,84 @@ export function planTaskReconciliation(
 export async function handleCloudTaskPublication(input: {
   userId: string;
   desktopId: string;
+  generation: CloudTaskPublicationGeneration;
   snapshot: unknown;
   store?: CloudTaskPublicationStore;
 }): Promise<void> {
+  validatePublicationGeneration(input.generation);
   const publication = validateCloudTaskPublication(input.snapshot, input.desktopId);
   const store = input.store ?? createFirestoreCloudTaskPublicationStore();
   await store.reconcile({
     userId: input.userId,
     desktopId: input.desktopId,
+    generation: input.generation,
     displayName: publication.displayName,
     tasks: publication.tasks,
   });
 }
 
+export async function beginCloudTaskPublicationSession(input: {
+  userId: string;
+  desktopId: string;
+  store?: CloudTaskPublicationSessionStore;
+}): Promise<number> {
+  const store = input.store ?? createFirestoreCloudTaskPublicationStore();
+  return await store.beginSession({
+    userId: input.userId,
+    desktopId: input.desktopId,
+  });
+}
+
 export function createFirestoreCloudTaskPublicationStore(
   db: Firestore = getFirebaseServices().db,
-): CloudTaskPublicationStore {
+  faultInjection?: CloudTaskPublicationFaultInjection,
+): CloudTaskPublicationSessionStore {
   return {
-    async reconcile({ userId, desktopId, displayName, tasks }) {
-      const desktopDocId = desktopId === "." || desktopId === ".."
-        ? `desktop-${Buffer.from(desktopId).toString("hex")}`
-        : desktopId.replaceAll("/", "_");
+    async beginSession({ userId, desktopId }) {
+      const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopsRef = db.collection(`users/${userId}/desktops`);
       const desktopRef = desktopsRef.doc(desktopDocId);
-      await desktopRef.set({
-        desktopId,
-        displayName,
-        updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
+      return await db.runTransaction(async (transaction) => {
+        const current = await transaction.get(desktopRef);
+        const currentGeneration = storedGenerationPart(
+          current.data()?.publicationSessionGeneration,
+        );
+        const nextGeneration = currentGeneration + 1;
+        if (!Number.isSafeInteger(nextGeneration)) {
+          throw new Error("cloud task publication generation exhausted");
+        }
+        transaction.set(desktopRef, {
+          desktopId,
+          publicationSessionGeneration: nextGeneration,
+          publicationSequence: 0,
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return nextGeneration;
+      });
+    },
+
+    async reconcile({ userId, desktopId, generation, displayName, tasks }) {
+      validatePublicationGeneration(generation);
+      const desktopDocId = cloudDesktopDocumentId(desktopId);
+      const desktopsRef = db.collection(`users/${userId}/desktops`);
+      const desktopRef = desktopsRef.doc(desktopDocId);
+      await db.runTransaction(async (transaction) => {
+        const current = await transaction.get(desktopRef);
+        const currentGeneration = storedPublicationGeneration(current.data());
+        if (
+          currentGeneration.session !== generation.session
+          || currentGeneration.sequence > generation.sequence
+        ) {
+          throw stalePublicationError(generation, currentGeneration);
+        }
+        transaction.set(desktopRef, {
+          desktopId,
+          displayName,
+          publicationSequence: generation.sequence,
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      });
+      await faultInjection?.afterGenerationClaim?.(generation);
 
       const tasksRef = desktopRef.collection("tasks");
       const existing = await tasksRef.get();
@@ -213,13 +286,14 @@ export function createFirestoreCloudTaskPublicationStore(
         ...plan.deleteIds.map((id) => ({ kind: "delete" as const, id })),
       ];
       for (let offset = 0; offset < operations.length; offset += MAX_BATCH_OPERATIONS) {
-        const batch = db.batch();
-        for (const operation of operations.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
-          const ref = tasksRef.doc(operation.id);
-          if (operation.kind === "set") batch.set(ref, operation.data);
-          else batch.delete(ref);
-        }
-        await batch.commit();
+        await db.runTransaction(async (transaction) => {
+          await requireCurrentPublication(transaction, desktopRef, generation);
+          for (const operation of operations.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
+            const ref = tasksRef.doc(operation.id);
+            if (operation.kind === "set") transaction.set(ref, operation.data);
+            else transaction.delete(ref);
+          }
+        });
       }
 
       // Older renderer publishers created auto-id desktop documents. The full
@@ -230,16 +304,75 @@ export function createFirestoreCloudTaskPublicationStore(
         if (duplicate.id === desktopRef.id) continue;
         const duplicateTasks = await duplicate.ref.collection("tasks").get();
         for (let offset = 0; offset < duplicateTasks.docs.length; offset += MAX_BATCH_OPERATIONS) {
-          const batch = db.batch();
-          for (const document of duplicateTasks.docs.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
-            batch.delete(document.ref);
-          }
-          await batch.commit();
+          await db.runTransaction(async (transaction) => {
+            await requireCurrentPublication(transaction, desktopRef, generation);
+            for (const document of duplicateTasks.docs.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
+              transaction.delete(document.ref);
+            }
+          });
         }
-        await duplicate.ref.delete();
+        await db.runTransaction(async (transaction) => {
+          await requireCurrentPublication(transaction, desktopRef, generation);
+          transaction.delete(duplicate.ref);
+        });
       }
     },
   };
+}
+
+function cloudDesktopDocumentId(desktopId: string): string {
+  return desktopId === "." || desktopId === ".."
+    ? `desktop-${Buffer.from(desktopId).toString("hex")}`
+    : desktopId.replaceAll("/", "_");
+}
+
+async function requireCurrentPublication(
+  transaction: FirebaseFirestore.Transaction,
+  desktopRef: FirebaseFirestore.DocumentReference,
+  generation: CloudTaskPublicationGeneration,
+): Promise<void> {
+  const current = await transaction.get(desktopRef);
+  const stored = storedPublicationGeneration(current.data());
+  if (
+    stored.session !== generation.session
+    || stored.sequence !== generation.sequence
+  ) {
+    throw stalePublicationError(generation, stored);
+  }
+}
+
+function storedPublicationGeneration(
+  data: FirebaseFirestore.DocumentData | undefined,
+): CloudTaskPublicationGeneration {
+  return {
+    session: storedGenerationPart(data?.publicationSessionGeneration),
+    sequence: storedGenerationPart(data?.publicationSequence),
+  };
+}
+
+function storedGenerationPart(value: unknown): number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : 0;
+}
+
+function validatePublicationGeneration(generation: CloudTaskPublicationGeneration): void {
+  if (
+    !Number.isSafeInteger(generation.session)
+    || generation.session <= 0
+    || !Number.isSafeInteger(generation.sequence)
+    || generation.sequence <= 0
+  ) {
+    throw new Error("cloud task publication generation must contain positive safe integers");
+  }
+}
+
+function stalePublicationError(
+  attempted: CloudTaskPublicationGeneration,
+  current: CloudTaskPublicationGeneration,
+): Error {
+  return new Error(
+    `stale cloud task publication ${attempted.session}/${attempted.sequence}; `
+    + `current generation is ${current.session}/${current.sequence}`,
+  );
 }
 
 function taskIdentity(task: Pick<CloudTaskDocument, "localRepoId" | "ownerLocalTaskId">): string {
@@ -298,10 +431,27 @@ function optionalNullableUnicodeString(
   return value;
 }
 
+// Missing on snapshots from older desktop publishers; treated as "no running post".
+function optionalBoolean(value: unknown, field: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value;
+}
+
 function nullableInteger(value: unknown, field: string): number | null {
   if (value === null) return null;
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${field} must be null or a non-negative integer`);
+  }
+  return value as number;
+}
+
+function optionalNonNegativeInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`${field} must be a non-negative integer when present`);
   }
   return value as number;
 }

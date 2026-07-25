@@ -253,6 +253,26 @@ impl TransferSidecarClient {
         .await
     }
 
+    pub async fn mark_peer_task_read(
+        &mut self,
+        peer_id: String,
+        task_id: String,
+        expected_activity_revision: i64,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("mark-read");
+        self.send_request(
+            json!({
+                "type": "mark_peer_task_read",
+                "request_id": request_id,
+                "target_peer_id": peer_id,
+                "task_id": task_id,
+                "expected_activity_revision": expected_activity_revision,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
     pub async fn start_peer_pairing(&mut self, peer_id: String) -> Result<Value, String> {
         let request_id = self.next_request_id("pair");
         eprintln!(

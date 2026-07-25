@@ -6,7 +6,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -39,6 +39,7 @@ impl Db {
                 notified_at: row.get(23)?,
                 parent_task_id: row.get(24)?,
                 pipeline_def: row.get(25)?,
+                activity_revision: row.get(26)?,
             })
         })?;
         rows.collect()
@@ -49,7 +50,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -86,6 +87,7 @@ impl Db {
                 notified_at: row.get(23)?,
                 parent_task_id: row.get(24)?,
                 pipeline_def: row.get(25)?,
+                activity_revision: row.get(26)?,
             })
         })?;
         rows.collect()
@@ -95,7 +97,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -127,6 +129,7 @@ impl Db {
                 notified_at: row.get(23)?,
                 parent_task_id: row.get(24)?,
                 pipeline_def: row.get(25)?,
+                activity_revision: row.get(26)?,
             })
         })?;
         rows.collect()
@@ -136,7 +139,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -167,6 +170,7 @@ impl Db {
                 notified_at: row.get(23)?,
                 parent_task_id: row.get(24)?,
                 pipeline_def: row.get(25)?,
+                activity_revision: row.get(26)?,
             })
         })?;
         match rows.next() {
@@ -508,12 +512,30 @@ impl Db {
         self.conn.execute(
             "UPDATE pipeline_item
              SET activity = ?, activity_changed_at = datetime('now'),
+                 activity_revision = activity_revision + 1,
                  unread_at = CASE WHEN ? = 'unread' THEN datetime('now') ELSE unread_at END,
                  updated_at = datetime('now')
              WHERE id = ? AND activity != ? AND closed_at IS NULL",
             (activity, activity, id, activity),
         )?;
         Ok(())
+    }
+
+    pub fn mark_pipeline_item_read_if_unchanged(
+        &self,
+        id: &str,
+        expected_activity_revision: Option<i64>,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET activity = 'idle', activity_changed_at = datetime('now'),
+                 activity_revision = activity_revision + 1,
+                 updated_at = datetime('now')
+             WHERE id = ? AND activity = 'unread' AND closed_at IS NULL
+               AND (? IS NULL OR activity_revision = ?)",
+            (id, expected_activity_revision, expected_activity_revision),
+        )?;
+        Ok(rows_affected > 0)
     }
 
     pub fn update_pipeline_item_base_ref_and_activity(
@@ -524,10 +546,12 @@ impl Db {
     ) -> Result<(), rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE pipeline_item
-             SET base_ref = ?, activity = ?, activity_changed_at = datetime('now'),
+             SET base_ref = ?,
+                 activity_revision = activity_revision + CASE WHEN activity != ? THEN 1 ELSE 0 END,
+                 activity = ?, activity_changed_at = datetime('now'),
                  updated_at = datetime('now')
              WHERE id = ? AND closed_at IS NULL",
-            (base_ref, activity, id),
+            (base_ref, activity, activity, id),
         )?;
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);

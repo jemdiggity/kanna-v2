@@ -1,10 +1,13 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use kanna_task_transfer::crypto::{public_key_to_string, TransferIdentity};
+use kanna_task_transfer::crypto::{
+    parse_public_key, public_key_to_string, seal_json, TransferIdentity,
+};
 use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
+use kanna_task_transfer::protocol::{PeerRequest, PeerResponse};
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
 use kanna_task_transfer::runtime::{
-    DiscoveryMode, PairingResult, RuntimeConfig, RuntimeEvent, TransferRuntime,
+    DiscoveryMode, PairingResult, RuntimeConfig, RuntimeError, RuntimeEvent, TransferRuntime,
 };
 use serde_json::json;
 use std::path::Path;
@@ -175,6 +178,146 @@ async fn start_pairing_times_out_when_peer_accepts_without_replying() {
     );
 
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let spoofing_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let spoofing_port = spoofing_listener.local_addr().unwrap().port();
+    let honest_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let honest_port = honest_listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    let honest_identity = TransferIdentity::generate();
+    let honest_public_key = public_key_to_string(&honest_identity.public_key);
+
+    let registry = PeerRegistry::new(temp.path().to_path_buf());
+    registry
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: format!("127.0.0.1:{spoofing_port}"),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    registry
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-z-honest".into(),
+            display_name: "Honest".into(),
+            endpoint: format!("127.0.0.1:{honest_port}"),
+            pid: std::process::id(),
+            public_key: honest_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let peer_store = PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"));
+    peer_store
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-04-17T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    peer_store
+        .upsert(PeerRecord {
+            peer_id: "peer-z-honest".into(),
+            display_name: "Honest".into(),
+            public_key: honest_public_key,
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-04-17T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+    let spoofing_server = tokio::spawn(async move {
+        let (stream, _) = spoofing_listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
+        let PeerRequest::GetTaskSnapshot { request_id, .. } = request else {
+            panic!("expected get task snapshot request");
+        };
+        let response = PeerResponse::TaskSnapshot {
+            request_id,
+            peer_id: "peer-victim".into(),
+            display_name: "Victim".into(),
+            snapshot: json!({
+                "tasks": [{
+                    "id": "victim-task"
+                }]
+            }),
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let honest_server = tokio::spawn(async move {
+        let (stream, _) = honest_listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
+        let PeerRequest::GetTaskSnapshot { request_id, .. } = request else {
+            panic!("expected get task snapshot request");
+        };
+        let response = PeerResponse::TaskSnapshot {
+            request_id,
+            peer_id: "peer-z-honest".into(),
+            display_name: "Honest".into(),
+            snapshot: json!({
+                "tasks": [{
+                    "id": "honest-task"
+                }]
+            }),
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let snapshots = primary.list_peer_task_snapshots().await.unwrap();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "expected only the honest peer snapshot: {snapshots:?}"
+    );
+    assert_eq!(snapshots[0].peer_id, "peer-z-honest");
+    assert_eq!(
+        snapshots[0].snapshot,
+        json!({
+            "tasks": [{
+                "id": "honest-task"
+            }]
+        })
+    );
+    spoofing_server.await.unwrap();
+    honest_server.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -568,6 +711,277 @@ async fn trusted_peer_read_task_file_fetches_from_owner_kanna_server() {
         "GET /v1/tasks/owner-task-1/files/content?path=src%20dir%2Fapp.ts HTTP/1.1\r\n"
     );
     server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).await.unwrap();
+            if header == "\r\n" {
+                break;
+            }
+            if let Some(value) = header.strip_prefix("Content-Length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).await.unwrap();
+        request_tx
+            .send((request_line, String::from_utf8(body).unwrap()))
+            .unwrap();
+
+        reader
+            .get_mut()
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+    });
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+
+    secondary
+        .mark_peer_task_read("peer-owner", "owner-task-1", 7)
+        .await
+        .unwrap();
+
+    let (request_line, body) = request_rx.await.unwrap();
+    assert_eq!(
+        request_line,
+        "POST /v1/tasks/owner-task-1/actions/mark-read HTTP/1.1\r\n"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        json!({ "expectedActivityRevision": 7 }),
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_task_action_percent_encodes_task_id_as_one_path_segment() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        request_tx.send(request_line).unwrap();
+
+        reader
+            .get_mut()
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+    });
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+
+    secondary
+        .mark_peer_task_read("peer-owner", "owner/task% snow 雪-._~", 7)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        request_rx.await.unwrap(),
+        "POST /v1/tasks/owner%2Ftask%25%20snow%20%E9%9B%AA-._~/actions/mark-read HTTP/1.1\r\n"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_rejects_request_smuggling_task_id_before_kanna_connection() {
+    assert_task_id_rejected_before_kanna_connection(
+        "owner\r\nHost: attacker\r\n\r\nGET /smuggled HTTP/1.1",
+        "task ID contains an ASCII control character",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_rejects_oversized_task_id_before_kanna_connection() {
+    let task_id = "a".repeat(1025);
+    assert_task_id_rejected_before_kanna_connection(&task_id, "task ID exceeds 1024 UTF-8 bytes")
+        .await;
+}
+
+async fn assert_task_id_rejected_before_kanna_connection(task_id: &str, expected_message: &str) {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+
+    let action = secondary.advance_peer_task_stage("peer-owner", task_id);
+    tokio::pin!(action);
+    let error = tokio::select! {
+        result = &mut action => result.unwrap_err(),
+        accepted = listener.accept() => {
+            panic!(
+                "invalid task ID opened a Kanna server connection: {:?}",
+                accepted.unwrap().1,
+            );
+        }
+        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+            panic!("task action did not reject the invalid task ID");
+        }
+    };
+    assert!(
+        matches!(error, RuntimeError::Protocol(_)),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.to_string().contains(expected_message),
+        "unexpected error: {error}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "invalid task ID left a queued Kanna server connection",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forged_mark_read_payload_cannot_apply_owner_action() {
+    let temp = tempfile::tempdir().unwrap();
+    let kanna_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let kanna_port = kanna_listener.local_addr().unwrap().port();
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+    let owner_peer = secondary
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let attacker = TransferIdentity::generate();
+    let owner_public_key = parse_public_key(&owner_peer.public_key).unwrap();
+    let sealed_payload = seal_json(
+        &attacker,
+        &owner_public_key,
+        &json!({
+            "task_id": "owner-task-1",
+            "expected_activity_revision": 7,
+        }),
+    )
+    .unwrap();
+
+    let mut stream = TcpStream::connect(&owner_peer.endpoint).await.unwrap();
+    let request = PeerRequest::MarkTaskRead {
+        request_id: "forged-mark-read".into(),
+        requester_peer_id: "peer-secondary".into(),
+        sealed_payload,
+    };
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    let mut response_line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response_line)
+        .await
+        .unwrap();
+    let response: PeerResponse = serde_json::from_str(response_line.trim()).unwrap();
+    let PeerResponse::Error {
+        request_id,
+        message,
+    } = response
+    else {
+        panic!("expected forged mark-read request to fail");
+    };
+    assert_eq!(request_id, "forged-mark-read");
+    assert!(
+        message.contains("payload decryption failed"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), kanna_listener.accept())
+            .await
+            .is_err(),
+        "forged request reached the owner Kanna server"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

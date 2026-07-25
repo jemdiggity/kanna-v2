@@ -9,11 +9,13 @@ export interface CloudTaskSnapshotInput {
     | "prompt"
     | "stage"
     | "activity"
+    | "activity_revision"
     | "branch"
     | "base_ref"
     | "pr_number"
     | "pr_url"
     | "display_name"
+    | "has_running_post"
     | "last_output_preview"
     | "agent_provider"
     | "agent_type"
@@ -40,7 +42,9 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
     displayName: input.item.display_name,
     stage: input.item.stage,
     activity: input.item.activity,
+    activityRevision: input.item.activity_revision,
     status: deriveStatus(input.item.stage, input.item.closed_at, input.blockedByTaskIds),
+    hasRunningPost: Boolean(input.item.has_running_post),
     repo: {
       cloudRepoId: input.repo.id,
       name: input.repo.name,

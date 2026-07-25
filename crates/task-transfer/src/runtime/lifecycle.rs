@@ -7,7 +7,7 @@ use super::state::{ListenerContext, TransferRuntime};
 use super::utils::{
     load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
 };
-use crate::crypto::public_key_to_string;
+use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
 use crate::protocol::{DiscoveredPeer, PeerTaskSnapshot};
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
@@ -162,13 +162,20 @@ impl TransferRuntime {
             match response {
                 PeerResponse::TaskSnapshot {
                     request_id: response_request_id,
-                    peer_id,
+                    peer_id: response_peer_id,
                     display_name,
                     snapshot,
                 } => {
                     if response_request_id == request_id {
+                        if response_peer_id != peer.peer_id {
+                            eprintln!(
+                                "[task-transfer] peer {} returned task snapshot for mismatched peer {}",
+                                peer.peer_id, response_peer_id
+                            );
+                            continue;
+                        }
                         snapshots.push(PeerTaskSnapshot {
-                            peer_id,
+                            peer_id: peer.peer_id.clone(),
                             display_name,
                             snapshot,
                         });
@@ -388,6 +395,43 @@ impl TransferRuntime {
             } if response_request_id == request_id => Ok((path, content)),
             PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
             other => Err(unexpected_peer_response("read-task-file", &other)),
+        }
+    }
+
+    pub async fn mark_peer_task_read(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+        expected_activity_revision: i64,
+    ) -> Result<(), RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let target_public_key = parse_public_key(&target_peer.public_key)?;
+        let sealed_payload = seal_json(
+            &self.identity,
+            &target_public_key,
+            &serde_json::json!({
+                "task_id": task_id,
+                "expected_activity_revision": expected_activity_revision,
+            }),
+        )?;
+        let request_id = self.next_request_id("mark-read");
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::MarkTaskRead {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    sealed_payload,
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::MarkTaskRead {
+                request_id: response_request_id,
+            } if response_request_id == request_id => Ok(()),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("mark-read", &other)),
         }
     }
 }

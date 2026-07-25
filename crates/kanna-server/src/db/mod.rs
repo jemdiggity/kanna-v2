@@ -66,6 +66,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "026_stage_run_resume",
     "027_pipeline_item_pr_branch",
     "028_stage_run_completion_transition",
+    "029_pipeline_item_activity_revision",
 ];
 
 #[derive(Debug, Serialize)]
@@ -83,6 +84,7 @@ pub struct PipelineItem {
     pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
     pub activity: Option<String>,
+    pub activity_revision: i64,
     pub activity_changed_at: Option<String>,
     pub closed_at: Option<String>,
     pub pinned: Option<i64>,
@@ -142,6 +144,7 @@ pub struct SnapshotPipelineItem {
     pub agent_type: Option<String>,
     pub agent_provider: String,
     pub activity: String,
+    pub activity_revision: i64,
     pub activity_changed_at: Option<String>,
     pub unread_at: Option<String>,
     pub port_offset: Option<i64>,
@@ -687,11 +690,27 @@ fn run_migration(
     }
 }
 
-fn add_column(conn: &Connection, table: &str, column: &str, definition: &str) {
-    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
-    if let Err(error) = conn.execute_batch(&sql) {
-        log::debug!("column {table}.{column} already exists or cannot be added: {error}");
+fn add_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), rusqlite::Error> {
+    let column_exists: i64 = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1
+           FROM pragma_table_xinfo(?1)
+           WHERE name = ?2
+         )",
+        params![table, column],
+        |row| row.get(0),
+    )?;
+    if column_exists != 0 {
+        return Ok(());
     }
+
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    conn.execute_batch(&sql)
 }
 
 fn drop_column(conn: &Connection, table: &str, column: &str) {
@@ -721,37 +740,37 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "pipeline_item",
             "activity",
             "TEXT NOT NULL DEFAULT 'idle'",
-        );
-        add_column(conn, "pipeline_item", "activity_changed_at", "TEXT");
-        add_column(conn, "pipeline_item", "port_offset", "INTEGER");
-        add_column(conn, "pipeline_item", "port_env", "TEXT");
+        )?;
+        add_column(conn, "pipeline_item", "activity_changed_at", "TEXT")?;
+        add_column(conn, "pipeline_item", "port_offset", "INTEGER")?;
+        add_column(conn, "pipeline_item", "port_env", "TEXT")?;
         add_column(
             conn,
             "pipeline_item",
             "pinned",
             "INTEGER NOT NULL DEFAULT 0",
-        );
-        add_column(conn, "pipeline_item", "pin_order", "INTEGER");
-        add_column(conn, "pipeline_item", "display_name", "TEXT");
-        add_column(conn, "pipeline_item", "unread_at", "TEXT");
-        add_column(conn, "repo", "hidden", "INTEGER NOT NULL DEFAULT 0");
-        add_column(conn, "repo", "sort_order", "INTEGER NOT NULL DEFAULT 0");
-        add_column(conn, "pipeline_item", "closed_at", "TEXT");
-        add_column(conn, "pipeline_item", "agent_type", "TEXT");
-        add_column(conn, "pipeline_item", "agent_session_id", "TEXT");
-        add_column(conn, "pipeline_item", "tags", "TEXT NOT NULL DEFAULT '[]'");
-        add_column(conn, "pipeline_item", "base_ref", "TEXT");
+        )?;
+        add_column(conn, "pipeline_item", "pin_order", "INTEGER")?;
+        add_column(conn, "pipeline_item", "display_name", "TEXT")?;
+        add_column(conn, "pipeline_item", "unread_at", "TEXT")?;
+        add_column(conn, "repo", "hidden", "INTEGER NOT NULL DEFAULT 0")?;
+        add_column(conn, "repo", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+        add_column(conn, "pipeline_item", "closed_at", "TEXT")?;
+        add_column(conn, "pipeline_item", "agent_type", "TEXT")?;
+        add_column(conn, "pipeline_item", "agent_session_id", "TEXT")?;
+        add_column(conn, "pipeline_item", "tags", "TEXT NOT NULL DEFAULT '[]'")?;
+        add_column(conn, "pipeline_item", "base_ref", "TEXT")?;
         add_column(
             conn,
             "pipeline_item",
             "agent_provider",
             "TEXT NOT NULL DEFAULT 'claude'",
-        );
-        add_column(conn, "pipeline_item", "agent_spawn_options", "TEXT");
-        add_column(conn, "pipeline_item", "previous_stage", "TEXT");
-        add_column(conn, "pipeline_item", "teardown_started_at", "TEXT");
-        add_column(conn, "pipeline_item", "created_at", "TEXT");
-        add_column(conn, "pipeline_item", "updated_at", "TEXT");
+        )?;
+        add_column(conn, "pipeline_item", "agent_spawn_options", "TEXT")?;
+        add_column(conn, "pipeline_item", "previous_stage", "TEXT")?;
+        add_column(conn, "pipeline_item", "teardown_started_at", "TEXT")?;
+        add_column(conn, "pipeline_item", "created_at", "TEXT")?;
+        add_column(conn, "pipeline_item", "updated_at", "TEXT")?;
         Ok(())
     })?;
 
@@ -825,8 +844,8 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "pipeline_item",
             "pipeline",
             "TEXT NOT NULL DEFAULT 'default'",
-        );
-        add_column(conn, "pipeline_item", "stage_result", "TEXT");
+        )?;
+        add_column(conn, "pipeline_item", "stage_result", "TEXT")?;
         Ok(())
     })?;
 
@@ -893,12 +912,12 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     })?;
 
     run_migration(conn, "011_pipeline_item_last_output_preview", |conn| {
-        add_column(conn, "pipeline_item", "last_output_preview", "TEXT");
+        add_column(conn, "pipeline_item", "last_output_preview", "TEXT")?;
         Ok(())
     })?;
 
     run_migration(conn, "012_pipeline_item_active_post_action", |conn| {
-        add_column(conn, "pipeline_item", "active_post_action", "TEXT");
+        add_column(conn, "pipeline_item", "active_post_action", "TEXT")?;
         Ok(())
     })?;
 
@@ -941,12 +960,12 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     })?;
 
     run_migration(conn, "014_task_transfer_payload_json", |conn| {
-        add_column(conn, "task_transfer", "payload_json", "TEXT");
+        add_column(conn, "task_transfer", "payload_json", "TEXT")?;
         Ok(())
     })?;
 
     run_migration(conn, "015_agent_session_id_rename", |conn| {
-        add_column(conn, "pipeline_item", "agent_session_id", "TEXT");
+        add_column(conn, "pipeline_item", "agent_session_id", "TEXT")?;
         let _ = conn.execute_batch(
             r#"
             UPDATE pipeline_item
@@ -959,7 +978,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     })?;
 
     run_migration(conn, "016_repo_sort_order", |conn| {
-        add_column(conn, "repo", "sort_order", "INTEGER NOT NULL DEFAULT 0");
+        add_column(conn, "repo", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
         let ids = {
             let mut stmt = conn.prepare("SELECT id FROM repo ORDER BY created_at ASC")?;
             let ids = stmt
@@ -977,7 +996,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     })?;
 
     run_migration(conn, "016_task_teardown_state", |conn| {
-        add_column(conn, "pipeline_item", "teardown_started_at", "TEXT");
+        add_column(conn, "pipeline_item", "teardown_started_at", "TEXT")?;
         conn.execute_batch(
             r#"
             UPDATE pipeline_item
@@ -1008,8 +1027,8 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     })?;
 
     run_migration(conn, "019_repo_remote_metadata_columns", |conn| {
-        add_column(conn, "repo", "remote_url", "TEXT");
-        add_column(conn, "repo", "remote_url_hash", "TEXT");
+        add_column(conn, "repo", "remote_url", "TEXT")?;
+        add_column(conn, "repo", "remote_url_hash", "TEXT")?;
         Ok(())
     })?;
 
@@ -1022,23 +1041,23 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     })?;
 
     run_migration(conn, "020_pipeline_item_notify_task", |conn| {
-        add_column(conn, "pipeline_item", "notify_task_id", "TEXT");
-        add_column(conn, "pipeline_item", "notified_at", "TEXT");
+        add_column(conn, "pipeline_item", "notify_task_id", "TEXT")?;
+        add_column(conn, "pipeline_item", "notified_at", "TEXT")?;
         Ok(())
     })?;
 
     run_migration(conn, "021_pipeline_item_agent_spawn_options", |conn| {
-        add_column(conn, "pipeline_item", "agent_spawn_options", "TEXT");
+        add_column(conn, "pipeline_item", "agent_spawn_options", "TEXT")?;
         Ok(())
     })?;
 
     run_migration(conn, "022_pipeline_item_parent_task_id", |conn| {
-        add_column(conn, "pipeline_item", "parent_task_id", "TEXT");
+        add_column(conn, "pipeline_item", "parent_task_id", "TEXT")?;
         Ok(())
     })?;
 
     run_migration(conn, "023_stage_run_pipeline_snapshot", |conn| {
-        add_column(conn, "pipeline_item", "pipeline_def", "TEXT");
+        add_column(conn, "pipeline_item", "pipeline_def", "TEXT")?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS stage_run (
@@ -1137,19 +1156,19 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     })?;
 
     run_migration(conn, "025_stage_run_kind", |conn| {
-        add_column(conn, "stage_run", "kind", "TEXT NOT NULL DEFAULT 'main'");
+        add_column(conn, "stage_run", "kind", "TEXT NOT NULL DEFAULT 'main'")?;
         Ok(())
     })?;
 
     run_migration(conn, "026_stage_run_resume", |conn| {
-        add_column(conn, "stage_run", "provider_session_id", "TEXT");
-        add_column(conn, "stage_run", "cwd", "TEXT");
-        add_column(conn, "stage_run", "resumed_from_run_id", "TEXT");
+        add_column(conn, "stage_run", "provider_session_id", "TEXT")?;
+        add_column(conn, "stage_run", "cwd", "TEXT")?;
+        add_column(conn, "stage_run", "resumed_from_run_id", "TEXT")?;
         Ok(())
     })?;
 
     run_migration(conn, "027_pipeline_item_pr_branch", |conn| {
-        add_column(conn, "pipeline_item", "pr_branch", "TEXT");
+        add_column(conn, "pipeline_item", "pr_branch", "TEXT")?;
         Ok(())
     })?;
 
@@ -1159,7 +1178,17 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "stage_run",
             "completion_transition",
             "TEXT CHECK (completion_transition IN ('manual', 'auto'))",
-        );
+        )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "029_pipeline_item_activity_revision", |conn| {
+        add_column(
+            conn,
+            "pipeline_item",
+            "activity_revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(())
     })?;
 

@@ -21,6 +21,12 @@ pub(super) struct TaskActivityResponse {
     activity: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MarkTaskReadRequest {
+    expected_activity_revision: Option<i64>,
+}
+
 pub(crate) fn activity_for_runtime_status(
     current_activity: Option<&str>,
     status: &str,
@@ -94,6 +100,7 @@ pub(super) async fn apply_runtime_status(
 pub(super) async fn mark_task_read(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
+    payload: Option<Json<MarkTaskReadRequest>>,
 ) -> Result<Json<TaskActivityResponse>, (axum::http::StatusCode, String)> {
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
@@ -118,8 +125,18 @@ pub(super) async fn mark_task_read(
         }));
     }
 
-    db.update_pipeline_item_activity(&task_id, "idle")
+    let expected_activity_revision = payload
+        .as_ref()
+        .and_then(|Json(payload)| payload.expected_activity_revision);
+    let marked_read = db
+        .mark_pipeline_item_read_if_unchanged(&task_id, expected_activity_revision)
         .map_err(|e| db_write_error("db error", e))?;
+    if !marked_read {
+        return Ok(Json(TaskActivityResponse {
+            task_id,
+            activity: None,
+        }));
+    }
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(TaskActivityResponse {
         task_id,

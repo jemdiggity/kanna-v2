@@ -15,7 +15,10 @@ import { invoke } from "../invoke";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import { associateDesktopCloudCredential } from "../services/desktopCloudAssociation";
 import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
-import { createConfiguredDesktopRelayTerminalClient } from "../services/desktopRelayTerminal";
+import {
+  createConfiguredDesktopRelayTerminalClient,
+  type DesktopRelayTerminalClient,
+} from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
 import { fetchClosedTaskIdentities } from "../services/desktopServerClient";
 import {
@@ -30,6 +33,7 @@ import { createWorkspaceSidebarProjector } from "../workspace/projectWorkspaceTa
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
 import type { WindowWorkspaceController } from "../windowWorkspace";
+import { useRemoteTaskReadDwell } from "./useRemoteTaskReadDwell";
 import type { useToast } from "./useToast";
 
 export type AppSidebarItem = SidebarTaskItem;
@@ -44,7 +48,13 @@ interface UseAppCloudWorkspaceOptions {
   windowWorkspace: WindowWorkspaceController;
 }
 
+interface ActiveMarkReadClient {
+  client: DesktopRelayTerminalClient;
+  closed: boolean;
+}
+
 const CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS = 30_000;
+const REMOTE_MARK_READ_TIMEOUT_MS = 10_000;
 
 export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseAppCloudWorkspaceOptions) {
   const desktopAuthSession = ref<DesktopAuthSession | null>(null);
@@ -55,7 +65,12 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   let unsubscribeDesktopAuth: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let subscribedCloudUid: string | null = null;
+  let cloudSubscriptionGeneration = 0;
+  let cloudSnapshotRevision = 0;
+  let cloudOneShotGeneration = 0;
   let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let desktopCloudWorkspaceDisposed = false;
+  const activeMarkReadClients = new Set<ActiveMarkReadClient>();
   const associatedCloudUsers = new Set<string>();
   let lastCloudBackendErrorToastAt: number | null = null;
   const selectedCloudRepoId = ref<string | null>(null);
@@ -184,6 +199,16 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
     return selectedItemId ? workspaceTasksByItemId.value.get(selectedItemId) ?? null : null;
   });
+  const selectedRemoteItemId = computed(() =>
+    selectedWorkspaceTask.value?.owner.kind === "remote"
+      ? selectedCloudItemId.value ?? store.selectedItemId
+      : null,
+  );
+  useRemoteTaskReadDwell({
+    selectedItemId: selectedRemoteItemId,
+    workspaceTasksByItemId,
+    markTaskRead: markRemoteWorkspaceTaskRead,
+  });
   const mainPanelCloudTerminalRef = computed(() => {
     const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
     if (!selectedItemId) return null;
@@ -261,14 +286,29 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   async function refreshCloudTasksForSignedInUser(): Promise<void> {
     const state = desktopAuthState.value;
     if (state.status !== "signedIn") {
-      cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
       return;
     }
-    const snapshot = await listDesktopCloudTasks(state.user.uid, undefined, {
+    const uid = state.user.uid;
+    const subscriptionGeneration = cloudSubscriptionGeneration;
+    const snapshotRevision = cloudSnapshotRevision;
+    const oneShotGeneration = ++cloudOneShotGeneration;
+    const snapshot = await listDesktopCloudTasks(uid, undefined, {
       localRepos: localReposForCloudMatching.value,
       localItems: localTaskIdentitiesForRemoteFiltering.value,
       localClosedItems: closedLocalTaskIdentities.value,
     });
+    const currentState = desktopAuthState.value;
+    if (
+      currentState.status !== "signedIn"
+      || currentState.user.uid !== uid
+      || subscribedCloudUid !== uid
+      || cloudSubscriptionGeneration !== subscriptionGeneration
+      || cloudSnapshotRevision !== snapshotRevision
+      || cloudOneShotGeneration !== oneShotGeneration
+    ) {
+      return;
+    }
+    cloudSnapshotRevision += 1;
     cloudSnapshot.value = {
       repos: snapshot.repos,
       items: snapshot.items,
@@ -280,9 +320,17 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     if (subscribedCloudUid === uid && cloudTasksUnsubscribe) return;
     stopCloudTaskSubscription();
     subscribedCloudUid = uid;
+    const subscriptionGeneration = cloudSubscriptionGeneration;
     cloudTasksUnsubscribe = subscribeDesktopCloudTasks(
       uid,
       (snapshot) => {
+        if (
+          subscribedCloudUid !== uid
+          || cloudSubscriptionGeneration !== subscriptionGeneration
+        ) {
+          return;
+        }
+        cloudSnapshotRevision += 1;
         cloudSnapshot.value = {
           repos: snapshot.repos,
           items: snapshot.items,
@@ -300,6 +348,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   }
 
   function stopCloudTaskSubscription(): void {
+    cloudSubscriptionGeneration += 1;
+    cloudOneShotGeneration += 1;
     cloudTasksUnsubscribe?.();
     cloudTasksUnsubscribe = null;
     subscribedCloudUid = null;
@@ -339,15 +389,17 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
               showCloudBackendErrorToast(error);
             });
         }
-        // One-shot read for immediate data, then live onSnapshot updates.
+        startCloudTaskSubscription(state.user.uid);
+        // One-shot read supplies immediate data only until a newer live
+        // subscription snapshot or auth generation commits.
         void refreshCloudTasksForSignedInUser().catch((error) => {
           console.warn("[cloud] failed to refresh cloud tasks:", error);
           showCloudBackendErrorToast(error);
         });
-        startCloudTaskSubscription(state.user.uid);
       } else {
         associatedCloudUsers.clear();
         stopCloudTaskSubscription();
+        cloudSnapshotRevision += 1;
         cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
       }
     });
@@ -536,7 +588,74 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     }
   }
 
+  async function markRemoteWorkspaceTaskRead(
+    workspaceTask: WorkspaceTask,
+    expectedActivityRevision: number,
+  ): Promise<void> {
+    const remoteRef = workspaceTask.terminal.remoteRef;
+    if (!remoteRef || workspaceTask.terminal.kind === "none") return;
+
+    let activeClient: ActiveMarkReadClient | null = null;
+    try {
+      const client = workspaceTask.terminal.kind === "lan"
+        ? await createConfiguredDesktopLanTerminalClient()
+        : await createConfiguredDesktopRelayTerminalClient();
+      if (!client) {
+        console.warn("[remote] failed to mark task read: remote task owner is unavailable.");
+        return;
+      }
+      activeClient = { client, closed: false };
+      if (desktopCloudWorkspaceDisposed) {
+        closeMarkReadClient(activeClient);
+        return;
+      }
+      activeMarkReadClients.add(activeClient);
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          client.markTaskRead({
+            desktopId: remoteRef.ownerDesktopId,
+            taskId: remoteRef.ownerLocalTaskId,
+            expectedActivityRevision,
+          }),
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(() => {
+              reject(new Error("remote mark-read request timed out"));
+            }, REMOTE_MARK_READ_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timeout !== null) clearTimeout(timeout);
+      }
+    } catch (error) {
+      console.warn(
+        "[remote] failed to mark task read:",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      if (activeClient) closeMarkReadClient(activeClient);
+    }
+  }
+
+  function closeMarkReadClient(activeClient: ActiveMarkReadClient): void {
+    if (activeClient.closed) return;
+    activeClient.closed = true;
+    activeMarkReadClients.delete(activeClient);
+    try {
+      activeClient.client.close();
+    } catch (error) {
+      console.warn(
+        "[remote] failed to close mark-read client:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   function disposeDesktopCloudWorkspace(): void {
+    desktopCloudWorkspaceDisposed = true;
+    for (const activeClient of [...activeMarkReadClients]) {
+      closeMarkReadClient(activeClient);
+    }
     unsubscribeDesktopAuth?.();
     stopCloudTaskSubscription();
     if (lanRefreshTimer) {

@@ -231,7 +231,7 @@ pub(super) async fn advance_owner_task_stage(
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
-    post_local_kanna_task_action(port, task_id, "advance-stage").await
+    post_local_kanna_task_action(port, task_id, "advance-stage", &serde_json::json!({})).await
 }
 
 pub(super) async fn read_owner_task_file(
@@ -323,15 +323,38 @@ async fn get_local_kanna_task_file(
     Ok((file_path.to_owned(), content.to_owned()))
 }
 
+pub(super) async fn mark_owner_task_read(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    task_id: &str,
+    expected_activity_revision: i64,
+) -> Result<(), RuntimeError> {
+    ensure_requester_peer_trusted(context, requester_peer_id).await?;
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    post_local_kanna_task_action(
+        port,
+        task_id,
+        "mark-read",
+        &serde_json::json!({ "expectedActivityRevision": expected_activity_revision }),
+    )
+    .await
+}
+
 async fn post_local_kanna_task_action(
     port: u16,
     task_id: &str,
     action: &str,
+    payload: &serde_json::Value,
 ) -> Result<(), RuntimeError> {
+    let encoded_task_id = encode_task_id_path_segment(task_id)?;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
-    let path = format!("/v1/tasks/{task_id}/actions/{action}");
+    let path = format!("/v1/tasks/{encoded_task_id}/actions/{action}");
+    let body = serde_json::to_string(payload)?;
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
     );
     stream.write_all(request.as_bytes()).await?;
 
@@ -359,6 +382,33 @@ async fn post_local_kanna_task_action(
     Err(RuntimeError::Protocol(format!(
         "Kanna server task action failed with HTTP {status}: {response}"
     )))
+}
+
+fn encode_task_id_path_segment(task_id: &str) -> Result<String, RuntimeError> {
+    if task_id.len() > 1024 {
+        return Err(RuntimeError::Protocol(format!(
+            "task ID exceeds 1024 UTF-8 bytes (received {})",
+            task_id.len()
+        )));
+    }
+    if task_id.bytes().any(|byte| byte <= 0x1f || byte == 0x7f) {
+        return Err(RuntimeError::Protocol(
+            "task ID contains an ASCII control character".into(),
+        ));
+    }
+
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(task_id.len());
+    for byte in task_id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    Ok(encoded)
 }
 
 async fn kill_daemon_session_if_present(

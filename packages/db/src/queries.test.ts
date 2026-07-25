@@ -164,6 +164,7 @@ function createMockDb(): DbHandle & {
           port_env: (port_env as string | null) ?? null,
           agent_spawn_options: (agent_spawn_options as string | null) ?? null,
           activity: (activity as string) || "idle",
+          activity_revision: 0,
           activity_changed_at: currentTimestamp(),
           unread_at: null,
           closed_at: null,
@@ -350,6 +351,7 @@ function createMockDb(): DbHandle & {
         const item = tables.pipeline_item.find((p) => p.id === id);
         if (item && (!q.includes("CLOSED_AT IS NULL") || item.closed_at === null) && item.activity !== activity) {
           item.activity = activity;
+          item.activity_revision = (item.activity_revision ?? 0) + 1;
           item.activity_changed_at = new Date().toISOString();
           item.updated_at = new Date().toISOString();
         }
@@ -1191,6 +1193,16 @@ describe("stage queries", () => {
     expect(item?.activity_changed_at).toBe("2026-06-03 00:00:00");
     expect(item?.unread_at).toBeNull();
     expect(item?.closed_at).toBe("2026-06-03 00:02:25");
+  });
+
+  it("updatePipelineItemActivity increments the activity revision on each transition", async () => {
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    if (item) item.activity_revision = 3;
+
+    await updatePipelineItemActivity(db, "pi1", "working");
+    await updatePipelineItemActivity(db, "pi1", "unread");
+
+    expect(item?.activity_revision).toBe(5);
   });
 
   it("markPipelineItemTearingDown marks teardown state without changing stage", async () => {

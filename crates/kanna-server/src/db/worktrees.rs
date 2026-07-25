@@ -181,6 +181,7 @@ impl Db {
         self.conn.execute(
             "UPDATE pipeline_item
              SET base_ref = ?, port_offset = NULL, port_env = NULL,
+                 activity_revision = activity_revision + CASE WHEN activity != 'idle' THEN 1 ELSE 0 END,
                  activity = 'idle', activity_changed_at = datetime('now'),
                  updated_at = datetime('now')
              WHERE id = ? AND closed_at IS NULL",

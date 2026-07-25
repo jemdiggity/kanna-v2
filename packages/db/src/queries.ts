@@ -293,7 +293,7 @@ export async function updatePipelineItemActivity(
     [id, activity]
   );
   const result = await db.execute(
-    `UPDATE pipeline_item SET activity = ?, activity_changed_at = datetime('now')${unreadClause}, updated_at = datetime('now') WHERE id = ? AND activity != ? AND closed_at IS NULL`,
+    `UPDATE pipeline_item SET activity = ?, activity_revision = activity_revision + 1, activity_changed_at = datetime('now')${unreadClause}, updated_at = datetime('now') WHERE id = ? AND activity != ? AND closed_at IS NULL`,
     [activity, id, activity]
   );
   if (result.rowsAffected === 0) return;

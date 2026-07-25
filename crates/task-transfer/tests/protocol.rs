@@ -198,6 +198,51 @@ fn remote_task_file_messages_use_expected_wire_names() {
 }
 
 #[test]
+fn remote_task_mark_read_messages_use_expected_wire_names() {
+    let control_request = ControlRequest::MarkPeerTaskRead {
+        request_id: "req-mark-read-control".into(),
+        target_peer_id: "peer-owner".into(),
+        task_id: "task-owner".into(),
+        expected_activity_revision: 7,
+    };
+    assert_eq!(
+        serde_json::to_value(&control_request).unwrap(),
+        json!({
+            "type": "mark_peer_task_read",
+            "request_id": "req-mark-read-control",
+            "target_peer_id": "peer-owner",
+            "task_id": "task-owner",
+            "expected_activity_revision": 7,
+        })
+    );
+    assert_roundtrip(control_request);
+
+    assert_roundtrip(ControlResponse::MarkPeerTaskRead {
+        request_id: "req-mark-read-control".into(),
+    });
+
+    let peer_request = PeerRequest::MarkTaskRead {
+        request_id: "req-mark-read-peer".into(),
+        requester_peer_id: "peer-secondary".into(),
+        sealed_payload: "sealed-task-and-cutoff".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&peer_request).unwrap(),
+        json!({
+            "type": "mark_task_read",
+            "request_id": "req-mark-read-peer",
+            "requester_peer_id": "peer-secondary",
+            "sealed_payload": "sealed-task-and-cutoff",
+        })
+    );
+    assert_roundtrip(peer_request);
+
+    assert_roundtrip(PeerResponse::MarkTaskRead {
+        request_id: "req-mark-read-peer".into(),
+    });
+}
+
+#[test]
 fn transfer_artifact_control_messages_roundtrip() {
     assert_roundtrip(ControlRequest::StageTransferArtifact {
         request_id: "req-stage".into(),

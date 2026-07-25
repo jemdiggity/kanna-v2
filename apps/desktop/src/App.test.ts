@@ -13,6 +13,7 @@ import {
   WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT,
 } from "./windowWorkspace";
 import { updateDesktopServerClientHandlersForTests } from "./services/desktopServerClient";
+import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 
 async function flushPromises() {
   await Promise.resolve();
@@ -93,10 +94,14 @@ function dispatchNativeCloseRequest() {
   return { completion, event };
 }
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
+const desktopCloudTaskSnapshotListeners = vi.hoisted(
+  () => new Set<(snapshot: DesktopCloudSnapshot) => void>(),
+);
 const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
-  vi.fn((_uid: string, onSnapshot: (snapshot: { repos: unknown[]; items: unknown[]; terminalRefs: Record<string, unknown> }) => void) => {
+  vi.fn((_uid: string, onSnapshot: (snapshot: DesktopCloudSnapshot) => void) => {
+    desktopCloudTaskSnapshotListeners.add(onSnapshot);
     onSnapshot({ repos: [], items: [], terminalRefs: {} });
-    return vi.fn();
+    return () => desktopCloudTaskSnapshotListeners.delete(onSnapshot);
   }),
 );
 const associateDesktopCloudCredentialMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -106,7 +111,15 @@ const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseTaskMock = vi.hoisted(() => vi.fn(async () => {}));
+const relayMarkTaskReadMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseMock = vi.hoisted(() => vi.fn());
+const lanMarkTaskReadMock = vi.hoisted(() => vi.fn(async () => {}));
+const lanCloseMock = vi.hoisted(() => vi.fn());
+const relayTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
+const lanTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
+const lanTasksMock = vi.hoisted(() =>
+  vi.fn(async () => ({ repos: [], items: [], terminalRefs: {} })),
+);
 const openLatestTerminalFileLinkMock = vi.hoisted(() => vi.fn(async () => true));
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
@@ -416,20 +429,17 @@ vi.mock("./services/desktopCloudAssociation", () => ({
   associateDesktopCloudCredential: associateDesktopCloudCredentialMock,
 }));
 
+vi.mock("./services/desktopLanTaskIndex", () => ({
+  listDesktopLanTasks: lanTasksMock,
+  publishDesktopLanTaskSnapshot: vi.fn(async () => {}),
+}));
+
 vi.mock("./services/desktopRelayTerminal", () => ({
-  createConfiguredDesktopRelayTerminalClient: vi.fn(async () => ({
-    advanceStage: relayAdvanceStageMock,
-    closeTask: relayCloseTaskMock,
-    close: relayCloseMock,
-  })),
+  createConfiguredDesktopRelayTerminalClient: relayTerminalClientFactoryMock,
 }));
 
 vi.mock("./services/desktopLanTerminal", () => ({
-  createConfiguredDesktopLanTerminalClient: vi.fn(async () => ({
-    advanceStage: relayAdvanceStageMock,
-    closeTask: relayCloseTaskMock,
-    close: relayCloseMock,
-  })),
+  createConfiguredDesktopLanTerminalClient: lanTerminalClientFactoryMock,
 }));
 
 vi.mock("./composables/useRestoreFocus", () => ({
@@ -458,6 +468,94 @@ const SidebarWithoutRepoStub = defineComponent({
   emits: ["new-task"],
   template: '<button data-testid="open-new-task" @click="$emit(\'new-task\')">open</button>',
 });
+
+const RemoteTaskSelectionStub = defineComponent({
+  name: "Sidebar",
+  props: {
+    taskSlots: { type: Array, default: () => [] },
+  },
+  emits: ["select-item"],
+  template: `
+    <div>
+      <button
+        v-for="item in taskSlots"
+        :key="item.slot_id"
+        data-testid="remote-task"
+        :data-task-id="item.task_id"
+        type="button"
+        @click="$emit('select-item', item.slot_id)"
+      >
+        <span data-testid="remote-task-activity">{{ item.activity }}</span>
+      </button>
+    </div>
+  `,
+});
+
+function remoteTaskSnapshot(
+  transport: "cloud" | "lan",
+  ownerDesktopId: string,
+  ownerLocalTaskId: string,
+): DesktopCloudSnapshot {
+  const repoId = `${transport}:repo-remote`;
+  const taskId = `${transport}:repo-remote:task-remote`;
+  return {
+    repos: [{
+      id: repoId,
+      path: "cloud",
+      name: "Remote Repo",
+      default_branch: "main",
+      remote_url: null,
+      remote_url_hash: null,
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-07-24T00:00:00.000Z",
+      last_opened_at: "2026-07-24T00:00:00.000Z",
+    }],
+    items: [{
+      id: taskId,
+      repo_id: repoId,
+      prompt: "Unread remote task",
+      pipeline: "default",
+      pipeline_def: null,
+      stage: "in progress",
+      pr_number: null,
+      pr_url: null,
+      branch: "task-remote",
+      activity: "unread" as const,
+      activity_revision: 7,
+      activity_changed_at: "2026-07-24T00:00:00.000Z",
+      unread_at: "2026-07-24T00:00:00.000Z",
+      port_offset: null,
+      port_env: null,
+      pinned: 0,
+      pin_order: null,
+      display_name: "Unread remote task",
+      issue_number: null,
+      issue_title: null,
+      closed_at: null,
+      agent_session_id: null,
+      base_ref: "origin/main",
+      agent_provider: "codex",
+      agent_type: "pty",
+      teardown_started_at: null,
+      last_output_preview: null,
+      active_post_action: null,
+      parent_task_id: null,
+      notify_task_id: null,
+      notified_at: null,
+      created_at: "2026-07-24T00:00:00.000Z",
+      updated_at: "2026-07-24T00:00:00.000Z",
+    }],
+    terminalRefs: {
+      [taskId]: {
+        ownerDesktopId,
+        ownerLocalRepoId: "owner-repo",
+        ownerLocalTaskId,
+        transport,
+      },
+    },
+  };
+}
 
 const FilePickerModalTestStub = defineComponent({
   name: "FilePickerModal",
@@ -706,7 +804,30 @@ describe("App", () => {
     store.advanceStage.mockClear();
     relayAdvanceStageMock.mockClear();
     relayCloseTaskMock.mockClear();
-    relayCloseMock.mockClear();
+    relayMarkTaskReadMock.mockReset();
+    relayMarkTaskReadMock.mockResolvedValue(undefined);
+    relayCloseMock.mockReset();
+    relayCloseMock.mockImplementation(() => {});
+    lanMarkTaskReadMock.mockReset();
+    lanMarkTaskReadMock.mockResolvedValue(undefined);
+    lanCloseMock.mockReset();
+    lanCloseMock.mockImplementation(() => {});
+    relayTerminalClientFactoryMock.mockReset();
+    relayTerminalClientFactoryMock.mockResolvedValue({
+      advanceStage: relayAdvanceStageMock,
+      closeTask: relayCloseTaskMock,
+      markTaskRead: relayMarkTaskReadMock,
+      close: relayCloseMock,
+    });
+    lanTerminalClientFactoryMock.mockReset();
+    lanTerminalClientFactoryMock.mockResolvedValue({
+      advanceStage: relayAdvanceStageMock,
+      closeTask: relayCloseTaskMock,
+      markTaskRead: lanMarkTaskReadMock,
+      close: lanCloseMock,
+    });
+    lanTasksMock.mockReset();
+    lanTasksMock.mockResolvedValue({ repos: [], items: [], terminalRefs: {} });
     openLatestTerminalFileLinkMock.mockReset();
     openLatestTerminalFileLinkMock.mockResolvedValue(true);
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
@@ -799,6 +920,7 @@ describe("App", () => {
     cloudTasksMock.mockReset();
     cloudTasksMock.mockResolvedValue({ repos: [], items: [] });
     subscribeDesktopCloudTasksMock.mockClear();
+    desktopCloudTaskSnapshotListeners.clear();
     desktopAuthStateListeners.clear();
     associateDesktopCloudCredentialMock.mockReset();
     associateDesktopCloudCredentialMock.mockResolvedValue(undefined);
@@ -965,6 +1087,126 @@ describe("App", () => {
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).toHaveBeenCalledWith("Cloud sync failed: permission-denied");
+
+    wrapper.unmount();
+  });
+
+  it("does not let a deferred one-shot cloud read overwrite a newer subscription snapshot", async () => {
+    const oneShot = createDeferred<DesktopCloudSnapshot>();
+    cloudTasksMock.mockImplementationOnce(() => oneShot.promise);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    const newerSnapshot = remoteTaskSnapshot(
+      "cloud",
+      "subscription-owner",
+      "subscription-owner-task",
+    );
+    const originalTaskId = newerSnapshot.items[0].id;
+    const newerTaskId = "cloud:repo-remote:task-subscription-newer";
+    newerSnapshot.items[0].id = newerTaskId;
+    newerSnapshot.items[0].branch = "task-subscription-newer";
+    newerSnapshot.terminalRefs[newerTaskId] = newerSnapshot.terminalRefs[originalTaskId];
+    delete newerSnapshot.terminalRefs[originalTaskId];
+
+    for (const listener of desktopCloudTaskSnapshotListeners) {
+      listener(newerSnapshot);
+    }
+    await nextTick();
+    expect(wrapper.get('[data-testid="remote-task"]').attributes("data-task-id")).toBe(
+      newerTaskId,
+    );
+
+    oneShot.resolve(remoteTaskSnapshot("cloud", "stale-owner", "stale-owner-task"));
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.findAll('[data-testid="remote-task"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="remote-task"]').attributes("data-task-id")).toBe(
+      newerTaskId,
+    );
+
+    wrapper.unmount();
+  });
+
+  it("does not let a deferred one-shot cloud read restore tasks after sign-out", async () => {
+    const oneShot = createDeferred<DesktopCloudSnapshot>();
+    cloudTasksMock.mockImplementationOnce(() => oneShot.promise);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({ status: "signedOut" });
+    }
+    await nextTick();
+    expect(wrapper.findAll('[data-testid="remote-task"]')).toHaveLength(0);
+
+    oneShot.resolve(remoteTaskSnapshot("cloud", "signed-out-owner", "signed-out-task"));
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.findAll('[data-testid="remote-task"]')).toHaveLength(0);
+
+    wrapper.unmount();
+  });
+
+  it("does not let a deferred one-shot cloud read from a previous account replace the current account snapshot", async () => {
+    const previousAccountOneShot = createDeferred<DesktopCloudSnapshot>();
+    cloudTasksMock
+      .mockImplementationOnce(() => previousAccountOneShot.promise)
+      .mockImplementationOnce(() => new Promise<DesktopCloudSnapshot>(() => {}));
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-2", email: "current@example.com" },
+      });
+    }
+    await nextTick();
+    const currentSnapshot = remoteTaskSnapshot(
+      "cloud",
+      "current-account-owner",
+      "current-account-task",
+    );
+    const currentOriginalTaskId = currentSnapshot.items[0].id;
+    const currentTaskId = "cloud:repo-remote:task-current-account";
+    currentSnapshot.items[0].id = currentTaskId;
+    currentSnapshot.items[0].branch = "task-current-account";
+    currentSnapshot.terminalRefs[currentTaskId] =
+      currentSnapshot.terminalRefs[currentOriginalTaskId];
+    delete currentSnapshot.terminalRefs[currentOriginalTaskId];
+    for (const listener of desktopCloudTaskSnapshotListeners) {
+      listener(currentSnapshot);
+    }
+    await nextTick();
+    expect(wrapper.get('[data-testid="remote-task"]').attributes("data-task-id")).toBe(
+      currentTaskId,
+    );
+
+    const previousSnapshot = remoteTaskSnapshot(
+      "cloud",
+      "previous-account-owner",
+      "previous-account-task",
+    );
+    const previousOriginalTaskId = previousSnapshot.items[0].id;
+    const previousTaskId = "cloud:repo-remote:task-previous-account";
+    previousSnapshot.items[0].id = previousTaskId;
+    previousSnapshot.items[0].branch = "task-previous-account";
+    previousSnapshot.terminalRefs[previousTaskId] =
+      previousSnapshot.terminalRefs[previousOriginalTaskId];
+    delete previousSnapshot.terminalRefs[previousOriginalTaskId];
+    previousAccountOneShot.resolve(previousSnapshot);
+    await flushPromises();
+    await flushPromises();
+
+    expect(subscribeDesktopCloudTasksMock).toHaveBeenNthCalledWith(
+      2,
+      "user-2",
+      expect.any(Function),
+      expect.any(Object),
+    );
+    expect(wrapper.findAll('[data-testid="remote-task"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="remote-task"]').attributes("data-task-id")).toBe(
+      currentTaskId,
+    );
 
     wrapper.unmount();
   });
@@ -1422,6 +1664,533 @@ describe("App", () => {
       });
       wrapper.unmount();
     }
+  });
+
+  it("marks a selected unread cloud task read through its owner relay after one second", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "relay-owner", "relay-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(relayTerminalClientFactoryMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "relay-owner",
+      taskId: "relay-owner-task",
+      expectedActivityRevision: 7,
+    });
+    expect(lanTerminalClientFactoryMock).not.toHaveBeenCalled();
+    expect(lanMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+  });
+
+  it("marks only the replacement selection after its own full dwell", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "first-owner", "first-owner-task");
+    const secondTaskId = "cloud:repo-remote:task-second";
+    snapshot.items.push({
+      ...snapshot.items[0],
+      id: secondTaskId,
+      prompt: "Second unread remote task",
+      branch: "task-second",
+    });
+    snapshot.terminalRefs[secondTaskId] = {
+      ownerDesktopId: "second-owner",
+      ownerLocalRepoId: "owner-repo",
+      ownerLocalTaskId: "second-owner-task",
+      transport: "cloud",
+    };
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get(`[data-task-id="${snapshot.items[0].id}"]`).trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(600);
+    await wrapper.get(`[data-task-id="${secondTaskId}"]`).trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(400);
+    await flushPromises();
+
+    expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(599);
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+
+    expect(relayTerminalClientFactoryMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "second-owner",
+      taskId: "second-owner-task",
+      expectedActivityRevision: 7,
+    });
+
+    wrapper.unmount();
+  });
+
+  it("keeps elapsed dwell across a coherent snapshot refresh", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "refreshed-owner", "refreshed-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get(`[data-task-id="${snapshot.items[0].id}"]`).trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(600);
+
+    const refreshedSnapshot = remoteTaskSnapshot(
+      "cloud",
+      "refreshed-owner",
+      "refreshed-owner-task",
+    );
+    refreshedSnapshot.items[0].prompt = "Refreshed unread remote task";
+    refreshedSnapshot.items[0].updated_at = "2026-07-25T01:00:00.600Z";
+    for (const listener of desktopCloudTaskSnapshotListeners) {
+      listener(refreshedSnapshot);
+    }
+    await nextTick();
+
+    await vi.advanceTimersByTimeAsync(399);
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+
+    expect(relayMarkTaskReadMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "refreshed-owner",
+      taskId: "refreshed-owner-task",
+      expectedActivityRevision: 7,
+    });
+
+    wrapper.unmount();
+  });
+
+  it("restarts the selected unread task dwell when activity revision advances", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "revision-owner", "revision-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get(`[data-task-id="${snapshot.items[0].id}"]`).trigger("click");
+    await nextTick();
+    const presentationSlotId = store.selectedItemId;
+    await vi.advanceTimersByTimeAsync(600);
+
+    const revisionEightSnapshot = remoteTaskSnapshot(
+      "cloud",
+      "revision-owner",
+      "revision-owner-task",
+    );
+    revisionEightSnapshot.items[0].activity_revision = 8;
+    revisionEightSnapshot.items[0].activity_changed_at = "2026-07-25T01:00:00.600Z";
+    revisionEightSnapshot.items[0].updated_at = "2026-07-25T01:00:00.600Z";
+    for (const listener of desktopCloudTaskSnapshotListeners) {
+      listener(revisionEightSnapshot);
+    }
+    await nextTick();
+
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    await vi.advanceTimersByTimeAsync(400);
+    await flushPromises();
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(599);
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+
+    expect(relayMarkTaskReadMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "revision-owner",
+      taskId: "revision-owner-task",
+      expectedActivityRevision: 8,
+    });
+
+    wrapper.unmount();
+  });
+
+  it("rejects a stale stable-slot owner and marks the replacement after its own dwell", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "original-owner", "original-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get(`[data-task-id="${snapshot.items[0].id}"]`).trigger("click");
+    await nextTick();
+    const presentationSlotId = store.selectedItemId;
+    await vi.advanceTimersByTimeAsync(600);
+
+    const replacementSnapshot = remoteTaskSnapshot(
+      "cloud",
+      "replacement-owner",
+      "replacement-owner-task",
+    );
+    replacementSnapshot.items[0].updated_at = "2026-07-25T01:00:00.600Z";
+    for (const listener of desktopCloudTaskSnapshotListeners) {
+      listener(replacementSnapshot);
+    }
+    await nextTick();
+
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    await vi.advanceTimersByTimeAsync(400);
+    await flushPromises();
+
+    expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(599);
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+
+    expect(relayTerminalClientFactoryMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "replacement-owner",
+      taskId: "replacement-owner-task",
+      expectedActivityRevision: 7,
+    });
+
+    wrapper.unmount();
+  });
+
+  it("closes an active mark-read client when the app unmounts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "active-owner", "active-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const markReadDeferred = createDeferred<void>();
+    relayMarkTaskReadMock.mockImplementationOnce(() => markReadDeferred.promise);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get(`[data-task-id="${snapshot.items[0].id}"]`).trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await waitForCondition(() => relayMarkTaskReadMock.mock.calls.length === 1);
+
+    expect(relayCloseMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+
+    markReadDeferred.resolve();
+    await flushPromises();
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+  });
+
+  it("expires and closes a mark-read client whose relay request never settles", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "stalled-owner", "stalled-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    relayMarkTaskReadMock.mockImplementationOnce(() => new Promise<void>(() => {}));
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get(`[data-task-id="${snapshot.items[0].id}"]`).trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await waitForCondition(() => relayMarkTaskReadMock.mock.calls.length === 1);
+
+    expect(relayCloseMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(relayCloseMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+    const closeCallsBeforeUnmount = relayCloseMock.mock.calls.length;
+
+    wrapper.unmount();
+    expect(closeCallsBeforeUnmount).toBe(1);
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+  });
+
+  it("closes a mark-read client acquired after app teardown without starting the request", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "late-owner", "late-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const client = {
+      advanceStage: relayAdvanceStageMock,
+      closeTask: relayCloseTaskMock,
+      markTaskRead: relayMarkTaskReadMock,
+      close: relayCloseMock,
+    };
+    const clientDeferred = createDeferred<typeof client>();
+    relayTerminalClientFactoryMock.mockImplementationOnce(() => clientDeferred.promise);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get(`[data-task-id="${snapshot.items[0].id}"]`).trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await waitForCondition(() => relayTerminalClientFactoryMock.mock.calls.length === 1);
+
+    wrapper.unmount();
+    clientDeferred.resolve(client);
+    await flushPromises();
+
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+  });
+
+  it("marks a selected unread LAN task read through its owner peer after one second", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("lan", "lan-owner", "lan-owner-task");
+    lanTasksMock.mockResolvedValue(snapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(lanTerminalClientFactoryMock).toHaveBeenCalledOnce();
+    expect(lanMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "lan-owner",
+      taskId: "lan-owner-task",
+      expectedActivityRevision: 7,
+    });
+    expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(lanCloseMock).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+  });
+
+  it("preserves dwell and uses a preferred LAN route added while the task stays selected", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const cloudSnapshot = remoteTaskSnapshot("cloud", "route-owner", "route-owner-task");
+    const lanSnapshot = remoteTaskSnapshot("lan", "route-owner", "route-owner-task");
+    lanSnapshot.repos[0].id = cloudSnapshot.repos[0].id;
+    lanSnapshot.items[0].repo_id = cloudSnapshot.repos[0].id;
+    cloudTasksMock.mockResolvedValue(cloudSnapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    const presentationSlotId = store.selectedItemId;
+    lanTasksMock.mockResolvedValue(lanSnapshot);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    expect(lanMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(499);
+    expect(lanMarkTaskReadMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    expect(lanMarkTaskReadMock).toHaveBeenCalledOnce();
+    expect(lanMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "route-owner",
+      taskId: "route-owner-task",
+      expectedActivityRevision: 7,
+    });
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("preserves dwell and falls back to relay when the selected task loses its LAN route", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const cloudSnapshot = remoteTaskSnapshot("cloud", "fallback-owner", "fallback-owner-task");
+    const lanSnapshot = remoteTaskSnapshot("lan", "fallback-owner", "fallback-owner-task");
+    lanSnapshot.repos[0].id = cloudSnapshot.repos[0].id;
+    lanSnapshot.items[0].repo_id = cloudSnapshot.repos[0].id;
+    cloudTasksMock.mockResolvedValue(cloudSnapshot);
+    lanTasksMock.mockResolvedValue(lanSnapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    const presentationSlotId = store.selectedItemId;
+    lanTasksMock.mockResolvedValue({ repos: [], items: [], terminalRefs: {} });
+
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    expect(lanMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(499);
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+
+    expect(store.selectedItemId).toBe(presentationSlotId);
+    expect(relayMarkTaskReadMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "fallback-owner",
+      taskId: "fallback-owner-task",
+      expectedActivityRevision: 7,
+    });
+    expect(lanMarkTaskReadMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("removes unread presentation after coherent cloud and LAN owner snapshots publish idle", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const cloudSnapshot = remoteTaskSnapshot("cloud", "duplicate-owner", "duplicate-owner-task");
+    const lanSnapshot = remoteTaskSnapshot("lan", "duplicate-owner", "duplicate-owner-task");
+    lanSnapshot.repos[0].id = cloudSnapshot.repos[0].id;
+    lanSnapshot.items[0].repo_id = cloudSnapshot.repos[0].id;
+    cloudTasksMock.mockResolvedValue(cloudSnapshot);
+    lanTasksMock.mockResolvedValue(lanSnapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    expect(wrapper.findAll('[data-testid="remote-task"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("unread");
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    const selectedPresentationSlot = store.selectedItemId;
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(lanMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "duplicate-owner",
+      taskId: "duplicate-owner-task",
+      expectedActivityRevision: 7,
+    });
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    const cloudReadSnapshot = remoteTaskSnapshot(
+      "cloud",
+      "duplicate-owner",
+      "duplicate-owner-task",
+    );
+    cloudReadSnapshot.items[0].activity = "idle";
+    cloudReadSnapshot.items[0].activity_revision = 8;
+    cloudReadSnapshot.items[0].activity_changed_at = "2026-07-25T01:00:01.000Z";
+    for (const listener of desktopCloudTaskSnapshotListeners) {
+      listener(cloudReadSnapshot);
+    }
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("unread");
+
+    const lanReadSnapshot = remoteTaskSnapshot(
+      "lan",
+      "duplicate-owner",
+      "duplicate-owner-task",
+    );
+    lanReadSnapshot.repos[0].id = cloudReadSnapshot.repos[0].id;
+    lanReadSnapshot.items[0].repo_id = cloudReadSnapshot.repos[0].id;
+    lanReadSnapshot.items[0].activity = "idle";
+    lanReadSnapshot.items[0].activity_revision = 8;
+    lanReadSnapshot.items[0].activity_changed_at = "2026-07-25T01:00:01.000Z";
+    lanTasksMock.mockResolvedValue(lanReadSnapshot);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(store.selectedItemId).toBe(selectedPresentationSlot);
+    expect(wrapper.findAll('[data-testid="remote-task"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("idle");
+
+    wrapper.unmount();
+  });
+
+  it("marks a restored unread remote selection read through the store fallback", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "restored-owner", "restored-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    store.selectedRepoId = snapshot.repos[0].id;
+    store.selectedRepo = null;
+    store.selectedItemId = snapshot.items[0].id;
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "restored-owner",
+      taskId: "restored-owner-task",
+      expectedActivityRevision: 7,
+    });
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+  });
+
+  it("closes the relay client after mark-read failure and logs close failures", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "failing-owner", "failing-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    relayMarkTaskReadMock.mockRejectedValueOnce(new Error("mark read failed"));
+    relayCloseMock.mockImplementationOnce(() => {
+      throw new Error("close failed");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      "[remote] failed to mark task read:",
+      "mark read failed",
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "[remote] failed to close mark-read client:",
+      "close failed",
+    );
+    expect(toastErrorMock).not.toHaveBeenCalled();
+
+    warn.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("leaves projected remote activity unread when relay acquisition fails", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "offline-owner", "offline-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    relayTerminalClientFactoryMock.mockRejectedValueOnce(new Error("relay unavailable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(relayCloseMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "[remote] failed to mark task read:",
+      "relay unavailable",
+    );
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(snapshot.items[0].activity).toBe("unread");
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("unread");
+
+    warn.mockRestore();
+    wrapper.unmount();
   });
 
   it("clears and persists a remote selection after closing its stable presentation slot", async () => {

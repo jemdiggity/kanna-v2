@@ -17,6 +17,7 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     displayName: null,
     stage: "in progress",
     activity: "idle",
+    activityRevision: 4,
     status: "active",
     repo: {
       cloudRepoId: "repo-1",
@@ -59,10 +60,26 @@ describe("cloud task publication validation", () => {
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
       activity: "idle",
+      activityRevision: 4,
       waitingPromptSnippet: "Ready for review",
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("accepts legacy missing revisions but rejects malformed activity revisions", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ activityRevision: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.activityRevision).toBeUndefined();
+
+    for (const activityRevision of [-1, 1.5, "4"]) {
+      expect(() => validateCloudTaskPublication(
+        publication([task({ activityRevision })]),
+        "desktop-1",
+      )).toThrow(/activityRevision/);
+    }
   });
 
   it("normalizes missing waiting prompts and bounds them by Unicode scalar count", () => {
@@ -82,6 +99,25 @@ describe("cloud task publication validation", () => {
       publication([task({ waitingPromptSnippet: "🙂".repeat(241) })]),
       "desktop-1",
     )).toThrow(/waitingPromptSnippet/);
+  });
+
+  it("normalizes missing running-post flags and passes present ones through", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ hasRunningPost: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.hasRunningPost).toBe(false);
+
+    const running = validateCloudTaskPublication(
+      publication([task({ hasRunningPost: true })]),
+      "desktop-1",
+    );
+    expect(running.tasks[0]?.hasRunningPost).toBe(true);
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({ hasRunningPost: "yes" })]),
+      "desktop-1",
+    )).toThrow(/hasRunningPost/);
   });
 
   it("normalizes missing parent task ids and bounds present ones", () => {
@@ -142,17 +178,20 @@ describe("cloud task publication reconciliation", () => {
     await handleCloudTaskPublication({
       userId: "user-owner",
       desktopId: "desktop-1",
+      generation: { session: 4, sequence: 2 },
       snapshot: publication(),
       store,
-    });
+    } as Parameters<typeof handleCloudTaskPublication>[0]);
 
     expect(reconcile).toHaveBeenCalledWith({
       userId: "user-owner",
       desktopId: "desktop-1",
+      generation: { session: 4, sequence: 2 },
       displayName: "Studio Mac",
       tasks: expect.arrayContaining([
         expect.objectContaining({ ownerDesktopId: "desktop-1", ownerLocalTaskId: "task-1" }),
       ]),
     });
   });
+
 });

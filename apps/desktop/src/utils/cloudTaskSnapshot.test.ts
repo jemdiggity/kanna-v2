@@ -13,6 +13,7 @@ describe("cloud task snapshot mapper", () => {
         prompt: "Fix cloud mobile task list",
         stage: "in progress",
         activity: "working",
+        activity_revision: 12,
         branch: "task-1",
         base_ref: "origin/main",
         pr_number: null,
@@ -42,6 +43,7 @@ describe("cloud task snapshot mapper", () => {
       title: "Cloud mobile",
       promptSnippet: "Fix cloud mobile task list",
       waitingPromptSnippet: "Ready for review",
+      activityRevision: 12,
       repo: {
         cloudRepoId: "repo-1",
         name: "kanna",
@@ -51,7 +53,43 @@ describe("cloud task snapshot mapper", () => {
       transfer: { state: "none" },
     });
     expect(snapshot).not.toHaveProperty("cloudTaskId");
+    expect(snapshot.hasRunningPost).toBe(false);
     expect(snapshot.repo.remoteUrlHash).toHaveLength(64);
+  });
+
+  it("publishes the running-post flag that drives the transition-in-flight indicator", async () => {
+    const snapshot = await buildCloudTaskSnapshot({
+      desktopId: "desktop-1",
+      item: {
+        id: "task-post",
+        repo_id: "repo-1",
+        prompt: "Commit the branch",
+        stage: "in progress",
+        activity: "working",
+        branch: "task-post",
+        base_ref: "origin/main",
+        pr_number: null,
+        pr_url: null,
+        display_name: null,
+        last_output_preview: null,
+        has_running_post: 1,
+        agent_provider: "claude",
+        agent_type: "pty",
+        created_at: "2026-07-25T00:00:00.000Z",
+        updated_at: "2026-07-25T00:01:00.000Z",
+        closed_at: null,
+      },
+      repo: {
+        id: "repo-1",
+        name: "kanna",
+        path: "/Users/test/kanna",
+        default_branch: "main",
+        remote_url: null,
+      },
+      blockedByTaskIds: [],
+    });
+
+    expect(snapshot.hasRunningPost).toBe(true);
   });
 
   it("publishes OpenCode from the local task agent provider", async () => {
