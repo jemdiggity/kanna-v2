@@ -162,13 +162,20 @@ impl TransferRuntime {
             match response {
                 PeerResponse::TaskSnapshot {
                     request_id: response_request_id,
-                    peer_id,
+                    peer_id: response_peer_id,
                     display_name,
                     snapshot,
                 } => {
                     if response_request_id == request_id {
+                        if response_peer_id != peer.peer_id {
+                            eprintln!(
+                                "[task-transfer] peer {} returned task snapshot for mismatched peer {}",
+                                peer.peer_id, response_peer_id
+                            );
+                            continue;
+                        }
                         snapshots.push(PeerTaskSnapshot {
-                            peer_id,
+                            peer_id: peer.peer_id.clone(),
                             display_name,
                             snapshot,
                         });

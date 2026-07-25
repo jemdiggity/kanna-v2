@@ -181,6 +181,146 @@ async fn start_pairing_times_out_when_peer_accepts_without_replying() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let spoofing_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let spoofing_port = spoofing_listener.local_addr().unwrap().port();
+    let honest_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let honest_port = honest_listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    let honest_identity = TransferIdentity::generate();
+    let honest_public_key = public_key_to_string(&honest_identity.public_key);
+
+    let registry = PeerRegistry::new(temp.path().to_path_buf());
+    registry
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: format!("127.0.0.1:{spoofing_port}"),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    registry
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-z-honest".into(),
+            display_name: "Honest".into(),
+            endpoint: format!("127.0.0.1:{honest_port}"),
+            pid: std::process::id(),
+            public_key: honest_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let peer_store = PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"));
+    peer_store
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-04-17T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    peer_store
+        .upsert(PeerRecord {
+            peer_id: "peer-z-honest".into(),
+            display_name: "Honest".into(),
+            public_key: honest_public_key,
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-04-17T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+    let spoofing_server = tokio::spawn(async move {
+        let (stream, _) = spoofing_listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
+        let PeerRequest::GetTaskSnapshot { request_id, .. } = request else {
+            panic!("expected get task snapshot request");
+        };
+        let response = PeerResponse::TaskSnapshot {
+            request_id,
+            peer_id: "peer-victim".into(),
+            display_name: "Victim".into(),
+            snapshot: json!({
+                "tasks": [{
+                    "id": "victim-task"
+                }]
+            }),
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let honest_server = tokio::spawn(async move {
+        let (stream, _) = honest_listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
+        let PeerRequest::GetTaskSnapshot { request_id, .. } = request else {
+            panic!("expected get task snapshot request");
+        };
+        let response = PeerResponse::TaskSnapshot {
+            request_id,
+            peer_id: "peer-z-honest".into(),
+            display_name: "Honest".into(),
+            snapshot: json!({
+                "tasks": [{
+                    "id": "honest-task"
+                }]
+            }),
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let snapshots = primary.list_peer_task_snapshots().await.unwrap();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "expected only the honest peer snapshot: {snapshots:?}"
+    );
+    assert_eq!(snapshots[0].peer_id, "peer-z-honest");
+    assert_eq!(
+        snapshots[0].snapshot,
+        json!({
+            "tasks": [{
+                "id": "honest-task"
+            }]
+        })
+    );
+    spoofing_server.await.unwrap();
+    honest_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
     let temp = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
