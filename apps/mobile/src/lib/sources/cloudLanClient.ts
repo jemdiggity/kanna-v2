@@ -14,6 +14,8 @@ import type {
   TaskActionResponse,
   TaskDiffContent,
   TaskFileContent,
+  TaskFileMentionInput,
+  TaskFileMentionResolution,
   TaskSummary
 } from "../api/types";
 import {
@@ -1385,6 +1387,27 @@ export function createCloudLanClient(
         );
       }
       return route.client.readTaskFile(route.taskId, path);
+    },
+    resolveTaskFileMentions: async (
+      taskId,
+      mentions: readonly TaskFileMentionInput[]
+    ): Promise<TaskFileMentionResolution> => {
+      const route = routeForTask(taskId);
+      if (route.source === "unavailable") {
+        throw new Error(route.message);
+      }
+      if (route.source === "lan") {
+        if (route.cloudFallbackTaskId) {
+          return cloud.resolveTaskFileMentions(
+            route.cloudFallbackTaskId,
+            mentions
+          );
+        }
+        throw new Error(
+          `Task file resolution for LAN-only task "${taskId}" requires an authenticated relay connection.`
+        );
+      }
+      return route.client.resolveTaskFileMentions(route.taskId, mentions);
     },
     readTaskDiff: async (taskId, request): Promise<TaskDiffContent> => {
       const route = routeForTask(taskId);

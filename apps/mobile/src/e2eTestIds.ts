@@ -56,6 +56,13 @@ export const MOBILE_E2E_IDS = {
   taskFilePreviewError: "mobile.task-file-preview.error",
   taskFilePreviewErrorMessage: "mobile.task-file-preview.error-message",
   taskFilePreviewInspection: "mobile.task-file-preview.inspection",
+  taskMentionedFilesModal: "mobile.task-mentioned-files.modal",
+  taskMentionedFilesClose: "mobile.task-mentioned-files.close",
+  taskMentionedFilesError: "mobile.task-mentioned-files.error",
+  taskMentionedFilesRetry: "mobile.task-mentioned-files.retry",
+  taskMentionedFilesRow(path: string): string {
+    return `mobile.task-mentioned-files.row.${path}`;
+  },
   accountButton: "mobile.account-button",
   accountSheet: "mobile.account-sheet",
   accountCloseButton: "mobile.account-close",

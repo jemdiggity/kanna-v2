@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as Clipboard from "expo-clipboard";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import {
   WebView as NativeWebView,
   type WebViewMessageEvent,
@@ -17,6 +17,11 @@ import {
 import { planTerminalMutation } from "./terminalMutation";
 import { DEFAULT_TERMINAL_BOTTOM_INSET } from "./terminalSafeArea";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
+import {
+  parseTerminalFileMentionHistory,
+  parseTerminalFileMentionRaw,
+  type TerminalFileMentionHistory
+} from "./terminalFileMentions";
 
 interface TerminalWebViewProps {
   taskId: string;
@@ -29,6 +34,7 @@ interface TerminalWebViewProps {
   fullscreen?: boolean;
   bottomInset?: number;
   onConsolePress?: () => void;
+  onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTerminalInput?: (dataB64: string) => void;
 }
@@ -52,36 +58,9 @@ interface TerminalInspection {
   byteCount: number;
   cols: number | null;
   frameCount: number;
+  mentionedFiles?: TerminalFileMentionHistory;
   rows: number | null;
   text: string;
-}
-
-interface TerminalFileLink {
-  line?: number;
-  path: string;
-  raw: string;
-}
-
-function isMarkdownPath(path: string): boolean {
-  return path.toLowerCase().endsWith(".md");
-}
-
-function parseTerminalFileLinkRaw(raw: string): { line?: number; path: string } | null {
-  const parts = raw.split(":");
-  const suffixes: number[] = [];
-  while (parts.length > 1 && suffixes.length < 2) {
-    const maybeNumber = parts[parts.length - 1];
-    if (!maybeNumber || !/^\d+$/.test(maybeNumber)) break;
-    suffixes.unshift(Number.parseInt(maybeNumber, 10));
-    parts.pop();
-  }
-
-  const path = parts.join(":");
-  if (!isMarkdownPath(path)) return null;
-  return {
-    path,
-    ...(suffixes[0] === undefined ? {} : { line: suffixes[0] })
-  };
 }
 
 const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<
@@ -99,6 +78,7 @@ export function TerminalWebView({
   fullscreen = false,
   bottomInset,
   onConsolePress,
+  onMentionedFilesChange,
   onOpenFile,
   onTerminalInput
 }: TerminalWebViewProps) {
@@ -119,7 +99,6 @@ export function TerminalWebView({
   const [selectionCopyPending, setSelectionCopyPending] = useState(false);
   const resolvedBottomInset =
     bottomInset ?? (fullscreen ? DEFAULT_TERMINAL_BOTTOM_INSET : 24);
-  const [terminalFileLinks, setTerminalFileLinks] = useState<TerminalFileLink[]>([]);
   const document = useMemo(
     () =>
       buildTerminalDocument({
@@ -183,7 +162,7 @@ export function TerminalWebView({
     if (taskChanged) {
       selectionContextRef.current.version += 1;
       selectionContextRef.current.copyPending = false;
-      setTerminalFileLinks([]);
+      onMentionedFilesChange?.({ mentions: [], overflow: false });
       setTerminalSelection("");
       setSelectionCopyError(null);
       setSelectionCopyPending(false);
@@ -228,7 +207,15 @@ export function TerminalWebView({
       default:
         break;
     }
-  }, [output, outputEpoch, outputStart, replaceScript, status, taskId]);
+  }, [
+    onMentionedFilesChange,
+    output,
+    outputEpoch,
+    outputStart,
+    replaceScript,
+    status,
+    taskId
+  ]);
 
   useEffect(() => {
     if (cols && rows) {
@@ -244,7 +231,8 @@ export function TerminalWebView({
     let payload: {
       type?: unknown;
       inspection?: TerminalInspection;
-      links?: unknown;
+      mentions?: unknown;
+      overflow?: unknown;
       path?: unknown;
       line?: unknown;
       text?: unknown;
@@ -266,7 +254,8 @@ export function TerminalWebView({
         return;
       }
       const path = payload.path.trim();
-      if (!path || !isMarkdownPath(path)) {
+      const parsedPath = parseTerminalFileMentionRaw(path);
+      if (!parsedPath || parsedPath.path !== path || parsedPath.line !== undefined) {
         return;
       }
       if (
@@ -281,38 +270,11 @@ export function TerminalWebView({
       return;
     }
 
-    if (payload.type === "terminal-file-links" && Array.isArray(payload.links)) {
-      const links: TerminalFileLink[] = [];
-      for (const candidate of payload.links) {
-        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
-          continue;
-        }
-        const record = candidate as Record<string, unknown>;
-        const path = typeof record.path === "string" ? record.path.trim() : "";
-        const raw = typeof record.raw === "string" ? record.raw.trim() : "";
-        if (!path || !raw || !isMarkdownPath(path)) continue;
-        const candidateLine = record.line;
-        const line =
-          typeof candidateLine === "number" &&
-          Number.isInteger(candidateLine) &&
-          candidateLine > 0
-            ? candidateLine
-            : undefined;
-        const parsedRaw = parseTerminalFileLinkRaw(raw);
-        if (
-          !parsedRaw ||
-          parsedRaw.path !== path ||
-          parsedRaw.line !== line
-        ) {
-          continue;
-        }
-        links.push({
-          path,
-          raw,
-          ...(line === undefined ? {} : { line })
-        });
+    if (payload.type === "terminal-file-mentions") {
+      const history = parseTerminalFileMentionHistory(payload);
+      if (history) {
+        onMentionedFilesChange?.(history);
       }
-      setTerminalFileLinks(links.slice(-6));
       return;
     }
 
@@ -423,47 +385,10 @@ export function TerminalWebView({
           {JSON.stringify(terminalInspection)}
         </Text>
       ) : null}
-      {terminalFileLinks.length ? (
-        <ScrollView
-          accessible={false}
-          horizontal
-          keyboardShouldPersistTaps="handled"
-          showsHorizontalScrollIndicator={false}
-          style={styles.fileLinks}
-        >
-          <Text
-            accessibilityLabel="Files mentioned in terminal"
-            accessibilityRole="header"
-            style={styles.fileLinksLabel}
-          >
-            Files
-          </Text>
-          {terminalFileLinks.map((link) => (
-            <Pressable
-              accessibilityLabel={
-                link.line === undefined
-                  ? `Open file ${link.path}`
-                  : `Open file ${link.path} at line ${link.line}`
-              }
-              accessibilityRole="button"
-              key={link.raw}
-              onPress={() => onOpenFile?.(link.path, link.line)}
-              style={styles.fileLink}
-            >
-              <Text ellipsizeMode="middle" numberOfLines={1} style={styles.fileLinkText}>
-                {link.raw}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      ) : null}
       {terminalSelection ? (
         <View
           accessibilityLabel="Terminal text selection controls"
-          style={[
-            styles.selectionToolbar,
-            { top: terminalFileLinks.length ? 55 : 12 }
-          ]}
+          style={styles.selectionToolbar}
         >
           <Text accessibilityLiveRegion="polite" style={styles.selectionStatus}>
             {selectionCopyError ?? "Text selected"}
@@ -521,41 +446,6 @@ export function TerminalWebView({
 }
 
 const styles = StyleSheet.create({
-  fileLink: {
-    alignItems: "center",
-    backgroundColor: "#10213A",
-    borderColor: "#365B83",
-    borderRadius: 7,
-    borderWidth: 1,
-    height: 32,
-    justifyContent: "center",
-    marginRight: 7,
-    maxWidth: 96,
-    paddingHorizontal: 10
-  },
-  fileLinks: {
-    backgroundColor: "#07101D",
-    borderBottomColor: "#1D2C43",
-    borderBottomWidth: 1,
-    flexGrow: 0,
-    maxHeight: 43,
-    paddingHorizontal: 9,
-    paddingVertical: 5
-  },
-  fileLinksLabel: {
-    color: "#8292A9",
-    fontSize: 10,
-    fontWeight: "700",
-    lineHeight: 32,
-    marginRight: 8,
-    textTransform: "uppercase"
-  },
-  fileLinkText: {
-    color: "#A9D7FF",
-    fontFamily: "Menlo",
-    fontSize: 11,
-    textDecorationLine: "underline"
-  },
   selectionButton: {
     borderRadius: 7,
     paddingHorizontal: 10,
@@ -592,6 +482,7 @@ const styles = StyleSheet.create({
     gap: 8,
     padding: 8,
     position: "absolute",
+    top: 12,
     zIndex: 10
   },
   wrap: {

@@ -567,6 +567,12 @@ function TaskDetailRoute({
           void controller.closeDesktopTask(durableTaskId);
         }
       }}
+      onResolveTaskFileMentions={(mentions) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        return durableTaskId
+          ? controller.resolveTaskFileMentions(durableTaskId, mentions)
+          : Promise.reject(new Error("Task creation is still in progress."));
+      }}
       onReadTaskFile={(path) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         return durableTaskId

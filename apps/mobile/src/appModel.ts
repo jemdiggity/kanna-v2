@@ -919,6 +919,7 @@ function createDisconnectedClient(): KannaClient {
     closeTask: unavailable,
     sendTaskInput: unavailable,
     readTaskFile: unavailable,
+    resolveTaskFileMentions: unavailable,
     readTaskDiff: unavailable,
     observeTaskTerminal(taskId, listener) {
       listener({
@@ -1096,6 +1097,11 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).sendTaskInput(taskId, input),
     readTaskFile: async (taskId, path) =>
       (await resolveClient(desktopId)).readTaskFile(taskId, path),
+    resolveTaskFileMentions: async (taskId, mentions) =>
+      (await resolveClient(desktopId)).resolveTaskFileMentions(
+        taskId,
+        mentions
+      ),
     readTaskDiff: async (taskId, request) =>
       (await resolveClient(desktopId)).readTaskDiff(taskId, request),
     observeTaskTerminal: (taskId, listener) =>
@@ -1295,6 +1301,8 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     closeTask: (taskId) => getClient().closeTask(taskId),
     sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
     readTaskFile: (taskId, path) => getClient().readTaskFile(taskId, path),
+    resolveTaskFileMentions: (taskId, mentions) =>
+      getClient().resolveTaskFileMentions(taskId, mentions),
     readTaskDiff: (taskId, request) => getClient().readTaskDiff(taskId, request),
     observeTaskTerminal: (taskId, listener) =>
       getClient().observeTaskTerminal(taskId, listener),

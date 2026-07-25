@@ -39,6 +39,8 @@ pub struct AppState {
     pub(super) stage_completer: Option<TestStageCompleter>,
     #[cfg(test)]
     pub(super) revision_requester: Option<TestRevisionRequester>,
+    #[cfg(test)]
+    pub(super) task_file_resolution_hook: Option<TestTaskFileResolutionHook>,
 }
 
 #[derive(Default)]
@@ -110,6 +112,9 @@ pub(super) type TestRevisionRequester = Arc<
         + Send
         + Sync,
 >;
+
+#[cfg(test)]
+pub(super) type TestTaskFileResolutionHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +190,8 @@ impl AppState {
             stage_completer: None,
             #[cfg(test)]
             revision_requester: None,
+            #[cfg(test)]
+            task_file_resolution_hook: None,
         }
     }
 

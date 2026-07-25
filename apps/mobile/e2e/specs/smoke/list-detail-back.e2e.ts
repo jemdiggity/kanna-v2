@@ -122,6 +122,10 @@ type TerminalWebViewInspection =
       byteCount: number;
       cols: number | null;
       frameCount: number;
+      mentionedFiles?: {
+        mentions: Array<{ line?: number; path: string; raw: string }>;
+        overflow: boolean;
+      };
       rows: number | null;
       text: string;
     }

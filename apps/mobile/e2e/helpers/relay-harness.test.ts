@@ -20,8 +20,13 @@ describe("mobile relay harness helpers", () => {
     expect(fixture?.sentinel).toMatch(/MOBILE.*SNAPSHOT/);
   });
 
-  it("describes the real Markdown file and routed failure used by Appium", () => {
+  it("describes unique, ambiguous, and Markdown mentions used by Appium", () => {
     expect(relayHarness.MOBILE_RELAY_FILE_PREVIEW_FIXTURE).toEqual({
+      ambiguousBarePath: "shared.ts",
+      ambiguousCanonicalPaths: [
+        "fixtures/a/shared.ts",
+        "fixtures/b/shared.ts"
+      ],
       content: [
         "# Mobile Relay Preview",
         "",
@@ -37,16 +42,35 @@ describe("mobile relay harness helpers", () => {
       expectedHighlightedTokenClass: "hljs-keyword",
       expectedRenderedText: "Rendered through the authenticated owner relay.",
       expectedRawLine: "TARGET RAW LINE",
-      line: 8,
-      missingLink: "docs/mobile-preview-missing.md",
-      nonMarkdownLinks: [
-        "apps/mobile/src/screens/TerminalWebView.tsx:42",
-        "apps/mobile/package.json",
-        "crates/daemon/src/lib.rs:9"
+      expectedCanonicalRowOrder: [
+        "fixtures/unique/TaskScreen.tsx",
+        "fixtures/a/shared.ts",
+        "fixtures/b/shared.ts",
+        "docs/spec.md"
       ],
-      path: "docs/mobile-file-preview.md",
-      rawLink: "docs/mobile-file-preview.md:8",
-      renderedLink: "docs/mobile-file-preview.md"
+      line: 7,
+      mentionedCount: 3,
+      mentionedLinks: [
+        "docs/spec.md",
+        "TaskScreen.tsx:7",
+        "shared.ts",
+        "TaskScreen.tsx:7"
+      ],
+      missingLink: "docs/mobile-preview-missing.md",
+      path: "docs/spec.md",
+      rawLink: "TaskScreen.tsx:7",
+      renderedLink: "docs/spec.md",
+      uniqueBarePath: "TaskScreen.tsx",
+      uniqueCanonicalPath: "fixtures/unique/TaskScreen.tsx",
+      uniqueContent: [
+        "export function relayFixture() {",
+        "  const status = \"connected\";",
+        "  return status;",
+        "}",
+        "",
+        "// Mentioned by bare filename.",
+        "TARGET RAW LINE"
+      ].join("\n")
     });
   });
 

@@ -197,6 +197,14 @@ function createClientMock(): ClientMock {
       path: "docs/spec.md",
       content: "# Spec"
     }),
+    resolveTaskFileMentions: vi.fn().mockResolvedValue({
+      mentions: [{
+        path: "TaskScreen.tsx",
+        line: 42,
+        matches: [{ path: "src/screens/TaskScreen.tsx" }],
+        truncated: false
+      }]
+    }),
     readTaskDiff: vi.fn().mockResolvedValue({
       taskId: "task-1",
       baseRef: "main",
@@ -927,6 +935,26 @@ describe("createMobileController", () => {
       content: "# Spec"
     });
     expect(client.readTaskFile).toHaveBeenCalledWith("task-1", "docs/spec.md");
+    expect(store.getState().errorMessage).toBe("existing error");
+  });
+
+  it("resolves mentioned task files without mutating global errors", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    store.setErrorMessage("existing error");
+
+    await expect(
+      controller.resolveTaskFileMentions("task-1", [
+        { path: "TaskScreen.tsx", line: 42 }
+      ])
+    ).resolves.toMatchObject({
+      mentions: [{ matches: [{ path: "src/screens/TaskScreen.tsx" }] }]
+    });
+    expect(client.resolveTaskFileMentions).toHaveBeenCalledWith(
+      "task-1",
+      [{ path: "TaskScreen.tsx", line: 42 }]
+    );
     expect(store.getState().errorMessage).toBe("existing error");
   });
 

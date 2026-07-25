@@ -132,6 +132,24 @@ export interface TaskFileContent {
   content: string;
 }
 
+export interface TaskFileMentionInput {
+  path: string;
+  line?: number;
+}
+
+export interface TaskFileMentionMatch {
+  path: string;
+}
+
+export interface ResolvedTaskFileMention extends TaskFileMentionInput {
+  matches: TaskFileMentionMatch[];
+  truncated: boolean;
+}
+
+export interface TaskFileMentionResolution {
+  mentions: ResolvedTaskFileMention[];
+}
+
 export type TaskDiffBranchMode = "none" | "staged" | "all";
 export type TaskDiffWorkingMode = "all" | "unstaged" | "staged";
 

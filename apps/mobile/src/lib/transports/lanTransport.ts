@@ -19,6 +19,8 @@ import type {
   TaskDiffContent,
   TaskDiffRequest,
   TaskFileContent,
+  TaskFileMentionInput,
+  TaskFileMentionResolution,
   TaskDetail,
   TaskSummary
 } from "../api/types";
@@ -172,6 +174,14 @@ export function createLanTransport(
     readTaskFile: async (_taskId: string, _path: string): Promise<TaskFileContent> => {
       throw new Error(
         "Task file preview requires an authenticated relay connection."
+      );
+    },
+    resolveTaskFileMentions: async (
+      _taskId: string,
+      _mentions: readonly TaskFileMentionInput[]
+    ): Promise<TaskFileMentionResolution> => {
+      throw new Error(
+        "Task file resolution requires an authenticated relay connection."
       );
     },
     readTaskDiff: (

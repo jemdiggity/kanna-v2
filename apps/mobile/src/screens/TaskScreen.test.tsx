@@ -125,6 +125,10 @@ vi.mock("./TaskDiffPreview", () => ({
   TaskDiffPreview: "TaskDiffPreview"
 }));
 
+vi.mock("./TaskMentionedFiles", () => ({
+  TaskMentionedFiles: "TaskMentionedFiles"
+}));
+
 vi.mock("./VisualCompanionModal", () => ({
   VisualCompanionModal: "VisualCompanionModal"
 }));
@@ -186,6 +190,15 @@ interface RenderTaskScreenOptions {
   onRecoverTaskCreation?: () => void;
   agentStatus?: TaskTerminalStatus;
   onSendTerminalInput?: (dataB64: string) => void;
+  onResolveTaskFileMentions?: (
+    mentions: readonly { path: string; line?: number }[]
+  ) => Promise<{
+    mentions: Array<{
+      path: string;
+      matches: Array<{ path: string }>;
+      truncated: boolean;
+    }>;
+  }>;
   onReadTaskFile?: (path: string) => Promise<{ path: string; content: string }>;
   onReadTaskDiff?: () => Promise<{
     taskId: string;
@@ -239,6 +252,9 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onRecoverTaskCreation = vi.fn(),
     agentStatus = "live",
     onSendTerminalInput,
+    onResolveTaskFileMentions = vi.fn().mockResolvedValue({
+      mentions: []
+    }),
     onReadTaskFile = vi.fn().mockResolvedValue({
       path: "docs/spec.md",
       content: "# Spec"
@@ -312,6 +328,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onStopAgent: vi.fn(),
     onResolveAgentPermission: vi.fn(),
     onRecoverTaskCreation,
+    onResolveTaskFileMentions,
     onReadTaskFile,
     onReadTaskDiff,
     onCompanionOpenChange,
@@ -492,11 +509,10 @@ describe("TaskScreen", () => {
     pressByTestId(tree, "mobile.task-more-button");
 
     expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
-      expect.any(Function),
-      undefined,
-      { taskCreation: true }
+      { mentionedFilesLabel: "Mentioned Files (0)", taskCreation: true },
+      expect.any(Function)
     );
-    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![0] as (
+    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![1] as (
       selectedAction: "close-task"
     ) => void;
     onSelect("close-task");
@@ -586,7 +602,7 @@ describe("TaskScreen", () => {
   ] as const)("routes the %s task action", (action, expectedCallback) => {
     const tree = renderTaskScreen({ agentType: "agent" });
     pressByTestId(tree, "mobile.task-more-button");
-    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![0] as (
+    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![1] as (
       selectedAction: "advance-stage" | "close-task"
     ) => void;
 
@@ -607,7 +623,7 @@ describe("TaskScreen", () => {
     expect(findByType(tree, "TaskDiffPreview")).toBeNull();
 
     pressByTestId(tree, "mobile.task-more-button");
-    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![0] as (
+    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![1] as (
       selectedAction: "view-diff"
     ) => void;
     onSelect("view-diff");
@@ -1024,36 +1040,118 @@ describe("TaskScreen", () => {
     }
   });
 
-  it("opens terminal file links in a task preview and closes it", async () => {
-    const onReadTaskFile = vi.fn().mockResolvedValue({
-      path: "docs/spec.md",
-      content: "# Spec"
+  it("lists terminal mentions from the + menu and previews a canonical selection", async () => {
+    const history = {
+      mentions: [
+        { raw: "src/main.ts:42", path: "src/main.ts", line: 42 },
+        { raw: "README.md", path: "README.md" }
+      ],
+      overflow: false
+    };
+    const onResolveTaskFileMentions = vi.fn().mockResolvedValue({
+      mentions: [
+        {
+          path: "src/main.ts",
+          matches: [{ path: "packages/app/src/main.ts" }],
+          truncated: false
+        },
+        {
+          path: "README.md",
+          matches: [{ path: "README.md" }],
+          truncated: false
+        }
+      ]
     });
-    let tree = renderTaskScreen({ agentType: "pty", onReadTaskFile });
+    const onReadTaskFile = vi.fn().mockResolvedValue({
+      path: "packages/app/src/main.ts",
+      content: "export {}"
+    });
+    let tree = renderTaskScreen({
+      agentType: "pty",
+      onReadTaskFile,
+      onResolveTaskFileMentions
+    });
     const terminal = findByType(tree, "TerminalWebView");
+    (terminal?.props?.onMentionedFilesChange as (value: unknown) => void)(history);
 
-    expect(terminal?.props?.onOpenFile).toBeTypeOf("function");
-    (terminal?.props?.onOpenFile as (path: string, line?: number) => void)(
-      "docs/spec.md",
-      42
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onReadTaskFile,
+      onResolveTaskFileMentions
+    });
+    pressByTestId(tree, "mobile.task-more-button");
+    expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
+      { mentionedFilesLabel: "Mentioned Files (2)" },
+      expect.any(Function)
     );
+    const onSelectAction =
+      componentMocks.showTaskActionMenu.mock.calls[0]![1] as (
+        action: "mentioned-files"
+      ) => void;
+    onSelectAction("mentioned-files");
 
-    tree = renderTaskScreen({ agentType: "pty", onReadTaskFile });
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onReadTaskFile,
+      onResolveTaskFileMentions
+    });
+    const mentionedFiles = findByType(tree, "TaskMentionedFiles");
+    expect(mentionedFiles?.props).toMatchObject({
+      history,
+      autoSelectUnique: false,
+      resolveMentions: onResolveTaskFileMentions
+    });
+    (
+      mentionedFiles?.props?.onSelect as (selection: {
+        path: string;
+        line?: number;
+      }) => void
+    )({ path: "packages/app/src/main.ts", line: 42 });
+
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onReadTaskFile,
+      onResolveTaskFileMentions
+    });
     const preview = findByType(tree, "TaskFilePreview");
     expect(preview?.props).toMatchObject({
-      path: "docs/spec.md",
+      path: "packages/app/src/main.ts",
       initialLine: 42
     });
     await expect(
       (preview?.props?.readFile as () => Promise<unknown>)()
     ).resolves.toEqual({
-      path: "docs/spec.md",
-      content: "# Spec"
+      path: "packages/app/src/main.ts",
+      content: "export {}"
     });
-    expect(onReadTaskFile).toHaveBeenCalledWith("docs/spec.md");
+    expect(onReadTaskFile).toHaveBeenCalledWith("packages/app/src/main.ts");
 
     (preview?.props?.onClose as () => void)();
-    tree = renderTaskScreen({ agentType: "pty", onReadTaskFile });
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onReadTaskFile,
+      onResolveTaskFileMentions
+    });
+    expect(findByType(tree, "TaskFilePreview")).toBeNull();
+  });
+
+  it("resolves a direct terminal file tap before opening its preview", () => {
+    let tree = renderTaskScreen({ agentType: "pty" });
+    const terminal = findByType(tree, "TerminalWebView");
+
+    (terminal?.props?.onOpenFile as (path: string, line?: number) => void)(
+      "main.ts",
+      7
+    );
+    tree = renderTaskScreen({ agentType: "pty" });
+
+    expect(findByType(tree, "TaskMentionedFiles")?.props).toMatchObject({
+      autoSelectUnique: true,
+      history: {
+        mentions: [{ raw: "main.ts:7", path: "main.ts", line: 7 }],
+        overflow: false
+      }
+    });
     expect(findByType(tree, "TaskFilePreview")).toBeNull();
   });
 

@@ -1,9 +1,15 @@
 use crate::db::Db;
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 pub const MAX_TASK_FILE_BYTES: u64 = 1024 * 1024;
+pub const MAX_TASK_FILE_MENTIONS: usize = 21;
+const MAX_TASK_FILE_MENTION_PATH_BYTES: usize = 4 * 1024;
+const MAX_TASK_FILE_MENTION_TOTAL_BYTES: usize = 32 * 1024;
+const MAX_TASK_FILE_MENTION_MATCHES: usize = 10;
+const MAX_TASK_FILE_WALK_ENTRIES: usize = 50_000;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -12,9 +18,38 @@ pub struct TaskFileContent {
     pub content: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskFileMention {
+    pub path: String,
+    pub line: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskFileMatch {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTaskFileMention {
+    pub path: String,
+    pub line: Option<u32>,
+    pub matches: Vec<TaskFileMatch>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskFileMentionResolution {
+    pub mentions: Vec<ResolvedTaskFileMention>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskFileError {
     InvalidPath(String),
+    RequestTooLarge,
     TaskNotFound,
     WorkspaceUnavailable,
     FileNotFound,
@@ -27,6 +62,7 @@ impl fmt::Display for TaskFileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPath(message) | Self::Internal(message) => formatter.write_str(message),
+            Self::RequestTooLarge => formatter.write_str("too many task file mentions"),
             Self::TaskNotFound => formatter.write_str("task not found"),
             Self::WorkspaceUnavailable => formatter.write_str("task workspace unavailable"),
             Self::FileNotFound => formatter.write_str("file not found"),
@@ -95,6 +131,214 @@ pub fn read_task_file(
         path: display_path(&relative),
         content,
     })
+}
+
+pub fn resolve_task_file_mentions(
+    db: &Db,
+    task_or_branch_id: &str,
+    mentions: Vec<TaskFileMention>,
+) -> Result<TaskFileMentionResolution, TaskFileError> {
+    resolve_task_file_mentions_with_limit(
+        db,
+        task_or_branch_id,
+        mentions,
+        MAX_TASK_FILE_WALK_ENTRIES,
+    )
+}
+
+fn resolve_task_file_mentions_with_limit(
+    db: &Db,
+    task_or_branch_id: &str,
+    mentions: Vec<TaskFileMention>,
+    walk_entry_limit: usize,
+) -> Result<TaskFileMentionResolution, TaskFileError> {
+    validate_mention_batch(&mentions)?;
+
+    let task_id = db
+        .resolve_pipeline_item_id(task_or_branch_id)
+        .map_err(|error| TaskFileError::Internal(format!("db error: {error}")))?
+        .ok_or(TaskFileError::TaskNotFound)?;
+    let worktree_path = db
+        .get_task_worktree_path(&task_id)
+        .map_err(|error| TaskFileError::Internal(format!("db error: {error}")))?
+        .ok_or(TaskFileError::WorkspaceUnavailable)?;
+    let root = Path::new(&worktree_path);
+    if !root.is_absolute() {
+        return Err(TaskFileError::WorkspaceUnavailable);
+    }
+    let root_directory = open_task_workspace_root(root)?;
+
+    let mut resolution = TaskFileMentionResolution {
+        mentions: mentions
+            .iter()
+            .map(|mention| ResolvedTaskFileMention {
+                path: mention.path.clone(),
+                line: mention.line,
+                matches: Vec::new(),
+                truncated: false,
+            })
+            .collect(),
+    };
+    let mut basename_mentions: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (index, mention) in mentions.iter().enumerate() {
+        let requested = Path::new(&mention.path);
+        let relative = normalize_requested_path(root, requested)?;
+        match open_task_file_from_root(&root_directory, &relative) {
+            Ok(file) => {
+                let metadata = file.metadata().map_err(|error| {
+                    TaskFileError::Internal(format!("failed to inspect task file: {error}"))
+                })?;
+                if !metadata.is_file() {
+                    return Err(TaskFileError::InvalidPath(
+                        "file path must identify a regular file".to_string(),
+                    ));
+                }
+                resolution.mentions[index].matches.push(TaskFileMatch {
+                    path: display_path(&relative),
+                });
+            }
+            Err(TaskFileError::FileNotFound)
+                if relative.components().count() == 1
+                    && relative
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some() =>
+            {
+                let basename = relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("checked UTF-8 basename");
+                basename_mentions
+                    .entry(basename.to_string())
+                    .or_default()
+                    .push(index);
+            }
+            Err(TaskFileError::FileNotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    if basename_mentions.is_empty() {
+        return Ok(resolution);
+    }
+
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false)
+        .filter_entry(|entry| {
+            !matches!(
+                entry.file_name().to_str(),
+                Some(".git") | Some(".kanna-worktrees")
+            )
+        });
+
+    let mut visited = 0usize;
+    let mut walk_incomplete = false;
+    for entry_result in builder.build() {
+        if visited >= walk_entry_limit {
+            walk_incomplete = true;
+            break;
+        }
+        visited += 1;
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(_) => {
+                walk_incomplete = true;
+                continue;
+            }
+        };
+        if !entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_file())
+        {
+            continue;
+        }
+        let Some(indices) = entry
+            .file_name()
+            .to_str()
+            .and_then(|basename| basename_mentions.get(basename))
+        else {
+            continue;
+        };
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            walk_incomplete = true;
+            continue;
+        };
+
+        let securely_opened = match open_task_file_from_root(&root_directory, relative) {
+            Ok(file) => file
+                .metadata()
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !securely_opened {
+            continue;
+        }
+
+        let candidate = TaskFileMatch {
+            path: display_path(relative),
+        };
+        for index in indices {
+            let mention = &mut resolution.mentions[*index];
+            mention.matches.push(candidate.clone());
+            if mention.matches.len() > MAX_TASK_FILE_MENTION_MATCHES {
+                mention
+                    .matches
+                    .sort_unstable_by(|left, right| left.path.cmp(&right.path));
+                mention.matches.truncate(MAX_TASK_FILE_MENTION_MATCHES);
+                mention.truncated = true;
+            }
+        }
+    }
+
+    for indices in basename_mentions.values() {
+        for index in indices {
+            let mention = &mut resolution.mentions[*index];
+            mention
+                .matches
+                .sort_unstable_by(|left, right| left.path.cmp(&right.path));
+            if walk_incomplete {
+                mention.truncated = true;
+            }
+        }
+    }
+
+    Ok(resolution)
+}
+
+fn validate_mention_batch(mentions: &[TaskFileMention]) -> Result<(), TaskFileError> {
+    if mentions.len() > MAX_TASK_FILE_MENTIONS {
+        return Err(TaskFileError::RequestTooLarge);
+    }
+    let mut total_path_bytes = 0usize;
+    for mention in mentions {
+        let path_bytes = mention.path.len();
+        total_path_bytes = total_path_bytes
+            .checked_add(path_bytes)
+            .ok_or(TaskFileError::RequestTooLarge)?;
+        if path_bytes > MAX_TASK_FILE_MENTION_PATH_BYTES
+            || total_path_bytes > MAX_TASK_FILE_MENTION_TOTAL_BYTES
+        {
+            return Err(TaskFileError::RequestTooLarge);
+        }
+        let requested = Path::new(&mention.path);
+        if mention.path.trim().is_empty()
+            || mention.path.contains('\0')
+            || requested
+                .components()
+                .any(|component| component == Component::ParentDir)
+        {
+            return Err(disallowed_path());
+        }
+    }
+    Ok(())
 }
 
 fn disallowed_path() -> TaskFileError {
@@ -263,7 +507,11 @@ fn display_path(path: &Path) -> String {
 mod tests {
     #[cfg(unix)]
     use super::{open_task_file_from_root, open_task_workspace_root};
-    use super::{read_task_file, TaskFileError, MAX_TASK_FILE_BYTES};
+    use super::{
+        read_task_file, resolve_task_file_mentions, resolve_task_file_mentions_with_limit,
+        TaskFileError, TaskFileMatch, TaskFileMention, MAX_TASK_FILE_BYTES, MAX_TASK_FILE_MENTIONS,
+        MAX_TASK_FILE_MENTION_MATCHES,
+    };
     use crate::db::Db;
     use std::path::{Path, PathBuf};
 
@@ -346,6 +594,206 @@ mod tests {
 
         assert_eq!(result.path, "docs/spec.md");
         assert_eq!(result.content, "# Spec\n");
+    }
+
+    #[test]
+    fn resolves_exact_and_unique_bare_mentions_in_request_order() {
+        let fixture = TaskFileFixture::new();
+        fixture.write("README.md", b"root");
+        fixture.write("apps/mobile/src/screens/TaskScreen.tsx", b"screen");
+
+        let result = resolve_task_file_mentions(
+            &fixture.db,
+            "task-1",
+            vec![
+                TaskFileMention {
+                    path: "TaskScreen.tsx".into(),
+                    line: Some(42),
+                },
+                TaskFileMention {
+                    path: "README.md".into(),
+                    line: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.mentions[0].matches,
+            vec![TaskFileMatch {
+                path: "apps/mobile/src/screens/TaskScreen.tsx".into(),
+            }]
+        );
+        assert_eq!(result.mentions[0].line, Some(42));
+        assert_eq!(
+            result.mentions[1].matches,
+            vec![TaskFileMatch {
+                path: "README.md".into(),
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn returns_sorted_ambiguous_matches_and_excludes_ignored_and_symlinked_files() {
+        let fixture = TaskFileFixture::new();
+        fixture.write(".gitignore", b"generated/\n");
+        fixture.write("a/shared.ts", b"a");
+        fixture.write("b/shared.ts", b"b");
+        fixture.write("generated/shared.ts", b"ignored");
+        fixture.symlink_outside("linked/shared.ts");
+
+        let result = resolve_task_file_mentions(
+            &fixture.db,
+            "task-1",
+            vec![TaskFileMention {
+                path: "shared.ts".into(),
+                line: None,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.mentions[0]
+                .matches
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a/shared.ts", "b/shared.ts"]
+        );
+    }
+
+    #[test]
+    fn exactly_maximum_bare_filename_matches_are_sorted_and_not_truncated() {
+        let fixture = TaskFileFixture::new();
+        for index in (0..MAX_TASK_FILE_MENTION_MATCHES).rev() {
+            fixture.write(&format!("match-{index:02}/shared.ts"), b"shared");
+        }
+
+        let result = resolve_task_file_mentions(
+            &fixture.db,
+            "task-1",
+            vec![TaskFileMention {
+                path: "shared.ts".into(),
+                line: None,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.mentions[0]
+                .matches
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            (0..MAX_TASK_FILE_MENTION_MATCHES)
+                .map(|index| format!("match-{index:02}/shared.ts"))
+                .collect::<Vec<_>>()
+        );
+        assert!(!result.mentions[0].truncated);
+    }
+
+    #[test]
+    fn more_than_maximum_bare_filename_matches_return_lexicographically_first_paths() {
+        let fixture = TaskFileFixture::new();
+        fixture.write("a/shared.ts", b"shared");
+        for index in (0..=MAX_TASK_FILE_MENTION_MATCHES).rev() {
+            fixture.write(&format!("a-{index:02}/shared.ts"), b"shared");
+        }
+
+        let result = resolve_task_file_mentions(
+            &fixture.db,
+            "task-1",
+            vec![TaskFileMention {
+                path: "shared.ts".into(),
+                line: None,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.mentions[0]
+                .matches
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            (0..MAX_TASK_FILE_MENTION_MATCHES)
+                .map(|index| format!("a-{index:02}/shared.ts"))
+                .collect::<Vec<_>>()
+        );
+        assert!(result.mentions[0].truncated);
+    }
+
+    #[test]
+    fn rejects_invalid_and_oversized_mention_requests() {
+        let fixture = TaskFileFixture::new();
+
+        assert!(matches!(
+            resolve_task_file_mentions(
+                &fixture.db,
+                "task-1",
+                vec![TaskFileMention {
+                    path: "../secret.ts".into(),
+                    line: None,
+                }]
+            ),
+            Err(TaskFileError::InvalidPath(_))
+        ));
+
+        assert!(matches!(
+            resolve_task_file_mentions(
+                &fixture.db,
+                "task-1",
+                (0..=MAX_TASK_FILE_MENTIONS)
+                    .map(|index| TaskFileMention {
+                        path: format!("file-{index}.ts"),
+                        line: None,
+                    })
+                    .collect()
+            ),
+            Err(TaskFileError::RequestTooLarge)
+        ));
+    }
+
+    #[test]
+    fn missing_nested_mentions_do_not_trigger_basename_search() {
+        let fixture = TaskFileFixture::new();
+        fixture.write("other/missing.ts", b"not the requested path");
+
+        let result = resolve_task_file_mentions(
+            &fixture.db,
+            "task-1",
+            vec![TaskFileMention {
+                path: "expected/missing.ts".into(),
+                line: Some(9),
+            }],
+        )
+        .unwrap();
+
+        assert!(result.mentions[0].matches.is_empty());
+        assert!(!result.mentions[0].truncated);
+        assert_eq!(result.mentions[0].line, Some(9));
+    }
+
+    #[test]
+    fn marks_unresolved_basename_truncated_when_walk_limit_is_reached() {
+        let fixture = TaskFileFixture::new();
+        fixture.write("a.ts", b"a");
+        fixture.write("nested/b.ts", b"b");
+
+        let result = resolve_task_file_mentions_with_limit(
+            &fixture.db,
+            "task-1",
+            vec![TaskFileMention {
+                path: "missing.ts".into(),
+                line: None,
+            }],
+            1,
+        )
+        .unwrap();
+
+        assert!(result.mentions[0].matches.is_empty());
+        assert!(result.mentions[0].truncated);
     }
 
     #[test]

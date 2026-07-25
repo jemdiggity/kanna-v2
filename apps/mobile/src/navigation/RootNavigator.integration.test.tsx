@@ -255,6 +255,9 @@ vi.mock("../screens/TaskDiffPreview", () => ({
 vi.mock("../screens/TaskFilePreview", () => ({
   TaskFilePreview: "TaskFilePreview"
 }));
+vi.mock("../screens/TaskMentionedFiles", () => ({
+  TaskMentionedFiles: "TaskMentionedFiles"
+}));
 vi.mock("../screens/TerminalWebView", () => ({
   TerminalWebView: "TerminalWebView"
 }));
@@ -337,6 +340,7 @@ function createClientMock(): KannaClient {
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-1" }),
     closeTask: vi.fn().mockResolvedValue(undefined),
+    resolveTaskFileMentions: vi.fn().mockResolvedValue({ mentions: [] }),
     observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
     observeTaskCompanion: vi.fn(() => ({
       close: vi.fn(),
@@ -766,7 +770,7 @@ describe("RootNavigator task action integration", () => {
       pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
     });
     expect(showTaskActionMenu).toHaveBeenCalledTimes(1);
-    return vi.mocked(showTaskActionMenu).mock.calls[0][0];
+    return vi.mocked(showTaskActionMenu).mock.calls[0][1];
   }
 
   beforeEach(() => {
@@ -815,11 +819,10 @@ describe("RootNavigator task action integration", () => {
       pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
     });
     expect(showTaskActionMenu).toHaveBeenCalledWith(
-      expect.any(Function),
-      undefined,
-      { taskCreation: true }
+      { mentionedFilesLabel: "Mentioned Files (0)", taskCreation: true },
+      expect.any(Function)
     );
-    const selectAction = vi.mocked(showTaskActionMenu).mock.calls[0]![0];
+    const selectAction = vi.mocked(showTaskActionMenu).mock.calls[0]![1];
 
     await act(async () => {
       selectAction("close-task");
@@ -916,7 +919,7 @@ describe("RootNavigator task action integration", () => {
       pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
     });
     const selectFirstAction =
-      vi.mocked(showTaskActionMenu).mock.calls[0]![0];
+      vi.mocked(showTaskActionMenu).mock.calls[0]![1];
     await act(async () => {
       selectFirstAction("close-task");
       await flushMicrotasks();
@@ -947,7 +950,7 @@ describe("RootNavigator task action integration", () => {
       pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
     });
     const selectSecondAction =
-      vi.mocked(showTaskActionMenu).mock.calls[1]![0];
+      vi.mocked(showTaskActionMenu).mock.calls[1]![1];
     await act(async () => {
       selectSecondAction("close-task");
       await flushMicrotasks();
@@ -1006,6 +1009,25 @@ describe("RootNavigator task action integration", () => {
     expect(visibleText()).toContain("Second desktop is offline");
   });
 
+  it("resolves mentioned files against the durable task identity", async () => {
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValue([task]);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([task]);
+    const store = createSessionStore();
+    const selectAction = await openTaskDetailAndCaptureMenu(client, store);
+
+    await act(async () => {
+      selectAction("mentioned-files");
+    });
+    const mentionedFiles = rendered!.root.findByType("TaskMentionedFiles");
+    await mentionedFiles.props.resolveMentions([
+      { path: "README.md", line: 4 }
+    ]);
+
+    expect(client.resolveTaskFileMentions).toHaveBeenCalledWith("task-1", [
+      { path: "README.md", line: 4 }
+    ]);
+  });
   it("closes a task exactly once from the + menu, shows the spinner, and blocks duplicates until success", async () => {
     const close = createDeferred<void>();
     const client = createClientMock();
@@ -1093,7 +1115,7 @@ describe("RootNavigator task action integration", () => {
     expect(showTaskActionMenu).toHaveBeenCalledTimes(2);
 
     await act(async () => {
-      vi.mocked(showTaskActionMenu).mock.calls[1][0]("close-task");
+      vi.mocked(showTaskActionMenu).mock.calls[1][1]("close-task");
       await flushMicrotasks();
     });
     expect(client.closeTask).toHaveBeenCalledTimes(2);

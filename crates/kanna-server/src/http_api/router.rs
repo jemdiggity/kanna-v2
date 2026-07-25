@@ -29,7 +29,7 @@ use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
 use super::task_blockers::{block_task, unblock_task};
 use super::task_diff::get_task_diff;
-use super::task_files::get_task_file;
+use super::task_files::{get_task_file, resolve_task_file_mentions};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
@@ -112,6 +112,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_task).put(put_task).patch(update_task),
         )
         .route("/v1/tasks/{task_id}/files/content", get(get_task_file))
+        .route(
+            "/v1/tasks/{task_id}/files/resolve-mentions",
+            post(resolve_task_file_mentions),
+        )
         .route("/v1/tasks/{task_id}/diff", get(get_task_diff))
         .route(
             "/v1/tasks/{task_id}/dependent-tasks-exist",

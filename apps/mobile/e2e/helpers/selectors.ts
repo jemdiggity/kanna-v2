@@ -37,6 +37,10 @@ export const selectors = {
   taskFilePreviewError: `~${MOBILE_E2E_IDS.taskFilePreviewError}`,
   taskFilePreviewErrorMessage: `~${MOBILE_E2E_IDS.taskFilePreviewErrorMessage}`,
   taskFilePreviewInspection: `~${MOBILE_E2E_IDS.taskFilePreviewInspection}`,
+  taskMentionedFilesModal: `~${MOBILE_E2E_IDS.taskMentionedFilesModal}`,
+  taskMentionedFilesClose: `~${MOBILE_E2E_IDS.taskMentionedFilesClose}`,
+  taskMentionedFilesError: `~${MOBILE_E2E_IDS.taskMentionedFilesError}`,
+  taskMentionedFilesRetry: `~${MOBILE_E2E_IDS.taskMentionedFilesRetry}`,
   accountButton: `~${MOBILE_E2E_IDS.accountButton}`,
   accountSheet: `~${MOBILE_E2E_IDS.accountSheet}`,
   accountCloseButton: `~${MOBILE_E2E_IDS.accountCloseButton}`,
@@ -95,6 +99,10 @@ export const selectors = {
     return `~${MOBILE_E2E_IDS.taskQuickReply(replyId)}`;
   }
 } as const;
+
+export function taskMentionedFilesRowSelector(path: string): string {
+  return `~${MOBILE_E2E_IDS.taskMentionedFilesRow(path)}`;
+}
 
 export function machineRowSelector(desktopId: string): string {
   return `~${MOBILE_E2E_IDS.machineRow(desktopId)}`;

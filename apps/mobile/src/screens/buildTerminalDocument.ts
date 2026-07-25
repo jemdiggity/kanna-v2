@@ -16,7 +16,7 @@ interface BuildTerminalUpdateScriptOptions {
 }
 
 const TERMINAL_FILE_PATH_PATTERN =
-  /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.md(?::\d+){0,2})(?=$|[\s"'`)\]}>,;!?]|\.(?=$|[\s"'`)\]}>,;!?]))/gi.source;
+  /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.[a-zA-Z][a-zA-Z0-9]*(?::\d+){0,2})(?=$|[\s"'`)\]}>,;!?]|\.(?=$|[\s"'`)\]}>,;!?]))/g.source;
 
 export function buildTerminalDocument({
   bottomInset,
@@ -92,90 +92,10 @@ export function buildTerminalDocument({
         overscroll-behavior: contain;
       }
 
-      .terminal-file-links {
-        align-items: center;
-        backdrop-filter: blur(12px);
-        background: rgba(9, 17, 29, 0.94);
-        border: 1px solid #2a4267;
-        border-radius: 12px;
-        bottom: ${bottomInset + 8}px;
-        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.34);
-        display: flex;
-        gap: 8px;
-        left: 12px;
-        max-width: calc(100vw - 24px);
-        overflow-x: auto;
-        padding: 7px 8px;
-        position: fixed;
-        scrollbar-width: none;
-        touch-action: pan-x pinch-zoom;
-        z-index: 5;
-      }
-
-      .terminal-file-links[hidden] {
-        display: none;
-      }
-
-      .terminal-file-links::-webkit-scrollbar {
-        display: none;
-      }
-
-      #terminal-file-link-buttons {
-        display: flex;
-        gap: 8px;
-      }
-
-      .terminal-file-links-label {
-        color: #8da4c4;
-        flex: 0 0 auto;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.04em;
-        padding-left: 2px;
-        text-transform: uppercase;
-      }
-
-      .terminal-file-link {
-        appearance: none;
-        background: #12233a;
-        border: 1px solid #365a87;
-        border-radius: 8px;
-        color: #9fd7ff;
-        flex: 0 0 auto;
-        font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
-        font-size: 12px;
-        line-height: 18px;
-        max-width: min(72vw, 460px);
-        overflow: hidden;
-        padding: 5px 8px;
-        text-decoration: underline;
-        text-decoration-thickness: 1px;
-        text-overflow: ellipsis;
-        text-underline-offset: 3px;
-        touch-action: pan-x pinch-zoom;
-        white-space: nowrap;
-      }
-
-      .terminal-file-link:focus-visible {
-        outline: 2px solid #7dd3fc;
-        outline-offset: 2px;
-      }
     </style>
   </head>
   <body>
     <div class="viewport" id="viewport">
-      <div
-        aria-label="Files mentioned in terminal"
-        aria-live="polite"
-        class="terminal-file-links"
-        hidden
-        id="terminal-file-links"
-        role="region"
-      >
-        <span aria-hidden="true" class="terminal-file-links-label">Files</span>
-        <div id="terminal-file-link-buttons"></div>
-      </div>
       <div id="terminal-root"></div>
     </div>
     <script>${XTERM_WEBVIEW_SCRIPT}</script>
@@ -183,8 +103,6 @@ export function buildTerminalDocument({
     <script>
       const root = document.getElementById("terminal-root");
       const viewport = document.getElementById("viewport");
-      const terminalFileLinks = document.getElementById("terminal-file-links");
-      const terminalFileLinkButtons = document.getElementById("terminal-file-link-buttons");
       const TerminalCtor = globalThis.Terminal;
       const FitAddonCtor = globalThis.FitAddon && globalThis.FitAddon.FitAddon;
       const TERMINAL_COLS = 220;
@@ -192,8 +110,23 @@ export function buildTerminalDocument({
       const MIN_FONT_SCALE = 0.75;
       const MAX_FONT_SCALE = 1.8;
       const SMOOTH_SCROLL_DURATION_MS = 80;
-      const MAX_DISCOVERABLE_FILE_LINKS = 6;
-      const MAX_FILE_LINK_SCAN_ROWS = 200;
+      const MAX_RETAINED_FILE_MENTIONS = 20;
+      const MAX_FILE_MENTION_PAYLOAD = 21;
+      const MAX_INITIAL_FILE_MENTION_SCAN_ROWS = 1000;
+      const MAX_REWRITTEN_FILE_MENTION_SCAN_ROWS = 200;
+      const FILE_MENTION_SCAN_OVERLAP_ROWS = 2;
+      const FILE_MENTION_SCAN_DEBOUNCE_MS = 200;
+      const UNSUPPORTED_FILE_MENTION_EXTENSIONS = new Set([
+        "apng",
+        "avif",
+        "bmp",
+        "gif",
+        "jpg",
+        "jpeg",
+        "png",
+        "svg",
+        "webp"
+      ]);
       const FILE_LINK_GESTURE_COOLDOWN_MS = 450;
       const DOUBLE_TAP_MAX_DELAY_MS = 300;
       const DOUBLE_TAP_MAX_DISTANCE_PX = 24;
@@ -247,6 +180,16 @@ export function buildTerminalDocument({
       let selectionAnchor = null;
       let selectionMode = false;
       let altScreenScrollCapture = null;
+      const terminalFileMentionHistory = new Map();
+      const terminalFileMentionOccurrences = {
+        alternate: new Map(),
+        normal: new Map()
+      };
+      let terminalFileMentionOverflow = false;
+      let pendingFileMentionScanStart = null;
+      let pendingAlternateFileMentionScan = false;
+      let pendingFileMentionScanTimer = null;
+      let lastPostedFileMentionSnapshot = "";
 
       term.loadAddon(fitAddon);
       term.open(root);
@@ -292,14 +235,19 @@ export function buildTerminalDocument({
           if (!maybeNumber || !/^\\d+$/.test(maybeNumber)) {
             break;
           }
-          suffixes.unshift(Number.parseInt(maybeNumber, 10));
+          const parsedNumber = Number.parseInt(maybeNumber, 10);
+          if (!Number.isSafeInteger(parsedNumber) || parsedNumber <= 0) {
+            return null;
+          }
+          suffixes.unshift(parsedNumber);
           parts.pop();
         }
 
         const path = parts.join(":");
+        const extension = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
         if (
-          !path.toLowerCase().endsWith(".md") ||
-          path.split("/").includes("..")
+          path.split("/").includes("..") ||
+          UNSUPPORTED_FILE_MENTION_EXTENSIONS.has(extension)
         ) {
           return null;
         }
@@ -419,59 +367,251 @@ export function buildTerminalDocument({
         return links;
       }
 
-      function refreshTerminalFileLinks() {
-        const buffer = term.buffer.active;
-        const firstLine = Math.max(0, buffer.length - MAX_FILE_LINK_SCAN_ROWS);
-        const discoverable = new Map();
+      function normalBuffer() {
+        return term.buffer.normal;
+      }
 
-        for (let index = firstLine; index < buffer.length; index += 1) {
-          const line = buffer.getLine(index);
-          if (!line) continue;
-          for (const candidate of terminalFileCandidates(line.translateToString(true))) {
-            if (discoverable.has(candidate.raw)) {
-              discoverable.delete(candidate.raw);
+      function terminalFileMention(candidate) {
+        return {
+          raw: candidate.raw,
+          path: candidate.parsed.path,
+          ...(candidate.parsed.line === undefined
+            ? {}
+            : { line: candidate.parsed.line })
+        };
+      }
+
+      function terminalFileMentionOccurrenceKey(candidate) {
+        return JSON.stringify([
+          candidate.start,
+          candidate.raw,
+          candidate.parsed.path,
+          candidate.parsed.line ?? null
+        ]);
+      }
+
+      function newlyRenderedTerminalFileCandidates(
+        bufferType,
+        rowIndex,
+        line
+      ) {
+        const occurrences = terminalFileMentionOccurrences[bufferType];
+        if (!line) {
+          occurrences.delete(rowIndex);
+          return [];
+        }
+        const candidates = terminalFileCandidates(
+          line.translateToString(true)
+        );
+        const previousKeys = occurrences.get(rowIndex) ?? new Set();
+        const currentKeys = new Set();
+        const newlyRendered = [];
+        for (const candidate of candidates) {
+          const key = terminalFileMentionOccurrenceKey(candidate);
+          currentKeys.add(key);
+          if (!previousKeys.has(key)) {
+            newlyRendered.push(candidate);
+          }
+        }
+        if (currentKeys.size > 0) {
+          occurrences.set(rowIndex, currentKeys);
+        } else {
+          occurrences.delete(rowIndex);
+        }
+        return newlyRendered;
+      }
+
+      function recordTerminalFileMention(candidate) {
+        const mention = terminalFileMention(candidate);
+        terminalFileMentionHistory.delete(candidate.parsed.path);
+        terminalFileMentionHistory.set(
+          candidate.parsed.path,
+          mention
+        );
+        if (terminalFileMentionHistory.size > MAX_RETAINED_FILE_MENTIONS) {
+          terminalFileMentionOverflow = true;
+          const oldestPath = terminalFileMentionHistory.keys().next().value;
+          terminalFileMentionHistory.delete(oldestPath);
+        }
+      }
+
+      function postTerminalFileMentionsIfChanged() {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+        const payload = {
+          type: "terminal-file-mentions",
+          mentions: Array.from(terminalFileMentionHistory.values()).reverse(),
+          overflow: terminalFileMentionOverflow
+        };
+        const snapshot = JSON.stringify(payload);
+        if (snapshot === lastPostedFileMentionSnapshot) {
+          return;
+        }
+        lastPostedFileMentionSnapshot = snapshot;
+        window.ReactNativeWebView.postMessage(snapshot);
+        ${enableE2EInspection ? "notifyTerminalInspection();" : ""}
+      }
+
+      function rebuildTerminalFileMentions() {
+        if (pendingFileMentionScanTimer !== null) {
+          window.clearTimeout(pendingFileMentionScanTimer);
+          pendingFileMentionScanTimer = null;
+        }
+        pendingFileMentionScanStart = null;
+        pendingAlternateFileMentionScan = false;
+        terminalFileMentionHistory.clear();
+        terminalFileMentionOccurrences.alternate.clear();
+        terminalFileMentionOccurrences.normal.clear();
+        terminalFileMentionOverflow = false;
+
+        const activeBuffer = term.buffer.active;
+        const buffers =
+          activeBuffer.type === "alternate"
+            ? [
+                {
+                  buffer: activeBuffer,
+                  bufferType: "alternate",
+                  firstLine: 0
+                },
+                {
+                  buffer: normalBuffer(),
+                  bufferType: "normal",
+                  firstLine: Math.max(
+                    0,
+                    normalBuffer().length -
+                      MAX_INITIAL_FILE_MENTION_SCAN_ROWS
+                  )
+                }
+              ]
+            : [
+                {
+                  buffer: normalBuffer(),
+                  bufferType: "normal",
+                  firstLine: Math.max(
+                    0,
+                    normalBuffer().length -
+                      MAX_INITIAL_FILE_MENTION_SCAN_ROWS
+                  )
+                }
+              ];
+        const newestMentions = [];
+        const seenPaths = new Set();
+        scan:
+        for (const entry of buffers) {
+          for (
+            let index = entry.buffer.length - 1;
+            index >= entry.firstLine;
+            index -= 1
+          ) {
+            const line = entry.buffer.getLine(index);
+            const candidates = newlyRenderedTerminalFileCandidates(
+              entry.bufferType,
+              index,
+              line
+            );
+            for (
+              let candidateIndex = candidates.length - 1;
+              candidateIndex >= 0;
+              candidateIndex -= 1
+            ) {
+              const candidate = candidates[candidateIndex];
+              if (seenPaths.has(candidate.parsed.path)) {
+                continue;
+              }
+              seenPaths.add(candidate.parsed.path);
+              newestMentions.push(candidate);
+              if (newestMentions.length >= MAX_FILE_MENTION_PAYLOAD) {
+                terminalFileMentionOverflow = true;
+                break scan;
+              }
             }
-            discoverable.set(candidate.raw, candidate);
           }
         }
 
-        const visible = Array.from(discoverable.values()).slice(
-          -MAX_DISCOVERABLE_FILE_LINKS
-        );
-        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-          window.ReactNativeWebView.postMessage(
-            JSON.stringify({
-              type: "terminal-file-links",
-              links: visible.map(({ parsed, raw }) => ({
-                raw,
-                path: parsed.path,
-                ...(parsed.line === undefined ? {} : { line: parsed.line })
-              }))
-            })
+        for (
+          let index = Math.min(
+            newestMentions.length,
+            MAX_RETAINED_FILE_MENTIONS
+          ) - 1;
+          index >= 0;
+          index -= 1
+        ) {
+          const candidate = newestMentions[index];
+          terminalFileMentionHistory.set(
+            candidate.parsed.path,
+            terminalFileMention(candidate)
           );
         }
-        terminalFileLinkButtons.replaceChildren();
-        for (const { parsed, raw } of visible) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "terminal-file-link";
-          button.dataset.terminalFileRaw = raw;
-          button.textContent = raw;
-          button.setAttribute(
-            "aria-label",
-            parsed.line === undefined
-              ? "Open file " + parsed.path
-              : "Open file " + parsed.path + " at line " + parsed.line
-          );
-          button.addEventListener("click", (event) => {
-            event.stopPropagation();
-            if (!activateTerminalFileLink(parsed.path, parsed.line)) {
-              event.preventDefault();
+        postTerminalFileMentionsIfChanged();
+      }
+
+      function scheduleIncrementalFileMentionScan(
+        previousLength,
+        scanNormalBuffer,
+        scanAlternateBuffer
+      ) {
+        if (scanNormalBuffer) {
+          const currentLength = normalBuffer().length;
+          const scanStart =
+            currentLength === previousLength
+              ? Math.max(
+                  0,
+                  currentLength -
+                    MAX_REWRITTEN_FILE_MENTION_SCAN_ROWS
+                )
+              : Math.max(
+                  0,
+                  previousLength - FILE_MENTION_SCAN_OVERLAP_ROWS
+                );
+          pendingFileMentionScanStart =
+            pendingFileMentionScanStart === null
+              ? scanStart
+              : Math.min(pendingFileMentionScanStart, scanStart);
+        }
+        pendingAlternateFileMentionScan ||= scanAlternateBuffer;
+        if (pendingFileMentionScanTimer !== null) {
+          window.clearTimeout(pendingFileMentionScanTimer);
+        }
+        pendingFileMentionScanTimer = window.setTimeout(() => {
+          pendingFileMentionScanTimer = null;
+          const normalScanStart = pendingFileMentionScanStart;
+          const scanAlternate = pendingAlternateFileMentionScan;
+          pendingFileMentionScanStart = null;
+          pendingAlternateFileMentionScan = false;
+          const buffers = [];
+          if (normalScanStart !== null) {
+            buffers.push({
+              buffer: normalBuffer(),
+              bufferType: "normal",
+              firstLine: normalScanStart
+            });
+          }
+          if (scanAlternate) {
+            buffers.push({
+              buffer: term.buffer.alternate,
+              bufferType: "alternate",
+              firstLine: 0
+            });
+          }
+          for (const entry of buffers) {
+            for (
+              let index = entry.firstLine;
+              index < entry.buffer.length;
+              index += 1
+            ) {
+              const line = entry.buffer.getLine(index);
+              for (const candidate of newlyRenderedTerminalFileCandidates(
+                entry.bufferType,
+                index,
+                line
+              )) {
+                recordTerminalFileMention(candidate);
+              }
             }
-          });
-          terminalFileLinkButtons.append(button);
-        }
-        terminalFileLinks.hidden = visible.length === 0;
+          }
+          postTerminalFileMentionsIfChanged();
+        }, FILE_MENTION_SCAN_DEBOUNCE_MS);
       }
 
       term.registerLinkProvider({
@@ -618,14 +758,6 @@ export function buildTerminalDocument({
       }
 
       window.__clearTerminalSelection = clearTerminalSelection;
-
-      function isTerminalControlTarget(target) {
-        return Boolean(
-          target &&
-          typeof target.closest === "function" &&
-          target.closest(".terminal-file-links")
-        );
-      }
 
       function registerSettledTap(touch) {
         const point = terminalPoint(touch);
@@ -946,11 +1078,10 @@ export function buildTerminalDocument({
           }
           if (
             event.touches.length === 0 &&
-            !selectionMode &&
-            !completedPinch &&
-            !completedMove &&
-            !isTerminalControlTarget(event.target) &&
-            endingTouch &&
+             !selectionMode &&
+             !completedPinch &&
+             !completedMove &&
+             endingTouch &&
             registerSettledTap(endingTouch)
           ) {
             if (event.cancelable) {
@@ -1086,8 +1217,6 @@ export function buildTerminalDocument({
         }
         scheduleViewportAlignment();
 
-        refreshTerminalFileLinks();
-
         ${enableE2EInspection ? "notifyTerminalInspection();" : ""}
       }
 
@@ -1127,6 +1256,10 @@ export function buildTerminalDocument({
             byteCount: Number.parseInt(root.dataset.kannaByteCount || "0", 10) || 0,
             cols: Number.parseInt(root.dataset.kannaCols || "", 10) || null,
             frameCount: Number.parseInt(root.dataset.kannaFrameCount || "0", 10) || 0,
+            mentionedFiles: {
+              mentions: Array.from(terminalFileMentionHistory.values()).reverse(),
+              overflow: terminalFileMentionOverflow
+            },
             rows: Number.parseInt(root.dataset.kannaRows || "", 10) || null,
             text: renderedTerminalText()
           }
@@ -1264,6 +1397,7 @@ export function buildTerminalDocument({
         const complete = () => {
           fitTerminal();
           finalizeRender(shouldStick);
+          rebuildTerminalFileMentions();
         };
         if (state.text) {
           term.write(state.text, complete);
@@ -1278,9 +1412,26 @@ export function buildTerminalDocument({
         }
 
         const shouldStick = shouldFollowTerminalBottom();
+        const previousNormalLength = normalBuffer().length;
         writeTerminalChunks(state.chunksB64, () => {
           fitTerminal();
           finalizeRender(shouldStick);
+          const currentNormalLength = normalBuffer().length;
+          const scanNormalBuffer =
+            term.buffer.active.type !== "alternate" ||
+            currentNormalLength !== previousNormalLength;
+          const scanAlternateBuffer =
+            term.buffer.active.type === "alternate";
+          if (
+            scanNormalBuffer ||
+            scanAlternateBuffer
+          ) {
+            scheduleIncrementalFileMentionScan(
+              previousNormalLength,
+              scanNormalBuffer,
+              scanAlternateBuffer
+            );
+          }
         });
       };
 

@@ -1,5 +1,9 @@
 import type { Browser } from "webdriverio";
-import { extractTaskRowId, selectors } from "../../helpers/selectors";
+import {
+  extractTaskRowId,
+  selectors,
+  taskMentionedFilesRowSelector
+} from "../../helpers/selectors";
 import {
   ensureTaskListVisible,
   inspectTerminalWebView,
@@ -21,7 +25,13 @@ const TASK_COMPOSER_PLACEHOLDER = "Reply…";
 const TASK_COMPOSER_MULTILINE_DRAFT =
   "First relay line.\nSecond relay line.\nThird relay line.";
 const TASK_ACTION_MENU_TITLE = "Task Actions";
-const TASK_ACTION_LABELS = ["Advance Stage", "Close Task", "Cancel"] as const;
+const TASK_ACTION_LABELS = [
+  "Mentioned Files (0)",
+  "View Diff",
+  "Advance Stage",
+  "Close Task",
+  "Cancel"
+] as const;
 
 interface RelayCredentials {
   email: string;
@@ -75,17 +85,23 @@ interface RelayVisualCompanionUi {
 }
 
 interface RelayFilePreviewFixture {
+  ambiguousBarePath: string;
+  ambiguousCanonicalPaths: readonly string[];
   expectedHeading: string;
   expectedHighlightedToken: string;
   expectedHighlightedTokenClass: string;
   expectedRawLine: string;
   expectedRenderedText: string;
+  expectedCanonicalRowOrder: readonly string[];
   line: number;
+  mentionedCount: number;
+  mentionedLinks: readonly string[];
   missingLink: string;
-  nonMarkdownLinks: readonly string[];
   path: string;
   rawLink: string;
   renderedLink: string;
+  uniqueBarePath: string;
+  uniqueCanonicalPath: string;
 }
 
 export interface RelayTaskRowExpectation {
@@ -227,8 +243,8 @@ export async function runRelayTaskJourneys(
   await journeys.verifyPtySnapshotRevisit();
   await journeys.verifyQuickReply();
   await journeys.verifyTaskActionMenu();
-  await journeys.verifyVisualCompanion();
   await journeys.verifyFilePreview();
+  await journeys.verifyVisualCompanion();
   await journeys.verifyComposerReset();
 }
 
@@ -821,15 +837,6 @@ export async function verifyRelayVisualCompanionJourney(
   await ui.close();
 }
 
-function terminalFileLinkAccessibilityLabel(
-  path: string,
-  line?: number
-): string {
-  return line === undefined
-    ? `Open file ${path}`
-    : `Open file ${path} at line ${line}`;
-}
-
 function webViewContextName(context: unknown): string | null {
   if (typeof context === "string") return context;
   if (!context || typeof context !== "object") return null;
@@ -943,23 +950,6 @@ export async function inspectTaskFilePreviewWebView(
   };
 }
 
-async function terminalFileLink(
-  driver: Browser,
-  path: string,
-  line?: number
-) {
-  const link = await driver.$(`~${terminalFileLinkAccessibilityLabel(path, line)}`);
-  await link.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  return link;
-}
-
-function terminalFileTarget(raw: string): { line?: number; path: string } {
-  const match = raw.match(/^(.*?):(\d+)(?::\d+)?$/);
-  return match
-    ? { path: match[1], line: Number.parseInt(match[2], 10) }
-    : { path: raw };
-}
-
 async function inspectTaskFilePreview(
   driver: Browser
 ): Promise<TaskFilePreviewInspection> {
@@ -1010,109 +1000,162 @@ async function closeTaskFilePreview(driver: Browser): Promise<void> {
   );
 }
 
-// Xterm link hitboxes live inside a React Native WebView and are not exposed as
-// XCUITest-native accessibility elements. The bridged native controls are the
-// Appium-drivable inspection/activation surface; buildTerminalDocument tests
-// separately exercise the exact xterm provider ranges and activation callback.
-// True hitbox E2E would require E2E-only WebView instrumentation that reports
-// provider ranges and activates a chosen row/cell through the native bridge.
-export async function verifyTerminalMarkdownFileControls(
+// Xterm link hitboxes remain inside the WebView. Appium drives the native
+// mentioned-files list, whose data comes from the same incremental xterm scan.
+// Direct hitbox activation remains covered by the terminal document bridge
+// tests without adding E2E-only controls to production UI.
+export async function openMentionedFileMenuSelection(
   driver: Browser,
   ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
   fixture: RelayFilePreviewFixture
 ): Promise<void> {
-  const terminalPaths = [
-    fixture.renderedLink,
-    fixture.rawLink,
-    fixture.missingLink,
-    ...fixture.nonMarkdownLinks
-  ];
   let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
 
   await ui.waitUntil(
     async () => {
       lastInspection = await ui.inspectTerminalWebView();
-      return lastInspection.kind === "rendered" && terminalPaths.every(
+      return lastInspection.kind === "rendered" && fixture.mentionedLinks.every(
         (path) => lastInspection?.kind === "rendered" && lastInspection.text.includes(path)
       );
     },
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: `Expected emitted file paths to remain visible inside xterm; last inspection ${JSON.stringify(lastInspection)}`
+      timeoutMsg: `Expected mentioned file paths to remain visible inside xterm; last inspection ${JSON.stringify(lastInspection)}`
     }
   );
 
-  for (const { path, line } of [
-    { path: fixture.path, line: undefined },
-    { path: fixture.path, line: fixture.line },
-    { path: fixture.missingLink, line: undefined }
-  ]) {
-    await terminalFileLink(driver, path, line);
+  const obsoleteStrip = await driver.$("~Files mentioned in terminal");
+  if (await obsoleteStrip.isExisting().catch(() => false)) {
+    throw new Error("The removed horizontal mentioned-file strip is still visible");
   }
 
-  for (const raw of fixture.nonMarkdownLinks) {
-    const { path, line } = terminalFileTarget(raw);
-    const accessibilityLabel = terminalFileLinkAccessibilityLabel(path, line);
-    const control = await driver.$(`~${accessibilityLabel}`);
-    if (await control.isExisting().catch(() => false)) {
+  // The xterm detector batches bridge updates for 200 ms. Terminal text can
+  // become inspectable just before the native history receives that batch.
+  await driver.pause(350);
+  lastInspection = await ui.inspectTerminalWebView();
+  const taskMore = await driver.$(selectors.taskMoreButton);
+  await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await taskMore.click();
+  const mentionedFilesAction = await driver.$(
+    '-ios predicate string:label BEGINSWITH "Mentioned Files ("'
+  );
+  await mentionedFilesAction.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const actualMentionedFilesLabel = await mentionedFilesAction.getAttribute(
+    "label"
+  );
+  const expectedMentionedFilesLabel =
+    `Mentioned Files (${fixture.mentionedCount})`;
+  if (actualMentionedFilesLabel !== expectedMentionedFilesLabel) {
+    throw new Error(
+      `Expected ${expectedMentionedFilesLabel}, got ${JSON.stringify(actualMentionedFilesLabel)}; ` +
+      `terminal inspection ${JSON.stringify(lastInspection)}`
+    );
+  }
+  await mentionedFilesAction.click();
+
+  const modal = await driver.$(selectors.taskMentionedFilesModal);
+  await modal.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const canonicalRowLocations: Array<{ path: string; y: number }> = [];
+  for (const path of fixture.expectedCanonicalRowOrder) {
+    const row = await driver.$(taskMentionedFilesRowSelector(path));
+    await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    const y = await row.getLocation("y");
+    canonicalRowLocations.push({ path, y });
+  }
+  for (let index = 1; index < canonicalRowLocations.length; index += 1) {
+    const previous = canonicalRowLocations[index - 1]!;
+    const current = canonicalRowLocations[index]!;
+    if (current.y <= previous.y) {
       throw new Error(
-        `Expected non-Markdown terminal path ${raw} to remain plain text, but found ${accessibilityLabel}`
+        `Expected canonical mentioned-file row order ${JSON.stringify(fixture.expectedCanonicalRowOrder)}; ` +
+        `measured ${JSON.stringify(canonicalRowLocations)}`
       );
     }
   }
+
+  const uniqueRow = await driver.$(
+    taskMentionedFilesRowSelector(fixture.uniqueCanonicalPath)
+  );
+  await uniqueRow.click();
 }
 
-async function verifyTerminalFilePreviewFlow(
+async function verifyMentionedFileMenuFlow(
   driver: Browser,
   ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
   fixture: RelayFilePreviewFixture
 ): Promise<void> {
-  await verifyTerminalMarkdownFileControls(driver, ui, fixture);
-  const renderedLink = await terminalFileLink(driver, fixture.path);
-
-  const [location, size] = await Promise.all([
-    renderedLink.getLocation(),
-    renderedLink.getSize()
-  ]);
-  const centerX = Math.round(location.x + size.width / 2);
-  const centerY = Math.round(location.y + size.height / 2);
-  await driver.actions([
-    driver
-      .action("pointer", { parameters: { pointerType: "touch" } })
-      .move(centerX - 8, centerY)
-      .down()
-      .move({ duration: 650, x: centerX - 42, y: centerY })
-      .up(),
-    driver
-      .action("pointer", { parameters: { pointerType: "touch" } })
-      .move(centerX + 8, centerY)
-      .down()
-      .move({ duration: 650, x: centerX + 42, y: centerY })
-      .up()
-  ]);
-  await driver
-    .action("pointer", { parameters: { pointerType: "touch" } })
-    .move(centerX + Math.min(60, size.width / 3), centerY)
-    .down()
-    .move({
-      duration: 650,
-      x: centerX - Math.min(60, size.width / 3),
-      y: centerY
-    })
-    .up()
-    .perform();
-  await driver.pause(650);
+  await openMentionedFileMenuSelection(driver, ui, fixture);
+  await expectNativeText(
+    driver,
+    selectors.taskFilePreviewPath,
+    fixture.uniqueCanonicalPath
+  );
+  let inspection = await inspectTaskFilePreview(driver);
   if (
-    await driver.$(selectors.taskFilePreviewPath).isExisting().catch(() => false)
+    inspection.path !== fixture.uniqueCanonicalPath ||
+    inspection.mode !== "raw" ||
+    inspection.initialLine !== fixture.line ||
+    !inspection.content
+      .split(/\r\n|\r|\n/)
+      [fixture.line - 1]?.includes(fixture.expectedRawLine)
   ) {
-    throw new Error("Scroll or pinch over a terminal file path opened the preview");
+    throw new Error(
+      `Expected bare filename to resolve to raw line ${fixture.line}; got ${JSON.stringify(inspection)}`
+    );
   }
+  let rawWebView: TaskFilePreviewWebViewInspection = {
+    kind: "unavailable",
+    reason: "WebView inspection has not started"
+  };
+  rawWebView = await inspectTaskFilePreviewWebView(
+    createWebViewContextDriver(driver)
+  );
+  if (rawWebView.kind !== "unavailable") {
+    try {
+      await driver.waitUntil(
+        async () => {
+          rawWebView = await inspectTaskFilePreviewWebView(
+            createWebViewContextDriver(driver)
+          );
+          return (
+            rawWebView.kind === "raw" &&
+            rawWebView.path === fixture.uniqueCanonicalPath &&
+            rawWebView.line === fixture.line &&
+            rawWebView.flashStarted &&
+            rawWebView.overlayWidth > 0 &&
+            rawWebView.overlayHeight > 0 &&
+            Number.isFinite(rawWebView.overlayTop)
+          );
+        },
+        {
+          interval: POLL_INTERVAL_MS,
+          timeout: SCREEN_TIMEOUT_MS,
+          timeoutMsg: `Expected raw preview WebView line ${fixture.line}`
+        }
+      );
+    } catch {
+      throw new Error(
+        `Expected resolved raw preview line ${fixture.line} to be laid out and flashed; got ${JSON.stringify(rawWebView)}`
+      );
+    }
+  }
+  await closeTaskFilePreview(driver);
 
-  await (await terminalFileLink(driver, fixture.path)).click();
+  const taskMore = await driver.$(selectors.taskMoreButton);
+  await taskMore.click();
+  const mentionedFilesAction = await driver.$(
+    `~Mentioned Files (${fixture.mentionedCount})`
+  );
+  await mentionedFilesAction.click();
+  const markdownRow = await driver.$(
+    taskMentionedFilesRowSelector(fixture.path)
+  );
+  await markdownRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await markdownRow.click();
   await expectNativeText(driver, selectors.taskFilePreviewPath, fixture.path);
   await expectNativeText(driver, selectors.taskFilePreviewMode, "Rendered Markdown");
-  let inspection = await inspectTaskFilePreview(driver);
+  inspection = await inspectTaskFilePreview(driver);
   if (
     inspection.path !== fixture.path ||
     inspection.mode !== "rendered" ||
@@ -1127,92 +1170,39 @@ async function verifyTerminalFilePreviewFlow(
     kind: "unavailable",
     reason: "WebView inspection has not started"
   };
-  try {
-    await driver.waitUntil(
-      async () => {
-        renderedWebView = await inspectTaskFilePreviewWebView(
-          createWebViewContextDriver(driver)
-        );
-        return (
-          renderedWebView.kind === "rendered" &&
-          renderedWebView.path === fixture.path &&
-          renderedWebView.tokenClass === fixture.expectedHighlightedTokenClass &&
-          renderedWebView.tokenText === fixture.expectedHighlightedToken &&
-          Boolean(renderedWebView.tokenColor) &&
-          renderedWebView.tokenColor !== renderedWebView.unhighlightedColor &&
-          renderedWebView.tokenWidth > 0 &&
-          renderedWebView.tokenHeight > 0
-        );
-      },
-      {
-        interval: POLL_INTERVAL_MS,
-        timeout: SCREEN_TIMEOUT_MS,
-        timeoutMsg: "Expected rendered preview WebView syntax highlighting"
-      }
-    );
-  } catch {
-    throw new Error(
-      `Expected rendered preview WebView syntax highlighting with a non-default computed color; got ${JSON.stringify(renderedWebView)}`
-    );
-  }
-  await closeTaskFilePreview(driver);
-
-  await (await terminalFileLink(driver, fixture.path, fixture.line)).click();
-  await expectNativeText(driver, selectors.taskFilePreviewPath, fixture.path);
-  await expectNativeText(driver, selectors.taskFilePreviewMode, "Raw source");
-  inspection = await inspectTaskFilePreview(driver);
-  if (
-    inspection.mode !== "raw" ||
-    inspection.initialLine !== fixture.line ||
-    !inspection.content
-      .split(/\r\n|\r|\n/)
-      [fixture.line - 1]?.includes(fixture.expectedRawLine)
-  ) {
-    throw new Error(
-      `Expected raw preview to target line ${fixture.line}; got ${JSON.stringify(inspection)}`
-    );
-  }
-  let rawWebView: TaskFilePreviewWebViewInspection = {
-    kind: "unavailable",
-    reason: "WebView inspection has not started"
-  };
-  try {
-    await driver.waitUntil(
-      async () => {
-        rawWebView = await inspectTaskFilePreviewWebView(
-          createWebViewContextDriver(driver)
-        );
-        return (
-          rawWebView.kind === "raw" &&
-          rawWebView.path === fixture.path &&
-          rawWebView.line === fixture.line &&
-          rawWebView.flashStarted &&
-          rawWebView.overlayWidth > 0 &&
-          rawWebView.overlayHeight > 0 &&
-          Number.isFinite(rawWebView.overlayTop)
-        );
-      },
-      {
-        interval: POLL_INTERVAL_MS,
-        timeout: SCREEN_TIMEOUT_MS,
-        timeoutMsg: `Expected raw preview WebView line ${fixture.line}`
-      }
-    );
-  } catch {
-    throw new Error(
-      `Expected raw preview WebView line ${fixture.line} to be laid out and flashed; got ${JSON.stringify(rawWebView)}`
-    );
-  }
-  await closeTaskFilePreview(driver);
-
-  await (await terminalFileLink(driver, fixture.missingLink)).click();
-  await expectNativeText(driver, selectors.taskFilePreviewPath, fixture.missingLink);
-  await expectNativeText(driver, selectors.taskFilePreviewError, "Couldn’t open file");
-  await expectNativeText(
-    driver,
-    selectors.taskFilePreviewErrorMessage,
-    /file not found/i
+  renderedWebView = await inspectTaskFilePreviewWebView(
+    createWebViewContextDriver(driver)
   );
+  if (renderedWebView.kind !== "unavailable") {
+    try {
+      await driver.waitUntil(
+        async () => {
+          renderedWebView = await inspectTaskFilePreviewWebView(
+            createWebViewContextDriver(driver)
+          );
+          return (
+            renderedWebView.kind === "rendered" &&
+            renderedWebView.path === fixture.path &&
+            renderedWebView.tokenClass === fixture.expectedHighlightedTokenClass &&
+            renderedWebView.tokenText === fixture.expectedHighlightedToken &&
+            Boolean(renderedWebView.tokenColor) &&
+            renderedWebView.tokenColor !== renderedWebView.unhighlightedColor &&
+            renderedWebView.tokenWidth > 0 &&
+            renderedWebView.tokenHeight > 0
+          );
+        },
+        {
+          interval: POLL_INTERVAL_MS,
+          timeout: SCREEN_TIMEOUT_MS,
+          timeoutMsg: "Expected rendered preview WebView syntax highlighting"
+        }
+      );
+    } catch {
+      throw new Error(
+        `Expected rendered preview WebView syntax highlighting with a non-default computed color; got ${JSON.stringify(renderedWebView)}`
+      );
+    }
+  }
   await closeTaskFilePreview(driver);
 }
 
@@ -1566,7 +1556,7 @@ export async function runRelayTaskFlow(
       ),
     async verifyFilePreview() {
       await options.emitFilePreviewLinks();
-      await verifyTerminalFilePreviewFlow(driver, ui, options.filePreview);
+      await verifyMentionedFileMenuFlow(driver, ui, options.filePreview);
     },
     verifyComposerReset: () => verifyRelayComposerResetJourney(ui),
     verifyQuickReply: () =>

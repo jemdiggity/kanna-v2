@@ -113,6 +113,14 @@ describe("createKannaClient", () => {
         path: "docs/spec one.md",
         content: "# Spec"
       }),
+      resolveTaskFileMentions: vi.fn().mockResolvedValue({
+        mentions: [{
+          path: "TaskScreen.tsx",
+          line: 42,
+          matches: [{ path: "src/screens/TaskScreen.tsx" }],
+          truncated: false
+        }]
+      }),
       readTaskDiff: vi.fn().mockResolvedValue({
         taskId: "task-1",
         baseRef: "main",
@@ -189,6 +197,17 @@ describe("createKannaClient", () => {
     expect(transport.readTaskFile).toHaveBeenCalledWith(
       "task/read",
       "docs/spec one.md"
+    );
+    await expect(
+      client.resolveTaskFileMentions("task/read", [
+        { path: "TaskScreen.tsx", line: 42 }
+      ])
+    ).resolves.toMatchObject({
+      mentions: [{ matches: [{ path: "src/screens/TaskScreen.tsx" }] }]
+    });
+    expect(transport.resolveTaskFileMentions).toHaveBeenCalledWith(
+      "task/read",
+      [{ path: "TaskScreen.tsx", line: 42 }]
     );
     await expect(client.readTaskDiff("task/diff")).resolves.toMatchObject({
       patch: "diff --git a/x b/x"

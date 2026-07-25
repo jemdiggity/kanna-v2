@@ -20,6 +20,8 @@ import type {
   TaskDiffContent,
   TaskDiffRequest,
   TaskFileContent,
+  TaskFileMentionInput,
+  TaskFileMentionResolution,
   TaskDetail,
   TaskSummary,
 } from "../api/types";
@@ -792,6 +794,17 @@ export function createRemoteTransport({
         (localTaskId) =>
           `/v1/tasks/${encodeURIComponent(localTaskId)}/files/content?path=${encodeURIComponent(path)}`,
         null
+      ),
+    resolveTaskFileMentions: (
+      taskId: string,
+      mentions: readonly TaskFileMentionInput[]
+    ) =>
+      requestTask<TaskFileMentionResolution>(
+        taskId,
+        "POST",
+        (localTaskId) =>
+          `/v1/tasks/${encodeURIComponent(localTaskId)}/files/resolve-mentions`,
+        { mentions }
       ),
     readTaskDiff: (taskId: string, diffRequest?: TaskDiffRequest) =>
       requestTask<TaskDiffContent>(

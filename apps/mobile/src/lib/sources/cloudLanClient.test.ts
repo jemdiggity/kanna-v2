@@ -86,6 +86,9 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
       path: "docs/spec.md",
       content: "# Spec"
     }),
+    resolveTaskFileMentions: vi.fn().mockResolvedValue({
+      mentions: []
+    }),
     readTaskDiff: vi.fn().mockResolvedValue({
       taskId: "task-1",
       baseRef: "main",
@@ -1369,6 +1372,47 @@ describe("createCloudLanClient", () => {
     );
   });
 
+  it("uses the authenticated cloud route for mentioned-file resolution", async () => {
+    const resolution = {
+      mentions: [{
+        path: "TaskScreen.tsx",
+        line: 42,
+        matches: [{ path: "apps/mobile/src/screens/TaskScreen.tsx" }],
+        truncated: false
+      }]
+    };
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({
+          id: "cloud-duplicate",
+          ownerDesktopId: "desktop-lan",
+          ownerLocalTaskId: "local-duplicate"
+        })
+      ]),
+      resolveTaskFileMentions: vi.fn().mockResolvedValue(resolution)
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([
+        task({ id: "local-duplicate" })
+      ])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRecentTasks();
+    await expect(
+      client.resolveTaskFileMentions("cloud-duplicate", [
+        { path: "TaskScreen.tsx", line: 42 }
+      ])
+    ).resolves.toEqual(resolution);
+    expect(lan.resolveTaskFileMentions).not.toHaveBeenCalled();
+    expect(cloud.resolveTaskFileMentions).toHaveBeenCalledWith(
+      "cloud-duplicate",
+      [{ path: "TaskScreen.tsx", line: 42 }]
+    );
+  });
+
   it("prefers the paired LAN route for the task diff over the cloud fallback", async () => {
     const cloud = createClientMock({
       listRecentTasks: vi.fn().mockResolvedValue([
@@ -1474,6 +1518,23 @@ describe("createCloudLanClient", () => {
     ).rejects.toThrow(/lan-only.*authenticated relay/i);
     expect(cloud.readTaskFile).not.toHaveBeenCalled();
     expect(lan.readTaskFile).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for a LAN-only mentioned-file resolution route", async () => {
+    const cloud = createClientMock();
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([task({ id: "lan-only" })])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await client.listRecentTasks();
+    await expect(
+      client.resolveTaskFileMentions("lan-only", [{ path: "TaskScreen.tsx" }])
+    ).rejects.toThrow(/lan-only.*authenticated relay/i);
+    expect(cloud.resolveTaskFileMentions).not.toHaveBeenCalled();
+    expect(lan.resolveTaskFileMentions).not.toHaveBeenCalled();
   });
 
   it("translates routed action responses back to the displayed task identity", async () => {

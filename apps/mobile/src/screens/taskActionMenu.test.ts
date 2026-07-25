@@ -26,21 +26,33 @@ describe("showTaskActionMenu", () => {
   });
 
   it("shows task actions with close marked destructive", () => {
-    showTaskActionMenu(vi.fn());
+    showTaskActionMenu(
+      { mentionedFilesLabel: "Mentioned Files (3)" },
+      vi.fn()
+    );
 
     expect(nativeMocks.actionSheet).toHaveBeenCalledWith(
       {
         title: "Task Actions",
-        options: ["View Diff", "Advance Stage", "Close Task", "Cancel"],
-        cancelButtonIndex: 3,
-        destructiveButtonIndex: 2
+        options: [
+          "Mentioned Files (3)",
+          "View Diff",
+          "Advance Stage",
+          "Close Task",
+          "Cancel"
+        ],
+        cancelButtonIndex: 4,
+        destructiveButtonIndex: 3
       },
       expect.any(Function)
     );
   });
 
   it("offers only close for an unresolved task creation", () => {
-    showTaskActionMenu(vi.fn(), undefined, { taskCreation: true });
+    showTaskActionMenu(
+      { mentionedFilesLabel: "Mentioned Files (0)", taskCreation: true },
+      vi.fn()
+    );
 
     expect(nativeMocks.actionSheet).toHaveBeenCalledWith(
       {
@@ -54,12 +66,13 @@ describe("showTaskActionMenu", () => {
   });
 
   it.each([
-    [0, "view-diff"],
-    [1, "advance-stage"],
-    [2, "close-task"]
+    [0, "mentioned-files"],
+    [1, "view-diff"],
+    [2, "advance-stage"],
+    [3, "close-task"]
   ] as const)("maps iOS index %s to %s", (index, action) => {
     const onSelect = vi.fn();
-    showTaskActionMenu(onSelect);
+    showTaskActionMenu({ mentionedFilesLabel: "Mentioned Files (0)" }, onSelect);
     const callback = nativeMocks.actionSheet.mock.calls[0]![1] as (
       buttonIndex: number
     ) => void;
@@ -70,10 +83,14 @@ describe("showTaskActionMenu", () => {
     expect(onSelect).toHaveBeenCalledWith(action);
   });
 
-  it.each([3, 99])("ignores cancel or invalid iOS index %s", (index) => {
+  it.each([4, 99])("ignores cancel or invalid iOS index %s", (index) => {
     const onSelect = vi.fn();
     const onDismiss = vi.fn();
-    showTaskActionMenu(onSelect, onDismiss);
+    showTaskActionMenu(
+      { mentionedFilesLabel: "Mentioned Files (0)" },
+      onSelect,
+      onDismiss
+    );
     const callback = nativeMocks.actionSheet.mock.calls[0]![1] as (
       buttonIndex: number
     ) => void;
@@ -88,12 +105,13 @@ describe("showTaskActionMenu", () => {
     nativeMocks.platform.OS = "android";
     const onSelect = vi.fn();
 
-    showTaskActionMenu(onSelect);
+    showTaskActionMenu({ mentionedFilesLabel: "Mentioned Files (2)" }, onSelect);
 
     expect(nativeMocks.alert).toHaveBeenCalledWith(
       "Task Actions",
       undefined,
       [
+        expect.objectContaining({ text: "Mentioned Files (2)" }),
         expect.objectContaining({ text: "View Diff" }),
         expect.objectContaining({ text: "Advance Stage" }),
         expect.objectContaining({ text: "Close Task", style: "destructive" }),
@@ -106,7 +124,9 @@ describe("showTaskActionMenu", () => {
     actions[0]!.onPress?.();
     actions[1]!.onPress?.();
     actions[2]!.onPress?.();
+    actions[3]!.onPress?.();
     expect(onSelect.mock.calls).toEqual([
+      ["mentioned-files"],
       ["view-diff"],
       ["advance-stage"],
       ["close-task"]
@@ -117,10 +137,14 @@ describe("showTaskActionMenu", () => {
     nativeMocks.platform.OS = "android";
     const onDismiss = vi.fn();
 
-    showTaskActionMenu(vi.fn(), onDismiss);
+    showTaskActionMenu(
+      { mentionedFilesLabel: "Mentioned Files (0)" },
+      vi.fn(),
+      onDismiss
+    );
 
     const actions = nativeMocks.alert.mock.calls[0]![2]!;
-    actions[3]!.onPress?.();
+    actions[4]!.onPress?.();
     expect(onDismiss).toHaveBeenCalledOnce();
   });
 });
