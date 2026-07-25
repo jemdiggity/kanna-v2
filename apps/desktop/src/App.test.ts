@@ -4080,8 +4080,18 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("repo-command-task");
   });
 
-  it("launches the setup agent after importing a repository from AddRepoModal", async () => {
+  it("launches the setup agent after importing an unconfigured repository from AddRepoModal", async () => {
     store.importRepo.mockResolvedValueOnce("repo-imported");
+    invokeMock.mockImplementation(async (command: string, args?: { name?: string; repoPath?: string }) => {
+      if (command === "file_exists") return false;
+      if (command === "list_dir") return ["default.json"];
+      if (command === "read_text_file") return "";
+      if (command === "git_default_branch") return "main";
+      if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
+      if (command === "read_env_var") return "/Users/test";
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
+      throw new Error(`unexpected invoke: ${command}`);
+    });
 
     const AddRepoModalStub = defineComponent({
       name: "AddRepoModal",
@@ -4109,6 +4119,9 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.importRepo).toHaveBeenCalledWith("/tmp/imported", "imported", "main");
+    expect(invokeMock).toHaveBeenCalledWith("file_exists", {
+      path: "/tmp/imported/.kanna",
+    });
     expect(store.loadAgent).toHaveBeenCalledWith("repo-imported", "setup");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-imported",
