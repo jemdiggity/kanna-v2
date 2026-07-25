@@ -19,6 +19,7 @@ import {
 } from "./router.js";
 import { handleOtaRequest } from "./ota.js";
 import {
+  beginCloudTaskPublicationSession,
   handleCloudTaskPublication,
   MAX_TASK_SNAPSHOT_BYTES,
 } from "./cloudTaskPublication.js";
@@ -120,6 +121,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   let role: "phone" | "server" | null = null;
   let desktopId: string | null = null;
   let serverAuthProof: ServerAuthProof | null = null;
+  let publicationSessionGeneration: number | null = null;
+  let nextPublicationSequence = 1;
 
   // 10-second auth timeout
   const authTimer = setTimeout(() => {
@@ -196,16 +199,45 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
 
-      authenticated = true;
-      clearTimeout(authTimer);
-
       if (role === "server" && desktopId && msg.tunnel_id) {
+        authenticated = true;
+        clearTimeout(authTimer);
         attachDesktopTunnel(userId, desktopId, msg.tunnel_id, ws);
         console.log(
           `[ws] Authenticated tunnel socket for ${userId}/${desktopId} from ${remoteAddr}`
         );
         return;
       }
+
+      if (
+        role === "server"
+        && desktopId
+        && serverAuthProof?.kind === "desktop"
+      ) {
+        try {
+          if (!await revalidateServerAuth(serverAuthProof, userId, desktopId)) {
+            clearTimeout(authTimer);
+            ws.close(4005, "Authentication revoked");
+            return;
+          }
+          publicationSessionGeneration = await beginCloudTaskPublicationSession({
+            userId,
+            desktopId,
+          });
+          nextPublicationSequence = 1;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[cloud] Failed to lease task publication generation for ${userId}/${desktopId}: ${message}`,
+          );
+          clearTimeout(authTimer);
+          ws.close(1011, "Cloud publication initialization failed");
+          return;
+        }
+      }
+
+      authenticated = true;
+      clearTimeout(authTimer);
 
       // Register the connection with the router
       if (role === "phone") {
@@ -236,6 +268,12 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       }
       if (publication?.type === "task_snapshot_publish") {
         const id = typeof publication.id === "string" ? publication.id : "";
+        const generation = publicationSessionGeneration === null
+          ? null
+          : {
+              session: publicationSessionGeneration,
+              sequence: nextPublicationSequence++,
+            };
         const sendAck = (ok: boolean, error?: string) => {
           if (ws.readyState !== 1) return;
           ws.send(JSON.stringify({
@@ -245,7 +283,11 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             ...(error ? { error } : {}),
           }));
         };
-        if (!id || Buffer.byteLength(data) > MAX_TASK_SNAPSHOT_BYTES + 16_384) {
+        if (
+          !id
+          || !generation
+          || Buffer.byteLength(data) > MAX_TASK_SNAPSHOT_BYTES + 16_384
+        ) {
           sendAck(false, "task snapshot publication is malformed or oversized");
           return;
         }
@@ -262,6 +304,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           await handleCloudTaskPublication({
             userId: userId!,
             desktopId,
+            generation,
             snapshot: publication.snapshot,
           });
           sendAck(true);

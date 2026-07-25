@@ -404,3 +404,229 @@ git log --oneline -4
 
 Expected: only the approved spec, plan, implementation, and regression changes
 are present; there are no whitespace errors.
+
+### Task 5: Complete App-level dwell and route interactions
+
+**Files:**
+- Modify: `apps/desktop/src/App.test.ts`
+
+**Interfaces:**
+- Consumes: `useRemoteTaskReadDwell`'s selected slot, owner tuple, activity
+  revision, and deadline behavior.
+- Produces: App-level regressions for selection replacement, revision changes,
+  and current cloud/LAN routing.
+
+- [ ] **Step 1: Extend replacement selection through its full deadline**
+
+After selecting the second task at 600 ms, assert no call at the first task's
+1,000 ms deadline, then advance another 600 ms and assert exactly one relay
+call for the second owner-local task and revision 7.
+
+- [ ] **Step 2: Add the revision 7-to-8 interaction**
+
+Select an unread revision-7 task, advance 600 ms, publish the same selected
+owner as unread revision 8, and assert the old deadline does not fire. Advance
+the remaining 600 ms and assert the only mark-read carries revision 8.
+
+- [ ] **Step 3: Add preferred-route addition and removal interactions**
+
+Arm dwell halfway between LAN polling ticks. Add the coherent LAN
+advertisement during one dwell and remove it during another. In both cases
+assert the presentation slot is unchanged, no fresh dwell is required, and
+the action at the original deadline uses the route current at that deadline.
+
+- [ ] **Step 4: Run the App regressions**
+
+```bash
+pnpm --dir apps/desktop test -- src/App.test.ts
+```
+
+Expected: replacement and revision cases pass against the observation tuple;
+route cases fail only if the workspace route change incorrectly resets dwell
+or the action captures a stale transport.
+
+### Task 6: Expire never-settling mark-read actions
+
+**Files:**
+- Modify: `apps/desktop/src/App.test.ts`
+- Modify: `apps/desktop/src/composables/useAppCloudWorkspace.ts`
+
+**Interfaces:**
+- Consumes: `DesktopRelayTerminalClient.close()`, which closes all owned
+  `StreamClient` instances and rejects their pending requests.
+- Produces: a ten-second action deadline and exact-once client cleanup.
+
+- [ ] **Step 1: Write the never-settling action regression**
+
+Make `markTaskRead` return a promise that never settles. After dwell fires,
+advance beyond the action deadline and assert the client closes once. Unmount
+the app and assert it is still closed only once.
+
+- [ ] **Step 2: Run the regression and verify RED**
+
+```bash
+pnpm --dir apps/desktop test -- src/App.test.ts
+```
+
+Expected: FAIL because the active client remains retained until app teardown.
+
+- [ ] **Step 3: Race the action with a bounded expiry**
+
+Add a ten-second timer around the mark-read promise. Reject with a focused
+timeout error, clear the timer in all paths, and retain the existing `finally`
+cleanup so success, failure, timeout, and disposal close exactly once.
+
+- [ ] **Step 4: Re-run the App suite**
+
+```bash
+pnpm --dir apps/desktop test -- src/App.test.ts
+```
+
+Expected: PASS.
+
+### Task 7: Guard cloud one-shot commits by auth and subscription state
+
+**Files:**
+- Modify: `apps/desktop/src/App.test.ts`
+- Modify: `apps/desktop/src/composables/useAppCloudWorkspace.ts`
+
+**Interfaces:**
+- Produces: `cloudSubscriptionGeneration` and `cloudSnapshotRevision`
+  invalidation counters owned by the cloud workspace composable.
+
+- [ ] **Step 1: Add deferred one-shot regressions**
+
+Start with a deferred `listDesktopCloudTasks`. Publish a newer subscription
+snapshot before resolving the one-shot and assert the newer task remains.
+Repeat with sign-out before resolution and assert the task list stays empty.
+Finally switch from UID A to UID B, commit UID B's subscription snapshot, and
+prove UID A's deferred one-shot cannot replace it.
+
+- [ ] **Step 2: Run the regressions and verify RED**
+
+```bash
+pnpm --dir apps/desktop test -- src/App.test.ts
+```
+
+Expected: FAIL because the older one-shot currently commits unconditionally.
+
+- [ ] **Step 3: Version subscription and snapshot commits**
+
+Start the live subscription before the one-shot. Capture UID, subscription
+generation, and snapshot revision before awaiting the one-shot; commit only if
+the auth state, subscribed UID, generation, and revision still match. Increment
+the generation when subscriptions stop/start and the revision whenever live or
+signed-out state commits.
+
+- [ ] **Step 4: Re-run the App suite**
+
+```bash
+pnpm --dir apps/desktop test -- src/App.test.ts
+```
+
+Expected: PASS.
+
+### Task 8: Reject stale cross-connection publications
+
+**Files:**
+- Modify: `crates/kanna-server/src/cloud_task_publisher.rs`
+- Modify: `crates/kanna-server/src/relay.rs`
+- Modify: `services/relay/src/index.ts`
+- Modify: `services/relay/src/cloudTaskPublication.ts`
+- Modify: `services/relay/test/cloudTaskPublication.test.ts`
+
+**Interfaces:**
+- Produces: `CloudTaskPublicationStore.beginSession({ userId, desktopId })`
+  returning a positive safe-integer generation.
+- Consumes: that generation in every `reconcile` call and guarded Firestore
+  transaction.
+
+- [ ] **Step 1: Add publisher and relay fault regressions**
+
+In Rust, time out an unacknowledged publish, disconnect, authenticate again,
+and prove the same publisher lifecycle emits the latest snapshot. Drive the
+production reconnect loop against a fake WebSocket relay so moving publisher
+state back inside that loop breaks the regression. In an emulator-backed relay
+test, use the production Firestore store to delay an old generation after its
+metadata claim, let a new session and publication complete, then assert the
+delayed task transaction is rejected and the newer activity remains.
+
+- [ ] **Step 2: Run the regressions and verify RED**
+
+```bash
+cargo test -p kanna-server cloud_task_publisher::tests -- --nocapture
+pnpm --dir services/relay test -- test/cloudTaskPublication.test.ts
+```
+
+Expected: the delayed publication regression fails because reconciliation has
+no generation contract.
+
+- [ ] **Step 3: Retain publisher state across reconnects**
+
+Move `PublisherState::new()` outside the relay reconnection loop. Keep
+`on_disconnected()` at connection teardown so in-flight requests and retry
+timers reset while the latest observed snapshot and publisher lifecycle remain.
+
+- [ ] **Step 4: Lease a generation during server authentication**
+
+Before registering a non-tunnel desktop-credential connection, revalidate its
+desktop-scoped proof and transactionally increment the canonical desktop
+document's `publicationGeneration`. Store the returned generation on the
+WebSocket handler and pass it with every publication. Authentication fails
+closed if revalidation or the lease fails. Legacy account-scoped device-token
+connections retain their command compatibility but receive no publication
+generation and cannot mutate desktop publication state.
+
+- [ ] **Step 5: Guard every reconciliation transaction**
+
+Claim desktop metadata only when the supplied generation is still current.
+Read the current generation in the same Firestore transaction as every task
+set/delete chunk and duplicate cleanup delete. Throw a stale-publication error
+when a newer connection has superseded the caller.
+
+- [ ] **Step 6: Run focused server and relay suites**
+
+```bash
+cargo test -p kanna-server cloud_task_publisher::tests -- --nocapture
+pnpm --dir services/relay test -- test/cloudTaskPublication.test.ts
+pnpm --dir services/relay build
+```
+
+Expected: PASS.
+
+### Task 9: Follow-up integrated verification
+
+**Files:**
+- Verify all files changed in Tasks 5-8.
+
+- [ ] **Step 1: Run formatting and focused suites**
+
+```bash
+cargo fmt --all -- --check
+pnpm exec prettier --check apps/desktop/src/App.test.ts apps/desktop/src/composables/useAppCloudWorkspace.ts services/relay/src/index.ts services/relay/src/cloudTaskPublication.ts services/relay/test/cloudTaskPublication.test.ts
+pnpm --dir apps/desktop test -- src/App.test.ts src/composables/useRemoteTaskReadDwell.test.ts src/workspace/buildWorkspace.test.ts
+cargo test -p kanna-server cloud_task_publisher::tests -- --nocapture
+pnpm --dir services/relay test -- test/cloudTaskPublication.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 2: Run repository checks**
+
+```bash
+pnpm test
+./kd test rust
+```
+
+Expected: PASS, or report exact unrelated failures.
+
+- [ ] **Step 3: Inspect the final diff**
+
+```bash
+git diff --check
+git status --short
+git diff --stat
+```
+
+Expected: only the approved follow-up docs, implementation, and regressions are
+present, with no whitespace errors.

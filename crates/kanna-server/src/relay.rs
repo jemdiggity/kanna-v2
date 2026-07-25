@@ -59,6 +59,8 @@ pub(crate) async fn run_relay_loop(
     db: db::Db,
     http_state: Arc<http_api::AppState>,
 ) -> Result<(), String> {
+    let mut publisher = PublisherState::new();
+
     // Reconnection loop
     loop {
         log::info!("Connecting to relay at {}...", config.relay_url);
@@ -87,7 +89,6 @@ pub(crate) async fn run_relay_loop(
             crate::ksp::request_concurrency(),
         ));
         let mut keepalive = RelayKeepalive::new();
-        let mut publisher = PublisherState::new();
         let mut ping_interval = tokio::time::interval(RELAY_PING_INTERVAL);
         ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ping_interval.tick().await;
@@ -929,6 +930,124 @@ mod tests {
 
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn relay_loop_republishes_after_an_unacknowledged_disconnect_with_persistent_state() {
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        async fn receive_publication(
+            listener: &tokio::net::TcpListener,
+        ) -> (
+            String,
+            tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        ) {
+            let (stream, _) = listener.accept().await.expect("accept relay connection");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let auth = ws.next().await.expect("auth message").expect("valid auth");
+            let TungsteniteMessage::Text(auth) = auth else {
+                panic!("expected text auth")
+            };
+            let auth: serde_json::Value = serde_json::from_str(&auth).expect("parse auth");
+            assert_eq!(auth["type"], "auth");
+            ws.send(TungsteniteMessage::Text(
+                serde_json::json!({ "type": "auth_ok", "userId": "user-1" })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send auth_ok");
+
+            loop {
+                let message = ws
+                    .next()
+                    .await
+                    .expect("publication message")
+                    .expect("valid publication");
+                let TungsteniteMessage::Text(text) = message else {
+                    continue;
+                };
+                let message: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay message");
+                if message["type"] == "task_snapshot_publish" {
+                    return (
+                        message["id"].as_str().expect("publication id").to_string(),
+                        ws,
+                    );
+                }
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake relay");
+        let relay_addr = listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-publisher-reconnect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let db_path = db::Db::test_db_path(&unique);
+        let config = Config {
+            relay_url: format!("ws://{relay_addr}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: std::env::temp_dir()
+                .join(&unique)
+                .to_string_lossy()
+                .to_string(),
+            db_path: db_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48_120,
+            pairing_store_path: std::env::temp_dir()
+                .join(format!("{unique}-pairings.json"))
+                .to_string_lossy()
+                .to_string(),
+        };
+        let database = db::Db::open_for_tests(&db_path).expect("open test database");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let relay_loop = run_relay_loop(config, database, state);
+        tokio::pin!(relay_loop);
+
+        let publications = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::select! {
+                publications = async {
+                    let (first_id, mut first_connection) = receive_publication(&listener).await;
+                    first_connection
+                        .close(None)
+                        .await
+                        .expect("disconnect first relay connection without ack");
+                    let (second_id, mut second_connection) = receive_publication(&listener).await;
+                    second_connection
+                        .close(None)
+                        .await
+                        .expect("close second relay connection");
+                    (first_id, second_id)
+                } => publications,
+                result = &mut relay_loop => {
+                    panic!("relay loop exited before reconnecting: {result:?}")
+                }
+            }
+        })
+        .await
+        .expect("relay did not reconnect and republish");
+
+        assert_eq!(publications.0, "task-snapshot-1");
+        assert_eq!(publications.1, "task-snapshot-2");
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]

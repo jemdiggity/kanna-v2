@@ -76,3 +76,66 @@ Use red-green regressions at each boundary:
 - the origin/main-era database upgrade satisfies the schema, backfill, query,
   snapshot, reopen, migration-record, and activity-transition assertions; and
 - focused Rust and Vitest suites pass before broader repository checks.
+
+## Second Review Follow-up
+
+### End-to-end dwell identity and route changes
+
+The desktop interaction tests must exercise the same observation tuple used by
+`useRemoteTaskReadDwell`: presentation slot, owner desktop, owner-local task,
+and activity revision. Switching selection, replacing the owner tuple, or
+publishing a new unread activity revision starts a fresh one-second dwell. A
+coherent content refresh does not.
+
+Cloud and LAN advertisements for the same owner task share a stable
+presentation slot. Adding or removing the preferred LAN route does not restart
+the dwell when owner identity and activity revision are unchanged. At the
+deadline the action resolves the current workspace task, so a newly available
+LAN route is used and a removed LAN route falls back to relay.
+
+### Bounded mark-read actions
+
+Every automatic mark-read owns a short-lived remote client. The action has a
+ten-second deadline. Success, failure, expiry, and app disposal all remove the
+client from the active set and close it exactly once. Closing the relay wrapper
+closes its `StreamClient`, which rejects the underlying pending request rather
+than allowing an unbounded request and client to accumulate.
+
+### Auth-scoped cloud snapshot commits
+
+Cloud subscription state has two monotonic counters: a subscription generation
+that changes whenever the signed-in UID or subscription changes, and a
+snapshot revision that changes whenever a live subscription snapshot commits.
+A one-shot fetch captures the UID and both counters before awaiting. It may
+commit only when all three are still current. A newer live snapshot, sign-out,
+account change, disposal, or subscription replacement invalidates the fetch.
+
+### Cross-connection publication ordering
+
+Each authenticated non-tunnel connection with a revalidated desktop-scoped
+credential leases a monotonically increasing publication generation from the
+canonical Firestore desktop document in a transaction. Legacy account-scoped
+device tokens cannot lease a desktop generation or publish desktop task state.
+Every reconciliation transaction reads that document and requires the
+connection generation to remain current before it writes task or
+duplicate-cleanup state. A reconnect therefore supersedes all work still
+running for the abandoned connection; Firestore transaction retries turn
+concurrent generation changes into explicit stale-publication rejection.
+
+`kanna-server` retains its `PublisherState` across relay reconnect attempts so
+disconnect and acknowledgement-timeout behavior is exercised against the same
+publisher lifecycle used in production. The relay generation remains the
+cross-process and cross-instance authority.
+
+### Follow-up tests
+
+- App interactions cover replacement-selection completion, unread revision
+  7-to-8 rearming, and LAN route addition/removal with stable selection and
+  current-transport routing.
+- A never-settling relay mark-read expires, closes once, and remains closed
+  through app teardown.
+- Deferred one-shot reads cannot replace newer subscription state, restore
+  state after sign-out, or cross a UID A-to-B account replacement.
+- The production reconnect loop and an emulator-backed, delayed
+  old-generation Firestore publication prove that a newer reconnect
+  publication remains authoritative.

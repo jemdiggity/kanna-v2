@@ -9,6 +9,11 @@ import { deleteApp, initializeApp, type App } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import WebSocket from "ws";
+import {
+  beginCloudTaskPublicationSession,
+  createFirestoreCloudTaskPublicationStore,
+  handleCloudTaskPublication,
+} from "../src/cloudTaskPublication.js";
 
 const TEST_EMAIL = "upvote.sieve.7t@icloud.com";
 const TEST_PASSWORD = "password123";
@@ -97,6 +102,15 @@ async function waitForAuthEmulator(authPort: number, timeoutMs = 60_000): Promis
 
 function sha256Hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function deferredVoid(): { promise: Promise<void>; resolve(): void } {
+  let resolve: (() => void) | null = null;
+  const promise = new Promise<void>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  if (!resolve) throw new Error("failed to create deferred promise");
+  return { promise, resolve };
 }
 
 function publishedTask(activity: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -531,6 +545,22 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
+  it("does not lease a desktop publication generation to a legacy device token", async () => {
+    const desktopRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`,
+    );
+    const before = (await desktopRef.get()).data()?.publicationSessionGeneration ?? null;
+    const { ws, userId } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: SECRET_DESKTOP_ID,
+    });
+
+    expect(userId).toBe(TEST_USER_ID);
+    await closeAndWait(ws);
+    const after = (await desktopRef.get()).data()?.publicationSessionGeneration ?? null;
+    expect(after).toBe(before);
+  });
+
   it("authenticates a desktop with desktop_id and desktop_secret", async () => {
     const { ws, userId } = await connectAndAuth({
       desktop_id: SECRET_DESKTOP_ID,
@@ -597,6 +627,67 @@ describe("Relay integration", () => {
       `users/${TEST_USER_ID}/desktops/desktop-other`,
     ).get()).exists).toBe(false);
     await closeAndWait(ws);
+  });
+
+  it("transactionally rejects a delayed older publication after a newer session commits", async () => {
+    const desktopId = `desktop-publication-race-${Date.now()}`;
+    const desktopRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/desktops/${desktopId}`,
+    );
+    const oldClaimed = deferredVoid();
+    const releaseOld = deferredVoid();
+    const oldStore = createFirestoreCloudTaskPublicationStore(testFirestore, {
+      async afterGenerationClaim() {
+        oldClaimed.resolve();
+        await releaseOld.promise;
+      },
+    });
+    const currentStore = createFirestoreCloudTaskPublicationStore(testFirestore);
+
+    try {
+      const oldSession = await beginCloudTaskPublicationSession({
+        userId: TEST_USER_ID,
+        desktopId,
+        store: oldStore,
+      });
+      const oldPublication = handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session: oldSession, sequence: 1 },
+        snapshot: publishedSnapshot("idle", [
+          publishedTask("idle", { ownerDesktopId: desktopId }),
+        ]),
+        store: oldStore,
+      });
+      await oldClaimed.promise;
+
+      const currentSession = await beginCloudTaskPublicationSession({
+        userId: TEST_USER_ID,
+        desktopId,
+        store: currentStore,
+      });
+      await handleCloudTaskPublication({
+        userId: TEST_USER_ID,
+        desktopId,
+        generation: { session: currentSession, sequence: 1 },
+        snapshot: publishedSnapshot("working", [
+          publishedTask("working", { ownerDesktopId: desktopId }),
+        ]),
+        store: currentStore,
+      });
+      releaseOld.resolve();
+
+      await expect(oldPublication).rejects.toThrow("stale cloud task publication");
+      const documents = await desktopRef.collection("tasks").get();
+      expect(documents.docs).toHaveLength(1);
+      expect(documents.docs[0]?.data()).toMatchObject({
+        ownerDesktopId: desktopId,
+        activity: "working",
+      });
+    } finally {
+      releaseOld.resolve();
+      await testFirestore.recursiveDelete(desktopRef);
+    }
   });
 
   it("reassigns the canonical credential, closes the old relay socket, and publishes only for the new owner", async () => {
