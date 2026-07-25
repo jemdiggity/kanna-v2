@@ -32,6 +32,14 @@ Desktop-side recording of the initial run (the resume source for a task's
 first revision cycle) is covered by type-checked wiring plus
 stage-run persistence and daemon-event tests.
 
+`apps/desktop/tests/e2e/mock/stage-advance.test.ts` now also drives the
+successful review → in-progress interaction through the running app,
+app-owned kanna-server, real daemon protocol, real git worktrees, and a
+deterministic fake Codex executable. It asserts the durable task id, restored
+prior branch/worktree, `codex resume` argv, provider handle, and
+`resumed_from_run_id`. The neighboring test retains the numbered-workspace
+fallback contract.
+
 ## Live validation (2026-07-05)
 
 The fallback lane was exercised live in a worktree dev instance with real
@@ -58,7 +66,8 @@ working directory.
 `tests/cli-contract/tests/live/provider-resume.test.ts` starts two real CLI
 processes per provider. The first turn stores a random nonce in a persisted
 conversation; the second uses the provider's native session ID and must return
-that nonce. This directly exercises Claude `--resume`, Codex `exec resume`,
+that nonce. This directly exercises Claude `--resume`, Codex's production PTY
+`codex resume` command,
 OpenCode `run --session`, Copilot `--resume=`, and Antigravity
 `--conversation`.
 
@@ -71,11 +80,12 @@ provider's live gate.
 
 ## What is not covered end to end, and why
 
-A full desktop E2E (create task → real Claude agent implements → review agent
-requests revision → resumed agent addresses feedback) requires the packaged
-app/WebDriver harness to deterministically drive two real agent completions,
-which needs external Claude credentials and nondeterministic agent behavior —
-the same limitation recorded for the completion-notify boundary
-(`AGENTS.md`, "Server-side completion notify boundary"). The deterministic
-server/daemon tests cover Kanna's orchestration, while the quota-gated live
-matrix independently covers the real provider persistence contract.
+The remaining packaged-app gap is a single test that creates a task and drives
+two real provider completions before revision. The WebDriver harness has no
+deterministic provider-response fixture at the CLI protocol boundary, so that
+scenario still requires credentials, quota, and nondeterministic model
+behavior. Add it when the packaged harness can inject/replay provider protocol
+responses (including a stable provider session id) without contacting an
+external model. Until then, the app/server/daemon fake-provider interaction
+above covers the full Kanna resume journey, and the quota-gated live matrix
+independently covers each real provider's persistence contract.

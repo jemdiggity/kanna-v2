@@ -10,7 +10,8 @@
  * on disk until cleanup. Posts and reruns keep the current workspace.
  * Advancing past the final stage closes the task (closed_at is the sole done
  * indicator — stage is never rewritten to a "done" sentinel). Revisions
- * rerun an earlier stage on the same task in a fresh fork.
+ * first resume the earlier run's provider session and workspace, and fork a
+ * numbered workspace only when a resume precondition fails.
  *
  * Coverage that was deleted with the old close-and-recreate model, and why:
  * - "spawns a next-stage task / baseRef checks on a created task": advancing
@@ -87,6 +88,9 @@ interface StageRunRow {
   status: string | null;
   session_id: string | null;
   feedback: string | null;
+  provider_session_id: string | null;
+  cwd: string | null;
+  resumed_from_run_id: string | null;
 }
 
 async function getTaskRow(client: WebDriverClient, taskId: string): Promise<TaskRow> {
@@ -120,7 +124,9 @@ async function waitForTaskRow(
 async function getStageRuns(client: WebDriverClient, taskId: string): Promise<StageRunRow[]> {
   return (await queryDb(
     client,
-    "SELECT id, stage, status, session_id, feedback FROM stage_run WHERE task_id = ? ORDER BY started_at, id",
+    `SELECT id, stage, status, session_id, feedback, provider_session_id, cwd,
+            resumed_from_run_id
+     FROM stage_run WHERE task_id = ? ORDER BY started_at, id`,
     [taskId],
   )) as StageRunRow[];
 }
@@ -344,6 +350,16 @@ describe("stage advance", () => {
     await mkdir(join(kannaDir, "agents", "revision-e2e"), { recursive: true });
     await mkdir(join(kannaDir, "fake-bin"), { recursive: true });
     await writeFile(
+      join(kannaDir, "config.json"),
+      JSON.stringify({
+        workspace: {
+          path: {
+            prepend: [".kanna/fake-bin"],
+          },
+        },
+      }),
+    );
+    await writeFile(
       join(kannaDir, "pipelines", `${TWO_STAGE_PIPELINE}.json`),
       JSON.stringify({
         name: TWO_STAGE_PIPELINE,
@@ -367,16 +383,10 @@ describe("stage advance", () => {
       join(kannaDir, "pipelines", `${REVISION_PIPELINE}.json`),
       JSON.stringify({
         name: REVISION_PIPELINE,
-        environments: {
-          "fake-bin": {
-            setup: ["export PATH=\"$PWD/.kanna/fake-bin:$PATH\""],
-          },
-        },
         stages: [
           {
             name: "in progress",
             agent: "revision-e2e",
-            environment: "fake-bin",
             policy: { transition: "manual" },
           },
           { name: "review", policy: { transition: "manual" } },
@@ -408,6 +418,7 @@ describe("stage advance", () => {
     await chmod(join(kannaDir, "fake-bin", "codex"), 0o755);
     await git(testRepoPath, ["add", ".kanna"]);
     await git(testRepoPath, ["commit", "-m", "test: add kanna stage fixtures"]);
+    await git(testRepoPath, ["push", "origin", "main"]);
 
     repoId = await importTestRepo(client, testRepoPath, "stage-advance-test");
   });
@@ -746,6 +757,133 @@ describe("stage advance", () => {
     expect(capturedArgs).toContain("--yolo\n");
     expect(capturedArgs).toContain("Implement revision:");
     expect(capturedArgs).toContain(`Original task:\n${reviewPrompt}`);
+    expect(capturedArgs).toContain(`Reviewer feedback:\n${revisionPrompt}`);
+  });
+
+  it("resumes an earlier Codex run in its original workspace on review revision", async () => {
+    const taskId = "request-revision-resume-task";
+    const implementationBranch = "task-request-revision-resume";
+    const reviewBranch = "task-request-revision-resume-2";
+    const implementationRunId = "run-request-revision-resume-implementation";
+    const reviewRunId = "run-request-revision-resume-review";
+    const providerSessionId = "6f7d2f7a-1b2e-4c3d-9a8b-123456789abc";
+    const originalPrompt = "Implement the resumable revision journey.";
+    const revisionPrompt =
+      "Address the deterministic desktop resume feedback.";
+    const implementationCwd = join(
+      testRepoPath,
+      ".kanna-worktrees",
+      implementationBranch,
+    );
+
+    await addTaskWorktree(taskId, implementationBranch);
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch: reviewBranch,
+      path: join(testRepoPath, ".kanna-worktrees", reviewBranch),
+      startPoint: "main",
+    });
+    await insertTask({
+      id: taskId,
+      prompt: originalPrompt,
+      pipeline: REVISION_PIPELINE,
+      stage: "review",
+      branch: reviewBranch,
+      displayName: "Resume reviewed implementation",
+    });
+    await execDb(
+      client,
+      `INSERT INTO stage_run (
+         id, task_id, stage, kind, agent, agent_provider, status, session_id,
+         provider_session_id, cwd, started_at, run_ownership_version
+       ) VALUES (?, ?, 'in progress', 'main', 'revision-e2e', 'codex',
+                 'succeeded', ?, ?, ?, datetime('now', '-1 minute'), 1)`,
+      [
+        implementationRunId,
+        taskId,
+        taskId,
+        providerSessionId,
+        implementationCwd,
+      ],
+    );
+    await execDb(
+      client,
+      `INSERT INTO stage_run (
+         id, task_id, stage, kind, agent_provider, status, session_id,
+         started_at, run_ownership_version
+       ) VALUES (?, ?, 'review', 'main', 'codex', 'running', ?,
+                 datetime('now'), 1)`,
+      [reviewRunId, taskId, taskId],
+    );
+    await withAppKannaServer(async (server) => {
+      const response = await fetch(
+        `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            targetStage: "in progress",
+            summary: "resume the implementation",
+            prompt: revisionPrompt,
+          }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(
+          `resumed request-revision failed: ${response.status} ${await response.text()}`,
+        );
+      }
+      expect((await response.json() as { taskId: string }).taskId).toBe(taskId);
+      await waitForTaskRow(
+        client,
+        taskId,
+        (candidate) =>
+          candidate.stage === "in progress" &&
+          candidate.branch === implementationBranch,
+      );
+    });
+
+    const row = await getTaskRow(client, taskId);
+    expect(row).toMatchObject({
+      id: taskId,
+      stage: "in progress",
+      branch: implementationBranch,
+      closed_at: null,
+      prompt: originalPrompt,
+    });
+    const runs = await waitForStageRuns(client, taskId, (candidateRuns) =>
+      candidateRuns.some(
+        (run) =>
+          run.stage === "in progress" &&
+          run.id !== implementationRunId &&
+          run.status === "running" &&
+          run.resumed_from_run_id === implementationRunId,
+      ),
+    );
+    expect(runs.find((run) => run.id === reviewRunId)?.status).toBe("failed");
+    const resumedRun = runs.find(
+      (run) => run.stage === "in progress" && run.id !== implementationRunId,
+    );
+    expect(resumedRun).toMatchObject({
+      status: "running",
+      session_id: taskId,
+      provider_session_id: providerSessionId,
+      cwd: implementationCwd,
+      resumed_from_run_id: implementationRunId,
+      feedback: revisionPrompt,
+    });
+
+    const capturedArgsPath = join(
+      implementationCwd,
+      ".kanna",
+      "revision-codex-args.txt",
+    );
+    await waitForFile(capturedArgsPath, 20_000);
+    const capturedArgs = await readFile(capturedArgsPath, "utf8");
+    expect(capturedArgs).toMatch(/^resume\n/);
+    expect(capturedArgs).toContain("--yolo\n");
+    expect(capturedArgs).toContain(`${providerSessionId}\n`);
+    expect(capturedArgs).toContain(`Original task:\n${originalPrompt}`);
     expect(capturedArgs).toContain(`Reviewer feedback:\n${revisionPrompt}`);
   });
 });

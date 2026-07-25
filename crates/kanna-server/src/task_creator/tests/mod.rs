@@ -328,6 +328,82 @@ async fn spawn_fake_daemon_fork_transition(
     })
 }
 
+/// Fake daemon for a transition out of a live injected post. The database's
+/// latest action row is the post, but the daemon process is still owned by
+/// the main run that received the injected prompt.
+async fn spawn_fake_daemon_post_replacement(
+    daemon_dir: String,
+    process_owner_run_id: &'static str,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = match &command {
+                kanna_daemon::protocol::Command::Kill {
+                    session_id,
+                    expected_run_id,
+                } if session_id == "task-1" => {
+                    if expected_run_id.as_deref() == Some(process_owner_run_id) {
+                        kanna_daemon::protocol::Event::Ok
+                    } else {
+                        kanna_daemon::protocol::Event::Error {
+                            code: Some(
+                                kanna_daemon::protocol::ErrorCode::SessionOwnershipMismatch,
+                            ),
+                            message: format!(
+                                "session is owned by {process_owner_run_id}, not {expected_run_id:?}"
+                            ),
+                        }
+                    }
+                }
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn {
+                    session_id, env, ..
+                } => kanna_daemon::protocol::Event::SessionCreated {
+                    session_id: session_id.clone(),
+                    run_id: env.get("KANNA_STAGE_RUN_ID").cloned(),
+                },
+                kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                        run_id: params.env.get("KANNA_STAGE_RUN_ID").cloned(),
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            let spawned = matches!(
+                command,
+                kanna_daemon::protocol::Command::Spawn { .. }
+                    | kanna_daemon::protocol::Command::SpawnAgent { .. }
+            );
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if spawned {
+                break;
+            }
+        }
+        commands
+    })
+}
+
 /// Fake daemon for a forked stage transition that also starts a detached
 /// workspace teardown session after the replacement stage has spawned.
 async fn spawn_fake_daemon_fork_transition_with_teardown(

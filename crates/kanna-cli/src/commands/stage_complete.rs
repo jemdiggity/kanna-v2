@@ -64,6 +64,9 @@ pub(crate) async fn run(
         .collect::<Vec<_>>();
     let base_url = resolve_server_base_url(&borrowed_pairs, server_url);
     let mut request = build_complete_stage_request(status.clone(), summary.clone(), metadata_value);
+    // New Kanna spawns always provide immutable ownership. A pre-upgrade CLI
+    // process has no such environment value; omission is preserved so the
+    // server can authorize it only against a durable legacy run marker.
     request.run_id = run_id.filter(|value| !value.trim().is_empty()).or_else(|| {
         env::var("KANNA_STAGE_RUN_ID")
             .ok()

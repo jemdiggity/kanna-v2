@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::time::Duration;
 
 use kanna_daemon::{
     protocol::{self, Command, Event},
@@ -18,7 +20,9 @@ use crate::fanout::{session_fanout, SessionFanouts, SubscriberKind};
 use crate::handoff::{blank_snapshot, handle_handoff};
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
-use crate::session::{SessionHandle, SessionManager, SessionRecord, StreamControl};
+use crate::session::{
+    CodexDiscoveryCancellation, SessionHandle, SessionManager, SessionRecord, StreamControl,
+};
 use crate::socket::{read_command, write_event};
 
 pub(crate) fn subscription_allows(message: &str, event_stream_version: u32) -> bool {
@@ -29,6 +33,56 @@ pub(crate) fn subscription_allows(message: &str, event_stream_version: u32) -> b
         .ok()
         .and_then(|value| value.get("type")?.as_str().map(str::to_string))
         .is_none_or(|event_type| event_type != "ProviderSessionChanged")
+}
+
+const CODEX_DISCOVERY_DEADLINE: Duration = Duration::from_secs(10);
+const CODEX_DISCOVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(25);
+const CODEX_DISCOVERY_MAX_BACKOFF: Duration = Duration::from_millis(500);
+
+enum CodexDiscoveryPoll {
+    Found(String),
+    Pending,
+    Stop,
+}
+
+async fn poll_codex_discovery<F, Fut>(
+    cancellation: CodexDiscoveryCancellation,
+    deadline: Duration,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    mut scan: F,
+) -> Option<String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = CodexDiscoveryPoll>,
+{
+    let expires_at = tokio::time::Instant::now() + deadline;
+    let mut backoff = initial_backoff;
+    loop {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        let scan_result = tokio::select! {
+            result = scan() => result,
+            _ = cancellation.cancelled() => return None,
+            _ = tokio::time::sleep_until(expires_at) => return None,
+        };
+        match scan_result {
+            CodexDiscoveryPoll::Found(provider_session_id) => return Some(provider_session_id),
+            CodexDiscoveryPoll::Stop => return None,
+            CodexDiscoveryPoll::Pending => {}
+        }
+        let now = tokio::time::Instant::now();
+        if now >= expires_at {
+            return None;
+        }
+        let sleep_for = backoff.min(expires_at.saturating_duration_since(now));
+        tokio::select! {
+            _ = tokio::time::sleep(sleep_for) => {}
+            _ = cancellation.cancelled() => return None,
+        }
+        backoff = backoff.saturating_mul(2).min(max_backoff);
+    }
 }
 
 fn start_subscription(
@@ -443,6 +497,87 @@ pub(crate) async fn handle_command(
                         .lock()
                         .await
                         .mark_streaming();
+                    // Establish the session on both the request connection and
+                    // runtime event stream before any prelude, provider
+                    // discovery, output, status, or Exit can be observed.
+                    let evt = Event::SessionCreated {
+                        session_id: session_id.clone(),
+                        run_id,
+                    };
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    if let Ok(json) = serde_json::to_string(&evt) {
+                        let _ = broadcast_tx.send(json);
+                    }
+
+                    if agent_provider == Some(protocol::AgentProvider::Codex) {
+                        let discovery_session_id = session_id.clone();
+                        let discovery_session = Arc::clone(&handle);
+                        let discovery_sessions = Arc::clone(&sessions);
+                        let discovery_broadcast = broadcast_tx.clone();
+                        let discovery_cancellation =
+                            discovery_session.codex_discovery_cancellation();
+                        tokio::spawn(async move {
+                            let found = poll_codex_discovery(
+                                discovery_cancellation,
+                                CODEX_DISCOVERY_DEADLINE,
+                                CODEX_DISCOVERY_INITIAL_BACKOFF,
+                                CODEX_DISCOVERY_MAX_BACKOFF,
+                                || {
+                                    let discovery_sessions = Arc::clone(&discovery_sessions);
+                                    let discovery_session = Arc::clone(&discovery_session);
+                                    let discovery_session_id = discovery_session_id.clone();
+                                    async move {
+                                        let still_current = discovery_sessions
+                                            .lock()
+                                            .await
+                                            .get(&discovery_session_id)
+                                            .is_some_and(|current| {
+                                                Arc::ptr_eq(&current, &discovery_session)
+                                            });
+                                        if !still_current {
+                                            return CodexDiscoveryPoll::Stop;
+                                        }
+                                        match discovery_session.codex_resume_session_id().await {
+                                            Ok(Some(provider_session_id)) => {
+                                                CodexDiscoveryPoll::Found(provider_session_id)
+                                            }
+                                            Ok(None) => CodexDiscoveryPoll::Pending,
+                                            Err(error) => {
+                                                log::warn!(
+                                                    "[codex-session] discovery failed for {}: {}",
+                                                    discovery_session_id,
+                                                    error
+                                                );
+                                                CodexDiscoveryPoll::Pending
+                                            }
+                                        }
+                                    }
+                                },
+                            )
+                            .await;
+                            if let Some(provider_session_id) = found {
+                                let event = Event::ProviderSessionChanged {
+                                    session_id: discovery_session_id,
+                                    run_id: discovery_session.run_id().await,
+                                    provider_session_id,
+                                };
+                                if let Ok(json) = serde_json::to_string(&event) {
+                                    let _ = discovery_broadcast.send(json);
+                                }
+                            }
+                        });
+                    }
+
+                    if let Err(error) = recovery_manager
+                        .start_session(&session_id, cols, rows, false)
+                        .await
+                    {
+                        log::warn!(
+                            "[recovery] failed to start mirrored session {}: {}",
+                            session_id,
+                            error
+                        );
+                    }
 
                     if let Some(prelude) = terminal_prelude
                         .as_deref()
@@ -977,6 +1112,9 @@ pub(crate) async fn handle_command(
                 ),
                 None => (None, None),
             };
+            if let Some(session) = &session {
+                session.cancel_codex_discovery();
+            }
             let result = match &session {
                 Some(session) => session.kill().await,
                 None => Err(std::io::Error::new(
@@ -1033,13 +1171,27 @@ pub(crate) async fn handle_command(
         Command::List => {
             let handles = sessions.lock().await.handles();
             let mut sessions_list = Vec::with_capacity(handles.len());
+            let mut immutable_run_ownership = true;
             for (id, session) in handles {
+                // ShellModal sessions are user-owned terminals, not task
+                // processes. They intentionally have no stage-run owner and
+                // must not downgrade task process ownership negotiation.
+                if !id.starts_with("shell-") {
+                    immutable_run_ownership &= session.run_id().await.is_some();
+                }
                 sessions_list.push(session.info(id).await);
             }
             sessions_list.extend(agent_runtime::agent_session_infos(&agent_sessions).await);
+            immutable_run_ownership &= agent_sessions
+                .lock()
+                .await
+                .values()
+                .all(|record| record.run_id.is_some());
+            let mut capabilities = protocol::DaemonCapabilities::current();
+            capabilities.immutable_run_ownership = immutable_run_ownership;
             let evt = Event::SessionList {
                 sessions: sessions_list,
-                capabilities: Some(protocol::DaemonCapabilities::current()),
+                capabilities: Some(capabilities),
             };
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
@@ -1192,5 +1344,71 @@ pub(crate) async fn handle_command(
         Command::AgentSetModel { session_id, model } => {
             agent_runtime::handle_agent_set_model(session_id, model, writer, agent_sessions).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_discovery_tests {
+    use super::{poll_codex_discovery, CodexDiscoveryPoll};
+    use crate::session::CodexDiscoveryCancellation;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn no_metadata_discovery_has_bounded_scans_and_prompt_cancellation() {
+        let scans = Arc::new(AtomicUsize::new(0));
+        let scans_for_poll = Arc::clone(&scans);
+        let result = poll_codex_discovery(
+            CodexDiscoveryCancellation::default(),
+            Duration::from_millis(45),
+            Duration::from_millis(5),
+            Duration::from_millis(20),
+            move || {
+                scans_for_poll.fetch_add(1, Ordering::SeqCst);
+                async { CodexDiscoveryPoll::Pending }
+            },
+        )
+        .await;
+        assert_eq!(result, None);
+        assert!(
+            (1..=5).contains(&scans.load(Ordering::SeqCst)),
+            "deadline/backoff must bound metadata scans, got {}",
+            scans.load(Ordering::SeqCst)
+        );
+
+        let cancellation = CodexDiscoveryCancellation::default();
+        let cancellation_for_poll = cancellation.clone();
+        let scans = Arc::new(AtomicUsize::new(0));
+        let scans_for_poll = Arc::clone(&scans);
+        let prompt = tokio::spawn(async move {
+            poll_codex_discovery(
+                cancellation_for_poll,
+                Duration::from_secs(30),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                move || {
+                    scans_for_poll.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        CodexDiscoveryPoll::Pending
+                    }
+                },
+            )
+            .await
+        });
+        while scans.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        cancellation.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), prompt)
+                .await
+                .expect("cancelled discovery prompt must tear down promptly")
+                .unwrap(),
+            None
+        );
     }
 }

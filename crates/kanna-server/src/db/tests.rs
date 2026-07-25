@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "034_pipeline_item_revision_rounds");
+    assert_eq!(latest_migration, "029_stage_run_ownership_version");
 
     let stage_run_sql: String = db
         .conn
@@ -189,6 +189,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(transfer_columns.contains(&"source_desktop_id".to_string()));
     assert!(transfer_columns.contains(&"target_desktop_id".to_string()));
     assert!(transfer_columns.contains(&"sidecar_cleanup_completed_at".to_string()));
+    assert!(stage_run_sql.contains("run_ownership_version"));
 
     let _ = std::fs::remove_file(path);
 }
@@ -848,6 +849,17 @@ fn open_migrates_legacy_frontend_schema_with_backfills() {
         )
         .expect("stage run backfill");
     assert_eq!(stage_run_count, 2);
+    let legacy_ownership_versions: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM stage_run
+             WHERE task_id IN ('task-merge', 'task-port')
+               AND run_ownership_version = 0",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pre-upgrade runs retain legacy completion capability");
+    assert_eq!(legacy_ownership_versions, 2);
 
     let _ = std::fs::remove_file(path);
 }
@@ -1915,6 +1927,64 @@ fn owned_stage_completion_requires_immutable_run_id() {
     assert_eq!(
         db.latest_stage_run("task-1").unwrap().unwrap().status,
         "running"
+    );
+}
+
+#[test]
+fn migrated_running_stage_completion_allows_old_agent_without_run_id() {
+    let path = Db::test_db_path("legacy-stage-completion-without-run-id");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Complete from an old CLI",
+        None,
+        "in progress",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "pre-upgrade-run",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.conn
+        .execute(
+            "UPDATE stage_run SET run_ownership_version = 0 WHERE id = ?1",
+            ["pre-upgrade-run"],
+        )
+        .unwrap();
+
+    let finished = db
+        .finish_active_stage_run(
+            "task-1",
+            None,
+            "succeeded",
+            Some("{}"),
+            Some("old-format completion"),
+        )
+        .expect("legacy capability permits missing run id")
+        .expect("running row");
+    assert_eq!(finished.kind, "main");
+    assert_eq!(
+        db.latest_stage_run("task-1")
+            .unwrap()
+            .unwrap()
+            .run_ownership_version,
+        0
     );
 }
 

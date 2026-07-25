@@ -1,4 +1,5 @@
 use crate::{daemon_client, http_api, session_replacements};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -20,6 +21,27 @@ fn persist_provider_session_id(
     let db = crate::db::Db::open(&state.config().db_path).map_err(|e| format!("db error: {e}"))?;
     let update = db
         .update_stage_run_provider_session_id(run_id, resume_session_id)
+        .map_err(|e| format!("db error: {e}"))?;
+    if update.changed {
+        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    }
+    Ok(())
+}
+
+fn persist_ownershipless_provider_session_id(
+    state: &http_api::AppState,
+    session_id: &str,
+    resume_session_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(resume_session_id) = resume_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let db = crate::db::Db::open(&state.config().db_path).map_err(|e| format!("db error: {e}"))?;
+    let update = db
+        .update_active_stage_run_provider_session_id_by_session(session_id, resume_session_id)
         .map_err(|e| format!("db error: {e}"))?;
     if update.changed {
         state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
@@ -59,6 +81,24 @@ fn exit_still_owns_active_run(
         .map_err(|error| format!("db error: {error}"))?
         .is_active_main_run_owner(run_id, session_id)
         .map_err(|error| format!("db error: {error}"))
+}
+
+fn ownershipless_exit_still_targets_open_task(
+    state: &http_api::AppState,
+    session_id: &str,
+) -> Result<bool, String> {
+    let db = crate::db::Db::open(&state.config().db_path)
+        .map_err(|error| format!("db error: {error}"))?;
+    let Some(task_id) = db
+        .resolve_pipeline_item_id(session_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(false);
+    };
+    Ok(db
+        .get_pipeline_item(&task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .is_some_and(|task| task.closed_at.is_none()))
 }
 
 fn apply_watcher_runtime_status(
@@ -265,7 +305,12 @@ async fn terminal_state_watcher_once(
         .list()
         .await
         .map_err(|e| format!("daemon list failed: {}", e))?;
+    let strict_run_ownership = daemon_list.capabilities.immutable_run_ownership;
+    let mut ownershipless_sessions = HashSet::new();
     for session in daemon_list.sessions {
+        if session.run_id.is_none() {
+            ownershipless_sessions.insert(session.session_id.clone());
+        }
         if let Err(error) = apply_watcher_runtime_status(state, &session.session_id, session.status)
         {
             log::warn!(
@@ -308,11 +353,24 @@ async fn terminal_state_watcher_once(
                 run_id,
                 provider_session_id,
             } => {
-                if let Err(error) = persist_provider_session_id(
-                    state,
-                    run_id.as_deref(),
-                    Some(&provider_session_id),
-                ) {
+                let ownershipless =
+                    !strict_run_ownership || ownershipless_sessions.contains(&session_id);
+                let persisted = if run_id.is_some() {
+                    persist_provider_session_id(
+                        state,
+                        run_id.as_deref(),
+                        Some(&provider_session_id),
+                    )
+                } else if ownershipless {
+                    persist_ownershipless_provider_session_id(
+                        state,
+                        &session_id,
+                        Some(&provider_session_id),
+                    )
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = persisted {
                     log::warn!(
                         "failed to persist provider session id for {}: {}",
                         session_id,
@@ -327,15 +385,28 @@ async fn terminal_state_watcher_once(
                 killed,
                 resume_session_id,
             } => {
+                let ownershipless =
+                    !strict_run_ownership || ownershipless_sessions.remove(&session_id);
                 // Consume the replacement entry even when the event is
                 // self-describing — a leftover entry would swallow a future
                 // legitimate Exit for the same session id.
                 let replaced = replacements.consume(&session_id);
-                if let Err(error) = persist_provider_session_id(
-                    state,
-                    run_id.as_deref(),
-                    resume_session_id.as_deref(),
-                ) {
+                let persisted = if run_id.is_some() {
+                    persist_provider_session_id(
+                        state,
+                        run_id.as_deref(),
+                        resume_session_id.as_deref(),
+                    )
+                } else if ownershipless {
+                    persist_ownershipless_provider_session_id(
+                        state,
+                        &session_id,
+                        resume_session_id.as_deref(),
+                    )
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = persisted {
                     log::warn!(
                         "failed to persist terminal resume session id for {}: {}",
                         session_id,
@@ -347,7 +418,14 @@ async fn terminal_state_watcher_once(
                     // agent finishing.
                     continue;
                 }
-                match exit_still_owns_active_run(state, &session_id, run_id.as_deref()) {
+                let owns_active_run = if run_id.is_some() {
+                    exit_still_owns_active_run(state, &session_id, run_id.as_deref())
+                } else if ownershipless {
+                    ownershipless_exit_still_targets_open_task(state, &session_id)
+                } else {
+                    Ok(false)
+                };
+                match owns_active_run {
                     Ok(true) => {}
                     Ok(false) => {
                         log::info!(
@@ -376,6 +454,13 @@ async fn terminal_state_watcher_once(
                         success,
                         error
                     );
+                }
+            }
+            DaemonEvent::SessionCreated { session_id, run_id } => {
+                if run_id.is_none() {
+                    ownershipless_sessions.insert(session_id);
+                } else {
+                    ownershipless_sessions.remove(&session_id);
                 }
             }
             DaemonEvent::ShuttingDown => return Ok(()),
@@ -480,6 +565,19 @@ mod tests {
         listener: &UnixListener,
         sessions: Vec<SessionInfo>,
     ) -> tokio::net::unix::OwnedWriteHalf {
+        expect_subscribe_with_list(
+            listener,
+            sessions,
+            kanna_daemon::protocol::DaemonCapabilities::current(),
+        )
+        .await
+    }
+
+    async fn expect_subscribe_with_list(
+        listener: &UnixListener,
+        sessions: Vec<SessionInfo>,
+        capabilities: kanna_daemon::protocol::DaemonCapabilities,
+    ) -> tokio::net::unix::OwnedWriteHalf {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -509,7 +607,7 @@ mod tests {
             &mut control_write,
             &DaemonEvent::SessionList {
                 sessions,
-                capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+                capabilities: Some(capabilities),
             },
         )
         .await;
@@ -774,6 +872,100 @@ mod tests {
         assert_task_agent_session_id(&config, "019d99a5-aa94-7c73-b786-644cc095c037");
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn mixed_version_ownershipless_natural_exit_completes_and_preserves_provider_handle() {
+        for (label, capabilities) in [
+            (
+                "old-daemon",
+                kanna_daemon::protocol::DaemonCapabilities::legacy(),
+            ),
+            (
+                "adopted-session",
+                kanna_daemon::protocol::DaemonCapabilities::current(),
+            ),
+        ] {
+            let unique = unique_name(&format!("terminal-watcher-{label}-natural-exit"));
+            let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+            let config = test_config(&unique, &daemon_dir);
+            seed_notifying_task(&config);
+            Db::open(&config.db_path)
+                .unwrap()
+                .insert_stage_run(NewStageRun {
+                    id: "run-current",
+                    task_id: "task-child",
+                    stage: "in progress",
+                    kind: "main",
+                    agent: None,
+                    agent_provider: Some("codex"),
+                    model: None,
+                    status: "running",
+                    result: None,
+                    feedback: None,
+                    session_id: Some("task-child"),
+                    provider_session_id: None,
+                    cwd: Some("/tmp/task-child"),
+                    resumed_from_run_id: None,
+                })
+                .unwrap();
+            let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+            let server = tokio::spawn(async move {
+                let sessions = vec![SessionInfo {
+                    session_id: "task-child".to_string(),
+                    pid: 42,
+                    cwd: "/tmp/task-child".to_string(),
+                    state: SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    kind: Default::default(),
+                    run_id: None,
+                }];
+                let mut subscriber =
+                    expect_subscribe_with_list(&listener, sessions, capabilities).await;
+                write_event(
+                    &mut subscriber,
+                    &DaemonEvent::Exit {
+                        session_id: "task-child".to_string(),
+                        run_id: None,
+                        code: 0,
+                        resume_session_id: Some("codex-thread-from-exit".to_string()),
+                        killed: false,
+                    },
+                )
+                .await;
+                let inputs = expect_completion_notification(&listener).await;
+                write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+                inputs
+            });
+
+            timeout(
+                Duration::from_secs(2),
+                terminal_state_watcher_once(
+                    &http_api::AppState::new(config.clone()),
+                    &session_replacements::SessionReplacements::default(),
+                ),
+            )
+            .await
+            .expect("watcher did not finish")
+            .unwrap();
+            assert_eq!(server.await.unwrap().len(), 2);
+            assert_task_completed(&config);
+            assert_task_agent_session_id(&config, "codex-thread-from-exit");
+            let run = Db::open(&config.db_path)
+                .unwrap()
+                .latest_stage_run("task-child")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                run.provider_session_id.as_deref(),
+                Some("codex-thread-from-exit")
+            );
+
+            let _ = std::fs::remove_file(socket_path);
+            let _ = std::fs::remove_dir_all(daemon_dir);
+        }
     }
 
     #[tokio::test]

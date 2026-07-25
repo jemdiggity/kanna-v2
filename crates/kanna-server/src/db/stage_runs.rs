@@ -1,6 +1,8 @@
 use super::{Db, NewStageRun, StageRun};
 use rusqlite::OptionalExtension;
 
+const CURRENT_RUN_OWNERSHIP_VERSION: i64 = 1;
+
 /// Identity of a run closed by `finish_latest_running_stage_run`.
 pub struct FinishedStageRun {
     pub kind: String,
@@ -11,7 +13,11 @@ pub struct FinishedStageRun {
 pub struct TaskActionState {
     pub stage: String,
     pub branch: String,
+    /// Latest database action row used for compare-and-swap and landing.
     pub active_run_id: Option<String>,
+    /// Main run that owns the live daemon process. Injected posts are action
+    /// rows, but they cannot replace the process's immutable spawn owner.
+    pub process_run_id: Option<String>,
 }
 
 /// Result of attaching a provider-native handle to its immutable owning run.
@@ -49,6 +55,17 @@ impl Db {
                       WHERE task_id = p.id
                       ORDER BY datetime(started_at) DESC, rowid DESC
                       LIMIT 1
+                    ),
+                    (
+                      SELECT CASE
+                               WHEN kind = 'post'
+                                 THEN COALESCE(resumed_from_run_id, id)
+                               ELSE id
+                             END
+                      FROM stage_run
+                      WHERE task_id = p.id
+                      ORDER BY datetime(started_at) DESC, rowid DESC
+                      LIMIT 1
                     )
              FROM pipeline_item p
              WHERE p.id = ?1 AND p.closed_at IS NULL",
@@ -58,6 +75,7 @@ impl Db {
                     stage: row.get(0)?,
                     branch: row.get(1)?,
                     active_run_id: row.get(2)?,
+                    process_run_id: row.get(3)?,
                 })
             },
         )
@@ -76,8 +94,8 @@ impl Db {
         let transaction = self.conn.unchecked_transaction()?;
         let run = transaction
             .query_row(
-                "SELECT id, kind, completion_transition, status, session_id,
-                        resumed_from_run_id
+                "SELECT id, kind, completion_transition, status,
+                        resumed_from_run_id, run_ownership_version
                  FROM stage_run
                  WHERE task_id = ?1
                  ORDER BY datetime(started_at) DESC, rowid DESC
@@ -90,7 +108,7 @@ impl Db {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 },
             )
@@ -100,8 +118,8 @@ impl Db {
             kind,
             completion_transition,
             current_status,
-            session_id,
             completion_owner_run_id,
+            run_ownership_version,
         )) = run
         else {
             return Ok(None);
@@ -113,10 +131,13 @@ impl Db {
                         .as_deref()
                         .is_some_and(|owner| owner == expected))
         });
-        if session_id.is_some() && !ownership_matches {
+        if run_ownership_version >= CURRENT_RUN_OWNERSHIP_VERSION && !ownership_matches {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        if session_id.is_none() && expected_run_id.is_some_and(|expected| expected != run_id) {
+        if run_ownership_version < CURRENT_RUN_OWNERSHIP_VERSION
+            && expected_run_id.is_some()
+            && !ownership_matches
+        {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         if !matches!(
@@ -154,8 +175,9 @@ impl Db {
         self.conn.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
-              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
+              run_ownership_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run.id,
                 run.task_id,
@@ -172,6 +194,7 @@ impl Db {
                 run.cwd,
                 run.resumed_from_run_id,
                 completion_transition,
+                CURRENT_RUN_OWNERSHIP_VERSION,
             ),
         )?;
         Ok(())
@@ -202,6 +225,17 @@ impl Db {
                           WHERE task_id = p.id
                           ORDER BY datetime(started_at) DESC, rowid DESC
                           LIMIT 1
+                        ),
+                        (
+                          SELECT CASE
+                                   WHEN kind = 'post'
+                                     THEN COALESCE(resumed_from_run_id, id)
+                                   ELSE id
+                                 END
+                          FROM stage_run
+                          WHERE task_id = p.id
+                          ORDER BY datetime(started_at) DESC, rowid DESC
+                          LIMIT 1
                         )
                  FROM pipeline_item p
                  WHERE p.id = ?1 AND p.closed_at IS NULL",
@@ -211,6 +245,7 @@ impl Db {
                         stage: row.get(0)?,
                         branch: row.get(1)?,
                         active_run_id: row.get(2)?,
+                        process_run_id: row.get(3)?,
                     })
                 },
             )
@@ -252,8 +287,9 @@ impl Db {
         transaction.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
-              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
+              run_ownership_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run.id,
                 run.task_id,
@@ -270,6 +306,7 @@ impl Db {
                 run.cwd,
                 run.resumed_from_run_id,
                 completion_transition,
+                CURRENT_RUN_OWNERSHIP_VERSION,
             ),
         )?;
         transaction.commit()
@@ -283,7 +320,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
-                    completion_transition, started_at, finished_at
+                    completion_transition, run_ownership_version, started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
              ORDER BY datetime(started_at) ASC, rowid ASC",
@@ -299,7 +336,7 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        completion_transition, started_at, finished_at
+                        completion_transition, run_ownership_version, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
                  ORDER BY datetime(started_at) DESC, rowid DESC
@@ -328,7 +365,7 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        completion_transition, started_at, finished_at
+                        completion_transition, run_ownership_version, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                  ORDER BY datetime(started_at) DESC, rowid DESC
@@ -392,6 +429,54 @@ impl Db {
         )?;
         transaction.commit()?;
         Ok(ProviderSessionUpdate { changed: true })
+    }
+
+    /// Compatibility path for a daemon session adopted without immutable run
+    /// ownership. The watcher calls this only after capability negotiation
+    /// identifies the live session as ownershipless.
+    pub fn update_active_stage_run_provider_session_id_by_session(
+        &self,
+        session_id: &str,
+        provider_session_id: &str,
+    ) -> Result<ProviderSessionUpdate, rusqlite::Error> {
+        let Some(task_id) = self.resolve_pipeline_item_id(session_id)? else {
+            return Ok(ProviderSessionUpdate { changed: false });
+        };
+        let transaction = self.conn.unchecked_transaction()?;
+        let run_id = transaction
+            .query_row(
+                "SELECT run.id
+                 FROM stage_run run
+                 JOIN pipeline_item task ON task.id = run.task_id
+                 WHERE run.task_id = ?1
+                   AND run.kind = 'main'
+                   AND task.closed_at IS NULL
+                 ORDER BY datetime(run.started_at) DESC, run.rowid DESC
+                 LIMIT 1",
+                [&task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(run_id) = run_id else {
+            transaction.commit()?;
+            return Ok(ProviderSessionUpdate { changed: false });
+        };
+        let changed = transaction.execute(
+            "UPDATE stage_run
+             SET provider_session_id = ?2
+             WHERE id = ?1 AND provider_session_id IS NULL",
+            (&run_id, provider_session_id),
+        )? > 0;
+        transaction.execute(
+            "UPDATE pipeline_item
+             SET agent_session_id = (
+               SELECT provider_session_id FROM stage_run WHERE id = ?2
+             )
+             WHERE id = ?1 AND closed_at IS NULL",
+            (&task_id, &run_id),
+        )?;
+        transaction.commit()?;
+        Ok(ProviderSessionUpdate { changed })
     }
 
     /// True only when `run_id` is the newest main run that owns the reusable
@@ -737,7 +822,8 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         cwd: row.get(12)?,
         resumed_from_run_id: row.get(13)?,
         completion_transition: row.get(14)?,
-        started_at: row.get(15)?,
-        finished_at: row.get(16)?,
+        run_ownership_version: row.get(15)?,
+        started_at: row.get(16)?,
+        finished_at: row.get(17)?,
     })
 }

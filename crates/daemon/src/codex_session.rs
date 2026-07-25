@@ -19,6 +19,34 @@ pub struct CodexSessionLocator {
     last_candidate_count: usize,
 }
 
+#[derive(Clone)]
+pub struct CodexSessionProbe {
+    sessions_root: PathBuf,
+    cwd: PathBuf,
+    spawned_at: chrono::DateTime<chrono::Utc>,
+    process_group_id: u32,
+}
+
+impl CodexSessionProbe {
+    pub fn discover(self) -> Option<String> {
+        let process_group_id = self.process_group_id;
+        self.discover_with(|| process_group_open_files(process_group_id))
+    }
+
+    fn discover_with<F>(self, find_open_files: F) -> Option<String>
+    where
+        F: FnOnce() -> Vec<PathBuf>,
+    {
+        discover_candidate(
+            &self.sessions_root,
+            &self.cwd,
+            self.spawned_at,
+            find_open_files(),
+        )
+        .0
+    }
+}
+
 impl CodexSessionLocator {
     /// Snapshot Codex metadata before the child starts. A resumed conversation
     /// is supplied by the server through an inherited ownership channel;
@@ -109,14 +137,40 @@ impl CodexSessionLocator {
         }
     }
 
+    #[cfg(test)]
     pub fn discover(&mut self) -> Option<String> {
         if let Some(id) = self.accepted_id.as_ref() {
             return Some(id.clone());
         }
-        let process_group_id = self.process_group_id?;
-        self.discover_with(|| process_group_open_files(process_group_id))
+        let probe = self.discovery_probe()?;
+        let candidate = probe.discover();
+        self.accept_discovered(candidate)
     }
 
+    pub fn accepted_id(&self) -> Option<String> {
+        self.accepted_id.clone()
+    }
+
+    pub fn discovery_probe(&self) -> Option<CodexSessionProbe> {
+        if self.accepted_id.is_some() {
+            return None;
+        }
+        Some(CodexSessionProbe {
+            sessions_root: self.sessions_root.clone(),
+            cwd: self.cwd.clone(),
+            spawned_at: self.spawned_at,
+            process_group_id: self.process_group_id?,
+        })
+    }
+
+    pub fn accept_discovered(&mut self, candidate: Option<String>) -> Option<String> {
+        if self.accepted_id.is_none() {
+            self.accepted_id = candidate;
+        }
+        self.accepted_id.clone()
+    }
+
+    #[cfg(test)]
     fn discover_with<F>(&mut self, find_open_files: F) -> Option<String>
     where
         F: FnOnce() -> Vec<PathBuf>,
@@ -125,32 +179,14 @@ impl CodexSessionLocator {
             return Some(id.clone());
         }
 
-        let candidate_paths: Vec<PathBuf> = find_open_files()
-            .into_iter()
-            .filter(|path| {
-                canonical_or_original(path).starts_with(canonical_or_original(&self.sessions_root))
-            })
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("jsonl"))
-            .collect();
-        #[cfg(test)]
-        {
-            self.last_candidate_count = candidate_paths.len();
-        }
-        let mut candidates = candidate_paths
-            .into_iter()
-            .filter_map(|path| metadata_from_file(&path))
-            .filter(|record| {
-                matches!(record.originator.as_str(), "codex-tui" | "codex_cli_rs")
-                    && record.created_at >= self.spawned_at
-                    && canonical_or_original(Path::new(&record.cwd)) == self.cwd
-            })
-            .map(|record| record.id);
-        let candidate = candidates.next()?;
-        if candidates.next().is_some() {
-            return None;
-        }
-        self.accepted_id = Some(candidate.clone());
-        Some(candidate)
+        let (candidate, candidate_count) = discover_candidate(
+            &self.sessions_root,
+            &self.cwd,
+            self.spawned_at,
+            find_open_files(),
+        );
+        self.last_candidate_count = candidate_count;
+        self.accept_discovered(candidate)
     }
 
     #[cfg(test)]
@@ -172,6 +208,35 @@ impl CodexSessionLocator {
     fn spawned_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.spawned_at
     }
+}
+
+fn discover_candidate(
+    sessions_root: &Path,
+    cwd: &Path,
+    spawned_at: chrono::DateTime<chrono::Utc>,
+    open_files: Vec<PathBuf>,
+) -> (Option<String>, usize) {
+    let canonical_sessions_root = canonical_or_original(sessions_root);
+    let candidate_paths: Vec<PathBuf> = open_files
+        .into_iter()
+        .filter(|path| canonical_or_original(path).starts_with(&canonical_sessions_root))
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("jsonl"))
+        .collect();
+    let candidate_count = candidate_paths.len();
+    let mut candidates = candidate_paths
+        .into_iter()
+        .filter_map(|path| metadata_from_file(&path))
+        .filter(|record| {
+            matches!(record.originator.as_str(), "codex-tui" | "codex_cli_rs")
+                && record.created_at >= spawned_at
+                && canonical_or_original(Path::new(&record.cwd)) == cwd
+        })
+        .map(|record| record.id);
+    let candidate = candidates.next();
+    if candidates.next().is_some() {
+        return (None, candidate_count);
+    }
+    (candidate, candidate_count)
 }
 
 struct SessionMetadata {

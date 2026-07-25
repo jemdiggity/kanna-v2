@@ -5,7 +5,7 @@ import {
   runAntigravityPrint,
 } from "../../helpers/antigravity";
 import { isClaudeUnavailable, runClaude } from "../../helpers/claude";
-import { runCodexExec, runCodexExecResume } from "../../helpers/codex";
+import { runCodexExec, runCodexPtyResume } from "../../helpers/codex";
 import { runCopilot } from "../../helpers/copilot";
 import {
   isOpenCodeProviderAuthenticated,
@@ -107,7 +107,14 @@ describe("live provider conversation resume", () => {
     ).toContain(nonce);
   }, 240_000);
 
-  it("Codex resumes a separately launched conversation by thread ID", async ({ skip }) => {
+  it("Codex production PTY command resumes a separately launched conversation", async ({
+    skip,
+  }) => {
+    if (process.platform !== "darwin") {
+      skip(
+        "Codex production PTY resume contract requires the macOS script utility",
+      );
+    }
     const nonce = createResumeNonce("codex");
 
     let first;
@@ -129,19 +136,23 @@ describe("live provider conversation resume", () => {
     ).toBe(0);
     const sessionId = extractCodexThreadId(first.lines);
 
-    const resumed = await runCodexExecResume({
+    const resumed = await runCodexPtyResume({
       sessionId,
       prompt: recallPrompt(),
+      waitFor: nonce,
+      flags: ["--yolo"],
       timeoutMs: 120_000,
     });
     const resumedUnavailable = providerUnavailableReason(
       `${resumed.stdout}\n${resumed.stderr}`,
     );
     if (resumedUnavailable) skip(resumedUnavailable);
+    // The interactive TUI remains open after the turn, so the harness closes
+    // its PTY once the recalled nonce is observed; its signal exit is expected.
     expect(
-      resumed.exitCode,
+      resumed.matched,
       diagnostic("Codex resumed turn", resumed.stdout, resumed.stderr),
-    ).toBe(0);
+    ).toBe(true);
     expect(
       resumed.stdout,
       diagnostic("Codex resumed turn", resumed.stdout, resumed.stderr),

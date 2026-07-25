@@ -269,13 +269,12 @@ async fn maybe_augment_tool_args(
     mut args: Value,
 ) -> Result<Value, String> {
     if name == "kanna_complete_stage" {
-        let run_id = env::var("KANNA_STAGE_RUN_ID")
+        if let Some(run_id) = env::var("KANNA_STAGE_RUN_ID")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                "KANNA_STAGE_RUN_ID is required to complete the current stage safely".to_string()
-            })?;
-        args = bind_stage_run_id(args, &run_id)?;
+        {
+            args = bind_stage_run_id(args, &run_id)?;
+        }
     }
     maybe_augment_create_task_args(base_url, name, args).await
 }
@@ -706,6 +705,30 @@ mod tests {
         let args = bind_stage_run_id(args, "run-from-environment").unwrap();
 
         assert_eq!(args["run_id"], json!("run-from-environment"));
+    }
+
+    #[test]
+    fn legacy_stage_completion_args_remain_valid_without_process_run_id() {
+        let args = json!({
+            "task_id": "task-1",
+            "status": "success",
+            "summary": "completed by a pre-upgrade MCP process"
+        });
+
+        assert!(args.get("run_id").is_none());
+        let request = resolve_request(
+            &kanna_tool_catalog::bundled_catalog(),
+            "kanna_complete_stage",
+            &args,
+        )
+        .unwrap();
+        assert_eq!(
+            request.body,
+            json!({
+                "status": "success",
+                "summary": "completed by a pre-upgrade MCP process"
+            })
+        );
     }
 
     #[test]

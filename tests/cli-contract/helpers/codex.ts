@@ -140,6 +140,103 @@ export async function runCodexExecResume(opts: {
   return { ...result, lines, duration: Date.now() - start };
 }
 
+/**
+ * Run the interactive production resume command under a real PTY:
+ * `codex resume <flags> <session-id> <prompt>`.
+ *
+ * Codex stays open after finishing a turn, so the harness tears the PTY down
+ * after observing the expected response text.
+ */
+export async function runCodexPtyResume(opts: {
+  sessionId: string;
+  prompt: string;
+  waitFor: string;
+  flags?: string[];
+  cwd?: string;
+  timeoutMs?: number;
+}): Promise<{
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  matched: boolean;
+  duration: number;
+}> {
+  if (process.platform !== "darwin") {
+    throw new Error(
+      "Codex production PTY resume contract currently requires macOS /usr/bin/script",
+    );
+  }
+  const binary = await findCodexBinary();
+  const args = [
+    "-q",
+    "/dev/null",
+    binary,
+    "resume",
+    ...(opts.flags || []),
+    opts.sessionId,
+    opts.prompt,
+  ];
+  const start = Date.now();
+  return await new Promise((resolve, reject) => {
+    const child = spawn("/usr/bin/script", args, {
+      cwd: opts.cwd ?? "/tmp",
+      env: {
+        ...process.env,
+        TERM: "xterm-256color",
+        COLUMNS: "120",
+        LINES: "40",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let matched = false;
+    let teardownStarted = false;
+    const beginTeardown = () => {
+      if (teardownStarted) return;
+      teardownStarted = true;
+      if (child.stdin?.writable) child.stdin.write("\x03");
+      setTimeout(() => {
+        if (child.stdin?.writable) child.stdin.write("\x04");
+      }, 100);
+      setTimeout(() => child.kill(), 1_000);
+    };
+    const observe = () => {
+      if (!matched && `${stdout}\n${stderr}`.includes(opts.waitFor)) {
+        matched = true;
+        beginTeardown();
+      }
+    };
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdin?.on("error", () => {
+      // The PTY may close between observing the nonce and the teardown keys.
+    });
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+      observe();
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+      observe();
+    });
+    child.on("error", reject);
+
+    const timer = setTimeout(beginTeardown, opts.timeoutMs ?? 120_000);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({
+        stdout,
+        stderr,
+        exitCode: code ?? -1,
+        matched,
+        duration: Date.now() - start,
+      });
+    });
+  });
+}
+
 export async function runCodexRaw(args: string[], opts?: {
   cwd?: string;
   env?: NodeJS.ProcessEnv;

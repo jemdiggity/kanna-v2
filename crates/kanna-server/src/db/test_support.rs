@@ -142,6 +142,7 @@ impl Db {
                 cwd TEXT,
                 resumed_from_run_id TEXT,
                 completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+                run_ownership_version INTEGER NOT NULL DEFAULT 0,
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 finished_at TEXT
             );

@@ -388,6 +388,7 @@ pub(crate) async fn stream_output(
         seal_lifted.await;
     }
 
+    session.cancel_codex_discovery();
     {
         let mut mgr = sessions.lock().await;
         if mgr

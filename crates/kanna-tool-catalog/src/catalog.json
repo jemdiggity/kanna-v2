@@ -220,7 +220,7 @@
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "status", "description": "'success' records the stage as complete and can trigger configured auto-advance; 'failure' records what blocked the stage and stops advancement.", "type": "string", "required": true, "location": "body", "enum": ["success", "failure"] },
         { "name": "summary", "description": "Short summary of what was accomplished, or on failure, what is blocking.", "type": "string", "required": true, "location": "body" },
-        { "name": "run_id", "description": "Immutable current stage-run id. kanna-mcp binds this to KANNA_STAGE_RUN_ID so a delayed verdict cannot complete a replacement run.", "type": "string", "required": true, "location": "body", "key": "runId" },
+        { "name": "run_id", "description": "Immutable current stage-run id. New agents receive KANNA_STAGE_RUN_ID and kanna-mcp binds it automatically; omission is accepted only for pre-upgrade running rows.", "type": "string", "required": false, "location": "body", "key": "runId" },
         { "name": "metadata", "description": "Optional structured result data (e.g. a review verdict) stored on the stage run and readable from the task detail's latestRun.", "type": "object", "required": false, "location": "body" }
       ]
     },

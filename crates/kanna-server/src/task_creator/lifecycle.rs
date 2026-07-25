@@ -113,6 +113,39 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(
     daemon: &mut DaemonClient,
     mut prepared: PreparedTaskSpawn,
 ) -> Result<crate::mobile_api::CreateTaskResponse, String> {
+    let resumes_headless_provider = matches!(
+        &prepared.session,
+        PreparedSessionSpawn::Agent {
+            resume_session_id: Some(session_id),
+            ..
+        } if !session_id.trim().is_empty()
+    );
+    if resumes_headless_provider {
+        let compatibility = async {
+            let capabilities = daemon
+                .capabilities()
+                .await
+                .map_err(|error| format!("daemon capability negotiation failed: {error}"))?;
+            crate::daemon_client::require_provider_resume(&capabilities)
+        }
+        .await;
+        if let Err(error) = compatibility {
+            let rollback_db_path = db_path.to_string();
+            let rollback_prepared = prepared.clone();
+            let rollback = tokio::task::spawn_blocking(move || {
+                let db =
+                    Db::open(&rollback_db_path).map_err(|e| format!("db rollback error: {e}"))?;
+                rollback_prepared_task_for_api(&db, &rollback_prepared)
+            })
+            .await
+            .map_err(|join_error| format!("task resume rollback worker failed: {join_error}"))?;
+            return Err(match rollback {
+                Ok(()) => error,
+                Err(rollback_error) => format!("{error}; {rollback_error}"),
+            });
+        }
+    }
+
     let run_id = generate_stage_run_id(&prepared.created_task.task_id);
     prepared
         .env
@@ -244,7 +277,14 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
 
     // Only a freshly forked workspace is rolled back on failure; a resumed
     // workspace pre-exists this spawn and must survive it.
-    if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
+    if let Err(error) = kill_session_replacing_if_owned(
+        daemon,
+        replacements,
+        &session_id,
+        prepared.expected_source.process_run_id.as_deref(),
+    )
+    .await
+    {
         return Err(fail_prepared_stage_spawn(
             db_path, &run_id, &prepared, error,
         ));
@@ -459,7 +499,15 @@ pub(crate) async fn dispatch_prepared_post_for_api(
             let inherited = db
                 .latest_stage_run(&task_id)
                 .map_err(|e| format!("db error: {}", e))?;
-            let completion_owner_run_id = inherited.as_ref().map(|run| run.id.clone());
+            let completion_owner_run_id = inherited.as_ref().map(|run| {
+                if run.kind == "post" {
+                    run.resumed_from_run_id
+                        .clone()
+                        .unwrap_or_else(|| run.id.clone())
+                } else {
+                    run.id.clone()
+                }
+            });
             db.finish_latest_running_stage_run(&task_id, "succeeded", None, None)
                 .map_err(|e| format!("db error: {}", e))?;
             // The post continues the inherited run's live agent session, so
@@ -570,6 +618,16 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             format!("{error}; failed to record stage rerun failure: {record_error}")
         }
     };
+    if let Err(error) = kill_session_replacing_if_owned(
+        daemon,
+        replacements,
+        &session_id,
+        prepared.expected_source.process_run_id.as_deref(),
+    )
+    .await
+    {
+        return Err(record_failure(error));
+    }
     if let Err(error) = prepare_deferred_rerun_setup(&mut prepared) {
         return Err(record_failure(error));
     }

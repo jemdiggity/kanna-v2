@@ -1101,6 +1101,9 @@ pub(crate) async fn handle_handoff(
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
 
+    for (_, handle) in &handles {
+        handle.cancel_codex_discovery();
+    }
     for control in &controls {
         control.request_stop();
     }

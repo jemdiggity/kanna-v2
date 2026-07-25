@@ -4186,6 +4186,78 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
 }
 
 #[tokio::test]
+async fn old_format_completion_finishes_pre_upgrade_running_row() {
+    let repo_temp = tempfile::Builder::new()
+        .prefix("kanna-http-old-format-completion-")
+        .tempdir()
+        .unwrap();
+    let repo_root = repo_temp.path().join("repo");
+    init_test_git_repo(&repo_root);
+    let repo_path = repo_root.to_string_lossy().to_string();
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", move |db| {
+        db.insert_test_repo_with_path("repo-1", &repo_path, "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Finish after upgrading Kanna",
+            Some("Finish after upgrading Kanna"),
+            "in progress",
+            "2026-07-25 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "pre-upgrade-run",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        db.connection_for_e2e_tests()
+            .execute(
+                "UPDATE stage_run
+                 SET run_ownership_version = 0
+                 WHERE id = 'pre-upgrade-run'",
+                [],
+            )
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "completed by an already-running old CLI or MCP"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let run = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(run.status, "succeeded");
+    assert_eq!(run.run_ownership_version, 0);
+}
+
+#[tokio::test]
 async fn stale_owned_completion_cannot_finish_replacement_run_through_http() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

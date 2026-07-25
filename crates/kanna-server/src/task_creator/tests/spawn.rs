@@ -48,6 +48,30 @@ async fn spawn_fake_daemon_asserting_pending_run(
     })
 }
 
+async fn spawn_fake_old_daemon_capabilities(daemon_dir: String) -> tokio::task::JoinHandle<()> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::List
+        ));
+        let response = serde_json::to_string(&kanna_daemon::protocol::Event::SessionList {
+            sessions: Vec::new(),
+            capabilities: None,
+        })
+        .unwrap();
+        write_half.write_all(response.as_bytes()).await.unwrap();
+        write_half.write_all(b"\n").await.unwrap();
+    })
+}
+
 #[tokio::test]
 async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
     let config = test_config("spawn-prepared-agent-command");
@@ -178,6 +202,70 @@ async fn spawn_records_pending_stage_run_before_daemon_can_emit_events() {
     assert_eq!(runs[0].model.as_deref(), Some("sonnet"));
     assert_eq!(runs[0].status, "running");
     assert_eq!(runs[0].session_id.as_deref(), Some("task-1"));
+}
+
+#[tokio::test]
+async fn create_resume_rejects_old_daemon_before_recording_task_or_run() {
+    let repo_root = init_git_repo("create-headless-resume-old-daemon");
+    let config = test_config("create-headless-resume-old-daemon");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Resume imported headless work".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: Some("364643cc-5e6d-48fc-86ca-ca7764380900".to_string()),
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+    let task_id = prepared.task_id().to_string();
+    let worktree_path = prepared.cwd.clone();
+    assert!(matches!(
+        &prepared.session,
+        PreparedSessionSpawn::Agent {
+            resume_session_id: Some(_),
+            ..
+        }
+    ));
+
+    let old_daemon = spawn_fake_old_daemon_capabilities(config.daemon_dir.clone()).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error =
+        spawn_prepared_task_for_api_recording_stage_run(&config.db_path, &mut daemon, prepared)
+            .await
+            .expect_err("old daemon must not silently discard provider resume");
+    old_daemon.await.unwrap();
+
+    assert!(error.contains("does not support provider resume"));
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db.get_pipeline_item(&task_id).unwrap().is_none());
+    assert!(db.list_stage_runs_for_task(&task_id).unwrap().is_empty());
+    assert!(!std::path::Path::new(&worktree_path).exists());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[tokio::test]

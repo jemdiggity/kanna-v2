@@ -117,6 +117,7 @@ fn run_kanna_mcp_with_env(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env_remove("KANNA_STAGE_RUN_ID")
         .envs(env_pairs.iter().copied())
         .spawn()
         .expect("spawn kanna-mcp");
@@ -384,6 +385,40 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
         tool_text(&responses[3]),
         json!({ "taskId": "task-1", "stage": "pr" })
     );
+}
+
+#[test]
+fn pre_upgrade_mcp_process_can_send_old_format_stage_completion() {
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "POST",
+        path: "/v1/tasks/task-legacy/actions/complete-stage",
+        body: Some(json!({
+            "status": "success",
+            "summary": "completed by old MCP"
+        })),
+        response_status: "200 OK",
+        response_body: json!({ "taskId": "task-legacy" }),
+    }]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_complete_stage",
+                "arguments": {
+                    "task_id": "task-legacy",
+                    "status": "success",
+                    "summary": "completed by old MCP"
+                }
+            }
+        })],
+    );
+
+    assert_eq!(server.join().expect("fixture server").len(), 1);
+    assert_eq!(tool_text(&responses[0]), json!({ "taskId": "task-legacy" }));
 }
 
 #[test]

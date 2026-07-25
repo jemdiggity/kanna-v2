@@ -109,6 +109,40 @@ pub struct SessionHandle {
     /// Permanently fences an outgoing incarnation from publishing output or
     /// mutating id-keyed state after a same-id replacement is allowed.
     retired: AtomicBool,
+    codex_discovery_cancellation: CodexDiscoveryCancellation,
+}
+
+#[derive(Clone, Default)]
+pub struct CodexDiscoveryCancellation {
+    cancelled: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl CodexDiscoveryCancellation {
+    pub fn cancel(&self) {
+        if !self.cancelled.swap(true, Ordering::SeqCst) {
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 impl SessionHandle {
@@ -130,6 +164,7 @@ impl SessionHandle {
             input_tx,
             input_rx: Mutex::new(Some(input_rx)),
             retired: AtomicBool::new(false),
+            codex_discovery_cancellation: CodexDiscoveryCancellation::default(),
         }
     }
 
@@ -241,11 +276,33 @@ impl SessionHandle {
     pub async fn codex_resume_session_id(
         &self,
     ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let probe = {
+            let state = self.state.lock().await;
+            let Some(locator) = state.codex_session_locator.as_ref() else {
+                return Ok(None);
+            };
+            if let Some(id) = locator.accepted_id() {
+                return Ok(Some(id));
+            }
+            locator.discovery_probe()
+        };
+        let Some(probe) = probe else {
+            return Ok(None);
+        };
+        let candidate = tokio::task::spawn_blocking(move || probe.discover()).await?;
         let mut state = self.state.lock().await;
         Ok(state
             .codex_session_locator
             .as_mut()
-            .and_then(CodexSessionLocator::discover))
+            .and_then(|locator| locator.accept_discovered(candidate)))
+    }
+
+    pub fn codex_discovery_cancellation(&self) -> CodexDiscoveryCancellation {
+        self.codex_discovery_cancellation.clone()
+    }
+
+    pub fn cancel_codex_discovery(&self) {
+        self.codex_discovery_cancellation.cancel();
     }
 
     pub async fn run_id(&self) -> Option<String> {
@@ -416,12 +473,9 @@ impl SessionHandle {
         let fd = pty.try_clone_handoff_fd()?;
         drop(pty);
 
+        let provider_session_id = self.codex_resume_session_id().await?;
         let mut state = self.state.lock().await;
         let snapshot = state.headless_terminal.snapshot().ok();
-        let provider_session_id = state
-            .codex_session_locator
-            .as_mut()
-            .and_then(CodexSessionLocator::discover);
         let codex_session = state
             .codex_session_locator
             .as_ref()

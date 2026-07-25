@@ -73,6 +73,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "032_task_transfer_sidecar_cleanup",
     "033_create_task_intent",
     "034_pipeline_item_revision_rounds",
+    "029_stage_run_ownership_version",
 ];
 
 #[derive(Debug, Serialize)]
@@ -322,6 +323,9 @@ pub struct StageRun {
     /// Effective completion policy chosen when this run was prepared.
     /// Legacy rows leave this null and fall back to the pinned stage policy.
     pub completion_transition: Option<String>,
+    /// Ownership protocol used when the run was created. Version zero is a
+    /// pre-upgrade row whose agent may not know its immutable run id.
+    pub run_ownership_version: i64,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -678,6 +682,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           cwd TEXT,
           resumed_from_run_id TEXT,
           completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+          run_ownership_version INTEGER NOT NULL DEFAULT 0,
           started_at TEXT NOT NULL DEFAULT (datetime('now')),
           finished_at TEXT
         );
@@ -1280,6 +1285,18 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "revision_rounds",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "029_stage_run_ownership_version", |conn| {
+        // Existing rows intentionally retain version zero: their already
+        // running CLI/MCP processes cannot supply KANNA_STAGE_RUN_ID.
+        add_column(
+            conn,
+            "stage_run",
+            "run_ownership_version",
+            "INTEGER NOT NULL DEFAULT 0",
+        );
         Ok(())
     })?;
 

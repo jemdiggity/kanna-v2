@@ -2507,6 +2507,106 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
 }
 
 #[tokio::test]
+async fn completed_live_post_kills_main_process_owner_before_replacement_spawn() {
+    let repo_root = init_git_repo("completed-live-post-replacement-owner");
+    write_post_pipeline_fixtures(&repo_root);
+
+    let config = test_config("completed-live-post-replacement-owner");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some(repo_root.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    let input_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    .unwrap();
+    input_daemon.await.unwrap();
+
+    let finished = db
+        .finish_active_stage_run(
+            "task-1",
+            Some("run-main"),
+            "succeeded",
+            Some(r#"{"status":"success"}"#),
+            Some("post complete"),
+        )
+        .unwrap()
+        .unwrap();
+    let replacement = match prepare_stage_completion_for_api(
+        &db,
+        &config,
+        "task-1",
+        Some(&finished.kind),
+        finished.completion_transition.as_deref(),
+    )
+    .unwrap()
+    {
+        Some(PreparedStageTransition::Run(run)) => run,
+        _ => panic!("completed middle-stage post must prepare its successor"),
+    };
+    let post_run_id = db.latest_stage_run("task-1").unwrap().unwrap().id;
+    assert_ne!(post_run_id, "run-main");
+    assert_eq!(
+        replacement.expected_source.active_run_id.as_deref(),
+        Some(post_run_id.as_str()),
+        "CAS ownership must remain the post action row"
+    );
+
+    let fake_daemon =
+        spawn_fake_daemon_post_replacement(config.daemon_dir.clone(), "run-main").await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    crate::task_creator::spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *replacement,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        kanna_daemon::protocol::Command::Kill {
+            session_id,
+            expected_run_id: Some(run_id),
+        } if session_id == "task-1" && run_id == "run-main"
+    )));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        kanna_daemon::protocol::Command::Spawn { .. }
+            | kanna_daemon::protocol::Command::SpawnAgent { .. }
+    )));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
     let repo_root = init_git_repo("dispatch-post-dead-session");
     write_post_pipeline_fixtures(&repo_root);

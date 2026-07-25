@@ -828,6 +828,37 @@ fn adopted_legacy_unowned_session_downgrades_ownership_capability() {
 }
 
 #[test]
+fn ownershipless_repo_shell_does_not_downgrade_task_ownership_capability() {
+    let dir = temp_dir("repo-shell-ownership");
+    let daemon = DaemonHandle::start_in(&dir);
+    let mut conn = daemon.connect();
+    conn.send(&Command::Spawn {
+        session_id: "shell-repo-test".to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), "sleep 30".to_string()],
+        cwd: dir.to_string_lossy().into_owned(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+        terminal_prelude: None,
+    });
+    conn.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    conn.send(&Command::List);
+    match conn.recv_until(|event| matches!(event, Event::SessionList { .. })) {
+        Event::SessionList {
+            capabilities: Some(capabilities),
+            ..
+        } => assert!(
+            capabilities.immutable_run_ownership,
+            "an ownershipless repo shell must not disable task run ownership"
+        ),
+        other => panic!("expected SessionList capabilities, got {other:?}"),
+    }
+}
+
+#[test]
 fn spawn_agent_with_resume_session_id_uses_resume_spawn() {
     let dir = temp_dir("spawn-resume-id");
     let script = write_script(&dir, "resume-id-agent.sh", RESUME_ID_ASSERTING_AGENT);
