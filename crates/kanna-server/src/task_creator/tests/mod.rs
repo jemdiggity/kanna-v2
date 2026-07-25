@@ -9,9 +9,10 @@ use super::{
     build_stage_prompt, create_dormant_task_for_api_with_error, prepare_advance_stage_for_api,
     prepare_merge_agent_for_api, prepare_rerun_stage_for_api, prepare_revision_task_for_api,
     prepare_stage_completion_for_api, prepare_task_for_api, prepare_task_for_api_with_error,
-    read_default_agent_provider_setting, rerun_prepared_stage_for_api, resolve_agent_type,
-    resolve_initial_terminal_geometry, spawn_prepared_stage_run_for_api,
-    spawn_prepared_task_for_api_recording_stage_run, PrepareTaskError,
+    read_default_agent_provider_setting, reopen_task_for_api, reopen_task_for_api_with_test_hook,
+    rerun_prepared_stage_for_api, resolve_agent_type, resolve_initial_terminal_geometry,
+    spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api_recording_stage_run,
+    PrepareTaskError, ReopenTaskError,
 };
 use crate::config::Config;
 use crate::daemon_client::DaemonClient;

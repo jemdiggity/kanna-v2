@@ -2096,9 +2096,32 @@ impl ReopenTaskError {
     }
 }
 
+impl From<rusqlite::Error> for ReopenTaskError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::internal(format!("db error: {error}"))
+    }
+}
+
 pub(crate) fn reopen_task_for_api(
     db: &Db,
     task_or_branch_id: &str,
+) -> Result<String, ReopenTaskError> {
+    reopen_task_for_api_with_hook(db, task_or_branch_id, || Ok(()))
+}
+
+#[cfg(test)]
+pub(crate) fn reopen_task_for_api_with_test_hook(
+    db: &Db,
+    task_or_branch_id: &str,
+    after_reopen_update: impl FnOnce() -> Result<(), String>,
+) -> Result<String, ReopenTaskError> {
+    reopen_task_for_api_with_hook(db, task_or_branch_id, after_reopen_update)
+}
+
+fn reopen_task_for_api_with_hook(
+    db: &Db,
+    task_or_branch_id: &str,
+    after_reopen_update: impl FnOnce() -> Result<(), String>,
 ) -> Result<String, ReopenTaskError> {
     let task_id = db
         .resolve_pipeline_item_id(task_or_branch_id)
@@ -2114,29 +2137,31 @@ pub(crate) fn reopen_task_for_api(
         .ok_or_else(|| ReopenTaskError::internal(format!("repo not found for task: {task_id}")))?;
     let definitions = RepoDefinitions::resolve(&repo).map_err(ReopenTaskError::internal)?;
 
-    match db.reopen_pipeline_item(&task_id) {
-        Ok(()) => {}
-        Err(crate::db::ReopenPipelineItemError::OwnershipConflict) => {
-            return Err(ReopenTaskError::OwnershipConflict);
+    db.with_immediate_transaction(|db| {
+        let guarded_item = db
+            .get_pipeline_item(&task_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if guarded_item.closed_at.is_none() {
+            return Ok(task_id.clone());
         }
-        Err(crate::db::ReopenPipelineItemError::Database(error)) => {
-            return Err(ReopenTaskError::internal(format!("db error: {error}")));
+
+        match db.reopen_pipeline_item(&task_id) {
+            Ok(()) => {}
+            Err(crate::db::ReopenPipelineItemError::OwnershipConflict) => {
+                return Err(ReopenTaskError::OwnershipConflict);
+            }
+            Err(crate::db::ReopenPipelineItemError::Database(error)) => {
+                return Err(error.into());
+            }
         }
-    }
-    if let Err(error) = (|| {
+        after_reopen_update().map_err(ReopenTaskError::internal)?;
         db.release_task_ports(&task_id)
-            .map_err(|e| format!("db error: {e}"))?;
-        let port_env = claim_task_ports(db, &task_id, definitions.config())?;
-        persist_task_ports(db, &task_id, &port_env)
-    })() {
-        if let Err(compensation_error) = db.close_pipeline_item(&task_id) {
-            return Err(ReopenTaskError::internal(format!(
-                "{error}; failed to restore closed task after reopen: {compensation_error}"
-            )));
-        }
-        return Err(ReopenTaskError::internal(error));
-    }
-    Ok(task_id)
+            .map_err(ReopenTaskError::from)?;
+        let port_env = claim_task_ports(db, &task_id, definitions.config())
+            .map_err(ReopenTaskError::internal)?;
+        persist_task_ports(db, &task_id, &port_env).map_err(ReopenTaskError::internal)?;
+        Ok(task_id.clone())
+    })
 }
 
 fn create_new_task_worktree(

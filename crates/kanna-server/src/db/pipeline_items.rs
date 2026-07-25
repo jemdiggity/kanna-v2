@@ -623,22 +623,24 @@ impl Db {
     }
 
     pub fn close_pipeline_item(&self, id: &str) -> Result<(), rusqlite::Error> {
-        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        };
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item
-             SET closed_at = datetime('now'),
-                 updated_at = datetime('now')
-             WHERE id = ?",
-            [&pipeline_item_id],
-        )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        self.cancel_running_stage_runs(&pipeline_item_id)?;
-        self.release_task_ports(&pipeline_item_id)?;
-        Ok(())
+        self.with_immediate_transaction(|db| {
+            let Some(pipeline_item_id) = db.resolve_pipeline_item_id(id)? else {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            };
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item
+                 SET closed_at = datetime('now'),
+                     updated_at = datetime('now')
+                 WHERE id = ?",
+                [&pipeline_item_id],
+            )?;
+            if rows_affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            db.cancel_running_stage_runs(&pipeline_item_id)?;
+            db.release_task_ports(&pipeline_item_id)?;
+            Ok(())
+        })
     }
 
     pub fn reopen_pipeline_item(&self, id: &str) -> Result<(), ReopenPipelineItemError> {

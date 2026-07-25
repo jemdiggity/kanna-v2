@@ -1238,6 +1238,33 @@ impl Db {
         &self.conn
     }
 
+    pub(crate) fn with_immediate_transaction<T, E>(
+        &self,
+        operation: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<rusqlite::Error>,
+    {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(E::from)?;
+        match operation(self) {
+            Ok(value) => {
+                if let Err(error) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(E::from(error));
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.conn.execute_batch("ROLLBACK") {
+                    log::error!("failed to roll back immediate transaction: {rollback_error}");
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_with_flags(path, database_open_flags())?;
         configure_shared_database_connection(&conn)?;
