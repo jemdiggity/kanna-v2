@@ -134,6 +134,34 @@ Status key: ✅ landed.
     terminal streaming over `GET /v1/tasks/{id}/terminal` (WS:
     ready→output→exit), input. Parity: the same task observed over LAN and
     relay yields consistent state.
+12. ⏳ **Desktop remote terminal file links** — the desktop
+    `CloudTerminalView` linkifies file paths in a remote task's agent
+    terminal, verifies and fetches them through
+    `GET /v1/tasks/{id}/files/content` (relay tunnel) or the transfer
+    sidecar's `read_task_file` peer request (LAN), and previews the fetched
+    content. The **remaining gap is the transport leg only**: no harness can
+    yet serve the file from a genuine second desktop, because the desktop
+    WebDriver harness runs a single desktop instance and the Layer B harness
+    drives a mobile-equivalent client rather than the desktop webview. Closing
+    it needs the desktop-under-test to see a relay- or LAN-visible task owned
+    by a second stack (Layer B exposing its desktop to a WebDriver desktop, or
+    a two-desktop LAN pairing harness). Everything downstream of the fetch is
+    covered:
+    - `mock/terminal-file-links.test.ts` drives the real app: a remote
+      `file-link-activate` payload renders its `remoteContent` for a path that
+      exists in no local worktree, with no `read_text_file` invoke and no
+      Open-in-IDE action.
+    - `FilePreviewModal.test.ts` pins the same contract at component level
+      (remote snapshot rendered, local read never issued, Open-in-IDE hidden,
+      Open-in-IDE still present for local previews).
+    - `remoteTerminalFileLinks.test.ts` covers link detection, cmd+click
+      activation, in-flight read sharing, and retry after a missing file or a
+      failed transport.
+    - `desktopRelayTerminal.test.ts` / `desktopLanTerminal.test.ts` cover the
+      transport clients, the two-peer transfer runtime integration test
+      (`trusted_peer_read_task_file_fetches_from_owner_kanna_server`) covers
+      the LAN peer fetch, and the kanna-server task-file route auth tests
+      cover access (loopback desktop allowed, unauthenticated tunnel denied).
 
 ## 4. Test architecture (layers)
 

@@ -147,6 +147,57 @@ fn remote_task_advance_messages_use_expected_wire_names() {
 }
 
 #[test]
+fn remote_task_file_messages_use_expected_wire_names() {
+    let control_request = ControlRequest::ReadPeerTaskFile {
+        request_id: "req-read-control".into(),
+        target_peer_id: "peer-owner".into(),
+        task_id: "task-owner".into(),
+        path: "src/app.ts".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&control_request).unwrap(),
+        json!({
+            "type": "read_peer_task_file",
+            "request_id": "req-read-control",
+            "target_peer_id": "peer-owner",
+            "task_id": "task-owner",
+            "path": "src/app.ts",
+        })
+    );
+    assert_roundtrip(control_request);
+
+    assert_roundtrip(ControlResponse::ReadPeerTaskFile {
+        request_id: "req-read-control".into(),
+        path: "src/app.ts".into(),
+        content: "remote body".into(),
+    });
+
+    let peer_request = PeerRequest::ReadTaskFile {
+        request_id: "req-read-peer".into(),
+        requester_peer_id: "peer-secondary".into(),
+        task_id: "task-owner".into(),
+        path: "src/app.ts".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&peer_request).unwrap(),
+        json!({
+            "type": "read_task_file",
+            "request_id": "req-read-peer",
+            "requester_peer_id": "peer-secondary",
+            "task_id": "task-owner",
+            "path": "src/app.ts",
+        })
+    );
+    assert_roundtrip(peer_request);
+
+    assert_roundtrip(PeerResponse::ReadTaskFile {
+        request_id: "req-read-peer".into(),
+        path: "src/app.ts".into(),
+        content: "remote body".into(),
+    });
+}
+
+#[test]
 fn transfer_artifact_control_messages_roundtrip() {
     assert_roundtrip(ControlRequest::StageTransferArtifact {
         request_id: "req-stage".into(),

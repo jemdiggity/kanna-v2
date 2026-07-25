@@ -26,12 +26,19 @@ const props = withDefaults(
   defineProps<{
     filePath: string;
     worktreePath: string;
+    /**
+     * Point-in-time file content fetched from another machine. When set, the
+     * modal renders this instead of reading the local worktree, and local-only
+     * actions (open in IDE) are hidden.
+     */
+    remoteContent?: string | null;
     ideCommand?: string;
     maximized?: boolean;
     initialLine?: number;
     initialMarkdownMode?: MarkdownPreviewMode;
   }>(),
   {
+    remoteContent: null,
     initialMarkdownMode: DEFAULT_MARKDOWN_PREVIEW_MODE,
   },
 );
@@ -74,7 +81,9 @@ registerContextShortcuts("file", [
   ...(props.filePath.toLowerCase().endsWith(".md")
     ? [{ label: t('filePreview.shortcutToggleMarkdown'), display: "m", groupKey: "shortcuts.groupViews" }]
     : []),
-  { label: t('filePreview.shortcutOpenIDE'), display: "⌘O", groupKey: "shortcuts.groupActions" },
+  ...(props.remoteContent === null
+    ? [{ label: t('filePreview.shortcutOpenIDE'), display: "⌘O", groupKey: "shortcuts.groupActions" }]
+    : []),
   { label: t('filePreview.shortcutClose'), display: "q", groupKey: "shortcuts.groupActions" },
 ]);
 const highlighted = ref("");
@@ -173,12 +182,15 @@ watch([renderMarkdown, content, effectiveCodeTheme], async ([shouldRender, raw])
   renderedMarkdown.value = parser.render(raw);
 });
 
+const isRemoteFile = computed(() => props.remoteContent !== null);
+
 async function loadFile() {
   loading.value = true;
   error.value = null;
   try {
-    const fullPath = `${props.worktreePath}/${props.filePath}`;
-    const raw = await invoke<string>("read_text_file", { path: fullPath });
+    const raw = props.remoteContent !== null
+      ? props.remoteContent
+      : await invoke<string>("read_text_file", { path: `${props.worktreePath}/${props.filePath}` });
 
     const hl = await getHighlighter();
     const lang = getSyntaxLanguageForPath(props.filePath);
@@ -256,6 +268,10 @@ watch(() => props.filePath, () => {
   closeSearch();
 });
 
+watch(() => props.remoteContent, () => {
+  loadFile();
+});
+
 watch(highlighted, () => {
   nextTick(() => {
     contentRef.value
@@ -292,6 +308,7 @@ watch([loading, highlighted], async ([isLoading]) => {
 });
 
 function openInIDE() {
+  if (isRemoteFile.value) return;
   const cmd = props.ideCommand || "code";
   const fullPath = `${props.worktreePath}/${props.filePath}`;
   invoke("run_script", {
@@ -378,7 +395,7 @@ onMounted(() => {
           <span v-if="isMarkdownFile" class="mode-badge" @click="toggleMarkdownMode" title="m">
             {{ renderMarkdown ? $t('filePreview.rendered') : $t('filePreview.raw') }}
           </span>
-          <button class="btn-open" @click="openInIDE" :title="$t('filePreview.openInIDETooltip')">{{ $t('filePreview.openInIDE') }}</button>
+          <button v-if="!isRemoteFile" class="btn-open" @click="openInIDE" :title="$t('filePreview.openInIDETooltip')">{{ $t('filePreview.openInIDE') }}</button>
         </div>
       </div>
       <div v-if="loading" class="preview-status">{{ $t('common.loading') }}</div>

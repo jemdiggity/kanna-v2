@@ -180,6 +180,22 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             Ok(()) => ControlResponse::AdvancePeerTaskStage { request_id },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::ReadPeerTaskFile {
+            request_id,
+            target_peer_id,
+            task_id,
+            path,
+        } => match runtime
+            .read_peer_task_file(&target_peer_id, &task_id, &path)
+            .await
+        {
+            Ok((path, content)) => ControlResponse::ReadPeerTaskFile {
+                request_id,
+                path,
+                content,
+            },
+            Err(error) => control_error(request_id, error),
+        },
         ControlRequest::UnobservePeerSession {
             request_id,
             target_peer_id,

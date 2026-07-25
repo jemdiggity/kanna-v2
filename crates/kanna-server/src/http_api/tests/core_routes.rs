@@ -1961,7 +1961,6 @@ impl TaskFileRouteFixture {
         )
         .await
     }
-
     async fn post_resolve(
         &self,
         task_id: &str,
@@ -2008,6 +2007,42 @@ impl TaskFileRouteFixture {
             "POST",
             &format!("/v1/tasks/{task_id}/files/resolve-mentions"),
             body,
+        )
+        .await
+    }
+
+    async fn get_as_desktop_loopback(
+        &self,
+        task_id: &str,
+        encoded_path: &str,
+    ) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/tasks/{task_id}/files/content?path={encoded_path}"
+                ))
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    52000,
+                ))))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn get_through_unauthenticated_tunnel(
+        &self,
+        task_id: &str,
+        encoded_path: &str,
+    ) -> crate::http_api::HttpInvokeResponse {
+        crate::http_api::dispatch_http_invoke(
+            Arc::clone(&self.state),
+            "GET",
+            &format!("/v1/tasks/{task_id}/files/content?path={encoded_path}"),
+            serde_json::Value::Null,
         )
         .await
     }
@@ -2202,6 +2237,38 @@ async fn task_file_route_denies_ordinary_http_requests_before_reading_the_path()
     assert!(task_file_response_text(response)
         .await
         .contains("authenticated relay"));
+}
+
+#[tokio::test]
+async fn task_file_route_allows_desktop_loopback_requests() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("docs/spec.md", b"# Spec\n");
+
+    let response = fixture
+        .get_as_desktop_loopback("task-file", "docs%2Fspec.md")
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let file: crate::task_files::TaskFileContent = from_slice(&body).unwrap();
+    assert_eq!(file.path, "docs/spec.md");
+    assert_eq!(file.content, "# Spec\n");
+}
+
+#[tokio::test]
+async fn task_file_route_denies_unauthenticated_tunneled_dispatch() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("docs/spec.md", b"# Spec\n");
+
+    // Unauthenticated relay/KSP dispatches synthesize a loopback peer; the
+    // tunnel marker must keep them from passing as desktop-local requests.
+    let response = fixture
+        .get_through_unauthenticated_tunnel("task-file", "docs%2Fspec.md")
+        .await;
+
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED.as_u16());
 }
 
 #[tokio::test]

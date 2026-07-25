@@ -67,6 +67,7 @@ interface UseAppLifecycleOptions {
     initialLine: number | undefined,
     fromPicker: boolean,
     fromTree?: boolean,
+    remoteContent?: string,
   ) => void;
   openImageUrlPreview: (imageUrl: string) => void;
   preferences: AppPreferences;
@@ -203,8 +204,12 @@ export function useAppLifecycle({
   }
 
   function handleFileLinkActivate(event: Event) {
-    const detail = (event as CustomEvent).detail as { path: string; line?: number };
-    openFilePreview(detail.path, detail.line, false);
+    const detail = (event as CustomEvent).detail as {
+      path: string;
+      line?: number;
+      remoteContent?: string;
+    };
+    openFilePreview(detail.path, detail.line, false, false, detail.remoteContent);
   }
 
   function handleImageLinkActivate(event: Event) {

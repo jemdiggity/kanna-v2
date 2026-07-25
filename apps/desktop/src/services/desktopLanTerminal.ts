@@ -103,6 +103,20 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
         taskId: options.taskId,
       });
     },
+    async readTaskFile(options) {
+      const response = await invoke("read_transfer_peer_task_file", {
+        peerId: options.desktopId,
+        taskId: options.taskId,
+        path: options.path,
+      });
+      const record = asRecord(response);
+      const path = record ? getStringField(record, "path") : null;
+      const content = record ? getStringField(record, "content") : null;
+      if (path === null || content === null) {
+        throw new Error("LAN task file response was malformed.");
+      }
+      return { path, content };
+    },
   };
 }
 

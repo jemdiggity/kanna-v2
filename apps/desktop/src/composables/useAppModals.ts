@@ -76,6 +76,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   const showFilePreviewModal = ref(false);
   const previewFilePath = ref("");
   const previewInitialLine = ref<number | undefined>(undefined);
+  const previewRemoteContent = ref<string | null>(null);
   const previewHidden = ref(false);
   const previewFromPicker = ref(false);
   const previewFromTree = ref(false);
@@ -343,11 +344,15 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     filePath: string,
     initialLine: number | undefined,
     fromPicker: boolean,
-    fromTree = false
+    fromTree = false,
+    remoteContent?: string
   ) {
     previewFilePath.value = filePath;
     previewInitialLine.value = initialLine;
-    rememberCurrentPreview(filePath, initialLine);
+    previewRemoteContent.value = remoteContent ?? null;
+    // Remote content is a point-in-time snapshot from another machine; it
+    // cannot be re-loaded later, so it is excluded from preview recall.
+    if (remoteContent === undefined) rememberCurrentPreview(filePath, initialLine);
     previewFromPicker.value = fromPicker;
     previewFromTree.value = fromTree;
     previewHidden.value = false;
@@ -412,6 +417,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     showFilePreviewModal,
     previewFilePath,
     previewInitialLine,
+    previewRemoteContent,
     previewHidden,
     previewFromPicker,
     previewFromTree,

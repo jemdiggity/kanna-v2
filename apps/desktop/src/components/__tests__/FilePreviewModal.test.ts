@@ -287,6 +287,119 @@ describe("FilePreviewModal", () => {
     wrapper.unmount();
   });
 
+  it("renders remote content without reading the local filesystem", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+    codeToHtmlMock.mockImplementation(
+      (code: string) => `<pre><code>${code}</code></pre>`,
+    );
+
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "src/app.ts",
+        // The owning desktop's worktree path is meaningless on this machine;
+        // the remote snapshot must be rendered without touching it.
+        worktreePath: "/repo",
+        remoteContent: "const fromRemoteDesktop = 42;\n",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.get(".preview-content").text()).toContain(
+          "const fromRemoteDesktop = 42;",
+        );
+      });
+
+      expect(invokeMock).not.toHaveBeenCalled();
+      // Open-in-IDE would shell out against a path that does not exist here.
+      expect(wrapper.find(".btn-open").exists()).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("reloads the preview when newer remote content arrives", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+    codeToHtmlMock.mockImplementation(
+      (code: string) => `<pre><code>${code}</code></pre>`,
+    );
+
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "src/app.ts",
+        worktreePath: "/repo",
+        remoteContent: "first remote body\n",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.get(".preview-content").text()).toContain("first remote body");
+      });
+
+      await wrapper.setProps({ remoteContent: "second remote body\n" });
+
+      await vi.waitFor(() => {
+        expect(wrapper.get(".preview-content").text()).toContain("second remote body");
+      });
+      expect(invokeMock).not.toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("keeps the Open in IDE action for local previews", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "read_text_file") {
+        return "const answer = 42;\n";
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+    codeToHtmlMock.mockImplementation(
+      (code: string) => `<pre><code>${code}</code></pre>`,
+    );
+
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "src/app.ts",
+        worktreePath: "/repo",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.get(".preview-content").text()).toContain("const answer = 42;");
+      });
+
+      expect(wrapper.find(".btn-open").exists()).toBe(true);
+      expect(invokeMock).toHaveBeenCalledWith("read_text_file", { path: "/repo/src/app.ts" });
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it("dismiss closes search before closing the modal", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "read_text_file") {

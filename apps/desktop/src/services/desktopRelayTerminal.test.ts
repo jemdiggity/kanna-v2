@@ -308,6 +308,84 @@ describe("createDesktopRelayTerminalClient", () => {
     await expect(closePromise).resolves.toBeUndefined();
     await expect(advancePromise).resolves.toBeUndefined();
   });
+
+  it("reads a remote task file through the relay tunnel", async () => {
+    const socket = new FakeSocket();
+    const client = createDesktopRelayTerminalClient({
+      createSocket: () => socket,
+      getIdToken: vi.fn(async () => "id-token"),
+      relayUrl: "ws://relay.test",
+    });
+
+    const readPromise = client.readTaskFile({
+      desktopId: "desktop-owner",
+      taskId: "task-1",
+      path: "src dir/app.ts",
+    });
+
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await Promise.resolve();
+
+    const sent = socket.sent.map((entry) => JSON.parse(entry));
+    const readRequest = sent.find(
+      (entry) => entry.path === "/v1/tasks/task-1/files/content?path=src%20dir%2Fapp.ts",
+    );
+    expect(readRequest).toMatchObject({ type: "request", method: "GET", body: null });
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: readRequest.id,
+        status: 200,
+        body: { path: "src dir/app.ts", content: "remote body" },
+      }),
+    });
+
+    await expect(readPromise).resolves.toEqual({ path: "src dir/app.ts", content: "remote body" });
+  });
+
+  it("rejects a remote task file read that fails or returns a malformed body", async () => {
+    const socket = new FakeSocket();
+    const client = createDesktopRelayTerminalClient({
+      createSocket: () => socket,
+      getIdToken: vi.fn(async () => "id-token"),
+      relayUrl: "ws://relay.test",
+    });
+
+    const missingPromise = client.readTaskFile({
+      desktopId: "desktop-owner",
+      taskId: "task-1",
+      path: "missing.ts",
+    });
+    const malformedPromise = client.readTaskFile({
+      desktopId: "desktop-owner",
+      taskId: "task-1",
+      path: "src/app.ts",
+    });
+
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await Promise.resolve();
+
+    const sent = socket.sent.map((entry) => JSON.parse(entry));
+    const missingRequest = sent.find(
+      (entry) => entry.path === "/v1/tasks/task-1/files/content?path=missing.ts",
+    );
+    const malformedRequest = sent.find(
+      (entry) => entry.path === "/v1/tasks/task-1/files/content?path=src%2Fapp.ts",
+    );
+
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "response", id: missingRequest.id, status: 404, body: { error: "file not found" } }),
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "response", id: malformedRequest.id, status: 200, body: { path: "src/app.ts" } }),
+    });
+
+    await expect(missingPromise).rejects.toThrow("Remote task file read failed with HTTP 404.");
+    await expect(malformedPromise).rejects.toThrow("Remote task file response was malformed.");
+  });
 });
 
 describe("resolveDesktopCloudTransportUrlFromEnv", () => {
