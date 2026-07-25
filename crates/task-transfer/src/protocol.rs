@@ -109,6 +109,10 @@ pub enum ControlRequest {
         source_task_id: String,
         destination_local_task_id: String,
     },
+    MarkImportCommitApplied {
+        request_id: String,
+        transfer_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +200,10 @@ pub enum ControlResponse {
         transfer_id: String,
     },
     AcknowledgeImportCommitted {
+        request_id: String,
+        transfer_id: String,
+    },
+    MarkImportCommitApplied {
         request_id: String,
         transfer_id: String,
     },

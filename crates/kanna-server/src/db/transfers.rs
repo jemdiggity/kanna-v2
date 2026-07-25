@@ -130,13 +130,17 @@ impl Db {
              SET status = 'completed', local_task_id = ?, completed_at = datetime('now'), error = NULL
              WHERE id = ?
                AND (
-                 (direction = 'outgoing' AND status IN ('pending', 'streaming'))
+                 (direction = 'outgoing'
+                   AND (
+                     status IN ('pending', 'streaming')
+                     OR (status = 'completed' AND local_task_id = ?)
+                   ))
                  OR
                  (direction = 'incoming'
                    AND local_task_id = ?
                    AND status IN ('awaiting_acknowledgment', 'completed'))
                )",
-            (local_task_id, transfer_id, local_task_id),
+            (local_task_id, transfer_id, local_task_id, local_task_id),
         )?;
         Ok(rows_affected == 1)
     }
@@ -212,7 +216,7 @@ impl Db {
             "SELECT id, status, source_peer_id, source_task_id, local_task_id, payload_json
              FROM task_transfer
              WHERE direction = 'incoming'
-               AND status IN ('pending', 'importing', 'awaiting_acknowledgment')
+               AND status IN ('pending', 'streaming', 'importing', 'awaiting_acknowledgment')
              ORDER BY started_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -237,7 +241,7 @@ impl Db {
              SET status = CASE WHEN status = 'pending' THEN 'streaming' ELSE status END,
                  error = NULL
              WHERE id = ? AND direction = 'incoming'
-               AND status IN ('pending', 'importing', 'awaiting_acknowledgment')",
+               AND status IN ('pending', 'streaming', 'importing', 'awaiting_acknowledgment')",
             [transfer_id],
         )?;
         Ok(rows_affected == 1)

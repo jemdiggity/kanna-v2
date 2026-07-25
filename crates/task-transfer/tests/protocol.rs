@@ -26,6 +26,18 @@ fn control_messages_roundtrip_with_request_ids() {
 }
 
 #[test]
+fn applied_import_commit_control_messages_roundtrip() {
+    assert_roundtrip(ControlRequest::MarkImportCommitApplied {
+        request_id: "req-applied".into(),
+        transfer_id: "transfer-1".into(),
+    });
+    assert_roundtrip(ControlResponse::MarkImportCommitApplied {
+        request_id: "req-applied".into(),
+        transfer_id: "transfer-1".into(),
+    });
+}
+
+#[test]
 fn incoming_transfer_event_roundtrips() {
     let event = SidecarEvent::IncomingTransferRequest {
         transfer_id: "transfer-1".into(),

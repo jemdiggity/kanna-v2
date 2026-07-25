@@ -8,8 +8,10 @@ use super::events::{
     OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent, PairingRequestedEvent,
     RuntimeError, RuntimeEvent,
 };
+use super::replay_store::unix_ms;
 use super::state::{
-    IncomingTransferReservation, ListenerContext, PairingDecision, PendingPairingRequest,
+    ImportCommitReceipt, IncomingTransferReservation, ListenerContext, PairingDecision,
+    PendingPairingRequest,
 };
 use super::utils::{
     ensure_peer_is_trusted_for, extract_request_id, load_or_create_identity,
@@ -461,19 +463,32 @@ async fn handle_connection(
             sealed_payload,
         }) => {
             match async {
-                let expected_target_peer_id = {
+                // Keep receipt creation serialized for the full validation and durable write.
+                // Otherwise concurrent acknowledgments could both observe no receipt and race
+                // incompatible bindings onto disk.
+                let mut receipts = context.import_commit_receipts.lock().await;
+                let existing_receipt = receipts.get(&transfer_id).cloned();
+                let reservation = if existing_receipt.is_none() {
                     let mut transfers = context.outgoing_transfers.lock().await;
                     prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl);
-                    transfers
-                        .get(&transfer_id)
-                        .map(|reservation| reservation.target_peer_id.clone())
-                }
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(format!(
-                        "missing target peer for import acknowledgment {}",
-                        transfer_id
-                    ))
-                })?;
+                    transfers.get(&transfer_id).cloned()
+                } else {
+                    None
+                };
+                let expected_target_peer_id = existing_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.target_peer_id.clone())
+                    .or_else(|| {
+                        reservation
+                            .as_ref()
+                            .map(|reservation| reservation.target_peer_id.clone())
+                    })
+                    .ok_or_else(|| {
+                        RuntimeError::Protocol(format!(
+                            "missing target peer for import acknowledgment {}",
+                            transfer_id
+                        ))
+                    })?;
 
                 if requester_peer_id != expected_target_peer_id {
                     return Err(RuntimeError::Protocol(format!(
@@ -524,6 +539,56 @@ async fn handle_connection(
                     })?
                     .to_string();
 
+                if let Some(receipt) = existing_receipt {
+                    if receipt.source_task_id != source_task_id
+                        || receipt.destination_local_task_id != destination_local_task_id
+                    {
+                        return Err(RuntimeError::Protocol(format!(
+                            "mismatched duplicate import acknowledgment for transfer {}",
+                            transfer_id
+                        )));
+                    }
+                    if !receipt.applied {
+                        context
+                            .incoming_sender
+                            .send(RuntimeEvent::OutgoingTransferCommitted(
+                                OutgoingTransferCommittedEvent {
+                                    transfer_id: transfer_id.clone(),
+                                    source_task_id,
+                                    destination_local_task_id,
+                                },
+                            ))
+                            .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                    }
+                    return Ok::<PeerResponse, RuntimeError>(PeerResponse::ImportCommitted {
+                        request_id: request_id.clone(),
+                        transfer_id,
+                    });
+                }
+
+                let reservation = reservation.ok_or_else(|| {
+                    RuntimeError::Protocol(format!(
+                        "missing target peer for import acknowledgment {}",
+                        transfer_id
+                    ))
+                })?;
+                if reservation.source_task_id != source_task_id {
+                    return Err(RuntimeError::Protocol(format!(
+                        "unexpected source task {} for import acknowledgment {}",
+                        source_task_id, transfer_id
+                    )));
+                }
+                let receipt = ImportCommitReceipt {
+                    target_peer_id: requester_peer_id,
+                    source_task_id: source_task_id.clone(),
+                    destination_local_task_id: destination_local_task_id.clone(),
+                    created_at_unix_ms: unix_ms(),
+                    applied: false,
+                };
+                context.replay_store.save_receipt(&transfer_id, &receipt)?;
+                receipts.insert(transfer_id.clone(), receipt);
+                context.outgoing_transfers.lock().await.remove(&transfer_id);
+                context.replay_store.remove_reservation(&transfer_id);
                 context
                     .incoming_sender
                     .send(RuntimeEvent::OutgoingTransferCommitted(
@@ -534,7 +599,6 @@ async fn handle_connection(
                         },
                     ))
                     .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
-                context.outgoing_transfers.lock().await.remove(&transfer_id);
                 Ok::<PeerResponse, RuntimeError>(PeerResponse::ImportCommitted {
                     request_id: request_id.clone(),
                     transfer_id,

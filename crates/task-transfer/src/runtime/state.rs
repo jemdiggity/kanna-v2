@@ -1,6 +1,7 @@
 use super::config::RuntimeConfig;
 use super::discovery::PeerDiscovery;
 use super::events::{FinalizedOutgoingTransfer, RuntimeError, RuntimeEvent};
+use super::replay_store::TransferReplayStore;
 use crate::crypto::TransferIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,7 +23,17 @@ pub(super) struct IncomingTransferReservation {
 #[derive(Debug, Clone)]
 pub(super) struct OutgoingTransferReservation {
     pub(super) target_peer_id: String,
+    pub(super) source_task_id: String,
     pub(super) created_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImportCommitReceipt {
+    pub(super) target_peer_id: String,
+    pub(super) source_task_id: String,
+    pub(super) destination_local_task_id: String,
+    pub(super) created_at_unix_ms: u64,
+    pub(super) applied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +73,8 @@ pub(super) struct ListenerContext {
     pub(super) peer_request_timeout: Duration,
     pub(super) pending_pairing_requests: PendingPairingRequests,
     pub(super) outgoing_transfers: Arc<Mutex<HashMap<String, OutgoingTransferReservation>>>,
+    pub(super) import_commit_receipts: Arc<Mutex<HashMap<String, ImportCommitReceipt>>>,
+    pub(super) replay_store: Arc<TransferReplayStore>,
     pub(super) pending_outgoing_transfer_finalizations: PendingOutgoingTransferFinalizations,
     pub(super) incoming_reservations: Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
     pub(super) transfer_artifacts:
@@ -80,6 +93,8 @@ pub struct TransferRuntime {
     pub(super) identity: TransferIdentity,
     pub(super) pending_pairing_requests: PendingPairingRequests,
     pub(super) outgoing_transfers: Arc<Mutex<HashMap<String, OutgoingTransferReservation>>>,
+    pub(super) import_commit_receipts: Arc<Mutex<HashMap<String, ImportCommitReceipt>>>,
+    pub(super) replay_store: Arc<TransferReplayStore>,
     pub(super) pending_outgoing_transfer_finalizations: PendingOutgoingTransferFinalizations,
     pub(super) incoming_reservations: Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
     pub(super) transfer_artifacts:

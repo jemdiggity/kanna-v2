@@ -442,6 +442,27 @@ impl TransferSidecarClient {
         }))
     }
 
+    pub async fn mark_outgoing_transfer_commit_applied(
+        &mut self,
+        transfer_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("commit-applied");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "mark_import_commit_applied",
+                    "request_id": request_id,
+                    "transfer_id": transfer_id,
+                }),
+                &request_id,
+            )
+            .await?;
+
+        Ok(json!({
+            "transferId": required_string(&response, &["transfer_id", "transferId"])?,
+        }))
+    }
+
     pub async fn finalize_outgoing_transfer(
         &mut self,
         transfer_id: String,

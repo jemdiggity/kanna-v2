@@ -180,6 +180,7 @@ export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
 }
 
 export interface CreateDesktopTaskRequest {
+  requestedTaskId?: string;
   repoId: string;
   prompt: string;
   displayName?: string | null;
@@ -216,9 +217,14 @@ export async function createDesktopTask(
   request: CreateDesktopTaskRequest,
 ): Promise<CreateDesktopTaskResponse> {
   if (clientHandlersForTests?.createTask) return await clientHandlersForTests.createTask(request);
-  return await requestJson<CreateDesktopTaskResponse>("/v1/tasks", {
-    method: "POST",
-    body: request,
+  const { requestedTaskId, ...body } = request;
+  const path = requestedTaskId
+    ? `/v1/tasks/${encodeURIComponent(requestedTaskId)}`
+    : "/v1/tasks";
+  return await requestJson<CreateDesktopTaskResponse>(path, {
+    method: requestedTaskId ? "PUT" : "POST",
+    body,
+    retryMs: requestedTaskId ? 15_000 : undefined,
   });
 }
 

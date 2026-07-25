@@ -3,6 +3,7 @@ use super::daemon::stream_peer_session;
 use super::discovery::{MdnsDiscovery, PeerDiscovery};
 use super::events::{RuntimeError, RuntimeEvent};
 use super::listener::run_listener;
+use super::replay_store::TransferReplayStore;
 use super::state::{ListenerContext, TransferRuntime};
 use super::utils::{
     load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
@@ -62,7 +63,31 @@ impl TransferRuntime {
         };
         let (incoming_sender, incoming_receiver) = mpsc::unbounded_channel();
         let pending_pairing_requests = Arc::new(Mutex::new(HashMap::new()));
-        let outgoing_transfers = Arc::new(Mutex::new(HashMap::new()));
+        let replay_store = Arc::new(TransferReplayStore::new(
+            &config.registry_dir,
+            &config.peer_id,
+            config.pending_transfer_ttl,
+        ));
+        let mut loaded_outgoing_transfers = replay_store.load_outgoing_reservations()?;
+        let loaded_receipts = replay_store.load_receipts()?;
+        for (transfer_id, receipt) in &loaded_receipts {
+            if loaded_outgoing_transfers.remove(transfer_id).is_some() {
+                replay_store.remove_reservation(transfer_id);
+            }
+            if !receipt.applied {
+                incoming_sender
+                    .send(RuntimeEvent::OutgoingTransferCommitted(
+                        super::events::OutgoingTransferCommittedEvent {
+                            transfer_id: transfer_id.clone(),
+                            source_task_id: receipt.source_task_id.clone(),
+                            destination_local_task_id: receipt.destination_local_task_id.clone(),
+                        },
+                    ))
+                    .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+            }
+        }
+        let outgoing_transfers = Arc::new(Mutex::new(loaded_outgoing_transfers));
+        let import_commit_receipts = Arc::new(Mutex::new(loaded_receipts));
         let pending_outgoing_transfer_finalizations = Arc::new(Mutex::new(HashMap::new()));
         let incoming_reservations = Arc::new(Mutex::new(HashMap::new()));
         let transfer_artifacts = Arc::new(Mutex::new(HashMap::new()));
@@ -79,6 +104,8 @@ impl TransferRuntime {
             peer_request_timeout: config.peer_request_timeout,
             pending_pairing_requests: Arc::clone(&pending_pairing_requests),
             outgoing_transfers: Arc::clone(&outgoing_transfers),
+            import_commit_receipts: Arc::clone(&import_commit_receipts),
+            replay_store: Arc::clone(&replay_store),
             pending_outgoing_transfer_finalizations: Arc::clone(
                 &pending_outgoing_transfer_finalizations,
             ),
@@ -99,6 +126,8 @@ impl TransferRuntime {
             identity,
             pending_pairing_requests,
             outgoing_transfers,
+            import_commit_receipts,
+            replay_store,
             pending_outgoing_transfer_finalizations,
             incoming_reservations,
             transfer_artifacts,

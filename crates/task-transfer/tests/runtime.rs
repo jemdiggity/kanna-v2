@@ -17,6 +17,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peers_become_trusted_after_explicit_pairing() {
     let temp = tempfile::tempdir().unwrap();
@@ -1250,6 +1252,200 @@ async fn destination_can_acknowledge_import_commit_back_to_source() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_reloads_outgoing_reservation_after_sidecar_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let primary = TransferRuntime::spawn(primary_config.clone())
+        .await
+        .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    drop(primary);
+    let primary = TransferRuntime::spawn(primary_config).await.unwrap();
+
+    primary
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let incoming = next_incoming_transfer_request(&secondary).await;
+    assert_eq!(incoming.transfer_id, preflight.transfer_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unapplied_import_commit_receipt_replays_after_source_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let primary = TransferRuntime::spawn(primary_config.clone())
+        .await
+        .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+
+    secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap();
+    drop(primary);
+    let primary = TransferRuntime::spawn(primary_config).await.unwrap();
+
+    let replay = tokio::time::timeout(
+        Duration::from_secs(1),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect("unapplied receipt was not replayed after restart");
+    assert_eq!(replay.transfer_id, preflight.transfer_id);
+    assert_eq!(replay.source_task_id, "task-source");
+    assert_eq!(replay.destination_local_task_id, "task-dest");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_import_commit_response_accepts_identical_retry_and_rejects_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+
+    send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "task-dest",
+        false,
+    )
+    .await;
+    let first = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(first.transfer_id, preflight.transfer_id);
+
+    let retry = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "task-dest",
+        true,
+    )
+    .await
+    .expect("identical retry response");
+    assert!(matches!(retry, PeerResponse::ImportCommitted { .. }));
+
+    let mismatch = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "task-other",
+        true,
+    )
+    .await
+    .expect("mismatched retry response");
+    assert!(matches!(mismatch, PeerResponse::Error { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applied_receipt_is_an_idempotent_tombstone_without_event_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap();
+    let _ = next_outgoing_transfer_committed(&primary).await;
+    primary
+        .mark_import_commit_applied(&preflight.transfer_id)
+        .await
+        .unwrap();
+
+    let retry = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "task-dest",
+        true,
+    )
+    .await
+    .expect("applied duplicate response");
+    assert!(matches!(retry, PeerResponse::ImportCommitted { .. }));
+    tokio::time::timeout(Duration::from_millis(100), primary.next_event())
+        .await
+        .expect_err("applied duplicate emitted another event");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn destination_can_finalize_outgoing_transfer_after_approval() {
     let temp = tempfile::tempdir().unwrap();
 
@@ -1940,6 +2136,66 @@ async fn next_outgoing_transfer_committed(
             RuntimeEvent::TerminalEvent { .. } => {}
         }
     }
+}
+
+async fn send_raw_import_committed(
+    registry_root: &Path,
+    requester: &TransferRuntime,
+    target_peer_id: &str,
+    transfer_id: &str,
+    source_task_id: &str,
+    destination_local_task_id: &str,
+    read_response: bool,
+) -> Option<PeerResponse> {
+    let target = requester
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == target_peer_id)
+        .expect("target peer");
+    let identity_path = registry_root
+        .join("transfer-identities")
+        .join(format!("{}.json", URL_SAFE_NO_PAD.encode("peer-secondary")));
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(identity_path).unwrap()).unwrap();
+    let requester_identity = TransferIdentity::from_secret_string(
+        stored["secret_key"].as_str().expect("stored secret key"),
+    )
+    .unwrap();
+    let target_public_key = parse_public_key(&target.public_key).unwrap();
+    let sealed_payload = seal_json(
+        &requester_identity,
+        &target_public_key,
+        &json!({
+            "source_task_id": source_task_id,
+            "destination_local_task_id": destination_local_task_id,
+        }),
+    )
+    .unwrap();
+    let request = PeerRequest::ImportCommitted {
+        request_id: format!("raw-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)),
+        transfer_id: transfer_id.to_owned(),
+        requester_peer_id: "peer-secondary".into(),
+        sealed_payload,
+    };
+    let mut stream = TcpStream::connect(&target.endpoint).await.unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    if !read_response {
+        drop(stream);
+        return None;
+    }
+
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .await
+        .unwrap();
+    Some(serde_json::from_str(response.trim()).unwrap())
 }
 
 async fn consume_pairing_completed(runtime: &TransferRuntime) {

@@ -138,6 +138,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     transferId: args.transferId ?? "mock-transfer-1",
   }),
   acknowledge_incoming_transfer_commit: () => ({ ok: true }),
+  mark_outgoing_transfer_commit_applied: () => ({ ok: true }),
   file_exists: () => true,
   read_text_file: () => "",
   read_image_file_data_url: () => "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",

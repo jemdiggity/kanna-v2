@@ -6,6 +6,7 @@ mod lifecycle;
 mod listener;
 mod pairing;
 mod peer;
+mod replay_store;
 mod state;
 mod transfers;
 mod utils;

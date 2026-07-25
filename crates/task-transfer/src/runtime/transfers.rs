@@ -54,13 +54,14 @@ impl TransferRuntime {
 
                 let mut transfers = self.outgoing_transfers.lock().await;
                 prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl);
-                transfers.insert(
-                    transfer_id.clone(),
-                    OutgoingTransferReservation {
-                        target_peer_id: target_peer_id.to_owned(),
-                        created_at: Instant::now(),
-                    },
-                );
+                let reservation = OutgoingTransferReservation {
+                    target_peer_id: target_peer_id.to_owned(),
+                    source_task_id: source_task_id.to_owned(),
+                    created_at: Instant::now(),
+                };
+                self.replay_store
+                    .save_reservation(&transfer_id, &reservation)?;
+                transfers.insert(transfer_id.clone(), reservation);
 
                 Ok(PreflightResult {
                     transfer_id,
@@ -542,5 +543,20 @@ impl TransferRuntime {
                 message,
             } => Err(RuntimeError::Protocol(message)),
         }
+    }
+
+    pub async fn mark_import_commit_applied(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        let mut receipts = self.import_commit_receipts.lock().await;
+        let receipt = receipts.get_mut(transfer_id).ok_or_else(|| {
+            RuntimeError::Protocol(format!("missing import commit receipt {}", transfer_id))
+        })?;
+        if receipt.applied {
+            return Ok(());
+        }
+        let mut applied = receipt.clone();
+        applied.applied = true;
+        self.replay_store.save_receipt(transfer_id, &applied)?;
+        *receipt = applied;
+        Ok(())
     }
 }

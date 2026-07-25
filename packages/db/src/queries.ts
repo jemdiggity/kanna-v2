@@ -622,11 +622,15 @@ export async function markTaskTransferCompleted(
      SET status = 'completed', local_task_id = ?, completed_at = datetime('now'), error = NULL
      WHERE id = ?
        AND (
-         (direction = 'outgoing' AND status IN ('pending', 'streaming'))
+         (direction = 'outgoing'
+           AND (
+             status IN ('pending', 'streaming')
+             OR (status = 'completed' AND local_task_id = ?)
+           ))
          OR
          (direction = 'incoming' AND local_task_id = ? AND status IN ('awaiting_acknowledgment', 'completed'))
        )`,
-    [localTaskId, transferId, localTaskId],
+    [localTaskId, transferId, localTaskId, localTaskId],
   );
 }
 

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeDesktopTask,
+  createDesktopTask,
   createDesktopBackup,
   fetchDesktopRepoAgentDefinition,
   fetchDesktopRepoAgentProviders,
@@ -77,6 +78,48 @@ describe("desktopServerClient", () => {
         method: "GET",
         headers: undefined,
         body: undefined,
+      },
+    );
+  });
+
+  it("uses PUT only for requested task IDs and preserves POST for ordinary creation", async () => {
+    const response = {
+      taskId: "task-created",
+      repoId: "repo-1",
+      title: "Ship it",
+      stage: "in progress",
+      agentType: "pty",
+      worktreePath: "/tmp/task-created",
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const ordinaryRequest = { repoId: "repo-1", prompt: "Ship it" };
+    await createDesktopTask(ordinaryRequest);
+    await createDesktopTask({
+      ...ordinaryRequest,
+      requestedTaskId: "0123456789abcdef".repeat(4),
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:48121/v1/tasks",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(ordinaryRequest),
+      },
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      `http://127.0.0.1:48121/v1/tasks/${"0123456789abcdef".repeat(4)}`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(ordinaryRequest),
       },
     );
   });

@@ -364,6 +364,17 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
         .expect("create provenance table");
     db.insert_test_task_transfer("transfer-1", "incoming", "streaming", Some("{}"))
         .expect("insert transfer");
+    drop(db);
+
+    let db = Db::open(&path).expect("reopen test db after restart");
+    let streaming = db
+        .list_pending_incoming_transfers()
+        .expect("list streaming transfer after restart");
+    assert_eq!(streaming.len(), 1);
+    assert_eq!(streaming[0].status, "streaming");
+    assert!(db
+        .claim_pending_incoming_transfer("transfer-1")
+        .expect("reclaim streaming transfer after restart"));
 
     assert!(db
         .mark_incoming_transfer_importing("transfer-1", "task-local")
@@ -415,6 +426,33 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
         .list_pending_incoming_transfers()
         .expect("list after complete")
         .is_empty());
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn outgoing_transfer_completion_replays_only_for_the_same_source_task() {
+    let path = Db::test_db_path("outgoing-transfer-completion-replay");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_task_transfer("transfer-1", "outgoing", "streaming", Some("{}"))
+        .expect("insert transfer");
+
+    assert!(db
+        .mark_task_transfer_completed("transfer-1", "task-source")
+        .expect("complete transfer"));
+    assert!(db
+        .mark_task_transfer_completed("transfer-1", "task-source")
+        .expect("replay matching completion"));
+    assert!(!db
+        .mark_task_transfer_completed("transfer-1", "different-source")
+        .expect("reject mismatched completion"));
+
+    let transfer = db
+        .get_task_transfer("transfer-1")
+        .expect("read transfer")
+        .expect("transfer exists");
+    assert_eq!(transfer.status, "completed");
+    assert_eq!(transfer.local_task_id.as_deref(), Some("task-source"));
 
     let _ = std::fs::remove_file(path);
 }

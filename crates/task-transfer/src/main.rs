@@ -372,6 +372,16 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::MarkImportCommitApplied {
+            request_id,
+            transfer_id,
+        } => match runtime.mark_import_commit_applied(&transfer_id).await {
+            Ok(()) => ControlResponse::MarkImportCommitApplied {
+                request_id,
+                transfer_id,
+            },
+            Err(error) => control_error(request_id, error),
+        },
     }
 }
 

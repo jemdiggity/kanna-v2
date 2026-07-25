@@ -1,6 +1,7 @@
 import type { PipelineItem, Repo } from "../types/kanna";
 import {
   completeDesktopTaskTransfer,
+  fetchClosedTaskIdentities,
   getDesktopTaskTransfer,
   insertDesktopTaskTransfer,
   insertDesktopTaskTransferProvenance,
@@ -107,6 +108,14 @@ function buildClaudeSessionArtifactId(transferId: string): string {
 
 function buildCopilotSessionArtifactId(transferId: string): string {
   return `${transferId}-copilot-session`;
+}
+
+async function destinationTaskIdForTransfer(transferId: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`kanna-transfer-destination:${transferId}`),
+  );
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function buildTransferArchivePath(transferId: string, suffix: string): string {
@@ -749,6 +758,7 @@ export function createTransferApi(
         payload.task.prompt ?? "",
         payload.task.agent_type === "agent" || payload.task.agent_type === "sdk" ? "agent" : "pty",
         {
+          requestedTaskId: await destinationTaskIdForTransfer(transferId),
           agentProvider: payload.task.agent_provider,
           baseBranch: resolveIncomingTransferBaseBranch(payload),
           pipelineName: payload.task.pipeline,
@@ -811,17 +821,31 @@ export function createTransferApi(
     if (!transfer || transfer.direction !== "outgoing") {
       return;
     }
-    if (transfer.status === "completed") {
-      return;
-    }
     if (transfer.source_task_id !== event.sourceTaskId) {
       throw new Error(
         `outgoing transfer source task mismatch for ${event.transferId}: expected ${transfer.source_task_id}, got ${event.sourceTaskId}`,
       );
     }
 
-    await completeDesktopTaskTransfer(event.transferId, transfer.local_task_id ?? event.sourceTaskId);
-    await tasks.closeTask(event.sourceTaskId);
+    const closedNow = await tasks.closeTask(event.sourceTaskId);
+    if (!closedNow) {
+      const sourceIsDurablyClosed = (await fetchClosedTaskIdentities())
+        .some((identity) => identity.id === event.sourceTaskId);
+      if (!sourceIsDurablyClosed) {
+        throw new Error(
+          `failed to confirm source task closure for outgoing transfer: ${event.transferId}`,
+        );
+      }
+    }
+    if (!await completeDesktopTaskTransfer(
+      event.transferId,
+      transfer.local_task_id ?? event.sourceTaskId,
+    )) {
+      throw new Error(`failed to complete outgoing transfer: ${event.transferId}`);
+    }
+    await invoke("mark_outgoing_transfer_commit_applied", {
+      transferId: event.transferId,
+    });
     await queries.reloadSnapshot();
   }
 
