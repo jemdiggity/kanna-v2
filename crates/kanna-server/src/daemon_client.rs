@@ -1,4 +1,4 @@
-use kanna_daemon::protocol::{Command, Event};
+use kanna_daemon::protocol::{Command, DaemonCapabilities, Event, SessionInfo};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -29,6 +29,38 @@ pub struct DaemonClientReader {
 
 pub struct DaemonClientWriter {
     writer: tokio::net::unix::OwnedWriteHalf,
+}
+
+pub struct DaemonList {
+    pub sessions: Vec<SessionInfo>,
+    pub capabilities: DaemonCapabilities,
+}
+
+fn list_from_event(event: Event) -> Result<DaemonList, String> {
+    match event {
+        Event::SessionList {
+            sessions,
+            capabilities,
+        } => Ok(DaemonList {
+            sessions,
+            capabilities: capabilities.unwrap_or_else(DaemonCapabilities::legacy),
+        }),
+        Event::Error { message, .. } => Err(format!("daemon list error: {message}")),
+        other => Err(format!("unexpected daemon list response: {other:?}")),
+    }
+}
+
+fn capabilities_from_list_event(event: Event) -> Result<DaemonCapabilities, String> {
+    Ok(list_from_event(event)?.capabilities)
+}
+
+pub fn require_provider_resume(capabilities: &DaemonCapabilities) -> Result<(), String> {
+    if !capabilities.provider_resume || !capabilities.immutable_run_ownership {
+        return Err(
+            "daemon does not support provider resume with immutable run ownership".to_string(),
+        );
+    }
+    Ok(())
 }
 
 impl DaemonClient {
@@ -96,6 +128,17 @@ impl DaemonClient {
         Ok(event)
     }
 
+    pub async fn list(&mut self) -> Result<DaemonList, Box<dyn std::error::Error>> {
+        let event = self.send_command(&Command::List).await?;
+        list_from_event(event).map_err(Into::into)
+    }
+
+    pub async fn capabilities(
+        &mut self,
+    ) -> Result<DaemonCapabilities, Box<dyn std::error::Error>> {
+        Ok(self.list().await?.capabilities)
+    }
+
     pub fn into_split(self) -> (DaemonClientReader, DaemonClientWriter) {
         (
             DaemonClientReader {
@@ -129,7 +172,6 @@ impl DaemonClientWriter {
         Ok(())
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +251,30 @@ mod tests {
 
         server.abort();
         let _ = std::fs::remove_file(&socket_path);
+    }
+
+    #[test]
+    fn daemon_capabilities_fail_closed_for_legacy_list() {
+        let capabilities = capabilities_from_list_event(Event::SessionList {
+            sessions: Vec::new(),
+            capabilities: None,
+        })
+        .unwrap();
+
+        assert!(!capabilities.immutable_run_ownership);
+        assert!(!capabilities.provider_session_events);
+        assert!(!capabilities.provider_resume);
+        assert!(require_provider_resume(&capabilities).is_err());
+    }
+
+    #[test]
+    fn daemon_capabilities_accept_current_resume_support() {
+        let capabilities = capabilities_from_list_event(Event::SessionList {
+            sessions: Vec::new(),
+            capabilities: Some(DaemonCapabilities::current()),
+        })
+        .unwrap();
+
+        require_provider_resume(&capabilities).unwrap();
     }
 }

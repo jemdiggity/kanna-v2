@@ -71,7 +71,7 @@ pub async fn handle_invoke(
                 .await
                 .map_err(|e| format!("daemon error: {}", e))?;
             match event {
-                DaemonEvent::SessionList { sessions } => {
+                DaemonEvent::SessionList { sessions, .. } => {
                     serde_json::to_value(&sessions).map_err(|e| format!("serialize error: {}", e))
                 }
                 DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),

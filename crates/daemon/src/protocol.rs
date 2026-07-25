@@ -150,6 +150,40 @@ pub enum SessionStatus {
     Idle,
 }
 
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 2;
+pub const CURRENT_EVENT_STREAM_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonCapabilities {
+    pub protocol_version: u32,
+    pub immutable_run_ownership: bool,
+    pub provider_session_events: bool,
+    pub provider_resume: bool,
+    pub event_stream_version: u32,
+}
+
+impl DaemonCapabilities {
+    pub fn current() -> Self {
+        Self {
+            protocol_version: CURRENT_DAEMON_PROTOCOL_VERSION,
+            immutable_run_ownership: true,
+            provider_session_events: true,
+            provider_resume: true,
+            event_stream_version: CURRENT_EVENT_STREAM_VERSION,
+        }
+    }
+
+    pub fn legacy() -> Self {
+        Self {
+            protocol_version: 1,
+            immutable_run_ownership: false,
+            provider_session_events: false,
+            provider_resume: false,
+            event_stream_version: 1,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Command {
@@ -206,6 +240,9 @@ pub enum Command {
     },
     List,
     Subscribe,
+    SubscribeEvents {
+        version: u32,
+    },
     Observe {
         session_id: String,
     },
@@ -295,6 +332,8 @@ pub enum Event {
     },
     SessionList {
         sessions: Vec<SessionInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<DaemonCapabilities>,
     },
     Ok,
     Error {
@@ -488,6 +527,65 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn protocol_capabilities_default_for_legacy_session_list() {
+        let decoded: Event =
+            serde_json::from_str(r#"{"type":"SessionList","sessions":[]}"#).unwrap();
+
+        match decoded {
+            Event::SessionList {
+                sessions,
+                capabilities,
+            } => {
+                assert!(sessions.is_empty());
+                assert_eq!(capabilities, None);
+            }
+            other => panic!("expected SessionList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn protocol_capabilities_roundtrip_current_daemon_features() {
+        let event = Event::SessionList {
+            sessions: Vec::new(),
+            capabilities: Some(DaemonCapabilities::current()),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"provider_resume\":true"));
+        let decoded: Event = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Event::SessionList {
+                capabilities: Some(capabilities),
+                ..
+            } => {
+                assert!(capabilities.immutable_run_ownership);
+                assert!(capabilities.provider_session_events);
+                assert!(capabilities.provider_resume);
+                assert_eq!(
+                    capabilities.event_stream_version,
+                    CURRENT_EVENT_STREAM_VERSION
+                );
+            }
+            other => panic!("expected capable SessionList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn protocol_versioned_subscription_roundtrips() {
+        let command = Command::SubscribeEvents {
+            version: CURRENT_EVENT_STREAM_VERSION,
+        };
+        let decoded: Command =
+            serde_json::from_str(&serde_json::to_string(&command).unwrap()).unwrap();
+        assert!(matches!(
+            decoded,
+            Command::SubscribeEvents {
+                version: CURRENT_EVENT_STREAM_VERSION
+            }
+        ));
     }
 
     #[test]
@@ -865,11 +963,12 @@ mod tests {
                 status: SessionStatus::Idle,
                 kind: SessionKind::Pty,
             }],
+            capabilities: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         let decoded: Event = serde_json::from_str(&json).unwrap();
         match decoded {
-            Event::SessionList { sessions } => {
+            Event::SessionList { sessions, .. } => {
                 assert_eq!(sessions.len(), 1);
                 assert_eq!(sessions[0].session_id, "s1");
             }

@@ -327,6 +327,7 @@ async fn fake_daemon_until_spawn(daemon_dir: PathBuf) -> DaemonCommand {
                             "{}\n",
                             serde_json::to_string(&DaemonEvent::SessionList {
                                 sessions: Vec::new(),
+                                capabilities: None,
                             })
                             .unwrap()
                         )
@@ -380,6 +381,7 @@ async fn serve_fake_daemon_connection(
             DaemonCommand::Subscribe => DaemonEvent::Ok,
             DaemonCommand::List => DaemonEvent::SessionList {
                 sessions: Vec::new(),
+                capabilities: None,
             },
             DaemonCommand::Spawn { session_id, .. }
             | DaemonCommand::SpawnAgent { session_id, .. } => DaemonEvent::SessionCreated {

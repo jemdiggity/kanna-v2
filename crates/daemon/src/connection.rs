@@ -20,6 +20,44 @@ use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{SessionHandle, SessionManager, SessionRecord, StreamControl};
 use crate::socket::{read_command, write_event};
+
+pub(crate) fn subscription_allows(message: &str, event_stream_version: u32) -> bool {
+    if event_stream_version >= protocol::CURRENT_EVENT_STREAM_VERSION {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|value| value.get("type")?.as_str().map(str::to_string))
+        .is_none_or(|event_type| event_type != "ProviderSessionChanged")
+}
+
+fn start_subscription(
+    subscription_task: &mut Option<tokio::task::JoinHandle<()>>,
+    event_stream_version: u32,
+    broadcast_tx: &broadcast::Sender<String>,
+    writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+) {
+    if subscription_task.is_some() {
+        return;
+    }
+    let mut broadcast_rx = broadcast_tx.subscribe();
+    let writer_broadcast = Arc::clone(writer);
+    *subscription_task = Some(tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        while let Ok(msg) = broadcast_rx.recv().await {
+            if !subscription_allows(&msg, event_stream_version) {
+                continue;
+            }
+            let mut writer = writer_broadcast.lock().await;
+            if writer.write_all(msg.as_bytes()).await.is_err()
+                || writer.write_all(b"\n").await.is_err()
+                || writer.flush().await.is_err()
+            {
+                break;
+            }
+        }
+    }));
+}
 use crate::util::{error_event, recovery_snapshot_to_terminal_snapshot};
 use crate::{agent_runtime, headless_terminal, pty};
 
@@ -77,22 +115,19 @@ pub(crate) async fn handle_connection(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
             }
             Some(Command::Subscribe) => {
-                if subscription_task.is_none() {
-                    let mut broadcast_rx = broadcast_tx.subscribe();
-                    let writer_broadcast = writer.clone();
-                    subscription_task = Some(tokio::spawn(async move {
-                        use tokio::io::AsyncWriteExt;
-                        while let Ok(msg) = broadcast_rx.recv().await {
-                            let mut w = writer_broadcast.lock().await;
-                            if w.write_all(msg.as_bytes()).await.is_err()
-                                || w.write_all(b"\n").await.is_err()
-                                || w.flush().await.is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }));
+                start_subscription(&mut subscription_task, 1, &broadcast_tx, &writer);
+                let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
+            }
+            Some(Command::SubscribeEvents { version }) => {
+                if version != protocol::CURRENT_EVENT_STREAM_VERSION {
+                    let event = error_event(
+                        None,
+                        format!("unsupported event stream version: {version}"),
+                    );
+                    let _ = write_event(&mut *writer.lock().await, &event).await;
+                    continue;
                 }
+                start_subscription(&mut subscription_task, version, &broadcast_tx, &writer);
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
             Some(Command::Observe { session_id }) => {
@@ -949,6 +984,7 @@ pub(crate) async fn handle_command(
             sessions_list.extend(agent_runtime::agent_session_infos(&agent_sessions).await);
             let evt = Event::SessionList {
                 sessions: sessions_list,
+                capabilities: Some(protocol::DaemonCapabilities::current()),
             };
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
@@ -1039,7 +1075,7 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
 
-        Command::Subscribe => {
+        Command::Subscribe | Command::SubscribeEvents { .. } => {
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
 

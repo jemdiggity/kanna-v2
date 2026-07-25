@@ -25,6 +25,31 @@ use crate::output::{
 use crate::paths::panic_log_path;
 
 #[test]
+fn legacy_subscription_filters_new_provider_session_variant_without_dropping_stream() {
+    let provider_changed = serde_json::to_string(&Event::ProviderSessionChanged {
+        session_id: "task-1".to_string(),
+        provider_session_id: "provider-thread".to_string(),
+    })
+    .unwrap();
+    let status = serde_json::to_string(&Event::StatusChanged {
+        session_id: "task-1".to_string(),
+        status: SessionStatus::Busy,
+        waiting_prompt_snippet: None,
+    })
+    .unwrap();
+
+    assert!(!crate::connection::subscription_allows(
+        &provider_changed,
+        1
+    ));
+    assert!(crate::connection::subscription_allows(&status, 1));
+    assert!(crate::connection::subscription_allows(
+        &provider_changed,
+        protocol::CURRENT_EVENT_STREAM_VERSION
+    ));
+}
+
+#[test]
 fn parse_handoff_response_accepts_v2_payload() {
     let line = serde_json::to_string(&Event::HandoffReady {
         sessions: vec![protocol::HandoffSession {
