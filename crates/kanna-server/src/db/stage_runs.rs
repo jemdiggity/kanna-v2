@@ -189,30 +189,6 @@ impl Db {
         })
     }
 
-    /// Legacy reusable-session lookup retained only until daemon events carry
-    /// immutable run ownership.
-    pub fn update_stage_run_provider_session_id_by_session(
-        &self,
-        session_id: &str,
-        provider_session_id: &str,
-        completed_only: bool,
-    ) -> Result<bool, rusqlite::Error> {
-        let changed = self.conn.execute(
-            "UPDATE stage_run
-             SET provider_session_id = ?1
-             WHERE id = (
-               SELECT id FROM stage_run
-               WHERE session_id = ?2
-                 AND provider_session_id IS NULL
-                 AND (?3 = 0 OR status != 'running')
-               ORDER BY datetime(started_at) DESC, id DESC
-               LIMIT 1
-             )",
-            (provider_session_id, session_id, completed_only),
-        )?;
-        Ok(changed > 0)
-    }
-
     pub fn finish_stage_run(
         &self,
         id: &str,

@@ -4,11 +4,12 @@ use tokio::sync::mpsc;
 
 fn persist_provider_session_id(
     state: &http_api::AppState,
-    session_id: &str,
+    run_id: Option<&str>,
     resume_session_id: Option<&str>,
-    completed_only: bool,
-    update_current_task: bool,
 ) -> Result<(), String> {
+    let Some(run_id) = run_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
     let Some(resume_session_id) = resume_session_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -17,23 +18,16 @@ fn persist_provider_session_id(
     };
 
     let db = crate::db::Db::open(&state.config().db_path).map_err(|e| format!("db error: {e}"))?;
-    let Some(task_id) = db
-        .resolve_pipeline_item_id(session_id)
-        .map_err(|e| format!("db error: {e}"))?
-    else {
-        return Ok(());
-    };
-    db.update_stage_run_provider_session_id_by_session(
-        session_id,
-        resume_session_id,
-        completed_only,
-    )
+    let update = db
+        .update_stage_run_provider_session_id(run_id, resume_session_id)
         .map_err(|e| format!("db error: {e}"))?;
-    if update_current_task {
+    if let Some(task_id) = update.current_task_id {
         db.update_pipeline_item_agent_session_id(&task_id, Some(resume_session_id))
             .map_err(|e| format!("db error: {e}"))?;
     }
-    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    if update.changed {
+        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    }
     Ok(())
 }
 
@@ -200,8 +194,7 @@ async fn terminal_state_watcher_once(
         .await
         .map_err(|e| format!("daemon list failed: {}", e))?;
     for session in daemon_list.sessions {
-        if let Err(error) =
-            apply_watcher_runtime_status(state, &session.session_id, session.status)
+        if let Err(error) = apply_watcher_runtime_status(state, &session.session_id, session.status)
         {
             log::warn!(
                 "failed to reconcile terminal status for {}: {}",
@@ -266,14 +259,13 @@ async fn terminal_state_watcher_once(
             }
             DaemonEvent::ProviderSessionChanged {
                 session_id,
+                run_id,
                 provider_session_id,
             } => {
                 if let Err(error) = persist_provider_session_id(
                     state,
-                    &session_id,
+                    run_id.as_deref(),
                     Some(&provider_session_id),
-                    false,
-                    true,
                 ) {
                     log::warn!(
                         "failed to persist provider session id for {}: {}",
@@ -284,6 +276,7 @@ async fn terminal_state_watcher_once(
             }
             DaemonEvent::Exit {
                 session_id,
+                run_id,
                 code,
                 killed,
                 resume_session_id,
@@ -294,10 +287,8 @@ async fn terminal_state_watcher_once(
                 let replaced = replacements.consume(&session_id);
                 if let Err(error) = persist_provider_session_id(
                     state,
-                    &session_id,
+                    run_id.as_deref(),
                     resume_session_id.as_deref(),
-                    replaced || killed,
-                    !(replaced || killed),
                 ) {
                     log::warn!(
                         "failed to persist terminal resume session id for {}: {}",
@@ -519,9 +510,7 @@ mod tests {
                 &mut control_write,
                 &DaemonEvent::SessionList {
                     sessions: Vec::new(),
-                    capabilities: Some(
-                        kanna_daemon::protocol::DaemonCapabilities::current(),
-                    ),
+                    capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
                 },
             )
             .await;
@@ -592,6 +581,7 @@ mod tests {
                 &mut subscriber,
                 &DaemonEvent::Exit {
                     session_id: "task-child".to_string(),
+                    run_id: None,
                     code: 0,
                     resume_session_id: None,
                     killed: true,
@@ -625,6 +615,25 @@ mod tests {
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(NewStageRun {
+                id: "run-current",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
         let server = tokio::spawn(async move {
@@ -633,6 +642,7 @@ mod tests {
                 &mut subscriber,
                 &DaemonEvent::Exit {
                     session_id: "task-child".to_string(),
+                    run_id: Some("run-current".to_string()),
                     code: 0,
                     resume_session_id: Some("019d99a5-aa94-7c73-b786-644cc095c037".to_string()),
                     killed: false,
@@ -692,6 +702,7 @@ mod tests {
                 &mut subscriber,
                 &DaemonEvent::Exit {
                     session_id: "task-child".to_string(),
+                    run_id: Some("run-implement".to_string()),
                     code: 137,
                     resume_session_id: Some("codex-thread".to_string()),
                     killed: true,
@@ -757,6 +768,7 @@ mod tests {
                 &mut subscriber,
                 &DaemonEvent::ProviderSessionChanged {
                     session_id: "task-child".to_string(),
+                    run_id: Some("run-implement".to_string()),
                     provider_session_id: "opencode-session".to_string(),
                 },
             )
@@ -779,6 +791,95 @@ mod tests {
             .unwrap();
         assert_eq!(run.provider_session_id.as_deref(), Some("opencode-session"));
         assert_task_agent_session_id(&config, "opencode-session");
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn delayed_old_provider_event_updates_only_its_owning_main_run() {
+        let unique = unique_name("terminal-watcher-delayed-provider-session");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let db = Db::open(&config.db_path).unwrap();
+        for (id, stage, kind, status, provider_session_id) in [
+            ("run-old", "in progress", "main", "succeeded", None),
+            ("run-post", "commit", "post", "succeeded", None),
+            (
+                "run-replacement",
+                "review",
+                "main",
+                "running",
+                Some("replacement-thread"),
+            ),
+        ] {
+            db.insert_stage_run(NewStageRun {
+                id,
+                task_id: "task-child",
+                stage,
+                kind,
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status,
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        }
+        db.update_pipeline_item_agent_session_id("task-child", Some("replacement-thread"))
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::ProviderSessionChanged {
+                    session_id: "task-child".to_string(),
+                    run_id: Some("run-old".to_string()),
+                    provider_session_id: "old-thread".to_string(),
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &http_api::AppState::new(config.clone()),
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let runs = Db::open(&config.db_path)
+            .unwrap()
+            .list_stage_runs_for_task("task-child")
+            .unwrap();
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == "run-old")
+                .and_then(|run| run.provider_session_id.as_deref()),
+            Some("old-thread")
+        );
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == "run-post")
+                .and_then(|run| run.provider_session_id.as_deref()),
+            None
+        );
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == "run-replacement")
+                .and_then(|run| run.provider_session_id.as_deref()),
+            Some("replacement-thread")
+        );
+        assert_task_agent_session_id(&config, "replacement-thread");
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
@@ -860,6 +961,7 @@ mod tests {
                 &mut subscriber,
                 &DaemonEvent::Exit {
                     session_id: "task-child".to_string(),
+                    run_id: None,
                     code: -1,
                     resume_session_id: None,
                     killed: true,
@@ -870,6 +972,7 @@ mod tests {
                 &mut subscriber,
                 &DaemonEvent::Exit {
                     session_id: "task-child".to_string(),
+                    run_id: None,
                     code: 0,
                     resume_session_id: None,
                     killed: false,

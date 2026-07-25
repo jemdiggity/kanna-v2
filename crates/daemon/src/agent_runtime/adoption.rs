@@ -176,6 +176,10 @@ pub async fn adopt_agent_session(
 
     let mut record = AgentSessionRecord {
         provider: params.agent_provider,
+        run_id: info
+            .run_id
+            .clone()
+            .or_else(|| params.env.get("KANNA_STAGE_RUN_ID").cloned()),
         params,
         adapter: Arc::new(std::sync::Mutex::new(adapter)),
         shared,

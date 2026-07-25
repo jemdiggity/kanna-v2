@@ -75,6 +75,8 @@ pub struct TerminalSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffSession {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub pid: u32,
     /// Start-time identity of `pid` (`proc_bsdinfo` start seconds/micros),
     /// recorded by the sending daemon while it owned the session. Advisory
@@ -307,6 +309,8 @@ pub enum Event {
     },
     Exit {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         code: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         resume_session_id: Option<String>,
@@ -325,10 +329,14 @@ pub enum Event {
     },
     ProviderSessionChanged {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         provider_session_id: String,
     },
     SessionCreated {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
     SessionList {
         sessions: Vec<SessionInfo>,
@@ -589,9 +597,63 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_events_roundtrip_immutable_run_id() {
+        let events = [
+            Event::SessionCreated {
+                session_id: "task-1".to_string(),
+                run_id: Some("run-main".to_string()),
+            },
+            Event::ProviderSessionChanged {
+                session_id: "task-1".to_string(),
+                run_id: Some("run-main".to_string()),
+                provider_session_id: "provider-thread".to_string(),
+            },
+            Event::Exit {
+                session_id: "task-1".to_string(),
+                run_id: Some("run-main".to_string()),
+                code: 0,
+                resume_session_id: None,
+                killed: false,
+            },
+        ];
+
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(json.contains("\"run_id\":\"run-main\""));
+            let decoded: Event = serde_json::from_str(&json).unwrap();
+            match decoded {
+                Event::SessionCreated { run_id, .. }
+                | Event::ProviderSessionChanged { run_id, .. }
+                | Event::Exit { run_id, .. } => {
+                    assert_eq!(run_id.as_deref(), Some("run-main"));
+                }
+                other => panic!("unexpected lifecycle event: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_lifecycle_events_default_run_id_to_none() {
+        for json in [
+            r#"{"type":"SessionCreated","session_id":"task-1"}"#,
+            r#"{"type":"ProviderSessionChanged","session_id":"task-1","provider_session_id":"thread"}"#,
+            r#"{"type":"Exit","session_id":"task-1","code":0}"#,
+        ] {
+            let decoded: Event = serde_json::from_str(json).unwrap();
+            match decoded {
+                Event::SessionCreated { run_id, .. }
+                | Event::ProviderSessionChanged { run_id, .. }
+                | Event::Exit { run_id, .. } => assert_eq!(run_id, None),
+                other => panic!("unexpected lifecycle event: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_event_exit_roundtrip() {
         let evt = Event::Exit {
             session_id: "s1".to_string(),
+            run_id: None,
             code: 42,
             resume_session_id: Some("019d99a5-aa94-7c73-b786-644cc095c037".to_string()),
             killed: false,
@@ -606,6 +668,7 @@ mod tests {
                 code,
                 resume_session_id,
                 killed,
+                ..
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(code, 42);
@@ -623,6 +686,7 @@ mod tests {
     fn test_event_exit_killed_roundtrip() {
         let evt = Event::Exit {
             session_id: "s1".to_string(),
+            run_id: None,
             code: -1,
             resume_session_id: None,
             killed: true,
@@ -801,6 +865,7 @@ mod tests {
     fn provider_session_changed_roundtrips() {
         let event = Event::ProviderSessionChanged {
             session_id: "task-1".to_string(),
+            run_id: None,
             provider_session_id: "provider-thread".to_string(),
         };
 
@@ -810,6 +875,7 @@ mod tests {
             Event::ProviderSessionChanged {
                 session_id,
                 provider_session_id,
+                ..
             } => {
                 assert_eq!(session_id, "task-1");
                 assert_eq!(provider_session_id, "provider-thread");
@@ -845,6 +911,7 @@ mod tests {
         let evt = Event::HandoffReady {
             sessions: vec![HandoffSession {
                 session_id: "sess-1".to_string(),
+                run_id: None,
                 pid: 42,
                 child_start: None,
                 cwd: "/tmp".to_string(),

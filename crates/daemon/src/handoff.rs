@@ -887,6 +887,7 @@ pub(crate) async fn handle_handoff(
                 }
                 infos.push(protocol::HandoffSession {
                     session_id: id.clone(),
+                    run_id: parts.run_id,
                     pid,
                     child_start: parts.child_start,
                     cwd,
@@ -977,6 +978,7 @@ pub(crate) async fn handle_handoff(
         );
         infos.push(protocol::HandoffSession {
             session_id: id.clone(),
+            run_id: record.run_id.clone(),
             pid: record.pid,
             child_start: record.child_start,
             cwd: record.params.cwd.clone(),

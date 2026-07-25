@@ -408,6 +408,7 @@ pub(crate) async fn stream_output(
 
     let evt = Event::Exit {
         session_id: session_id.clone(),
+        run_id: session.run_id().await,
         code: exit_code,
         resume_session_id,
         killed: false,

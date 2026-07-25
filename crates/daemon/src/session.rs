@@ -70,6 +70,7 @@ impl StreamControl {
 
 pub struct SessionRecord {
     pub pty: PtySession,
+    pub run_id: Option<String>,
     pub headless_terminal: HeadlessTerminal,
     pub stream_control: Option<StreamControl>,
     pub agent_provider: Option<AgentProvider>,
@@ -80,6 +81,7 @@ pub struct SessionRecord {
 
 pub struct SessionRuntimeState {
     pub headless_terminal: HeadlessTerminal,
+    pub run_id: Option<String>,
     pub stream_control: Option<StreamControl>,
     pub agent_provider: Option<AgentProvider>,
     pub status: SessionStatus,
@@ -114,6 +116,7 @@ impl SessionHandle {
             teardown_claimed: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(SessionRuntimeState {
                 headless_terminal: record.headless_terminal,
+                run_id: record.run_id,
                 stream_control: record.stream_control,
                 agent_provider: record.agent_provider,
                 status: record.status,
@@ -240,6 +243,10 @@ impl SessionHandle {
         }
 
         state.headless_terminal.codex_resume_session_id()
+    }
+
+    pub async fn run_id(&self) -> Option<String> {
+        self.state.lock().await.run_id.clone()
     }
 
     pub async fn update_status(&self, status: SessionStatus) -> bool {
@@ -409,6 +416,7 @@ impl SessionHandle {
         Ok(Some(SessionHandoffParts {
             pid,
             child_start,
+            run_id: state.run_id.clone(),
             cwd,
             rows,
             cols,
@@ -425,6 +433,7 @@ pub struct SessionHandoffParts {
     /// Start-time identity of the child, so the adopting daemon can
     /// authenticate the pid against the live process table.
     pub child_start: Option<crate::proc_info::StartTime>,
+    pub run_id: Option<String>,
     pub cwd: String,
     pub rows: u16,
     pub cols: u16,
@@ -893,6 +902,7 @@ mod tests {
 
         Ok(SessionRecord {
             pty,
+            run_id: None,
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
             stream_control: None,
             agent_provider: Some(provider),

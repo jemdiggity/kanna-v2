@@ -1745,6 +1745,7 @@ async fn stream_agent_once(
             }
             Ok(DaemonEvent::Exit {
                 session_id: event_session,
+                run_id: None,
                 code,
                 ..
             }) if event_session == session_id => {
@@ -1959,6 +1960,7 @@ async fn stream_terminal_once(
             }
             Ok(DaemonEvent::Exit {
                 session_id: event_session,
+                run_id: None,
                 code,
                 ..
             }) if event_session == session_id => {
@@ -4045,6 +4047,7 @@ mod tests {
                 },
                 DaemonEvent::Exit {
                     session_id: session_id.to_string(),
+                    run_id: None,
                     code: 0,
                     resume_session_id: None,
                     killed: false,
@@ -4171,6 +4174,7 @@ mod tests {
                 },
                 DaemonEvent::Exit {
                     session_id: "daemon-terminal-status".to_string(),
+                    run_id: None,
                     code: 0,
                     resume_session_id: None,
                     killed: false,
@@ -4317,6 +4321,7 @@ mod tests {
             };
             let exit = DaemonEvent::Exit {
                 session_id: "daemon-terminal-1".to_string(),
+                run_id: None,
                 code: 0,
                 resume_session_id: None,
                 killed: false,
@@ -4525,6 +4530,7 @@ mod tests {
                 if round == 1 {
                     events.push(DaemonEvent::Exit {
                         session_id: "shell-wt-reattach-1".to_string(),
+                        run_id: None,
                         code: 0,
                         resume_session_id: None,
                         killed: false,

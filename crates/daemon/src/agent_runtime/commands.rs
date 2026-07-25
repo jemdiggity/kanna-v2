@@ -58,6 +58,7 @@ pub async fn handle_spawn_agent(
     let shared = agent::shared_agent_state(&data_dir, &session_id);
     let initiating_prompt = params.prompt.clone();
     let provider_session_id = params.resume_session_id.clone();
+    let run_id = params.env.get("KANNA_STAGE_RUN_ID").cloned();
 
     // Reserve the id atomically: the existence check and the reservation
     // record land under one lock acquisition, so a concurrent SpawnAgent for
@@ -101,6 +102,7 @@ pub async fn handle_spawn_agent(
             session_id.clone(),
             AgentSessionRecord {
                 provider: params.agent_provider,
+                run_id: run_id.clone(),
                 params,
                 adapter: Arc::new(std::sync::Mutex::new(adapter)),
                 shared: shared.clone(),
@@ -184,6 +186,7 @@ pub async fn handle_spawn_agent(
 
     let created = Event::SessionCreated {
         session_id: session_id.clone(),
+        run_id,
     };
     reply(&writer, &created).await;
     broadcast_event(&broadcast_tx, &created);

@@ -125,7 +125,7 @@ async fn process_event(
         return;
     }
 
-    let shared = {
+    let (shared, run_id) = {
         let mut registry = agents.lock().await;
         // Re-resolve after the brief gap above; a life change here is still
         // handled without awaiting under the guard.
@@ -206,7 +206,7 @@ async fn process_event(
             );
         }
 
-        life.shared.clone()
+        (life.shared.clone(), record.run_id.clone())
     };
 
     if let Some(provider_session_id) = provider_session_to_persist {
@@ -217,6 +217,7 @@ async fn process_event(
             broadcast_tx,
             &kanna_daemon::protocol::Event::ProviderSessionChanged {
                 session_id: session_id.to_string(),
+                run_id,
                 provider_session_id,
             },
         );
@@ -366,7 +367,7 @@ async fn handle_child_exit(
     // Phase 3 (relock): revalidate the incarnation before mutating session
     // state — a kill/recreate or respawn while we were reaping owns the
     // record now.
-    let (shared, reason) = {
+    let (shared, run_id, reason) = {
         let mut registry = agents.lock().await;
         let Some(record) = registry.get_mut(session_id) else {
             return;
@@ -404,7 +405,7 @@ async fn handle_child_exit(
         // how the two drifted apart. Every early return above this line leaves
         // the flag untouched (still false) — correct, since none published.
         record.exit_published = reason.is_some();
-        (life.shared.clone(), reason)
+        (life.shared.clone(), record.run_id.clone(), reason)
     };
     let Some(reason) = reason else {
         return;
@@ -423,6 +424,7 @@ async fn handle_child_exit(
         broadcast_tx,
         &Event::Exit {
             session_id: session_id.to_string(),
+            run_id,
             code,
             resume_session_id: None,
             killed: false,

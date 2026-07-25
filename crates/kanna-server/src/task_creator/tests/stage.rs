@@ -1648,6 +1648,7 @@ async fn headless_rerun_runs_environment_setup_after_killing_previous_session() 
                     assert!(params.executable.is_some());
                     kanna_daemon::protocol::Event::SessionCreated {
                         session_id: session_id.clone(),
+                        run_id: None,
                     }
                 }
                 other => panic!("unexpected daemon command: {other:?}"),
@@ -2538,6 +2539,7 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
                 kanna_daemon::protocol::Command::Spawn { session_id, .. } => {
                     kanna_daemon::protocol::Event::SessionCreated {
                         session_id: session_id.clone(),
+                        run_id: None,
                     }
                 }
                 other => panic!("unexpected daemon command: {other:?}"),
@@ -2654,6 +2656,7 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
                 | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
                     kanna_daemon::protocol::Event::SessionCreated {
                         session_id: session_id.clone(),
+                        run_id: None,
                     }
                 }
                 other => panic!("unexpected daemon command: {other:?}"),

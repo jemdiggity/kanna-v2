@@ -186,7 +186,11 @@ async fn request_revision_route_resolves_branch_style_task_id() {
                 .write_all(
                     format!(
                         "{}\n",
-                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                        serde_json::to_string(&DaemonEvent::SessionCreated {
+                            session_id,
+                            run_id: None
+                        })
+                        .unwrap()
                     )
                     .as_bytes(),
                 )
@@ -409,6 +413,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
                     (
                         DaemonEvent::SessionCreated {
                             session_id: session_id.clone(),
+                            run_id: None,
                         },
                         Some(session_id),
                     )
@@ -426,6 +431,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
                     (
                         DaemonEvent::SessionCreated {
                             session_id: session_id.clone(),
+                            run_id: None,
                         },
                         Some(session_id),
                     )
@@ -767,7 +773,11 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
                 .write_all(
                     format!(
                         "{}\n",
-                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                        serde_json::to_string(&DaemonEvent::SessionCreated {
+                            session_id,
+                            run_id: None
+                        })
+                        .unwrap()
                     )
                     .as_bytes(),
                 )

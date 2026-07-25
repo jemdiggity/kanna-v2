@@ -240,6 +240,7 @@ pub(crate) async fn run_daemon() {
             let stream_control = StreamControl::new();
             let handle = Arc::new(SessionHandle::new(SessionRecord {
                 pty: pty_session,
+                run_id: handoff.run_id,
                 headless_terminal,
                 stream_control: None,
                 agent_provider: handoff.agent_provider,

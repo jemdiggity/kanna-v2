@@ -133,9 +133,7 @@ impl DaemonClient {
         list_from_event(event).map_err(Into::into)
     }
 
-    pub async fn capabilities(
-        &mut self,
-    ) -> Result<DaemonCapabilities, Box<dyn std::error::Error>> {
+    pub async fn capabilities(&mut self) -> Result<DaemonCapabilities, Box<dyn std::error::Error>> {
         Ok(self.list().await?.capabilities)
     }
 

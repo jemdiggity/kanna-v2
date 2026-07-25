@@ -372,7 +372,11 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
             .write_all(
                 format!(
                     "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                        session_id,
+                        run_id: None
+                    })
+                    .unwrap()
                 )
                 .as_bytes(),
             )
@@ -934,7 +938,11 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
             .write_all(
                 format!(
                     "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                        session_id,
+                        run_id: None
+                    })
+                    .unwrap()
                 )
                 .as_bytes(),
             )
@@ -1052,7 +1060,11 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
             .write_all(
                 format!(
                     "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                        session_id,
+                        run_id: None
+                    })
+                    .unwrap()
                 )
                 .as_bytes(),
             )
@@ -1239,7 +1251,11 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
             .write_all(
                 format!(
                     "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                        session_id,
+                        run_id: None
+                    })
+                    .unwrap()
                 )
                 .as_bytes(),
             )
@@ -1393,7 +1409,11 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
                 .write_all(
                     format!(
                         "{}\n",
-                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                        serde_json::to_string(&DaemonEvent::SessionCreated {
+                            session_id,
+                            run_id: None
+                        })
+                        .unwrap()
                     )
                     .as_bytes(),
                 )
@@ -1843,7 +1863,11 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
             .write_all(
                 format!(
                     "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                        session_id,
+                        run_id: None
+                    })
+                    .unwrap()
                 )
                 .as_bytes(),
             )

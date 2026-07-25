@@ -28,6 +28,7 @@ use crate::paths::panic_log_path;
 fn legacy_subscription_filters_new_provider_session_variant_without_dropping_stream() {
     let provider_changed = serde_json::to_string(&Event::ProviderSessionChanged {
         session_id: "task-1".to_string(),
+        run_id: Some("run-main".to_string()),
         provider_session_id: "provider-thread".to_string(),
     })
     .unwrap();
@@ -54,6 +55,7 @@ fn parse_handoff_response_accepts_v2_payload() {
     let line = serde_json::to_string(&Event::HandoffReady {
         sessions: vec![protocol::HandoffSession {
             session_id: "s1".to_string(),
+            run_id: None,
             pid: 42,
             child_start: None,
             cwd: "/tmp".to_string(),

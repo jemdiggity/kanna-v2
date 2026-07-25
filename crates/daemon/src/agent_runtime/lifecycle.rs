@@ -92,6 +92,7 @@ pub async fn kill_agent_session(
             broadcast_tx,
             &Event::Exit {
                 session_id: session_id.to_string(),
+                run_id: record.run_id.clone(),
                 code: -1,
                 resume_session_id: None,
                 killed: true,

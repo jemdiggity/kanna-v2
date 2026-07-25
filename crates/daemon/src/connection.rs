@@ -120,10 +120,8 @@ pub(crate) async fn handle_connection(
             }
             Some(Command::SubscribeEvents { version }) => {
                 if version != protocol::CURRENT_EVENT_STREAM_VERSION {
-                    let event = error_event(
-                        None,
-                        format!("unsupported event stream version: {version}"),
-                    );
+                    let event =
+                        error_event(None, format!("unsupported event stream version: {version}"));
                     let _ = write_event(&mut *writer.lock().await, &event).await;
                     continue;
                 }
@@ -294,6 +292,7 @@ pub(crate) async fn handle_command(
             }
 
             lost_handoff_sessions.lock().await.remove(&session_id);
+            let run_id = env.get("KANNA_STAGE_RUN_ID").cloned();
 
             match pty::PtySession::spawn(&executable, &args, &cwd, &env, cols, rows) {
                 Ok(mut pty_session) => {
@@ -367,6 +366,7 @@ pub(crate) async fn handle_command(
                     };
                     let handle = Arc::new(SessionHandle::new(SessionRecord {
                         pty: pty_session,
+                        run_id: run_id.clone(),
                         headless_terminal,
                         stream_control: Some(stream_control.clone()),
                         agent_provider,
@@ -484,6 +484,7 @@ pub(crate) async fn handle_command(
 
                     let evt = Event::SessionCreated {
                         session_id: session_id.clone(),
+                        run_id,
                     };
                     let _ = write_event(&mut *writer.lock().await, &evt).await;
                     if let Ok(json) = serde_json::to_string(&evt) {
@@ -940,6 +941,10 @@ pub(crate) async fn handle_command(
                 // agree on the exact outgoing incarnation.
                 let exit_evt = Event::Exit {
                     session_id: session_id.clone(),
+                    run_id: match &session {
+                        Some(session) => session.run_id().await,
+                        None => None,
+                    },
                     code: 128 + libc::SIGKILL,
                     resume_session_id: match &session {
                         Some(session) => {

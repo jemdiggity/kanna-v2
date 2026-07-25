@@ -1306,7 +1306,8 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
                 format!(
                     "{}\n",
                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                        session_id: "td-task-source".to_string()
+                        session_id: "td-task-source".to_string(),
+                        run_id: None,
                     })
                     .unwrap()
                 )
@@ -1830,8 +1831,11 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )
@@ -1849,8 +1853,11 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )
@@ -2231,8 +2238,11 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )
@@ -2249,8 +2259,11 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )
@@ -2496,7 +2509,8 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
                                 format!(
                                     "{}\n",
                                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                                        session_id
+                                        session_id,
+                                        run_id: None
                                     })
                                     .unwrap()
                                 )
@@ -2520,7 +2534,8 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
                                 format!(
                                     "{}\n",
                                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                                        session_id
+                                        session_id,
+                                        run_id: None
                                     })
                                     .unwrap()
                                 )
@@ -2739,7 +2754,8 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
                                 format!(
                                     "{}\n",
                                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                                        session_id
+                                        session_id,
+                                        run_id: None
                                     })
                                     .unwrap()
                                 )
@@ -2758,7 +2774,8 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
                                 format!(
                                     "{}\n",
                                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                                        session_id
+                                        session_id,
+                                        run_id: None
                                     })
                                     .unwrap()
                                 )
@@ -3035,7 +3052,8 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
                                 format!(
                                     "{}\n",
                                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                                        session_id
+                                        session_id,
+                                        run_id: None
                                     })
                                     .unwrap()
                                 )
@@ -3427,7 +3445,11 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
                 .write_all(
                     format!(
                         "{}\n",
-                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                        serde_json::to_string(&DaemonEvent::SessionCreated {
+                            session_id,
+                            run_id: None
+                        })
+                        .unwrap()
                     )
                     .as_bytes(),
                 )
@@ -3651,7 +3673,8 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
                                 format!(
                                     "{}\n",
                                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                                        session_id
+                                        session_id,
+                                        run_id: None
                                     })
                                     .unwrap()
                                 )
@@ -3672,7 +3695,8 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
                                 format!(
                                     "{}\n",
                                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                                        session_id
+                                        session_id,
+                                        run_id: None
                                     })
                                     .unwrap()
                                 )
@@ -3691,6 +3715,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
                                     "{}\n",
                                     serde_json::to_string(&DaemonEvent::Exit {
                                         session_id: "source-1".to_string(),
+                                        run_id: None,
                                         code: 0,
                                         resume_session_id: None,
                                         killed: true,
@@ -3948,7 +3973,8 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
                 format!(
                     "{}\n",
                     serde_json::to_string(&DaemonEvent::SessionCreated {
-                        session_id: "td-task-source".to_string()
+                        session_id: "td-task-source".to_string(),
+                        run_id: None,
                     })
                     .unwrap()
                 )
@@ -4298,9 +4324,11 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
                 },
                 DaemonCommand::Spawn { session_id, .. } => DaemonEvent::SessionCreated {
                     session_id: session_id.clone(),
+                    run_id: None,
                 },
                 DaemonCommand::SpawnAgent { session_id, .. } => DaemonEvent::SessionCreated {
                     session_id: session_id.clone(),
+                    run_id: None,
                 },
                 other => panic!("unexpected daemon command: {other:?}"),
             };
@@ -4565,10 +4593,12 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
                     let response = match &command {
                         DaemonCommand::Spawn { session_id, .. } => DaemonEvent::SessionCreated {
                             session_id: session_id.clone(),
+                            run_id: None,
                         },
                         DaemonCommand::SpawnAgent { session_id, .. } => {
                             DaemonEvent::SessionCreated {
                                 session_id: session_id.clone(),
+                                run_id: None,
                             }
                         }
                         _ => DaemonEvent::Ok,
@@ -4838,7 +4868,11 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
                 .write_all(
                     format!(
                         "{}\n",
-                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                        serde_json::to_string(&DaemonEvent::SessionCreated {
+                            session_id,
+                            run_id: None
+                        })
+                        .unwrap()
                     )
                     .as_bytes(),
                 )
@@ -5085,8 +5119,11 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )
@@ -5102,8 +5139,11 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )
@@ -5312,8 +5352,11 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )
@@ -5329,8 +5372,11 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )

@@ -426,6 +426,7 @@ pub fn live_shared_agent_states() -> usize {
 
 pub struct AgentSessionRecord {
     pub provider: AgentProvider,
+    pub run_id: Option<String>,
     pub params: AgentSpawnParams,
     /// Adapter is shared with the reader thread (sync mutex: parse_line is
     /// CPU-only and never blocks).

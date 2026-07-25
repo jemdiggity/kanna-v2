@@ -346,8 +346,11 @@ async fn fake_daemon_until_spawn(daemon_dir: PathBuf) -> DaemonCommand {
                     .write_all(
                         format!(
                             "{}\n",
-                            serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                .unwrap()
+                            serde_json::to_string(&DaemonEvent::SessionCreated {
+                                session_id,
+                                run_id: None
+                            })
+                            .unwrap()
                         )
                         .as_bytes(),
                     )
@@ -386,6 +389,7 @@ async fn serve_fake_daemon_connection(
             DaemonCommand::Spawn { session_id, .. }
             | DaemonCommand::SpawnAgent { session_id, .. } => DaemonEvent::SessionCreated {
                 session_id: session_id.clone(),
+                run_id: None,
             },
             DaemonCommand::Kill { .. } | DaemonCommand::Input { .. } => DaemonEvent::Error {
                 code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),

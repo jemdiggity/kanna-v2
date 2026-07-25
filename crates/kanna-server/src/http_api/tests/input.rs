@@ -205,7 +205,11 @@ async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
             .write_all(
                 format!(
                     "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                        session_id,
+                        run_id: None
+                    })
+                    .unwrap()
                 )
                 .as_bytes(),
             )

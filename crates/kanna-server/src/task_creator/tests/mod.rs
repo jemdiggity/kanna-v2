@@ -56,6 +56,7 @@ async fn spawn_fake_daemon_session_created_once(
         let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
         let response = serde_json::to_string(&kanna_daemon::protocol::Event::SessionCreated {
             session_id: "task-1".to_string(),
+            run_id: None,
         })
         .unwrap();
         write_half.write_all(response.as_bytes()).await.unwrap();
@@ -295,6 +296,7 @@ async fn spawn_fake_daemon_fork_transition(
                     spawns += 1;
                     kanna_daemon::protocol::Event::SessionCreated {
                         session_id: session_id.clone(),
+                        run_id: None,
                     }
                 }
                 other => panic!("unexpected daemon command: {other:?}"),
@@ -336,6 +338,7 @@ async fn spawn_fake_daemon_fork_transition_with_teardown(
                 | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
                     kanna_daemon::protocol::Event::SessionCreated {
                         session_id: session_id.clone(),
+                        run_id: None,
                     }
                 }
                 other => panic!("unexpected daemon command: {other:?}"),
