@@ -638,6 +638,7 @@ mod tests {
                 },
                 DaemonEvent::Exit {
                     session_id: "sess-transfer".to_string(),
+                    run_id: None,
                     code: 0,
                     resume_session_id: None,
                     killed: false,
