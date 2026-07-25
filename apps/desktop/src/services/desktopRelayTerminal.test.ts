@@ -287,6 +287,7 @@ describe("createDesktopRelayTerminalClient", () => {
     const markReadPromise = client.markTaskRead({
       desktopId: "desktop-owner",
       taskId: "task/read",
+      activityCutoff: "2026-07-25T01:00:00.000Z",
     });
 
     await openRelayTunnel(socket);
@@ -305,7 +306,11 @@ describe("createDesktopRelayTerminalClient", () => {
     const markReadRequest = sent.find((entry) => entry.path === "/v1/tasks/task%2Fread/actions/mark-read");
     expect(closeRequest).toMatchObject({ type: "request", method: "POST", body: null });
     expect(advanceRequest).toMatchObject({ type: "request", method: "POST", body: null });
-    expect(markReadRequest).toMatchObject({ type: "request", method: "POST", body: null });
+    expect(markReadRequest).toMatchObject({
+      type: "request",
+      method: "POST",
+      body: { activityCutoff: "2026-07-25T01:00:00.000Z" },
+    });
 
     socket.onmessage?.({ data: JSON.stringify({ type: "response", id: closeRequest.id, status: 200, body: null }) });
     socket.onmessage?.({ data: JSON.stringify({ type: "response", id: advanceRequest.id, status: 200, body: null }) });

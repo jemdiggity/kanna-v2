@@ -99,7 +99,7 @@ describe("useRemoteTaskReadDwell", () => {
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(markTaskRead).toHaveBeenCalledOnce();
-    expect(markTaskRead).toHaveBeenCalledWith(task);
+    expect(markTaskRead).toHaveBeenCalledWith(task, "2026-07-25T01:00:00.000Z");
     scope.stop();
   });
 
@@ -138,6 +138,27 @@ describe("useRemoteTaskReadDwell", () => {
 
     selectedItemId.value = "slot:remote";
     await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(markTaskRead).not.toHaveBeenCalled();
+    scope.stop();
+  });
+
+  it("keeps the original selection cutoff when the dwell callback runs late", async () => {
+    const selectedItemId = ref<string | null>(null);
+    const task = remoteWorkspaceTask();
+    const workspaceTasksByItemId = computed(() => new Map([["slot:remote", task]]));
+    const markTaskRead = vi.fn(async () => {});
+    const scope = effectScope();
+
+    scope.run(() => {
+      useRemoteTaskReadDwell({ selectedItemId, workspaceTasksByItemId, markTaskRead });
+    });
+
+    selectedItemId.value = "slot:remote";
+    await nextTick();
+    task.item.activity_changed_at = "2026-07-25T01:00:00.500Z";
+    vi.setSystemTime(new Date("2026-07-25T01:00:10.000Z"));
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(markTaskRead).not.toHaveBeenCalled();

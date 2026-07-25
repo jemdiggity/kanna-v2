@@ -48,6 +48,10 @@ export interface RemoteTerminalActionOptions {
   taskId: string;
 }
 
+export interface MarkRemoteTaskReadOptions extends RemoteTerminalActionOptions {
+  activityCutoff: string;
+}
+
 export interface SendRemoteTerminalInputOptions extends RemoteTerminalActionOptions {
   data: string;
 }
@@ -74,7 +78,7 @@ export interface DesktopRelayTerminalClient {
   closeTask(options: RemoteTerminalActionOptions): Promise<void>;
   advanceStage(options: RemoteTerminalActionOptions): Promise<void>;
   readTaskFile(options: ReadRemoteTaskFileOptions): Promise<RemoteTaskFileContent>;
-  markTaskRead(options: RemoteTerminalActionOptions): Promise<void>;
+  markTaskRead(options: MarkRemoteTaskReadOptions): Promise<void>;
 }
 
 export async function createConfiguredDesktopRelayTerminalClient(): Promise<DesktopRelayTerminalClient | null> {
@@ -203,7 +207,7 @@ export function createDesktopRelayTerminalClient({
       await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/mark-read`,
-        null,
+        { activityCutoff: options.activityCutoff },
       );
     },
   };

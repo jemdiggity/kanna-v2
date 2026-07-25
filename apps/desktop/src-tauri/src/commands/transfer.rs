@@ -248,6 +248,7 @@ pub async fn mark_transfer_peer_task_read(
     state: tauri::State<'_, crate::TransferServiceState>,
     peer_id: String,
     task_id: String,
+    activity_cutoff: String,
 ) -> Result<Value, String> {
     let mut guard = state.lock().await;
     ensure_client(&app, &mut guard).await?;
@@ -255,7 +256,9 @@ pub async fn mark_transfer_peer_task_read(
         let client = guard
             .as_mut()
             .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client.mark_peer_task_read(peer_id, task_id).await;
+        let result = client
+            .mark_peer_task_read(peer_id, task_id, activity_cutoff)
+            .await;
         (result, client.is_dead())
     };
     if dead {

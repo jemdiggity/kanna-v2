@@ -550,7 +550,10 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     }
   }
 
-  async function markRemoteWorkspaceTaskRead(workspaceTask: WorkspaceTask): Promise<void> {
+  async function markRemoteWorkspaceTaskRead(
+    workspaceTask: WorkspaceTask,
+    activityCutoff: string,
+  ): Promise<void> {
     const remoteRef = workspaceTask.terminal.remoteRef;
     if (!remoteRef || workspaceTask.terminal.kind === "none") return;
 
@@ -566,6 +569,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       await client.markTaskRead({
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,
+        activityCutoff,
       });
     } catch (error) {
       console.warn(

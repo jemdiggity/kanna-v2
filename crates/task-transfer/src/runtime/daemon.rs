@@ -231,7 +231,7 @@ pub(super) async fn advance_owner_task_stage(
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
-    post_local_kanna_task_action(port, task_id, "advance-stage").await
+    post_local_kanna_task_action(port, task_id, "advance-stage", &serde_json::json!({})).await
 }
 
 pub(super) async fn read_owner_task_file(
@@ -327,23 +327,33 @@ pub(super) async fn mark_owner_task_read(
     context: &ListenerContext,
     requester_peer_id: &str,
     task_id: &str,
+    activity_cutoff: &str,
 ) -> Result<(), RuntimeError> {
     ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
-    post_local_kanna_task_action(port, task_id, "mark-read").await
+    post_local_kanna_task_action(
+        port,
+        task_id,
+        "mark-read",
+        &serde_json::json!({ "activityCutoff": activity_cutoff }),
+    )
+    .await
 }
 
 async fn post_local_kanna_task_action(
     port: u16,
     task_id: &str,
     action: &str,
+    payload: &serde_json::Value,
 ) -> Result<(), RuntimeError> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
     let path = format!("/v1/tasks/{task_id}/actions/{action}");
+    let body = serde_json::to_string(payload)?;
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
     );
     stream.write_all(request.as_bytes()).await?;
 

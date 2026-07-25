@@ -680,9 +680,49 @@ async fn handle_connection(
         Ok(PeerRequest::MarkTaskRead {
             request_id,
             requester_peer_id,
-            task_id,
-        }) => match mark_owner_task_read(&context, &requester_peer_id, &task_id).await {
-            Ok(()) => PeerResponse::MarkTaskRead { request_id },
+            sealed_payload,
+        }) => match async {
+            let requester_peer = context
+                .discovery
+                .list_peers(&context.self_peer_id)
+                .await?
+                .into_iter()
+                .find(|peer| peer.peer_id == requester_peer_id)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol(format!(
+                        "requester peer {} is not currently discovered",
+                        requester_peer_id
+                    ))
+                })?;
+            ensure_peer_is_trusted_for(
+                &context.registry_root,
+                &context.self_peer_id,
+                &requester_peer_id,
+                &requester_peer.public_key,
+            )?;
+            let requester_public_key = parse_public_key(&requester_peer.public_key)?;
+            let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
+            let payload = open_json(&identity, &requester_public_key, &sealed_payload)?;
+            let task_id = payload
+                .get("task_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol("mark-read payload missing task_id".into())
+                })?;
+            let activity_cutoff = payload
+                .get("activity_cutoff")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol("mark-read payload missing activity_cutoff".into())
+                })?;
+            mark_owner_task_read(&context, &requester_peer_id, task_id, activity_cutoff).await?;
+            Ok::<PeerResponse, RuntimeError>(PeerResponse::MarkTaskRead {
+                request_id: request_id.clone(),
+            })
+        }
+        .await
+        {
+            Ok(response) => response,
             Err(error) => PeerResponse::Error {
                 request_id,
                 message: error.to_string(),

@@ -1,7 +1,10 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use kanna_task_transfer::crypto::{public_key_to_string, TransferIdentity};
+use kanna_task_transfer::crypto::{
+    parse_public_key, public_key_to_string, seal_json, TransferIdentity,
+};
 use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
+use kanna_task_transfer::protocol::{PeerRequest, PeerResponse};
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
 use kanna_task_transfer::runtime::{
     DiscoveryMode, PairingResult, RuntimeConfig, RuntimeEvent, TransferRuntime,
@@ -628,7 +631,7 @@ async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
     pair_peers(&secondary, &owner, "peer-owner").await;
 
     secondary
-        .mark_peer_task_read("peer-owner", "owner-task-1")
+        .mark_peer_task_read("peer-owner", "owner-task-1", "2026-07-25T01:00:00.000Z")
         .await
         .unwrap();
 
@@ -637,8 +640,88 @@ async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
         request_line,
         "POST /v1/tasks/owner-task-1/actions/mark-read HTTP/1.1\r\n"
     );
-    assert_eq!(body, "{}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        json!({ "activityCutoff": "2026-07-25T01:00:00.000Z" }),
+    );
     server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forged_mark_read_payload_cannot_apply_owner_action() {
+    let temp = tempfile::tempdir().unwrap();
+    let kanna_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let kanna_port = kanna_listener.local_addr().unwrap().port();
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+    let owner_peer = secondary
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let attacker = TransferIdentity::generate();
+    let owner_public_key = parse_public_key(&owner_peer.public_key).unwrap();
+    let sealed_payload = seal_json(
+        &attacker,
+        &owner_public_key,
+        &json!({
+            "task_id": "owner-task-1",
+            "activity_cutoff": "2026-07-25T01:00:00.000Z",
+        }),
+    )
+    .unwrap();
+
+    let mut stream = TcpStream::connect(&owner_peer.endpoint).await.unwrap();
+    let request = PeerRequest::MarkTaskRead {
+        request_id: "forged-mark-read".into(),
+        requester_peer_id: "peer-secondary".into(),
+        sealed_payload,
+    };
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    let mut response_line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response_line)
+        .await
+        .unwrap();
+    let response: PeerResponse = serde_json::from_str(response_line.trim()).unwrap();
+    let PeerResponse::Error {
+        request_id,
+        message,
+    } = response
+    else {
+        panic!("expected forged mark-read request to fail");
+    };
+    assert_eq!(request_id, "forged-mark-read");
+    assert!(
+        message.contains("payload decryption failed"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), kanna_listener.accept())
+            .await
+            .is_err(),
+        "forged request reached the owner Kanna server"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

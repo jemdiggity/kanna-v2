@@ -203,6 +203,7 @@ fn remote_task_mark_read_messages_use_expected_wire_names() {
         request_id: "req-mark-read-control".into(),
         target_peer_id: "peer-owner".into(),
         task_id: "task-owner".into(),
+        activity_cutoff: "2026-07-25T01:00:00.000Z".into(),
     };
     assert_eq!(
         serde_json::to_value(&control_request).unwrap(),
@@ -211,6 +212,7 @@ fn remote_task_mark_read_messages_use_expected_wire_names() {
             "request_id": "req-mark-read-control",
             "target_peer_id": "peer-owner",
             "task_id": "task-owner",
+            "activity_cutoff": "2026-07-25T01:00:00.000Z",
         })
     );
     assert_roundtrip(control_request);
@@ -222,7 +224,7 @@ fn remote_task_mark_read_messages_use_expected_wire_names() {
     let peer_request = PeerRequest::MarkTaskRead {
         request_id: "req-mark-read-peer".into(),
         requester_peer_id: "peer-secondary".into(),
-        task_id: "task-owner".into(),
+        sealed_payload: "sealed-task-and-cutoff".into(),
     };
     assert_eq!(
         serde_json::to_value(&peer_request).unwrap(),
@@ -230,7 +232,7 @@ fn remote_task_mark_read_messages_use_expected_wire_names() {
             "type": "mark_task_read",
             "request_id": "req-mark-read-peer",
             "requester_peer_id": "peer-secondary",
-            "task_id": "task-owner",
+            "sealed_payload": "sealed-task-and-cutoff",
         })
     );
     assert_roundtrip(peer_request);

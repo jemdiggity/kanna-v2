@@ -51,6 +51,7 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         task_id: String,
+        activity_cutoff: String,
     },
     UnobservePeerSession {
         request_id: String,
@@ -282,7 +283,7 @@ pub enum PeerRequest {
     MarkTaskRead {
         request_id: String,
         requester_peer_id: String,
-        task_id: String,
+        sealed_payload: String,
     },
 }
 

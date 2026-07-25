@@ -516,6 +516,25 @@ impl Db {
         Ok(())
     }
 
+    pub fn mark_pipeline_item_read_if_unchanged(
+        &self,
+        id: &str,
+        activity_cutoff: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET activity = 'idle', activity_changed_at = datetime('now'),
+                 updated_at = datetime('now')
+             WHERE id = ? AND activity = 'unread' AND closed_at IS NULL
+               AND (
+                 ? IS NULL
+                 OR julianday(COALESCE(activity_changed_at, created_at)) <= julianday(?)
+               )",
+            (id, activity_cutoff, activity_cutoff),
+        )?;
+        Ok(rows_affected > 0)
+    }
+
     pub fn update_pipeline_item_base_ref_and_activity(
         &self,
         id: &str,
