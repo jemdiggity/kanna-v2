@@ -217,6 +217,21 @@ impl Db {
         Ok(())
     }
 
+    /// Roll back a stage run that was inserted before daemon spawn but never
+    /// became the task's active stage. Task close changes pending rows to
+    /// cancelled, so both pre-start states are eligible.
+    pub fn delete_unstarted_stage_run(&self, id: &str) -> Result<(), rusqlite::Error> {
+        let changed = self.conn.execute(
+            "DELETE FROM stage_run
+             WHERE id = ?1 AND status IN ('pending', 'cancelled')",
+            [id],
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
     /// Finish the task's most recent `running` run, returning its kind so
     /// callers can tell whether a main run or a post completed.
     /// Returns `Ok(None)` without writing when no run is running.

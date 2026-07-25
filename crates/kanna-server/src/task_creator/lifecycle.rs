@@ -344,7 +344,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
             log::warn!("failed to clean up stale stage session {session_id}: {error}");
         }
-        return Err(fail_prepared_stage_spawn(
+        return Err(rollback_closed_stage_spawn(
             db_path,
             &run_id,
             &prepared,
@@ -366,7 +366,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                             "failed to clean up stale stage session {session_id}: {kill_error}"
                         );
                     }
-                    return Err(fail_prepared_stage_spawn(
+                    return Err(rollback_closed_stage_spawn(
                         db_path,
                         &run_id,
                         &prepared,
@@ -393,7 +393,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                             "failed to clean up stale stage session {session_id}: {kill_error}"
                         );
                     }
-                    return Err(fail_prepared_stage_spawn(
+                    return Err(rollback_closed_stage_spawn(
                         db_path,
                         &run_id,
                         &prepared,
@@ -433,6 +433,21 @@ fn fail_prepared_stage_spawn(
         Err(db_error) => format!("{error}; failed to record stage spawn failure: {db_error}"),
     };
     rollback_prepared_stage_fork(prepared, recorded_error)
+}
+
+fn rollback_closed_stage_spawn(
+    db_path: &str,
+    run_id: &str,
+    prepared: &PreparedStageRunSpawn,
+    error: String,
+) -> String {
+    let rollback_error = match Db::open(db_path)
+        .and_then(|db| db.delete_unstarted_stage_run(run_id))
+    {
+        Ok(()) => error,
+        Err(db_error) => format!("{error}; failed to roll back unstarted stage run: {db_error}"),
+    };
+    rollback_prepared_stage_fork(prepared, rollback_error)
 }
 
 fn rollback_prepared_stage_fork(prepared: &PreparedStageRunSpawn, error: String) -> String {
