@@ -146,6 +146,35 @@ describe("useRemoteTaskReadDwell", () => {
     scope.stop();
   });
 
+  it("does not mark a replacement owner with the same revision read", async () => {
+    const selectedItemId = ref<string | null>(null);
+    const originalTask = remoteWorkspaceTask(7);
+    const workspaceTasks = ref(new Map([["slot:remote", originalTask]]));
+    const workspaceTasksByItemId = computed(() => workspaceTasks.value);
+    const markTaskRead = vi.fn(async () => {});
+    const scope = effectScope();
+
+    scope.run(() => {
+      useRemoteTaskReadDwell({ selectedItemId, workspaceTasksByItemId, markTaskRead });
+    });
+
+    selectedItemId.value = "slot:remote";
+    await nextTick();
+
+    const replacementTask = remoteWorkspaceTask(7);
+    replacementTask.owner = { kind: "remote", id: "replacement-desktop" };
+    replacementTask.terminal.remoteRef = {
+      ownerDesktopId: "replacement-desktop",
+      ownerLocalTaskId: "replacement-task",
+    };
+    workspaceTasks.value = new Map([["slot:remote", replacementTask]]);
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(markTaskRead).not.toHaveBeenCalled();
+    scope.stop();
+  });
+
   it("keeps the original activity revision when the dwell callback runs late", async () => {
     const selectedItemId = ref<string | null>(null);
     const task = remoteWorkspaceTask();

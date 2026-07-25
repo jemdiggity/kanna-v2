@@ -21,11 +21,14 @@ owner database assigns every task a durable monotonic `activity_revision` and
 increments it atomically whenever activity changes. Owner cloud and LAN
 snapshots publish that revision.
 
-The watcher captures the selected task's exact unread activity revision, waits
-one second, verifies that the selection, unread state, and revision are all
-unchanged, and then routes a compare-and-swap mark-read action to the owner's
-local task ID. Missing revisions from older remote snapshots fail safe and do
-not trigger automatic mark-read.
+The watcher captures the selected task's owner desktop ID, owner-local task ID,
+and exact unread activity revision. After one second, it verifies that the
+selection, remote identity, unread state, and revision are all unchanged, then
+routes a compare-and-swap mark-read action to that owner-local task ID. Binding
+the revision to its owner identity prevents a stable sidebar presentation slot
+from applying an observation after its preferred remote source changes.
+Missing revisions from older remote snapshots fail safe and do not trigger
+automatic mark-read.
 
 Extend the shared remote terminal/action client with `markTaskRead`:
 
@@ -64,6 +67,8 @@ Add regression coverage that proves:
 - navigating away before one second cancels the action;
 - revision changes and newly unread activity are not overwritten by a stale
   dwell callback;
+- a presentation slot rebound to another owner with the same numeric revision
+  is not marked read;
 - restored selections start the dwell immediately and missing revisions fail
   safe;
 - every activity transition increments the durable revision;
