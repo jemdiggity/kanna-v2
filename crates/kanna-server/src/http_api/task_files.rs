@@ -1,9 +1,10 @@
-use super::state::AppState;
+use super::state::{AppState, TunneledHttpInvoke};
 use crate::db::Db;
 use crate::task_files::{TaskFileContent, TaskFileError};
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
@@ -17,13 +18,20 @@ pub(super) struct AuthenticatedTaskFileAccess;
 pub(super) async fn get_task_file(
     State(state): State<Arc<AppState>>,
     access: Option<Extension<AuthenticatedTaskFileAccess>>,
+    tunneled: Option<Extension<TunneledHttpInvoke>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(task_id): Path<String>,
     Query(query): Query<TaskFileQuery>,
 ) -> Result<Json<TaskFileContent>, (StatusCode, String)> {
-    if access.is_none() {
+    // Desktop-local processes (the app and its transfer sidecar) reach the
+    // server over the real loopback listener and carry no tunnel marker;
+    // relay/KSP dispatches synthesize a loopback peer but are marked tunneled.
+    let desktop_local = tunneled.is_none()
+        && peer.is_some_and(|Extension(ConnectInfo(addr))| addr.ip().is_loopback());
+    if access.is_none() && !desktop_local {
         return Err((
             StatusCode::UNAUTHORIZED,
-            "task file preview requires an authenticated relay".to_string(),
+            "task file preview requires an authenticated relay or the local desktop".to_string(),
         ));
     }
 
