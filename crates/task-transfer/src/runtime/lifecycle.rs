@@ -67,6 +67,9 @@ impl TransferRuntime {
             &config.registry_dir,
             &config.peer_id,
             config.pending_transfer_ttl,
+            config.applied_receipt_ttl,
+            config.max_unapplied_receipts,
+            config.max_applied_receipts,
         ));
         let mut loaded_outgoing_transfers = replay_store.load_outgoing_reservations()?;
         let loaded_receipts = replay_store.load_receipts()?;
@@ -89,7 +92,8 @@ impl TransferRuntime {
         let outgoing_transfers = Arc::new(Mutex::new(loaded_outgoing_transfers));
         let import_commit_receipts = Arc::new(Mutex::new(loaded_receipts));
         let pending_outgoing_transfer_finalizations = Arc::new(Mutex::new(HashMap::new()));
-        let incoming_reservations = Arc::new(Mutex::new(HashMap::new()));
+        let incoming_reservations =
+            Arc::new(Mutex::new(replay_store.load_incoming_reservations()?));
         let transfer_artifacts = Arc::new(Mutex::new(HashMap::new()));
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
@@ -119,6 +123,39 @@ impl TransferRuntime {
             incoming_sender: incoming_sender.clone(),
         };
         let listener_task = tokio::spawn(run_listener(listener, listener_context));
+        let retry_receipts = Arc::clone(&import_commit_receipts);
+        let retry_sender = incoming_sender.clone();
+        let retry_interval = config
+            .receipt_retry_interval
+            .max(std::time::Duration::from_millis(1));
+        let receipt_retry_task = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(retry_interval);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let pending = retry_receipts
+                    .lock()
+                    .await
+                    .iter()
+                    .filter(|(_, receipt)| !receipt.applied)
+                    .map(
+                        |(transfer_id, receipt)| super::events::OutgoingTransferCommittedEvent {
+                            transfer_id: transfer_id.clone(),
+                            source_task_id: receipt.source_task_id.clone(),
+                            destination_local_task_id: receipt.destination_local_task_id.clone(),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                for event in pending {
+                    if retry_sender
+                        .send(RuntimeEvent::OutgoingTransferCommitted(event))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
 
         Ok(Self {
             config,
@@ -137,6 +174,7 @@ impl TransferRuntime {
             incoming_events: Mutex::new(incoming_receiver),
             request_counter,
             listener_task,
+            receipt_retry_task,
             registry_entry_path,
         })
     }
@@ -468,6 +506,7 @@ impl TransferRuntime {
 impl Drop for TransferRuntime {
     fn drop(&mut self) {
         self.listener_task.abort();
+        self.receipt_retry_task.abort();
         self.discovery.shutdown();
         if let Some(registry_entry_path) = &self.registry_entry_path {
             let _ = std::fs::remove_file(registry_entry_path);

@@ -185,20 +185,32 @@ async fn handle_connection(
                 })?
                 .to_string();
             let mut reservations = context.incoming_reservations.lock().await;
-            prune_incoming_reservations(&mut reservations, context.pending_transfer_ttl);
-            let transfer_id = format!(
-                "{}-transfer-{}",
-                context.self_peer_id,
-                context.request_counter.fetch_add(1, Ordering::Relaxed)
-            );
-            reservations.insert(
-                transfer_id.clone(),
-                IncomingTransferReservation {
-                    source_peer_id: source_peer_id.clone(),
-                    source_task_id,
-                    created_at: Instant::now(),
-                },
-            );
+            for expired in
+                prune_incoming_reservations(&mut reservations, context.pending_transfer_ttl)
+            {
+                context.replay_store.remove_incoming_reservation(&expired);
+            }
+            let transfer_id = loop {
+                let candidate = format!(
+                    "{}-transfer-{}",
+                    context.self_peer_id,
+                    context.request_counter.fetch_add(1, Ordering::Relaxed)
+                );
+                if !reservations.contains_key(&candidate) {
+                    break candidate;
+                }
+            };
+            let reservation = IncomingTransferReservation {
+                source_peer_id: source_peer_id.clone(),
+                source_task_id,
+                created_at: Instant::now(),
+                created_at_unix_ms: unix_ms(),
+                committed: false,
+            };
+            context
+                .replay_store
+                .save_incoming_reservation(&transfer_id, &reservation)?;
+            reservations.insert(transfer_id.clone(), reservation);
 
             Ok::<PeerResponse, RuntimeError>(PeerResponse::PrepareTransfer {
                 request_id: request_id.clone(),
@@ -228,10 +240,21 @@ async fn handle_connection(
                 context.pending_transfer_ttl,
                 sealed_payload,
                 &context.incoming_reservations,
+                &context.replay_store,
             )
             .await
             {
                 Ok(event) => {
+                    {
+                        let mut reservations = context.incoming_reservations.lock().await;
+                        let reservation = reservations.get_mut(&transfer_id).ok_or_else(|| {
+                            RuntimeError::Protocol(format!("unknown transfer id {}", transfer_id))
+                        })?;
+                        reservation.committed = true;
+                        context
+                            .replay_store
+                            .save_incoming_reservation(&transfer_id, reservation)?;
+                    }
                     context
                         .incoming_sender
                         .send(RuntimeEvent::IncomingTransferRequest(event))
@@ -256,7 +279,11 @@ async fn handle_connection(
             match async {
                 let expected_target_peer_id = {
                     let mut transfers = context.outgoing_transfers.lock().await;
-                    prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl);
+                    for expired in
+                        prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
+                    {
+                        context.replay_store.remove_reservation(&expired);
+                    }
                     transfers
                         .get(&transfer_id)
                         .map(|reservation| reservation.target_peer_id.clone())
@@ -363,7 +390,11 @@ async fn handle_connection(
             match async {
                 let expected_target_peer_id = {
                     let mut transfers = context.outgoing_transfers.lock().await;
-                    prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl);
+                    for expired in
+                        prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
+                    {
+                        context.replay_store.remove_reservation(&expired);
+                    }
                     transfers
                         .get(&transfer_id)
                         .map(|reservation| reservation.target_peer_id.clone())
@@ -470,7 +501,11 @@ async fn handle_connection(
                 let existing_receipt = receipts.get(&transfer_id).cloned();
                 let reservation = if existing_receipt.is_none() {
                     let mut transfers = context.outgoing_transfers.lock().await;
-                    prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl);
+                    for expired in
+                        prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
+                    {
+                        context.replay_store.remove_reservation(&expired);
+                    }
                     transfers.get(&transfer_id).cloned()
                 } else {
                     None
@@ -576,6 +611,14 @@ async fn handle_connection(
                     return Err(RuntimeError::Protocol(format!(
                         "unexpected source task {} for import acknowledgment {}",
                         source_task_id, transfer_id
+                    )));
+                }
+                if receipts.values().filter(|receipt| !receipt.applied).count()
+                    >= context.replay_store.max_unapplied_receipts()
+                {
+                    return Err(RuntimeError::Protocol(format!(
+                        "too many unapplied import acknowledgments (maximum {})",
+                        context.replay_store.max_unapplied_receipts()
                     )));
                 }
                 let receipt = ImportCommitReceipt {
@@ -819,10 +862,13 @@ async fn build_incoming_event(
     pending_transfer_ttl: Duration,
     sealed_payload: String,
     incoming_reservations: &Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
+    replay_store: &super::replay_store::TransferReplayStore,
 ) -> Result<IncomingTransferEvent, RuntimeError> {
     let reservation = {
         let mut reservations = incoming_reservations.lock().await;
-        prune_incoming_reservations(&mut reservations, pending_transfer_ttl);
+        for expired in prune_incoming_reservations(&mut reservations, pending_transfer_ttl) {
+            replay_store.remove_incoming_reservation(&expired);
+        }
         reservations
             .get(transfer_id)
             .cloned()
@@ -850,18 +896,23 @@ async fn build_incoming_event(
     let identity = load_or_create_identity(registry_root, self_peer_id)?;
     let payload = open_json(&identity, &source_public_key, &sealed_payload)?;
 
-    let source_task_id = payload
+    let payload_source_task_id = payload
         .pointer("/task/source_task_id")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or(reservation.source_task_id);
+        .unwrap_or(&reservation.source_task_id);
+    if payload_source_task_id != reservation.source_task_id {
+        return Err(RuntimeError::Protocol(format!(
+            "transfer {} payload source task does not match its reservation",
+            transfer_id
+        )));
+    }
 
     let source_name = Some(source_peer.display_name);
 
     Ok(IncomingTransferEvent {
         transfer_id: transfer_id.to_owned(),
         source_peer_id: reservation.source_peer_id,
-        source_task_id,
+        source_task_id: reservation.source_task_id,
         source_name,
         payload,
     })

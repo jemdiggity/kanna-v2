@@ -3,6 +3,16 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Duration;
 
+// Two seconds keeps crash recovery responsive without flooding the renderer when
+// its handler is temporarily failing.
+const DEFAULT_RECEIPT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+// Applied receipts only provide duplicate suppression, so retain one month and
+// cap their count. Unapplied receipts represent required work and are never
+// evicted; the lower admission cap instead makes overload explicit.
+const DEFAULT_APPLIED_RECEIPT_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const DEFAULT_MAX_UNAPPLIED_RECEIPTS: usize = 256;
+const DEFAULT_MAX_APPLIED_RECEIPTS: usize = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryMode {
     Registry,
@@ -21,6 +31,10 @@ pub struct RuntimeConfig {
     pub(super) discovery_mode: DiscoveryMode,
     pub(super) pending_transfer_ttl: Duration,
     pub(super) peer_request_timeout: Duration,
+    pub(super) receipt_retry_interval: Duration,
+    pub(super) applied_receipt_ttl: Duration,
+    pub(super) max_unapplied_receipts: usize,
+    pub(super) max_applied_receipts: usize,
 }
 
 impl RuntimeConfig {
@@ -41,6 +55,10 @@ impl RuntimeConfig {
             discovery_mode: DiscoveryMode::Registry,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
+            receipt_retry_interval: DEFAULT_RECEIPT_RETRY_INTERVAL,
+            applied_receipt_ttl: DEFAULT_APPLIED_RECEIPT_TTL,
+            max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
+            max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
         }
     }
 
@@ -56,6 +74,26 @@ impl RuntimeConfig {
 
     pub fn with_peer_request_timeout(mut self, peer_request_timeout: Duration) -> Self {
         self.peer_request_timeout = peer_request_timeout;
+        self
+    }
+
+    pub fn with_receipt_retry_interval(mut self, receipt_retry_interval: Duration) -> Self {
+        self.receipt_retry_interval = receipt_retry_interval;
+        self
+    }
+
+    pub fn with_replay_limits(
+        mut self,
+        max_unapplied_receipts: usize,
+        max_applied_receipts: usize,
+    ) -> Self {
+        self.max_unapplied_receipts = max_unapplied_receipts;
+        self.max_applied_receipts = max_applied_receipts;
+        self
+    }
+
+    pub fn with_applied_receipt_ttl(mut self, applied_receipt_ttl: Duration) -> Self {
+        self.applied_receipt_ttl = applied_receipt_ttl;
         self
     }
 
@@ -146,6 +184,10 @@ impl RuntimeConfig {
             discovery_mode,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
+            receipt_retry_interval: DEFAULT_RECEIPT_RETRY_INTERVAL,
+            applied_receipt_ttl: DEFAULT_APPLIED_RECEIPT_TTL,
+            max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
+            max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
         })
     }
 

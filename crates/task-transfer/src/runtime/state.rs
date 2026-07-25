@@ -18,6 +18,8 @@ pub(super) struct IncomingTransferReservation {
     pub(super) source_peer_id: String,
     pub(super) source_task_id: String,
     pub(super) created_at: Instant,
+    pub(super) created_at_unix_ms: u64,
+    pub(super) committed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +107,7 @@ pub struct TransferRuntime {
     pub(super) incoming_events: Mutex<mpsc::UnboundedReceiver<RuntimeEvent>>,
     pub(super) request_counter: Arc<AtomicU64>,
     pub(super) listener_task: JoinHandle<()>,
+    pub(super) receipt_retry_task: JoinHandle<()>,
     pub(super) registry_entry_path: Option<PathBuf>,
 }
 

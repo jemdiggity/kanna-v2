@@ -39,12 +39,12 @@ use provider::{
 use std::collections::HashMap;
 use std::str::FromStr;
 use types::{
-    CreatedTask, ForkedWorkspace, PreparedRunWorkspace, PreparedSessionSpawn, PreparedStageRerun,
-    RunWorkspaceSpec, TaskCreationRequest,
+    CreatedTask, ForkedWorkspace, PreparedRunWorkspace, PreparedSessionSpawn, RunWorkspaceSpec,
+    TaskCreationRequest,
 };
 pub(crate) use types::{
-    PrepareTaskError, PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn,
-    PreparedWorkspaceTeardown,
+    PrepareTaskError, PreparedStageRerun, PreparedStageRunSpawn, PreparedStageTransition,
+    PreparedTaskSpawn, PreparedWorkspaceTeardown,
 };
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,

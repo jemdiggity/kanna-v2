@@ -53,7 +53,11 @@ impl TransferRuntime {
                 }
 
                 let mut transfers = self.outgoing_transfers.lock().await;
-                prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl);
+                for expired in
+                    prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl)
+                {
+                    self.replay_store.remove_reservation(&expired);
+                }
                 let reservation = OutgoingTransferReservation {
                     target_peer_id: target_peer_id.to_owned(),
                     source_task_id: source_task_id.to_owned(),
@@ -110,7 +114,11 @@ impl TransferRuntime {
     ) -> Result<(), RuntimeError> {
         let target_peer_id = {
             let mut transfers = self.outgoing_transfers.lock().await;
-            prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl);
+            for expired in
+                prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl)
+            {
+                self.replay_store.remove_reservation(&expired);
+            }
             transfers
                 .get(transfer_id)
                 .map(|reservation| reservation.target_peer_id.clone())
@@ -199,7 +207,11 @@ impl TransferRuntime {
     ) -> Result<FinalizedOutgoingTransfer, RuntimeError> {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl);
+            for expired in
+                prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl)
+            {
+                self.replay_store.remove_incoming_reservation(&expired);
+            }
             reservations
                 .get(transfer_id)
                 .map(|reservation| reservation.source_peer_id.clone())
@@ -348,7 +360,11 @@ impl TransferRuntime {
 
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl);
+            for expired in
+                prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl)
+            {
+                self.replay_store.remove_incoming_reservation(&expired);
+            }
             reservations
                 .get(transfer_id)
                 .map(|reservation| reservation.source_peer_id.clone())
@@ -465,10 +481,17 @@ impl TransferRuntime {
     ) -> Result<(), RuntimeError> {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl);
-            reservations
-                .get(transfer_id)
-                .map(|reservation| reservation.source_peer_id.clone())
+            for expired in
+                prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl)
+            {
+                self.replay_store.remove_incoming_reservation(&expired);
+            }
+            reservations.get(transfer_id).map(|reservation| {
+                (
+                    reservation.source_peer_id.clone(),
+                    reservation.source_task_id.clone(),
+                )
+            })
         }
         .ok_or_else(|| {
             RuntimeError::Protocol(format!(
@@ -477,6 +500,13 @@ impl TransferRuntime {
             ))
         })?;
 
+        let (source_peer_id, reserved_source_task_id) = source_peer_id;
+        if reserved_source_task_id != source_task_id {
+            return Err(RuntimeError::Protocol(format!(
+                "unexpected source task {} for import acknowledgment {}",
+                source_task_id, transfer_id
+            )));
+        }
         let source_peer = self.find_peer(&source_peer_id).await?;
         self.ensure_peer_is_trusted(&source_peer.peer_id, &source_peer.public_key)?;
         let source_public_key = parse_public_key(&source_peer.public_key)?;
@@ -520,7 +550,6 @@ impl TransferRuntime {
                     )));
                 }
 
-                self.incoming_reservations.lock().await.remove(transfer_id);
                 Ok(())
             }
             PeerResponse::StartPairing { .. }
@@ -545,6 +574,12 @@ impl TransferRuntime {
         }
     }
 
+    pub async fn mark_import_ack_completed(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        self.incoming_reservations.lock().await.remove(transfer_id);
+        self.replay_store.remove_incoming_reservation(transfer_id);
+        Ok(())
+    }
+
     pub async fn mark_import_commit_applied(&self, transfer_id: &str) -> Result<(), RuntimeError> {
         let mut receipts = self.import_commit_receipts.lock().await;
         let receipt = receipts.get_mut(transfer_id).ok_or_else(|| {
@@ -557,6 +592,7 @@ impl TransferRuntime {
         applied.applied = true;
         self.replay_store.save_receipt(transfer_id, &applied)?;
         *receipt = applied;
+        self.replay_store.compact_receipts(&mut receipts);
         Ok(())
     }
 }

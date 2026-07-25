@@ -113,6 +113,10 @@ pub enum ControlRequest {
         request_id: String,
         transfer_id: String,
     },
+    MarkImportAckCompleted {
+        request_id: String,
+        transfer_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +208,10 @@ pub enum ControlResponse {
         transfer_id: String,
     },
     MarkImportCommitApplied {
+        request_id: String,
+        transfer_id: String,
+    },
+    MarkImportAckCompleted {
         request_id: String,
         transfer_id: String,
     },

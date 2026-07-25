@@ -440,6 +440,29 @@ pub async fn acknowledge_incoming_transfer_commit(
 }
 
 #[tauri::command]
+pub async fn mark_incoming_transfer_ack_completed(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::TransferServiceState>,
+    transfer_id: String,
+) -> Result<Value, String> {
+    let mut guard = state.lock().await;
+    ensure_client(&app, &mut guard).await?;
+    let (result, dead) = {
+        let client = guard
+            .as_mut()
+            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
+        let result = client
+            .mark_incoming_transfer_ack_completed(transfer_id)
+            .await;
+        (result, client.is_dead())
+    };
+    if dead {
+        *guard = None;
+    }
+    result
+}
+
+#[tauri::command]
 pub async fn mark_outgoing_transfer_commit_applied(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,

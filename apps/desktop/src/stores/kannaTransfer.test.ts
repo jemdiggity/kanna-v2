@@ -148,6 +148,16 @@ function mockIncomingTransferApprovalInvoke(
     if (cmd === "git_fetch") {
       return null;
     }
+    if (cmd === "mark_incoming_transfer_ack_completed") {
+      try {
+        return await handler(cmd, args);
+      } catch (error) {
+        if (error instanceof Error && error.message === `unexpected invoke: ${cmd}`) {
+          return null;
+        }
+        throw error;
+      }
+    }
     return handler(cmd, args);
   });
 }
@@ -1494,6 +1504,7 @@ describe("incoming transfer approval", () => {
         return null;
       }
       if (cmd === "acknowledge_incoming_transfer_commit") return null;
+      if (cmd === "mark_incoming_transfer_ack_completed") return null;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
@@ -1620,6 +1631,10 @@ describe("incoming transfer approval", () => {
         events.push(`ack:${args?.transferId as string}`);
         return null;
       }
+      if (cmd === "mark_incoming_transfer_ack_completed") {
+        events.push(`mark:${args?.transferId as string}`);
+        return null;
+      }
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
@@ -1629,6 +1644,7 @@ describe("incoming transfer approval", () => {
       `identity:${destinationTaskId}:cloud-stable`,
       "ack:transfer-1",
       `complete:transfer-1:${destinationTaskId}`,
+      "mark:transfer-1",
     ]);
   });
 
@@ -1791,7 +1807,7 @@ describe("incoming transfer approval", () => {
     expect(acknowledgmentCalls).toBe(2);
   });
 
-  it("replays a lost destination create response with one deterministic task", async () => {
+  it("repairs a destination crash after task prepare before acknowledging the source", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
@@ -1823,6 +1839,7 @@ describe("incoming transfer approval", () => {
         if (!requestedTaskId) throw new Error("incoming create did not request a stable task id");
         const existing = fakeDb.tables.pipeline_item.find((item) => item.id === requestedTaskId);
         if (existing) {
+          if (uniqueSessions === 0) uniqueSessions += 1;
           return {
             taskId: existing.id,
             repoId: existing.repo_id,
@@ -1840,7 +1857,6 @@ describe("incoming transfer approval", () => {
         item.cloud_task_id = null;
         fakeDb.tables.pipeline_item.push(item);
         uniqueWorktrees += 1;
-        uniqueSessions += 1;
         if (firstResponseLost) {
           firstResponseLost = false;
           throw new Error("create response lost");
@@ -1859,7 +1875,10 @@ describe("incoming transfer approval", () => {
       if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
       if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
       if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") return null;
-      if (cmd === "acknowledge_incoming_transfer_commit") return null;
+      if (cmd === "acknowledge_incoming_transfer_commit") {
+        expect(uniqueSessions).toBe(1);
+        return null;
+      }
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
@@ -1939,6 +1958,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
       if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") return null;
       if (cmd === "acknowledge_incoming_transfer_commit") return null;
+      if (cmd === "mark_incoming_transfer_ack_completed") return null;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 

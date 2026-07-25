@@ -195,19 +195,38 @@ pub(super) fn unexpected_peer_response(operation: &str, response: &PeerResponse)
 pub(super) fn prune_outgoing_transfers(
     transfers: &mut HashMap<String, OutgoingTransferReservation>,
     pending_transfer_ttl: Duration,
-) {
+) -> Vec<String> {
     let now = Instant::now();
-    transfers
-        .retain(|_, reservation| now.duration_since(reservation.created_at) < pending_transfer_ttl);
+    let expired = transfers
+        .iter()
+        .filter(|(_, reservation)| {
+            now.duration_since(reservation.created_at) >= pending_transfer_ttl
+        })
+        .map(|(transfer_id, _)| transfer_id.clone())
+        .collect::<Vec<_>>();
+    for transfer_id in &expired {
+        transfers.remove(transfer_id);
+    }
+    expired
 }
 
 pub(super) fn prune_incoming_reservations(
     reservations: &mut HashMap<String, IncomingTransferReservation>,
     pending_transfer_ttl: Duration,
-) {
+) -> Vec<String> {
     let now = Instant::now();
-    reservations
-        .retain(|_, reservation| now.duration_since(reservation.created_at) < pending_transfer_ttl);
+    let expired = reservations
+        .iter()
+        .filter(|(_, reservation)| {
+            !reservation.committed
+                && now.duration_since(reservation.created_at) >= pending_transfer_ttl
+        })
+        .map(|(transfer_id, _)| transfer_id.clone())
+        .collect::<Vec<_>>();
+    for transfer_id in &expired {
+        reservations.remove(transfer_id);
+    }
+    expired
 }
 
 pub(super) fn prune_transfer_artifacts(

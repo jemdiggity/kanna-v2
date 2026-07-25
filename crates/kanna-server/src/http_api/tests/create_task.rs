@@ -371,6 +371,160 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
 }
 
 #[tokio::test]
+async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let task_id = "d1e2f3a4b5c60718";
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-repair-{unique}"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-repair-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-create-repair-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-create-repair-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let request_body = serde_json::json!({
+        "repoId": "repo-1",
+        "prompt": "Repair the interrupted spawn",
+        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+        "agentProvider": "claude"
+    })
+    .to_string();
+    let first = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(
+        db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+        1
+    );
+    assert!(db.list_stage_runs_for_task(task_id).unwrap().is_empty());
+    drop(db);
+
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut command_count = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            command_count += 1;
+            match command {
+                DaemonCommand::Kill { .. } => {
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::Error {
+                                    code: Some(ErrorCode::SessionNotFound),
+                                    message: "session not found".to_string(),
+                                })
+                                .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                DaemonCommand::Spawn { session_id, .. }
+                | DaemonCommand::SpawnAgent { session_id, .. } => {
+                    assert_eq!(session_id, task_id);
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                    .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                other => panic!("unexpected repair command: {other:?}"),
+            }
+        }
+        command_count
+    });
+
+    let retry = app
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let command_count = daemon_server.await.unwrap();
+    assert_eq!(command_count, 2);
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(
+        db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+        1
+    );
+    let runs = db.list_stage_runs_for_task(task_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "running");
+    assert_eq!(runs[0].session_id.as_deref(), Some(task_id));
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn create_task_route_rejects_requested_task_id_with_mismatched_task_data() {
     let task_id = "b1c2d3e4f5a60718";
     let app = super::test_router_with_seed("desktop-create-task-mismatch", "Studio Mac", |db| {

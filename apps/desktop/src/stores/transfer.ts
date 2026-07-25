@@ -793,6 +793,7 @@ export function createTransferApi(
     if (!await completeDesktopTaskTransfer(transferId, localTaskId)) {
       throw new Error(`failed to complete acknowledged incoming transfer: ${transferId}`);
     }
+    await invoke("mark_incoming_transfer_ack_completed", { transferId });
     await queries.reloadSnapshot();
 
     return localTaskId;

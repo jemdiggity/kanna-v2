@@ -35,6 +35,14 @@ fn applied_import_commit_control_messages_roundtrip() {
         request_id: "req-applied".into(),
         transfer_id: "transfer-1".into(),
     });
+    assert_roundtrip(ControlRequest::MarkImportAckCompleted {
+        request_id: "req-ack-completed".into(),
+        transfer_id: "transfer-1".into(),
+    });
+    assert_roundtrip(ControlResponse::MarkImportAckCompleted {
+        request_id: "req-ack-completed".into(),
+        transfer_id: "transfer-1".into(),
+    });
 }
 
 #[test]

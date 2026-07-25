@@ -1,5 +1,5 @@
 use super::events::RuntimeError;
-use super::state::{ImportCommitReceipt, OutgoingTransferReservation};
+use super::state::{ImportCommitReceipt, IncomingTransferReservation, OutgoingTransferReservation};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -32,19 +32,41 @@ struct StoredImportCommitReceipt {
     applied: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredIncomingTransferReservation {
+    transfer_id: String,
+    source_peer_id: String,
+    source_task_id: String,
+    created_at_unix_ms: u64,
+    committed: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct TransferReplayStore {
     root: PathBuf,
     ttl: Duration,
+    applied_receipt_ttl: Duration,
+    max_unapplied_receipts: usize,
+    max_applied_receipts: usize,
 }
 
 impl TransferReplayStore {
-    pub(super) fn new(registry_root: &Path, self_peer_id: &str, ttl: Duration) -> Self {
+    pub(super) fn new(
+        registry_root: &Path,
+        self_peer_id: &str,
+        ttl: Duration,
+        applied_receipt_ttl: Duration,
+        max_unapplied_receipts: usize,
+        max_applied_receipts: usize,
+    ) -> Self {
         Self {
             root: registry_root
                 .join("transfer-replay")
                 .join(URL_SAFE_NO_PAD.encode(self_peer_id)),
             ttl,
+            applied_receipt_ttl,
+            max_unapplied_receipts,
+            max_applied_receipts,
         }
     }
 
@@ -60,7 +82,7 @@ impl TransferReplayStore {
             if self.is_expired(stored.created_at_unix_ms, now_ms)
                 || path != self.reservation_path(&stored.transfer_id)
             {
-                let _ = fs::remove_file(path);
+                self.remove_record(&path);
                 continue;
             }
             let age = Duration::from_millis(now_ms.saturating_sub(stored.created_at_unix_ms));
@@ -76,29 +98,76 @@ impl TransferReplayStore {
         Ok(loaded)
     }
 
+    pub(super) fn load_incoming_reservations(
+        &self,
+    ) -> Result<HashMap<String, IncomingTransferReservation>, RuntimeError> {
+        let now_ms = unix_ms();
+        let now = Instant::now();
+        let mut loaded = HashMap::new();
+        for (path, stored) in self.load_records::<StoredIncomingTransferReservation>(
+            &self.root.join("incoming-reservations"),
+        )? {
+            if path != self.incoming_reservation_path(&stored.transfer_id)
+                || (!stored.committed && self.is_expired(stored.created_at_unix_ms, now_ms))
+            {
+                self.remove_record(&path);
+                continue;
+            }
+            let age = Duration::from_millis(now_ms.saturating_sub(stored.created_at_unix_ms));
+            loaded.insert(
+                stored.transfer_id,
+                IncomingTransferReservation {
+                    source_peer_id: stored.source_peer_id,
+                    source_task_id: stored.source_task_id,
+                    created_at: now.checked_sub(age).unwrap_or(now),
+                    created_at_unix_ms: stored.created_at_unix_ms,
+                    committed: stored.committed,
+                },
+            );
+        }
+        Ok(loaded)
+    }
+
     pub(super) fn load_receipts(
         &self,
     ) -> Result<HashMap<String, ImportCommitReceipt>, RuntimeError> {
+        let now_ms = unix_ms();
         let mut loaded = HashMap::new();
+        let mut applied = Vec::new();
+        let mut unapplied_count = 0usize;
         for (path, stored) in
             self.load_records::<StoredImportCommitReceipt>(&self.root.join("receipts"))?
         {
-            // Receipts are durable protocol history, not pending reservations:
-            // unapplied entries must replay and applied entries remain idempotency tombstones.
             if path != self.receipt_path(&stored.transfer_id) {
-                let _ = fs::remove_file(path);
+                self.remove_record(&path);
                 continue;
             }
-            loaded.insert(
-                stored.transfer_id,
-                ImportCommitReceipt {
-                    target_peer_id: stored.target_peer_id,
-                    source_task_id: stored.source_task_id,
-                    destination_local_task_id: stored.destination_local_task_id,
-                    created_at_unix_ms: stored.created_at_unix_ms,
-                    applied: stored.applied,
-                },
-            );
+            if stored.applied {
+                if now_ms.saturating_sub(stored.created_at_unix_ms)
+                    >= self.applied_receipt_ttl.as_millis() as u64
+                {
+                    self.remove_record(&path);
+                    continue;
+                }
+                applied.push((path, stored));
+            } else {
+                unapplied_count += 1;
+                loaded.insert(stored.transfer_id.clone(), stored.into());
+            }
+        }
+        if unapplied_count > self.max_unapplied_receipts {
+            return Err(RuntimeError::InvalidConfig(format!(
+                "replay store contains {unapplied_count} unapplied receipts, exceeding configured maximum {}",
+                self.max_unapplied_receipts
+            )));
+        }
+        applied.sort_by_key(|(_, receipt)| std::cmp::Reverse(receipt.created_at_unix_ms));
+        for (index, (path, stored)) in applied.into_iter().enumerate() {
+            if index >= self.max_applied_receipts {
+                self.remove_record(&path);
+            } else {
+                loaded.insert(stored.transfer_id.clone(), stored.into());
+            }
         }
         Ok(loaded)
     }
@@ -118,7 +187,28 @@ impl TransferReplayStore {
     }
 
     pub(super) fn remove_reservation(&self, transfer_id: &str) {
-        let _ = fs::remove_file(self.reservation_path(transfer_id));
+        self.remove_record(&self.reservation_path(transfer_id));
+    }
+
+    pub(super) fn save_incoming_reservation(
+        &self,
+        transfer_id: &str,
+        reservation: &IncomingTransferReservation,
+    ) -> Result<(), RuntimeError> {
+        self.write_atomic(
+            &self.incoming_reservation_path(transfer_id),
+            &StoredIncomingTransferReservation {
+                transfer_id: transfer_id.to_owned(),
+                source_peer_id: reservation.source_peer_id.clone(),
+                source_task_id: reservation.source_task_id.clone(),
+                created_at_unix_ms: reservation.created_at_unix_ms,
+                committed: reservation.committed,
+            },
+        )
+    }
+
+    pub(super) fn remove_incoming_reservation(&self, transfer_id: &str) {
+        self.remove_record(&self.incoming_reservation_path(transfer_id));
     }
 
     pub(super) fn save_receipt(
@@ -137,6 +227,28 @@ impl TransferReplayStore {
         self.write_atomic(&self.receipt_path(transfer_id), &stored)
     }
 
+    pub(super) fn max_unapplied_receipts(&self) -> usize {
+        self.max_unapplied_receipts
+    }
+
+    pub(super) fn compact_receipts(&self, receipts: &mut HashMap<String, ImportCommitReceipt>) {
+        let now_ms = unix_ms();
+        let mut applied = receipts
+            .iter()
+            .filter(|(_, receipt)| receipt.applied)
+            .map(|(id, receipt)| (id.clone(), receipt.created_at_unix_ms))
+            .collect::<Vec<_>>();
+        applied.sort_by_key(|(_, created)| std::cmp::Reverse(*created));
+        for (index, (transfer_id, created_at)) in applied.into_iter().enumerate() {
+            if index >= self.max_applied_receipts
+                || now_ms.saturating_sub(created_at) >= self.applied_receipt_ttl.as_millis() as u64
+            {
+                receipts.remove(&transfer_id);
+                self.remove_record(&self.receipt_path(&transfer_id));
+            }
+        }
+    }
+
     fn load_records<T: DeserializeOwned>(
         &self,
         directory: &Path,
@@ -148,6 +260,9 @@ impl TransferReplayStore {
         for entry in fs::read_dir(directory)? {
             let path = entry?.path();
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                if path.extension().and_then(|extension| extension.to_str()) == Some("tmp") {
+                    self.remove_record(&path);
+                }
                 continue;
             }
             match fs::read(&path)
@@ -156,7 +271,7 @@ impl TransferReplayStore {
             {
                 Some(record) => records.push((path, record)),
                 None => {
-                    let _ = fs::remove_file(path);
+                    self.remove_record(&path);
                 }
             }
         }
@@ -206,8 +321,34 @@ impl TransferReplayStore {
             .join(format!("{}.json", transfer_key(transfer_id)))
     }
 
+    fn incoming_reservation_path(&self, transfer_id: &str) -> PathBuf {
+        self.root
+            .join("incoming-reservations")
+            .join(format!("{}.json", transfer_key(transfer_id)))
+    }
+
+    fn remove_record(&self, path: &Path) {
+        if fs::remove_file(path).is_ok() {
+            if let Some(parent) = path.parent() {
+                let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+            }
+        }
+    }
+
     fn is_expired(&self, created_at_ms: u64, now_ms: u64) -> bool {
         now_ms.saturating_sub(created_at_ms) >= self.ttl.as_millis() as u64
+    }
+}
+
+impl From<StoredImportCommitReceipt> for ImportCommitReceipt {
+    fn from(stored: StoredImportCommitReceipt) -> Self {
+        Self {
+            target_peer_id: stored.target_peer_id,
+            source_task_id: stored.source_task_id,
+            destination_local_task_id: stored.destination_local_task_id,
+            created_at_unix_ms: stored.created_at_unix_ms,
+            applied: stored.applied,
+        }
     }
 }
 

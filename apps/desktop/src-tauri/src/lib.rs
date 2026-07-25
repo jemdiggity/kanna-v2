@@ -319,6 +319,7 @@ pub fn run() {
             commands::transfer::finalize_outgoing_transfer,
             commands::transfer::complete_outgoing_transfer_finalization,
             commands::transfer::acknowledge_incoming_transfer_commit,
+            commands::transfer::mark_incoming_transfer_ack_completed,
             commands::transfer::mark_outgoing_transfer_commit_applied,
         ])
         .run(tauri::generate_context!())
