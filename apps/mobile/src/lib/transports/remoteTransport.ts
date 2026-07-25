@@ -730,6 +730,13 @@ export function createRemoteTransport({
 
       return request<CreateTaskResponse>(method, path, taskInput);
     },
+    abortTaskCreation: ({ taskId, desktopId }) =>
+      requestDesktop<void>(
+        desktopId,
+        "POST",
+        `/v1/tasks/${encodeURIComponent(taskId)}/actions/abort-creation`,
+        null
+      ),
     runMergeAgent: (taskId: string) =>
       requestTaskAction(
         taskId,

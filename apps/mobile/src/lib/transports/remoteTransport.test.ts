@@ -1385,6 +1385,28 @@ describe("remote transport", () => {
     });
   });
 
+  it("routes creation abort to the frozen desktop without a published task route", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-selected-elsewhere",
+      invokeDesktop,
+      listCloudTasks: async () => []
+    });
+
+    await transport.abortTaskCreation({
+      taskId: "a1b2c3d4",
+      desktopId: "desktop-created-here"
+    });
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-created-here",
+      method: "POST",
+      path: "/v1/tasks/a1b2c3d4/actions/abort-creation",
+      body: null
+    });
+  });
+
   it("retires a created task alias when its canonical identity is closed", async () => {
     const cloudTaskId = "cloud:desktop-created-here:repo-1:task-created";
     const listCloudTasks = vi

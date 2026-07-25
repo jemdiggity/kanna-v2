@@ -6,6 +6,7 @@ import type {
   PermissionDecision,
 } from "@kanna/agent-protocol";
 import type {
+  AbortTaskCreationRequest,
   CreateTaskRequest,
   CreateTaskResponse,
   RepoSummary,
@@ -98,6 +99,7 @@ export interface KannaTransport {
   getTask?(taskId: string): Promise<TaskDetail>;
   searchTasks(query: string): Promise<TaskSummary[]>;
   createTask(input: CreateTaskRequest): Promise<CreateTaskResponse>;
+  abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
   markTaskRead(taskId: string): Promise<TaskActivityResponse>;
@@ -135,6 +137,7 @@ export interface KannaClient {
   getTask?(taskId: string): Promise<TaskDetail>;
   searchTasks(query: string): Promise<TaskSummary[]>;
   createTask(input: CreateTaskRequest): Promise<CreateTaskResponse>;
+  abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
   markTaskRead(taskId: string): Promise<TaskActivityResponse>;
@@ -208,6 +211,7 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
         );
       }
     },
+    abortTaskCreation: (input) => transport.abortTaskCreation(input),
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
     markTaskRead: (taskId) => transport.markTaskRead(taskId),

@@ -86,6 +86,25 @@ describe("createLanTransport", () => {
     );
   });
 
+  it("aborts an identified creation without sending desktop routing in the body", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => null
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await transport.abortTaskCreation({
+      taskId: "a1b2/c3d4",
+      desktopId: "desktop-route"
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/a1b2%2Fc3d4/actions/abort-creation",
+      { method: "POST" }
+    );
+  });
+
   it("never downgrades a present but invalid task identity to legacy POST", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: false,

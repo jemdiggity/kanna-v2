@@ -96,6 +96,7 @@ describe("createKannaClient", () => {
         title: "Ship it",
         stage: "in progress"
       }),
+      abortTaskCreation: vi.fn().mockResolvedValue(undefined),
       runMergeAgent: vi.fn().mockResolvedValue({
         taskId: "task-4"
       }),
@@ -157,6 +158,14 @@ describe("createKannaClient", () => {
       repoId: "repo-1",
       title: "Ship it",
       stage: "in progress"
+    });
+    await expect(client.abortTaskCreation({
+      taskId: "a1b2c3d4",
+      desktopId: "desktop-owner"
+    })).resolves.toBeUndefined();
+    expect(transport.abortTaskCreation).toHaveBeenCalledWith({
+      taskId: "a1b2c3d4",
+      desktopId: "desktop-owner"
     });
     expect(await client.runMergeAgent("task-1")).toEqual({
       taskId: "task-4"
