@@ -287,12 +287,12 @@ fn resolve_task_file_mentions_with_limit(
         };
         for index in indices {
             let mention = &mut resolution.mentions[*index];
-            if mention.matches.len() < MAX_TASK_FILE_MENTION_MATCHES {
-                mention.matches.push(candidate.clone());
-                if mention.matches.len() == MAX_TASK_FILE_MENTION_MATCHES {
-                    mention.truncated = true;
-                }
-            } else {
+            mention.matches.push(candidate.clone());
+            if mention.matches.len() > MAX_TASK_FILE_MENTION_MATCHES {
+                mention
+                    .matches
+                    .sort_unstable_by(|left, right| left.path.cmp(&right.path));
+                mention.matches.truncate(MAX_TASK_FILE_MENTION_MATCHES);
                 mention.truncated = true;
             }
         }
@@ -510,6 +510,7 @@ mod tests {
     use super::{
         read_task_file, resolve_task_file_mentions, resolve_task_file_mentions_with_limit,
         TaskFileError, TaskFileMatch, TaskFileMention, MAX_TASK_FILE_BYTES, MAX_TASK_FILE_MENTIONS,
+        MAX_TASK_FILE_MENTION_MATCHES,
     };
     use crate::db::Db;
     use std::path::{Path, PathBuf};
@@ -660,6 +661,67 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a/shared.ts", "b/shared.ts"]
         );
+    }
+
+    #[test]
+    fn exactly_maximum_bare_filename_matches_are_sorted_and_not_truncated() {
+        let fixture = TaskFileFixture::new();
+        for index in (0..MAX_TASK_FILE_MENTION_MATCHES).rev() {
+            fixture.write(&format!("match-{index:02}/shared.ts"), b"shared");
+        }
+
+        let result = resolve_task_file_mentions(
+            &fixture.db,
+            "task-1",
+            vec![TaskFileMention {
+                path: "shared.ts".into(),
+                line: None,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.mentions[0]
+                .matches
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            (0..MAX_TASK_FILE_MENTION_MATCHES)
+                .map(|index| format!("match-{index:02}/shared.ts"))
+                .collect::<Vec<_>>()
+        );
+        assert!(!result.mentions[0].truncated);
+    }
+
+    #[test]
+    fn more_than_maximum_bare_filename_matches_return_lexicographically_first_paths() {
+        let fixture = TaskFileFixture::new();
+        fixture.write("a/shared.ts", b"shared");
+        for index in (0..=MAX_TASK_FILE_MENTION_MATCHES).rev() {
+            fixture.write(&format!("a-{index:02}/shared.ts"), b"shared");
+        }
+
+        let result = resolve_task_file_mentions(
+            &fixture.db,
+            "task-1",
+            vec![TaskFileMention {
+                path: "shared.ts".into(),
+                line: None,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.mentions[0]
+                .matches
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            (0..MAX_TASK_FILE_MENTION_MATCHES)
+                .map(|index| format!("a-{index:02}/shared.ts"))
+                .collect::<Vec<_>>()
+        );
+        assert!(result.mentions[0].truncated);
     }
 
     #[test]
