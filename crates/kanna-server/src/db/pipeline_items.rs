@@ -764,17 +764,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn update_pipeline_item_stage(&self, id: &str, stage: &str) -> Result<(), rusqlite::Error> {
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
-            (stage, id),
-        )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        Ok(())
-    }
-
     /// Record the task's pull request once an agent reports it (the pr
     /// stage's verdict carries the URL). Best-effort denormalization: the
     /// authoritative record is the stage run result.

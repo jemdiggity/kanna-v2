@@ -1089,45 +1089,6 @@ fn close_pipeline_item_accepts_task_branch_name() {
 }
 
 #[test]
-fn update_pipeline_item_stage_does_not_mutate_closed_rows() {
-    let path = temp_db_path();
-    let conn = Connection::open(&path).expect("open temp db");
-    conn.execute_batch(
-        r#"
-            CREATE TABLE pipeline_item (
-              id TEXT PRIMARY KEY,
-              stage TEXT NOT NULL,
-              closed_at TEXT,
-              updated_at TEXT
-            );
-            INSERT INTO pipeline_item (id, stage, closed_at)
-            VALUES ('task-1', 'review', '2026-06-03 00:02:25');
-            "#,
-    )
-    .expect("seed db");
-    drop(conn);
-
-    let db = Db::open(path.to_str().expect("utf8 path")).expect("open db");
-    let err = db
-        .update_pipeline_item_stage("task-1", "pr")
-        .expect_err("closed task should not be stage-mutated");
-
-    assert!(matches!(err, rusqlite::Error::QueryReturnedNoRows));
-    let conn = Connection::open(&path).expect("re-open db");
-    let (stage, closed_at): (String, Option<String>) = conn
-        .query_row(
-            "SELECT stage, closed_at FROM pipeline_item WHERE id = 'task-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("query row");
-    assert_eq!(stage, "review");
-    assert_eq!(closed_at.as_deref(), Some("2026-06-03 00:02:25"));
-
-    let _ = std::fs::remove_file(path);
-}
-
-#[test]
 fn resolves_pipeline_item_id_from_task_branch_name() {
     let path = Db::test_db_path("resolve-task-branch-name");
     let db = Db::open_for_tests(&path).expect("open test db");
