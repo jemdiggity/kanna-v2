@@ -41,6 +41,7 @@ function openItem(id: string) {
     prompt: "Open task",
     stage: "in progress",
     activity: "working",
+    activity_revision: 5,
     branch: id,
     base_ref: "main",
     pr_number: null,
@@ -90,6 +91,23 @@ describe("desktop LAN task index publisher", () => {
     expect(
       mocks.invoke.mock.calls.filter(([command]) => command === "git_remote_url"),
     ).toHaveLength(0);
+  });
+
+  it("publishes the owner activity revision in LAN task snapshots", async () => {
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [{ repo: repo() as never, items: [openItem("task-open") as never] }],
+      taskBlockers: [],
+      blockerTaskStates: {},
+      worktreePaths: {},
+      settings: {},
+    }));
+
+    await publishDesktopLanTaskSnapshot();
+
+    const publishCall = mocks.invoke.mock.calls.find(
+      ([command]) => command === "set_transfer_task_snapshot",
+    );
+    expect(publishCall?.[1].snapshot.tasks[0].activityRevision).toBe(5);
   });
 
   it("omits resolved blockers from the published task snapshot", async () => {

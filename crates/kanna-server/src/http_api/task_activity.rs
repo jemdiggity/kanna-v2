@@ -24,7 +24,7 @@ pub(super) struct TaskActivityResponse {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct MarkTaskReadRequest {
-    activity_cutoff: Option<String>,
+    expected_activity_revision: Option<i64>,
 }
 
 pub(crate) fn activity_for_runtime_status(
@@ -125,11 +125,11 @@ pub(super) async fn mark_task_read(
         }));
     }
 
-    let activity_cutoff = payload
+    let expected_activity_revision = payload
         .as_ref()
-        .and_then(|Json(payload)| payload.activity_cutoff.as_deref());
+        .and_then(|Json(payload)| payload.expected_activity_revision);
     let marked_read = db
-        .mark_pipeline_item_read_if_unchanged(&task_id, activity_cutoff)
+        .mark_pipeline_item_read_if_unchanged(&task_id, expected_activity_revision)
         .map_err(|e| db_write_error("db error", e))?;
     if !marked_read {
         return Ok(Json(TaskActivityResponse {

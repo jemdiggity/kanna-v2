@@ -161,7 +161,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "028_stage_run_completion_transition");
+    assert_eq!(latest_migration, "029_pipeline_item_activity_revision");
 
     let stage_run_sql: String = db
         .conn
@@ -870,6 +870,48 @@ fn insert_pipeline_item_stores_stage_metadata() {
     assert_eq!(row.display_name.as_deref(), Some("Merge queue"));
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn every_server_activity_write_advances_the_activity_revision() {
+    let path = Db::test_db_path("activity-revision-writes");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-07-25 01:00:00",
+    )
+    .unwrap();
+
+    db.update_pipeline_item_activity("task-1", "working")
+        .unwrap();
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity_revision,
+        1
+    );
+
+    db.update_pipeline_item_base_ref_and_activity("task-1", Some("origin/main"), "unread")
+        .unwrap();
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity_revision,
+        2
+    );
+
+    db.delete_dormant_task_start_artifacts("task-1", Some("origin/main"))
+        .unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("idle"));
+    assert_eq!(item.activity_revision, 3);
 }
 
 #[test]

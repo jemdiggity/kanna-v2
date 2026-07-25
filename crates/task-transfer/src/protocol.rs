@@ -45,7 +45,7 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         task_id: String,
-        activity_cutoff: String,
+        expected_activity_revision: i64,
     },
     UnobservePeerSession {
         request_id: String,

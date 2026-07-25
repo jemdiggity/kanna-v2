@@ -566,7 +566,7 @@ async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
     pair_peers(&secondary, &owner, "peer-owner").await;
 
     secondary
-        .mark_peer_task_read("peer-owner", "owner-task-1", "2026-07-25T01:00:00.000Z")
+        .mark_peer_task_read("peer-owner", "owner-task-1", 7)
         .await
         .unwrap();
 
@@ -577,7 +577,7 @@ async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
     );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&body).unwrap(),
-        json!({ "activityCutoff": "2026-07-25T01:00:00.000Z" }),
+        json!({ "expectedActivityRevision": 7 }),
     );
     server.await.unwrap();
 }
@@ -618,7 +618,7 @@ async fn forged_mark_read_payload_cannot_apply_owner_action() {
         &owner_public_key,
         &json!({
             "task_id": "owner-task-1",
-            "activity_cutoff": "2026-07-25T01:00:00.000Z",
+            "expected_activity_revision": 7,
         }),
     )
     .unwrap();

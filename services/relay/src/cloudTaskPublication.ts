@@ -95,6 +95,10 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     throw new Error(`${path}.status is invalid`);
   }
   if (task.closedAt !== null) throw new Error(`${path}.closedAt must be null for an open task`);
+  const activityRevision = optionalNonNegativeInteger(
+    task.activityRevision,
+    `${path}.activityRevision`,
+  );
 
   return {
     localRepoId,
@@ -110,6 +114,7 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     displayName: nullableString(task.displayName, `${path}.displayName`, 512),
     stage: requiredString(task.stage, `${path}.stage`, 64),
     activity: requiredString(task.activity, `${path}.activity`, 32),
+    ...(activityRevision === undefined ? {} : { activityRevision }),
     status,
     repo: {
       cloudRepoId: requiredString(repo.cloudRepoId, `${path}.repo.cloudRepoId`, 128),
@@ -302,6 +307,14 @@ function nullableInteger(value: unknown, field: string): number | null {
   if (value === null) return null;
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${field} must be null or a non-negative integer`);
+  }
+  return value as number;
+}
+
+function optionalNonNegativeInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`${field} must be a non-negative integer when present`);
   }
   return value as number;
 }

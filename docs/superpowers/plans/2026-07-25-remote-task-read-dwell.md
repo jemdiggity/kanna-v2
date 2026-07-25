@@ -808,3 +808,28 @@ git diff --stat HEAD~3
 Expected: the worktree is clean, the three implementation commits follow the
 design commit, and the diff is limited to the remote read-dwell files described
 above.
+
+## 2026-07-25 Revision: Owner Activity-Revision CAS
+
+Review found that the original activity timestamp cutoff was unsafe across
+machines and could not distinguish multiple transitions within SQLite's
+one-second timestamp resolution. Preserve the transport and dwell structure
+above, but replace the timestamp guard with an owner-issued monotonic revision:
+
+- add durable `pipeline_item.activity_revision INTEGER NOT NULL DEFAULT 0` in
+  migration `029_pipeline_item_activity_revision`;
+- increment the revision atomically whenever production code changes activity;
+- publish optional `activityRevision` through cloud and LAN snapshots so older
+  snapshots remain readable, while missing or invalid revisions disable remote
+  automatic mark-read;
+- synchronously capture the exact unread revision when selection begins, then
+  require the same selection, unread activity, and revision after the dwell;
+- send `expectedActivityRevision` through relay and the sealed LAN payload; and
+- make the owner update conditional on exact revision and unread state,
+  incrementing the revision in the successful update so delayed and replayed
+  requests are harmless.
+
+Verification must cover same-second transitions, delayed/replayed requests,
+restored selection, missing revisions, cloud/LAN projection, legacy empty-body
+owner calls, and forged sealed callers in addition to the original plan's
+transport and cancellation coverage.

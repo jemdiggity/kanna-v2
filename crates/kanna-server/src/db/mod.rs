@@ -66,6 +66,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "026_stage_run_resume",
     "027_pipeline_item_pr_branch",
     "028_stage_run_completion_transition",
+    "029_pipeline_item_activity_revision",
 ];
 
 #[derive(Debug, Serialize)]
@@ -83,6 +84,7 @@ pub struct PipelineItem {
     pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
     pub activity: Option<String>,
+    pub activity_revision: i64,
     pub activity_changed_at: Option<String>,
     pub closed_at: Option<String>,
     pub pinned: Option<i64>,
@@ -141,6 +143,7 @@ pub struct SnapshotPipelineItem {
     pub agent_type: Option<String>,
     pub agent_provider: String,
     pub activity: String,
+    pub activity_revision: i64,
     pub activity_changed_at: Option<String>,
     pub unread_at: Option<String>,
     pub port_offset: Option<i64>,
@@ -1158,6 +1161,16 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "stage_run",
             "completion_transition",
             "TEXT CHECK (completion_transition IN ('manual', 'auto'))",
+        );
+        Ok(())
+    })?;
+
+    run_migration(conn, "029_pipeline_item_activity_revision", |conn| {
+        add_column(
+            conn,
+            "pipeline_item",
+            "activity_revision",
+            "INTEGER NOT NULL DEFAULT 0",
         );
         Ok(())
     })?;

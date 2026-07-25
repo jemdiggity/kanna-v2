@@ -517,6 +517,7 @@ function remoteTaskSnapshot(
       pr_url: null,
       branch: "task-remote",
       activity: "unread" as const,
+      activity_revision: 7,
       activity_changed_at: "2026-07-24T00:00:00.000Z",
       unread_at: "2026-07-24T00:00:00.000Z",
       port_offset: null,
@@ -1427,7 +1428,7 @@ describe("App", () => {
     expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
       desktopId: "relay-owner",
       taskId: "relay-owner-task",
-      activityCutoff: "2026-07-25T01:00:00.000Z",
+      expectedActivityRevision: 7,
     });
     expect(lanTerminalClientFactoryMock).not.toHaveBeenCalled();
     expect(lanMarkTaskReadMock).not.toHaveBeenCalled();
@@ -1452,7 +1453,7 @@ describe("App", () => {
     expect(lanMarkTaskReadMock).toHaveBeenCalledWith({
       desktopId: "lan-owner",
       taskId: "lan-owner-task",
-      activityCutoff: "2026-07-25T01:00:00.000Z",
+      expectedActivityRevision: 7,
     });
     expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
     expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
@@ -1477,7 +1478,7 @@ describe("App", () => {
     expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
       desktopId: "restored-owner",
       taskId: "restored-owner-task",
-      activityCutoff: "2026-07-25T01:00:00.000Z",
+      expectedActivityRevision: 7,
     });
     expect(relayCloseMock).toHaveBeenCalledOnce();
 

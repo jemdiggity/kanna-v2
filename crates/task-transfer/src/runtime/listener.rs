@@ -693,13 +693,22 @@ async fn handle_connection(
                 .ok_or_else(|| {
                     RuntimeError::Protocol("mark-read payload missing task_id".into())
                 })?;
-            let activity_cutoff = payload
-                .get("activity_cutoff")
-                .and_then(Value::as_str)
+            let expected_activity_revision = payload
+                .get("expected_activity_revision")
+                .and_then(Value::as_i64)
+                .filter(|revision| *revision >= 0)
                 .ok_or_else(|| {
-                    RuntimeError::Protocol("mark-read payload missing activity_cutoff".into())
+                    RuntimeError::Protocol(
+                        "mark-read payload missing expected_activity_revision".into(),
+                    )
                 })?;
-            mark_owner_task_read(&context, &requester_peer_id, task_id, activity_cutoff).await?;
+            mark_owner_task_read(
+                &context,
+                &requester_peer_id,
+                task_id,
+                expected_activity_revision,
+            )
+            .await?;
             Ok::<PeerResponse, RuntimeError>(PeerResponse::MarkTaskRead {
                 request_id: request_id.clone(),
             })

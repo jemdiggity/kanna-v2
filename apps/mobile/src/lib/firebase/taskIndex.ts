@@ -26,6 +26,7 @@ export interface CloudTaskSnapshot {
   displayName?: string | null;
   stage: string;
   activity?: string | null;
+  activityRevision?: number;
   status?: string;
   repo: { cloudRepoId: string; name: string };
   agent?: { provider?: string | null; type?: string | null } | null;

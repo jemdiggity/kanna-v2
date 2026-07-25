@@ -26,6 +26,7 @@ export interface DesktopCloudTaskSnapshot {
   displayName: string | null;
   stage: string;
   activity?: string;
+  activityRevision?: number;
   status: string;
   repo: {
     cloudRepoId: string;
@@ -288,6 +289,11 @@ export function mapDesktopCloudTasks(
       pr_url: snapshot.prUrl,
       branch: snapshot.branch,
       activity: normalizeActivity(snapshot.activity),
+      activity_revision: typeof snapshot.activityRevision === "number"
+        && Number.isSafeInteger(snapshot.activityRevision)
+        && snapshot.activityRevision >= 0
+        ? snapshot.activityRevision
+        : undefined,
       activity_changed_at: snapshot.updatedAt,
       unread_at: null,
       port_offset: null,

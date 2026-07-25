@@ -238,7 +238,7 @@ pub(super) async fn mark_owner_task_read(
     context: &ListenerContext,
     requester_peer_id: &str,
     task_id: &str,
-    activity_cutoff: &str,
+    expected_activity_revision: i64,
 ) -> Result<(), RuntimeError> {
     ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
@@ -248,7 +248,7 @@ pub(super) async fn mark_owner_task_read(
         port,
         task_id,
         "mark-read",
-        &serde_json::json!({ "activityCutoff": activity_cutoff }),
+        &serde_json::json!({ "expectedActivityRevision": expected_activity_revision }),
     )
     .await
 }

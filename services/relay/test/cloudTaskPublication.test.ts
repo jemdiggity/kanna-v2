@@ -17,6 +17,7 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     displayName: null,
     stage: "in progress",
     activity: "idle",
+    activityRevision: 4,
     status: "active",
     repo: {
       cloudRepoId: "repo-1",
@@ -59,10 +60,26 @@ describe("cloud task publication validation", () => {
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
       activity: "idle",
+      activityRevision: 4,
       waitingPromptSnippet: "Ready for review",
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("accepts legacy missing revisions but rejects malformed activity revisions", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ activityRevision: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.activityRevision).toBeUndefined();
+
+    for (const activityRevision of [-1, 1.5, "4"]) {
+      expect(() => validateCloudTaskPublication(
+        publication([task({ activityRevision })]),
+        "desktop-1",
+      )).toThrow(/activityRevision/);
+    }
   });
 
   it("normalizes missing waiting prompts and bounds them by Unicode scalar count", () => {

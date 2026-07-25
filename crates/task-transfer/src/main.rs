@@ -184,9 +184,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             request_id,
             target_peer_id,
             task_id,
-            activity_cutoff,
+            expected_activity_revision,
         } => match runtime
-            .mark_peer_task_read(&target_peer_id, &task_id, &activity_cutoff)
+            .mark_peer_task_read(&target_peer_id, &task_id, expected_activity_revision)
             .await
         {
             Ok(()) => ControlResponse::MarkPeerTaskRead { request_id },

@@ -4,7 +4,7 @@ import type { PipelineItem } from "../types/kanna";
 import type { WorkspaceTask } from "../workspace/types";
 import { useRemoteTaskReadDwell } from "./useRemoteTaskReadDwell";
 
-function remoteWorkspaceTask(activityChangedAt = "2026-07-24T00:00:00.000Z"): WorkspaceTask {
+function remoteWorkspaceTask(activityRevision: number | null = 7): WorkspaceTask {
   const item: PipelineItem = {
     id: "remote-task",
     repo_id: "remote-repo",
@@ -21,8 +21,9 @@ function remoteWorkspaceTask(activityChangedAt = "2026-07-24T00:00:00.000Z"): Wo
     agent_type: "pty",
     agent_provider: "claude",
     activity: "unread",
-    activity_changed_at: activityChangedAt,
-    unread_at: activityChangedAt,
+    activity_revision: activityRevision ?? undefined,
+    activity_changed_at: "2026-07-24T00:00:00.000Z",
+    unread_at: "2026-07-24T00:00:00.000Z",
     port_offset: null,
     display_name: null,
     last_output_preview: null,
@@ -99,7 +100,7 @@ describe("useRemoteTaskReadDwell", () => {
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(markTaskRead).toHaveBeenCalledOnce();
-    expect(markTaskRead).toHaveBeenCalledWith(task, "2026-07-25T01:00:00.000Z");
+    expect(markTaskRead).toHaveBeenCalledWith(task, 7);
     scope.stop();
   });
 
@@ -125,9 +126,50 @@ describe("useRemoteTaskReadDwell", () => {
     scope.stop();
   });
 
-  it("does not overwrite activity newer than the selection", async () => {
+  it("does not overwrite activity with a revision newer than the selection", async () => {
     const selectedItemId = ref<string | null>(null);
-    const task = remoteWorkspaceTask("2026-07-25T01:00:00.500Z");
+    const task = remoteWorkspaceTask(7);
+    const workspaceTasksByItemId = computed(() => new Map([["slot:remote", task]]));
+    const markTaskRead = vi.fn(async () => {});
+    const scope = effectScope();
+
+    scope.run(() => {
+      useRemoteTaskReadDwell({ selectedItemId, workspaceTasksByItemId, markTaskRead });
+    });
+
+    selectedItemId.value = "slot:remote";
+    await nextTick();
+    task.item.activity_revision = 8;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(markTaskRead).not.toHaveBeenCalled();
+    scope.stop();
+  });
+
+  it("keeps the original activity revision when the dwell callback runs late", async () => {
+    const selectedItemId = ref<string | null>(null);
+    const task = remoteWorkspaceTask();
+    const workspaceTasksByItemId = computed(() => new Map([["slot:remote", task]]));
+    const markTaskRead = vi.fn(async () => {});
+    const scope = effectScope();
+
+    scope.run(() => {
+      useRemoteTaskReadDwell({ selectedItemId, workspaceTasksByItemId, markTaskRead });
+    });
+
+    selectedItemId.value = "slot:remote";
+    await nextTick();
+    task.item.activity_revision = 8;
+    vi.setSystemTime(new Date("2026-07-25T01:00:10.000Z"));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(markTaskRead).not.toHaveBeenCalled();
+    scope.stop();
+  });
+
+  it("fails safe when the remote snapshot has no activity revision", async () => {
+    const selectedItemId = ref<string | null>(null);
+    const task = remoteWorkspaceTask(null);
     const workspaceTasksByItemId = computed(() => new Map([["slot:remote", task]]));
     const markTaskRead = vi.fn(async () => {});
     const scope = effectScope();
@@ -144,9 +186,9 @@ describe("useRemoteTaskReadDwell", () => {
     scope.stop();
   });
 
-  it("keeps the original selection cutoff when the dwell callback runs late", async () => {
-    const selectedItemId = ref<string | null>(null);
-    const task = remoteWorkspaceTask();
+  it("starts the dwell immediately for a restored remote selection", async () => {
+    const selectedItemId = ref<string | null>("slot:remote");
+    const task = remoteWorkspaceTask(11);
     const workspaceTasksByItemId = computed(() => new Map([["slot:remote", task]]));
     const markTaskRead = vi.fn(async () => {});
     const scope = effectScope();
@@ -155,13 +197,11 @@ describe("useRemoteTaskReadDwell", () => {
       useRemoteTaskReadDwell({ selectedItemId, workspaceTasksByItemId, markTaskRead });
     });
 
-    selectedItemId.value = "slot:remote";
-    await nextTick();
-    task.item.activity_changed_at = "2026-07-25T01:00:00.500Z";
-    vi.setSystemTime(new Date("2026-07-25T01:00:10.000Z"));
-    await vi.advanceTimersByTimeAsync(1000);
-
+    await vi.advanceTimersByTimeAsync(999);
     expect(markTaskRead).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(markTaskRead).toHaveBeenCalledWith(task, 11);
     scope.stop();
   });
 });

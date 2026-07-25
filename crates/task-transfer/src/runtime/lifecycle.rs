@@ -364,7 +364,7 @@ impl TransferRuntime {
         &self,
         target_peer_id: &str,
         task_id: &str,
-        activity_cutoff: &str,
+        expected_activity_revision: i64,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
@@ -374,7 +374,7 @@ impl TransferRuntime {
             &target_public_key,
             &serde_json::json!({
                 "task_id": task_id,
-                "activity_cutoff": activity_cutoff,
+                "expected_activity_revision": expected_activity_revision,
             }),
         )?;
         let request_id = self.next_request_id("mark-read");

@@ -152,7 +152,7 @@ fn remote_task_mark_read_messages_use_expected_wire_names() {
         request_id: "req-mark-read-control".into(),
         target_peer_id: "peer-owner".into(),
         task_id: "task-owner".into(),
-        activity_cutoff: "2026-07-25T01:00:00.000Z".into(),
+        expected_activity_revision: 7,
     };
     assert_eq!(
         serde_json::to_value(&control_request).unwrap(),
@@ -161,7 +161,7 @@ fn remote_task_mark_read_messages_use_expected_wire_names() {
             "request_id": "req-mark-read-control",
             "target_peer_id": "peer-owner",
             "task_id": "task-owner",
-            "activity_cutoff": "2026-07-25T01:00:00.000Z",
+            "expected_activity_revision": 7,
         })
     );
     assert_roundtrip(control_request);

@@ -17,18 +17,34 @@ projection of the task afterward.
 ## Design
 
 Add a remote selection dwell watcher alongside the existing local watcher. The
-watcher observes the selected remote workspace task, waits one second, verifies
-that the task is still unread and that its activity predates the selection, and
-then routes a mark-read action to the owner's local task ID.
+owner database assigns every task a durable monotonic `activity_revision` and
+increments it atomically whenever activity changes. Owner cloud and LAN
+snapshots publish that revision.
+
+The watcher captures the selected task's exact unread activity revision, waits
+one second, verifies that the selection, unread state, and revision are all
+unchanged, and then routes a compare-and-swap mark-read action to the owner's
+local task ID. Missing revisions from older remote snapshots fail safe and do
+not trigger automatic mark-read.
 
 Extend the shared remote terminal/action client with `markTaskRead`:
 
 - Relay transport posts to the owner's existing
-  `/v1/tasks/{task_id}/actions/mark-read` route.
+  `/v1/tasks/{task_id}/actions/mark-read` route with
+  `expectedActivityRevision`.
 - LAN transport invokes a new Tauri command that follows the existing
-  close-task and advance-stage task-transfer path.
+  close-task and advance-stage task-transfer path. The task ID and expected
+  revision are sealed to the paired owner's key so the listener verifies
+  possession of the requester's paired private key.
 - The task-transfer protocol forwards the action to the owner, whose listener
   calls the same local server mark-read route.
+
+The owner route performs one conditional update requiring `activity = 'unread'`
+and an exact revision match, then changes activity to idle and increments the
+revision in the same statement. This prevents stale or replayed requests from
+clearing newer activity without relying on cross-machine clocks, timestamp
+precision, or timezone parsing. An empty request body retains the legacy local
+unconditional mark-read behavior.
 
 The observing desktop does not mutate its remote snapshot optimistically.
 Successful owner-side persistence propagates through the existing cloud or LAN
@@ -46,10 +62,18 @@ Add regression coverage that proves:
 
 - a selected unread remote task invokes mark-read after one second;
 - navigating away before one second cancels the action;
-- recent activity is not overwritten by a stale dwell callback;
+- revision changes and newly unread activity are not overwritten by a stale
+  dwell callback;
+- restored selections start the dwell immediately and missing revisions fail
+  safe;
+- every activity transition increments the durable revision;
+- cloud and LAN snapshots preserve the revision;
 - relay routes mark-read to the encoded owner task API path;
 - LAN routes mark-read through the new Tauri command;
-- task-transfer forwards the action and the owner persists the read state.
+- task-transfer seals the action, rejects forged callers, and forwards the
+  expected revision;
+- owner compare-and-swap rejects stale and replayed requests, including two
+  activity transitions within one timestamp second.
 
 Run the focused desktop TypeScript and task-transfer Rust tests, followed by the
 repository's practical broader checks for the touched packages.
