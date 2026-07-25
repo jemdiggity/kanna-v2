@@ -896,3 +896,54 @@ transport and cancellation coverage.
 - [ ] Run `pnpm test` and `./kd test rust`.
 - [ ] Run `git diff --check` and inspect the final diff against every reviewer
   requirement.
+
+## 2026-07-25 Revision Plan: Observation and Legacy Invoke Feedback
+
+### Task 9: Re-arm dwell when the selected presentation tuple changes
+
+**Files:**
+- Modify: `apps/desktop/src/composables/useRemoteTaskReadDwell.test.ts`
+- Modify: `apps/desktop/src/composables/useRemoteTaskReadDwell.ts`
+- Modify: `apps/desktop/src/App.test.ts`
+
+- [ ] Replace the stable-slot owner regression with assertions that the old
+  tuple is not marked at its deadline and the replacement tuple is marked only
+  after a fresh one-second dwell.
+- [ ] Run the focused composable and App tests and verify they fail because
+  task-map refreshes do not recompute the selected tuple.
+- [ ] Recompute presentation slot, owner desktop, owner-local task, and activity
+  revision on every task-map update; retain the existing observation object
+  only when all four values are unchanged.
+- [ ] Re-run the focused tests and verify coherent refreshes retain elapsed
+  dwell while changed tuples re-arm it.
+
+### Task 10: Preserve null-body tunneled mark-read
+
+**Files:**
+- Modify: `crates/kanna-server/src/ksp.rs`
+- Modify: `crates/kanna-server/src/http_api/router.rs`
+
+- [ ] Add KSP request-dispatch coverage that marks one unread task with an
+  exact revision JSON body and another through the legacy omitted/null body
+  request.
+- [ ] Run the focused Rust test and verify the null-body case fails with a JSON
+  EOF rejection while the revision-body case succeeds.
+- [ ] Build tunneled requests without a JSON content type when the body is
+  null, while retaining JSON serialization and the header for non-null bodies.
+- [ ] Re-run the focused Rust test and the existing mark-read route tests.
+
+### Task 11: Cover the visible duplicate-source read transition
+
+**Files:**
+- Modify: `apps/desktop/src/App.test.ts`
+
+- [ ] Add an App interaction test with coherent cloud and LAN advertisements
+  for one owner task, select the sidebar row, and let LAN issue mark-read after
+  the dwell.
+- [ ] Feed authoritative `idle` snapshots with activity revision 8 through both
+  the cloud subscription and LAN refresh, then assert the still-selected
+  sidebar row changes from `unread` to `idle`.
+- [ ] Run the focused App test and verify the interaction succeeds only after
+  both source snapshots have been replayed.
+- [ ] Run desktop typecheck, focused desktop/Rust tests, `pnpm test`,
+  `./kd test rust`, formatting checks, and `git diff --check`.
