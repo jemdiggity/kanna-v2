@@ -13,6 +13,7 @@ import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import {
   setDesktopSnapshotFetcherForTests,
   setDesktopServerClientHandlersForTests,
+  updateDesktopServerClientHandlersForTests,
   type NewTaskTransferInput,
   type NewTaskTransferProvenanceInput,
 } from "../services/desktopServerClient";
@@ -61,6 +62,7 @@ function buildRepo(): Repo {
 function buildItem(repoId = "repo-1"): PipelineItem {
   return {
     id: "task-source",
+    cloud_task_id: "cloud-task-source",
     repo_id: repoId,
     issue_number: null,
     issue_title: null,
@@ -95,8 +97,11 @@ function buildItem(repoId = "repo-1"): PipelineItem {
 function buildIncomingTransferPayload() {
   return {
     target_peer_id: "peer-target",
+    target_desktop_id: null,
     task: {
+      cloud_task_id: "cloud-task-source",
       source_peer_id: "peer-source",
+      source_desktop_id: null,
       source_task_id: "task-source",
       resume_session_id: null,
       prompt: "Fix handoff",
@@ -209,6 +214,11 @@ function createTransferDb(initial: {
       if (item) {
         item.agent_session_id = agentSessionId;
       }
+    },
+    setTaskCloudIdentity: async (taskId, cloudTaskId) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (!item) throw new Error(`task not found: ${taskId}`);
+      item.cloud_task_id = cloudTaskId;
     },
     claimTaskPorts: async (taskId) => ({ taskId, portEnv: {}, firstPort: null }),
     releaseTaskPorts: async () => {},
@@ -938,6 +948,8 @@ describe("pushTaskToPeer", () => {
       status: "pending",
       source_peer_id: "peer-real-source",
       target_peer_id: "peer-target",
+      source_desktop_id: null,
+      target_desktop_id: null,
       source_task_id: "task-source",
       local_task_id: "task-source",
       payload_json: expect.any(String),
@@ -1348,6 +1360,8 @@ describe("recordIncomingTransfer", () => {
       direction: "incoming",
       status: "pending",
       source_peer_id: "peer-source",
+      source_desktop_id: null,
+      target_desktop_id: null,
       source_task_id: "task-source",
       payload_json: expect.any(String),
     });
@@ -1523,6 +1537,7 @@ describe("incoming transfer approval", () => {
       branch: localTaskId ? `task-${localTaskId}` : undefined,
       stage: "in progress",
       display_name: "Transferred task",
+      cloud_task_id: "cloud-task-source",
     });
     expect(fakeDb.tables.task_transfer[0]).toMatchObject({
       id: "transfer-1",
@@ -1536,6 +1551,117 @@ describe("incoming transfer approval", () => {
       source_task_id: "task-source",
       source_machine_task_label: "task-source",
     });
+  });
+
+  it("sets stable cloud identity before completing and acknowledging the import", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = {
+      ...buildIncomingTransferPayload(),
+      task: {
+        ...buildIncomingTransferPayload().task,
+        cloud_task_id: "cloud-stable",
+      },
+    };
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+    await store.init(fakeDb);
+
+    const events: string[] = [];
+    updateDesktopServerClientHandlersForTests({
+      setTaskCloudIdentity: async (taskId, cloudTaskId) => {
+        events.push(`identity:${taskId}:${cloudTaskId}`);
+      },
+      completeTaskTransfer: async (transferId, localTaskId) => {
+        events.push(`complete:${transferId}:${localTaskId}`);
+        return true;
+      },
+    });
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") return null;
+      if (cmd === "acknowledge_incoming_transfer_commit") {
+        events.push(`ack:${args?.transferId as string}`);
+        return null;
+      }
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    const destinationTaskId = await store.approveIncomingTransfer("transfer-1");
+
+    expect(events).toEqual([
+      `identity:${destinationTaskId}:cloud-stable`,
+      `complete:transfer-1:${destinationTaskId}`,
+      "ack:transfer-1",
+    ]);
+  });
+
+  it("does not complete or acknowledge when stable identity persistence fails", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = {
+      ...buildIncomingTransferPayload(),
+      task: {
+        ...buildIncomingTransferPayload().task,
+        cloud_task_id: "cloud-stable",
+      },
+    };
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+    await store.init(fakeDb);
+
+    const completeTaskTransfer = vi.fn(async () => true);
+    updateDesktopServerClientHandlersForTests({
+      setTaskCloudIdentity: async () => {
+        throw new Error("identity write failed");
+      },
+      completeTaskTransfer,
+    });
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") return null;
+      if (cmd === "acknowledge_incoming_transfer_commit") {
+        throw new Error("acknowledgment must not run");
+      }
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    await expect(store.approveIncomingTransfer("transfer-1")).rejects.toThrow("identity write failed");
+    expect(completeTaskTransfer).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "acknowledge_incoming_transfer_commit",
+      expect.anything(),
+    );
   });
 
   it("clones the repo remotely before importing a clone-remote transfer", async () => {

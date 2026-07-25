@@ -8,6 +8,7 @@ import {
 
 function task(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    cloudTaskId: "cloud-stable",
     localRepoId: "repo-1",
     ownerDesktopId: "desktop-1",
     ownerLocalTaskId: "task-1",
@@ -59,12 +60,70 @@ describe("cloud task publication validation", () => {
     expect(parsed.tasks[0]).toMatchObject({
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
+      cloudTaskId: "cloud-stable",
       activity: "idle",
       activityRevision: 4,
       waitingPromptSnippet: "Ready for review",
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("accepts exactly the four transfer states with authenticated desktop ids", () => {
+    const states = ["none", "outgoing", "incoming", "finalization_pending"] as const;
+
+    for (const state of states) {
+      const transfer = state === "none"
+        ? {
+            state,
+            transferId: null,
+            sourceDesktopId: null,
+            destinationDesktopId: null,
+          }
+        : {
+            state,
+            transferId: "transfer-1",
+            sourceDesktopId: "desktop-a",
+            destinationDesktopId: "desktop-b",
+          };
+      const parsed = validateCloudTaskPublication(
+        publication([task({ transfer })]),
+        "desktop-1",
+      );
+
+      expect(parsed.tasks[0]?.transfer).toEqual(transfer);
+    }
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state: "finished",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-a",
+          destinationDesktopId: "desktop-b",
+        },
+      })]),
+      "desktop-1",
+    )).toThrow(/transfer.state/);
+  });
+
+  it.each([
+    ["transferId", null],
+    ["sourceDesktopId", null],
+    ["destinationDesktopId", null],
+  ])("rejects outgoing transfer missing %s", (field, missingValue) => {
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state: "outgoing",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-a",
+          destinationDesktopId: "desktop-b",
+          [field]: missingValue,
+        },
+      })]),
+      "desktop-1",
+    )).toThrow(new RegExp(`transfer\\.${field}`));
   });
 
   it("accepts legacy missing revisions but rejects malformed activity revisions", () => {

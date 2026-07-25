@@ -68,6 +68,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "028_stage_run_completion_transition",
     "029_pipeline_item_activity_revision",
     "030_pipeline_item_cloud_task_id",
+    "031_task_transfer_cloud_desktop_ids",
 ];
 
 #[derive(Debug, Serialize)]
@@ -132,7 +133,14 @@ pub struct SnapshotRepo {
 #[derive(Debug, Serialize)]
 pub struct SnapshotPipelineItem {
     pub id: String,
-    pub cloud_task_id: Option<String>,
+    pub cloud_task_id: String,
+    pub transfer_id: Option<String>,
+    pub transfer_direction: Option<String>,
+    pub transfer_status: Option<String>,
+    pub transfer_source_peer_id: Option<String>,
+    pub transfer_target_peer_id: Option<String>,
+    pub transfer_source_desktop_id: Option<String>,
+    pub transfer_target_desktop_id: Option<String>,
     pub repo_id: String,
     pub issue_number: Option<i64>,
     pub issue_title: Option<String>,
@@ -1227,6 +1235,12 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             WHERE closed_at IS NULL;
             "#,
         )
+    })?;
+
+    run_migration(conn, "031_task_transfer_cloud_desktop_ids", |conn| {
+        add_column(conn, "task_transfer", "source_desktop_id", "TEXT")?;
+        add_column(conn, "task_transfer", "target_desktop_id", "TEXT")?;
+        Ok(())
     })?;
 
     Ok(())

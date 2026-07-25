@@ -116,6 +116,8 @@ export interface TaskTransfer {
   status: "pending" | "streaming" | "completed" | "failed" | "rejected";
   source_peer_id: string | null;
   target_peer_id: string | null;
+  source_desktop_id: string | null;
+  target_desktop_id: string | null;
   source_task_id: string | null;
   local_task_id: string | null;
   started_at: string;

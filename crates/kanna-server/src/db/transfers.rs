@@ -17,6 +17,8 @@ pub struct TaskTransfer {
     pub status: String,
     pub source_peer_id: Option<String>,
     pub target_peer_id: Option<String>,
+    pub source_desktop_id: Option<String>,
+    pub target_desktop_id: Option<String>,
     pub source_task_id: Option<String>,
     pub local_task_id: Option<String>,
     pub started_at: Option<String>,
@@ -32,6 +34,8 @@ pub struct NewTaskTransfer {
     pub status: String,
     pub source_peer_id: Option<String>,
     pub target_peer_id: Option<String>,
+    pub source_desktop_id: Option<String>,
+    pub target_desktop_id: Option<String>,
     pub source_task_id: Option<String>,
     pub local_task_id: Option<String>,
     pub error: Option<String>,
@@ -50,14 +54,16 @@ impl Db {
     pub fn insert_task_transfer(&self, transfer: &NewTaskTransfer) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO task_transfer
-             (id, direction, status, source_peer_id, target_peer_id, source_task_id, local_task_id, error, payload_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, direction, status, source_peer_id, target_peer_id, source_desktop_id, target_desktop_id, source_task_id, local_task_id, error, payload_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 &transfer.id,
                 &transfer.direction,
                 &transfer.status,
                 transfer.source_peer_id.as_deref(),
                 transfer.target_peer_id.as_deref(),
+                transfer.source_desktop_id.as_deref(),
+                transfer.target_desktop_id.as_deref(),
                 transfer.source_task_id.as_deref(),
                 transfer.local_task_id.as_deref(),
                 transfer.error.as_deref(),
@@ -72,7 +78,8 @@ impl Db {
         transfer_id: &str,
     ) -> Result<Option<TaskTransfer>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, direction, status, source_peer_id, target_peer_id, source_task_id,
+            "SELECT id, direction, status, source_peer_id, target_peer_id,
+                    source_desktop_id, target_desktop_id, source_task_id,
                     local_task_id, started_at, completed_at, error, payload_json
              FROM task_transfer WHERE id = ?",
         )?;
@@ -83,12 +90,14 @@ impl Db {
                 status: row.get(2)?,
                 source_peer_id: row.get(3)?,
                 target_peer_id: row.get(4)?,
-                source_task_id: row.get(5)?,
-                local_task_id: row.get(6)?,
-                started_at: row.get(7)?,
-                completed_at: row.get(8)?,
-                error: row.get(9)?,
-                payload_json: row.get(10)?,
+                source_desktop_id: row.get(5)?,
+                target_desktop_id: row.get(6)?,
+                source_task_id: row.get(7)?,
+                local_task_id: row.get(8)?,
+                started_at: row.get(9)?,
+                completed_at: row.get(10)?,
+                error: row.get(11)?,
+                payload_json: row.get(12)?,
             })
         })?;
         match rows.next() {

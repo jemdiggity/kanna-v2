@@ -1,6 +1,7 @@
 use super::NewStageRun;
 use super::{
-    add_column, database_open_flags, run_migration, Db, NewPipelineItem, CURRENT_SCHEMA_MIGRATIONS,
+    add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
+    CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -163,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "030_pipeline_item_cloud_task_id");
+    assert_eq!(latest_migration, "031_task_transfer_cloud_desktop_ids");
 
     let stage_run_sql: String = db
         .conn
@@ -176,6 +177,112 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(stage_run_sql.contains("provider_session_id"));
     assert!(stage_run_sql.contains("resumed_from_run_id"));
     assert!(stage_run_sql.contains("completion_transition"));
+    let mut transfer_columns_stmt = db
+        .conn
+        .prepare("PRAGMA table_info(task_transfer)")
+        .expect("prepare transfer columns");
+    let transfer_columns = transfer_columns_stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("read transfer columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect transfer columns");
+    assert!(transfer_columns.contains(&"source_desktop_id".to_string()));
+    assert!(transfer_columns.contains(&"target_desktop_id".to_string()));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn task_transfer_round_trip_preserves_nullable_authenticated_desktop_ids() {
+    let path = Db::test_db_path("task-transfer-cloud-desktop-ids");
+    let db = Db::open_for_tests(&path).expect("open test db");
+
+    db.insert_task_transfer(&NewTaskTransfer {
+        id: "transfer-cloud".into(),
+        direction: "outgoing".into(),
+        status: "pending".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: Some("peer-b".into()),
+        source_desktop_id: Some("desktop-a".into()),
+        target_desktop_id: Some("desktop-b".into()),
+        source_task_id: Some("task-a".into()),
+        local_task_id: None,
+        error: None,
+        payload_json: None,
+    })
+    .expect("insert cloud transfer");
+    db.insert_task_transfer(&NewTaskTransfer {
+        id: "transfer-lan".into(),
+        direction: "incoming".into(),
+        status: "pending".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: Some("peer-b".into()),
+        source_desktop_id: None,
+        target_desktop_id: None,
+        source_task_id: Some("task-a".into()),
+        local_task_id: None,
+        error: None,
+        payload_json: None,
+    })
+    .expect("insert LAN transfer");
+
+    let cloud = db
+        .get_task_transfer("transfer-cloud")
+        .expect("load cloud transfer")
+        .expect("cloud transfer exists");
+    assert_eq!(cloud.source_desktop_id.as_deref(), Some("desktop-a"));
+    assert_eq!(cloud.target_desktop_id.as_deref(), Some("desktop-b"));
+
+    let lan = db
+        .get_task_transfer("transfer-lan")
+        .expect("load LAN transfer")
+        .expect("LAN transfer exists");
+    assert_eq!(lan.source_desktop_id, None);
+    assert_eq!(lan.target_desktop_id, None);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn snapshot_selects_latest_relevant_transfer_for_open_task() {
+    let path = Db::test_db_path("snapshot-latest-task-transfer");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-destination",
+        "repo-1",
+        "Transferred task",
+        None,
+        "in progress",
+        "2026-07-26 00:00:00",
+    )
+    .expect("insert task");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-completed",
+        "incoming",
+        "completed",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert completed incoming transfer");
+
+    let snapshot = db.ui_snapshot().expect("load snapshot");
+    let item = &snapshot.entries[0].items[0];
+    assert_eq!(item.cloud_task_id, "task-destination");
+    assert_eq!(item.transfer_id.as_deref(), Some("transfer-completed"));
+    assert_eq!(item.transfer_direction.as_deref(), Some("incoming"));
+    assert_eq!(item.transfer_status.as_deref(), Some("completed"));
+    assert_eq!(item.transfer_source_peer_id.as_deref(), Some("peer-1"));
+    assert_eq!(item.transfer_target_peer_id.as_deref(), Some("peer-2"));
+    assert_eq!(
+        item.transfer_source_desktop_id.as_deref(),
+        Some("desktop-a")
+    );
+    assert_eq!(
+        item.transfer_target_desktop_id.as_deref(),
+        Some("desktop-b")
+    );
 
     let _ = std::fs::remove_file(path);
 }
@@ -394,8 +501,8 @@ fn migration_backfills_cloud_task_identity_from_local_task_id() {
 
     let snapshot = db.ui_snapshot().expect("load migrated snapshot");
     assert_eq!(
-        snapshot.entries[0].items[0].cloud_task_id.as_deref(),
-        Some("task-local-uuid")
+        snapshot.entries[0].items[0].cloud_task_id,
+        "task-local-uuid"
     );
 
     db.conn

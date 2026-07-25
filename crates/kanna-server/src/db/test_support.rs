@@ -185,6 +185,8 @@ impl Db {
                 status TEXT NOT NULL,
                 source_peer_id TEXT,
                 target_peer_id TEXT,
+                source_desktop_id TEXT,
+                target_desktop_id TEXT,
                 source_task_id TEXT,
                 local_task_id TEXT,
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -389,6 +391,33 @@ impl Db {
                 id, direction, status, source_peer_id, source_task_id, payload_json
              ) VALUES (?, ?, ?, 'peer-1', 'source-task-1', ?)",
             (id, direction, status, payload_json),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_task_transfer_with_desktops(
+        &self,
+        id: &str,
+        direction: &str,
+        status: &str,
+        local_task_id: Option<&str>,
+        source_desktop_id: Option<&str>,
+        target_desktop_id: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO task_transfer (
+                id, direction, status, source_peer_id, target_peer_id,
+                source_desktop_id, target_desktop_id, source_task_id, local_task_id
+             ) VALUES (?, ?, ?, 'peer-1', 'peer-2', ?, ?, 'source-task-1', ?)",
+            (
+                id,
+                direction,
+                status,
+                source_desktop_id,
+                target_desktop_id,
+                local_task_id,
+            ),
         )?;
         Ok(())
     }

@@ -5,6 +5,7 @@ import {
   insertDesktopTaskTransfer,
   insertDesktopTaskTransferProvenance,
   rejectDesktopTaskTransfer,
+  setDesktopTaskCloudIdentity,
   updateDesktopTaskTransferPayload,
 } from "../services/desktopServerClient";
 import { loadSessionRecoveryState } from "../composables/sessionRecoveryState";
@@ -590,6 +591,8 @@ export function createTransferApi(
       status: "pending",
       source_peer_id: preflight.sourcePeerId,
       target_peer_id: peerId,
+      source_desktop_id: payload.task.source_desktop_id,
+      target_desktop_id: payload.target_desktop_id,
       source_task_id: taskId,
       local_task_id: taskId,
       error: null,
@@ -614,6 +617,8 @@ export function createTransferApi(
         status: "pending",
         source_peer_id: request.sourcePeerId,
         target_peer_id: null,
+        source_desktop_id: request.payload.task.source_desktop_id,
+        target_desktop_id: request.payload.target_desktop_id,
         source_task_id: request.sourceTaskId,
         local_task_id: null,
         error: null,
@@ -742,6 +747,7 @@ export function createTransferApi(
       },
     );
 
+    await setDesktopTaskCloudIdentity(localTaskId, payload.task.cloud_task_id);
     await completeDesktopTaskTransfer(transferId, localTaskId);
     await insertDesktopTaskTransferProvenance({
       pipeline_item_id: localTaskId,

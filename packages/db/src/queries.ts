@@ -573,14 +573,16 @@ export async function insertTaskTransfer(
 ): Promise<void> {
   await db.execute(
     `INSERT INTO task_transfer
-       (id, direction, status, source_peer_id, target_peer_id, source_task_id, local_task_id, error, payload_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, direction, status, source_peer_id, target_peer_id, source_desktop_id, target_desktop_id, source_task_id, local_task_id, error, payload_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       transfer.id,
       transfer.direction,
       transfer.status,
       transfer.source_peer_id,
       transfer.target_peer_id,
+      transfer.source_desktop_id,
+      transfer.target_desktop_id,
       transfer.source_task_id,
       transfer.local_task_id,
       transfer.error,

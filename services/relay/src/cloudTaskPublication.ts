@@ -89,6 +89,9 @@ export function validateCloudTaskPublication(
 function validateTask(value: unknown, index: number, desktopId: string): CloudTaskDocument {
   const path = `tasks[${index}]`;
   const task = requiredRecord(value, path);
+  const cloudTaskId = task.cloudTaskId === undefined
+    ? undefined
+    : requiredString(task.cloudTaskId, `${path}.cloudTaskId`, 128);
   const ownerDesktopId = requiredString(task.ownerDesktopId, `${path}.ownerDesktopId`, 128);
   if (ownerDesktopId !== desktopId) {
     throw new Error(`${path}.ownerDesktopId must match the authenticated desktop`);
@@ -98,10 +101,30 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
   const repo = requiredRecord(task.repo, `${path}.repo`);
   const agent = requiredRecord(task.agent, `${path}.agent`);
   const transfer = requiredRecord(task.transfer, `${path}.transfer`);
-  if (transfer.state !== "none") throw new Error(`${path}.transfer.state must be none`);
-  for (const field of ["transferId", "sourceDesktopId", "destinationDesktopId"] as const) {
-    if (transfer[field] !== null) throw new Error(`${path}.transfer.${field} must be null`);
+  const transferState = requiredString(transfer.state, `${path}.transfer.state`, 32);
+  if (!new Set(["none", "outgoing", "incoming", "finalization_pending"]).has(transferState)) {
+    throw new Error(`${path}.transfer.state is invalid`);
   }
+  const validatedTransfer = transferState === "none"
+    ? validateEmptyTransfer(transfer, path)
+    : {
+        state: transferState,
+        transferId: requiredNonblankString(
+          transfer.transferId,
+          `${path}.transfer.transferId`,
+          128,
+        ),
+        sourceDesktopId: requiredNonblankString(
+          transfer.sourceDesktopId,
+          `${path}.transfer.sourceDesktopId`,
+          128,
+        ),
+        destinationDesktopId: requiredNonblankString(
+          transfer.destinationDesktopId,
+          `${path}.transfer.destinationDesktopId`,
+          128,
+        ),
+      };
   if (!Array.isArray(task.blockedByTaskIds) || task.blockedByTaskIds.length > 100) {
     throw new Error(`${path}.blockedByTaskIds must be an array of at most 100 ids`);
   }
@@ -118,6 +141,7 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
   );
 
   return {
+    ...(cloudTaskId === undefined ? {} : { cloudTaskId }),
     localRepoId,
     ownerDesktopId,
     ownerLocalTaskId,
@@ -149,17 +173,34 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
       provider: requiredString(agent.provider, `${path}.agent.provider`, 64),
       type: requiredString(agent.type, `${path}.agent.type`, 32),
     },
-    transfer: {
-      state: "none",
-      transferId: null,
-      sourceDesktopId: null,
-      destinationDesktopId: null,
-    },
+    transfer: validatedTransfer,
     blockedByTaskIds,
     parentTaskId: optionalNullableString(task.parentTaskId, `${path}.parentTaskId`, 128),
     createdAt: requiredString(task.createdAt, `${path}.createdAt`, 64),
     updatedAt: requiredString(task.updatedAt, `${path}.updatedAt`, 64),
     closedAt: null,
+  };
+}
+
+function validateEmptyTransfer(
+  transfer: Record<string, unknown>,
+  path: string,
+): {
+  state: "none";
+  transferId: null;
+  sourceDesktopId: null;
+  destinationDesktopId: null;
+} {
+  for (const field of ["transferId", "sourceDesktopId", "destinationDesktopId"] as const) {
+    if (transfer[field] !== null) {
+      throw new Error(`${path}.transfer.${field} must be null`);
+    }
+  }
+  return {
+    state: "none",
+    transferId: null,
+    sourceDesktopId: null,
+    destinationDesktopId: null,
   };
 }
 
@@ -399,6 +440,14 @@ function requiredString(value: unknown, field: string, maxLength: number): strin
     throw new Error(`${field} must be a non-empty string of at most ${maxLength} characters`);
   }
   return value;
+}
+
+function requiredNonblankString(value: unknown, field: string, maxLength: number): string {
+  const stringValue = requiredString(value, field, maxLength);
+  if (stringValue.trim().length === 0) {
+    throw new Error(`${field} must be a nonblank string`);
+  }
+  return stringValue;
 }
 
 function nullableString(value: unknown, field: string, maxLength: number): string | null {
