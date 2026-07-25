@@ -508,7 +508,8 @@ function TaskDetailRoute({
 
   const pendingTaskAction =
     state.pendingTaskAction &&
-    state.pendingTaskAction.taskId === resolveDurableTaskId(state, routeTaskId)
+    state.pendingTaskAction.taskId ===
+      (resolveDurableTaskId(state, routeTaskId) ?? routeTaskId)
       ? state.pendingTaskAction.action
       : null;
 
@@ -545,6 +546,11 @@ function TaskDetailRoute({
         }
       }}
       onCloseTask={() => {
+        const slot = taskUiSlotForSelection(state.taskUiSlots, routeTaskId);
+        if (slot?.state === "creating") {
+          void controller.abortTaskCreation(slot.slotId);
+          return;
+        }
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) {
           void controller.closeDesktopTask(durableTaskId);
@@ -585,7 +591,10 @@ function TaskDetailRoute({
         }
       }}
       onRecoverTaskCreation={() => {
-        void controller.recoverTaskCreation();
+        const slot = taskUiSlotForSelection(state.taskUiSlots, routeTaskId);
+        if (slot?.state === "creating") {
+          void controller.recoverTaskCreation(slot.slotId);
+        }
       }}
       onCompanionOpenChange={(isOpen) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
@@ -615,9 +624,12 @@ function ComposerOverlay() {
     state,
     taskDetailViewportRef
   } = useNavigationContent();
+  const selectedCreationAttempt = state.taskCreationAttempts?.find(
+    (attempt) => attempt.slotId === state.selectedTaskId
+  );
   const pendingTaskRoute = resolvePendingTaskCreationRoute({
     composerOpen: state.isComposerOpen,
-    pendingSlotId: state.pendingTaskCreation?.slotId ?? null,
+    pendingSlotId: selectedCreationAttempt?.slotId ?? null,
     selectedTaskId: state.selectedTaskId
   });
   const machines = useMemo(
@@ -734,17 +746,23 @@ function resolveTask(state: SessionState, taskId: string) {
 }
 
 function resolveDurableTaskId(state: SessionState, taskId: string) {
-  return taskUiSlotForSelection(state.taskUiSlots, taskId)?.taskId ??
-    resolveTask(state, taskId)?.id ??
-    null;
+  const slot = taskUiSlotForSelection(state.taskUiSlots, taskId);
+  if (slot) {
+    return slot.taskId;
+  }
+  return resolveTask(state, taskId)?.id ?? null;
 }
 
 function resolveTaskCreationPhase(state: SessionState, taskId: string) {
   const slot = taskUiSlotForSelection(state.taskUiSlots, taskId);
-  return slot?.state === "creating" &&
-    state.pendingTaskCreation?.slotId === slot.slotId
-    ? state.taskCreationPhase
-    : "idle";
+  if (slot?.state !== "creating") {
+    return "idle";
+  }
+  return (
+    state.taskCreationAttempts.find(
+      (attempt) => attempt.slotId === slot.slotId
+    )?.phase ?? "idle"
+  );
 }
 
 function useNavigationContent(): NavigationContent {

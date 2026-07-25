@@ -283,19 +283,23 @@ export function TaskScreen({
     if (isTaskActionPending) {
       return;
     }
-    showTaskActionMenu((action: TaskAction) => {
-      switch (action) {
-        case "view-diff":
-          setDiffModalTaskId(task.id);
-          break;
-        case "advance-stage":
-          onAdvanceTaskStage();
-          break;
-        case "close-task":
-          onCloseTask();
-          break;
-      }
-    });
+    showTaskActionMenu(
+      (action: TaskAction) => {
+        switch (action) {
+          case "view-diff":
+            setDiffModalTaskId(task.id);
+            break;
+          case "advance-stage":
+            onAdvanceTaskStage();
+            break;
+          case "close-task":
+            onCloseTask();
+            break;
+        }
+      },
+      undefined,
+      { taskCreation: taskCreationPhase !== "idle" }
+    );
   };
   const selectQuickReply = (replyId: string) => {
     const currentSnapshot = composerSnapshotRef.current;

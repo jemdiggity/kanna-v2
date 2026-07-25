@@ -27,7 +27,8 @@ import type {
   MobileView,
   PendingRepoCommandTask,
   PendingTaskCreation,
-  SessionStore
+  SessionStore,
+  TaskCreationAttempt
 } from "./sessionStore";
 import type { PersistedSessionContext } from "./sessionPersistence";
 import { isTaskBlocked } from "../lib/api/taskIdentity";
@@ -63,7 +64,8 @@ export interface MobileController {
   selectComposerAgentProvider(provider: ComposerAgentProvider): void;
   searchTasks(query: string): Promise<void>;
   createTask(terminalGeometry?: MobileTerminalGeometry): Promise<string | null>;
-  recoverTaskCreation(): Promise<string | null>;
+  recoverTaskCreation(slotId?: string): Promise<string | null>;
+  abortTaskCreation(slotId: string): Promise<void>;
   runMergeAgent(taskId: string): Promise<string | null>;
   advanceDesktopTaskStage(taskId: string): Promise<string | null>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
@@ -222,16 +224,17 @@ export function createMobileController(
   let lastExplicitRepos: RepoSummary[] = [];
   let desktopCollectionsRevision = 0;
   let refreshDesktopsInFlight: Promise<void> | null = null;
-  let ordinaryTaskCreationFlight:
-    | { taskId: string; promise: Promise<string | null> }
-    | null = null;
-  let recoveryTaskCreationFlight:
-    | { taskId: string; promise: Promise<string | null> }
-    | null = null;
-  let taskCreationPersistenceFlight:
-    | { taskId: string; promise: Promise<void> }
-    | null = null;
-  let recoveryStartedTaskId: string | null = null;
+  const ordinaryTaskCreationFlights = new Map<
+    string,
+    Promise<string | null>
+  >();
+  const recoveryTaskCreationFlights = new Map<
+    string,
+    Promise<string | null>
+  >();
+  const taskCreationPersistenceFlights = new Map<string, Promise<void>>();
+  const recoveryStartedTaskIds = new Set<string>();
+  let lastSubmittedTaskCreationId: string | null = null;
   let repoCommandLoadGeneration = 0;
   const repoCommandCatalogs = new Map<string, RepoCommandCatalog>();
   const pendingTaskIdentities = new Map<
@@ -1556,12 +1559,45 @@ export function createMobileController(
         attempt.terminalRows ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows
     });
 
+  const findTaskCreationAttempt = (
+    selectionOrSlotId?: string | null
+  ): TaskCreationAttempt | null => {
+    const state = store.getState();
+    const identity = selectionOrSlotId ?? state.selectedTaskId;
+    return (
+      state.taskCreationAttempts.find(
+        (attempt) =>
+          attempt.slotId === identity || attempt.taskId === identity
+      ) ??
+      (!selectionOrSlotId ? state.taskCreationAttempts[0] : null) ??
+      null
+    );
+  };
+
+  const isCurrentTaskCreationAttempt = (attempt: PendingTaskCreation) =>
+    store.getState().taskCreationAttempts.some(
+      (candidate) =>
+        candidate.slotId === attempt.slotId &&
+        candidate.taskId === attempt.taskId
+    );
+
+  const isTaskCreationAbortPending = (attempt: PendingTaskCreation) => {
+    const action = store.getState().pendingTaskAction;
+    return (
+      action?.taskId === attempt.slotId &&
+      action.action === "close-task"
+    );
+  };
+
   const completeTaskCreation = (
     attempt: PendingTaskCreation,
     created: CreateTaskResponse
   ): string | null => {
     const currentState = store.getState();
-    if (currentState.pendingTaskCreation?.taskId !== attempt.taskId) {
+    if (
+      !isCurrentTaskCreationAttempt(attempt) ||
+      isTaskCreationAbortPending(attempt)
+    ) {
       return null;
     }
 
@@ -1590,17 +1626,15 @@ export function createMobileController(
       agentProvider: attempt.agentProvider,
       updatedAt: new Date().toISOString()
     });
-    store.setTaskCreationState({
-      phase: "idle",
-      pendingTaskCreation: null
-    });
-    if (taskCreationPersistenceFlight?.taskId === attempt.taskId) {
-      taskCreationPersistenceFlight = null;
+    store.removeTaskCreationAttempt(attempt.slotId);
+    taskCreationPersistenceFlights.delete(attempt.taskId);
+    recoveryStartedTaskIds.delete(attempt.taskId);
+    if (
+      !currentState.isComposerOpen &&
+      currentState.composerPrompt === attempt.prompt
+    ) {
+      store.setComposerState(false, "");
     }
-    if (recoveryStartedTaskId === attempt.taskId) {
-      recoveryStartedTaskId = null;
-    }
-    store.setComposerState(false, "");
     setUnownedErrorMessage(null);
     if (shouldOpenCreatedTask) {
       taskCollectionsRevision += 1;
@@ -1614,23 +1648,20 @@ export function createMobileController(
     attempt: PendingTaskCreation,
     message: string
   ) => {
-    if (taskCreationPersistenceFlight?.taskId === attempt.taskId) {
-      taskCreationPersistenceFlight = null;
+    if (!isCurrentTaskCreationAttempt(attempt)) {
+      return;
     }
-    store.setTaskCreationState({
-      phase: "idle",
-      pendingTaskCreation: null
-    });
+    taskCreationPersistenceFlights.delete(attempt.taskId);
+    store.removeTaskCreationAttempt(attempt.slotId);
     store.removeTaskUiSlot(attempt.slotId);
     if (store.getState().selectedTaskId === attempt.slotId) {
       stopTaskSession();
       store.setSelectedTask(null);
       store.clearTaskTerminal();
       store.clearTaskAgent();
+      store.clearTaskCompanion();
     }
-    if (recoveryStartedTaskId === attempt.taskId) {
-      recoveryStartedTaskId = null;
-    }
+    recoveryStartedTaskIds.delete(attempt.taskId);
     setUnownedErrorMessage(message);
   };
 
@@ -1881,11 +1912,6 @@ export function createMobileController(
 
     openComposer() {
       const state = store.getState();
-      const pendingTaskCreation = state.pendingTaskCreation;
-      if (pendingTaskCreation) {
-        store.setSelectedTask(pendingTaskCreation.slotId);
-        return;
-      }
       const selectedRepoId = state.selectedRepoId;
       const profile = selectedRepoId
         ? state.repoCreationProfiles.find((candidate) => candidate.repoId === selectedRepoId)
@@ -1901,43 +1927,27 @@ export function createMobileController(
       store.setComposerDesktop(composerDesktopId);
       store.setComposerAgentProvider(profile?.agentProvider ?? "claude");
       store.setComposerOptionsExpanded(!composerDesktopId);
-      store.setComposerState(true, state.composerPrompt);
+      lastSubmittedTaskCreationId = null;
+      store.setComposerState(true, "");
     },
 
     closeComposer() {
-      const state = store.getState();
-      if (state.pendingTaskCreation) {
-        store.setComposerState(false, state.composerPrompt);
-        return;
-      }
       store.setComposerState(false, "");
     },
 
     updateComposerPrompt(prompt) {
-      if (store.getState().pendingTaskCreation) {
-        return;
-      }
       store.setComposerState(store.getState().isComposerOpen, prompt);
     },
 
     selectComposerDesktop(desktopId) {
-      if (store.getState().pendingTaskCreation) {
-        return;
-      }
       store.setComposerDesktop(desktopId);
     },
 
     setComposerOptionsExpanded(isExpanded) {
-      if (store.getState().pendingTaskCreation) {
-        return;
-      }
       store.setComposerOptionsExpanded(isExpanded);
     },
 
     selectComposerAgentProvider(provider) {
-      if (store.getState().pendingTaskCreation) {
-        return;
-      }
       store.setComposerAgentProvider(provider);
     },
 
@@ -1967,14 +1977,10 @@ export function createMobileController(
 
     createTask(terminalGeometry) {
       const state = store.getState();
-      if (state.pendingTaskCreation) {
-        if (
-          ordinaryTaskCreationFlight?.taskId ===
-          state.pendingTaskCreation.taskId
-        ) {
-          return ordinaryTaskCreationFlight.promise;
-        }
-        return Promise.resolve(null);
+      if (!state.isComposerOpen && lastSubmittedTaskCreationId) {
+        const existing =
+          ordinaryTaskCreationFlights.get(lastSubmittedTaskCreationId);
+        if (existing) return existing;
       }
       if (!state.composerRepoId || !state.composerPrompt.trim()) {
         store.setComposerErrorMessage("Choose a repo and enter a task prompt first.");
@@ -2003,16 +2009,14 @@ export function createMobileController(
         terminalCols: cols,
         terminalRows: rows
       };
-      recoveryStartedTaskId = null;
+      recoveryStartedTaskIds.delete(attempt.taskId);
       store.setComposerRepo(attempt.repoId);
-      store.setTaskCreationState({
-        phase: "pending",
-        pendingTaskCreation: attempt
-      });
+      store.addTaskCreationAttempt({ ...attempt, phase: "pending" });
       store.addTaskUiSlot(buildCreatingTaskUiSlot(attempt));
       store.setSelectedTask(attempt.slotId);
       store.setComposerState(false, attempt.prompt);
       store.setComposerErrorMessage(null);
+      lastSubmittedTaskCreationId = attempt.taskId;
       let persistenceReady: Promise<void>;
       try {
         persistenceReady =
@@ -2020,10 +2024,7 @@ export function createMobileController(
       } catch (error) {
         persistenceReady = Promise.reject(error);
       }
-      taskCreationPersistenceFlight = {
-        taskId: attempt.taskId,
-        promise: persistenceReady
-      };
+      taskCreationPersistenceFlights.set(attempt.taskId, persistenceReady);
       let taskCreationPromise!: Promise<string | null>;
       taskCreationPromise = (async () => {
         let requestDispatched = false;
@@ -2033,11 +2034,13 @@ export function createMobileController(
           const created = await submitFrozenTaskCreation(attempt);
           return completeTaskCreation(attempt, created);
         } catch (error) {
-          const currentAttempt = store.getState().pendingTaskCreation;
-          if (currentAttempt?.taskId !== attempt.taskId) {
+          if (!isCurrentTaskCreationAttempt(attempt)) {
             return null;
           }
-          if (recoveryStartedTaskId === attempt.taskId) {
+          if (isTaskCreationAbortPending(attempt)) {
+            return null;
+          }
+          if (recoveryStartedTaskIds.has(attempt.taskId)) {
             return null;
           }
           const message =
@@ -2048,43 +2051,40 @@ export function createMobileController(
           ) {
             failTaskCreationDefinitely(attempt, message);
           } else {
-            store.setTaskCreationState({
-              phase: "uncertain",
-              pendingTaskCreation: attempt
-            });
+            store.setTaskCreationAttemptPhase(attempt.slotId, "uncertain");
           }
           store.setComposerErrorMessage(message);
           return null;
         }
       })().finally(() => {
-        if (ordinaryTaskCreationFlight?.promise === taskCreationPromise) {
-          ordinaryTaskCreationFlight = null;
+        if (
+          ordinaryTaskCreationFlights.get(attempt.taskId) ===
+          taskCreationPromise
+        ) {
+          ordinaryTaskCreationFlights.delete(attempt.taskId);
         }
       });
-      ordinaryTaskCreationFlight = {
-        taskId: attempt.taskId,
-        promise: taskCreationPromise
-      };
+      ordinaryTaskCreationFlights.set(attempt.taskId, taskCreationPromise);
       return taskCreationPromise;
     },
 
-    recoverTaskCreation() {
-      const attempt = store.getState().pendingTaskCreation;
+    recoverTaskCreation(slotId) {
+      const attempt = findTaskCreationAttempt(slotId);
       if (!attempt) {
         return Promise.resolve(null);
       }
-      if (recoveryTaskCreationFlight?.taskId === attempt.taskId) {
-        return recoveryTaskCreationFlight.promise;
+      if (isTaskCreationAbortPending(attempt)) {
+        return Promise.resolve(null);
+      }
+      const existingRecovery =
+        recoveryTaskCreationFlights.get(attempt.taskId);
+      if (existingRecovery) {
+        return existingRecovery;
       }
 
       const persistenceReady =
-        taskCreationPersistenceFlight?.taskId === attempt.taskId
-          ? taskCreationPersistenceFlight.promise
-          : Promise.resolve();
-      store.setTaskCreationState({
-        phase: "recovering",
-        pendingTaskCreation: attempt
-      });
+        taskCreationPersistenceFlights.get(attempt.taskId) ?? Promise.resolve();
+      store.setTaskCreationAttemptPhase(attempt.slotId, "recovering");
       store.setComposerErrorMessage(null);
       let recoveryPromise!: Promise<string | null>;
       recoveryPromise = (async () => {
@@ -2092,17 +2092,17 @@ export function createMobileController(
         try {
           await persistenceReady;
           if (
-            store.getState().pendingTaskCreation?.taskId !== attempt.taskId
+            !isCurrentTaskCreationAttempt(attempt)
           ) {
             return null;
           }
-          recoveryStartedTaskId = attempt.taskId;
+          recoveryStartedTaskIds.add(attempt.taskId);
           requestDispatched = true;
           const created = await submitFrozenTaskCreation(attempt);
           return completeTaskCreation(attempt, created);
         } catch (error) {
           if (
-            store.getState().pendingTaskCreation?.taskId !== attempt.taskId
+            !isCurrentTaskCreationAttempt(attempt)
           ) {
             return null;
           }
@@ -2119,23 +2119,74 @@ export function createMobileController(
             store.setComposerErrorMessage(message);
             return null;
           }
-          store.setTaskCreationState({
-            phase: "uncertain",
-            pendingTaskCreation: attempt
-          });
+          store.setTaskCreationAttemptPhase(attempt.slotId, "uncertain");
           store.setComposerErrorMessage(message);
           return null;
         }
       })().finally(() => {
-        if (recoveryTaskCreationFlight?.promise === recoveryPromise) {
-          recoveryTaskCreationFlight = null;
+        if (
+          recoveryTaskCreationFlights.get(attempt.taskId) === recoveryPromise
+        ) {
+          recoveryTaskCreationFlights.delete(attempt.taskId);
         }
       });
-      recoveryTaskCreationFlight = {
-        taskId: attempt.taskId,
-        promise: recoveryPromise
-      };
+      recoveryTaskCreationFlights.set(attempt.taskId, recoveryPromise);
       return recoveryPromise;
+    },
+
+    async abortTaskCreation(slotId) {
+      const attempt = findTaskCreationAttempt(slotId);
+      if (!attempt || !store.beginTaskAction(slotId, "close-task")) {
+        return;
+      }
+      try {
+        await client.abortTaskCreation({
+          taskId: attempt.taskId,
+          desktopId: attempt.desktopId
+        });
+        if (!isCurrentTaskCreationAttempt(attempt)) {
+          return;
+        }
+        const slot = taskUiSlotForSelection(
+          store.getState().taskUiSlots,
+          attempt.slotId
+        );
+        const acknowledgedTaskId = slot?.taskId;
+        store.removeTaskCreationAttempt(attempt.slotId);
+        store.removeTaskUiSlot(attempt.slotId);
+        taskCreationPersistenceFlights.delete(attempt.taskId);
+        recoveryStartedTaskIds.delete(attempt.taskId);
+        if (acknowledgedTaskId) {
+          store.setRecentTasks(
+            store.getState().recentTasks.filter(
+              (task) => task.id !== acknowledgedTaskId
+            )
+          );
+          store.setRepoTasks(
+            store.getState().repoTasks.filter(
+              (task) => task.id !== acknowledgedTaskId
+            )
+          );
+        }
+        if (store.getState().selectedTaskId === attempt.slotId) {
+          taskCollectionsRevision += 1;
+          taskDetailVisible = false;
+          stopTaskSession();
+          store.setSelectedTask(null);
+          store.clearTaskTerminal();
+          store.clearTaskAgent();
+          store.clearTaskCompanion();
+        }
+        setUnownedErrorMessage(null);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Could not abort task creation";
+        setUnownedErrorMessage(message);
+      } finally {
+        store.finishTaskAction(slotId, "close-task");
+      }
     },
 
     async runMergeAgent(taskId) {

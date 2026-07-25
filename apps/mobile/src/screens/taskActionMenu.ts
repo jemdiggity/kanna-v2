@@ -18,20 +18,24 @@ const CANCEL_LABEL = "Cancel";
 
 export function showTaskActionMenu(
   onSelect: (action: TaskAction) => void,
-  onDismiss: () => void = () => undefined
+  onDismiss: () => void = () => undefined,
+  options: { taskCreation?: boolean } = {}
 ): void {
+  const actions = options.taskCreation
+    ? TASK_ACTIONS.filter((action) => action.id === "close-task")
+    : TASK_ACTIONS;
   if (Platform.OS === "ios") {
     ActionSheetIOS.showActionSheetWithOptions(
       {
         title: MENU_TITLE,
-        options: [...TASK_ACTIONS.map((action) => action.label), CANCEL_LABEL],
-        cancelButtonIndex: TASK_ACTIONS.length,
-        destructiveButtonIndex: TASK_ACTIONS.findIndex(
+        options: [...actions.map((action) => action.label), CANCEL_LABEL],
+        cancelButtonIndex: actions.length,
+        destructiveButtonIndex: actions.findIndex(
           (action) => action.style === "destructive"
         )
       },
       (buttonIndex) => {
-        const action = TASK_ACTIONS[buttonIndex];
+        const action = actions[buttonIndex];
         if (action) {
           onSelect(action.id);
         } else {
@@ -46,7 +50,7 @@ export function showTaskActionMenu(
     MENU_TITLE,
     undefined,
     [
-      ...TASK_ACTIONS.map((action) => ({
+      ...actions.map((action) => ({
         text: action.label,
         style: action.style,
         onPress: () => onSelect(action.id)

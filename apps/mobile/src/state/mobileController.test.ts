@@ -182,6 +182,7 @@ function createClientMock(): ClientMock {
       prompt: "Ship mobile shell with the canonical requirements",
       stage: "in progress"
     }),
+    abortTaskCreation: vi.fn().mockResolvedValue(undefined),
     runMergeAgent: vi.fn().mockResolvedValue({
       taskId: "task-merge"
     }),
@@ -3120,6 +3121,208 @@ describe("createMobileController", () => {
     expect(store.getState().composerPrompt).toBe("");
   });
 
+  it("opens a fresh composer and starts another task while an earlier creation is uncertain", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.createTask
+      .mockRejectedValueOnce(new Error("Creation response was lost"))
+      .mockRejectedValueOnce(new Error("Second creation response was lost"));
+    const taskIds = [
+      "11111111111111111111111111111111",
+      "22222222222222222222222222222222"
+    ];
+    const slotIds = ["create:slot-1", "create:slot-2"];
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => taskIds.shift()!,
+      createTaskSlotId: () => slotIds.shift()!,
+      persistSessionContext: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("First uncertain task");
+    await controller.createTask();
+
+    controller.openComposer();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerPrompt: "",
+      taskCreationAttempts: [
+        {
+          slotId: "create:slot-1",
+          taskId: "11111111111111111111111111111111",
+          phase: "uncertain"
+        }
+      ]
+    });
+
+    controller.updateComposerPrompt("Second uncertain task");
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledTimes(2);
+    expect(store.getState().taskCreationAttempts).toMatchObject([
+      {
+        slotId: "create:slot-2",
+        taskId: "22222222222222222222222222222222",
+        prompt: "Second uncertain task",
+        phase: "uncertain"
+      },
+      {
+        slotId: "create:slot-1",
+        taskId: "11111111111111111111111111111111",
+        prompt: "First uncertain task",
+        phase: "uncertain"
+      }
+    ]);
+  });
+
+  it("aborts only the selected unresolved creation on its frozen desktop", async () => {
+    const store = createSessionStore();
+    const attempts = [
+      {
+        slotId: "create:slot-1",
+        taskId: "11111111111111111111111111111111",
+        repoId: "repo-2",
+        prompt: "First uncertain task",
+        desktopId: "desktop-1",
+        agentProvider: "claude" as const
+      },
+      {
+        slotId: "create:slot-2",
+        taskId: "22222222222222222222222222222222",
+        repoId: "repo-2",
+        prompt: "Second uncertain task",
+        desktopId: "desktop-2",
+        agentProvider: "codex" as const
+      }
+    ];
+    store.hydrateContext({
+      mobileDeviceId: null,
+      selectedDesktopId: "desktop-1",
+      selectedRepoId: "repo-2",
+      selectedTaskId: attempts[0].slotId,
+      activeView: "tasks",
+      taskCreationAttempts: attempts
+    });
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.abortTaskCreation(attempts[0].slotId);
+
+    expect(client.abortTaskCreation).toHaveBeenCalledWith({
+      taskId: attempts[0].taskId,
+      desktopId: attempts[0].desktopId
+    });
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      taskCreationAttempts: [
+        {
+          slotId: attempts[1].slotId,
+          taskId: attempts[1].taskId,
+          phase: "uncertain"
+        }
+      ],
+      taskUiSlots: [{ slotId: attempts[1].slotId, state: "creating" }]
+    });
+  });
+
+  it("does not replay creation while abort is in flight and preserves the slot if abort fails", async () => {
+    const store = createSessionStore();
+    const attempt = {
+      slotId: "create:slot-abort",
+      taskId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      repoId: "repo-2",
+      prompt: "Uncertain task",
+      desktopId: "desktop-2",
+      agentProvider: "codex" as const
+    };
+    store.hydrateContext({
+      mobileDeviceId: null,
+      selectedDesktopId: "desktop-1",
+      selectedRepoId: "repo-2",
+      selectedTaskId: attempt.slotId,
+      activeView: "tasks",
+      taskCreationAttempts: [attempt]
+    });
+    const client = createClientMock();
+    const abort = createDeferred<void>();
+    client.abortTaskCreation.mockReturnValue(abort.promise);
+    const controller = createMobileController(client, store);
+
+    const abortPromise = controller.abortTaskCreation(attempt.slotId);
+    await controller.recoverTaskCreation(attempt.slotId);
+
+    expect(client.createTask).not.toHaveBeenCalled();
+
+    abort.reject(new Error("Desktop is offline"));
+    await abortPromise;
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: attempt.slotId,
+      taskCreationAttempts: [
+        {
+          ...attempt,
+          phase: "uncertain"
+        }
+      ],
+      taskUiSlots: [{ slotId: attempt.slotId, state: "creating" }]
+    });
+  });
+
+  it("lets abort own the slot when the original create response arrives first", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const create = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    const abort = createDeferred<void>();
+    client.createTask.mockReturnValue(create.promise);
+    client.abortTaskCreation.mockReturnValue(abort.promise);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      createTaskSlotId: () => "create:slot-race",
+      persistSessionContext: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Abort this creation");
+    const createPromise = controller.createTask();
+    await flushMicrotasks();
+    const abortPromise = controller.abortTaskCreation("create:slot-race");
+
+    create.resolve({
+      taskId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      repoId: "repo-2",
+      title: "Abort this creation",
+      stage: "in progress"
+    });
+    await createPromise;
+
+    expect(store.getState()).toMatchObject({
+      taskCreationAttempts: [
+        {
+          slotId: "create:slot-race",
+          taskId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          phase: "pending"
+        }
+      ],
+      taskUiSlots: [{ slotId: "create:slot-race", state: "creating" }]
+    });
+
+    abort.resolve();
+    await abortPromise;
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      taskCreationAttempts: [],
+      taskUiSlots: []
+    });
+  });
+
   it("issues one durable create while an ordinary submission is pending", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -3472,7 +3675,7 @@ describe("createMobileController", () => {
     );
   });
 
-  it("reopens a restarted uncertain attempt without allowing its identity to drift", async () => {
+  it("opens a fresh composer beside a restarted attempt without allowing recovery identity to drift", async () => {
     const store = createSessionStore();
     const pendingTaskCreation = {
       slotId: "create:slot-restarted",
@@ -3506,10 +3709,10 @@ describe("createMobileController", () => {
 
     expect(store.getState()).toMatchObject({
       isComposerOpen: false,
-      composerPrompt: pendingTaskCreation.prompt,
+      composerPrompt: "",
       composerRepoId: pendingTaskCreation.repoId,
-      composerDesktopId: pendingTaskCreation.desktopId,
-      composerAgentProvider: pendingTaskCreation.agentProvider,
+      composerDesktopId: "desktop-1",
+      composerAgentProvider: "claude",
       taskCreationPhase: "uncertain",
       pendingTaskCreation
     });
@@ -3517,17 +3720,17 @@ describe("createMobileController", () => {
     controller.openComposer();
 
     expect(store.getState()).toMatchObject({
-      isComposerOpen: false,
+      isComposerOpen: true,
       selectedTaskId: pendingTaskCreation.slotId,
-      composerPrompt: pendingTaskCreation.prompt,
+      composerPrompt: "",
       composerRepoId: pendingTaskCreation.repoId,
-      composerDesktopId: pendingTaskCreation.desktopId,
-      composerAgentProvider: pendingTaskCreation.agentProvider,
+      composerDesktopId: null,
+      composerAgentProvider: "claude",
       taskCreationPhase: "uncertain",
       pendingTaskCreation
     });
 
-    await controller.recoverTaskCreation();
+    await controller.recoverTaskCreation(pendingTaskCreation.slotId);
 
     expect(client.createTask).toHaveBeenCalledOnce();
     expect(client.createTask).toHaveBeenCalledWith({
@@ -3541,7 +3744,7 @@ describe("createMobileController", () => {
       terminalRows: 48
     });
     expect(store.getState()).toMatchObject({
-      isComposerOpen: false,
+      isComposerOpen: true,
       selectedTaskId: pendingTaskCreation.slotId,
       taskCreationPhase: "idle",
       pendingTaskCreation: null

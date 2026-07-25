@@ -75,6 +75,46 @@ describe("createSessionPersistence", () => {
     });
   });
 
+  it("round-trips multiple task creation attempts and ignores duplicate identities", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    const attempts = [
+      {
+        slotId: "create:slot-a",
+        taskId: "11111111",
+        repoId: "repo-1",
+        prompt: "First task",
+        desktopId: "desktop-a",
+        agentProvider: "claude" as const
+      },
+      {
+        slotId: "create:slot-b",
+        taskId: "22222222",
+        repoId: "repo-2",
+        prompt: "Second task",
+        desktopId: "desktop-b",
+        agentProvider: "codex" as const
+      }
+    ];
+
+    await persistence.save({
+      mobileDeviceId: null,
+      selectedDesktopId: "desktop-a",
+      selectedRepoId: "repo-1",
+      selectedTaskId: attempts[0].slotId,
+      activeView: "tasks",
+      taskCreationAttempts: [
+        ...attempts,
+        { ...attempts[0], slotId: "create:duplicate-task" },
+        { ...attempts[1], taskId: "33333333" }
+      ]
+    });
+
+    await expect(persistence.load()).resolves.toMatchObject({
+      taskCreationAttempts: attempts
+    });
+  });
+
   it("derives a deterministic UI slot for a legacy pending attempt", async () => {
     const storage = createMemoryStorage();
     const persistence = createSessionPersistence(storage);

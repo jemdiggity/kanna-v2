@@ -121,7 +121,7 @@ describe("createAppModel task creation persistence", () => {
         ]
       }),
       save: vi.fn((context) =>
-        context.pendingTaskCreation
+        context.taskCreationAttempts?.length
           ? pendingAttemptSave.promise
           : Promise.resolve()
       )
@@ -208,13 +208,15 @@ describe("createAppModel task creation persistence", () => {
 
     expect(persistence.save).toHaveBeenCalledWith(
       expect.objectContaining({
-        pendingTaskCreation: expect.objectContaining({
-          taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
-          repoId: "repo-lan",
-          prompt: "Persist this identity",
-          desktopId: "desktop-lan",
-          agentProvider: "claude"
-        })
+        taskCreationAttempts: [
+          expect.objectContaining({
+            taskId: expect.stringMatching(/^[0-9a-f]{32}$/),
+            repoId: "repo-lan",
+            prompt: "Persist this identity",
+            desktopId: "desktop-lan",
+            agentProvider: "claude"
+          })
+        ]
       })
     );
     expect(
