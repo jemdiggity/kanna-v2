@@ -400,6 +400,11 @@ export function TaskScreen({
               {model.canRecoverTaskCreation ? (
                 <Pressable
                   accessibilityRole="button"
+                  accessibilityState={{
+                    busy: isTaskActionPending,
+                    disabled: isTaskActionPending
+                  }}
+                  disabled={isTaskActionPending}
                   style={styles.taskCreationRecoverButton}
                   testID={MOBILE_E2E_IDS.taskCreationRecoverButton}
                   onPress={onRecoverTaskCreation}

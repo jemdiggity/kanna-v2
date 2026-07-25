@@ -480,6 +480,53 @@ describe("TaskScreen", () => {
     expect(onRecoverTaskCreation).toHaveBeenCalledOnce();
   });
 
+  it("opens the creation-specific task actions for an uncertain workspace", () => {
+    const tree = renderTaskScreen({
+      taskCreationPhase: "uncertain",
+      taskId: "create:slot-1"
+    });
+
+    pressByTestId(tree, "mobile.task-more-button");
+
+    expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
+      expect.any(Function),
+      undefined,
+      { taskCreation: true }
+    );
+    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![0] as (
+      selectedAction: "close-task"
+    ) => void;
+    onSelect("close-task");
+    expect(componentMocks.onCloseTask).toHaveBeenCalledOnce();
+  });
+
+  it("blocks recovery and duplicate task actions while abort is in flight", () => {
+    const onRecoverTaskCreation = vi.fn();
+    const tree = renderTaskScreen({
+      taskCreationPhase: "uncertain",
+      taskId: "create:slot-1",
+      pendingTaskAction: "close-task",
+      onRecoverTaskCreation
+    });
+
+    expect(findByTestId(tree, "mobile.task-creation.recover")?.props)
+      .toMatchObject({
+        accessibilityState: { busy: true, disabled: true },
+        disabled: true
+      });
+    expect(findByTestId(tree, "mobile.task-more-button")?.props)
+      .toMatchObject({
+        accessibilityLabel: "Closing task",
+        accessibilityState: { busy: true, disabled: true },
+        disabled: true
+      });
+
+    pressByTestId(tree, "mobile.task-more-button");
+
+    expect(componentMocks.showTaskActionMenu).not.toHaveBeenCalled();
+    expect(onRecoverTaskCreation).not.toHaveBeenCalled();
+  });
+
   it("shows pending creation without offering recovery", () => {
     const tree = renderTaskScreen({
       taskCreationPhase: "pending",

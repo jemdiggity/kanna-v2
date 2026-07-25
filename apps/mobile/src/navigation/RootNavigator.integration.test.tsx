@@ -326,6 +326,8 @@ function createClientMock(): KannaClient {
     listRepoTasks: vi.fn().mockResolvedValue([]),
     listRecentTasks: vi.fn().mockResolvedValue([]),
     searchTasks: vi.fn().mockResolvedValue([]),
+    createTask: vi.fn(),
+    abortTaskCreation: vi.fn().mockResolvedValue(undefined),
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-1" }),
     closeTask: vi.fn().mockResolvedValue(undefined),
@@ -765,6 +767,95 @@ describe("RootNavigator task action integration", () => {
     vi.mocked(showTaskActionMenu).mockClear();
   });
 
+  it("aborts an uncertain creation through its slot with the reserved id and frozen desktop", async () => {
+    const attempt = {
+      slotId: "create:slot-abort",
+      taskId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      repoId: "repo-1",
+      prompt: "Abort this partial task",
+      desktopId: "desktop-owner",
+      agentProvider: "codex" as const
+    };
+    const abort = createDeferred<void>();
+    const client = createClientMock();
+    vi.mocked(client.abortTaskCreation).mockReturnValue(abort.promise);
+    const store = createSessionStore();
+    store.hydrateContext({
+      mobileDeviceId: null,
+      selectedDesktopId: "desktop-1",
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      activeView: "tasks",
+      taskCreationAttempts: [attempt]
+    });
+    controller = createMobileController(client, store);
+    const abortTaskCreation = vi.spyOn(controller, "abortTaskCreation");
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempt.slotId));
+      await flushMicrotasks();
+    });
+    expect(findByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton))
+      .toBeDefined();
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    expect(showTaskActionMenu).toHaveBeenCalledWith(
+      expect.any(Function),
+      undefined,
+      { taskCreation: true }
+    );
+    const selectAction = vi.mocked(showTaskActionMenu).mock.calls[0]![0];
+
+    await act(async () => {
+      selectAction("close-task");
+      await flushMicrotasks();
+    });
+
+    expect(abortTaskCreation).toHaveBeenCalledWith(attempt.slotId);
+    expect(client.abortTaskCreation).toHaveBeenCalledOnce();
+    expect(client.abortTaskCreation).toHaveBeenCalledWith({
+      taskId: attempt.taskId,
+      desktopId: attempt.desktopId
+    });
+    expect(store.getState().pendingTaskAction).toEqual({
+      taskId: attempt.slotId,
+      action: "close-task"
+    });
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(true);
+    expect(
+      findByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton).props.disabled
+    ).toBe(true);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+      selectAction("close-task");
+      pressByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton);
+      await flushMicrotasks();
+    });
+    expect(showTaskActionMenu).toHaveBeenCalledTimes(1);
+    expect(client.abortTaskCreation).toHaveBeenCalledOnce();
+    expect(client.createTask).not.toHaveBeenCalled();
+
+    abort.resolve();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.getState().taskCreationAttempts).toEqual([]);
+    expect(countByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toBe(0);
+  });
+
   it("closes a task exactly once from the + menu, shows the spinner, and blocks duplicates until success", async () => {
     const close = createDeferred<void>();
     const client = createClientMock();
@@ -777,12 +868,14 @@ describe("RootNavigator task action integration", () => {
     vi.mocked(client.closeTask).mockReturnValue(close.promise);
     const store = createSessionStore();
     const selectAction = await openTaskDetailAndCaptureMenu(client, store);
+    const closeDesktopTask = vi.spyOn(controller!, "closeDesktopTask");
 
     await act(async () => {
       selectAction("close-task");
       await flushMicrotasks();
     });
 
+    expect(closeDesktopTask).toHaveBeenCalledWith(task.id);
     expect(client.closeTask).toHaveBeenCalledTimes(1);
     expect(client.closeTask).toHaveBeenCalledWith("task-1");
     expect(store.getState().pendingTaskAction).toEqual({
