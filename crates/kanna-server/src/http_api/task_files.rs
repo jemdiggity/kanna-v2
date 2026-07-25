@@ -44,7 +44,7 @@ fn map_task_file_error(error: TaskFileError) -> (StatusCode, String) {
         TaskFileError::InvalidPath(_) => StatusCode::BAD_REQUEST,
         TaskFileError::TaskNotFound | TaskFileError::FileNotFound => StatusCode::NOT_FOUND,
         TaskFileError::WorkspaceUnavailable => StatusCode::CONFLICT,
-        TaskFileError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        TaskFileError::RequestTooLarge | TaskFileError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         TaskFileError::UnsupportedContent => StatusCode::UNSUPPORTED_MEDIA_TYPE,
         TaskFileError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
