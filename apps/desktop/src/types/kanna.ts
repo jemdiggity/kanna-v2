@@ -60,6 +60,10 @@ export interface TaskBlocker {
 
 export type BlockerTaskState = Pick<PipelineItem, "closed_at" | "stage" | "pr_url">;
 export type BlockerTaskStates = Record<string, BlockerTaskState>;
+export type BlockerDisplayItem = Pick<
+  PipelineItem,
+  "id" | "display_name" | "issue_title" | "prompt" | "closed_at" | "stage" | "pr_url"
+>;
 
 export interface TaskPort {
   port: number;

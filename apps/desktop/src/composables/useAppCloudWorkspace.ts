@@ -30,6 +30,7 @@ import {
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
 import { buildWorkspace, workspaceTaskOwnerTaskId } from "../workspace/buildWorkspace";
 import { createWorkspaceSidebarProjector } from "../workspace/projectWorkspaceTasksForSidebar";
+import { projectWorkspaceBlockers } from "../workspace/projectWorkspaceBlockers";
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
 import type { WindowWorkspaceController } from "../windowWorkspace";
@@ -177,6 +178,11 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   const workspaceTasksByItemId = computed(
     () => workspaceSidebarProjection.value.workspaceTasksByItemId,
   );
+  const workspaceBlockers = computed(() => projectWorkspaceBlockers({
+    workspaceTasks: workspace.value.tasks,
+    sidebarItems: workspaceSidebarProjection.value.sidebarItems,
+    workspaceTasksByItemId: workspaceSidebarProjection.value.workspaceTasksByItemId,
+  }));
   const sidebarRepos = computed(() => workspace.value.repos.map((repo) => ({
     id: repo.key,
     path: repo.path ?? "cloud",
@@ -223,6 +229,14 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     workspaceTasksByItemId,
     markTaskRead: markRemoteWorkspaceTaskRead,
   });
+  const selectedRemoteBlockers = computed(() => {
+    const task = selectedWorkspaceTask.value;
+    if (!task || task.owner.kind === "local") return [];
+    return workspaceBlockers.value.blockersByLogicalTaskKey[task.logicalTaskKey] ?? [];
+  });
+  const selectedRemoteTaskIsBlocked = computed(
+    () => selectedRemoteBlockers.value.length > 0,
+  );
   const mainPanelCloudTerminalRef = computed(() => {
     const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
     if (!selectedItemId) return null;
@@ -700,6 +714,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     workspace,
     remoteTaskDiagnostics,
     workspaceTasksByItemId,
+    workspaceBlockers,
     sidebarRepos,
     sidebarItems,
     selectedCloudRepo,
@@ -708,6 +723,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     mainPanelItem,
     mainPanelIsCloudTask,
     selectedWorkspaceTask,
+    selectedRemoteBlockers,
+    selectedRemoteTaskIsBlocked,
     mainPanelCloudTerminalRef,
     isCloudOnlyRepoId,
     cloudRepoRemoteUrl,
