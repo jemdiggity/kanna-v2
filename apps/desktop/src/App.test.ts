@@ -14,7 +14,6 @@ import {
 } from "./windowWorkspace";
 import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 import { updateDesktopServerClientHandlersForTests } from "./services/desktopServerClient";
-import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 
 async function flushPromises() {
   await Promise.resolve();
