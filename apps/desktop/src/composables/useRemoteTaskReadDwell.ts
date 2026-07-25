@@ -14,39 +14,37 @@ interface RemoteSelectionObservation {
   activityRevision: number;
 }
 
+function sameObservation(
+  left: RemoteSelectionObservation | null,
+  right: RemoteSelectionObservation | null,
+): boolean {
+  return left === right || (
+    left !== null
+    && right !== null
+    && left.itemId === right.itemId
+    && left.ownerDesktopId === right.ownerDesktopId
+    && left.ownerLocalTaskId === right.ownerLocalTaskId
+    && left.activityRevision === right.activityRevision
+  );
+}
+
 export function useRemoteTaskReadDwell({
   selectedItemId,
   workspaceTasksByItemId,
   markTaskRead,
 }: UseRemoteTaskReadDwellOptions): void {
   const observedSelection = shallowRef<RemoteSelectionObservation | null>(null);
-  let pendingItemId: string | null = null;
 
   watch(
     [selectedItemId, workspaceTasksByItemId],
-    ([itemId, taskMap], previous) => {
-      const previousItemId = previous?.[0] ?? null;
-      if (!itemId) {
-        pendingItemId = null;
-        observedSelection.value = null;
-        return;
-      }
-
-      const selectionChanged = itemId !== previousItemId;
-      if (!selectionChanged && pendingItemId !== itemId) return;
-
-      const task = taskMap.get(itemId);
-      if (!task) {
-        pendingItemId = itemId;
-        observedSelection.value = null;
-        return;
-      }
-
-      pendingItemId = null;
-      const activityRevision = task.item.activity_revision;
-      const remoteRef = task.terminal.remoteRef;
-      observedSelection.value = (
-        task.owner.kind !== "local"
+    ([itemId, taskMap]) => {
+      const task = itemId ? taskMap.get(itemId) : null;
+      const activityRevision = task?.item.activity_revision;
+      const remoteRef = task?.terminal.remoteRef;
+      const nextObservation = (
+        itemId
+        && task
+        && task.owner.kind !== "local"
         && remoteRef
         && task.item.activity === "unread"
         && typeof activityRevision === "number"
@@ -60,6 +58,9 @@ export function useRemoteTaskReadDwell({
             activityRevision,
           }
         : null;
+      if (!sameObservation(observedSelection.value, nextObservation)) {
+        observedSelection.value = nextObservation;
+      }
     },
     { flush: "sync", immediate: true },
   );

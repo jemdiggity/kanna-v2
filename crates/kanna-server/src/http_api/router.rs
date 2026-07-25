@@ -313,9 +313,8 @@ async fn dispatch_http_invoke_with_access(
         };
     }
 
-    let body = if body.is_null() {
-        Body::empty()
-    } else {
+    let has_json_body = !body.is_null();
+    let body = if has_json_body {
         match serde_json::to_vec(&body) {
             Ok(bytes) => Body::from(bytes),
             Err(error) => {
@@ -326,14 +325,15 @@ async fn dispatch_http_invoke_with_access(
                 };
             }
         }
+    } else {
+        Body::empty()
     };
 
-    let mut request = match Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(body)
-    {
+    let mut request_builder = Request::builder().method(method).uri(path);
+    if has_json_body {
+        request_builder = request_builder.header("content-type", "application/json");
+    }
+    let mut request = match request_builder.body(body) {
         Ok(request) => request,
         Err(error) => {
             return HttpInvokeResponse {

@@ -1643,7 +1643,7 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("does not mark either owner when a stable presentation slot is rebound", async () => {
+  it("rejects a stale stable-slot owner and marks the replacement after its own dwell", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
     const snapshot = remoteTaskSnapshot("cloud", "original-owner", "original-owner-task");
@@ -1667,11 +1667,23 @@ describe("App", () => {
     await nextTick();
 
     expect(store.selectedItemId).toBe(presentationSlotId);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(400);
     await flushPromises();
 
     expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
     expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(599);
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+
+    expect(relayTerminalClientFactoryMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "replacement-owner",
+      taskId: "replacement-owner-task",
+      expectedActivityRevision: 7,
+    });
 
     wrapper.unmount();
   });
@@ -1748,6 +1760,70 @@ describe("App", () => {
     expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
     expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
     expect(lanCloseMock).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+  });
+
+  it("removes unread presentation after coherent cloud and LAN owner snapshots publish idle", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const cloudSnapshot = remoteTaskSnapshot("cloud", "duplicate-owner", "duplicate-owner-task");
+    const lanSnapshot = remoteTaskSnapshot("lan", "duplicate-owner", "duplicate-owner-task");
+    lanSnapshot.repos[0].id = cloudSnapshot.repos[0].id;
+    lanSnapshot.items[0].repo_id = cloudSnapshot.repos[0].id;
+    cloudTasksMock.mockResolvedValue(cloudSnapshot);
+    lanTasksMock.mockResolvedValue(lanSnapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    expect(wrapper.findAll('[data-testid="remote-task"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("unread");
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    const selectedPresentationSlot = store.selectedItemId;
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(lanMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "duplicate-owner",
+      taskId: "duplicate-owner-task",
+      expectedActivityRevision: 7,
+    });
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+
+    const cloudReadSnapshot = remoteTaskSnapshot(
+      "cloud",
+      "duplicate-owner",
+      "duplicate-owner-task",
+    );
+    cloudReadSnapshot.items[0].activity = "idle";
+    cloudReadSnapshot.items[0].activity_revision = 8;
+    cloudReadSnapshot.items[0].activity_changed_at = "2026-07-25T01:00:01.000Z";
+    for (const listener of desktopCloudTaskSnapshotListeners) {
+      listener(cloudReadSnapshot);
+    }
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("unread");
+
+    const lanReadSnapshot = remoteTaskSnapshot(
+      "lan",
+      "duplicate-owner",
+      "duplicate-owner-task",
+    );
+    lanReadSnapshot.repos[0].id = cloudReadSnapshot.repos[0].id;
+    lanReadSnapshot.items[0].repo_id = cloudReadSnapshot.repos[0].id;
+    lanReadSnapshot.items[0].activity = "idle";
+    lanReadSnapshot.items[0].activity_revision = 8;
+    lanReadSnapshot.items[0].activity_changed_at = "2026-07-25T01:00:01.000Z";
+    lanTasksMock.mockResolvedValue(lanReadSnapshot);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(store.selectedItemId).toBe(selectedPresentationSlot);
+    expect(wrapper.findAll('[data-testid="remote-task"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("idle");
 
     wrapper.unmount();
   });

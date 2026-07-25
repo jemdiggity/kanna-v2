@@ -145,27 +145,7 @@ describe("useRemoteTaskReadDwell", () => {
     expect(markTaskRead).not.toHaveBeenCalled();
   });
 
-  it("does not overwrite activity with a revision newer than the selection", async () => {
-    const selectedItemId = ref<string | null>(null);
-    const task = remoteWorkspaceTask(7);
-    const workspaceTasksByItemId = computed(() => new Map([["slot:remote", task]]));
-    const markTaskRead = vi.fn(async () => {});
-    const scope = effectScope();
-
-    scope.run(() => {
-      useRemoteTaskReadDwell({ selectedItemId, workspaceTasksByItemId, markTaskRead });
-    });
-
-    selectedItemId.value = "slot:remote";
-    await nextTick();
-    task.item.activity_revision = 8;
-    await vi.advanceTimersByTimeAsync(1000);
-
-    expect(markTaskRead).not.toHaveBeenCalled();
-    scope.stop();
-  });
-
-  it("does not mark a replacement owner with the same revision read", async () => {
+  it("restarts dwell when the selected task activity revision changes", async () => {
     const selectedItemId = ref<string | null>(null);
     const originalTask = remoteWorkspaceTask(7);
     const workspaceTasks = ref(new Map([["slot:remote", originalTask]]));
@@ -179,6 +159,38 @@ describe("useRemoteTaskReadDwell", () => {
 
     selectedItemId.value = "slot:remote";
     await nextTick();
+    await vi.advanceTimersByTimeAsync(600);
+
+    const currentTask = remoteWorkspaceTask(8);
+    workspaceTasks.value = new Map([["slot:remote", currentTask]]);
+    await nextTick();
+
+    await vi.advanceTimersByTimeAsync(400);
+    expect(markTaskRead).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(599);
+    expect(markTaskRead).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(markTaskRead).toHaveBeenCalledOnce();
+    expect(markTaskRead).toHaveBeenCalledWith(currentTask, 8);
+    scope.stop();
+  });
+
+  it("rejects a stale owner tuple and marks its replacement after a fresh dwell", async () => {
+    const selectedItemId = ref<string | null>(null);
+    const originalTask = remoteWorkspaceTask(7);
+    const workspaceTasks = ref(new Map([["slot:remote", originalTask]]));
+    const workspaceTasksByItemId = computed(() => workspaceTasks.value);
+    const markTaskRead = vi.fn(async () => {});
+    const scope = effectScope();
+
+    scope.run(() => {
+      useRemoteTaskReadDwell({ selectedItemId, workspaceTasksByItemId, markTaskRead });
+    });
+
+    selectedItemId.value = "slot:remote";
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(600);
 
     const replacementTask = remoteWorkspaceTask(7);
     replacementTask.owner = { kind: "remote", id: "replacement-desktop" };
@@ -188,9 +200,15 @@ describe("useRemoteTaskReadDwell", () => {
     };
     workspaceTasks.value = new Map([["slot:remote", replacementTask]]);
     await nextTick();
-    await vi.advanceTimersByTimeAsync(1000);
 
+    await vi.advanceTimersByTimeAsync(400);
     expect(markTaskRead).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(599);
+    expect(markTaskRead).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(markTaskRead).toHaveBeenCalledOnce();
+    expect(markTaskRead).toHaveBeenCalledWith(replacementTask, 7);
     scope.stop();
   });
 
