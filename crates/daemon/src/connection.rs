@@ -720,6 +720,16 @@ pub(crate) async fn handle_command(
                 return;
             }
             let session = session_handle(&sessions, &session_id).await;
+            let stream_control = match &session {
+                Some(session) => {
+                    let control = session.stream_control().await;
+                    if let Some(control) = control.as_ref() {
+                        control.request_stop();
+                    }
+                    control
+                }
+                None => None,
+            };
             let result = match &session {
                 Some(session) => session.kill().await,
                 None => Err(std::io::Error::new(
@@ -730,7 +740,24 @@ pub(crate) async fn handle_command(
             let success = result.is_ok();
             let killed_fanout = fanouts.lock().await.remove(&session_id);
             if success {
-                sessions.lock().await.remove(&session_id);
+                if let Some(session) = session.as_ref() {
+                    session.retire();
+                    let mut manager = sessions.lock().await;
+                    if manager.is_current(&session_id, session) {
+                        manager.remove(&session_id);
+                    }
+                }
+                if let Some(control) = stream_control.as_ref() {
+                    if !control
+                        .wait_stopped(std::time::Duration::from_millis(500))
+                        .await
+                    {
+                        log::warn!(
+                            "[kill] reader did not acknowledge stop before timeout session={}",
+                            session_id
+                        );
+                    }
+                }
                 // A kill removes the session from the map, so the output
                 // reader's exit cleanup is skipped ("current session changed")
                 // and would never announce the death. Announce it here —

@@ -1,19 +1,31 @@
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
 use kanna_daemon::recovery::{RecoveryManager, SeededRecoverySnapshot};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::client::{LostHandoffSessions, SessionSizes, TerminalEmulatorClients};
 use crate::connection::handle_connection;
-use crate::fanout::SessionFanouts;
+use crate::fanout::{session_fanout, SessionFanouts};
 use crate::handoff::attempt_handoff;
+use crate::output::stream_output;
 use crate::paths::{
     app_support_dir, daemon_data_dir, handle_cli_args, install_panic_hook, CliAction,
 };
-use crate::session::{SessionHandle, SessionManager, SessionRecord};
+use crate::session::{SessionHandle, SessionManager, SessionRecord, StreamControl};
 use crate::socket::bind_socket;
 use crate::{agent_runtime, headless_terminal};
+
+struct AdoptedPtyReader {
+    session_id: String,
+    io_fd: OwnedFd,
+    input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    stream_control: StreamControl,
+    handle: Arc<SessionHandle>,
+    rows: u16,
+    cols: u16,
+}
 
 pub(crate) async fn run_daemon() {
     match handle_cli_args() {
@@ -47,6 +59,7 @@ pub(crate) async fn run_daemon() {
         eprintln!("kanna-daemon: refusing to start: {message}");
         std::process::exit(1);
     }
+    let has_adopted_agents = !handoff_result.adopted_agents.is_empty();
 
     let sessions: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
     let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
@@ -56,6 +69,7 @@ pub(crate) async fn run_daemon() {
     let agent_sessions: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let recovery_manager = RecoveryManager::start().await;
     let (broadcast_tx, _) = broadcast::channel::<String>(256);
+    let mut adopted_pty_readers = Vec::new();
 
     // Adopt handed-off sessions and persist their handed-off snapshots immediately so the
     // recovery sidecar has durable state before any post-restart attach occurs.
@@ -122,6 +136,9 @@ pub(crate) async fn run_daemon() {
                 Ok(Some(_))
             ) || handoff.status
                 != headless_terminal::initial_session_status(handoff.agent_provider);
+            let rows = handoff.rows;
+            let cols = handoff.cols;
+            let stream_control = StreamControl::new();
             let handle = Arc::new(SessionHandle::new(SessionRecord {
                 pty: pty_session,
                 headless_terminal,
@@ -131,28 +148,97 @@ pub(crate) async fn run_daemon() {
                 status_observed,
                 last_status_check_at: None,
             }));
-            mgr.insert(session_id, handle);
-            // Note: no stream_output started — client must AttachSnapshot to start streaming.
-        }
-    }
-    // Adopt handed-off agent sessions. Wait for the old daemon to exit first:
-    // its blocked reader threads hold the same pipes until then, and its
-    // final journal appends must land before we reload from disk.
-    if !handoff_result.adopted_agents.is_empty() {
-        if let Some(old_pid) = handoff_result.old_pid {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while unsafe { libc::kill(old_pid, 0) } == 0 {
-                if std::time::Instant::now() >= deadline {
+            let reader = match handle.try_clone_io_fd().await {
+                Ok(io_fd) => match handle.take_input_rx().await {
+                    Some(input_rx) => {
+                        handle.set_stream_control(stream_control.clone()).await;
+                        Some(AdoptedPtyReader {
+                            session_id: session_id.clone(),
+                            io_fd,
+                            input_rx,
+                            stream_control,
+                            handle: Arc::clone(&handle),
+                            rows,
+                            cols,
+                        })
+                    }
+                    None => {
+                        log::warn!(
+                            "[handoff] adopted PTY input queue was already taken for {}",
+                            session_id
+                        );
+                        None
+                    }
+                },
+                Err(error) => {
                     log::warn!(
-                        "[handoff] old daemon (pid={}) still alive after 5s; killing it before adopting agent sessions",
-                        old_pid
+                        "[handoff] failed to clone adopted PTY fd for {}: {}",
+                        session_id,
+                        error
                     );
-                    unsafe { libc::kill(old_pid, libc::SIGKILL) };
-                    break;
+                    None
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            };
+            mgr.insert(session_id, handle);
+            if let Some(reader) = reader {
+                adopted_pty_readers.push(reader);
             }
         }
+    }
+
+    // attempt_handoff returns only after the old daemon closes the dedicated
+    // handoff connection, which fences its readers before these start.
+    for reader in adopted_pty_readers {
+        let resume_from_disk = recovery_manager.has_persisted_snapshot(&reader.session_id);
+        if let Err(error) = recovery_manager
+            .start_session(
+                &reader.session_id,
+                reader.cols,
+                reader.rows,
+                resume_from_disk,
+            )
+            .await
+        {
+            log::warn!(
+                "[recovery] failed to start adopted session {} (resume_from_disk={}): {}",
+                reader.session_id,
+                resume_from_disk,
+                error
+            );
+        }
+
+        session_fanout(&fanouts, &reader.session_id)
+            .await
+            .state
+            .lock()
+            .await
+            .mark_streaming();
+        let sessions_for_stream = sessions.clone();
+        let fanouts_for_stream = fanouts.clone();
+        let terminal_clients_for_stream = terminal_emulator_clients.clone();
+        let sizes_for_stream = session_sizes.clone();
+        let recovery_for_stream = recovery_manager.clone();
+        let broadcast_for_stream = broadcast_tx.clone();
+        tokio::spawn(async move {
+            stream_output(
+                reader.session_id,
+                reader.io_fd,
+                reader.input_rx,
+                reader.stream_control,
+                broadcast_for_stream,
+                fanouts_for_stream,
+                terminal_clients_for_stream,
+                sessions_for_stream,
+                sizes_for_stream,
+                recovery_for_stream,
+                reader.handle,
+            )
+            .await;
+        });
+    }
+
+    // Adopt handed-off agent sessions after the same handoff barrier.
+    if has_adopted_agents {
         for (info, fds) in handoff_result.adopted_agents {
             agent_runtime::adopt_agent_session(
                 info,

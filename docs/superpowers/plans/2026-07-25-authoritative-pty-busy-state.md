@@ -94,15 +94,16 @@
 
   In `crates/daemon/src/session.rs`, add a helper that requests the active
   stream control to stop and waits asynchronously, with a short bounded
-  timeout, for `is_stopped()`. Do not hold the PTY, state, or manager mutex
-  while waiting.
+  timeout, for `is_stopped()`. Give each handle a monotonic retired flag that
+  `SessionManager` sets on removal/replacement. Do not hold the PTY, state, or
+  manager mutex while waiting.
 
 - [ ] **Step 4: Fence externally visible reader work**
 
-  In `crates/daemon/src/output.rs`, add a current-handle predicate using
-  `SessionManager`. Check it together with `StreamControl` before mirroring
-  chunks and before quiet status refresh/emission. A stale reader marks itself
-  stopped and exits without touching fanout, recovery, or task status.
+  In `crates/daemon/src/output.rs`, check the handle's O(1) retired flag
+  together with `StreamControl` before mirroring chunks and before quiet status
+  refresh/emission. A stale reader marks itself stopped and exits without
+  touching fanout, recovery, or task status.
 
 - [ ] **Step 5: Stop the reader before completing Kill**
 
@@ -149,11 +150,12 @@
   local pending-reader collection while inserting the handle into
   `SessionManager`.
 
-- [ ] **Step 4: Share the old-daemon relinquish wait**
+- [ ] **Step 4: Establish the old-daemon relinquish barrier**
 
-  Refactor the existing old-process wait so it runs once whenever PTY or agent
-  sessions were adopted. Do not start replacement readers while the old daemon
-  can still read the same descriptors.
+  Keep the handoff connection open after `HandoffAdopted` until the old daemon
+  closes it after relinquishing readers. Use this connection EOF as the shared
+  PTY/agent ownership barrier, with a bounded kill fallback. Do not use
+  `kill(pid, 0)` because zombies remain visible until reaped.
 
 - [ ] **Step 5: Start recovery, fanout, and stream ingestion**
 

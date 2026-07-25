@@ -82,11 +82,16 @@ During handoff startup:
 1. reconstruct each adopted `SessionHandle`;
 2. retain the transferred PTY fd, input receiver, and handle needed to start
    `stream_output`;
-3. wait for the previous daemon process to exit once when either PTY or agent
-   sessions were adopted;
+3. treat closure of the dedicated handoff connection after
+   `HandoffAdopted` as the ownership barrier (with a bounded kill fallback);
 4. initialize recovery mirroring and fanout streaming state;
 5. start one `stream_output` task for every adopted PTY before publishing the
    new daemon socket.
+
+Waiting for connection EOF is intentional: `kill(pid, 0)` continues to report
+an exited-but-unreaped daemon as alive, creating a false five-second stall in
+test harnesses and other parent-owned launchers. The connection cannot close
+until the old daemon has accepted adoption and relinquished its readers.
 
 `AttachSnapshot` keeps its existing lazy-start branch as defensive support for
 legacy/non-streaming handles, but normal handoff no longer depends on a client
@@ -95,8 +100,11 @@ attach.
 ### 3. A killed session stops before its id can be reused
 
 `Kill` requests the current `StreamControl` to stop before terminating and
-removing the PTY session. The reader checks both its stop token and manager
-handle identity before externally visible chunk/status work. The kill path
+removing the PTY session. Each `SessionHandle` also has a monotonic retired
+flag. `SessionManager` retires a handle when it is removed or replaced, giving
+the hot output loop an O(1) incarnation fence without taking the global
+session-manager mutex for every PTY chunk. The reader checks both its stop token
+and retired flag before externally visible chunk/status work. The kill path
 waits for the reader to acknowledge the stop for a bounded interval before
 replying, so a successful same-id respawn cannot race an old reader that is
 still publishing events.
@@ -112,8 +120,9 @@ manager identity guard has made the old reader stale.
 2. Server watcher: attached `Idle`/`Waiting` remains delegated to the client.
 3. Daemon replacement: after killing and respawning a same-id session, output
    and status from the old handle cannot affect the replacement.
-4. Daemon handoff: an adopted PTY changes status without any
-   `AttachSnapshot`, and `List` observes the new status.
+4. Daemon handoff: an adopted PTY ingests delayed output without any
+   `AttachSnapshot`, proving the headless terminal and its status detector are
+   live before selection.
 5. Existing focused server and daemon suites, formatting, linting, and the
    repository's practical verification commands remain green.
 

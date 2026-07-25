@@ -320,6 +320,27 @@ fn request_snapshot(conn: &mut ClientConn, id: &str) -> SnapshotPayload {
     }
 }
 
+fn wait_for_snapshot_text(
+    conn: &mut ClientConn,
+    id: &str,
+    expected: &str,
+    timeout: Duration,
+) -> SnapshotPayload {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let snapshot = request_snapshot(conn, id);
+        if snapshot.vt.contains(expected) {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "snapshot for {id} never contained {expected:?}; last snapshot={:?}",
+            snapshot.vt
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn test_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "kanna-handoff-test-{}-{}",
@@ -684,6 +705,60 @@ fn test_handoff_transfers_session() {
         b"after-handoff\n",
         "after-handoff",
     );
+
+    drop(daemon_b);
+    cleanup(&dir);
+}
+
+#[test]
+fn test_adopted_pty_streams_before_first_attach() {
+    let dir = test_dir("stream-before-attach");
+    let release_path = dir.join("release-output");
+
+    let daemon_a = DaemonHandle::start_in(&dir);
+    let mut conn_a = daemon_a.connect();
+    let mut env = HashMap::new();
+    env.insert(
+        "KANNA_HANDOFF_RELEASE".to_string(),
+        release_path.to_string_lossy().into_owned(),
+    );
+    conn_a.send(&Cmd::Spawn {
+        session_id: "sess-adopted-stream".to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'BEFORE_HANDOFF\\r\\n'; while [ ! -f \"$KANNA_HANDOFF_RELEASE\" ]; do sleep 0.05; done; printf 'AFTER_HANDOFF\\r\\n'; sleep 30".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env,
+        cols: 80,
+        rows: 24,
+    });
+    match conn_a.recv() {
+        Evt::SessionCreated { .. } => {}
+        other => panic!("expected SessionCreated, got: {:?}", other),
+    }
+    wait_for_snapshot_text(
+        &mut conn_a,
+        "sess-adopted-stream",
+        "BEFORE_HANDOFF",
+        Duration::from_secs(2),
+    );
+
+    drop(conn_a);
+    let daemon_b = DaemonHandle::start_in(&dir);
+    let mut conn_b = daemon_b.connect();
+    std::fs::write(&release_path, b"go").unwrap();
+
+    // Snapshot is deliberately used instead of AttachSnapshot: the adopted
+    // reader must already be running before any terminal client selects it.
+    let snapshot = wait_for_snapshot_text(
+        &mut conn_b,
+        "sess-adopted-stream",
+        "AFTER_HANDOFF",
+        Duration::from_secs(2),
+    );
+    assert!(snapshot.vt.contains("BEFORE_HANDOFF"));
 
     drop(daemon_b);
     cleanup(&dir);

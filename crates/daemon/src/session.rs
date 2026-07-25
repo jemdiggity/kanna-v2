@@ -9,7 +9,7 @@ use crate::headless_terminal::HeadlessTerminal;
 use crate::protocol::{AgentProvider, SessionInfo, SessionState, SessionStatus};
 use crate::pty::PtySession;
 use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 
 pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
 
@@ -17,6 +17,7 @@ pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
 pub struct StreamControl {
     stop_requested: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    stopped_notify: Arc<Notify>,
 }
 
 impl Default for StreamControl {
@@ -30,6 +31,7 @@ impl StreamControl {
         Self {
             stop_requested: Arc::new(AtomicBool::new(false)),
             stopped: Arc::new(AtomicBool::new(false)),
+            stopped_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -43,6 +45,7 @@ impl StreamControl {
 
     pub fn mark_stopped(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.stopped_notify.notify_waiters();
     }
 
     pub fn is_stopped(&self) -> bool {
@@ -52,6 +55,20 @@ impl StreamControl {
     pub fn is_same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.stop_requested, &other.stop_requested)
             && Arc::ptr_eq(&self.stopped, &other.stopped)
+    }
+
+    pub async fn wait_stopped(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.stopped_notify.notified();
+                if self.is_stopped() {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
     }
 }
 
@@ -84,6 +101,7 @@ pub struct SessionHandle {
     state: Mutex<SessionRuntimeState>,
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
     input_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
+    retired: AtomicBool,
 }
 
 impl SessionHandle {
@@ -101,7 +119,16 @@ impl SessionHandle {
             }),
             input_tx,
             input_rx: Mutex::new(Some(input_rx)),
+            retired: AtomicBool::new(false),
         }
+    }
+
+    pub fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::SeqCst)
     }
 
     pub fn enqueue_input(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
@@ -401,7 +428,9 @@ impl SessionManager {
     }
 
     pub fn insert(&mut self, session_id: String, session: Arc<SessionHandle>) {
-        self.sessions.insert(session_id, session);
+        if let Some(previous) = self.sessions.insert(session_id, session) {
+            previous.retire();
+        }
     }
 
     pub fn get(&self, session_id: &str) -> Option<Arc<SessionHandle>> {
@@ -409,11 +438,21 @@ impl SessionManager {
     }
 
     pub fn remove(&mut self, session_id: &str) -> Option<Arc<SessionHandle>> {
-        self.sessions.remove(session_id)
+        let removed = self.sessions.remove(session_id);
+        if let Some(session) = removed.as_ref() {
+            session.retire();
+        }
+        removed
     }
 
     pub fn contains(&self, session_id: &str) -> bool {
         self.sessions.contains_key(session_id)
+    }
+
+    pub fn is_current(&self, session_id: &str, session: &Arc<SessionHandle>) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
     }
 
     pub fn handles(&self) -> Vec<(String, Arc<SessionHandle>)> {
@@ -425,6 +464,9 @@ impl SessionManager {
 
     pub fn kill_all_handles(&mut self) -> Vec<(String, Arc<SessionHandle>)> {
         let handles = self.handles();
+        for (_, session) in &handles {
+            session.retire();
+        }
         self.sessions.clear();
         handles
     }
@@ -565,7 +607,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        replay_headless_terminal_for_benchmark, BenchmarkStatusState, SessionHandle, SessionRecord,
+        replay_headless_terminal_for_benchmark, BenchmarkStatusState, SessionHandle,
+        SessionManager, SessionRecord,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
     use crate::headless_terminal::{initial_session_status, HeadlessTerminal};
@@ -638,6 +681,43 @@ mod tests {
         // The pty mutex must be free as soon as kill returns; the old code
         // held it through a blocking reap of the child.
         assert!(handle.pty.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn session_manager_distinguishes_same_id_handle_incarnations() {
+        let old = spawn_test_handle(AgentProvider::Codex, SessionStatus::Busy).unwrap();
+        let replacement = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut manager = SessionManager::new();
+
+        manager.insert("task-same-id".to_string(), Arc::clone(&old));
+        assert!(manager.is_current("task-same-id", &old));
+
+        manager.insert("task-same-id".to_string(), Arc::clone(&replacement));
+        assert!(!manager.is_current("task-same-id", &old));
+        assert!(manager.is_current("task-same-id", &replacement));
+        assert!(
+            old.is_retired(),
+            "replacing a session id must fence the old reader incarnation"
+        );
+        assert!(!replacement.is_retired());
+
+        old.kill().await.unwrap();
+        replacement.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_control_waits_for_stop_acknowledgement() {
+        let control = super::StreamControl::new();
+        let reader_control = control.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            reader_control.mark_stopped();
+        });
+
+        assert!(
+            control.wait_stopped(Duration::from_millis(100)).await,
+            "reader stop acknowledgement should wake the kill path"
+        );
     }
 
     #[tokio::test]

@@ -28,7 +28,6 @@ pub(crate) struct HandoffResult {
     pub(crate) adopted: Vec<(String, pty::PtySession, protocol::HandoffSession)>,
     pub(crate) adopted_agents: Vec<(protocol::HandoffSession, Vec<std::os::fd::RawFd>)>,
     pub(crate) lost: HashMap<String, String>,
-    pub(crate) old_pid: Option<i32>,
     pub(crate) abort_start: Option<String>,
 }
 
@@ -38,7 +37,6 @@ impl HandoffResult {
             adopted: vec![],
             adopted_agents: vec![],
             lost: HashMap::new(),
-            old_pid: None,
             abort_start: None,
         }
     }
@@ -192,6 +190,7 @@ pub(crate) fn blank_snapshot(rows: u16, cols: u16) -> protocol::TerminalSnapshot
 async fn request_handoff(
     socket_path: &PathBuf,
     version: u32,
+    old_pid: libc::pid_t,
 ) -> Result<(Vec<protocol::HandoffSession>, Vec<std::os::fd::RawFd>), HandoffRequestError> {
     let stream = tokio::net::UnixStream::connect(socket_path)
         .await
@@ -239,6 +238,7 @@ async fn request_handoff(
     let expected_fds = expected_handoff_fd_count(&session_infos);
     if expected_fds == 0 {
         send_handoff_ack(&mut writer, version).await?;
+        wait_for_handoff_release(&mut reader, old_pid).await;
         return Ok((session_infos, vec![]));
     }
 
@@ -254,7 +254,50 @@ async fn request_handoff(
         }
     })?;
     send_handoff_ack(&mut writer, version).await?;
+    wait_for_handoff_release(&mut reader, old_pid).await;
     Ok((session_infos, fds))
+}
+
+async fn wait_for_handoff_release(
+    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    old_pid: libc::pid_t,
+) {
+    use tokio::io::AsyncBufReadExt;
+
+    // HandoffAdopted commits ownership transfer. The old daemon then fences
+    // its readers and exits, closing this dedicated connection. EOF is a
+    // stronger ownership barrier than kill(pid, 0), which reports zombies as
+    // alive until their parent reaps them.
+    let released = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    log::debug!(
+                        "[handoff] ignoring message while waiting for old daemon release: {}",
+                        line.trim()
+                    );
+                }
+            }
+        }
+    })
+    .await;
+
+    if released.is_err() {
+        log::warn!(
+            "[handoff] old daemon (pid={}) did not release readers after 5s; killing it",
+            old_pid
+        );
+        unsafe { libc::kill(old_pid, libc::SIGKILL) };
+        let mut line = String::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reader.read_line(&mut line),
+        )
+        .await;
+    }
 }
 
 async fn send_handoff_ack(
@@ -362,8 +405,12 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         socket_path
     );
 
-    let (session_infos, fds, used_version) = match request_handoff(socket_path, HANDOFF_VERSION)
-        .await
+    let (session_infos, fds, used_version) = match request_handoff(
+        socket_path,
+        HANDOFF_VERSION,
+        old_pid,
+    )
+    .await
     {
         Ok((session_infos, fds)) => (session_infos, fds, HANDOFF_VERSION),
         Err(error) => {
@@ -377,13 +424,12 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                     adopted: vec![],
                     adopted_agents: vec![],
                     lost: lost_sessions_from_handoff_error(&error),
-                    old_pid: Some(old_pid),
                     abort_start: Some(format!(
                         "old daemon pid {old_pid} is alive but handoff failed ambiguously: {error}"
                     )),
                 };
             }
-            match request_handoff(socket_path, HANDOFF_COMPAT_VERSION).await {
+            match request_handoff(socket_path, HANDOFF_COMPAT_VERSION, old_pid).await {
                 Ok((session_infos, fds)) => {
                     log::info!(
                         "[handoff] fell back to compatible handoff version {}",
@@ -401,7 +447,6 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                         adopted: vec![],
                         adopted_agents: vec![],
                         lost: lost_sessions_from_handoff_error(&compat_error),
-                        old_pid: Some(old_pid),
                         abort_start: Some(format!(
                             "old daemon pid {old_pid} is alive but compatible handoff failed: {compat_error}"
                         )),
@@ -452,7 +497,6 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         );
         return HandoffResult {
             lost,
-            old_pid: Some(old_pid),
             abort_start: Some(format!(
                 "old daemon pid {old_pid} sent an invalid handoff fd count"
             )),
@@ -517,7 +561,6 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         adopted,
         adopted_agents,
         lost: HashMap::new(),
-        old_pid: Some(old_pid),
         abort_start: None,
     }
 }
