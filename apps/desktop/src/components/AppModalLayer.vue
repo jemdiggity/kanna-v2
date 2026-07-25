@@ -193,11 +193,12 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
   />
   <FilePreviewModal
     :ref="setFilePreviewRef"
-    v-if="(m.showFilePreviewModal.value || m.previewHidden.value) && !c.isMobile && c.store.selectedRepo?.path"
+    v-if="(m.showFilePreviewModal.value || m.previewHidden.value) && !c.isMobile && (c.store.selectedRepo?.path || m.previewRemoteContent.value !== null)"
     v-show="m.showFilePreviewModal.value"
     :key="`${m.activeWorktreePath.value}:${m.previewFilePath.value}`"
     :file-path="m.previewFilePath.value"
     :worktree-path="m.activeWorktreePath.value"
+    :remote-content="m.previewRemoteContent.value"
     :ide-command="c.store.ideCommand"
     :initial-line="m.previewInitialLine.value"
     :initial-markdown-mode="m.currentPreviewMarkdownMode.value"

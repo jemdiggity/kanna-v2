@@ -57,6 +57,15 @@ export interface ResizeRemoteTerminalOptions extends RemoteTerminalActionOptions
   rows: number;
 }
 
+export interface ReadRemoteTaskFileOptions extends RemoteTerminalActionOptions {
+  path: string;
+}
+
+export interface RemoteTaskFileContent {
+  path: string;
+  content: string;
+}
+
 export interface DesktopRelayTerminalClient {
   close(): void;
   observeTerminal(options: ObserveDesktopRelayTerminalOptions): DesktopRelayTerminalSubscription;
@@ -64,6 +73,7 @@ export interface DesktopRelayTerminalClient {
   resize(options: ResizeRemoteTerminalOptions): Promise<void>;
   closeTask(options: RemoteTerminalActionOptions): Promise<void>;
   advanceStage(options: RemoteTerminalActionOptions): Promise<void>;
+  readTaskFile(options: ReadRemoteTaskFileOptions): Promise<RemoteTaskFileContent>;
 }
 
 export async function createConfiguredDesktopRelayTerminalClient(): Promise<DesktopRelayTerminalClient | null> {
@@ -173,198 +183,20 @@ export function createDesktopRelayTerminalClient({
         null,
       );
     },
-  };
-
-  let socket: RelaySocketLike | null = null;
-  let readyPromise: Promise<void> | null = null;
-  let resolveReady: (() => void) | null = null;
-  let rejectReady: ((error: Error) => void) | null = null;
-  let nextId = 1;
-  const pendingInvokes = new Map<string, PendingInvoke>();
-  const terminalObservers = new Map<string, ObserveDesktopRelayTerminalOptions>();
-
-  const ensureSocket = () => {
-    if (socket) return socket;
-
-    socket = createSocket(relayUrl);
-    readyPromise = new Promise<void>((resolve, reject) => {
-      resolveReady = resolve;
-      rejectReady = reject;
-    });
-    socket.onopen = () => {
-      void sendAuth(socket!);
-    };
-    socket.onmessage = (event) => {
-      handleRelayMessage(event.data);
-    };
-    socket.onerror = () => {
-      failAll(new Error("Relay connection failed."));
-    };
-    socket.onclose = () => {
-      failAll(new Error("Relay connection closed."));
-      socket = null;
-      readyPromise = null;
-      resolveReady = null;
-      rejectReady = null;
-    };
-    return socket;
-  };
-
-  const sendAuth = async (openSocket: RelaySocketLike) => {
-    try {
-      const idToken = await getIdToken();
-      if (!idToken) throw new Error("Sign in before connecting to the relay.");
-      openSocket.send(JSON.stringify({ type: "auth", id_token: idToken }));
-    } catch (error) {
-      failAll(error instanceof Error ? error : new Error("Relay authentication failed."));
-    }
-  };
-
-  const sendInvoke = async (
-    desktopId: string,
-    payload: Record<string, unknown>,
-    onSuccess?: () => void,
-  ) => {
-    const openSocket = ensureSocket();
-    if (!readyPromise) throw new Error("Relay connection was not initialized.");
-    await readyPromise;
-    const id = `desktop-${nextId++}`;
-    const promise = new Promise<unknown>((resolve, reject) => {
-      pendingInvokes.set(id, { onSuccess, resolve, reject });
-    });
-    openSocket.send(JSON.stringify({ type: "invoke", id, desktopId, ...payload }));
-    return promise;
-  };
-
-  const handleRelayMessage = (raw: unknown) => {
-    if (typeof raw !== "string") return;
-    const parsed = parseJsonRecord(raw);
-    if (!parsed) return;
-    if (parsed.type === "auth_ok") {
-      resolveReady?.();
-      resolveReady = null;
-      rejectReady = null;
-      return;
-    }
-    if (parsed.type === "response") {
-      handleResponse(parsed);
-      return;
-    }
-    if (parsed.type === "event") {
-      handleTerminalEvent(parsed);
-    }
-  };
-
-  const handleResponse = (message: Record<string, unknown>) => {
-    const id = normalizeId(message.id);
-    if (!id) return;
-    const pending = pendingInvokes.get(id);
-    if (!pending) return;
-    pendingInvokes.delete(id);
-    if (typeof message.error === "string" && message.error.trim()) {
-      pending.reject(new Error(message.error));
-      return;
-    }
-    pending.onSuccess?.();
-    pending.resolve(message.body ?? message.data ?? null);
-  };
-
-  const handleTerminalEvent = (message: Record<string, unknown>) => {
-    if (!isRecord(message.payload)) return;
-    const payload = message.payload;
-    const taskId = getStringField(payload, "session_id");
-    if (!taskId) return;
-    const observer = terminalObservers.get(taskId);
-    if (!observer) return;
-
-    switch (message.name) {
-      case "terminal_snapshot": {
-        const snapshot = isRecord(payload.snapshot) ? payload.snapshot : null;
-        observer.listener({ type: "output", taskId, text: snapshot ? getStringField(snapshot, "vt") ?? "" : "" });
-        break;
+    async readTaskFile(options) {
+      const response = await clientForDesktop(options.desktopId).request(
+        "GET",
+        `/v1/tasks/${encodeURIComponent(options.taskId)}/files/content?path=${encodeURIComponent(options.path)}`,
+        null,
+      );
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`Remote task file read failed with HTTP ${response.status}.`);
       }
-      case "terminal_output":
-        observer.listener({ type: "output", taskId, text: decodeBase64(getStringField(payload, "data_b64") ?? "") });
-        break;
-      case "session_exit":
-        observer.listener({ type: "exit", taskId, code: getNumberField(payload, "code") ?? 0 });
-        terminalObservers.delete(taskId);
-        break;
-      case "terminal_error":
-        observer.listener({ type: "error", taskId, message: getStringField(payload, "message") ?? "Remote terminal failed." });
-        terminalObservers.delete(taskId);
-        break;
-    }
-  };
-
-  const failAll = (error: Error) => {
-    rejectReady?.(error);
-    resolveReady = null;
-    rejectReady = null;
-    for (const pending of pendingInvokes.values()) {
-      pending.reject(error);
-    }
-    pendingInvokes.clear();
-    for (const observer of terminalObservers.values()) {
-      observer.listener({ type: "error", taskId: observer.taskId, message: error.message });
-    }
-    terminalObservers.clear();
-  };
-
-  return {
-    close() {
-      socket?.close();
-    },
-    observeTerminal(options) {
-      terminalObservers.set(options.taskId, options);
-      void sendInvoke(options.desktopId, {
-        command: "observe_session",
-        args: { session_id: options.taskId },
-      }, () => {
-        options.listener({ type: "ready", taskId: options.taskId });
-      })
-        .then(() => undefined)
-        .catch((error: unknown) => {
-          options.listener({
-            type: "error",
-            taskId: options.taskId,
-            message: error instanceof Error ? error.message : "Remote terminal failed.",
-          });
-        });
-
-      return {
-        close() {
-          terminalObservers.delete(options.taskId);
-          void sendInvoke(options.desktopId, {
-            command: "unobserve_session",
-            args: { session_id: options.taskId },
-          }).catch(() => undefined);
-        },
-      };
-    },
-    async sendInput(options) {
-      await sendInvoke(options.desktopId, {
-        command: "send_input",
-        args: { session_id: options.taskId, data: options.data },
-      });
-    },
-    async resize(options) {
-      await sendInvoke(options.desktopId, {
-        command: "resize_session",
-        args: { session_id: options.taskId, cols: options.cols, rows: options.rows },
-      });
-    },
-    async closeTask(options) {
-      await sendInvoke(options.desktopId, {
-        command: "close_task",
-        args: { task_id: options.taskId },
-      });
-    },
-    async advanceStage(options) {
-      await sendInvoke(options.desktopId, {
-        command: "advance_stage",
-        args: { task_id: options.taskId },
-      });
+      const body = response.body;
+      if (!isRecord(body) || typeof body.path !== "string" || typeof body.content !== "string") {
+        throw new Error("Remote task file response was malformed.");
+      }
+      return { path: body.path, content: body.content };
     },
   };
 }
@@ -508,16 +340,6 @@ function normalizeId(id: unknown): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function getStringField(record: Record<string, unknown>, field: string): string | null {
-  const value = record[field];
-  return typeof value === "string" ? value : null;
-}
-
-function getNumberField(record: Record<string, unknown>, field: string): number | null {
-  const value = record[field];
-  return typeof value === "number" ? value : null;
 }
 
 function decodeBase64(value: string): string {

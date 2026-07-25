@@ -134,6 +134,23 @@ Status key: ✅ landed.
     terminal streaming over `GET /v1/tasks/{id}/terminal` (WS:
     ready→output→exit), input. Parity: the same task observed over LAN and
     relay yields consistent state.
+12. ⏳ **Desktop remote terminal file links** — the desktop
+    `CloudTerminalView` linkifies file paths in a remote task's agent
+    terminal, verifies and fetches them through
+    `GET /v1/tasks/{id}/files/content` (relay tunnel) or the transfer
+    sidecar's `read_task_file` peer request (LAN), and previews the fetched
+    content. Not yet driveable end to end: the desktop WebDriver harness runs
+    a single desktop instance, and the Layer B harness drives a
+    mobile-equivalent client rather than the desktop webview. Making this
+    testable needs the desktop-under-test to see a relay- or LAN-visible task
+    owned by a second stack (Layer B exposing its desktop to a WebDriver
+    desktop, or a two-desktop LAN pairing harness). Covered today by narrower
+    tests: `remoteTerminalFileLinks.test.ts` (link detection/activation),
+    `desktopRelayTerminal.test.ts` / `desktopLanTerminal.test.ts` (transport
+    clients), the two-peer transfer runtime integration test
+    (`trusted_peer_read_task_file_fetches_from_owner_kanna_server`), and the
+    kanna-server task-file route auth tests (loopback desktop allowed,
+    unauthenticated tunnel denied).
 
 ## 4. Test architecture (layers)
 

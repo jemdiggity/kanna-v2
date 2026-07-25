@@ -40,4 +40,33 @@ describe("createDesktopLanTerminalClient", () => {
       taskId: "task-1",
     });
   });
+
+  it("reads a remote task file through the transfer sidecar command", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      type: "read_peer_task_file",
+      request_id: "read-task-file-1",
+      path: "src/app.ts",
+      content: "remote body",
+    });
+    const client = createDesktopLanTerminalClient();
+
+    await expect(
+      client.readTaskFile({ desktopId: "peer-primary", taskId: "task-1", path: "src/app.ts" }),
+    ).resolves.toEqual({ path: "src/app.ts", content: "remote body" });
+
+    expect(invoke).toHaveBeenCalledWith("read_transfer_peer_task_file", {
+      peerId: "peer-primary",
+      taskId: "task-1",
+      path: "src/app.ts",
+    });
+  });
+
+  it("rejects a malformed LAN task file response", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ path: "src/app.ts" });
+    const client = createDesktopLanTerminalClient();
+
+    await expect(
+      client.readTaskFile({ desktopId: "peer-primary", taskId: "task-1", path: "src/app.ts" }),
+    ).rejects.toThrow("LAN task file response was malformed.");
+  });
 });
