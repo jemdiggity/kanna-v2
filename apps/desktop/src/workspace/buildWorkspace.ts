@@ -50,8 +50,8 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
     ...input.localItems
       .filter((item) => !item.closed_at)
       .map((item) => localCandidate(item, repoContext.localRepoKeyById)),
-    ...remoteCandidates(input.cloudSnapshot.items, input.cloudSnapshot.terminalRefs, "cloud", repoContext, closedLocalKeys, input.remoteTaskPins),
-    ...remoteCandidates(input.lanSnapshot.items, input.lanSnapshot.terminalRefs, "lan", repoContext, closedLocalKeys, input.remoteTaskPins),
+    ...remoteCandidates(input.cloudSnapshot, "cloud", repoContext, closedLocalKeys, input.remoteTaskPins),
+    ...remoteCandidates(input.lanSnapshot, "lan", repoContext, closedLocalKeys, input.remoteTaskPins),
   ].filter((candidate): candidate is Candidate => candidate !== null);
 
   const tasksByKey = new Map<string, WorkspaceTask>();
@@ -146,24 +146,24 @@ function localCandidate(
       taskId: item.id,
       repoId: item.repo_id,
       updatedAt: item.updated_at,
+      blockedByTaskIds: [],
     },
   };
 }
 
 function remoteCandidates(
-  items: PipelineItem[],
-  terminalRefs: BuildWorkspaceInput["cloudSnapshot"]["terminalRefs"],
+  snapshot: BuildWorkspaceInput["cloudSnapshot"],
   kind: "cloud" | "lan",
   repoContext: ReturnType<typeof buildRepoContext>,
   closedLocalKeys: Set<string>,
   remoteTaskPins: BuildWorkspaceInput["remoteTaskPins"],
 ): Array<Candidate | null> {
-  return items.map((item) => {
+  return snapshot.items.map((item) => {
     if (item.closed_at) return null;
     const repoKey = repoContext.remoteRepoKeyById.get(item.repo_id)
       ?? repoContext.localRepoKeyById.get(item.repo_id)
       ?? item.repo_id;
-    const terminalRef = terminalRefs[item.id];
+    const terminalRef = snapshot.terminalRefs[item.id];
     const ownerLocalTaskId = terminalRef?.ownerLocalTaskId ?? stripRemoteTaskPrefix(item.id);
     const logicalKey = `${repoKey}${LOGICAL_OWNER_TASK_MARKER}${ownerLocalTaskId}`;
     if (closedLocalKeys.has(logicalKey)) return null;
@@ -178,6 +178,7 @@ function remoteCandidates(
         repoId: item.repo_id,
         updatedAt: item.updated_at,
         terminalRef,
+        blockedByTaskIds: snapshot.blockedByTaskIds?.[item.id] ?? [],
       },
     };
   });
@@ -215,6 +216,7 @@ function createWorkspaceTask(candidate: Candidate): WorkspaceTask {
       ? { kind: "local", id: "local" }
       : { kind: "remote", id: remoteRef?.ownerDesktopId ?? "unknown" },
     sources: [candidate.source],
+    blockedByTaskIds: blockedByTaskIdsForSources([candidate.source]),
     reachability: isLocal ? "local" : remoteRef ? "reachable" : "unknown",
     capabilities: capabilitiesFor(candidate),
     terminal: terminalRouteFor(candidate),
@@ -231,6 +233,7 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
       item: candidate.item,
       owner: { kind: "local", id: "local" },
       sources,
+      blockedByTaskIds: [],
       reachability: "local",
       capabilities: capabilitiesFor(candidate),
       terminal: { kind: "local", localSessionId: candidate.item.id },
@@ -249,6 +252,7 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
       ...existing,
       remoteTaskIds,
       sources,
+      blockedByTaskIds: blockedByTaskIdsForSources(sources),
     };
   }
 
@@ -262,10 +266,24 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
     },
     remoteTaskIds,
     sources,
+    blockedByTaskIds: blockedByTaskIdsForSources(sources),
     terminal: candidateRoute,
     reachability: candidateRoute.kind === "none" ? "unknown" : "reachable",
     capabilities: capabilitiesFor(candidate),
   };
+}
+
+function blockedByTaskIdsForSources(sources: readonly WorkspaceTaskSource[]): string[] {
+  if (sources.some((source) => source.kind === "local")) return [];
+  const newestUpdatedAt = sources.reduce(
+    (newest, source) => source.updatedAt > newest ? source.updatedAt : newest,
+    "",
+  );
+  return [...new Set(
+    sources
+      .filter((source) => source.updatedAt === newestUpdatedAt)
+      .flatMap((source) => source.blockedByTaskIds),
+  )];
 }
 
 function routePrecedence(route: WorkspaceTerminalRoute): number {

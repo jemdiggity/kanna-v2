@@ -58,6 +58,125 @@ function emptySnapshot() {
 }
 
 describe("buildWorkspace", () => {
+  it("deduplicates equally fresh remote blocker ids across cloud and LAN sources", () => {
+    const cloudItem = item({
+      id: "cloud:repo-remote:blocked-owner",
+      repo_id: "cloud:repo-remote",
+      updated_at: "2026-07-25T00:00:00.000Z",
+    });
+    const lanItem = { ...cloudItem };
+    const terminalRef = {
+      ownerDesktopId: "desktop-owner",
+      ownerLocalTaskId: "blocked-owner",
+    };
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudItem],
+        terminalRefs: {
+          [cloudItem.id]: { ...terminalRef, transport: "cloud" },
+        },
+        blockedByTaskIds: {
+          [cloudItem.id]: ["blocker-owner", "blocker-owner"],
+        },
+      },
+      lanSnapshot: {
+        repos: [],
+        items: [lanItem],
+        terminalRefs: {
+          [lanItem.id]: { ...terminalRef, transport: "lan" },
+        },
+        blockedByTaskIds: {
+          [lanItem.id]: ["blocker-owner"],
+        },
+      },
+    });
+
+    expect(result.tasks[0].blockedByTaskIds).toEqual(["blocker-owner"]);
+    expect(result.tasks[0].sources.map((source) => source.blockedByTaskIds))
+      .toEqual([["blocker-owner", "blocker-owner"], ["blocker-owner"]]);
+  });
+
+  it("uses a newer remote source to clear stale blocker ids", () => {
+    const cloudItem = item({
+      id: "cloud:repo-remote:blocked-owner",
+      repo_id: "cloud:repo-remote",
+      updated_at: "2026-07-25T00:00:00.000Z",
+    });
+    const lanItem = item({
+      id: cloudItem.id,
+      repo_id: cloudItem.repo_id,
+      updated_at: "2026-07-25T00:01:00.000Z",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudItem],
+        terminalRefs: {
+          [cloudItem.id]: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "blocked-owner",
+            transport: "cloud",
+          },
+        },
+        blockedByTaskIds: {
+          [cloudItem.id]: ["blocker-owner"],
+        },
+      },
+      lanSnapshot: {
+        repos: [],
+        items: [lanItem],
+        terminalRefs: {
+          [lanItem.id]: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "blocked-owner",
+            transport: "lan",
+          },
+        },
+        blockedByTaskIds: {},
+      },
+    });
+
+    expect(result.tasks[0].blockedByTaskIds).toEqual([]);
+  });
+
+  it("keeps local blocker state authoritative for a matching remote task", () => {
+    const localItem = item({ id: "blocked-owner" });
+    const cloudItem = item({
+      id: "cloud:repo-local:blocked-owner",
+      repo_id: "repo-local",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo(), remoteUrlHash: "remote-hash" }],
+      localItems: [localItem],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudItem],
+        terminalRefs: {
+          [cloudItem.id]: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: localItem.id,
+            transport: "cloud",
+          },
+        },
+        blockedByTaskIds: {
+          [cloudItem.id]: ["remote-blocker"],
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks[0].owner.kind).toBe("local");
+    expect(result.tasks[0].blockedByTaskIds).toEqual([]);
+  });
+
   it("keeps a local task as a single local-owned workspace task", () => {
     const result = buildWorkspace({
       localRepos: [{ repo: repo(), remoteUrlHash: "remote-hash", remoteUrl: "git@example.com:kanna.git" }],

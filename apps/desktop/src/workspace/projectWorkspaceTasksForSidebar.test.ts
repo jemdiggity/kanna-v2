@@ -71,6 +71,7 @@ function source(
     taskId,
     repoId: "repo-1",
     updatedAt: "2026-07-11T00:00:00.000Z",
+    blockedByTaskIds: [],
     ...(ownerLocalTaskId
       ? {
           terminalRef: {
@@ -114,6 +115,7 @@ function workspaceTask(options: WorkspaceTaskOptions = {}): WorkspaceTask {
       ? { kind: "local", id: "local" }
       : { kind: "remote", id: options.ownerDesktopId ?? "remote-desktop" },
     sources: options.sources ?? [source(localTaskId ? "local" : "cloud", itemId, logicalOwnerId)],
+    blockedByTaskIds: [],
     reachability: ownerKind === "local" ? "local" : "reachable",
     capabilities: CAPABILITIES,
     terminal: ownerKind === "local"

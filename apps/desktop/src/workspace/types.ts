@@ -55,6 +55,7 @@ export interface WorkspaceTaskSource {
   repoId: string;
   updatedAt: string;
   terminalRef?: DesktopCloudTerminalRef;
+  blockedByTaskIds: string[];
 }
 
 export interface WorkspaceTask {
@@ -66,6 +67,7 @@ export interface WorkspaceTask {
   item: PipelineItem;
   owner: WorkspaceOwner;
   sources: WorkspaceTaskSource[];
+  blockedByTaskIds: string[];
   reachability: WorkspaceReachability;
   capabilities: WorkspaceCapabilities;
   terminal: WorkspaceTerminalRoute;
