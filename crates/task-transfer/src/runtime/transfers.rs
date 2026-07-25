@@ -91,7 +91,8 @@ impl TransferRuntime {
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
             | PeerResponse::AdvanceTaskStage { .. }
-            | PeerResponse::ReadTaskFile { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::ReadTaskFile { .. }
+            | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected observe-session response during preflight".into(),
             )),
             PeerResponse::Error {
@@ -180,7 +181,8 @@ impl TransferRuntime {
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
             | PeerResponse::AdvanceTaskStage { .. }
-            | PeerResponse::ReadTaskFile { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::ReadTaskFile { .. }
+            | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected observe-session response during transfer commit".into(),
             )),
             PeerResponse::Error {
@@ -267,7 +269,8 @@ impl TransferRuntime {
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
             | PeerResponse::AdvanceTaskStage { .. }
-            | PeerResponse::ReadTaskFile { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::ReadTaskFile { .. }
+            | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while finalizing outgoing transfer".into(),
             )),
             PeerResponse::Error {
@@ -442,7 +445,8 @@ impl TransferRuntime {
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
             | PeerResponse::AdvanceTaskStage { .. }
-            | PeerResponse::ReadTaskFile { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::ReadTaskFile { .. }
+            | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while fetching transfer artifact".into(),
             )),
             PeerResponse::Error {
@@ -529,7 +533,8 @@ impl TransferRuntime {
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
             | PeerResponse::AdvanceTaskStage { .. }
-            | PeerResponse::ReadTaskFile { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::ReadTaskFile { .. }
+            | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while acknowledging import commit".into(),
             )),
             PeerResponse::Error {

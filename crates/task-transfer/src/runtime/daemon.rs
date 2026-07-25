@@ -323,6 +323,18 @@ async fn get_local_kanna_task_file(
     Ok((file_path.to_owned(), content.to_owned()))
 }
 
+pub(super) async fn mark_owner_task_read(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    task_id: &str,
+) -> Result<(), RuntimeError> {
+    ensure_requester_peer_trusted(context, requester_peer_id).await?;
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    post_local_kanna_task_action(port, task_id, "mark-read").await
+}
+
 async fn post_local_kanna_task_action(
     port: u16,
     task_id: &str,

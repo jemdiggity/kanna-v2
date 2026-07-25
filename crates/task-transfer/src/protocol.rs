@@ -47,6 +47,11 @@ pub enum ControlRequest {
         task_id: String,
         path: String,
     },
+    MarkPeerTaskRead {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+    },
     UnobservePeerSession {
         request_id: String,
         target_peer_id: String,
@@ -138,6 +143,9 @@ pub enum ControlResponse {
         request_id: String,
         path: String,
         content: String,
+    },
+    MarkPeerTaskRead {
+        request_id: String,
     },
     UnobservePeerSession {
         request_id: String,
@@ -271,6 +279,11 @@ pub enum PeerRequest {
         task_id: String,
         path: String,
     },
+    MarkTaskRead {
+        request_id: String,
+        requester_peer_id: String,
+        task_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +344,9 @@ pub enum PeerResponse {
         request_id: String,
         path: String,
         content: String,
+    },
+    MarkTaskRead {
+        request_id: String,
     },
     Error {
         request_id: String,

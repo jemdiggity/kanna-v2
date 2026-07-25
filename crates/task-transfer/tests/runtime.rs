@@ -571,6 +571,77 @@ async fn trusted_peer_read_task_file_fetches_from_owner_kanna_server() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).await.unwrap();
+            if header == "\r\n" {
+                break;
+            }
+            if let Some(value) = header.strip_prefix("Content-Length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).await.unwrap();
+        request_tx
+            .send((request_line, String::from_utf8(body).unwrap()))
+            .unwrap();
+
+        reader
+            .get_mut()
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+    });
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+
+    secondary
+        .mark_peer_task_read("peer-owner", "owner-task-1")
+        .await
+        .unwrap();
+
+    let (request_line, body) = request_rx.await.unwrap();
+    assert_eq!(
+        request_line,
+        "POST /v1/tasks/owner-task-1/actions/mark-read HTTP/1.1\r\n"
+    );
+    assert_eq!(body, "{}");
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unpaired_peers_cannot_start_transfer_preflight() {
     let temp = tempfile::tempdir().unwrap();
 

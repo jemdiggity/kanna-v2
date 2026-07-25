@@ -196,6 +196,14 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::MarkPeerTaskRead {
+            request_id,
+            target_peer_id,
+            task_id,
+        } => match runtime.mark_peer_task_read(&target_peer_id, &task_id).await {
+            Ok(()) => ControlResponse::MarkPeerTaskRead { request_id },
+            Err(error) => control_error(request_id, error),
+        },
         ControlRequest::UnobservePeerSession {
             request_id,
             target_peer_id,
