@@ -42,6 +42,11 @@ interface UseAppCloudWorkspaceOptions {
   windowWorkspace: WindowWorkspaceController;
 }
 
+interface ActiveMarkReadClient {
+  client: DesktopRelayTerminalClient;
+  closed: boolean;
+}
+
 const CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS = 30_000;
 
 export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseAppCloudWorkspaceOptions) {
@@ -54,6 +59,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let subscribedCloudUid: string | null = null;
   let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let desktopCloudWorkspaceDisposed = false;
+  const activeMarkReadClients = new Set<ActiveMarkReadClient>();
   const associatedCloudUsers = new Set<string>();
   let lastCloudBackendErrorToastAt: number | null = null;
   const selectedCloudRepoId = ref<string | null>(null);
@@ -464,15 +471,21 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     const remoteRef = workspaceTask.terminal.remoteRef;
     if (!remoteRef || workspaceTask.terminal.kind === "none") return;
 
-    let client: DesktopRelayTerminalClient | null = null;
+    let activeClient: ActiveMarkReadClient | null = null;
     try {
-      client = workspaceTask.terminal.kind === "lan"
+      const client = workspaceTask.terminal.kind === "lan"
         ? await createConfiguredDesktopLanTerminalClient()
         : await createConfiguredDesktopRelayTerminalClient();
       if (!client) {
         console.warn("[remote] failed to mark task read: remote task owner is unavailable.");
         return;
       }
+      activeClient = { client, closed: false };
+      if (desktopCloudWorkspaceDisposed) {
+        closeMarkReadClient(activeClient);
+        return;
+      }
+      activeMarkReadClients.add(activeClient);
       await client.markTaskRead({
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,
@@ -484,18 +497,29 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         error instanceof Error ? error.message : String(error),
       );
     } finally {
-      try {
-        client?.close();
-      } catch (error) {
-        console.warn(
-          "[remote] failed to close mark-read client:",
-          error instanceof Error ? error.message : String(error),
-        );
-      }
+      if (activeClient) closeMarkReadClient(activeClient);
+    }
+  }
+
+  function closeMarkReadClient(activeClient: ActiveMarkReadClient): void {
+    if (activeClient.closed) return;
+    activeClient.closed = true;
+    activeMarkReadClients.delete(activeClient);
+    try {
+      activeClient.client.close();
+    } catch (error) {
+      console.warn(
+        "[remote] failed to close mark-read client:",
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
   function disposeDesktopCloudWorkspace(): void {
+    desktopCloudWorkspaceDisposed = true;
+    for (const activeClient of [...activeMarkReadClients]) {
+      closeMarkReadClient(activeClient);
+    }
     unsubscribeDesktopAuth?.();
     stopCloudTaskSubscription();
     if (lanRefreshTimer) {

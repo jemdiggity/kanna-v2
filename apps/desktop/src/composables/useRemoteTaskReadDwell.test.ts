@@ -126,6 +126,25 @@ describe("useRemoteTaskReadDwell", () => {
     scope.stop();
   });
 
+  it("cancels mark-read when its effect scope stops after arming", async () => {
+    const selectedItemId = ref<string | null>(null);
+    const task = remoteWorkspaceTask();
+    const workspaceTasksByItemId = computed(() => new Map([["slot:remote", task]]));
+    const markTaskRead = vi.fn(async () => {});
+    const scope = effectScope();
+
+    scope.run(() => {
+      useRemoteTaskReadDwell({ selectedItemId, workspaceTasksByItemId, markTaskRead });
+    });
+
+    selectedItemId.value = "slot:remote";
+    await nextTick();
+    scope.stop();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(markTaskRead).not.toHaveBeenCalled();
+  });
+
   it("does not overwrite activity with a revision newer than the selection", async () => {
     const selectedItemId = ref<string | null>(null);
     const task = remoteWorkspaceTask(7);
