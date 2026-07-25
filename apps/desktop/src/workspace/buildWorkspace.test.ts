@@ -178,6 +178,139 @@ describe("buildWorkspace", () => {
     });
   });
 
+  it("selects every routed task field from the exact reachable LAN advertisement", () => {
+    const cloudItem = item({
+      id: "cloud:remote-repo:task-provenance",
+      repo_id: "repo-local",
+      prompt: "Cloud task copy",
+      activity_revision: 7,
+    });
+    const lanItem = item({
+      id: "cloud:lan:peer-lan:remote-repo:task-provenance",
+      repo_id: "repo-local",
+      prompt: "LAN task copy",
+      activity_revision: 7,
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo(), remoteUrlHash: "same-hash" }],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudItem],
+        terminalRefs: {
+          "cloud:remote-repo:task-provenance": {
+            ownerDesktopId: "desktop-cloud",
+            ownerLocalTaskId: "task-provenance",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: {
+        repos: [],
+        items: [lanItem],
+        terminalRefs: {
+          "cloud:lan:peer-lan:remote-repo:task-provenance": {
+            ownerDesktopId: "desktop-lan",
+            ownerLocalTaskId: "task-provenance",
+            transport: "lan",
+          },
+        },
+      },
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      id: "cloud:lan:peer-lan:remote-repo:task-provenance",
+      remoteTaskIds: [
+        "cloud:remote-repo:task-provenance",
+        "cloud:lan:peer-lan:remote-repo:task-provenance",
+      ],
+      item: {
+        id: "cloud:lan:peer-lan:remote-repo:task-provenance",
+        prompt: "LAN task copy",
+        activity_revision: 7,
+      },
+      owner: { kind: "remote", id: "desktop-lan" },
+      reachability: "reachable",
+      terminal: {
+        kind: "lan",
+        remoteRef: {
+          ownerDesktopId: "desktop-lan",
+          ownerLocalTaskId: "task-provenance",
+          transport: "lan",
+        },
+      },
+      capabilities: {
+        canOpenTerminal: true,
+        canSendInput: true,
+        canClose: true,
+        canAdvanceStage: true,
+      },
+    });
+  });
+
+  it("keeps the already-selected exact candidate for equal-precedence advertisements", () => {
+    const firstCloudItem = item({
+      id: "cloud:first:remote-repo:task-provenance",
+      repo_id: "repo-local",
+      prompt: "First cloud copy",
+      activity_revision: 9,
+    });
+    const secondCloudItem = item({
+      id: "cloud:second:remote-repo:task-provenance",
+      repo_id: "repo-local",
+      prompt: "Second cloud copy",
+      activity_revision: 9,
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo(), remoteUrlHash: "same-hash" }],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [firstCloudItem, secondCloudItem],
+        terminalRefs: {
+          "cloud:first:remote-repo:task-provenance": {
+            ownerDesktopId: "desktop-first",
+            ownerLocalTaskId: "task-provenance",
+            transport: "cloud",
+          },
+          "cloud:second:remote-repo:task-provenance": {
+            ownerDesktopId: "desktop-second",
+            ownerLocalTaskId: "task-provenance",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      id: "cloud:first:remote-repo:task-provenance",
+      remoteTaskIds: [
+        "cloud:first:remote-repo:task-provenance",
+        "cloud:second:remote-repo:task-provenance",
+      ],
+      item: {
+        id: "cloud:first:remote-repo:task-provenance",
+        prompt: "First cloud copy",
+        activity_revision: 9,
+      },
+      owner: { kind: "remote", id: "desktop-first" },
+      terminal: {
+        kind: "cloud",
+        remoteRef: {
+          ownerDesktopId: "desktop-first",
+          ownerLocalTaskId: "task-provenance",
+          transport: "cloud",
+        },
+      },
+    });
+    expect(result.tasks[0].sources).toHaveLength(2);
+  });
+
   it("reports cloud transport diagnostics for cloud-only tasks", () => {
     const cloudItem = item({
       id: "cloud:remote-repo:task-cloud",
