@@ -19,6 +19,23 @@ interface Candidate {
   logicalKey: string;
 }
 
+const LOGICAL_OWNER_TASK_MARKER = ":owner-local:";
+
+/**
+ * The owner-side durable task id embedded in a workspace task's logical key.
+ * This is the stable identity for viewer-local per-task state (e.g. remote
+ * task pins) — unlike `item.id`, it does not change with the selected
+ * transport route.
+ */
+export function workspaceTaskOwnerTaskId(
+  task: Pick<WorkspaceTask, "logicalTaskKey">,
+): string | null {
+  const markerIndex = task.logicalTaskKey.indexOf(LOGICAL_OWNER_TASK_MARKER);
+  if (markerIndex < 0) return null;
+  const ownerTaskId = task.logicalTaskKey.slice(markerIndex + LOGICAL_OWNER_TASK_MARKER.length);
+  return ownerTaskId || null;
+}
+
 export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult {
   const repoContext = buildRepoContext(input.localRepos, [
     ...input.cloudSnapshot.repos,
@@ -33,8 +50,8 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
     ...input.localItems
       .filter((item) => !item.closed_at)
       .map((item) => localCandidate(item, repoContext.localRepoKeyById)),
-    ...remoteCandidates(input.cloudSnapshot.items, input.cloudSnapshot.terminalRefs, "cloud", repoContext, closedLocalKeys),
-    ...remoteCandidates(input.lanSnapshot.items, input.lanSnapshot.terminalRefs, "lan", repoContext, closedLocalKeys),
+    ...remoteCandidates(input.cloudSnapshot.items, input.cloudSnapshot.terminalRefs, "cloud", repoContext, closedLocalKeys, input.remoteTaskPins),
+    ...remoteCandidates(input.lanSnapshot.items, input.lanSnapshot.terminalRefs, "lan", repoContext, closedLocalKeys, input.remoteTaskPins),
   ].filter((candidate): candidate is Candidate => candidate !== null);
 
   const tasksByKey = new Map<string, WorkspaceTask>();
@@ -119,7 +136,7 @@ function localCandidate(
 ): Candidate | null {
   const repoKey = localRepoKeyById.get(item.repo_id);
   if (!repoKey) return null;
-  const logicalKey = `${repoKey}:owner-local:${item.id}`;
+  const logicalKey = `${repoKey}${LOGICAL_OWNER_TASK_MARKER}${item.id}`;
   return {
     item,
     repoKey,
@@ -139,6 +156,7 @@ function remoteCandidates(
   kind: "cloud" | "lan",
   repoContext: ReturnType<typeof buildRepoContext>,
   closedLocalKeys: Set<string>,
+  remoteTaskPins: BuildWorkspaceInput["remoteTaskPins"],
 ): Array<Candidate | null> {
   return items.map((item) => {
     if (item.closed_at) return null;
@@ -147,13 +165,13 @@ function remoteCandidates(
       ?? item.repo_id;
     const terminalRef = terminalRefs[item.id];
     const ownerLocalTaskId = terminalRef?.ownerLocalTaskId ?? stripRemoteTaskPrefix(item.id);
-    const closedKey = `${repoKey}:owner-local:${ownerLocalTaskId}`;
-    if (closedLocalKeys.has(closedKey)) return null;
-    const localKey = `${repoKey}:owner-local:${ownerLocalTaskId}`;
+    const logicalKey = `${repoKey}${LOGICAL_OWNER_TASK_MARKER}${ownerLocalTaskId}`;
+    if (closedLocalKeys.has(logicalKey)) return null;
+    const pinOrder = remoteTaskPins?.get(ownerLocalTaskId);
     return {
-      item,
+      item: pinOrder === undefined ? item : { ...item, pinned: 1, pin_order: pinOrder },
       repoKey,
-      logicalKey: localKey,
+      logicalKey,
       source: {
         kind,
         taskId: item.id,
@@ -174,11 +192,11 @@ function buildClosedLocalKeys(
   for (const item of items) {
     if (!item.closed_at) continue;
     const repoKey = localRepoKeyById.get(item.repo_id);
-    if (repoKey) keys.add(`${repoKey}:owner-local:${item.id}`);
+    if (repoKey) keys.add(`${repoKey}${LOGICAL_OWNER_TASK_MARKER}${item.id}`);
   }
   for (const item of closedItems) {
     const repoKey = localRepoKeyById.get(item.repo_id);
-    if (repoKey) keys.add(`${repoKey}:owner-local:${item.id}`);
+    if (repoKey) keys.add(`${repoKey}${LOGICAL_OWNER_TASK_MARKER}${item.id}`);
   }
   return keys;
 }

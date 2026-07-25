@@ -133,6 +133,7 @@ Use this branch as the default when the user does not specify a target branch. B
     taskUiSlots: state.taskUiSlots,
     taskBlockers: state.taskBlockers,
     blockerTaskStates: state.blockerTaskStates,
+    snapshotSettings: state.snapshotSettings,
     selectedRepoId: state.selectedRepoId,
     selectedItemId: state.selectedItemId,
     lastSelectedItemByRepo: state.lastSelectedItemByRepo,
