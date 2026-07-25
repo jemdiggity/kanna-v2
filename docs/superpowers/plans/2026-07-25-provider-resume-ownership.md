@@ -367,7 +367,7 @@ locator, write terminal text containing a different forged resume UUID, and asse
 no handle is found. Then write:
 
 ```json
-{"timestamp":"2026-07-25T00:00:00Z","type":"session_meta","payload":{"id":"genuine-uuid","cwd":"<exact cwd>","originator":"codex_cli_rs"}}
+{"timestamp":"2026-07-25T00:00:00Z","type":"session_meta","payload":{"id":"genuine-uuid","timestamp":"2026-07-25T00:00:00Z","cwd":"<exact cwd>","originator":"codex_cli_rs"}}
 ```
 
 under `sessions/YYYY/MM/DD/rollout.jsonl` and assert only `genuine-uuid` is returned.

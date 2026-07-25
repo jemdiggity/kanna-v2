@@ -2869,6 +2869,7 @@ name = "kanna-daemon"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "criterion",
  "flexi_logger",
  "futures",

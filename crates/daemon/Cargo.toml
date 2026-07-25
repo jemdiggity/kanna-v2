@@ -12,6 +12,7 @@ libc = "0.2"
 log = "0.4"
 flexi_logger = "0.31"
 futures = "0.3"
+chrono = { version = "0.4", features = ["clock"] }
 libghostty-vt = { git = "https://github.com/jemdiggity/libghostty-rs.git", rev = "61ae57d7b42821e1b19ad325abc7ff49c80fc880", package = "libghostty-vt" }
 ghostty-xterm-compat-serialize = { git = "https://github.com/jemdiggity/ghostty-xterm-compat-serialize.git", rev = "06895c8ea1830a85c9ada93ca2a7ece1f5a9dc20" }
 kanna-runtime-defaults = { path = "../runtime-defaults" }

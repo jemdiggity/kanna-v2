@@ -325,7 +325,7 @@ impl Db {
                    AND status = 'running'
                    AND session_id IS NOT NULL
                    AND session_id != ''
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY datetime(started_at) DESC, rowid DESC
                  LIMIT 1",
                 [&pipeline_item_id],
                 |row| row.get(0),
@@ -351,7 +351,7 @@ impl Db {
                  WHERE p.repo_id = ?
                    AND p.closed_at IS NULL
                    AND sr.agent = ?
-                 ORDER BY datetime(sr.started_at) DESC, sr.id DESC
+                 ORDER BY datetime(sr.started_at) DESC, sr.rowid DESC
                  LIMIT 1",
                 (repo_id, agent),
                 |row| {

@@ -1422,12 +1422,23 @@ fn provider_session_id_updates_exact_owning_main_run() {
         .update_stage_run_provider_session_id("run-implement", "codex-thread")
         .unwrap();
     assert!(update.changed);
-    assert_eq!(update.current_task_id, None);
 
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
     assert_eq!(runs[0].provider_session_id.as_deref(), Some("codex-thread"));
     assert_eq!(runs[1].provider_session_id, None);
     assert_eq!(runs[2].provider_session_id, None);
+    let task_handle: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT agent_session_id FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        task_handle, None,
+        "a delayed old-run event must not stamp the replacement task handle"
+    );
 }
 
 #[test]
@@ -1467,7 +1478,15 @@ fn provider_session_id_reports_when_owning_main_run_is_current() {
         .unwrap();
 
     assert!(update.changed);
-    assert_eq!(update.current_task_id.as_deref(), Some("task-1"));
+    let task_handle: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT agent_session_id FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(task_handle.as_deref(), Some("opencode-thread"));
 }
 
 #[test]

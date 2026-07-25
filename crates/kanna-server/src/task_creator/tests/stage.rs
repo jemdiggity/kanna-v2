@@ -392,10 +392,18 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
         commands.first(),
         Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "task-1"
     ));
-    assert!(matches!(
-        commands.get(1),
-        Some(kanna_daemon::protocol::Command::Spawn { session_id, .. }) if session_id == "task-1"
-    ));
+    let run_id = match commands.get(1) {
+        Some(kanna_daemon::protocol::Command::Spawn {
+            session_id, env, ..
+        }) if session_id == "task-1" => env
+            .get("KANNA_STAGE_RUN_ID")
+            .cloned()
+            .expect("rerun spawn carries immutable run ownership"),
+        other => panic!("expected rerun spawn command, got {other:?}"),
+    };
+    let latest = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(latest.id, run_id);
+    assert_eq!(latest.status, "running");
     assert_eq!(
         db.get_pipeline_item("task-1")
             .unwrap()

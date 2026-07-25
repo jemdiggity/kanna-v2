@@ -21,10 +21,6 @@ fn persist_provider_session_id(
     let update = db
         .update_stage_run_provider_session_id(run_id, resume_session_id)
         .map_err(|e| format!("db error: {e}"))?;
-    if let Some(task_id) = update.current_task_id {
-        db.update_pipeline_item_agent_session_id(&task_id, Some(resume_session_id))
-            .map_err(|e| format!("db error: {e}"))?;
-    }
     if update.changed {
         state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
     }
@@ -183,9 +179,71 @@ async fn terminal_state_watcher_once(
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 
     let config = state.config();
-    // Negotiate on an unsubscribed control socket before opening the event
-    // stream. An old daemon's List response has no capabilities and therefore
-    // selects the legacy stream, which never receives new enum variants.
+    // Register the versioned stream before doing any reconciliation. The
+    // daemon registers its broadcast receiver before acknowledging, so no
+    // provider identity event can fall into a List-then-Subscribe gap.
+    // Legacy daemons reject/close on the unknown command; they never emit the
+    // new provider event variant, so reconnecting with Subscribe is safe.
+    let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|e| format!("daemon connection failed: {}", e))?;
+    let versioned = daemon
+        .send_command(&DaemonCommand::SubscribeEvents {
+            version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
+        })
+        .await
+        .map_err(|error| error.to_string());
+    match versioned {
+        Ok(DaemonEvent::Ok) => {}
+        Ok(DaemonEvent::Error { message, .. }) => {
+            log::info!("daemon rejected versioned event stream ({message}); using legacy stream");
+            daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+                .await
+                .map_err(|e| format!("legacy daemon connection failed: {}", e))?;
+            match daemon
+                .send_command(&DaemonCommand::Subscribe)
+                .await
+                .map_err(|e| format!("legacy daemon subscribe failed: {}", e))?
+            {
+                DaemonEvent::Ok => {}
+                DaemonEvent::Error { message, .. } => {
+                    return Err(format!("legacy daemon subscribe error: {message}"));
+                }
+                other => {
+                    return Err(format!(
+                        "unexpected legacy daemon subscribe response: {other:?}"
+                    ));
+                }
+            }
+        }
+        Ok(other) => {
+            return Err(format!(
+                "unexpected versioned daemon subscribe response: {other:?}"
+            ));
+        }
+        Err(error) => {
+            log::info!("versioned event stream unavailable ({error}); using legacy stream");
+            daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+                .await
+                .map_err(|e| format!("legacy daemon connection failed: {}", e))?;
+            match daemon
+                .send_command(&DaemonCommand::Subscribe)
+                .await
+                .map_err(|e| format!("legacy daemon subscribe failed: {}", e))?
+            {
+                DaemonEvent::Ok => {}
+                DaemonEvent::Error { message, .. } => {
+                    return Err(format!("legacy daemon subscribe error: {message}"));
+                }
+                other => {
+                    return Err(format!(
+                        "unexpected legacy daemon subscribe response: {other:?}"
+                    ));
+                }
+            }
+        }
+    }
+
     let mut control = daemon_client::DaemonClient::connect(&config.daemon_dir)
         .await
         .map_err(|e| format!("daemon control connection failed: {}", e))?;
@@ -203,32 +261,6 @@ async fn terminal_state_watcher_once(
             );
         }
     }
-    let subscribe = if daemon_list.capabilities.provider_session_events
-        && daemon_list.capabilities.event_stream_version
-            >= kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION
-    {
-        DaemonCommand::SubscribeEvents {
-            version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
-        }
-    } else {
-        DaemonCommand::Subscribe
-    };
-
-    let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
-        .await
-        .map_err(|e| format!("daemon connection failed: {}", e))?;
-    match daemon
-        .send_command(&subscribe)
-        .await
-        .map_err(|e| format!("daemon subscribe failed: {}", e))?
-    {
-        DaemonEvent::Ok => {}
-        DaemonEvent::Error { message, .. } => {
-            return Err(format!("daemon subscribe error: {}", message));
-        }
-        other => return Err(format!("unexpected daemon subscribe response: {:?}", other)),
-    }
-
     loop {
         match daemon
             .read_event()
@@ -415,12 +447,28 @@ mod tests {
         listener: &UnixListener,
         sessions: Vec<SessionInfo>,
     ) -> tokio::net::unix::OwnedWriteHalf {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
+            DaemonCommand::SubscribeEvents { version } => {
+                assert_eq!(
+                    version,
+                    kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION
+                );
+            }
+            other => panic!("expected SubscribeEvents command, got {other:?}"),
+        }
+        write_event(&mut write_half, &DaemonEvent::Ok).await;
+
         let (control_stream, _) = listener.accept().await.unwrap();
         let (control_read, mut control_write) = control_stream.into_split();
         let mut control_reader = BufReader::new(control_read);
-        let mut line = String::new();
-        control_reader.read_line(&mut line).await.unwrap();
-        match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
+        let mut control_line = String::new();
+        control_reader.read_line(&mut control_line).await.unwrap();
+        match serde_json::from_str::<DaemonCommand>(control_line.trim()).unwrap() {
             DaemonCommand::List => {}
             other => panic!("expected List command, got {other:?}"),
         }
@@ -428,21 +476,10 @@ mod tests {
             &mut control_write,
             &DaemonEvent::SessionList {
                 sessions,
-                capabilities: None,
+                capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
             },
         )
         .await;
-
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        line.clear();
-        reader.read_line(&mut line).await.unwrap();
-        match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-            DaemonCommand::Subscribe => {}
-            other => panic!("expected Subscribe command, got {other:?}"),
-        }
-        write_event(&mut write_half, &DaemonEvent::Ok).await;
         write_half
     }
 
@@ -497,37 +534,8 @@ mod tests {
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
         let server = tokio::spawn(async move {
-            let (control_stream, _) = listener.accept().await.unwrap();
-            let (control_read, mut control_write) = control_stream.into_split();
-            let mut control_reader = BufReader::new(control_read);
-            let mut line = String::new();
-            control_reader.read_line(&mut line).await.unwrap();
-            assert!(matches!(
-                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
-                DaemonCommand::List
-            ));
-            write_event(
-                &mut control_write,
-                &DaemonEvent::SessionList {
-                    sessions: Vec::new(),
-                    capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
-                },
-            )
-            .await;
-
-            let (subscriber_stream, _) = listener.accept().await.unwrap();
-            let (subscriber_read, mut subscriber_write) = subscriber_stream.into_split();
-            let mut subscriber_reader = BufReader::new(subscriber_read);
-            line.clear();
-            subscriber_reader.read_line(&mut line).await.unwrap();
-            assert!(matches!(
-                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
-                DaemonCommand::SubscribeEvents {
-                    version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION
-                }
-            ));
-            write_event(&mut subscriber_write, &DaemonEvent::Ok).await;
-            write_event(&mut subscriber_write, &DaemonEvent::ShuttingDown).await;
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
         });
 
         terminal_state_watcher_once(
@@ -1097,6 +1105,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watcher_falls_back_to_legacy_stream_when_versioned_subscribe_is_rejected() {
+        let unique = unique_name("terminal-watcher-legacy-subscription");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let (versioned_stream, _) = listener.accept().await.unwrap();
+            let (versioned_read, mut versioned_write) = versioned_stream.into_split();
+            let mut versioned_reader = BufReader::new(versioned_read);
+            let mut line = String::new();
+            versioned_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::SubscribeEvents { .. }
+            ));
+            write_event(
+                &mut versioned_write,
+                &DaemonEvent::Error {
+                    code: None,
+                    message: "unknown command".to_string(),
+                },
+            )
+            .await;
+
+            let (subscriber_stream, _) = listener.accept().await.unwrap();
+            let (subscriber_read, mut subscriber_write) = subscriber_stream.into_split();
+            let mut subscriber_reader = BufReader::new(subscriber_read);
+            line.clear();
+            subscriber_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::Subscribe
+            ));
+            write_event(&mut subscriber_write, &DaemonEvent::Ok).await;
+
+            let (control_stream, _) = listener.accept().await.unwrap();
+            let (control_read, mut control_write) = control_stream.into_split();
+            let mut control_reader = BufReader::new(control_read);
+            line.clear();
+            control_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut control_write,
+                &DaemonEvent::SessionList {
+                    sessions: Vec::new(),
+                    capabilities: None,
+                },
+            )
+            .await;
+            write_event(&mut subscriber_write, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &http_api::AppState::new(config),
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
     async fn watcher_applies_unattached_idle_from_working_as_unread() {
         let unique = unique_name("terminal-watcher-unattached-idle");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
@@ -1383,18 +1459,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watcher_applies_subscriber_event_after_list_negotiation() {
+    async fn watcher_preserves_provider_event_emitted_before_list_reconciliation() {
         let unique = unique_name("terminal-watcher-list-interleaved-status");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(NewStageRun {
+                id: "run-current",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("opencode"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
         let server = tokio::spawn(async move {
+            let (subscriber_stream, _) = listener.accept().await.unwrap();
+            let (subscriber_read, mut subscriber_write) = subscriber_stream.into_split();
+            let mut subscriber_reader = BufReader::new(subscriber_read);
+            let mut line = String::new();
+            subscriber_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::SubscribeEvents {
+                    version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION
+                }
+            ));
+            write_event(&mut subscriber_write, &DaemonEvent::Ok).await;
+            write_event(
+                &mut subscriber_write,
+                &DaemonEvent::ProviderSessionChanged {
+                    session_id: "task-child".to_string(),
+                    run_id: Some("run-current".to_string()),
+                    provider_session_id: "provider-before-list".to_string(),
+                },
+            )
+            .await;
+
             let (control_stream, _) = listener.accept().await.unwrap();
             let (control_read, mut control_write) = control_stream.into_split();
             let mut control_reader = BufReader::new(control_read);
-            let mut line = String::new();
+            line.clear();
             control_reader.read_line(&mut line).await.unwrap();
             assert!(matches!(
                 serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
@@ -1412,27 +1529,7 @@ mod tests {
                         status: kanna_daemon::protocol::SessionStatus::Busy,
                         kind: Default::default(),
                     }],
-                    capabilities: None,
-                },
-            )
-            .await;
-
-            let (subscriber_stream, _) = listener.accept().await.unwrap();
-            let (subscriber_read, mut subscriber_write) = subscriber_stream.into_split();
-            let mut subscriber_reader = BufReader::new(subscriber_read);
-            line.clear();
-            subscriber_reader.read_line(&mut line).await.unwrap();
-            assert!(matches!(
-                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
-                DaemonCommand::Subscribe
-            ));
-            write_event(&mut subscriber_write, &DaemonEvent::Ok).await;
-            write_event(
-                &mut subscriber_write,
-                &DaemonEvent::StatusChanged {
-                    session_id: "task-child".to_string(),
-                    status: kanna_daemon::protocol::SessionStatus::Idle,
-                    waiting_prompt_snippet: Some("Ready after reconciliation".to_string()),
+                    capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
                 },
             )
             .await;
@@ -1456,11 +1553,8 @@ mod tests {
             .get_pipeline_item("task-child")
             .unwrap()
             .unwrap();
-        assert_eq!(item.activity.as_deref(), Some("unread"));
-        assert_eq!(
-            item.last_output_preview.as_deref(),
-            Some("Ready after reconciliation")
-        );
+        assert_eq!(item.activity.as_deref(), Some("working"));
+        assert_task_agent_session_id(&config, "provider-before-list");
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

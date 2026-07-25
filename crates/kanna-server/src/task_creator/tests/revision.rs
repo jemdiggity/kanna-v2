@@ -913,6 +913,39 @@ fn revision_does_not_skip_newer_null_handle_main_run() {
 }
 
 #[test]
+fn revision_does_not_resume_provider_removed_from_current_stage_definition() {
+    let config = test_config("revision-provider-changed");
+    let (repo_root, db) =
+        init_resume_revision_fixture_for_provider("revision-provider-changed", &config, "claude");
+    let codex_pipeline = r#"{
+  "stages": [
+    { "name": "in progress", "policy": { "transition": "manual", "revision_transition": "auto" }, "agent": "implement", "agent_provider": "codex", "prompt": "$TASK_PROMPT" },
+    { "name": "review", "transition": "manual" }
+  ]
+}"#;
+    std::fs::write(repo_root.join(".kanna/pipelines/qa.json"), codex_pipeline).unwrap();
+    publish_origin_main(&repo_root, "change revision provider to codex");
+
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Use the current provider definition.",
+    )
+    .unwrap();
+
+    assert!(prepared.resumed_workspace().is_none());
+    assert_eq!(prepared.agent_provider, "codex");
+    let fork = prepared
+        .forked_workspace()
+        .expect("provider mismatch must force a fresh fork");
+    let _ =
+        crate::task_creator::worktree::remove_prepared_worktree(&fork.worktree_path, &fork.branch);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
     // The built-in implement def lists several providers (codex first); a
     // revision continues work the task already did with its own provider and

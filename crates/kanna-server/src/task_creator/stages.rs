@@ -445,7 +445,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         feedback,
         source_task.agent_type.as_deref(),
         explicit_provider,
-        source_task.agent_provider.as_deref(),
+        context.source_task.agent_provider.as_deref(),
     )?;
     if matches!(run.workspace, PreparedRunWorkspace::Forked(_)) {
         let departed_stage = source_task
@@ -551,6 +551,12 @@ pub(crate) fn prepare_revision_task_for_api(
         revision_prompt,
         round,
     );
+    let inherited_provider = match loaded.source_task.agent_provider.as_ref() {
+        Some(provider) if stage_allows_provider(&context, &target_stage, provider)? => {
+            Some(provider.clone())
+        }
+        _ => None,
+    };
     prepare_stage_run_for_target_with_provider(
         db,
         config,
@@ -561,7 +567,7 @@ pub(crate) fn prepare_revision_task_for_api(
         target_stage.policy.revision_transition(),
         Some(&composed_prompt),
         Some(revision_prompt.to_string()),
-        loaded.source_task.agent_provider.clone(),
+        inherited_provider,
     )
 }
 
@@ -596,6 +602,9 @@ fn prepare_revision_resume(
     };
     if !provider_supports_resume(run_provider) {
         return fall_back("previous run's provider does not support resume");
+    }
+    if !stage_allows_provider(context, target_stage, run_provider)? {
+        return fall_back("stage no longer allows the recorded provider");
     }
     let (Some(provider_session_id), Some(run_cwd)) =
         (run.provider_session_id.clone(), run.cwd.clone())
@@ -731,6 +740,26 @@ pub(crate) fn resolve_revision_budget(
         .task_revision_rounds(source_task_id)
         .map_err(|e| format!("db error: {}", e))?;
     Ok(RevisionBudget { rounds, limit })
+}
+
+fn stage_allows_provider(
+    context: &StageTransitionContext<'_>,
+    stage: &PipelineStage,
+    provider: &str,
+) -> Result<bool, String> {
+    let agent = match stage.agent.as_deref() {
+        Some(agent_name) => Some(context.definitions.agent(agent_name)?),
+        None => None,
+    };
+    let candidates = super::resolve_agent_provider_candidates(
+        None,
+        stage.agent_provider.as_deref(),
+        agent.as_ref(),
+        context.source_task.agent_provider.as_deref(),
+    )?;
+    Ok(candidates
+        .iter()
+        .any(|candidate| candidate.as_str() == provider))
 }
 
 fn provider_supports_resume(provider: &str) -> bool {

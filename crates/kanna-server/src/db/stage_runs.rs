@@ -10,8 +10,6 @@ pub struct FinishedStageRun {
 /// Result of attaching a provider-native handle to its immutable owning run.
 pub struct ProviderSessionUpdate {
     pub changed: bool,
-    /// Present only when the updated run is still the task's newest main run.
-    pub current_task_id: Option<String>,
 }
 
 impl Db {
@@ -79,7 +77,7 @@ impl Db {
                     completion_transition, started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
-             ORDER BY datetime(started_at) ASC, id ASC",
+             ORDER BY datetime(started_at) ASC, rowid ASC",
         )?;
         let rows = stmt.query_map([task_id], stage_run_from_row)?;
         rows.collect()
@@ -95,7 +93,7 @@ impl Db {
                         completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY datetime(started_at) DESC, rowid DESC
                  LIMIT 1",
                 [task_id],
                 stage_run_from_row,
@@ -124,7 +122,7 @@ impl Db {
                         completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY datetime(started_at) DESC, rowid DESC
                  LIMIT 1",
                 [task_id, stage],
                 stage_run_from_row,
@@ -146,47 +144,45 @@ impl Db {
         run_id: &str,
         provider_session_id: &str,
     ) -> Result<ProviderSessionUpdate, rusqlite::Error> {
-        let changed = self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
             "UPDATE stage_run
              SET provider_session_id = ?2
              WHERE id = ?1 AND kind = 'main' AND provider_session_id IS NULL",
             (run_id, provider_session_id),
         )? > 0;
         if !changed {
-            return Ok(ProviderSessionUpdate {
-                changed: false,
-                current_task_id: None,
-            });
+            transaction.commit()?;
+            return Ok(ProviderSessionUpdate { changed: false });
         }
 
-        let current_task_id = self
-            .conn
-            .query_row(
-                "SELECT owner.task_id
-                 FROM stage_run owner
-                 WHERE owner.id = ?1
-                   AND owner.kind = 'main'
-                   AND NOT EXISTS (
-                     SELECT 1
-                     FROM stage_run newer
-                     WHERE newer.task_id = owner.task_id
-                       AND newer.kind = 'main'
-                       AND (
-                         datetime(newer.started_at) > datetime(owner.started_at)
-                         OR (
-                           datetime(newer.started_at) = datetime(owner.started_at)
-                           AND newer.id > owner.id
-                         )
-                       )
-                   )",
-                [run_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(ProviderSessionUpdate {
-            changed: true,
-            current_task_id,
-        })
+        transaction.execute(
+            "UPDATE pipeline_item
+             SET agent_session_id = ?2
+             WHERE id = (
+               SELECT owner.task_id
+               FROM stage_run owner
+               WHERE owner.id = ?1 AND owner.kind = 'main'
+             )
+             AND NOT EXISTS (
+               SELECT 1
+               FROM stage_run owner
+               JOIN stage_run newer
+                 ON newer.task_id = owner.task_id
+                AND newer.kind = 'main'
+                AND (
+                  datetime(newer.started_at) > datetime(owner.started_at)
+                  OR (
+                    datetime(newer.started_at) = datetime(owner.started_at)
+                    AND newer.rowid > owner.rowid
+                  )
+                )
+               WHERE owner.id = ?1
+             )",
+            (run_id, provider_session_id),
+        )?;
+        transaction.commit()?;
+        Ok(ProviderSessionUpdate { changed: true })
     }
 
     pub fn finish_stage_run(
@@ -237,7 +233,7 @@ impl Db {
                 "SELECT id, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status = 'running'
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY datetime(started_at) DESC, rowid DESC
                  LIMIT 1",
                 [task_id],
                 |row| {
@@ -282,7 +278,7 @@ impl Db {
                 "SELECT id, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status IN ('succeeded', 'failed')
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY datetime(started_at) DESC, rowid DESC
                  LIMIT 1",
                 [task_id],
                 |row| {
@@ -360,7 +356,7 @@ impl Db {
                    AND status IN ('succeeded', 'failed')
                    AND result IS NOT NULL
                    AND (?2 IS NULL OR kind = ?2)
-                 ORDER BY datetime(finished_at) DESC, datetime(started_at) DESC, id DESC
+                 ORDER BY datetime(finished_at) DESC, datetime(started_at) DESC, rowid DESC
                  LIMIT 1",
                 rusqlite::params![task_id, kind],
                 |row| row.get(0),

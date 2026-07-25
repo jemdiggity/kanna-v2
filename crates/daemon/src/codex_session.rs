@@ -12,6 +12,7 @@ const RUN_ID_ENV: &str = "KANNA_PROVIDER_SESSION_ID";
 pub struct CodexSessionLocator {
     sessions_root: PathBuf,
     cwd: PathBuf,
+    spawned_at: chrono::DateTime<chrono::Utc>,
     baseline_ids: HashSet<String>,
     accepted_id: Option<String>,
 }
@@ -28,6 +29,7 @@ impl CodexSessionLocator {
         if provider != Some(AgentProvider::Codex) {
             return None;
         }
+        let spawned_at = chrono::Utc::now();
         let sessions_root = effective_codex_home(env).join("sessions");
         let accepted_id = env.get(RUN_ID_ENV).filter(|id| is_uuid_like(id)).cloned();
         Some(Self {
@@ -37,6 +39,7 @@ impl CodexSessionLocator {
                 .collect(),
             sessions_root,
             cwd: canonical_or_original(Path::new(cwd)),
+            spawned_at,
             accepted_id,
         })
     }
@@ -61,6 +64,7 @@ impl CodexSessionLocator {
                 .collect(),
             sessions_root,
             cwd: canonical_or_original(Path::new(cwd)),
+            spawned_at: chrono::Utc::now(),
             accepted_id: provider_session_id.filter(|id| is_uuid_like(id)),
         })
     }
@@ -75,6 +79,7 @@ impl CodexSessionLocator {
             .filter(|record| {
                 record.originator == "codex_cli_rs"
                     && !self.baseline_ids.contains(&record.id)
+                    && record.created_at >= self.spawned_at
                     && canonical_or_original(Path::new(&record.cwd)) == self.cwd
             })
             .map(|record| record.id);
@@ -91,6 +96,7 @@ struct SessionMetadata {
     id: String,
     cwd: String,
     originator: String,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 fn effective_codex_home(env: &HashMap<String, String>) -> PathBuf {
@@ -155,6 +161,9 @@ fn metadata_from_file(path: &Path) -> Option<SessionMetadata> {
             id: id.to_string(),
             cwd: payload.get("cwd")?.as_str()?.to_string(),
             originator: payload.get("originator")?.as_str()?.to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339(payload.get("timestamp")?.as_str()?)
+                .ok()?
+                .with_timezone(&chrono::Utc),
         });
     }
     None
@@ -216,10 +225,11 @@ mod tests {
         fs::write(
             metadata_dir.join("rollout.jsonl"),
             serde_json::json!({
-                "timestamp": "2026-07-25T00:00:00Z",
+                "timestamp": chrono::Utc::now().to_rfc3339(),
                 "type": "session_meta",
                 "payload": {
                     "id": genuine,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
                     "cwd": cwd,
                     "originator": "codex_cli_rs"
                 }
@@ -230,6 +240,53 @@ mod tests {
         terminal.write(format!("To continue, run codex resume {genuine}\r\n").as_bytes());
 
         assert_eq!(locator.discover().as_deref(), Some(genuine));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_created_before_spawn_is_rejected_even_when_it_appears_late() {
+        let root = std::env::temp_dir().join(format!(
+            "kanna-codex-stale-session-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = root.join("worktree");
+        let codex_home = root.join("codex-home");
+        fs::create_dir_all(&cwd).unwrap();
+        let mut env = HashMap::new();
+        env.insert(
+            "CODEX_HOME".to_string(),
+            codex_home.to_string_lossy().into_owned(),
+        );
+        let mut locator = CodexSessionLocator::before_spawn(
+            Some(AgentProvider::Codex),
+            cwd.to_str().unwrap(),
+            &env,
+        )
+        .unwrap();
+
+        let metadata_dir = codex_home.join("sessions/2026/07/25");
+        fs::create_dir_all(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("delayed-stale-rollout.jsonl"),
+            serde_json::json!({
+                "timestamp": "2000-01-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "019d99a5-aa94-7c73-b786-644cc095c039",
+                    "timestamp": "2000-01-01T00:00:00Z",
+                    "cwd": cwd,
+                    "originator": "codex_cli_rs"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(locator.discover(), None);
         fs::remove_dir_all(root).unwrap();
     }
 }
