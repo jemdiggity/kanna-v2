@@ -13,6 +13,7 @@ import {
   WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT,
 } from "./windowWorkspace";
 import { updateDesktopServerClientHandlersForTests } from "./services/desktopServerClient";
+import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 
 async function flushPromises() {
   await Promise.resolve();
@@ -106,7 +107,15 @@ const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseTaskMock = vi.hoisted(() => vi.fn(async () => {}));
+const relayMarkTaskReadMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseMock = vi.hoisted(() => vi.fn());
+const lanMarkTaskReadMock = vi.hoisted(() => vi.fn(async () => {}));
+const lanCloseMock = vi.hoisted(() => vi.fn());
+const relayTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
+const lanTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
+const lanTasksMock = vi.hoisted(() =>
+  vi.fn(async () => ({ repos: [], items: [], terminalRefs: {} })),
+);
 const openLatestTerminalFileLinkMock = vi.hoisted(() => vi.fn(async () => true));
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
@@ -416,20 +425,17 @@ vi.mock("./services/desktopCloudAssociation", () => ({
   associateDesktopCloudCredential: associateDesktopCloudCredentialMock,
 }));
 
+vi.mock("./services/desktopLanTaskIndex", () => ({
+  listDesktopLanTasks: lanTasksMock,
+  publishDesktopLanTaskSnapshot: vi.fn(async () => {}),
+}));
+
 vi.mock("./services/desktopRelayTerminal", () => ({
-  createConfiguredDesktopRelayTerminalClient: vi.fn(async () => ({
-    advanceStage: relayAdvanceStageMock,
-    closeTask: relayCloseTaskMock,
-    close: relayCloseMock,
-  })),
+  createConfiguredDesktopRelayTerminalClient: relayTerminalClientFactoryMock,
 }));
 
 vi.mock("./services/desktopLanTerminal", () => ({
-  createConfiguredDesktopLanTerminalClient: vi.fn(async () => ({
-    advanceStage: relayAdvanceStageMock,
-    closeTask: relayCloseTaskMock,
-    close: relayCloseMock,
-  })),
+  createConfiguredDesktopLanTerminalClient: lanTerminalClientFactoryMock,
 }));
 
 vi.mock("./composables/useRestoreFocus", () => ({
@@ -458,6 +464,92 @@ const SidebarWithoutRepoStub = defineComponent({
   emits: ["new-task"],
   template: '<button data-testid="open-new-task" @click="$emit(\'new-task\')">open</button>',
 });
+
+const RemoteTaskSelectionStub = defineComponent({
+  name: "Sidebar",
+  props: {
+    taskSlots: { type: Array, default: () => [] },
+  },
+  emits: ["select-item"],
+  template: `
+    <div>
+      <button
+        v-for="item in taskSlots"
+        :key="item.slot_id"
+        data-testid="remote-task"
+        type="button"
+        @click="$emit('select-item', item.slot_id)"
+      >
+        <span data-testid="remote-task-activity">{{ item.activity }}</span>
+      </button>
+    </div>
+  `,
+});
+
+function remoteTaskSnapshot(
+  transport: "cloud" | "lan",
+  ownerDesktopId: string,
+  ownerLocalTaskId: string,
+): DesktopCloudSnapshot {
+  const repoId = `${transport}:repo-remote`;
+  const taskId = `${transport}:repo-remote:task-remote`;
+  return {
+    repos: [{
+      id: repoId,
+      path: "cloud",
+      name: "Remote Repo",
+      default_branch: "main",
+      remote_url: null,
+      remote_url_hash: null,
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-07-24T00:00:00.000Z",
+      last_opened_at: "2026-07-24T00:00:00.000Z",
+    }],
+    items: [{
+      id: taskId,
+      repo_id: repoId,
+      prompt: "Unread remote task",
+      pipeline: "default",
+      pipeline_def: null,
+      stage: "in progress",
+      pr_number: null,
+      pr_url: null,
+      branch: "task-remote",
+      activity: "unread" as const,
+      activity_changed_at: "2026-07-24T00:00:00.000Z",
+      unread_at: "2026-07-24T00:00:00.000Z",
+      port_offset: null,
+      port_env: null,
+      pinned: 0,
+      pin_order: null,
+      display_name: "Unread remote task",
+      issue_number: null,
+      issue_title: null,
+      closed_at: null,
+      agent_session_id: null,
+      base_ref: "origin/main",
+      agent_provider: "codex",
+      agent_type: "pty",
+      teardown_started_at: null,
+      last_output_preview: null,
+      active_post_action: null,
+      parent_task_id: null,
+      notify_task_id: null,
+      notified_at: null,
+      created_at: "2026-07-24T00:00:00.000Z",
+      updated_at: "2026-07-24T00:00:00.000Z",
+    }],
+    terminalRefs: {
+      [taskId]: {
+        ownerDesktopId,
+        ownerLocalRepoId: "owner-repo",
+        ownerLocalTaskId,
+        transport,
+      },
+    },
+  };
+}
 
 const FilePickerModalTestStub = defineComponent({
   name: "FilePickerModal",
@@ -706,7 +798,30 @@ describe("App", () => {
     store.advanceStage.mockClear();
     relayAdvanceStageMock.mockClear();
     relayCloseTaskMock.mockClear();
-    relayCloseMock.mockClear();
+    relayMarkTaskReadMock.mockReset();
+    relayMarkTaskReadMock.mockResolvedValue(undefined);
+    relayCloseMock.mockReset();
+    relayCloseMock.mockImplementation(() => {});
+    lanMarkTaskReadMock.mockReset();
+    lanMarkTaskReadMock.mockResolvedValue(undefined);
+    lanCloseMock.mockReset();
+    lanCloseMock.mockImplementation(() => {});
+    relayTerminalClientFactoryMock.mockReset();
+    relayTerminalClientFactoryMock.mockResolvedValue({
+      advanceStage: relayAdvanceStageMock,
+      closeTask: relayCloseTaskMock,
+      markTaskRead: relayMarkTaskReadMock,
+      close: relayCloseMock,
+    });
+    lanTerminalClientFactoryMock.mockReset();
+    lanTerminalClientFactoryMock.mockResolvedValue({
+      advanceStage: relayAdvanceStageMock,
+      closeTask: relayCloseTaskMock,
+      markTaskRead: lanMarkTaskReadMock,
+      close: lanCloseMock,
+    });
+    lanTasksMock.mockReset();
+    lanTasksMock.mockResolvedValue({ repos: [], items: [], terminalRefs: {} });
     openLatestTerminalFileLinkMock.mockReset();
     openLatestTerminalFileLinkMock.mockResolvedValue(true);
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
@@ -1293,6 +1408,136 @@ describe("App", () => {
     });
     expect(wrapper.get('[data-testid="main-repo-path"]').text()).toBe("cloud");
 
+    wrapper.unmount();
+  });
+
+  it("marks a selected unread cloud task read through its owner relay after one second", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "relay-owner", "relay-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(relayTerminalClientFactoryMock).toHaveBeenCalledOnce();
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "relay-owner",
+      taskId: "relay-owner-task",
+    });
+    expect(lanTerminalClientFactoryMock).not.toHaveBeenCalled();
+    expect(lanMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+  });
+
+  it("marks a selected unread LAN task read through its owner peer after one second", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("lan", "lan-owner", "lan-owner-task");
+    lanTasksMock.mockResolvedValue(snapshot);
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(lanTerminalClientFactoryMock).toHaveBeenCalledOnce();
+    expect(lanMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "lan-owner",
+      taskId: "lan-owner-task",
+    });
+    expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(lanCloseMock).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+  });
+
+  it("marks a restored unread remote selection read through the store fallback", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "restored-owner", "restored-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    store.selectedRepoId = snapshot.repos[0].id;
+    store.selectedRepo = null;
+    store.selectedItemId = snapshot.items[0].id;
+
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
+      desktopId: "restored-owner",
+      taskId: "restored-owner-task",
+    });
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+  });
+
+  it("closes the relay client after mark-read failure and logs close failures", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "failing-owner", "failing-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    relayMarkTaskReadMock.mockRejectedValueOnce(new Error("mark read failed"));
+    relayCloseMock.mockImplementationOnce(() => {
+      throw new Error("close failed");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(relayCloseMock).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      "[remote] failed to mark task read:",
+      "mark read failed",
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "[remote] failed to close mark-read client:",
+      "close failed",
+    );
+    expect(toastErrorMock).not.toHaveBeenCalled();
+
+    warn.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("leaves projected remote activity unread when relay acquisition fails", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
+    const snapshot = remoteTaskSnapshot("cloud", "offline-owner", "offline-owner-task");
+    cloudTasksMock.mockResolvedValue(snapshot);
+    relayTerminalClientFactoryMock.mockRejectedValueOnce(new Error("relay unavailable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
+    expect(relayCloseMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "[remote] failed to mark task read:",
+      "relay unavailable",
+    );
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(snapshot.items[0].activity).toBe("unread");
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("unread");
+
+    warn.mockRestore();
     wrapper.unmount();
   });
 

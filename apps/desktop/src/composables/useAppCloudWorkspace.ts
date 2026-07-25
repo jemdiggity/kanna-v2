@@ -15,7 +15,10 @@ import { invoke } from "../invoke";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import { associateDesktopCloudCredential } from "../services/desktopCloudAssociation";
 import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
-import { createConfiguredDesktopRelayTerminalClient } from "../services/desktopRelayTerminal";
+import {
+  createConfiguredDesktopRelayTerminalClient,
+  type DesktopRelayTerminalClient,
+} from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
 import { fetchClosedTaskIdentities } from "../services/desktopServerClient";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
@@ -24,6 +27,7 @@ import { createWorkspaceSidebarProjector } from "../workspace/projectWorkspaceTa
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
 import type { WindowWorkspaceController } from "../windowWorkspace";
+import { useRemoteTaskReadDwell } from "./useRemoteTaskReadDwell";
 import type { useToast } from "./useToast";
 
 export type AppSidebarItem = SidebarTaskItem;
@@ -174,6 +178,16 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   const selectedWorkspaceTask = computed(() => {
     const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
     return selectedItemId ? workspaceTasksByItemId.value.get(selectedItemId) ?? null : null;
+  });
+  const selectedRemoteItemId = computed(() =>
+    selectedWorkspaceTask.value?.owner.kind === "remote"
+      ? selectedCloudItemId.value ?? store.selectedItemId
+      : null,
+  );
+  useRemoteTaskReadDwell({
+    selectedItemId: selectedRemoteItemId,
+    workspaceTasksByItemId,
+    markTaskRead: markRemoteWorkspaceTaskRead,
   });
   const mainPanelCloudTerminalRef = computed(() => {
     const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
@@ -440,6 +454,40 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       client.close();
+    }
+  }
+
+  async function markRemoteWorkspaceTaskRead(workspaceTask: WorkspaceTask): Promise<void> {
+    const remoteRef = workspaceTask.terminal.remoteRef;
+    if (!remoteRef || workspaceTask.terminal.kind === "none") return;
+
+    let client: DesktopRelayTerminalClient | null = null;
+    try {
+      client = workspaceTask.terminal.kind === "lan"
+        ? await createConfiguredDesktopLanTerminalClient()
+        : await createConfiguredDesktopRelayTerminalClient();
+      if (!client) {
+        console.warn("[remote] failed to mark task read: remote task owner is unavailable.");
+        return;
+      }
+      await client.markTaskRead({
+        desktopId: remoteRef.ownerDesktopId,
+        taskId: remoteRef.ownerLocalTaskId,
+      });
+    } catch (error) {
+      console.warn(
+        "[remote] failed to mark task read:",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      try {
+        client?.close();
+      } catch (error) {
+        console.warn(
+          "[remote] failed to close mark-read client:",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     }
   }
 
