@@ -64,6 +64,7 @@ export interface DesktopRelayTerminalClient {
   resize(options: ResizeRemoteTerminalOptions): Promise<void>;
   closeTask(options: RemoteTerminalActionOptions): Promise<void>;
   advanceStage(options: RemoteTerminalActionOptions): Promise<void>;
+  markTaskRead(options: RemoteTerminalActionOptions): Promise<void>;
 }
 
 export async function createConfiguredDesktopRelayTerminalClient(): Promise<DesktopRelayTerminalClient | null> {
@@ -170,6 +171,13 @@ export function createDesktopRelayTerminalClient({
       await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/advance-stage`,
+        null,
+      );
+    },
+    async markTaskRead(options) {
+      await clientForDesktop(options.desktopId).request(
+        "POST",
+        `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/mark-read`,
         null,
       );
     },
@@ -363,6 +371,12 @@ export function createDesktopRelayTerminalClient({
     async advanceStage(options) {
       await sendInvoke(options.desktopId, {
         command: "advance_stage",
+        args: { task_id: options.taskId },
+      });
+    },
+    async markTaskRead(options) {
+      await sendInvoke(options.desktopId, {
+        command: "mark_task_read",
         args: { task_id: options.taskId },
       });
     },

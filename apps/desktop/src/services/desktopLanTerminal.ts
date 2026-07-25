@@ -103,6 +103,12 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
         taskId: options.taskId,
       });
     },
+    async markTaskRead(options) {
+      await invoke("mark_transfer_peer_task_read", {
+        peerId: options.desktopId,
+        taskId: options.taskId,
+      });
+    },
   };
 }
 
