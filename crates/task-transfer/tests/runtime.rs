@@ -7,7 +7,7 @@ use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
 use kanna_task_transfer::protocol::{PeerRequest, PeerResponse};
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
 use kanna_task_transfer::runtime::{
-    DiscoveryMode, PairingResult, RuntimeConfig, RuntimeEvent, TransferRuntime,
+    DiscoveryMode, PairingResult, RuntimeConfig, RuntimeError, RuntimeEvent, TransferRuntime,
 };
 use serde_json::json;
 use std::path::Path;
@@ -645,6 +645,126 @@ async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
         json!({ "expectedActivityRevision": 7 }),
     );
     server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_task_action_percent_encodes_task_id_as_one_path_segment() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        request_tx.send(request_line).unwrap();
+
+        reader
+            .get_mut()
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+    });
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+
+    secondary
+        .mark_peer_task_read("peer-owner", "owner/task% snow 雪-._~", 7)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        request_rx.await.unwrap(),
+        "POST /v1/tasks/owner%2Ftask%25%20snow%20%E9%9B%AA-._~/actions/mark-read HTTP/1.1\r\n"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_rejects_request_smuggling_task_id_before_kanna_connection() {
+    assert_task_id_rejected_before_kanna_connection(
+        "owner\r\nHost: attacker\r\n\r\nGET /smuggled HTTP/1.1",
+        "task ID contains an ASCII control character",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_rejects_oversized_task_id_before_kanna_connection() {
+    let task_id = "a".repeat(1025);
+    assert_task_id_rejected_before_kanna_connection(&task_id, "task ID exceeds 1024 UTF-8 bytes")
+        .await;
+}
+
+async fn assert_task_id_rejected_before_kanna_connection(task_id: &str, expected_message: &str) {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+
+    let action = secondary.advance_peer_task_stage("peer-owner", task_id);
+    tokio::pin!(action);
+    let error = tokio::select! {
+        result = &mut action => result.unwrap_err(),
+        accepted = listener.accept() => {
+            panic!(
+                "invalid task ID opened a Kanna server connection: {:?}",
+                accepted.unwrap().1,
+            );
+        }
+        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+            panic!("task action did not reject the invalid task ID");
+        }
+    };
+    assert!(
+        matches!(error, RuntimeError::Protocol(_)),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.to_string().contains(expected_message),
+        "unexpected error: {error}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "invalid task ID left a queued Kanna server connection",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
