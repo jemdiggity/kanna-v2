@@ -97,7 +97,7 @@ export async function listDesktopLanTasks(options: {
     for (const task of payload.tasks) {
       tasks.push({
         ...task,
-        cloudTaskId: `lan:${peerId}:${task.cloudTaskId}`,
+        cloudTaskId: lanTaskPresentationId(peerId, task),
         ownerDesktopId: peerId,
       });
     }
@@ -108,6 +108,14 @@ export async function listDesktopLanTasks(options: {
     ref.transport = "lan";
   }
   return mapped;
+}
+
+function lanTaskPresentationId(
+  peerId: string,
+  task: DesktopCloudTaskSnapshot,
+): string {
+  const localRepoId = task.localRepoId ?? task.repo.cloudRepoId;
+  return `lan:${JSON.stringify([peerId, localRepoId, task.ownerLocalTaskId])}`;
 }
 
 async function resolveLanDesktopId(): Promise<string> {
