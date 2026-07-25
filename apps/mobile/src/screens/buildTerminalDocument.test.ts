@@ -37,6 +37,18 @@ interface StubBufferCell {
   getWidth(): number;
 }
 
+interface StubTerminalBuffer {
+  type: "normal" | "alternate";
+  baseY: number;
+  viewportY: number;
+  length: number;
+  getLine(index: number): {
+    length: number;
+    getCell(cellIndex: number): StubBufferCell | undefined;
+    translateToString(trimRight?: boolean): string;
+  } | undefined;
+}
+
 function terminalCells(text: string): Array<{ chars: string; width: number }> {
   const cells: Array<{ chars: string; width: number }> = [];
   for (const character of text) {
@@ -58,39 +70,15 @@ class StubTerminal {
   options: { fontSize: number; smoothScrollDuration?: number };
   linkProvider: StubTerminalLinkProvider | null = null;
   bufferLines = new Map<number, string>();
+  alternateBufferLines = new Map<number, string>();
   getLineCalls: number[] = [];
   translateToStringCalls: Array<{ index: number; trimRight: boolean | undefined }> = [];
+  normalBuffer = this.createBuffer("normal", this.bufferLines);
+  alternateBuffer = this.createBuffer("alternate", this.alternateBufferLines);
   buffer = {
-    active: {
-      type: "normal" as "normal" | "alternate",
-      baseY: 100,
-      viewportY: 100,
-      length: 101,
-      getLine: (index: number) => {
-        this.getLineCalls.push(index);
-        const text = this.bufferLines.get(index);
-        if (text === undefined) {
-          return undefined;
-        }
-        const cells = terminalCells(text);
-        return {
-          length: cells.length,
-          getCell: (cellIndex: number): StubBufferCell | undefined => {
-            const cell = cells[cellIndex];
-            return cell
-              ? {
-                  getChars: () => cell.chars,
-                  getWidth: () => cell.width
-                }
-              : undefined;
-          },
-          translateToString: (trimRight?: boolean) => {
-            this.translateToStringCalls.push({ index, trimRight });
-            return text;
-          }
-        };
-      }
-    }
+    active: this.normalBuffer,
+    normal: this.normalBuffer,
+    alternate: this.alternateBuffer
   };
   resizeCalls: Array<{ cols: number; rows: number }> = [];
   scrollToBottomCalls = 0;
@@ -122,6 +110,42 @@ class StubTerminal {
   private selectionListeners: Array<() => void> = [];
   private dataListeners: Array<(data: string) => void> = [];
   private binaryListeners: Array<(data: string) => void> = [];
+
+  private createBuffer(
+    type: "normal" | "alternate",
+    lines: Map<number, string>
+  ): StubTerminalBuffer {
+    return {
+      type,
+      baseY: 100,
+      viewportY: 100,
+      length: 101,
+      getLine: (index: number) => {
+        this.getLineCalls.push(index);
+        const text = lines.get(index);
+        if (text === undefined) {
+          return undefined;
+        }
+        const cells = terminalCells(text);
+        return {
+          length: cells.length,
+          getCell: (cellIndex: number): StubBufferCell | undefined => {
+            const cell = cells[cellIndex];
+            return cell
+              ? {
+                  getChars: () => cell.chars,
+                  getWidth: () => cell.width
+                }
+              : undefined;
+          },
+          translateToString: (trimRight?: boolean) => {
+            this.translateToStringCalls.push({ index, trimRight });
+            return text;
+          }
+        };
+      }
+    };
+  }
 
   constructor(options: {
     cols: number;
@@ -307,16 +331,26 @@ class StubTerminal {
     const text =
       typeof data === "string"
         ? data
-        : data instanceof Uint8Array
-          ? new TextDecoder().decode(data)
+        : ArrayBuffer.isView(data)
+          ? new TextDecoder().decode(
+              new Uint8Array(
+                data.buffer,
+                data.byteOffset,
+                data.byteLength
+              )
+            )
           : "";
     const parts = text.replace(/\r\n|\r/g, "\n").split("\n");
+    const lines =
+      this.buffer.active.type === "normal"
+        ? this.bufferLines
+        : this.alternateBufferLines;
     let lineIndex = Math.max(0, this.buffer.active.length - 1);
-    const firstLine = this.bufferLines.get(lineIndex) ?? "";
-    this.bufferLines.set(lineIndex, firstLine + (parts.shift() ?? ""));
+    const firstLine = lines.get(lineIndex) ?? "";
+    lines.set(lineIndex, firstLine + (parts.shift() ?? ""));
     for (const part of parts) {
       lineIndex += 1;
-      this.bufferLines.set(lineIndex, part);
+      lines.set(lineIndex, part);
     }
     this.buffer.active.length = Math.max(this.buffer.active.length, lineIndex + 1);
     this.buffer.active.baseY += 1;
@@ -330,9 +364,21 @@ class StubTerminal {
   reset(): void {
     this.resets += 1;
     this.bufferLines.clear();
-    this.buffer.active.baseY = 0;
-    this.buffer.active.viewportY = 0;
-    this.buffer.active.length = 0;
+    this.alternateBufferLines.clear();
+    for (const buffer of [this.buffer.normal, this.buffer.alternate]) {
+      buffer.baseY = 0;
+      buffer.viewportY = 0;
+      buffer.length = 0;
+    }
+    this.buffer.active = this.buffer.normal;
+  }
+
+  useAlternateBuffer(): void {
+    this.buffer.active = this.buffer.alternate;
+  }
+
+  useNormalBuffer(): void {
+    this.buffer.active = this.buffer.normal;
   }
 
   emitScroll(viewportY?: number): void {
@@ -373,6 +419,12 @@ class StubFitAddon {
 
 function b64(input: string): string {
   return Buffer.from(input, "utf8").toString("base64");
+}
+
+function lastMessageOfType(messages: string[], type: string): unknown {
+  return messages
+    .map((message) => JSON.parse(message))
+    .findLast((message) => message.type === type);
 }
 
 function createTouchEvent(
@@ -467,6 +519,10 @@ function createExecutedTerminalDocument({
     callback(0);
     return 1;
   }) as typeof window.requestAnimationFrame;
+  window.setTimeout = globalThis.setTimeout.bind(globalThis) as typeof window.setTimeout;
+  window.clearTimeout = globalThis.clearTimeout.bind(
+    globalThis
+  ) as typeof window.clearTimeout;
   window.ReactNativeWebView = {
     postMessage(message: string) {
       messages.push(message);
@@ -524,21 +580,31 @@ function createExecutedTerminalDocument({
 }
 
 describe("buildTerminalDocument", () => {
-  it("provides only Markdown file links with case-insensitive extensions and line suffixes", () => {
+  it("provides conservative source-file links with line suffixes", () => {
     const { messages, terminal } = createExecutedTerminalDocument();
     const row = 7;
     const line =
-      "See README.md. app.tsx config.json docs/SPEC.MD:42:7 src/lib.rs draft.mdx archive.md.bak /tmp/task/notes.md:9";
+      "See README.md. app.tsx config.json docs/SPEC.MD:42:7 src/lib.rs image.png ../escape.ts /tmp/task/code.rs:9";
 
     const links = provideLinks(terminal, row, line);
 
     expect(links?.map((link) => link.text)).toEqual([
       "README.md",
+      "app.tsx",
+      "config.json",
       "docs/SPEC.MD:42:7",
-      "/tmp/task/notes.md:9"
+      "src/lib.rs",
+      "/tmp/task/code.rs:9"
     ]);
     expect(links?.map((link) => link.range)).toEqual(
-      ["README.md", "docs/SPEC.MD:42:7", "/tmp/task/notes.md:9"].map((text) => {
+      [
+        "README.md",
+        "app.tsx",
+        "config.json",
+        "docs/SPEC.MD:42:7",
+        "src/lib.rs",
+        "/tmp/task/code.rs:9"
+      ].map((text) => {
         const start = line.indexOf(text);
         return {
           start: { x: start + 1, y: row },
@@ -546,17 +612,15 @@ describe("buildTerminalDocument", () => {
         };
       })
     );
-    expect(links?.map((link) => link.decorations)).toEqual([
-      { pointerCursor: true, underline: true },
-      { pointerCursor: true, underline: true },
-      { pointerCursor: true, underline: true }
-    ]);
+    expect(links?.every((link) =>
+      link.decorations.pointerCursor && link.decorations.underline
+    )).toBe(true);
 
     expect(
       messages.map((message) => JSON.parse(message).type)
     ).not.toContain("terminal-file-link");
 
-    links?.[1]?.activate();
+    links?.[3]?.activate();
     expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
       type: "terminal-file-link",
       path: "docs/SPEC.MD",
@@ -564,76 +628,62 @@ describe("buildTerminalDocument", () => {
     });
   });
 
-  it("renders persistent Markdown buttons while leaving other extensions as plain text", () => {
-    const { messages, window } = createExecutedTerminalDocument();
+  it("tracks source-file mentions as a reverse-chronological MRU without file-strip markup", async () => {
+    vi.useFakeTimers();
+    try {
+      const { messages, window } = createExecutedTerminalDocument();
 
-    window.__replaceTerminalState({
-      text: "See README.md app.tsx config.json docs/SPEC.MD:42 src/lib.rs\n"
-    });
+      window.__replaceTerminalState({
+        text: "Older src/Old.ts:2 then README.md\n"
+      });
+      await vi.runAllTimersAsync();
+      window.__appendTerminalChunk({
+        chunksB64: [b64("Changed src/New.tsx:42:7 and src/Old.ts:9\n")]
+      });
+      await vi.runAllTimersAsync();
 
-    const region = window.document.getElementById("terminal-file-links");
-    const buttons = Array.from(
-      region?.querySelectorAll<HTMLButtonElement>("button") ?? []
-    );
-    expect(region?.hidden).toBe(false);
-    expect(buttons.map((button) => button.textContent)).toEqual([
-      "README.md",
-      "docs/SPEC.MD:42"
-    ]);
-    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
-      "Open file README.md",
-      "Open file docs/SPEC.MD at line 42"
-    ]);
-    expect(region?.textContent).not.toContain("app.tsx");
-    expect(region?.textContent).not.toContain("config.json");
-    expect(region?.textContent).not.toContain("src/lib.rs");
-
-    const discovery = messages
-      .map((message) => JSON.parse(message))
-      .findLast((message) => message.type === "terminal-file-links");
-    expect(discovery?.links).toEqual([
-      { raw: "README.md", path: "README.md" },
-      { raw: "docs/SPEC.MD:42", path: "docs/SPEC.MD", line: 42 }
-    ]);
-
-    buttons[1]?.click();
-    expect(JSON.parse(messages.at(-1) ?? "null")).toEqual({
-      type: "terminal-file-link",
-      path: "docs/SPEC.MD",
-      line: 42
-    });
+      expect(lastMessageOfType(messages, "terminal-file-mentions")).toEqual({
+        type: "terminal-file-mentions",
+        mentions: [
+          { raw: "src/Old.ts:9", path: "src/Old.ts", line: 9 },
+          { raw: "src/New.tsx:42:7", path: "src/New.tsx", line: 42 },
+          { raw: "README.md", path: "README.md" }
+        ],
+        overflow: false
+      });
+      expect(window.document.getElementById("terminal-file-links")).toBeNull();
+      expect(messages.map((message) => JSON.parse(message).type))
+        .not.toContain("terminal-file-links");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("keeps the newest six unique Markdown buttons visible", () => {
-    const { window } = createExecutedTerminalDocument();
-    window.__replaceTerminalState({
-      text: [
-        "docs/one.md",
-        "src/ignored.tsx",
-        "docs/two.md",
-        "package.json",
-        "docs/three.md",
-        "docs/four.md",
-        "docs/five.md",
-        "docs/six.md",
-        "docs/seven.md",
-        "docs/two.md"
-      ].join("\n")
-    });
+  it("retains twenty unique mentions and reports overflow", async () => {
+    vi.useFakeTimers();
+    try {
+      const { messages, window } = createExecutedTerminalDocument();
+      window.__replaceTerminalState({
+        text: Array.from(
+          { length: 21 },
+          (_, index) => `src/File${index}.ts`
+        ).join("\n")
+      });
+      await vi.runAllTimersAsync();
 
-    const buttons = Array.from(
-      window.document.querySelectorAll<HTMLButtonElement>(
-        "#terminal-file-links button"
-      )
-    );
-    expect(buttons.map((button) => button.textContent)).toEqual([
-      "docs/three.md",
-      "docs/four.md",
-      "docs/five.md",
-      "docs/six.md",
-      "docs/seven.md",
-      "docs/two.md"
-    ]);
+      const history = lastMessageOfType(
+        messages,
+        "terminal-file-mentions"
+      ) as { mentions: unknown[]; overflow: boolean };
+      expect(history.mentions).toHaveLength(20);
+      expect(history.overflow).toBe(true);
+      expect(history.mentions[0]).toEqual({
+        raw: "src/File20.ts",
+        path: "src/File20.ts"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects literal parent segments and non-file-like rows", () => {
@@ -653,6 +703,115 @@ describe("buildTerminalDocument", () => {
     expect(links?.map((link) => link.text)).toEqual(["docs/spec.md"]);
     expect(terminal.getLineCalls).toEqual([8]);
     expect(terminal.translateToStringCalls).toEqual([{ index: 8, trimRight: true }]);
+  });
+
+  it("scans only the appended normal-buffer delta plus two overlap rows", async () => {
+    vi.useFakeTimers();
+    try {
+      const { terminal, window } = createExecutedTerminalDocument();
+      window.__replaceTerminalState({ text: "zero.ts\none.ts\ntwo.ts\n" });
+      await vi.runAllTimersAsync();
+      terminal.getLineCalls = [];
+      const previousLength = terminal.buffer.normal.length;
+
+      window.__appendTerminalChunk({
+        chunksB64: [b64("three.ts\n")]
+      });
+      await vi.runAllTimersAsync();
+
+      expect(terminal.getLineCalls).toEqual(
+        Array.from(
+          { length: terminal.buffer.normal.length - (previousLength - 2) },
+          (_, offset) => previousLength - 2 + offset
+        )
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces rapid appends into one mention scan", async () => {
+    vi.useFakeTimers();
+    try {
+      const { terminal, window } = createExecutedTerminalDocument();
+      window.__replaceTerminalState({ text: "base.ts\n" });
+      await vi.runAllTimersAsync();
+      terminal.getLineCalls = [];
+
+      window.__appendTerminalChunk({ chunksB64: [b64("one.ts\n")] });
+      window.__appendTerminalChunk({ chunksB64: [b64("two.ts\n")] });
+      window.__appendTerminalChunk({ chunksB64: [b64("three.ts\n")] });
+      expect(terminal.getLineCalls).toEqual([]);
+      await vi.runAllTimersAsync();
+
+      expect(terminal.getLineCalls).toEqual(
+        Array.from(
+          { length: terminal.buffer.normal.length },
+          (_, index) => index
+        )
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds replacement reconstruction and stops once overflow is known", async () => {
+    vi.useFakeTimers();
+    try {
+      const first = createExecutedTerminalDocument();
+      first.window.__replaceTerminalState({
+        text: Array.from({ length: 1_100 }, () => "ordinary output").join("\n")
+      });
+      await vi.runAllTimersAsync();
+      expect(first.terminal.getLineCalls).toHaveLength(1_000);
+
+      const second = createExecutedTerminalDocument();
+      second.window.__replaceTerminalState({
+        text: Array.from(
+          { length: 1_100 },
+          (_, index) => `src/File${index}.ts`
+        ).join("\n")
+      });
+      await vi.runAllTimersAsync();
+      expect(second.terminal.getLineCalls.length).toBeLessThanOrEqual(22);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores alternate-buffer-only writes and unchanged history", async () => {
+    vi.useFakeTimers();
+    try {
+      const { messages, terminal, window } = createExecutedTerminalDocument();
+      window.__replaceTerminalState({ text: "src/Existing.ts\n" });
+      await vi.runAllTimersAsync();
+      const initialMessages = messages.filter(
+        (message) => JSON.parse(message).type === "terminal-file-mentions"
+      ).length;
+
+      terminal.useAlternateBuffer();
+      window.__appendTerminalChunk({
+        chunksB64: [b64("src/AlternateOnly.ts\n")]
+      });
+      await vi.runAllTimersAsync();
+      terminal.useNormalBuffer();
+      window.__appendTerminalChunk({ chunksB64: [b64("ordinary output\n")] });
+      await vi.runAllTimersAsync();
+
+      expect(messages.filter(
+        (message) => JSON.parse(message).type === "terminal-file-mentions"
+      )).toHaveLength(initialMessages);
+      expect(lastMessageOfType(messages, "terminal-file-mentions")).toEqual({
+        type: "terminal-file-mentions",
+        mentions: [{
+          raw: "src/Existing.ts",
+          path: "src/Existing.ts"
+        }],
+        overflow: false
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("maps file-link ranges to terminal cells after wide and combining characters", () => {
@@ -685,9 +844,11 @@ describe("buildTerminalDocument", () => {
 
     expect(script).not.toContain("terminal-inspection");
     expect(script).not.toContain("function renderedTerminalText");
-    expect(script).toContain("const MAX_FILE_LINK_SCAN_ROWS = 200;");
     expect(script).toContain(
-      "Math.max(0, buffer.length - MAX_FILE_LINK_SCAN_ROWS)"
+      "const MAX_INITIAL_FILE_MENTION_SCAN_ROWS = 1000;"
+    );
+    expect(script).toContain(
+      "buffer.length - MAX_INITIAL_FILE_MENTION_SCAN_ROWS"
     );
     expect(script).not.toContain("const firstLine = 0");
     expect(script).not.toContain("recordTerminalFrame");
@@ -905,25 +1066,6 @@ describe("buildTerminalDocument", () => {
     expect(terminal.selectionCalls.at(-1)).toEqual({ column: 5, row: 2, length: 1 });
   });
 
-  it("does not select terminal text when double tapping a fallback file control", () => {
-    const { terminal, viewport, window } = createExecutedTerminalDocument();
-    window.__replaceTerminalState({ text: "docs/spec.md\n" });
-    terminal.buffer.active.viewportY = 0;
-    terminal.buffer.active.length = 3;
-    terminal.bufferLines.set(2, "docs/spec.md");
-    const button = window.document.querySelector<HTMLButtonElement>(
-      "#terminal-file-links button"
-    );
-    expect(button).not.toBeNull();
-    const point = { clientX: 9 * 3 + 4, clientY: 18 * 2 + 9 };
-
-    tapElement(window, button!, point, 1_000);
-    tapElement(window, button!, point, 1_180);
-
-    expect(terminal.selectionCalls).toEqual([]);
-    expect(viewport.contains(button)).toBe(true);
-  });
-
   it.each([
     ["too slowly", { secondAt: 1_301, secondX: 9 * 9 + 4 }],
     ["too far apart", { secondAt: 1_200, secondX: 9 * 9 + 4 + 25 }]
@@ -1117,7 +1259,7 @@ describe("buildTerminalDocument", () => {
 
   it("replays alt-screen vertical drags as forwarded wheel input instead of scrollback scrolling", () => {
     const { terminal, viewport, window, messages } = createExecutedTerminalDocument();
-    terminal.buffer.active.type = "alternate";
+    terminal.useAlternateBuffer();
 
     viewport.dispatchEvent(
       createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
@@ -1146,7 +1288,7 @@ describe("buildTerminalDocument", () => {
 
   it("accumulates sub-cell alt-screen drags and forwards opposite directions as wheel up", () => {
     const { terminal, viewport, window, messages } = createExecutedTerminalDocument();
-    terminal.buffer.active.type = "alternate";
+    terminal.useAlternateBuffer();
 
     viewport.dispatchEvent(
       createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
@@ -1193,7 +1335,7 @@ describe("buildTerminalDocument", () => {
 
   it("ignores terminal data emitted outside an alt-screen scroll dispatch", () => {
     const { terminal, messages } = createExecutedTerminalDocument();
-    terminal.buffer.active.type = "alternate";
+    terminal.useAlternateBuffer();
 
     terminal.emitData("\u001b[?1u");
     terminal.emitBinary(" ");
@@ -1284,41 +1426,6 @@ describe("buildTerminalDocument", () => {
     expect(terminal.resets).toBe(1);
     expect(terminal.writes).toHaveLength(1);
     expect(terminal.scrollToLineCalls).toEqual([]);
-  });
-
-  it.each([
-    [
-      "scroll",
-      [{ clientX: 220, clientY: 240 }],
-      [{ clientX: 150, clientY: 230 }]
-    ],
-    [
-      "pinch",
-      [
-        { clientX: 100, clientY: 200 },
-        { clientX: 200, clientY: 200 }
-      ],
-      [
-        { clientX: 60, clientY: 200 },
-        { clientX: 240, clientY: 200 }
-      ]
-    ]
-  ])("does not open a Markdown file after a %s gesture over its button", (_label, start, move) => {
-    const { messages, window } = createExecutedTerminalDocument();
-    window.__replaceTerminalState({ text: "docs/spec.md\n" });
-    const button = window.document.querySelector<HTMLButtonElement>(
-      "#terminal-file-links button"
-    );
-    expect(button).not.toBeNull();
-
-    button?.dispatchEvent(createTouchEvent(window, "touchstart", start));
-    button?.dispatchEvent(createTouchEvent(window, "touchmove", move));
-    button?.dispatchEvent(createTouchEvent(window, "touchend", []));
-    button?.click();
-
-    expect(
-      messages.map((message) => JSON.parse(message).type)
-    ).not.toContain("terminal-file-link");
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {
