@@ -321,7 +321,6 @@ describe("createDesktopRelayTerminalClient", () => {
     await expect(advancePromise).resolves.toBeUndefined();
     await expect(markReadPromise).resolves.toBeUndefined();
   });
-
   it("reads a remote task file through the relay tunnel", async () => {
     const socket = new FakeSocket();
     const client = createDesktopRelayTerminalClient({
@@ -398,6 +397,38 @@ describe("createDesktopRelayTerminalClient", () => {
 
     await expect(missingPromise).rejects.toThrow("Remote task file read failed with HTTP 404.");
     await expect(malformedPromise).rejects.toThrow("Remote task file response was malformed.");
+  });
+  it("rejects a blocked owner response with its message", async () => {
+    const socket = new FakeSocket();
+    const client = createDesktopRelayTerminalClient({
+      createSocket: () => socket,
+      getIdToken: vi.fn(async () => "id-token"),
+      relayUrl: "ws://relay.test",
+    });
+    const advancePromise = client.advanceStage({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+    });
+
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await Promise.resolve();
+    const request = socket.sent
+      .map((entry) => JSON.parse(entry))
+      .find((entry) =>
+        entry.path === "/v1/tasks/task-blocked/actions/advance-stage"
+      );
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: request.id,
+        status: 409,
+        body: { error: "task is blocked: task-blocked" },
+      }),
+    });
+
+    await expect(advancePromise).rejects.toThrow("task is blocked: task-blocked");
   });
 });
 
