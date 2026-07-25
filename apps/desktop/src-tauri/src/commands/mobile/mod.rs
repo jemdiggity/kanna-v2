@@ -1954,7 +1954,7 @@ mod tests {
                                     .expect("daemon command should be JSON");
 
                                 match command.get("type").and_then(|value| value.as_str()) {
-                                    Some("Subscribe") => {
+                                    Some("Subscribe" | "SubscribeEvents") => {
                                         write_half
                                             .write_all(b"{\"type\":\"Ok\"}\n")
                                             .await
@@ -1990,7 +1990,7 @@ mod tests {
                                         return true;
                                     }
                                     other => panic!(
-                                        "expected Subscribe, List, or Spawn command, got {other:?}"
+                                        "expected SubscribeEvents, Subscribe, List, or Spawn command, got {other:?}"
                                     ),
                                 }
                             }

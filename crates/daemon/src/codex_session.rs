@@ -161,7 +161,7 @@ fn metadata_from_file(path: &Path) -> Option<SessionMetadata> {
             id: id.to_string(),
             cwd: payload.get("cwd")?.as_str()?.to_string(),
             originator: payload.get("originator")?.as_str()?.to_string(),
-            created_at: chrono::DateTime::parse_from_rfc3339(payload.get("timestamp")?.as_str()?)
+            created_at: chrono::DateTime::parse_from_rfc3339(value.get("timestamp")?.as_str()?)
                 .ok()?
                 .with_timezone(&chrono::Utc),
         });
@@ -229,7 +229,6 @@ mod tests {
                 "type": "session_meta",
                 "payload": {
                     "id": genuine,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
                     "cwd": cwd,
                     "originator": "codex_cli_rs"
                 }
@@ -277,7 +276,6 @@ mod tests {
                 "type": "session_meta",
                 "payload": {
                     "id": "019d99a5-aa94-7c73-b786-644cc095c039",
-                    "timestamp": "2000-01-01T00:00:00Z",
                     "cwd": cwd,
                     "originator": "codex_cli_rs"
                 }
