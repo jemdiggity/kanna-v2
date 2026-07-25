@@ -77,6 +77,7 @@ impl Db {
                 branch TEXT,
                 agent_type TEXT,
                 activity TEXT,
+                activity_revision INTEGER NOT NULL DEFAULT 0,
                 activity_changed_at TEXT,
                 unread_at TEXT,
                 pinned INTEGER,

@@ -9,6 +9,7 @@ export interface CloudTaskSnapshotInput {
     | "prompt"
     | "stage"
     | "activity"
+    | "activity_revision"
     | "branch"
     | "base_ref"
     | "pr_number"
@@ -40,6 +41,7 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
     displayName: input.item.display_name,
     stage: input.item.stage,
     activity: input.item.activity,
+    activityRevision: input.item.activity_revision,
     status: deriveStatus(input.item.stage, input.item.closed_at, input.blockedByTaskIds),
     repo: {
       cloudRepoId: input.repo.id,

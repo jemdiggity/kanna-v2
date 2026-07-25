@@ -49,7 +49,7 @@ export interface RemoteTerminalActionOptions {
 }
 
 export interface MarkRemoteTaskReadOptions extends RemoteTerminalActionOptions {
-  activityCutoff: string;
+  expectedActivityRevision: number;
 }
 
 export interface SendRemoteTerminalInputOptions extends RemoteTerminalActionOptions {
@@ -207,7 +207,7 @@ export function createDesktopRelayTerminalClient({
       await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/mark-read`,
-        { activityCutoff: options.activityCutoff },
+        { expectedActivityRevision: options.expectedActivityRevision },
       );
     },
   };

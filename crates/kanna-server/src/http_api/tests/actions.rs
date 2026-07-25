@@ -430,10 +430,11 @@ async fn mark_read_route_sets_unread_task_idle() {
     let db = Db::open(&db_path).unwrap();
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
     assert_eq!(item.activity.as_deref(), Some("idle"));
+    assert_eq!(item.activity_revision, 2);
 }
 
 #[tokio::test]
-async fn mark_read_route_keeps_unread_activity_newer_than_cutoff() {
+async fn mark_read_route_rejects_stale_revision_after_same_second_transitions() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_pipeline_item(
@@ -445,17 +446,30 @@ async fn mark_read_route_keeps_unread_activity_newer_than_cutoff() {
             "2026-04-17 07:00:00",
         )
         .unwrap();
-        db.update_pipeline_item_activity("task-1", "unread")
-            .unwrap();
     });
     let db_path = state.config.db_path.clone();
+    let db = Db::open(&db_path).unwrap();
+    db.update_pipeline_item_activity("task-1", "unread")
+        .unwrap();
     rusqlite::Connection::open(&db_path)
         .unwrap()
         .execute(
-            "UPDATE pipeline_item SET activity_changed_at = '2026-07-25 01:00:00.500' WHERE id = 'task-1'",
+            "UPDATE pipeline_item SET activity_changed_at = '2026-07-25 01:00:00' WHERE id = 'task-1'",
             [],
         )
         .unwrap();
+    db.update_pipeline_item_activity("task-1", "working")
+        .unwrap();
+    db.update_pipeline_item_activity("task-1", "unread")
+        .unwrap();
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "UPDATE pipeline_item SET activity_changed_at = '2026-07-25 01:00:00' WHERE id = 'task-1'",
+            [],
+        )
+        .unwrap();
+    drop(db);
     let app = super::router(state);
 
     let response = app
@@ -464,7 +478,7 @@ async fn mark_read_route_keeps_unread_activity_newer_than_cutoff() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
-                        "activityCutoff": "2026-07-25T01:00:00.000Z",
+                        "expectedActivityRevision": 1,
                     })
                     .to_string(),
                 ))
@@ -477,10 +491,15 @@ async fn mark_read_route_keeps_unread_activity_newer_than_cutoff() {
     let db = Db::open(&db_path).unwrap();
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
     assert_eq!(item.activity.as_deref(), Some("unread"));
+    assert_eq!(item.activity_revision, 3);
+    assert_eq!(
+        item.activity_changed_at.as_deref(),
+        Some("2026-07-25 01:00:00")
+    );
 }
 
 #[tokio::test]
-async fn mark_read_route_clears_unread_activity_at_or_before_cutoff() {
+async fn mark_read_route_clears_exact_revision_and_makes_replay_harmless() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_pipeline_item(
@@ -496,34 +515,28 @@ async fn mark_read_route_clears_unread_activity_at_or_before_cutoff() {
             .unwrap();
     });
     let db_path = state.config.db_path.clone();
-    rusqlite::Connection::open(&db_path)
-        .unwrap()
-        .execute(
-            "UPDATE pipeline_item SET activity_changed_at = '2026-07-25 01:00:00.000' WHERE id = 'task-1'",
-            [],
-        )
-        .unwrap();
     let app = super::router(state);
 
-    let response = app
-        .oneshot(
-            Request::post("/v1/tasks/task-1/actions/mark-read")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "activityCutoff": "2026-07-25T01:00:00.000Z",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let request = || {
+        Request::post("/v1/tasks/task-1/actions/mark-read")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "expectedActivityRevision": 1,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(request()).await.unwrap();
+    let replay_response = app.oneshot(request()).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(replay_response.status(), StatusCode::OK);
     let db = Db::open(&db_path).unwrap();
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
     assert_eq!(item.activity.as_deref(), Some("idle"));
+    assert_eq!(item.activity_revision, 2);
 }
 
 #[tokio::test]

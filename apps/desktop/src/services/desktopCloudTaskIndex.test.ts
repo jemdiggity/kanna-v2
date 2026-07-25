@@ -64,6 +64,7 @@ describe("mapDesktopCloudTasks", () => {
         displayName: null,
         stage: "in progress",
         activity: "working",
+        activityRevision: 9,
         status: "active",
         repo: {
           cloudRepoId: "repo-1",
@@ -99,6 +100,7 @@ describe("mapDesktopCloudTasks", () => {
         last_output_preview: "Ready for review",
         agent_provider: "codex",
         agent_type: "agent",
+        activity_revision: 9,
       },
     ]);
     expect(snapshot.terminalRefs["cloud:repo-1:task-1"]).toEqual({

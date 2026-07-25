@@ -71,7 +71,8 @@ impl Db {
                       WHERE stage_run.task_id = pipeline_item.id
                         AND stage_run.kind = 'post'
                         AND stage_run.status = 'running'
-                    ) AS has_running_post
+                    ) AS has_running_post,
+                    pipeline_item.activity_revision
              FROM pipeline_item
              WHERE repo_id = ? AND closed_at IS NULL
              ORDER BY created_at DESC",
@@ -111,6 +112,7 @@ impl Db {
                 created_at: row.get(30)?,
                 updated_at: row.get(31)?,
                 has_running_post: row.get(32)?,
+                activity_revision: row.get(33)?,
             })
         })?;
         rows.collect()

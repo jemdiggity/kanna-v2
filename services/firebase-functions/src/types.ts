@@ -31,6 +31,7 @@ export interface CloudTaskSnapshot {
   displayName: string | null;
   stage: string;
   activity: CloudTaskActivity;
+  activityRevision?: number;
   status: CloudTaskStatus;
   repo: {
     cloudRepoId: string;

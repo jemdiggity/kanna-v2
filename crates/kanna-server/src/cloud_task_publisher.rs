@@ -38,6 +38,7 @@ struct CloudTaskSnapshot {
     display_name: Option<String>,
     stage: String,
     activity: String,
+    activity_revision: i64,
     status: String,
     repo: CloudRepoSnapshot,
     branch: Option<String>,
@@ -174,6 +175,7 @@ fn map_task(
         display_name: truncate_option(item.display_name, 512),
         stage: truncate(&item.stage, 64),
         activity: truncate(&item.activity, 32),
+        activity_revision: item.activity_revision,
         status: status.into(),
         repo: CloudRepoSnapshot {
             cloud_repo_id: repo.id.clone(),
@@ -398,6 +400,7 @@ mod tests {
                     agent_type: Some("pty".into()),
                     agent_provider: "codex".into(),
                     activity: activity.into(),
+                    activity_revision: 7,
                     activity_changed_at: Some("2026-07-14 01:02:03".into()),
                     unread_at: None,
                     port_offset: None,
@@ -444,6 +447,7 @@ mod tests {
             "Implement publication\nwith detail"
         );
         assert_eq!(json["tasks"][0]["activity"], "working");
+        assert_eq!(json["tasks"][0]["activityRevision"], 7);
         assert_eq!(json["tasks"][0]["waitingPromptSnippet"], "Ready for review");
         assert_eq!(json["tasks"][0]["status"], "blocked");
         assert_eq!(

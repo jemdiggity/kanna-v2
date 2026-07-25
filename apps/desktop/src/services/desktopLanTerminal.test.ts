@@ -22,7 +22,7 @@ describe("createDesktopLanTerminalClient", () => {
     await client.markTaskRead({
       desktopId: "peer-primary",
       taskId: "task-1",
-      activityCutoff: "2026-07-25T01:00:00.000Z",
+      expectedActivityRevision: 7,
     });
 
     expect(invoke).toHaveBeenCalledWith("send_transfer_peer_session_input", {
@@ -47,7 +47,7 @@ describe("createDesktopLanTerminalClient", () => {
     expect(invoke).toHaveBeenCalledWith("mark_transfer_peer_task_read", {
       peerId: "peer-primary",
       taskId: "task-1",
-      activityCutoff: "2026-07-25T01:00:00.000Z",
+      expectedActivityRevision: 7,
     });
   });
 

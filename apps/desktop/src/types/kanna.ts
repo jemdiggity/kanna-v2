@@ -31,6 +31,7 @@ export interface PipelineItem {
   agent_type: string | null;
   agent_provider: AgentProvider;
   activity: "working" | "unread" | "idle";
+  activity_revision?: number;
   activity_changed_at: string | null;
   unread_at: string | null;
   port_offset: number | null;
