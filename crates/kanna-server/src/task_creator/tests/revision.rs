@@ -790,6 +790,57 @@ async fn request_revision_falls_back_to_fork_without_cli_transcript() {
 }
 
 #[test]
+fn revision_does_not_skip_newer_null_handle_main_run() {
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    let config = test_config("revision-resume-newer-null-handle");
+    let (repo_root, db) =
+        init_resume_revision_fixture("revision-resume-newer-null-handle", &config);
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
+    let claude_config_dir = repo_root.join("claude-config");
+    write_resume_transcript(&claude_config_dir, &impl_worktree);
+    std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
+    db.insert_stage_run(NewStageRun {
+        id: "run-newer-codex",
+        task_id: "review-task",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        status: "succeeded",
+        result: Some("{\"status\":\"success\"}"),
+        feedback: None,
+        session_id: Some("review-task"),
+        provider_session_id: None,
+        cwd: Some(impl_worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Do not resume stale Claude work.",
+    )
+    .unwrap();
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+
+    assert!(prepared.resumed_workspace().is_none());
+    assert_ne!(
+        prepared.provider_session_id.as_deref(),
+        Some(RESUME_SESSION_UUID)
+    );
+    let fork = prepared
+        .forked_workspace()
+        .expect("newest null-handle run must force a fresh fork");
+    let _ =
+        crate::task_creator::worktree::remove_prepared_worktree(&fork.worktree_path, &fork.branch);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
     // The built-in implement def lists several providers (codex first); a
     // revision continues work the task already did with its own provider and

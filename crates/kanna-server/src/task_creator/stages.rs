@@ -585,11 +585,11 @@ fn prepare_revision_resume(
     };
 
     let run = match db
-        .latest_resumable_stage_run(task_id, &target_stage.name)
+        .latest_main_stage_run(task_id, &target_stage.name)
         .map_err(|e| format!("db error: {}", e))?
     {
         Some(run) => run,
-        None => return fall_back("no stage run recorded a provider session"),
+        None => return fall_back("no main stage run was recorded"),
     };
     let Some(run_provider) = run.agent_provider.as_deref() else {
         return fall_back("previous run recorded no provider");

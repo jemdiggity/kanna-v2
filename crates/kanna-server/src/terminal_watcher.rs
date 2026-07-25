@@ -23,7 +23,11 @@ fn persist_provider_session_id(
     else {
         return Ok(());
     };
-    db.update_stage_run_provider_session_id(session_id, resume_session_id, completed_only)
+    db.update_stage_run_provider_session_id_by_session(
+        session_id,
+        resume_session_id,
+        completed_only,
+    )
         .map_err(|e| format!("db error: {e}"))?;
     if update_current_task {
         db.update_pipeline_item_agent_session_id(&task_id, Some(resume_session_id))

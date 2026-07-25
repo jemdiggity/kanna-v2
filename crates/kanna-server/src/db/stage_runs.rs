@@ -7,6 +7,13 @@ pub struct FinishedStageRun {
     pub completion_transition: Option<String>,
 }
 
+/// Result of attaching a provider-native handle to its immutable owning run.
+pub struct ProviderSessionUpdate {
+    pub changed: bool,
+    /// Present only when the updated run is still the task's newest main run.
+    pub current_task_id: Option<String>,
+}
+
 impl Db {
     pub fn has_durable_running_task_session(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
@@ -101,11 +108,10 @@ impl Db {
         }
     }
 
-    /// The most recent main run of `stage` whose provider session could be
-    /// resumed: it recorded both the agent CLI's own session id and the
-    /// worktree it ran in. Whether resumption is actually possible (worktree
-    /// still on disk, transcript present, tips match) is the caller's check.
-    pub fn latest_resumable_stage_run(
+    /// The most recent main run of `stage`, whether or not it is resumable.
+    /// The caller must validate this exact run rather than skipping a newer
+    /// incomplete run to resume an older provider conversation.
+    pub fn latest_main_stage_run(
         &self,
         task_id: &str,
         stage: &str,
@@ -118,7 +124,6 @@ impl Db {
                         completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
-                   AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
                  ORDER BY datetime(started_at) DESC, id DESC
                  LIMIT 1",
                 [task_id, stage],
@@ -132,11 +137,61 @@ impl Db {
         }
     }
 
-    /// Attach a provider-native resume handle to the most recent run owned by
-    /// a daemon terminal session. Orchestrated replacements use
-    /// `completed_only` so a delayed exit event cannot stamp the newly
-    /// spawned running stage that reuses the same durable terminal id.
+    /// Attach a provider-native resume handle to its immutable owning main
+    /// run. The run id is generated before daemon spawn and echoed on daemon
+    /// lifecycle events, so a delayed event cannot stamp a replacement run
+    /// that reuses the same durable terminal session id.
     pub fn update_stage_run_provider_session_id(
+        &self,
+        run_id: &str,
+        provider_session_id: &str,
+    ) -> Result<ProviderSessionUpdate, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE stage_run
+             SET provider_session_id = ?2
+             WHERE id = ?1 AND kind = 'main' AND provider_session_id IS NULL",
+            (run_id, provider_session_id),
+        )? > 0;
+        if !changed {
+            return Ok(ProviderSessionUpdate {
+                changed: false,
+                current_task_id: None,
+            });
+        }
+
+        let current_task_id = self
+            .conn
+            .query_row(
+                "SELECT owner.task_id
+                 FROM stage_run owner
+                 WHERE owner.id = ?1
+                   AND owner.kind = 'main'
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM stage_run newer
+                     WHERE newer.task_id = owner.task_id
+                       AND newer.kind = 'main'
+                       AND (
+                         datetime(newer.started_at) > datetime(owner.started_at)
+                         OR (
+                           datetime(newer.started_at) = datetime(owner.started_at)
+                           AND newer.id > owner.id
+                         )
+                       )
+                   )",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(ProviderSessionUpdate {
+            changed: true,
+            current_task_id,
+        })
+    }
+
+    /// Legacy reusable-session lookup retained only until daemon events carry
+    /// immutable run ownership.
+    pub fn update_stage_run_provider_session_id_by_session(
         &self,
         session_id: &str,
         provider_session_id: &str,
