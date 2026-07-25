@@ -1157,6 +1157,150 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+/// A wedged daemon must not silently strand a stage transition: when the
+/// kill round-trip times out, the transition fails with the timeout error,
+/// the forked workspace is rolled back, and the task's stage/branch stay
+/// untouched (2026-07-24 outage regression).
+#[tokio::test]
+async fn stage_transition_rolls_back_fork_when_daemon_command_times_out() {
+    let repo_root = init_git_repo("advance-stage-daemon-timeout");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review $BRANCH" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nname: reviewer\ndescription: Reviews task changes\nagent_provider: claude\n---\nReview task: $TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add kanna pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    publish_origin_main(&repo_root, "publish stage timeout definitions");
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let source_worktree = repo_root.join(".kanna-worktrees/task-source");
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            source_worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("advance-stage-daemon-timeout");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix stage promotion",
+        Some("Fix stage promotion"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-1",
+        "task-source",
+        "default",
+        Some("{\"status\":\"success\",\"summary\":\"implemented\"}"),
+        "claude",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-task-1",
+        "task-1",
+        &source_worktree.to_string_lossy(),
+        "task-source",
+    )
+    .unwrap();
+
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        other => panic!(
+            "expected stage swap, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    };
+    let fork_branch = run
+        .forked_workspace()
+        .expect("stage transition forks a workspace")
+        .branch
+        .clone();
+    let fork_worktree = run.forked_workspace().unwrap().worktree_path.clone();
+    assert!(std::path::Path::new(&fork_worktree).is_dir());
+
+    // Fake daemon reads the first Kill and never replies; the client's
+    // shrunken timeout stands in for the production 30s bound.
+    let fake_daemon = spawn_fake_daemon_read_then_stall(config.daemon_dir.clone()).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    daemon.set_command_timeout_for_test(std::time::Duration::from_millis(200));
+
+    let error = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *run,
+    )
+    .await
+    .expect_err("transition against a wedged daemon must fail, not park");
+    assert!(error.contains("timed out"), "unexpected error: {error}");
+
+    // The fork is rolled back and the task did not move.
+    assert!(
+        !std::path::Path::new(&fork_worktree).is_dir(),
+        "forked worktree must be removed on rollback"
+    );
+    assert_eq!(
+        run_git_fixture(&repo_root, &["branch", "--list", &fork_branch]),
+        "",
+        "forked branch must be deleted on rollback"
+    );
+    let task = db.get_task_stage_source("task-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(task.branch.as_deref(), Some("task-source"));
+    assert_eq!(
+        db.get_task_worktree_path("task-1").unwrap().as_deref(),
+        Some(source_worktree.to_string_lossy().as_ref())
+    );
+    // No review run was left behind.
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert!(
+        runs.iter().all(|run| run.stage != "review"),
+        "no review run may exist after a failed transition: {runs:?}"
+    );
+
+    fake_daemon.abort();
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[tokio::test]
 async fn prompt_only_stage_provider_overrides_source_task_provider_in_daemon_spawn() {
     let repo_root = init_git_repo("prompt-only-stage-provider");

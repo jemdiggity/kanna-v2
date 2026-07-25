@@ -9,8 +9,9 @@ use std::io;
 use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
 
-const RECV_FDS_RETRY_TIMEOUT: Duration = Duration::from_millis(250);
+const RECV_FDS_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 const RECV_FDS_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+const SEND_FDS_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Send file descriptors over a Unix socket.
 ///
@@ -61,12 +62,29 @@ pub fn send_fds(socket: RawFd, fds: &[RawFd]) -> io::Result<()> {
         std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(cmsg), fds_size);
     }
 
-    let ret = unsafe { libc::sendmsg(socket, &msg, 0) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // An SCM_RIGHTS message must be queued atomically, and the peer may
+    // still be draining a large payload written just before this call (the
+    // handoff writes the whole HandoffReady response first). On a
+    // nonblocking socket whose send buffer is still full, macOS rejects the
+    // ancillary-bearing message — observed as EMSGSIZE, not just EAGAIN —
+    // so retry both until the peer drains or the deadline passes. A single
+    // unretried sendmsg here lost a 33-session handoff on 2026-07-24.
+    let deadline = Instant::now() + SEND_FDS_RETRY_TIMEOUT;
+    loop {
+        let ret = unsafe { libc::sendmsg(socket, &msg, 0) };
+        if ret >= 0 {
+            return Ok(());
+        }
 
-    Ok(())
+        let error = io::Error::last_os_error();
+        let transient = error.kind() == io::ErrorKind::WouldBlock
+            || error.raw_os_error() == Some(libc::EMSGSIZE);
+        if !transient || Instant::now() >= deadline {
+            return Err(error);
+        }
+
+        std::thread::sleep(RECV_FDS_RETRY_INTERVAL);
+    }
 }
 
 /// Receive file descriptors from a Unix socket.
@@ -256,6 +274,77 @@ mod tests {
         unsafe {
             libc::close(s1);
             libc::close(s2);
+        }
+    }
+
+    #[test]
+    fn test_send_fds_retries_until_peer_drains_backlog() {
+        let (s1, s2) = socketpair();
+
+        let flags = unsafe { libc::fcntl(s1, libc::F_GETFL) };
+        assert!(flags >= 0, "failed to read socket flags");
+        let set_ret = unsafe { libc::fcntl(s1, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        assert_eq!(set_ret, 0, "failed to enable nonblocking mode");
+
+        // Fill the send buffer the way a handoff does: a large response
+        // written immediately before the fds.
+        let junk = [0u8; 8192];
+        let mut queued: usize = 0;
+        loop {
+            let n = unsafe { libc::send(s1, junk.as_ptr() as *const _, junk.len(), 0) };
+            if n < 0 {
+                let error = io::Error::last_os_error();
+                assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+                break;
+            }
+            queued += n as usize;
+        }
+        assert!(queued > 0, "expected to fill the socket send buffer");
+
+        let mut pipe_fds = [0 as RawFd; 2];
+        assert_eq!(
+            unsafe { libc::pipe(pipe_fds.as_mut_ptr()) },
+            0,
+            "pipe failed"
+        );
+        let (pipe_read, pipe_write) = (pipe_fds[0], pipe_fds[1]);
+
+        // Drain the backlog from the peer after a delay, mimicking the
+        // adopting daemon still reading the response line.
+        let drainer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut remaining = queued;
+            let mut buf = [0u8; 8192];
+            while remaining > 0 {
+                let want = remaining.min(buf.len());
+                let n = unsafe { libc::read(s2, buf.as_mut_ptr() as *mut _, want) };
+                assert!(n > 0, "peer read failed while draining backlog");
+                remaining -= n as usize;
+            }
+            s2
+        });
+
+        // Must retry through the full buffer instead of failing on the
+        // first EAGAIN/EMSGSIZE.
+        send_fds(s1, &[pipe_read]).unwrap();
+        unsafe { libc::close(pipe_read) };
+
+        let s2 = drainer.join().unwrap();
+        let received = recv_fds(s2, 1).unwrap();
+        assert_eq!(received.len(), 1);
+
+        let msg = b"drain";
+        unsafe { libc::write(pipe_write, msg.as_ptr() as *const _, msg.len()) };
+        let mut buf = [0u8; 5];
+        let n = unsafe { libc::read(received[0], buf.as_mut_ptr() as *mut _, buf.len()) };
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"drain");
+
+        unsafe {
+            libc::close(s1);
+            libc::close(s2);
+            libc::close(pipe_write);
+            libc::close(received[0]);
         }
     }
 
