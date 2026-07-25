@@ -357,9 +357,16 @@ describe("mentioned file menu", () => {
       "fixtures/a/shared.ts",
       "fixtures/b/shared.ts"
     ],
+    expectedCanonicalRowOrder: [
+      "fixtures/unique/TaskScreen.tsx",
+      "fixtures/a/shared.ts",
+      "fixtures/b/shared.ts",
+      "docs/spec.md"
+    ],
     mentionedCount: 3,
     mentionedLinks: [
       "docs/spec.md",
+      "TaskScreen.tsx:7",
       "shared.ts",
       "TaskScreen.tsx:7"
     ],
@@ -374,9 +381,13 @@ describe("mentioned file menu", () => {
 
   it("opens the dynamic menu, exposes canonical rows, and selects the unique file", async () => {
     const clicked: string[] = [];
+    const measuredRows: string[] = [];
     const driver = {
       $: vi.fn(async (selector: string) => {
         const exists = selector !== "~Files mentioned in terminal";
+        const rowIndex = fixture.expectedCanonicalRowOrder.findIndex(
+          (path) => selector === `~mobile.task-mentioned-files.row.${path}`
+        );
         return {
           click: vi.fn(async () => {
             clicked.push(selector);
@@ -387,6 +398,13 @@ describe("mentioned file menu", () => {
               ? "Mentioned Files (3)"
               : null
           ),
+          getLocation: vi.fn(async (axis: string) => {
+            if (axis !== "y" || rowIndex < 0) {
+              throw new Error(`Unexpected location request ${axis} for ${selector}`);
+            }
+            measuredRows.push(selector);
+            return 200 + rowIndex * 48;
+          }),
           isExisting: vi.fn(async () => exists),
           waitForDisplayed: vi.fn(async () => {
             if (!exists) throw new Error(`Missing control ${selector}`);
@@ -423,6 +441,11 @@ describe("mentioned file menu", () => {
       '-ios predicate string:label BEGINSWITH "Mentioned Files ("',
       "~mobile.task-mentioned-files.row.fixtures/unique/TaskScreen.tsx"
     ]);
+    expect(measuredRows).toEqual(
+      fixture.expectedCanonicalRowOrder.map(
+        (path) => `~mobile.task-mentioned-files.row.${path}`
+      )
+    );
     for (const path of [
       fixture.uniqueCanonicalPath,
       ...fixture.ambiguousCanonicalPaths,

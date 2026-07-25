@@ -92,6 +92,7 @@ interface RelayFilePreviewFixture {
   expectedHighlightedTokenClass: string;
   expectedRawLine: string;
   expectedRenderedText: string;
+  expectedCanonicalRowOrder: readonly string[];
   line: number;
   mentionedCount: number;
   mentionedLinks: readonly string[];
@@ -1055,13 +1056,22 @@ export async function openMentionedFileMenuSelection(
 
   const modal = await driver.$(selectors.taskMentionedFilesModal);
   await modal.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  for (const path of [
-    fixture.uniqueCanonicalPath,
-    ...fixture.ambiguousCanonicalPaths,
-    fixture.path
-  ]) {
+  const canonicalRowLocations: Array<{ path: string; y: number }> = [];
+  for (const path of fixture.expectedCanonicalRowOrder) {
     const row = await driver.$(taskMentionedFilesRowSelector(path));
     await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    const y = await row.getLocation("y");
+    canonicalRowLocations.push({ path, y });
+  }
+  for (let index = 1; index < canonicalRowLocations.length; index += 1) {
+    const previous = canonicalRowLocations[index - 1]!;
+    const current = canonicalRowLocations[index]!;
+    if (current.y <= previous.y) {
+      throw new Error(
+        `Expected canonical mentioned-file row order ${JSON.stringify(fixture.expectedCanonicalRowOrder)}; ` +
+        `measured ${JSON.stringify(canonicalRowLocations)}`
+      );
+    }
   }
 
   const uniqueRow = await driver.$(

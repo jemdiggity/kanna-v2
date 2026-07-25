@@ -181,6 +181,10 @@ export function buildTerminalDocument({
       let selectionMode = false;
       let altScreenScrollCapture = null;
       const terminalFileMentionHistory = new Map();
+      const terminalFileMentionOccurrences = {
+        alternate: new Map(),
+        normal: new Map()
+      };
       let terminalFileMentionOverflow = false;
       let pendingFileMentionScanStart = null;
       let pendingAlternateFileMentionScan = false;
@@ -377,16 +381,48 @@ export function buildTerminalDocument({
         };
       }
 
+      function terminalFileMentionOccurrenceKey(candidate) {
+        return JSON.stringify([
+          candidate.start,
+          candidate.raw,
+          candidate.parsed.path,
+          candidate.parsed.line ?? null
+        ]);
+      }
+
+      function newlyRenderedTerminalFileCandidates(
+        bufferType,
+        rowIndex,
+        line
+      ) {
+        const occurrences = terminalFileMentionOccurrences[bufferType];
+        if (!line) {
+          occurrences.delete(rowIndex);
+          return [];
+        }
+        const candidates = terminalFileCandidates(
+          line.translateToString(true)
+        );
+        const previousKeys = occurrences.get(rowIndex) ?? new Set();
+        const currentKeys = new Set();
+        const newlyRendered = [];
+        for (const candidate of candidates) {
+          const key = terminalFileMentionOccurrenceKey(candidate);
+          currentKeys.add(key);
+          if (!previousKeys.has(key)) {
+            newlyRendered.push(candidate);
+          }
+        }
+        if (currentKeys.size > 0) {
+          occurrences.set(rowIndex, currentKeys);
+        } else {
+          occurrences.delete(rowIndex);
+        }
+        return newlyRendered;
+      }
+
       function recordTerminalFileMention(candidate) {
         const mention = terminalFileMention(candidate);
-        const existing = terminalFileMentionHistory.get(candidate.parsed.path);
-        if (
-          existing &&
-          existing.raw === mention.raw &&
-          existing.line === mention.line
-        ) {
-          return;
-        }
         terminalFileMentionHistory.delete(candidate.parsed.path);
         terminalFileMentionHistory.set(
           candidate.parsed.path,
@@ -425,15 +461,22 @@ export function buildTerminalDocument({
         pendingFileMentionScanStart = null;
         pendingAlternateFileMentionScan = false;
         terminalFileMentionHistory.clear();
+        terminalFileMentionOccurrences.alternate.clear();
+        terminalFileMentionOccurrences.normal.clear();
         terminalFileMentionOverflow = false;
 
         const activeBuffer = term.buffer.active;
         const buffers =
           activeBuffer.type === "alternate"
             ? [
-                { buffer: activeBuffer, firstLine: 0 },
+                {
+                  buffer: activeBuffer,
+                  bufferType: "alternate",
+                  firstLine: 0
+                },
                 {
                   buffer: normalBuffer(),
+                  bufferType: "normal",
                   firstLine: Math.max(
                     0,
                     normalBuffer().length -
@@ -444,6 +487,7 @@ export function buildTerminalDocument({
             : [
                 {
                   buffer: normalBuffer(),
+                  bufferType: "normal",
                   firstLine: Math.max(
                     0,
                     normalBuffer().length -
@@ -461,9 +505,10 @@ export function buildTerminalDocument({
             index -= 1
           ) {
             const line = entry.buffer.getLine(index);
-            if (!line) continue;
-            const candidates = terminalFileCandidates(
-              line.translateToString(true)
+            const candidates = newlyRenderedTerminalFileCandidates(
+              entry.bufferType,
+              index,
+              line
             );
             for (
               let candidateIndex = candidates.length - 1;
@@ -538,12 +583,14 @@ export function buildTerminalDocument({
           if (normalScanStart !== null) {
             buffers.push({
               buffer: normalBuffer(),
+              bufferType: "normal",
               firstLine: normalScanStart
             });
           }
           if (scanAlternate) {
             buffers.push({
               buffer: term.buffer.alternate,
+              bufferType: "alternate",
               firstLine: 0
             });
           }
@@ -554,9 +601,10 @@ export function buildTerminalDocument({
               index += 1
             ) {
               const line = entry.buffer.getLine(index);
-              if (!line) continue;
-              for (const candidate of terminalFileCandidates(
-                line.translateToString(true)
+              for (const candidate of newlyRenderedTerminalFileCandidates(
+                entry.bufferType,
+                index,
+                line
               )) {
                 recordTerminalFileMention(candidate);
               }

@@ -4,15 +4,18 @@
 coverage because this journey crosses the terminal WebView, React Native,
 relay transport, owner server, SQLite task/worktree lookup, and the owner's
 filesystem. The relay fixture emits a Markdown path, a unique nested file by
-bare filename and line number, and an ambiguous bare filename with two owner
-filesystem matches.
+bare filename and line number, an ambiguous bare filename with two owner
+filesystem matches, then the identical unique bare token again. The repeated
+token surrounds the ambiguous mention so the journey exercises distinct-count
+deduplication and genuine reverse-chronological promotion.
 
 Appium waits for those mentions in xterm, asserts that the removed horizontal
 file strip is absent, then drives `+ -> Mentioned Files`. It verifies the
-dynamic count and the canonical rows returned by owner-side unique and
-ambiguous resolution. Selecting the unique bare mention opens the raw preview
-at the requested line; reopening the menu and selecting the Markdown row opens
-the rendered preview.
+dynamic count and measures the native rows to require this canonical order:
+the re-mentioned unique file, both sorted ambiguous matches, then the older
+Markdown file. Selecting the unique bare mention opens the raw preview at the
+requested line; reopening the menu and selecting the Markdown row opens the
+rendered preview.
 
 Native inspection metadata is required proof for both selections. It reports
 the canonical path, preview mode, initial line, and authenticated file content,
@@ -32,12 +35,14 @@ The canonical lane was rerun on July 25, 2026 after
 `./kd dev up --mobile --emulators`, using the rebuilt development app on iOS
 Simulator 26.2, Appium 2.19.0, and XCUITest driver 9.9.1. The file-preview
 portion ran successfully through its required native assertions: Appium opened
-`Mentioned Files (3)`, displayed the owner-resolved unique and ambiguous rows,
-resolved the unique bare mention to `fixtures/unique/TaskScreen.tsx`, fetched
-authenticated file content through the relay, and exposed the expected native
-inspection metadata for both the raw line-linked preview and the rendered
-`docs/spec.md` preview. The lane continued beyond file preview and eventually
-exited 1 in the visual-companion journey.
+`Mentioned Files (3)` after xterm rendered the sequence unique, ambiguous,
+identical unique; measured the owner-resolved native rows in the required
+unique, sorted ambiguous matches, Markdown order; resolved the unique bare
+mention to `fixtures/unique/TaskScreen.tsx`; fetched authenticated file content
+through the relay; and exposed the expected native inspection metadata for both
+the raw line-linked preview and the rendered `docs/spec.md` preview. The lane
+continued beyond file preview and eventually exited 1 in the visual-companion
+journey.
 
 The exact remaining blocker is WebKit inspection in this simulator/tooling
 combination. Appium advertised `WEBVIEW_*` contexts for `about:blank` pages, but
@@ -55,11 +60,12 @@ command supplies those services.
 
 - `e2e/specs/relay/relay-task-flow.test.ts` verifies `+ -> Mentioned Files`
   orchestration, dynamic menu counts, canonical unique/ambiguous rows, preview
-  selection order, WebView context selection, unavailable-context handling,
-  and native-context restoration.
+  native row ordering, selection order, WebView context selection,
+  unavailable-context handling, and native-context restoration.
 - `e2e/helpers/relay-harness.test.ts` fixes the unique bare mention, ambiguous
-  owner-side matches, Markdown code fence, Highlight.js token, and line-linked
-  raw target used by the real relay journey.
+  owner-side matches, identical repeated-token emission, expected canonical
+  MRU order, Markdown code fence, Highlight.js token, and line-linked raw
+  target used by the real relay journey.
 - `src/screens/buildTerminalDocument.test.ts`,
   `src/screens/TerminalWebView.test.tsx`,
   `src/screens/TaskMentionedFiles.test.tsx`, and

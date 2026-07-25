@@ -659,6 +659,62 @@ describe("buildTerminalDocument", () => {
     }
   });
 
+  it("promotes a later identical mention without increasing the bounded history", async () => {
+    vi.useFakeTimers();
+    try {
+      const { messages, window } = createExecutedTerminalDocument();
+
+      window.__replaceTerminalState({ text: "A.ts\nB.ts\n" });
+      await vi.runAllTimersAsync();
+      window.__appendTerminalChunk({ chunksB64: [b64("A.ts\n")] });
+      await vi.runAllTimersAsync();
+
+      expect(lastMessageOfType(messages, "terminal-file-mentions")).toEqual({
+        type: "terminal-file-mentions",
+        mentions: [
+          { raw: "A.ts", path: "A.ts" },
+          { raw: "B.ts", path: "B.ts" }
+        ],
+        overflow: false
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reorder or repost mentions from unchanged overlap or redraw scans", async () => {
+    vi.useFakeTimers();
+    try {
+      const { messages, window } = createExecutedTerminalDocument();
+
+      window.__replaceTerminalState({ text: "A.ts\nB.ts\n" });
+      await vi.runAllTimersAsync();
+      const mentionMessagesBeforeOverlap = messages.filter(
+        (message) => JSON.parse(message).type === "terminal-file-mentions"
+      );
+
+      window.__appendTerminalChunk({ chunksB64: [b64("ordinary output\n")] });
+      await vi.runAllTimersAsync();
+      window.__appendTerminalChunk({ chunksB64: [b64("redrawn output")] });
+      await vi.runAllTimersAsync();
+
+      const mentionMessagesAfterOverlap = messages.filter(
+        (message) => JSON.parse(message).type === "terminal-file-mentions"
+      );
+      expect(mentionMessagesAfterOverlap).toEqual(mentionMessagesBeforeOverlap);
+      expect(lastMessageOfType(messages, "terminal-file-mentions")).toEqual({
+        type: "terminal-file-mentions",
+        mentions: [
+          { raw: "B.ts", path: "B.ts" },
+          { raw: "A.ts", path: "A.ts" }
+        ],
+        overflow: false
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("retains twenty unique mentions and reports overflow", async () => {
     vi.useFakeTimers();
     try {

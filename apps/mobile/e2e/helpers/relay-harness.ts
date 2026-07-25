@@ -60,10 +60,17 @@ export const MOBILE_RELAY_FILE_PREVIEW_FIXTURE = {
   expectedHighlightedTokenClass: "hljs-keyword",
   expectedRenderedText: "Rendered through the authenticated owner relay.",
   expectedRawLine: "TARGET RAW LINE",
+  expectedCanonicalRowOrder: [
+    "fixtures/unique/TaskScreen.tsx",
+    "fixtures/a/shared.ts",
+    "fixtures/b/shared.ts",
+    "docs/spec.md"
+  ],
   line: 7,
   mentionedCount: 3,
   mentionedLinks: [
     "docs/spec.md",
+    "TaskScreen.tsx:7",
     "shared.ts",
     "TaskScreen.tsx:7"
   ],
