@@ -17,9 +17,9 @@ use tokio::task::JoinHandle;
 pub(super) struct IncomingTransferReservation {
     pub(super) source_peer_id: String,
     pub(super) source_task_id: String,
-    pub(super) created_at: Instant,
     pub(super) created_at_unix_ms: u64,
     pub(super) committed: bool,
+    pub(super) committed_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

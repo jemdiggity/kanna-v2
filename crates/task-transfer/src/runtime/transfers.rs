@@ -1,9 +1,7 @@
 use super::events::{FinalizedOutgoingTransfer, PreflightResult, RuntimeError, RuntimeEvent};
 use super::state::StagedTransferArtifact;
 use super::state::{OutgoingTransferReservation, TransferArtifactRecord, TransferRuntime};
-use super::utils::{
-    prune_incoming_reservations, prune_outgoing_transfers, prune_transfer_artifacts,
-};
+use super::utils::{prune_outgoing_transfers, prune_transfer_artifacts};
 use crate::crypto::{open_json, parse_public_key, seal_json};
 use crate::protocol::{PeerRequest, PeerResponse};
 use serde_json::Value;
@@ -207,11 +205,8 @@ impl TransferRuntime {
     ) -> Result<FinalizedOutgoingTransfer, RuntimeError> {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            for expired in
-                prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl)
-            {
-                self.replay_store.remove_incoming_reservation(&expired);
-            }
+            self.replay_store
+                .prune_incoming_reservations(&mut reservations, None);
             reservations
                 .get(transfer_id)
                 .map(|reservation| reservation.source_peer_id.clone())
@@ -360,11 +355,8 @@ impl TransferRuntime {
 
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            for expired in
-                prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl)
-            {
-                self.replay_store.remove_incoming_reservation(&expired);
-            }
+            self.replay_store
+                .prune_incoming_reservations(&mut reservations, None);
             reservations
                 .get(transfer_id)
                 .map(|reservation| reservation.source_peer_id.clone())
@@ -481,11 +473,8 @@ impl TransferRuntime {
     ) -> Result<(), RuntimeError> {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            for expired in
-                prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl)
-            {
-                self.replay_store.remove_incoming_reservation(&expired);
-            }
+            self.replay_store
+                .prune_incoming_reservations(&mut reservations, None);
             reservations.get(transfer_id).map(|reservation| {
                 (
                     reservation.source_peer_id.clone(),

@@ -1,8 +1,5 @@
 use super::events::RuntimeError;
-use super::state::{
-    IncomingTransferReservation, OutgoingTransferReservation, StoredIdentity,
-    TransferArtifactRecord,
-};
+use super::state::{OutgoingTransferReservation, StoredIdentity, TransferArtifactRecord};
 use crate::crypto::TransferIdentity;
 use crate::peer_store::PeerStore;
 use crate::protocol::{PeerResponse, PeerTerminalEvent};
@@ -206,25 +203,6 @@ pub(super) fn prune_outgoing_transfers(
         .collect::<Vec<_>>();
     for transfer_id in &expired {
         transfers.remove(transfer_id);
-    }
-    expired
-}
-
-pub(super) fn prune_incoming_reservations(
-    reservations: &mut HashMap<String, IncomingTransferReservation>,
-    pending_transfer_ttl: Duration,
-) -> Vec<String> {
-    let now = Instant::now();
-    let expired = reservations
-        .iter()
-        .filter(|(_, reservation)| {
-            !reservation.committed
-                && now.duration_since(reservation.created_at) >= pending_transfer_ttl
-        })
-        .map(|(transfer_id, _)| transfer_id.clone())
-        .collect::<Vec<_>>();
-    for transfer_id in &expired {
-        reservations.remove(transfer_id);
     }
     expired
 }

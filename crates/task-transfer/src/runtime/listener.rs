@@ -15,8 +15,8 @@ use super::state::{
 };
 use super::utils::{
     ensure_peer_is_trusted_for, extract_request_id, load_or_create_identity,
-    local_capabilities_json, pairing_verification_code, peer_store, prune_incoming_reservations,
-    prune_outgoing_transfers, prune_transfer_artifacts, write_json_line,
+    local_capabilities_json, pairing_verification_code, peer_store, prune_outgoing_transfers,
+    prune_transfer_artifacts, write_json_line,
 };
 use crate::crypto::{open_json, parse_public_key, seal_json};
 use crate::peer_store::PeerRecord;
@@ -24,12 +24,12 @@ use crate::protocol::{PairingPeer, PeerRequest, PeerResponse};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
+use rand_core::{OsRng, RngCore};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
@@ -185,17 +185,22 @@ async fn handle_connection(
                 })?
                 .to_string();
             let mut reservations = context.incoming_reservations.lock().await;
-            for expired in
-                prune_incoming_reservations(&mut reservations, context.pending_transfer_ttl)
+            context
+                .replay_store
+                .prune_incoming_reservations(&mut reservations, None);
+            if reservations
+                .values()
+                .filter(|reservation| !reservation.committed)
+                .count()
+                >= context.replay_store.max_active_incoming_reservations()
             {
-                context.replay_store.remove_incoming_reservation(&expired);
+                return Err(RuntimeError::Protocol(format!(
+                    "too many active incoming transfer reservations (maximum {})",
+                    context.replay_store.max_active_incoming_reservations()
+                )));
             }
             let transfer_id = loop {
-                let candidate = format!(
-                    "{}-transfer-{}",
-                    context.self_peer_id,
-                    context.request_counter.fetch_add(1, Ordering::Relaxed)
-                );
+                let candidate = random_transfer_id();
                 if !reservations.contains_key(&candidate) {
                     break candidate;
                 }
@@ -203,9 +208,9 @@ async fn handle_connection(
             let reservation = IncomingTransferReservation {
                 source_peer_id: source_peer_id.clone(),
                 source_task_id,
-                created_at: Instant::now(),
                 created_at_unix_ms: unix_ms(),
                 committed: false,
+                committed_at_unix_ms: None,
             };
             context
                 .replay_store
@@ -237,7 +242,6 @@ async fn handle_connection(
                 &context.registry_root,
                 &context.discovery,
                 &transfer_id,
-                context.pending_transfer_ttl,
                 sealed_payload,
                 &context.incoming_reservations,
                 &context.replay_store,
@@ -251,9 +255,13 @@ async fn handle_connection(
                             RuntimeError::Protocol(format!("unknown transfer id {}", transfer_id))
                         })?;
                         reservation.committed = true;
+                        reservation.committed_at_unix_ms = Some(unix_ms());
                         context
                             .replay_store
                             .save_incoming_reservation(&transfer_id, reservation)?;
+                        context
+                            .replay_store
+                            .prune_incoming_reservations(&mut reservations, Some(&transfer_id));
                     }
                     context
                         .incoming_sender
@@ -859,16 +867,13 @@ async fn build_incoming_event(
     registry_root: &Path,
     discovery: &PeerDiscovery,
     transfer_id: &str,
-    pending_transfer_ttl: Duration,
     sealed_payload: String,
     incoming_reservations: &Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
     replay_store: &super::replay_store::TransferReplayStore,
 ) -> Result<IncomingTransferEvent, RuntimeError> {
     let reservation = {
         let mut reservations = incoming_reservations.lock().await;
-        for expired in prune_incoming_reservations(&mut reservations, pending_transfer_ttl) {
-            replay_store.remove_incoming_reservation(&expired);
-        }
+        replay_store.prune_incoming_reservations(&mut reservations, None);
         reservations
             .get(transfer_id)
             .cloned()
@@ -916,4 +921,10 @@ async fn build_incoming_event(
         source_name,
         payload,
     })
+}
+
+fn random_transfer_id() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
