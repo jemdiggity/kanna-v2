@@ -2613,6 +2613,92 @@ describe("createCloudLanClient", () => {
     ]);
   });
 
+  it("canonicalizes a concurrent bootstrap even when the cloud repo read resolves last", async () => {
+    const lanTask = task({
+      id: "lan-only-task",
+      repoId: "repo-lan",
+      title: "Unpublished LAN task"
+    });
+    const cloudRepoRead = deferred<Array<{ id: string; name: string; remoteUrlHash?: string }>>();
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      listRepos: vi.fn().mockReturnValue(cloudRepoRead.promise)
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([lanTask]),
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-lan", name: "kanna", remoteUrlHash: "hash-kanna" }
+      ])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    // Bootstrap issues both reads concurrently. The LAN repo/task reads and
+    // the cloud task read settle first; the cloud repo read is still pending
+    // when the task list is returned — the ordering that used to leak the
+    // desktop-local repo id and recreate the duplicate repo entry.
+    const repoRead = client.listRepos();
+    const taskRead = client.listRecentTasks();
+    const tasks = await taskRead;
+    cloudRepoRead.resolve([
+      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+    ]);
+    const repos = await repoRead;
+
+    expect(tasks).toEqual([
+      { ...lanTask, repoId: "git:hash-kanna", ownerLocalRepoId: "repo-lan" }
+    ]);
+    expect(repos).toEqual([
+      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+    ]);
+    // The canonical repo id still routes to the LAN task.
+    await expect(client.listRepoTasks("git:hash-kanna")).resolves.toEqual([
+      { ...lanTask, repoId: "git:hash-kanna", ownerLocalRepoId: "repo-lan" }
+    ]);
+  });
+
+  it("reprojects an accepted task snapshot when LAN repo identity arrives later", async () => {
+    const lanTask = task({
+      id: "lan-only-task",
+      repoId: "repo-lan",
+      title: "Unpublished LAN task"
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+      ])
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([lanTask]),
+      listRepos: vi
+        .fn<KannaClient["listRepos"]>()
+        .mockRejectedValueOnce(new Error("repo read unavailable"))
+        .mockResolvedValue([
+          { id: "repo-lan", name: "kanna", remoteUrlHash: "hash-kanna" }
+        ])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    // The identity fetch attached to the task read fails, so the snapshot is
+    // accepted with the desktop-local repo id.
+    const tasks = await client.listRecentTasks();
+    expect(tasks).toEqual([lanTask]);
+
+    // A later successful repo read merges the entries and reprojects the
+    // accepted snapshot in place — the derived duplicate never surfaces.
+    await expect(client.listRepos()).resolves.toEqual([
+      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+    ]);
+    await expect(client.getTask("lan-only-task")).resolves.toMatchObject({
+      repoId: "git:hash-kanna",
+      ownerLocalRepoId: "repo-lan"
+    });
+  });
+
   it("uses last-good repository source data when a later explicit read fails", async () => {
     const cloud = createClientMock({
       listRepos: vi

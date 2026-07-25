@@ -444,6 +444,7 @@ export function createCloudLanClient(
   const lanRepoDisplayIds = new Map<string, string>();
 
   const rememberLanRepos = (snapshot: LanRepoSnapshot) => {
+    let displayIdsChanged = false;
     for (const repo of snapshot.repos) {
       const displayRepoId = canonicalRepoId(repo);
       lanRepoOwners.set(displayRepoId, {
@@ -451,10 +452,19 @@ export function createCloudLanClient(
         localRepoId: repo.id
       });
       if (displayRepoId === repo.id) {
-        lanRepoDisplayIds.delete(repo.id);
-      } else {
+        displayIdsChanged = lanRepoDisplayIds.delete(repo.id) || displayIdsChanged;
+      } else if (lanRepoDisplayIds.get(repo.id) !== displayRepoId) {
         lanRepoDisplayIds.set(repo.id, displayRepoId);
+        displayIdsChanged = true;
       }
+    }
+    // Newly learned repo identity reprojects the accepted snapshot, so an
+    // already-published task list stops deriving a duplicate repo entry the
+    // moment the LAN repo read lands. Routes are keyed by task display id
+    // and stay valid.
+    if (displayIdsChanged && acceptedTaskSnapshot) {
+      acceptedTaskSnapshot = canonicalizeLanTaskRepoIds(acceptedTaskSnapshot);
+      snapshotTaskRoutes = acceptedTaskSnapshot.routes;
     }
   };
 
@@ -583,24 +593,40 @@ export function createCloudLanClient(
     }
   };
 
-  const loadLanTaskSnapshot = async (): Promise<LanTaskSnapshot> => {
-    const status = await lan.getStatus();
-    if (status.state !== "running") {
-      throw new Error(`LAN desktop is not running (${status.state}).`);
+  // One repo fetch per desktop is shared between repo listings and task
+  // reads, so concurrent bootstrap flows consume a single /v1/repos call and
+  // identity bookkeeping happens at fetch resolution regardless of which
+  // caller wins the race.
+  const lanRepoIdentityDesktops = new Set<string>();
+  let lanRepoFetchInFlight: {
+    desktopId: string;
+    read: Promise<LanRepoSnapshot>;
+  } | null = null;
+  const fetchLanRepoSnapshot = (
+    desktopLan: KannaClient,
+    desktopId: string
+  ): Promise<LanRepoSnapshot> => {
+    if (lanRepoFetchInFlight?.desktopId === desktopId) {
+      return lanRepoFetchInFlight.read;
     }
-    const desktopLan = lanClientForDesktop(status.desktopId);
-    if (!desktopLan) {
-      throw new Error(
-        `No LAN client is available for desktop ${status.desktopId}.`
-      );
-    }
-    const tasks = await desktopLan.listRecentTasks();
-    return {
-      desktopId: status.desktopId,
-      tasks
-    };
+    let inFlight!: { desktopId: string; read: Promise<LanRepoSnapshot> };
+    const read = desktopLan
+      .listRepos()
+      .then((repos) => {
+        const snapshot: LanRepoSnapshot = { desktopId, repos };
+        rememberLanRepos(snapshot);
+        lanRepoIdentityDesktops.add(desktopId);
+        return snapshot;
+      })
+      .finally(() => {
+        if (lanRepoFetchInFlight === inFlight) {
+          lanRepoFetchInFlight = null;
+        }
+      });
+    inFlight = { desktopId, read };
+    lanRepoFetchInFlight = inFlight;
+    return read;
   };
-  const readLanTaskSnapshot = shareWhilePending(loadLanTaskSnapshot);
   const loadLanRepoSnapshot = async (): Promise<LanRepoSnapshot> => {
     const status = await lan.getStatus();
     if (status.state !== "running") {
@@ -612,12 +638,42 @@ export function createCloudLanClient(
         `No LAN client is available for desktop ${status.desktopId}.`
       );
     }
-    return {
-      desktopId: status.desktopId,
-      repos: await desktopLan.listRepos()
-    };
+    return fetchLanRepoSnapshot(desktopLan, status.desktopId);
   };
   const readLanRepoSnapshot = shareWhilePending(loadLanRepoSnapshot);
+  const loadLanTaskSnapshot = async (): Promise<LanTaskSnapshot> => {
+    const status = await lan.getStatus();
+    if (status.state !== "running") {
+      throw new Error(`LAN desktop is not running (${status.state}).`);
+    }
+    const desktopLan = lanClientForDesktop(status.desktopId);
+    if (!desktopLan) {
+      throw new Error(
+        `No LAN client is available for desktop ${status.desktopId}.`
+      );
+    }
+    // Until this desktop's repo identity is known, task reads fetch the repo
+    // list alongside the tasks so LAN-only tasks canonicalize to
+    // `git:<hash>` in the same read. Without this, a bootstrap that accepts
+    // tasks before any repo read lands would return desktop-local repo ids
+    // and resurface the cross-machine duplicate. Best-effort: a failed repo
+    // read degrades to the last known identity.
+    const repoIdentityRead = lanRepoIdentityDesktops.has(status.desktopId)
+      ? null
+      : fetchLanRepoSnapshot(desktopLan, status.desktopId).then(
+          () => undefined,
+          () => undefined
+        );
+    const tasks = await desktopLan.listRecentTasks();
+    if (repoIdentityRead) {
+      await repoIdentityRead;
+    }
+    return {
+      desktopId: status.desktopId,
+      tasks
+    };
+  };
+  const readLanTaskSnapshot = shareWhilePending(loadLanTaskSnapshot);
   const readLanDesktops = shareWhilePending(() => lan.listDesktops());
 
   const performRecentTaskRead = async (
@@ -990,18 +1046,19 @@ export function createCloudLanClient(
               options.isLanEnabled()
             ) {
               lastLanRepoSnapshot = lateSnapshot;
-              rememberLanRepos(lateSnapshot);
             }
           }
         )
       : null;
     const cachedTaskSnapshot =
       lastCloudTasks !== undefined || (lanEnabled && lastLanTaskSnapshot !== undefined)
-        ? mergeCloudAndLanTasks({
-            cloudTasks: lastCloudTasks ?? [],
-            lan: lanEnabled ? lastLanTaskSnapshot ?? null : null,
-            lanAuthoritative: false
-          }).tasks
+        ? canonicalizeLanTaskRepoIds(
+            mergeCloudAndLanTasks({
+              cloudTasks: lastCloudTasks ?? [],
+              lan: lanEnabled ? lastLanTaskSnapshot ?? null : null,
+              lanAuthoritative: false
+            })
+          ).tasks
         : null;
     const tasksRead: Promise<SettledRead<TaskSummary[]>> = cachedTaskSnapshot
       ? Promise.resolve({ status: "fulfilled", value: cachedTaskSnapshot })
@@ -1021,7 +1078,6 @@ export function createCloudLanClient(
       lanResult?.status === "fulfilled"
     ) {
       lastLanRepoSnapshot = lanResult.value;
-      rememberLanRepos(lanResult.value);
     }
 
     const cloudRepos =
