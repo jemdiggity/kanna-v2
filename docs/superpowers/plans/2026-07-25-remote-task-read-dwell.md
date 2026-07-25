@@ -833,3 +833,66 @@ Verification must cover same-second transitions, delayed/replayed requests,
 restored selection, missing revisions, cloud/LAN projection, legacy empty-body
 owner calls, and forged sealed callers in addition to the original plan's
 transport and cancellation coverage.
+
+## 2026-07-25 Revision Plan: Review Hardening
+
+### Task 5: Harden the owner HTTP request target
+
+**Files:**
+- Modify: `crates/task-transfer/tests/runtime.rs`
+- Modify: `crates/task-transfer/src/runtime/daemon.rs`
+
+- [ ] Add runtime tests that send a task ID containing `/`, `%`, spaces, and
+  CRLF request-smuggling bytes, assert valid bytes are encoded in one segment,
+  assert control/oversized IDs fail before connecting, and prove only one
+  request reaches the owner server.
+- [ ] Run the focused runtime tests and verify the new cases fail for the
+  expected raw-target behavior.
+- [ ] Add bounded task-ID validation and RFC 3986 path-segment percent
+  encoding before opening the TCP stream.
+- [ ] Re-run the focused runtime tests and verify they pass.
+
+### Task 6: Preserve coherent duplicate-source provenance
+
+**Files:**
+- Modify: `apps/desktop/src/workspace/buildWorkspace.test.ts`
+- Modify: `apps/desktop/src/workspace/buildWorkspace.ts`
+
+- [ ] Add an equal-revision two-owner cloud/LAN regression that asserts item
+  ID, activity revision, owner, capabilities, and terminal route all come from
+  the chosen LAN candidate.
+- [ ] Run the focused workspace test and verify it fails because the merged
+  owner/item still describe the cloud candidate.
+- [ ] Select a complete candidate for the preferred route and derive all
+  source-sensitive fields from it while retaining the complete source list.
+- [ ] Re-run the focused workspace test and verify it passes.
+
+### Task 7: Scope dwell and mark-read client lifetimes
+
+**Files:**
+- Modify: `apps/desktop/src/composables/useRemoteTaskReadDwell.test.ts`
+- Modify: `apps/desktop/src/composables/useRemoteTaskReadDwell.ts`
+- Modify: `apps/desktop/src/App.test.ts`
+- Modify: `apps/desktop/src/composables/useAppCloudWorkspace.ts`
+
+- [ ] Add composable and App interaction regressions for selection changes,
+  identity-stable snapshot refreshes, stable-slot owner rebinding, and scope
+  teardown after arming.
+- [ ] Add an App teardown regression whose mark-read promise remains
+  unresolved and assert teardown closes the active client.
+- [ ] Run the focused tests and verify each new regression fails for the
+  expected lifecycle or identity reason.
+- [ ] Make the debounced watcher scope-disposable without resetting an
+  identity-stable dwell, and register active action clients so disposal closes
+  them while settled actions remove themselves.
+- [ ] Re-run the focused tests and typecheck, then run the integrated desktop
+  suite.
+
+### Task 8: Integrated verification
+
+- [ ] Run `cargo fmt --all -- --check`.
+- [ ] Run the focused task-transfer and desktop tests.
+- [ ] Run `pnpm --dir apps/desktop exec vue-tsc --noEmit`.
+- [ ] Run `pnpm test` and `./kd test rust`.
+- [ ] Run `git diff --check` and inspect the final diff against every reviewer
+  requirement.
