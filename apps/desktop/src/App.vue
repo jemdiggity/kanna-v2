@@ -60,6 +60,9 @@ const {
   initializeDesktopLanTaskSync,
   closeSelectedWorkspaceTask,
   advanceSelectedRemoteWorkspaceTask,
+  pinSidebarTask,
+  unpinSidebarTask,
+  reorderPinnedSidebarTasks,
   disposeDesktopCloudWorkspace,
 } = useAppCloudWorkspace({ db, store, toast, windowWorkspace });
 if (import.meta.env.DEV) {
@@ -406,9 +409,9 @@ const modalLayerController = {
         @select-repo="handleSelectRepo"
         @select-item="selectSidebarItemById"
         @new-task="(repoId: string) => openNewTaskModal(repoId).catch((e) => console.error('[App] openNewTaskModal failed:', e))"
-        @pin-item="store.pinItem"
-        @unpin-item="store.unpinItem"
-        @reorder-pinned="store.reorderPinned"
+        @pin-item="pinSidebarTask"
+        @unpin-item="unpinSidebarTask"
+        @reorder-pinned="reorderPinnedSidebarTasks"
         @set-parent="store.setTaskParent"
         @rename-item="store.renameItem"
         @rename-done="focusAgentTerminal"

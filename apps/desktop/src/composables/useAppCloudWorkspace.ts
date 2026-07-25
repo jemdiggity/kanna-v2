@@ -18,8 +18,14 @@ import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import { createConfiguredDesktopRelayTerminalClient } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
 import { fetchClosedTaskIdentities } from "../services/desktopServerClient";
+import {
+  parseRemoteTaskPins,
+  pinRemoteTask,
+  reorderRemoteTaskPins,
+  unpinRemoteTask,
+} from "../services/remoteTaskPins";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
-import { buildWorkspace } from "../workspace/buildWorkspace";
+import { buildWorkspace, workspaceTaskOwnerTaskId } from "../workspace/buildWorkspace";
 import { createWorkspaceSidebarProjector } from "../workspace/projectWorkspaceTasksForSidebar";
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
@@ -119,12 +125,15 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     ),
   }));
 
+  const remoteTaskPins = computed(() => parseRemoteTaskPins(store.snapshotSettings));
+
   const workspace = computed(() => buildWorkspace({
     localRepos: localReposForCloudMatching.value,
     localItems: store.items,
     localClosedItems: closedLocalTaskIdentities.value,
     cloudSnapshot: filterClosedRemoteSnapshot(cloudSnapshot.value),
     lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
+    remoteTaskPins: remoteTaskPins.value,
   }));
   const remoteTaskDiagnostics = computed(() => workspace.value.diagnostics);
   const workspaceSidebarProjection = computed(() => workspaceSidebarProjector.project({
@@ -392,6 +401,12 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         taskId: remoteRef.ownerLocalTaskId,
       });
       markWorkspaceTaskLocallyClosed(workspaceTask);
+      const pinnedOwnerTaskId = workspaceTaskOwnerTaskId(workspaceTask);
+      if (pinnedOwnerTaskId && remoteTaskPins.value.has(pinnedOwnerTaskId)) {
+        void unpinRemoteTask(pinnedOwnerTaskId).catch((error) =>
+          console.warn("[cloud] failed to drop closed remote task pin:", error),
+        );
+      }
       const currentPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
       if (closingPresentationSlotId && currentPresentationSlotId === closingPresentationSlotId) {
         selectedCloudItemId.value = null;
@@ -443,6 +458,84 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     }
   }
 
+  /**
+   * A workspace task that exists only on a remote owner. Its pin state lives
+   * in the viewer-local overlay because there is no local pipeline_item row
+   * to carry pinned/pin_order. Tasks with a local row use the normal store
+   * pin path even when remote duplicates exist.
+   */
+  function remoteOnlyWorkspaceTask(itemId: string): WorkspaceTask | null {
+    const task = workspaceTasksByItemId.value.get(itemId);
+    if (!task || task.owner.kind === "local" || task.localTaskId !== null) return null;
+    return task;
+  }
+
+  function requireRemoteOwnerTaskId(task: WorkspaceTask): string {
+    const ownerTaskId = workspaceTaskOwnerTaskId(task);
+    if (!ownerTaskId) throw new Error("Remote task identity is unavailable.");
+    return ownerTaskId;
+  }
+
+  async function refreshAfterRemotePinChange(reason: string): Promise<void> {
+    await store.reloadSnapshot();
+    await windowWorkspace.invalidateSharedData(reason);
+  }
+
+  async function pinSidebarTask(itemId: string, position: number): Promise<void> {
+    try {
+      const remoteTask = remoteOnlyWorkspaceTask(itemId);
+      if (!remoteTask) {
+        await store.pinItem(itemId, position);
+        return;
+      }
+      await pinRemoteTask(requireRemoteOwnerTaskId(remoteTask), position);
+      await refreshAfterRemotePinChange("pinRemoteTask");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function unpinSidebarTask(itemId: string): Promise<void> {
+    try {
+      const remoteTask = remoteOnlyWorkspaceTask(itemId);
+      if (!remoteTask) {
+        await store.unpinItem(itemId);
+        return;
+      }
+      await unpinRemoteTask(requireRemoteOwnerTaskId(remoteTask));
+      await refreshAfterRemotePinChange("unpinRemoteTask");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function reorderPinnedSidebarTasks(repoId: string, orderedIds: string[]): Promise<void> {
+    try {
+      const remoteOrders = new Map<string, number>();
+      let hasLocalIds = false;
+      orderedIds.forEach((id, index) => {
+        const remoteTask = remoteOnlyWorkspaceTask(id);
+        if (!remoteTask) {
+          hasLocalIds = true;
+          return;
+        }
+        const ownerTaskId = workspaceTaskOwnerTaskId(remoteTask);
+        if (ownerTaskId) remoteOrders.set(ownerTaskId, index);
+      });
+      await reorderRemoteTaskPins(remoteOrders);
+      if (hasLocalIds) {
+        // Local pin orders take their index within the full mixed list, so the
+        // full ordered id list goes to the server; it ignores ids it does not
+        // own, leaving remote entries to the overlay written above.
+        await store.reorderPinned(repoId, orderedIds);
+      } else if (remoteOrders.size > 0) {
+        await refreshAfterRemotePinChange("reorderRemoteTaskPins");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   function disposeDesktopCloudWorkspace(): void {
     unsubscribeDesktopAuth?.();
     stopCloudTaskSubscription();
@@ -481,6 +574,9 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     initializeDesktopLanTaskSync,
     closeSelectedWorkspaceTask,
     advanceSelectedRemoteWorkspaceTask,
+    pinSidebarTask,
+    unpinSidebarTask,
+    reorderPinnedSidebarTasks,
     disposeDesktopCloudWorkspace,
   };
 }
