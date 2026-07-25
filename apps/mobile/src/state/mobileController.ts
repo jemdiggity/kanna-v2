@@ -2177,12 +2177,17 @@ export function createMobileController(
           store.clearTaskAgent();
           store.clearTaskCompanion();
         }
+        store.setComposerErrorMessage(null);
         setUnownedErrorMessage(null);
       } catch (error) {
         const message =
           error instanceof Error
             ? error.message
             : "Could not abort task creation";
+        if (isCurrentTaskCreationAttempt(attempt)) {
+          store.setTaskCreationAttemptPhase(attempt.slotId, "uncertain");
+        }
+        store.setComposerErrorMessage(message);
         setUnownedErrorMessage(message);
       } finally {
         store.finishTaskAction(slotId, "close-task");

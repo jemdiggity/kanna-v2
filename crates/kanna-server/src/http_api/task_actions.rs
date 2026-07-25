@@ -491,18 +491,23 @@ pub(super) async fn abort_task_creation(
     }
 
     let task = {
-        let db = Db::open(&state.config.db_path).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-        db.get_pipeline_item(&task_id).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?
+        let state = Arc::clone(&state);
+        let lookup_task_id = task_id.clone();
+        super::blocking::run_handler_blocking("task creation abort lookup", move || {
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            db.get_pipeline_item(&lookup_task_id).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })
+        })
+        .await?
     };
     if task.is_none() || task.is_some_and(|task| task.closed_at.is_some()) {
         return Ok(axum::http::StatusCode::NO_CONTENT);

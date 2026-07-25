@@ -3261,6 +3261,7 @@ describe("createMobileController", () => {
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: attempt.slotId,
+      composerErrorMessage: "Desktop is offline",
       taskCreationAttempts: [
         {
           ...attempt,
@@ -3268,6 +3269,56 @@ describe("createMobileController", () => {
         }
       ],
       taskUiSlots: [{ slotId: attempt.slotId, state: "creating" }]
+    });
+  });
+
+  it("marks a pending slot uncertain when create settles but abort fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const create = createDeferred<
+      Awaited<ReturnType<KannaClient["createTask"]>>
+    >();
+    const abort = createDeferred<void>();
+    client.createTask.mockReturnValue(create.promise);
+    client.abortTaskCreation.mockReturnValue(abort.promise);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "cccccccccccccccccccccccccccccccc",
+      createTaskSlotId: () => "create:slot-abort-failure",
+      persistSessionContext: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Creation may have finished");
+    const createPromise = controller.createTask();
+    await flushMicrotasks();
+    const abortPromise = controller.abortTaskCreation(
+      "create:slot-abort-failure"
+    );
+
+    create.resolve({
+      taskId: "cccccccccccccccccccccccccccccccc",
+      repoId: "repo-2",
+      title: "Creation may have finished",
+      stage: "in progress"
+    });
+    await createPromise;
+    abort.reject(new Error("Could not close the desktop task"));
+    await abortPromise;
+
+    expect(store.getState()).toMatchObject({
+      composerErrorMessage: "Could not close the desktop task",
+      taskCreationAttempts: [
+        {
+          slotId: "create:slot-abort-failure",
+          taskId: "cccccccccccccccccccccccccccccccc",
+          phase: "uncertain"
+        }
+      ],
+      taskUiSlots: [
+        { slotId: "create:slot-abort-failure", state: "creating" }
+      ]
     });
   });
 
