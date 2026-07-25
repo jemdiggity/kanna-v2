@@ -20,15 +20,36 @@ pub async fn kill_agent_session(
     let Some(mut record) = record else {
         return false;
     };
+    // Every successful termination must broadcast exactly one Exit —
+    // consume-once kill orchestration (SessionReplacements) depends on it.
+    // `exited` alone is the wrong predicate: an INITIAL SpawnAgent reservation
+    // is created with `exited: true` and never announced a SessionCreated or
+    // an Exit, so removing one used to reply Ok while emitting nothing, and a
+    // consumer awaiting the Exit would wait forever (or a replacement entry
+    // would stay unconsumed). A record that exited naturally already
+    // broadcast its Exit from the reader; a reservation never did.
+    let must_announce_exit = !record.exited || record.reservation_is_initial;
     if !record.exited {
-        let _ = agent::signal_agent_pid(record.pid, libc::SIGKILL);
-        if let Some(mut child) = record.child.take() {
-            let _ = child.wait();
+        // Group-kill only through a verified identity; the direct
+        // `child.kill()` below is safe regardless (std tracks our own child).
+        if let Err(error) = agent::kill_agent_group_verified(record.pid, record.child_start) {
+            super::log_info(format_args!(
+                "[agent] kill {}: group signal refused: {}",
+                session_id, error
+            ));
         }
-        // An exited session already broadcast its Exit from the reader; a
-        // live session killed here never reaches that path, so announce the
-        // death now. Every termination must broadcast exactly one Exit —
-        // consume-once kill orchestration (SessionReplacements) depends on it.
+        if let Some(mut child) = record.child.take() {
+            let _ = child.kill();
+            // Hand the child to the central reaper instead of blocking this
+            // task on `wait()`: a child stuck exiting in the kernel must not
+            // wedge the caller (Kill is issued from a client connection).
+            kanna_daemon::reaper::reap_detached(child, record.child_start);
+        }
+    }
+    if must_announce_exit {
+        // A live session killed here never reaches the reader's exit path, and
+        // a cancelled reservation has no reader at all: announce the death now
+        // so exactly one Exit is emitted per successful Kill.
         broadcast_event(
             broadcast_tx,
             &Event::Exit {
@@ -42,6 +63,11 @@ pub async fn kill_agent_session(
     if let Some(fds) = record.handoff_fds.take() {
         fds.close();
     }
+    // Close the child's stdin explicitly, and drop the record (with it, the
+    // stdout/stderr pipe handles the readers were given). The child is dead
+    // and its whole descendant tree with it, so the read ends see EOF and the
+    // reader tasks exit instead of lingering on inherited descriptors.
+    drop(record.stdin.take());
     let mut sh = record.shared.lock().await;
     let entry = sh.journal.append(AgentEvent::SessionEnded {
         reason: SessionEndReason::Interrupted,
@@ -54,6 +80,11 @@ pub async fn kill_agent_session(
         event: entry.event,
     };
     fan_out(&mut sh.writers, &wire).await;
+    // Deliver the final event, then detach every writer: the session is gone,
+    // so retaining client sockets here would hold them (and the shared state)
+    // alive across session churn.
+    sh.writers.clear();
+    drop(sh);
     broadcast_event(
         broadcast_tx,
         &Event::StatusChanged {

@@ -137,16 +137,22 @@ impl DaemonHandle {
     /// Start a daemon in the given directory. If a daemon is already running
     /// there (from a previous start), the new one will attempt handoff.
     fn start_in(dir: &PathBuf) -> Self {
+        Self::start_in_with_env(dir, &[])
+    }
+
+    fn start_in_with_env(dir: &PathBuf, extra_env: &[(&str, &str)]) -> Self {
         std::fs::create_dir_all(dir).unwrap();
 
         let daemon_bin = PathBuf::from(env!("CARGO_BIN_EXE_kanna-daemon"));
         let socket_path = compute_socket_path(dir);
         let pid_path = dir.join("daemon.pid");
 
-        let child = Command::new(&daemon_bin)
-            .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
-            .spawn()
-            .expect("failed to start daemon");
+        let mut command = Command::new(&daemon_bin);
+        command.env("KANNA_DAEMON_DIR", dir.to_str().unwrap());
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let child = command.spawn().expect("failed to start daemon");
 
         let expected_pid = child.id();
 
@@ -956,6 +962,63 @@ fn test_handoff_broadcasts_shutting_down() {
         matches!(evt_b, Evt::ShuttingDown),
         "sub_b should get ShuttingDown, got: {:?}",
         evt_b
+    );
+
+    cleanup(&dir);
+}
+
+/// Release-complete regression: even when the old daemon is slow to
+/// relinquish its PTY readers after acknowledging adoption (fault-injected
+/// via KANNA_TEST_HANDOFF_RELEASE_DELAY_MS), the adopting daemon must not
+/// publish itself (pid file + socket) until the old daemon has actually
+/// exited — otherwise both daemons would consume and split session output.
+#[test]
+fn test_adopter_publishes_only_after_delayed_old_daemon_exits() {
+    let dir = test_dir("delayed-release");
+    let session_id = unique_session_id("delayed-release");
+
+    // Old daemon with a delayed reader release.
+    let mut daemon_a =
+        DaemonHandle::start_in_with_env(&dir, &[("KANNA_TEST_HANDOFF_RELEASE_DELAY_MS", "1500")]);
+    let mut conn_a = daemon_a.connect();
+    spawn_echo(&mut conn_a, &session_id);
+    attach(&mut conn_a, &session_id);
+    send_input_and_wait_for_echo(
+        &mut conn_a,
+        &session_id,
+        b"before-handoff\n",
+        "before-handoff",
+    );
+
+    // New daemon adopts. start_in returns only once B's pid file and socket
+    // are live — by then the delayed old daemon must have exited (it may be
+    // an unreaped zombie of this test process, so probe with try_wait, not
+    // kill(pid, 0)).
+    let publish_started = Instant::now();
+    let daemon_b = DaemonHandle::start_in(&dir);
+    let waited = publish_started.elapsed();
+    assert!(
+        daemon_a
+            .child
+            .try_wait()
+            .expect("old daemon status should be queryable")
+            .is_some(),
+        "old daemon must have exited before the adopter published its socket"
+    );
+    assert!(
+        waited >= Duration::from_millis(1400),
+        "the adopter must have actually waited out the delayed release, waited {waited:?}"
+    );
+
+    // The adopted session still works end-to-end through the new daemon —
+    // no split reader consumed its output.
+    let mut conn_b = daemon_b.connect();
+    attach(&mut conn_b, &session_id);
+    send_input_and_wait_for_echo(
+        &mut conn_b,
+        &session_id,
+        b"after-handoff\n",
+        "after-handoff",
     );
 
     cleanup(&dir);

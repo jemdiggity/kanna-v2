@@ -70,6 +70,13 @@ pub struct TerminalSnapshot {
 pub struct HandoffSession {
     pub session_id: String,
     pub pid: u32,
+    /// Start-time identity of `pid` (`proc_bsdinfo` start seconds/micros),
+    /// recorded by the sending daemon while it owned the session. Advisory
+    /// only: adopters derive signal authority from descriptor provenance
+    /// (the transferred terminal/pipe fds), never from this
+    /// sender-controlled value. Absent on legacy senders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_start: Option<(u64, u64)>,
     pub cwd: String,
     pub rows: u16,
     pub cols: u16,
@@ -707,6 +714,7 @@ mod tests {
             sessions: vec![HandoffSession {
                 session_id: "sess-1".to_string(),
                 pid: 42,
+                child_start: None,
                 cwd: "/tmp".to_string(),
                 rows: 24,
                 cols: 80,

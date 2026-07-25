@@ -645,7 +645,13 @@ async fn spawn_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = command.spawn().map_err(|error| {
+    // Fork/exec inside the spawn/fd boundary so the sidecar can never capture
+    // another thread's not-yet-CLOEXEC descriptor (e.g. a PTY pair mid-open).
+    let spawned = {
+        let _spawn_boundary = crate::fd::spawn_fd_boundary();
+        command.spawn()
+    };
+    let mut child = spawned.map_err(|error| {
         format!(
             "failed to spawn recovery sidecar {:?}: {}",
             launcher.program, error

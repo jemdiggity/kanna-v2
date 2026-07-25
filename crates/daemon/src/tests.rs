@@ -44,6 +44,7 @@ fn parse_handoff_response_accepts_v2_payload() {
         sessions: vec![protocol::HandoffSession {
             session_id: "s1".to_string(),
             pid: 42,
+            child_start: None,
             cwd: "/tmp".to_string(),
             rows: 24,
             cols: 80,
@@ -459,4 +460,1461 @@ fn explicit_handoff_version_mismatch_is_safe_for_compat_retry() {
             "handoff version mismatch: expected 1, got 2".to_string(),
         )
     ));
+}
+
+// ---- Old-daemon shutdown hardening (handoff pid authentication) ----
+
+pub(crate) fn temp_daemon_dir(prefix: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "kanna-daemon-test-{prefix}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn handoff_session(kind: protocol::SessionKind, agent_fd_count: u8) -> protocol::HandoffSession {
+    protocol::HandoffSession {
+        session_id: "s1".to_string(),
+        pid: 42,
+        child_start: None,
+        cwd: "/tmp".to_string(),
+        rows: 24,
+        cols: 80,
+        snapshot: None,
+        agent_provider: None,
+        status: SessionStatus::Idle,
+        kind,
+        provider_session_id: None,
+        agent_fd_count,
+        agent_spawn: None,
+    }
+}
+
+#[test]
+fn handoff_fd_counts_accept_only_protocol_shapes() {
+    use crate::handoff::validate_handoff_fd_counts;
+
+    for valid in [0u8, 2, 3] {
+        assert!(
+            validate_handoff_fd_counts(&[handoff_session(protocol::SessionKind::Agent, valid)])
+                .is_ok(),
+            "agent fd count {valid} is protocol-valid"
+        );
+    }
+    for invalid in [1u8, 4, 200, 255] {
+        assert!(
+            validate_handoff_fd_counts(&[handoff_session(protocol::SessionKind::Agent, invalid)])
+                .is_err(),
+            "agent fd count {invalid} must be rejected"
+        );
+    }
+    // PTY sessions ignore agent_fd_count entirely.
+    assert!(
+        validate_handoff_fd_counts(&[handoff_session(protocol::SessionKind::Pty, 200)]).is_ok()
+    );
+}
+
+/// Hostile or stale pid files must never become signal targets: negative
+/// values (broadcast after negation), 0/1, oversized values, garbage, and
+/// reaped pids all resolve to "no old daemon".
+#[tokio::test]
+async fn attempt_handoff_rejects_hostile_and_stale_pid_files() {
+    let dir = temp_daemon_dir("pidfile");
+    let pid_path = dir.join("daemon.pid");
+    let socket_path = dir.join("daemon.sock");
+
+    for hostile in ["-1", "0", "1", "4294967295", "99999999999", "abc", ""] {
+        std::fs::write(&pid_path, hostile).unwrap();
+        let result = crate::handoff::attempt_handoff(&pid_path, &socket_path).await;
+        assert!(
+            result.old_daemon.is_none() && result.abort_start.is_none(),
+            "pid file {hostile:?} must resolve to no old daemon"
+        );
+    }
+
+    // A reaped pid (no such process) is not an old daemon either.
+    let mut reaped = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let reaped_pid = reaped.id();
+    reaped.wait().unwrap();
+    std::fs::write(&pid_path, reaped_pid.to_string()).unwrap();
+    let result = crate::handoff::attempt_handoff(&pid_path, &socket_path).await;
+    assert!(
+        result.old_daemon.is_none() && result.abort_start.is_none(),
+        "reaped pid must resolve to no old daemon"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pid file pointing at an unrelated live process (pid reuse) with no
+/// serving socket: handoff aborts, and the old-daemon record stays
+/// unauthenticated so the release wait can never SIGKILL it.
+#[tokio::test]
+async fn attempt_handoff_keeps_unverified_reused_pids_unauthenticated() {
+    let dir = temp_daemon_dir("reused-pid");
+    let pid_path = dir.join("daemon.pid");
+    let socket_path = dir.join("daemon.sock");
+
+    let mut victim = std::process::Command::new("/bin/sleep")
+        .arg("300")
+        .spawn()
+        .unwrap();
+    std::fs::write(&pid_path, victim.id().to_string()).unwrap();
+
+    let result = crate::handoff::attempt_handoff(&pid_path, &socket_path).await;
+    let old = result
+        .old_daemon
+        .expect("live pid-file process is reported as the old daemon");
+    assert!(
+        !old.authenticated,
+        "a pid never confirmed against the socket peer must stay unauthenticated"
+    );
+    assert!(result.abort_start.is_some(), "handoff must abort");
+    assert!(
+        victim.try_wait().unwrap().is_none(),
+        "the unrelated process must not be touched"
+    );
+
+    victim.kill().unwrap();
+    victim.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Interleavings for the overstayer kill: unauthenticated, identity-
+/// mismatched (reused pid), and reaped targets are never signaled; only an
+/// authenticated identity-intact overstayer is killed.
+#[tokio::test]
+async fn old_daemon_release_only_kills_authenticated_identity_intact_overstayers() {
+    use crate::handoff::OldDaemon;
+    use crate::startup::wait_for_old_daemon_release_with;
+    let short = Duration::from_millis(150);
+
+    // Unauthenticated overstayer: waited out, never killed.
+    let mut victim = std::process::Command::new("/bin/sleep")
+        .arg("300")
+        .spawn()
+        .unwrap();
+    let victim_pid = victim.id() as libc::pid_t;
+    let victim_start = crate::proc_info::process_info(victim_pid).map(|info| info.start);
+    wait_for_old_daemon_release_with(
+        &OldDaemon {
+            pid: victim_pid,
+            start: victim_start,
+            authenticated: false,
+        },
+        short,
+        short,
+    )
+    .await;
+    assert!(
+        victim.try_wait().unwrap().is_none(),
+        "unauthenticated overstayer must not be killed"
+    );
+
+    // Authenticated but identity-mismatched (reused pid): treated as exited,
+    // never killed.
+    if let Some(start) = victim_start {
+        wait_for_old_daemon_release_with(
+            &OldDaemon {
+                pid: victim_pid,
+                start: Some((start.0.wrapping_add(1), start.1)),
+                authenticated: true,
+            },
+            short,
+            short,
+        )
+        .await;
+        assert!(
+            victim.try_wait().unwrap().is_none(),
+            "identity-mismatched overstayer must not be killed"
+        );
+
+        // Authenticated, identity intact: the overstayer is killed.
+        wait_for_old_daemon_release_with(
+            &OldDaemon {
+                pid: victim_pid,
+                start: Some(start),
+                authenticated: true,
+            },
+            short,
+            short,
+        )
+        .await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if victim.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "authenticated identity-intact overstayer must be killed"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    } else {
+        victim.kill().unwrap();
+        victim.wait().unwrap();
+    }
+}
+
+// ---- Agent resume-spawn lifecycle ----
+
+pub(crate) fn agent_record_fixture(
+    dir: &Path,
+    session_id: &str,
+) -> kanna_daemon::agent::AgentSessionRecord {
+    use kanna_daemon::agent::{make_adapter, AgentJournal, AgentSessionRecord, AgentShared};
+
+    let adapter = make_adapter(protocol::AgentProvider::Claude).expect("claude adapter");
+    let turn_model = adapter.turn_model();
+    let journal = AgentJournal::open(dir, session_id);
+    AgentSessionRecord {
+        provider: protocol::AgentProvider::Claude,
+        params: protocol::AgentSpawnParams {
+            agent_provider: protocol::AgentProvider::Claude,
+            prompt: "hi".to_string(),
+            cwd: "/tmp".to_string(),
+            env: std::collections::HashMap::new(),
+            model: None,
+            permission_mode: None,
+            allowed_tools: vec![],
+            disallowed_tools: vec![],
+            max_turns: None,
+            max_budget_usd: None,
+            system_prompt: None,
+            mcp_config_path: None,
+            executable: None,
+        },
+        adapter: Arc::new(std::sync::Mutex::new(adapter)),
+        shared: Arc::new(Mutex::new(AgentShared {
+            journal,
+            writers: Vec::new(),
+        })),
+        child: None,
+        stdin: None,
+        pid: 0,
+        child_start: None,
+        incarnation: 2,
+        spawning: false,
+        reservation_is_initial: false,
+        provider_session_id: Some("prov-1".to_string()),
+        status: SessionStatus::Idle,
+        last_assistant_prompt: None,
+        session_allowed_tools: std::collections::HashSet::new(),
+        pending_permissions: std::collections::HashSet::new(),
+        exited: true,
+        interrupt_requested: false,
+        turn_model,
+        created_at: Instant::now(),
+        last_activity_at: Instant::now(),
+        handoff_fds: None,
+    }
+}
+
+pub(crate) fn sleeper_spawned_child() -> kanna_daemon::agent::SpawnedAgentChild {
+    kanna_daemon::agent::spawn_agent_child(
+        &kanna_agent_protocol::SpawnSpec {
+            executable: "/bin/sleep".to_string(),
+            args: vec!["300".to_string()],
+            env: Vec::new(),
+            initial_stdin: None,
+        },
+        "/tmp",
+        &std::collections::HashMap::new(),
+    )
+    .expect("sleeper spawn should succeed")
+}
+
+/// Close-during-spawn: the session is removed while its resume-spawn is in
+/// flight; the installer must kill and clean up the orphan child instead of
+/// leaking it forever.
+#[tokio::test]
+async fn install_respawned_child_kills_orphan_when_session_was_removed() {
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let spawned = sleeper_spawned_child();
+    let orphan_pid = spawned.pid as libc::pid_t;
+
+    let installed =
+        crate::agent_runtime::install_respawned_child("gone", 2, spawned, &agents).await;
+    assert!(installed.is_none(), "no session to install into");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if unsafe { libc::kill(orphan_pid, 0) } != 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "orphan child {orphan_pid} must be killed, not leaked"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A reservation that survives to install wins the record; a stale
+/// generation loses and its child is cleaned up.
+#[tokio::test]
+async fn install_respawned_child_installs_only_matching_generations() {
+    let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
+    let dir = temp_daemon_dir("agent-install");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let mut record = agent_record_fixture(&dir, "sess");
+    let reservation = kanna_daemon::agent::next_agent_incarnation();
+    record.incarnation = reservation;
+    record.spawning = true;
+    agents.lock().await.insert("sess".to_string(), record);
+
+    // Stale incarnation: child killed, record untouched.
+    let stale = sleeper_spawned_child();
+    let stale_pid = stale.pid as libc::pid_t;
+    let installed = crate::agent_runtime::install_respawned_child(
+        "sess",
+        kanna_daemon::agent::next_agent_incarnation(),
+        stale,
+        &agents,
+    )
+    .await;
+    assert!(installed.is_none());
+    {
+        let registry = agents.lock().await;
+        let record = registry.get("sess").unwrap();
+        assert!(
+            record.spawning,
+            "stale install must not clear the reservation"
+        );
+        assert_eq!(record.pid, 0, "stale install must not takeover the record");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(stale_pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "stale child must be cleaned up");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The reserving incarnation installs and clears the reservation.
+    let winner = sleeper_spawned_child();
+    let winner_pid = winner.pid;
+    let winner_start = winner.child_start;
+    let installed =
+        crate::agent_runtime::install_respawned_child("sess", reservation, winner, &agents).await;
+    assert!(installed.is_some(), "reserving incarnation must install");
+    {
+        let mut registry = agents.lock().await;
+        let record = registry.get_mut(&"sess".to_string()).unwrap();
+        assert!(!record.spawning);
+        assert!(!record.exited);
+        assert_eq!(record.pid, winner_pid);
+        assert_eq!(record.child_start, winner_start);
+        // Cleanup: kill + reap the installed child.
+        let _ = kanna_daemon::agent::signal_agent_pid(
+            record.pid,
+            record.child_start,
+            true,
+            libc::SIGKILL,
+        );
+        if let Some(mut child) = record.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(fds) = record.handoff_fds.take() {
+            fds.close();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Concurrent resume attempts: the second input arriving while a respawn
+/// reservation is held must be rejected instead of double-spawning.
+#[tokio::test]
+async fn agent_input_rejects_resume_while_reservation_is_held() {
+    let dir = temp_daemon_dir("agent-reserve");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let mut record = agent_record_fixture(&dir, "sess");
+    record.spawning = true; // a respawn is in flight
+    agents.lock().await.insert("sess".to_string(), record);
+
+    let (client, server) = UnixStream::pair().unwrap();
+    let (_server_read, server_write) = server.into_split();
+    let writer: kanna_daemon::agent::AgentClientWriter = Arc::new(Mutex::new(server_write));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
+
+    crate::agent_runtime::handle_agent_input(
+        "sess".to_string(),
+        "second message".to_string(),
+        writer,
+        broadcast_tx,
+        agents.clone(),
+    )
+    .await;
+
+    let (client_read, _client_write) = client.into_split();
+    let mut lines = BufReader::new(client_read);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), lines.read_line(&mut line))
+        .await
+        .expect("reply should arrive")
+        .expect("reply should parse");
+    let event: Event = serde_json::from_str(line.trim()).expect("reply should be an event");
+    match event {
+        Event::Error { message, .. } => {
+            assert!(
+                message.contains("resume already in progress"),
+                "unexpected rejection message: {message}"
+            );
+        }
+        other => panic!("expected Error reply, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- Third review round: creation atomicity, ABA, seal, provenance ----
+
+fn agent_client_writer() -> (
+    kanna_daemon::agent::AgentClientWriter,
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+) {
+    let (client, server) = UnixStream::pair().unwrap();
+    let (_server_read, server_write) = server.into_split();
+    let (client_read, _client_write) = client.into_split();
+    // Keep the client write half alive by leaking it into the reader tuple
+    // owner; tests only read replies.
+    std::mem::forget(_client_write);
+    (
+        Arc::new(Mutex::new(server_write)),
+        BufReader::new(client_read),
+    )
+}
+
+async fn read_reply(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> Event {
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .expect("reply should arrive")
+        .expect("reply should read");
+    serde_json::from_str(line.trim()).expect("reply should parse")
+}
+
+fn sleeper_spawn_params(session_id: &str) -> protocol::AgentSpawnParams {
+    protocol::AgentSpawnParams {
+        agent_provider: protocol::AgentProvider::Claude,
+        prompt: format!("prompt for {session_id}"),
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        model: None,
+        permission_mode: None,
+        allowed_tools: vec![],
+        disallowed_tools: vec![],
+        max_turns: None,
+        max_budget_usd: None,
+        system_prompt: None,
+        mcp_config_path: None,
+        executable: Some("/bin/sleep".to_string()),
+    }
+}
+
+/// Concurrent SpawnAgent for the same id: the existence check and the
+/// reservation are atomic, so exactly one create wins; the loser is rejected
+/// before spawning anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_spawn_agent_creates_exactly_one_session() {
+    let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
+    let dir = temp_daemon_dir("agent-create-race");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(64);
+
+    let (writer_a, mut reader_a) = agent_client_writer();
+    let (writer_b, mut reader_b) = agent_client_writer();
+    let spawn = |writer| {
+        crate::agent_runtime::handle_spawn_agent(
+            "race-sess".to_string(),
+            sleeper_spawn_params("race-sess"),
+            writer,
+            broadcast_tx.clone(),
+            agents.clone(),
+            dir.clone(),
+        )
+    };
+    tokio::join!(spawn(writer_a), spawn(writer_b));
+
+    let replies = [
+        read_reply(&mut reader_a).await,
+        read_reply(&mut reader_b).await,
+    ];
+    let created = replies
+        .iter()
+        .filter(|event| matches!(event, Event::SessionCreated { .. }))
+        .count();
+    let rejected = replies
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Error {
+                    code: Some(protocol::ErrorCode::SessionAlreadyExists),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        (created, rejected),
+        (1, 1),
+        "exactly one create must win: {replies:?}"
+    );
+
+    {
+        let mut registry = agents.lock().await;
+        assert_eq!(registry.len(), 1);
+        let record = registry.get_mut("race-sess").unwrap();
+        assert!(!record.spawning, "winner must have installed");
+        let _ = kanna_daemon::agent::signal_agent_pid(
+            record.pid,
+            record.child_start,
+            true,
+            libc::SIGKILL,
+        );
+        if let Some(mut child) = record.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(fds) = record.handoff_fds.take() {
+            fds.close();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Create/kill interleaving at the exact race point: the session is killed
+/// while its initial spawn is in flight (reservation present, install not
+/// yet). The installer must clean up the spawned loser instead of resurrecting
+/// the killed session or leaking the child.
+#[tokio::test]
+async fn kill_during_initial_spawn_cleans_up_the_loser() {
+    let dir = temp_daemon_dir("agent-create-kill");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
+
+    // Reservation exactly as handle_spawn_agent creates it.
+    let mut reservation = agent_record_fixture(&dir, "cksess");
+    let incarnation = kanna_daemon::agent::next_agent_incarnation();
+    reservation.incarnation = incarnation;
+    reservation.spawning = true;
+    reservation.exited = true;
+    agents
+        .lock()
+        .await
+        .insert("cksess".to_string(), reservation);
+
+    // Kill lands while the spawn is in flight.
+    assert!(
+        crate::agent_runtime::kill_agent_session("cksess", &agents, &broadcast_tx).await,
+        "kill should remove the reservation"
+    );
+    assert!(agents.lock().await.is_empty());
+
+    // The spawn resolves afterwards: its install must lose and clean up.
+    let spawned = sleeper_spawned_child();
+    let orphan_pid = spawned.pid as libc::pid_t;
+    let installed =
+        crate::agent_runtime::install_respawned_child("cksess", incarnation, spawned, &agents)
+            .await;
+    assert!(
+        installed.is_none(),
+        "killed session must not be resurrected"
+    );
+    assert!(agents.lock().await.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(orphan_pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "loser child must be cleaned up");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ABA regression: the session is killed and recreated under the same id
+/// while a respawn reservation from the FIRST life is still in flight. The
+/// stale installer's incarnation token can never match the recreated record,
+/// so the new session is untouched and the stale child is cleaned up.
+#[tokio::test]
+async fn stale_installer_from_previous_life_cannot_take_over_recreated_session() {
+    let dir = temp_daemon_dir("agent-aba");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
+
+    // Life 1 reserves a respawn...
+    let mut first_life = agent_record_fixture(&dir, "aba");
+    let stale_incarnation = kanna_daemon::agent::next_agent_incarnation();
+    first_life.incarnation = stale_incarnation;
+    first_life.spawning = true;
+    agents.lock().await.insert("aba".to_string(), first_life);
+    // ...is killed...
+    assert!(crate::agent_runtime::kill_agent_session("aba", &agents, &broadcast_tx).await);
+    // ...and recreated under the same id with a fresh incarnation.
+    let mut second_life = agent_record_fixture(&dir, "aba");
+    second_life.incarnation = kanna_daemon::agent::next_agent_incarnation();
+    let second_incarnation = second_life.incarnation;
+    agents.lock().await.insert("aba".to_string(), second_life);
+
+    let spawned = sleeper_spawned_child();
+    let stale_pid = spawned.pid as libc::pid_t;
+    let installed =
+        crate::agent_runtime::install_respawned_child("aba", stale_incarnation, spawned, &agents)
+            .await;
+    assert!(installed.is_none(), "stale incarnation must lose");
+    {
+        let registry = agents.lock().await;
+        let record = registry.get("aba").unwrap();
+        assert_eq!(record.incarnation, second_incarnation);
+        assert_eq!(record.pid, 0, "recreated session must be untouched");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(stale_pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "stale child must be cleaned up");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Handoff-during-respawn: once the registry is sealed for transfer, an
+/// in-flight installer must treat its record as lost (child cleaned up, no
+/// install into the exiting daemon); a failed handoff lifts the seal again.
+#[tokio::test]
+async fn sealed_registry_rejects_in_flight_installs_until_unsealed() {
+    let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
+    let dir = temp_daemon_dir("agent-seal");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+
+    let mut record = agent_record_fixture(&dir, "sealsess");
+    let incarnation = kanna_daemon::agent::next_agent_incarnation();
+    record.incarnation = incarnation;
+    record.spawning = true;
+    agents.lock().await.insert("sealsess".to_string(), record);
+
+    {
+        let seal = crate::agent_runtime::AgentHandoffSealGuard::arm();
+        let spawned = sleeper_spawned_child();
+        let sealed_pid = spawned.pid as libc::pid_t;
+        let installed = crate::agent_runtime::install_respawned_child(
+            "sealsess",
+            incarnation,
+            spawned,
+            &agents,
+        )
+        .await;
+        assert!(installed.is_none(), "sealed registry must reject installs");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(sealed_pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "sealed loser must be cleaned up");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(seal); // failed handoff: seal lifts
+    }
+
+    let spawned = sleeper_spawned_child();
+    let installed =
+        crate::agent_runtime::install_respawned_child("sealsess", incarnation, spawned, &agents)
+            .await;
+    assert!(
+        installed.is_some(),
+        "after the seal lifts, the reservation installs normally"
+    );
+    {
+        let mut registry = agents.lock().await;
+        let record = registry.get_mut("sealsess").unwrap();
+        let _ = kanna_daemon::agent::signal_agent_pid(
+            record.pid,
+            record.child_start,
+            true,
+            libc::SIGKILL,
+        );
+        if let Some(mut child) = record.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(fds) = record.handoff_fds.take() {
+            fds.close();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Forged agent handoff: metadata names an unrelated live process with its
+/// CORRECT start time, but the transferred pipes are not that process's
+/// pipes. Descriptor provenance must refuse signal authority; the victim
+/// survives the session's kill.
+#[tokio::test]
+async fn forged_agent_handoff_cannot_target_unrelated_processes() {
+    let dir = temp_daemon_dir("agent-forged");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
+
+    let mut victim = std::process::Command::new("/bin/sleep")
+        .arg("300")
+        .spawn()
+        .unwrap();
+    let victim_start =
+        crate::proc_info::process_info(victim.id() as libc::pid_t).map(|info| info.start);
+    assert!(victim_start.is_some());
+
+    // "Transferred" pipes fabricated by the attacker — not held by the victim.
+    let mut stdout_pipe = [0 as std::os::unix::io::RawFd; 2];
+    let mut stderr_pipe = [0 as std::os::unix::io::RawFd; 2];
+    assert_eq!(unsafe { libc::pipe(stdout_pipe.as_mut_ptr()) }, 0);
+    assert_eq!(unsafe { libc::pipe(stderr_pipe.as_mut_ptr()) }, 0);
+
+    let info = protocol::HandoffSession {
+        session_id: "forged".to_string(),
+        pid: victim.id(),
+        child_start: victim_start,
+        cwd: "/tmp".to_string(),
+        rows: 0,
+        cols: 0,
+        snapshot: None,
+        agent_provider: Some(protocol::AgentProvider::Claude),
+        status: SessionStatus::Busy,
+        kind: protocol::SessionKind::Agent,
+        provider_session_id: Some("prov-forged".to_string()),
+        agent_fd_count: 2,
+        agent_spawn: Some(sleeper_spawn_params("forged")),
+    };
+    crate::agent_runtime::adopt_agent_session(
+        info,
+        vec![stdout_pipe[0], stderr_pipe[0]],
+        agents.clone(),
+        broadcast_tx.clone(),
+        dir.clone(),
+    )
+    .await;
+
+    {
+        let registry = agents.lock().await;
+        let record = registry.get("forged").expect("session adopted");
+        assert!(record.exited, "forged pid must be treated as exited");
+        assert!(
+            record.child_start.is_none(),
+            "forged pid must stay non-signalable"
+        );
+    }
+    assert!(crate::agent_runtime::kill_agent_session("forged", &agents, &broadcast_tx).await);
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        victim.try_wait().unwrap().is_none(),
+        "victim named by forged metadata must survive"
+    );
+
+    victim.kill().unwrap();
+    victim.wait().unwrap();
+    unsafe {
+        libc::close(stdout_pipe[1]);
+        libc::close(stderr_pipe[1]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Old-v2 → new upgrade path: a live agent transferred WITHOUT identity
+/// metadata is authenticated through pipe provenance and stays killable —
+/// the legacy termination path the identity semantics must not break.
+#[tokio::test]
+async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
+    let dir = temp_daemon_dir("agent-legacy");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
+
+    // A real agent-shaped child: setsid'd, pipes to us.
+    let mut spawned = sleeper_spawned_child();
+    use std::os::unix::io::AsRawFd;
+    let stdout_dup = kanna_daemon::agent::dup_cloexec(spawned.stdout.as_raw_fd()).unwrap();
+    let stderr_dup = kanna_daemon::agent::dup_cloexec(spawned.stderr.as_raw_fd()).unwrap();
+
+    let info = protocol::HandoffSession {
+        session_id: "legacy".to_string(),
+        pid: spawned.pid,
+        child_start: None, // old-v2 senders never transferred identity
+        cwd: "/tmp".to_string(),
+        rows: 0,
+        cols: 0,
+        snapshot: None,
+        agent_provider: Some(protocol::AgentProvider::Claude),
+        status: SessionStatus::Busy,
+        kind: protocol::SessionKind::Agent,
+        provider_session_id: Some("prov-legacy".to_string()),
+        agent_fd_count: 2,
+        agent_spawn: Some(sleeper_spawn_params("legacy")),
+    };
+    crate::agent_runtime::adopt_agent_session(
+        info,
+        vec![stdout_dup, stderr_dup],
+        agents.clone(),
+        broadcast_tx.clone(),
+        dir.clone(),
+    )
+    .await;
+
+    {
+        let registry = agents.lock().await;
+        let record = registry.get("legacy").expect("session adopted");
+        assert!(!record.exited, "pipe-bound live agent must adopt as alive");
+        assert!(
+            record.child_start.is_some(),
+            "provenance must authenticate the legacy pid for signaling"
+        );
+    }
+    assert!(crate::agent_runtime::kill_agent_session("legacy", &agents, &broadcast_tx).await);
+    let status = spawned.child.wait().expect("legacy child reaped");
+    assert!(!status.success(), "legacy live agent must have been killed");
+    if let Some(fds) = spawned.handoff_fds.take() {
+        fds.close();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- Fourth review round ----
+
+/// Stale-reader fault: a reader from an old session life must journal into
+/// its OWN transcript and never resolve the replacement record's adapter or
+/// touch its state after a kill+recreate of the same session id.
+#[tokio::test]
+async fn stale_reader_from_previous_life_cannot_touch_the_recreated_session() {
+    use kanna_agent_protocol::AgentEvent;
+
+    let dir = temp_daemon_dir("reader-life");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(32);
+
+    // Life 1, with a reader bound to it.
+    let mut first = agent_record_fixture(&dir, "life");
+    let first_incarnation = kanna_daemon::agent::next_agent_incarnation();
+    first.incarnation = first_incarnation;
+    first.status = SessionStatus::Busy;
+    let stale_life = crate::agent_runtime::readers::ReaderLife {
+        session_id: "life".to_string(),
+        incarnation: first_incarnation,
+        adapter: first.adapter.clone(),
+        shared: first.shared.clone(),
+    };
+    agents.lock().await.insert("life".to_string(), first);
+
+    // Life 1 is killed and the id recreated with its own adapter/journal.
+    assert!(crate::agent_runtime::kill_agent_session("life", &agents, &broadcast_tx).await);
+    let mut second = agent_record_fixture(&dir, "life");
+    second.incarnation = kanna_daemon::agent::next_agent_incarnation();
+    second.status = SessionStatus::Idle;
+    second.exited = false;
+    let second_shared = second.shared.clone();
+    let second_adapter_ptr = Arc::as_ptr(&second.adapter) as usize;
+    agents.lock().await.insert("life".to_string(), second);
+
+    // The stale reader must be pinned to life 1's adapter, not life 2's.
+    assert_ne!(
+        Arc::as_ptr(&stale_life.adapter) as usize,
+        second_adapter_ptr,
+        "the stale reader must not share the replacement's adapter"
+    );
+
+    // Its exit handling must not mark the live replacement exited...
+    crate::agent_runtime::readers::handle_child_exit_for_test(&stale_life, &agents, &broadcast_tx)
+        .await;
+    {
+        let registry = agents.lock().await;
+        let record = registry.get("life").expect("replacement present");
+        assert!(
+            !record.exited,
+            "a stale reader must not mark the replacement child exited"
+        );
+        assert_eq!(
+            record.status,
+            SessionStatus::Idle,
+            "a stale reader must not change the replacement's status"
+        );
+    }
+
+    // ...and its output must land in life 1's journal, not life 2's.
+    crate::agent_runtime::readers::process_event_for_test(
+        &stale_life,
+        AgentEvent::AssistantText {
+            text: "old life output".to_string(),
+            truncated: false,
+        },
+        &agents,
+        &broadcast_tx,
+    )
+    .await;
+    // Note: both lives share the on-disk journal for this session id, so the
+    // replacement legitimately replays life 1's *persisted history*. What must
+    // not happen is the stale reader appending through the replacement's
+    // handle — assert on the specific event instead of on emptiness.
+    let has_stale_text = |entries: &[kanna_daemon::protocol::SeqAgentEvent]| {
+        entries.iter().any(|entry| {
+            matches!(&entry.event, AgentEvent::AssistantText { text, .. } if text == "old life output")
+        })
+    };
+    let stale_events = stale_life.shared.lock().await.journal.events_from(0);
+    assert!(
+        has_stale_text(&stale_events),
+        "old-life output belongs in the old life's journal"
+    );
+    let replacement_events = second_shared.lock().await.journal.events_from(0);
+    assert!(
+        !has_stale_text(&replacement_events),
+        "old-life output must never be appended through the replacement's handle"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AgentInput interleaving: a kill+recreate between planning and delivery
+/// must neither write the old input to the replacement child's stdin nor mark
+/// the replacement Busy for a turn it never received.
+#[tokio::test]
+async fn agent_input_planned_before_recreate_does_not_touch_the_replacement() {
+    let dir = temp_daemon_dir("input-interleave");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(32);
+
+    // A live persistent session whose stdin we can observe.
+    let mut spawned = sleeper_spawned_child();
+    let mut record = agent_record_fixture(&dir, "iv");
+    let first_incarnation = kanna_daemon::agent::next_agent_incarnation();
+    record.incarnation = first_incarnation;
+    record.exited = false;
+    record.pid = spawned.pid;
+    record.child_start = spawned.child_start;
+    record.stdin = spawned.stdin.take();
+    record.turn_model = kanna_agent_protocol::TurnModel::Persistent;
+    agents.lock().await.insert("iv".to_string(), record);
+
+    // Recreate the id under a fresh incarnation, standing in for the state a
+    // kill+create leaves behind while an input is mid-flight.
+    let mut replacement = agent_record_fixture(&dir, "iv");
+    replacement.incarnation = kanna_daemon::agent::next_agent_incarnation();
+    replacement.status = SessionStatus::Idle;
+    replacement.exited = false;
+    agents.lock().await.insert("iv".to_string(), replacement);
+
+    // Deliver with the STALE planning incarnation.
+    crate::agent_runtime::deliver_planned_input_for_test(
+        "iv",
+        first_incarnation,
+        "old input",
+        &agents,
+        &broadcast_tx,
+    )
+    .await;
+
+    let registry = agents.lock().await;
+    let record = registry.get("iv").expect("replacement present");
+    assert_eq!(
+        record.status,
+        SessionStatus::Idle,
+        "the replacement must not be marked Busy for an input it never received"
+    );
+    drop(registry);
+
+    let _ = kanna_daemon::agent::signal_agent_pid(
+        spawned.pid,
+        spawned.child_start,
+        true,
+        libc::SIGKILL,
+    );
+    let _ = spawned.child.kill();
+    let _ = spawned.child.wait();
+    if let Some(fds) = spawned.handoff_fds.take() {
+        fds.close();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A seal-rejected installer whose reservation was otherwise valid must roll
+/// the reservation back, so an aborted handoff (failed fd-send or missing
+/// ACK, both of which unseal) leaves the session able to resume.
+#[tokio::test]
+async fn seal_rejected_install_rolls_back_the_reservation() {
+    let dir = temp_daemon_dir("seal-rollback");
+    let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+
+    let mut record = agent_record_fixture(&dir, "rb");
+    let incarnation = kanna_daemon::agent::next_agent_incarnation();
+    record.incarnation = incarnation;
+    record.spawning = true;
+    agents.lock().await.insert("rb".to_string(), record);
+
+    {
+        let seal = crate::agent_runtime::AgentHandoffSealGuard::arm();
+        let spawned = sleeper_spawned_child();
+        let loser_pid = spawned.pid as libc::pid_t;
+        assert!(
+            crate::agent_runtime::install_respawned_child("rb", incarnation, spawned, &agents)
+                .await
+                .is_none(),
+            "the seal must reject the install"
+        );
+        {
+            let registry = agents.lock().await;
+            let record = registry.get("rb").expect("record present");
+            assert!(
+                !record.spawning,
+                "a seal-rejected reservation must be rolled back so resumes still work"
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(loser_pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "seal loser must be cleaned up");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(seal); // aborted handoff
+    }
+
+    // With the reservation rolled back, a fresh reservation + install works.
+    let retry_incarnation = {
+        let mut registry = agents.lock().await;
+        let record = registry.get_mut("rb").expect("record present");
+        record.spawning = true;
+        record.incarnation = kanna_daemon::agent::next_agent_incarnation();
+        record.incarnation
+    };
+    let spawned = sleeper_spawned_child();
+    let installed =
+        crate::agent_runtime::install_respawned_child("rb", retry_incarnation, spawned, &agents)
+            .await;
+    assert!(
+        installed.is_some(),
+        "after the aborted handoff the session must accept a resume again"
+    );
+    {
+        let mut registry = agents.lock().await;
+        let record = registry.get_mut("rb").unwrap();
+        let _ = kanna_daemon::agent::signal_agent_pid(
+            record.pid,
+            record.child_start,
+            true,
+            libc::SIGKILL,
+        );
+        if let Some(mut child) = record.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(fds) = record.handoff_fds.take() {
+            fds.close();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// PTY lifecycle fence: while a handoff transfer is in flight the session
+/// manager is sealed, so a post-snapshot Spawn cannot insert a session whose
+/// master fd was never transferred (it would be silently lost), and a killed
+/// session cannot be reinserted behind the snapshot. Aborting the handoff
+/// lifts the seal.
+#[tokio::test]
+async fn sealed_session_manager_fences_post_snapshot_spawn_and_reinsertion() {
+    use crate::session::{SessionHandle, SessionManager};
+
+    let mut manager = SessionManager::new();
+    let handle = Arc::new(SessionHandle::new(
+        crate::session::test_support::spawn_sleeper_record().expect("record"),
+    ));
+    assert!(manager.insert_unless_sealed("before".to_string(), handle.clone()));
+
+    let epoch = manager.seal_for_handoff();
+    assert!(manager.is_sealed_for_handoff());
+    assert_eq!(manager.handoff_epoch(), epoch);
+
+    // Post-snapshot spawn is refused rather than stranded.
+    assert!(
+        !manager.insert_unless_sealed("after-snapshot".to_string(), handle.clone()),
+        "a sealed manager must refuse post-snapshot spawns"
+    );
+    // A killed session must not reappear behind the transfer.
+    manager.remove("before");
+    assert!(
+        !manager.insert_unless_sealed("before".to_string(), handle.clone()),
+        "a sealed manager must refuse reinsertion of a killed session"
+    );
+
+    // Aborted handoff: the seal lifts and normal service resumes.
+    manager.unseal_for_handoff();
+    assert!(!manager.is_sealed_for_handoff());
+    assert!(manager.insert_unless_sealed("after-abort".to_string(), handle.clone()));
+
+    let _ = handle.kill().await;
+}
+
+// ---- Fifth review round ----
+
+/// One journal (one sequence space) per session id. Two lives of the same id
+/// — a stale reader still draining the previous child while the replacement
+/// journals its own events — must not both allocate the same seq, which
+/// corrupts the transcript.
+#[tokio::test]
+async fn concurrent_lives_of_one_session_id_share_one_sequence_space() {
+    use kanna_agent_protocol::AgentEvent;
+
+    let dir = temp_daemon_dir("journal-seq");
+    let first = kanna_daemon::agent::shared_agent_state(&dir, "seq");
+    let second = kanna_daemon::agent::shared_agent_state(&dir, "seq");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "both lives of a session id must share one journal handle"
+    );
+
+    for index in 0..6 {
+        let handle = if index % 2 == 0 { &first } else { &second };
+        handle.lock().await.journal.append(AgentEvent::Diagnostic {
+            message: format!("event-{index}"),
+        });
+    }
+
+    let entries = first.lock().await.journal.events_from(0);
+    let seqs: Vec<u64> = entries.iter().map(|entry| entry.seq).collect();
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        seqs.len(),
+        "sequence numbers must be unique across lives, got {seqs:?}"
+    );
+    assert_eq!(
+        seqs,
+        (0..seqs.len() as u64).collect::<Vec<_>>(),
+        "sequence numbers must be dense and ordered, got {seqs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A seal-rejected INITIAL reservation must be removed, not rolled back: a
+/// pid=0 provider-less ghost would occupy the id and block both retry and
+/// transfer.
+#[tokio::test]
+async fn seal_rejected_initial_reservation_is_removed_not_rolled_back() {
+    let dir = temp_daemon_dir("ghost-removal");
+    let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+
+    let mut record = agent_record_fixture(&dir, "ghost");
+    let incarnation = kanna_daemon::agent::next_agent_incarnation();
+    record.incarnation = incarnation;
+    record.spawning = true;
+    record.reservation_is_initial = true;
+    record.pid = 0;
+    record.provider_session_id = None;
+    agents.lock().await.insert("ghost".to_string(), record);
+
+    let seal = crate::agent_runtime::AgentHandoffSealGuard::arm();
+    let spawned = sleeper_spawned_child();
+    let loser = spawned.pid as libc::pid_t;
+    assert!(
+        crate::agent_runtime::install_respawned_child("ghost", incarnation, spawned, &agents)
+            .await
+            .is_none()
+    );
+    assert!(
+        !agents.lock().await.contains_key("ghost"),
+        "a seal-rejected initial reservation must be removed, leaving no ghost"
+    );
+    drop(seal);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(loser, 0) } == 0 {
+        assert!(Instant::now() < deadline, "loser child must be cleaned up");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Teardown is single-flight per session: repeated/concurrent Kill calls must
+/// not each enqueue a whole-table sweep on the lifecycle executor.
+#[tokio::test]
+async fn repeated_kill_is_single_flight_and_does_not_requeue_sweeps() {
+    use crate::session::SessionHandle;
+
+    let handle = Arc::new(SessionHandle::new(
+        crate::session::test_support::spawn_sleeper_record().expect("record"),
+    ));
+    assert!(handle.claim_teardown(), "first claim wins");
+    assert!(!handle.claim_teardown(), "second claim must be refused");
+
+    // Both kills succeed; only the first can have run a sweep.
+    let (first, second) = tokio::join!(handle.kill(), handle.kill());
+    first.expect("kill ok");
+    second.expect("repeat kill is a no-op");
+}
+
+/// Bulk teardown must complete every kill plan BEFORE handing reap tokens to
+/// the reaper: reaping first frees the pid for reuse while the plan still
+/// holds it as a signal target.
+#[tokio::test]
+async fn bulk_teardown_completes_plans_before_enqueueing_reaps() {
+    use crate::session::{SessionHandle, SessionManager};
+
+    let mut manager = SessionManager::new();
+    let mut pids = Vec::new();
+    for index in 0..3 {
+        let record = crate::session::test_support::spawn_sleeper_record().expect("record");
+        let handle = Arc::new(SessionHandle::new(record));
+        pids.push(handle.pty.lock().await.pid() as libc::pid_t);
+        assert!(manager.insert_unless_sealed(format!("bulk-{index}"), handle));
+    }
+
+    let handles = manager.kill_all_with_shared_scan().await;
+    assert_eq!(handles.len(), 3);
+
+    // Every child must be dead once the batch returns — the plans ran to
+    // completion rather than racing an early reap.
+    for pid in pids {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "session child {pid} should be killed by the batch"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+// ---- Sixth review round ----
+
+/// A rejected duplicate SpawnAgent must not contaminate the winning session's
+/// journal: the initiating UserMessage is appended only after the id is won.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejected_duplicate_spawn_does_not_contaminate_the_winners_journal() {
+    use kanna_agent_protocol::AgentEvent;
+
+    let dir = temp_daemon_dir("spawn-journal");
+    let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(64);
+
+    let (writer_a, mut reader_a) = agent_client_writer();
+    let (writer_b, mut reader_b) = agent_client_writer();
+    let spawn = |writer, prompt: &str| {
+        let mut params = sleeper_spawn_params("dupe");
+        params.prompt = prompt.to_string();
+        crate::agent_runtime::handle_spawn_agent(
+            "dupe".to_string(),
+            params,
+            writer,
+            broadcast_tx.clone(),
+            agents.clone(),
+            dir.clone(),
+        )
+    };
+    tokio::join!(spawn(writer_a, "prompt-a"), spawn(writer_b, "prompt-b"));
+    let replies = [
+        read_reply(&mut reader_a).await,
+        read_reply(&mut reader_b).await,
+    ];
+    let created = replies
+        .iter()
+        .filter(|event| matches!(event, Event::SessionCreated { .. }))
+        .count();
+    assert_eq!(created, 1, "exactly one spawn wins: {replies:?}");
+
+    // Exactly ONE initiating UserMessage — the loser's prompt never lands.
+    let shared = kanna_daemon::agent::shared_agent_state(&dir, "dupe");
+    let user_messages: Vec<String> = shared
+        .lock()
+        .await
+        .journal
+        .events_from(0)
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AgentEvent::UserMessage { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_messages.len(),
+        1,
+        "a rejected duplicate spawn must not append its prompt: {user_messages:?}"
+    );
+
+    {
+        let mut registry = agents.lock().await;
+        if let Some(record) = registry.get_mut("dupe") {
+            let _ = kanna_daemon::agent::signal_agent_pid(
+                record.pid,
+                record.child_start,
+                true,
+                libc::SIGKILL,
+            );
+            if let Some(mut child) = record.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            if let Some(fds) = record.handoff_fds.take() {
+                fds.close();
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Session churn must not monotonically retain shared journal state: the
+/// registry holds Weak references, so once a session's record and readers are
+/// gone its journal handle, event vector, and writer sockets are released.
+/// Overlapping lives of one id still share a single sequencer.
+#[tokio::test]
+async fn session_churn_does_not_retain_shared_journal_state() {
+    let dir = temp_daemon_dir("shared-churn");
+    let baseline = kanna_daemon::agent::live_shared_agent_states();
+
+    for index in 0..25 {
+        let id = format!("churn-{index}");
+        let handle = kanna_daemon::agent::shared_agent_state(&dir, &id);
+        handle
+            .lock()
+            .await
+            .journal
+            .append(kanna_agent_protocol::AgentEvent::Diagnostic {
+                message: "x".to_string(),
+            });
+        // Dropping the last strong reference must release the entry.
+        drop(handle);
+    }
+    let after = kanna_daemon::agent::live_shared_agent_states();
+    assert!(
+        after <= baseline,
+        "churned sessions must not retain shared state: baseline {baseline}, after {after}"
+    );
+
+    // Overlapping lives of ONE id still share one sequencer.
+    let first = kanna_daemon::agent::shared_agent_state(&dir, "overlap");
+    let second = kanna_daemon::agent::shared_agent_state(&dir, "overlap");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "overlapping lives must share one journal handle"
+    );
+    drop(second);
+    drop(first);
+    // And once both end, the entry is releasable again.
+    let reopened = kanna_daemon::agent::shared_agent_state(&dir, "overlap");
+    assert_eq!(Arc::strong_count(&reopened), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- Seventh review round ----
+
+/// Killing an INITIAL SpawnAgent reservation must still emit exactly one
+/// killed Exit. Such records carry `exited: true` and never announced a
+/// SessionCreated, so the old `!exited` gate replied Ok while broadcasting
+/// nothing — leaving a consume-once replacement entry unconsumed and any
+/// consumer awaiting the Exit waiting forever.
+#[tokio::test]
+async fn killing_an_initial_reservation_emits_exactly_one_exit() {
+    let dir = temp_daemon_dir("reservation-exit");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
+
+    let mut reservation = agent_record_fixture(&dir, "resv");
+    reservation.incarnation = kanna_daemon::agent::next_agent_incarnation();
+    reservation.spawning = true;
+    reservation.reservation_is_initial = true;
+    reservation.exited = true;
+    reservation.pid = 0;
+    agents.lock().await.insert("resv".to_string(), reservation);
+
+    assert!(
+        crate::agent_runtime::kill_agent_session("resv", &agents, &broadcast_tx).await,
+        "removing a reservation is a successful kill"
+    );
+
+    let mut killed_exits = 0;
+    while let Ok(line) = rx.try_recv() {
+        if let Ok(Event::Exit {
+            session_id, killed, ..
+        }) = serde_json::from_str::<Event>(&line)
+        {
+            if session_id == "resv" {
+                assert!(
+                    killed,
+                    "a cancelled reservation reports an orchestrated kill"
+                );
+                killed_exits += 1;
+            }
+        }
+    }
+    assert_eq!(
+        killed_exits, 1,
+        "exactly one Exit must be emitted per successful Kill"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A live agent session still emits exactly one Exit (no double-announce from
+/// the new reservation-aware predicate).
+#[tokio::test]
+async fn killing_a_live_agent_session_still_emits_exactly_one_exit() {
+    let dir = temp_daemon_dir("live-exit");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
+
+    let mut spawned = sleeper_spawned_child();
+    let mut record = agent_record_fixture(&dir, "live");
+    record.incarnation = kanna_daemon::agent::next_agent_incarnation();
+    record.exited = false;
+    record.reservation_is_initial = false;
+    record.pid = spawned.pid;
+    record.child_start = spawned.child_start;
+    record.child = Some(spawned.child);
+    record.handoff_fds = spawned.handoff_fds.take();
+    agents.lock().await.insert("live".to_string(), record);
+
+    assert!(crate::agent_runtime::kill_agent_session("live", &agents, &broadcast_tx).await);
+    let mut killed_exits = 0;
+    while let Ok(line) = rx.try_recv() {
+        if let Ok(Event::Exit { session_id, .. }) = serde_json::from_str::<Event>(&line) {
+            if session_id == "live" {
+                killed_exits += 1;
+            }
+        }
+    }
+    assert_eq!(killed_exits, 1, "a live kill must not double-announce");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A same-id Spawn must not install while the outgoing incarnation's id-keyed
+/// state is still being cleared: the teardown tombstone holds the id until the
+/// Exit is published and every registry entry is gone, so the replacement
+/// cannot have its own fanout/clients/sizes wiped by that cleanup.
+#[tokio::test]
+async fn teardown_tombstone_blocks_same_id_replacement_until_cleanup_completes() {
+    use crate::session::{SessionHandle, SessionManager};
+
+    let mut manager = SessionManager::new();
+    let outgoing = Arc::new(SessionHandle::new(
+        crate::session::test_support::spawn_sleeper_record().expect("record"),
+    ));
+    assert!(manager.insert_unless_sealed("swap".to_string(), outgoing.clone()));
+
+    // Claim + tombstone, as the Kill handler does in one critical section.
+    let taken = manager
+        .get("swap")
+        .and_then(|handle| manager.remove_if_same("swap", &handle));
+    assert!(taken.is_some(), "claim takes the exact incarnation");
+    assert!(manager.begin_teardown("swap"));
+    assert!(manager.is_tearing_down("swap"));
+
+    // A replacement must be refused while cleanup is in flight.
+    let replacement = Arc::new(SessionHandle::new(
+        crate::session::test_support::spawn_sleeper_record().expect("record"),
+    ));
+    assert!(
+        !manager.insert_unless_sealed("swap".to_string(), replacement.clone()),
+        "a same-id Spawn must not install into a half-cleaned slot"
+    );
+
+    // Once cleanup completes the id is usable again.
+    manager.end_teardown("swap");
+    assert!(manager.insert_unless_sealed("swap".to_string(), replacement.clone()));
+
+    let _ = outgoing.kill().await;
+    let _ = replacement.kill().await;
 }

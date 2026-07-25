@@ -908,6 +908,72 @@ fn test_kill_then_respawn_broadcasts_exit_before_session_created() {
     }
 }
 
+/// Stress the kill/respawn ordering: the claimed incarnation's reader must
+/// never publish a natural `killed: false` Exit, and every respawn's
+/// SessionCreated must be preceded by exactly one killed Exit. Regression for
+/// the widened teardown window (kill now awaits the lifecycle executor).
+#[test]
+fn test_kill_then_respawn_ordering_holds_under_repetition() {
+    let daemon = DaemonHandle::start();
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    match subscriber.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok for Subscribe, got: {:?}", other),
+    }
+
+    let mut creator = daemon.connect();
+    spawn_shell_session(&mut creator, "sess-stress", "sleep 30");
+    loop {
+        match subscriber.recv() {
+            Evt::SessionCreated { session_id } => {
+                assert_eq!(session_id, "sess-stress");
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected SessionCreated, got: {:?}", other),
+        }
+    }
+
+    for round in 0..6 {
+        kill_session(&mut creator, "sess-stress");
+        spawn_shell_session(&mut creator, "sess-stress", "sleep 30");
+
+        let mut saw_killed_exit = false;
+        loop {
+            match subscriber.recv() {
+                Evt::Exit {
+                    session_id, killed, ..
+                } => {
+                    assert_eq!(session_id, "sess-stress");
+                    assert!(
+                        killed,
+                        "round {round}: a claimed incarnation must not publish a natural Exit"
+                    );
+                    assert!(
+                        !saw_killed_exit,
+                        "round {round}: exactly one Exit per termination"
+                    );
+                    saw_killed_exit = true;
+                }
+                Evt::SessionCreated { session_id } => {
+                    assert_eq!(session_id, "sess-stress");
+                    assert!(
+                        saw_killed_exit,
+                        "round {round}: respawn SessionCreated must follow the killed Exit"
+                    );
+                    break;
+                }
+                Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+                other => panic!(
+                    "round {round}: expected Exit then SessionCreated, got: {:?}",
+                    other
+                ),
+            }
+        }
+    }
+}
+
 fn kill_session(conn: &mut ClientConn, session_id: &str) {
     conn.send(&Cmd::Kill {
         session_id: session_id.to_string(),
@@ -2189,14 +2255,12 @@ fn same_connection_reattach_discards_stale_backlog_behind_fresh_snapshot() {
             Instant::now() < snapshot_deadline,
             "reattach snapshot never arrived"
         );
-        match subject.recv_with_timeout(Duration::from_millis(100)) {
-            Ok(Evt::Snapshot {
-                session_id: sid, ..
-            }) => {
-                assert_eq!(sid, session_id);
-                break;
-            }
-            Ok(_) | Err(_) => {}
+        if let Ok(Evt::Snapshot {
+            session_id: sid, ..
+        }) = subject.recv_with_timeout(Duration::from_millis(100))
+        {
+            assert_eq!(sid, session_id);
+            break;
         }
     }
 

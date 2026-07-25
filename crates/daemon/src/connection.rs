@@ -238,8 +238,6 @@ pub(crate) async fn handle_command(
             agent_provider,
             terminal_prelude,
         } => {
-            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
-            let _lifecycle_guard = lifecycle.lock().await;
             log::info!(
                 "[spawn] session={} executable={} cwd={} cols={} rows={}",
                 session_id,
@@ -310,7 +308,26 @@ pub(crate) async fn handle_command(
                             let _ = write_event(&mut *writer.lock().await, &evt).await;
                             return;
                         }
-                        mgr.insert(session_id.clone(), Arc::clone(&handle));
+                        if !mgr.insert_unless_sealed(session_id.clone(), Arc::clone(&handle)) {
+                            // A handoff transfer is in flight: this session's
+                            // master fd was not in the snapshot, so it would
+                            // be silently lost when this daemon exits. Refuse
+                            // the spawn instead and tear the child down.
+                            drop(mgr);
+                            log::warn!(
+                                "[spawn] refusing session {}: handoff transfer in flight",
+                                session_id
+                            );
+                            let _ = handle.kill().await;
+                            let evt = error_event(
+                                Some(protocol::ErrorCode::PtySpawnFailed),
+                                format!(
+                                    "daemon handoff in progress; retry session {session_id} against the new daemon"
+                                ),
+                            );
+                            let _ = write_event(&mut *writer.lock().await, &evt).await;
+                            return;
+                        }
                     }
 
                     if let Err(error) = recovery_manager
@@ -713,9 +730,11 @@ pub(crate) async fn handle_command(
         }
 
         Command::Kill { session_id } => {
-            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
-            let _lifecycle_guard = lifecycle.lock().await;
             log::info!("[kill] session={}", session_id);
+            // Fence Kill with the handoff transaction: the snapshot has
+            // already been taken and sent, so removing the session here would
+            // let the successor resurrect it from that snapshot. Refuse and
+            // let the client retry against the new daemon.
             if session_handle(&sessions, &session_id).await.is_none()
                 && agent_runtime::kill_agent_session(&session_id, &agent_sessions, &broadcast_tx)
                     .await
@@ -723,36 +742,60 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
                 return;
             }
-            let session = session_handle(&sessions, &session_id).await;
-            let stream_control = match &session {
-                Some(session) => {
-                    let control = session.stream_control().await;
-                    if let Some(control) = control.as_ref() {
-                        control.request_stop();
+            // Claim the exact incarnation BEFORE tearing it down, and do it in
+            // the same lock acquisition that resolved it. Teardown awaits the
+            // lifecycle executor, so leaving the session in the map across
+            // that await lets its reader observe the child's death and publish
+            // a natural `killed: false` Exit first — which both races the
+            // orchestrated Exit and can land after a same-id respawn's
+            // SessionCreated. Removing it up front makes the reader's exit
+            // cleanup skip ("current session changed"), leaving exactly one
+            // authoritative Exit, published here before any same-id spawn can
+            // be accepted.
+            let claim = {
+                let mut mgr = sessions.lock().await;
+                // The seal test and the claim share this one acquisition —
+                // the same synchronization boundary the handoff snapshot uses
+                // — so a snapshot can never be taken between them and
+                // resurrect a Kill this daemon already acknowledged.
+                if mgr.is_sealed_for_handoff() {
+                    Err(())
+                } else {
+                    let taken = mgr
+                        .get(&session_id)
+                        .and_then(|handle| mgr.remove_if_same(&session_id, &handle));
+                    if taken.is_some() {
+                        // Guard the id until this teardown has published its
+                        // Exit and cleared every id-keyed registry. Without it
+                        // a same-id Spawn could install between the claim and
+                        // the cleanup below, and then have its own fanout,
+                        // terminal-client and size entries wiped by that
+                        // cleanup.
+                        let _ = mgr.begin_teardown(&session_id);
                     }
-                    control
+                    Ok(taken)
                 }
-                None => None,
             };
-            let result = match &session {
-                Some(session) => session.kill().await,
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("session not found: {}", session_id),
-                )),
+            let session = match claim {
+                Err(()) => {
+                    log::warn!(
+                        "[kill] refusing session {}: handoff transfer in flight",
+                        session_id
+                    );
+                    let evt = error_event(
+                        Some(protocol::ErrorCode::HandoffLost),
+                        format!(
+                            "daemon handoff in progress; retry killing session {session_id} against the new daemon"
+                        ),
+                    );
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    return;
+                }
+                Ok(session) => session,
             };
-            let success = result.is_ok();
             let killed_fanout = fanouts.lock().await.remove(&session_id);
+            let success = session.is_some();
             if success {
-                if let Some(session) = session.as_ref() {
-                    session.retire();
-                }
-                if let Some(control) = stream_control.as_ref() {
-                    control.wait_until_stopped().await;
-                }
-                // The lifecycle guard keeps a same-id Spawn on another
-                // connection behind the old reader's stop acknowledgement,
-                // killed Exit, and recovery teardown.
                 let exit_evt = Event::Exit {
                     session_id: session_id.clone(),
                     code: 128 + libc::SIGKILL,
@@ -776,16 +819,23 @@ pub(crate) async fn handle_command(
                     fanout.state.lock().await.deliver_final(&exit_evt);
                 }
                 recovery_manager.end_session(&session_id).await;
-                if let Some(session) = session.as_ref() {
-                    let mut manager = sessions.lock().await;
-                    if manager.is_current(&session_id, session) {
-                        manager.remove(&session_id);
-                    }
-                }
             }
             drop(killed_fanout);
             terminal_emulator_clients.lock().await.remove(&session_id);
             session_sizes.lock().await.remove(&session_id);
+            // Only now tear the claimed incarnation down. The Exit is already
+            // published and the id is already free, so a same-id respawn can
+            // proceed without ever observing this session again.
+            let result = match &session {
+                Some(session) => session.kill().await,
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("session not found: {}", session_id),
+                )),
+            };
+            // Every id-keyed registry is now clear and the Exit is published:
+            // a replacement may install.
+            sessions.lock().await.end_teardown(&session_id);
             let evt = match result {
                 Ok(_) => Event::Ok,
                 Err(e) => error_event(None, e.to_string()),

@@ -24,10 +24,35 @@ const HANDOFF_VERSION: u32 = 2;
 const HANDOFF_COMPAT_VERSION: u32 = 1;
 const HANDOFF_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The daemon this process is replacing, pinned to a verifiable identity.
+/// `pid` comes from the pid file but is only trusted for signaling when
+/// `authenticated` is set (confirmed against the Unix-socket peer that
+/// actually served the handoff) and its start-time identity still matches.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OldDaemon {
+    pub(crate) pid: libc::pid_t,
+    pub(crate) start: Option<crate::proc_info::StartTime>,
+    pub(crate) authenticated: bool,
+}
+
+impl OldDaemon {
+    /// True while the recorded process is still running (identity-checked;
+    /// a zombie or a recycled pid counts as exited).
+    pub(crate) fn is_alive(&self) -> bool {
+        match self.start {
+            Some(start) => crate::proc_info::identity_alive(self.pid, start),
+            // No identity available (non-macOS fallback): a liveness probe is
+            // the best we can do, but never enough to authorize a kill.
+            None => unsafe { libc::kill(self.pid, 0) == 0 },
+        }
+    }
+}
+
 pub(crate) struct HandoffResult {
     pub(crate) adopted: Vec<(String, pty::PtySession, protocol::HandoffSession)>,
     pub(crate) adopted_agents: Vec<(protocol::HandoffSession, Vec<std::os::fd::RawFd>)>,
     pub(crate) lost: HashMap<String, String>,
+    pub(crate) old_daemon: Option<OldDaemon>,
     pub(crate) abort_start: Option<String>,
 }
 
@@ -37,6 +62,7 @@ impl HandoffResult {
             adopted: vec![],
             adopted_agents: vec![],
             lost: HashMap::new(),
+            old_daemon: None,
             abort_start: None,
         }
     }
@@ -137,6 +163,7 @@ pub(crate) fn parse_handoff_response(line: &str) -> Result<Vec<protocol::Handoff
                 snapshot: Some(session.snapshot),
                 session_id: session.session_id,
                 pid: session.pid,
+                child_start: None,
                 cwd: session.cwd,
                 agent_provider: None,
                 status: SessionStatus::Idle,
@@ -153,6 +180,7 @@ pub(crate) fn parse_handoff_response(line: &str) -> Result<Vec<protocol::Handoff
                 .map(|session| protocol::HandoffSession {
                     session_id: session.session_id,
                     pid: session.pid,
+                    child_start: None,
                     cwd: session.cwd,
                     rows: 0,
                     cols: 0,
@@ -187,11 +215,18 @@ pub(crate) fn blank_snapshot(rows: u16, cols: u16) -> protocol::TerminalSnapshot
     }
 }
 
+type HandoffTransfer = (
+    Vec<protocol::HandoffSession>,
+    Vec<std::os::fd::RawFd>,
+    Option<libc::pid_t>,
+);
+
 async fn request_handoff(
     socket_path: &PathBuf,
     version: u32,
-    old_pid: libc::pid_t,
-) -> Result<(Vec<protocol::HandoffSession>, Vec<std::os::fd::RawFd>), HandoffRequestError> {
+    expected_pid: libc::pid_t,
+    expected_start: Option<crate::proc_info::StartTime>,
+) -> Result<HandoffTransfer, HandoffRequestError> {
     let stream = tokio::net::UnixStream::connect(socket_path)
         .await
         .map_err(|e| {
@@ -201,7 +236,49 @@ async fn request_handoff(
             ))
         })?;
 
-    log::info!("[handoff] connected to old daemon");
+    // The socket peer is the process that actually serves this handoff —
+    // the authoritative identity of the old daemon, unlike the pid file.
+    // Fail closed on disagreement before any protocol exchange: adopting
+    // sessions from (and later signaling) a process other than the one
+    // daemon.pid names is exactly the confusion this check exists to stop.
+    // Peer credentials are MANDATORY: descriptors (and, later, signal
+    // authority) must never be accepted from a peer we could not identify.
+    // A missing credential result is a refusal, not a soft fallback.
+    let peer_pid = crate::proc_info::socket_peer_pid(stream.as_raw_fd());
+    match peer_pid {
+        None => {
+            return Err(HandoffRequestError::Other(
+                "could not read the handoff peer's credentials; refusing handoff".to_string(),
+            ));
+        }
+        Some(peer) if peer != expected_pid => {
+            return Err(HandoffRequestError::Other(format!(
+                "socket peer pid {peer} does not match daemon.pid {expected_pid}; refusing handoff"
+            )));
+        }
+        Some(_) => {}
+    }
+    // The pid alone is not an identity: authenticate it against the start-time
+    // pinned before we connected, so a peer that exited and had its pid
+    // recycled cannot pass as the old daemon.
+    let peer_identity_ok = |phase: &str| -> Result<(), HandoffRequestError> {
+        match expected_start {
+            Some(start) if crate::proc_info::identity_matches(expected_pid, start) => Ok(()),
+            Some(start) => Err(HandoffRequestError::Other(format!(
+                "handoff peer {expected_pid} no longer matches its pinned start identity \
+                 {start:?} at {phase}; refusing handoff"
+            ))),
+            None => Err(HandoffRequestError::Other(format!(
+                "handoff peer {expected_pid} has no pinned start identity at {phase}; \
+                 refusing handoff"
+            ))),
+        }
+    };
+    peer_identity_ok("connect")?;
+    log::info!(
+        "[handoff] connected to old daemon (peer_pid={:?})",
+        peer_pid
+    );
 
     let raw_fd = stream.as_raw_fd();
     let (read_half, write_half) = stream.into_split();
@@ -235,11 +312,19 @@ async fn request_handoff(
     let session_infos =
         parse_handoff_response(line.trim()).map_err(HandoffRequestError::OldDaemonRefused)?;
 
+    if let Err(message) = validate_handoff_fd_counts(&session_infos) {
+        // The fd stream is positional: one out-of-protocol count would
+        // misassign every subsequent descriptor. Refuse before receiving.
+        return Err(HandoffRequestError::TransferFailed {
+            message,
+            session_infos: session_infos.clone(),
+        });
+    }
+
     let expected_fds = expected_handoff_fd_count(&session_infos);
     if expected_fds == 0 {
         send_handoff_ack(&mut writer, version).await?;
-        wait_for_handoff_release(&mut reader, old_pid).await;
-        return Ok((session_infos, vec![]));
+        return Ok((session_infos, vec![], peer_pid));
     }
 
     log::info!(
@@ -253,51 +338,17 @@ async fn request_handoff(
             session_infos: session_infos.clone(),
         }
     })?;
-    send_handoff_ack(&mut writer, version).await?;
-    wait_for_handoff_release(&mut reader, old_pid).await;
-    Ok((session_infos, fds))
-}
-
-async fn wait_for_handoff_release(
-    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
-    old_pid: libc::pid_t,
-) {
-    use tokio::io::AsyncBufReadExt;
-
-    // HandoffAdopted commits ownership transfer. The old daemon then fences
-    // its readers and exits, closing this dedicated connection. EOF is a
-    // stronger ownership barrier than kill(pid, 0), which reports zombies as
-    // alive until their parent reaps them.
-    let released = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => return,
-                Ok(_) => {
-                    log::debug!(
-                        "[handoff] ignoring message while waiting for old daemon release: {}",
-                        line.trim()
-                    );
-                }
-            }
+    // Re-authenticate immediately before the ACK: these descriptors are only
+    // adoptable if the peer that sent them is still the pinned old daemon.
+    // On mismatch close every received fd rather than adopting them.
+    if let Err(error) = peer_identity_ok("descriptor ack") {
+        for fd in &fds {
+            unsafe { libc::close(*fd) };
         }
-    })
-    .await;
-
-    if released.is_err() {
-        log::warn!(
-            "[handoff] old daemon (pid={}) did not release readers after 5s; killing it",
-            old_pid
-        );
-        unsafe { libc::kill(old_pid, libc::SIGKILL) };
-        let mut line = String::new();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            reader.read_line(&mut line),
-        )
-        .await;
+        return Err(error);
     }
+    send_handoff_ack(&mut writer, version).await?;
+    Ok((session_infos, fds, peer_pid))
 }
 
 async fn send_handoff_ack(
@@ -325,6 +376,24 @@ async fn send_handoff_ack(
         Err(error) => Err(HandoffRequestError::Other(format!(
             "failed to send handoff ack: {error}"
         ))),
+    }
+}
+
+/// Agent sessions may only transfer protocol-shaped pipe bundles: nothing
+/// for an exited child, stdout+stderr, or stdout+stderr+stdin. Any other
+/// count is a corrupt or hostile wire value that would misalign the
+/// positional fd stream for every later session.
+pub(crate) fn validate_handoff_fd_counts(
+    session_infos: &[protocol::HandoffSession],
+) -> Result<(), String> {
+    match session_infos.iter().find(|info| {
+        info.kind == protocol::SessionKind::Agent && !matches!(info.agent_fd_count, 0 | 2 | 3)
+    }) {
+        Some(info) => Err(format!(
+            "agent session {} declares invalid fd count {} (protocol allows 0, 2, or 3)",
+            info.session_id, info.agent_fd_count
+        )),
+        None => Ok(()),
     }
 }
 
@@ -377,18 +446,19 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         socket_path
     );
 
-    // Check if old daemon is running
-    let old_pid = match std::fs::read_to_string(pid_path) {
-        Ok(s) => match s.trim().parse::<i32>() {
-            Ok(pid) if unsafe { libc::kill(pid, 0) } == 0 => pid,
-            Ok(pid) => {
-                log::info!(
-                    "[handoff] pid file contains {} but process is not running",
-                    pid
-                );
-                return HandoffResult::empty();
-            }
-            _ => {
+    // Check if the old daemon is running. The pid file is untrusted input:
+    // parse it strictly (a negative or oversized value would turn later
+    // signals into process-group or broadcast targets) and pin the process
+    // to its start-time identity; a zombie or recycled pid counts as exited.
+    let pid_file_pid = match std::fs::read_to_string(pid_path) {
+        Ok(s) => match s
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .and_then(pty::validated_child_pid)
+        {
+            Some(pid) => pid,
+            None => {
                 log::info!("[handoff] pid file has invalid content: {:?}", s.trim());
                 return HandoffResult::empty();
             }
@@ -398,21 +468,64 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
             return HandoffResult::empty();
         }
     };
+    // Pin the exact (pid, start) identity BEFORE connecting. Everything that
+    // follows — the peer-continuity check, the release wait, and any kill —
+    // uses this pinned pair; it is never replaced by a later sample, so a
+    // peer that exits mid-handoff and has its pid recycled can never be
+    // signaled.
+    let pinned_start = match crate::proc_info::process_info(pid_file_pid) {
+        Some(info) if !info.is_zombie => Some(info.start),
+        observed => {
+            log::info!(
+                "[handoff] pid file contains {} but process is not running (observed {:?})",
+                pid_file_pid,
+                observed
+            );
+            return HandoffResult::empty();
+        }
+    };
 
     log::info!(
         "[handoff] old daemon detected (pid={}), connecting to {:?}",
-        old_pid,
+        pid_file_pid,
         socket_path
     );
 
-    let (session_infos, fds, used_version) = match request_handoff(
+    // Bind the old-daemon identity to the pid file, marked authenticated
+    // only once the socket peer confirmed it (request_handoff fails closed
+    // on a peer/pid-file disagreement, so a successful transfer implies
+    // agreement). Unauthenticated old daemons can be awaited but never
+    // killed.
+    let resolve_old_daemon = |peer_pid: Option<libc::pid_t>| -> OldDaemon {
+        OldDaemon {
+            pid: pid_file_pid,
+            // The pre-connect sample, never a fresh one: re-sampling after
+            // the ACK would silently re-pin a recycled pid.
+            start: pinned_start,
+            // Authenticated only when the socket peer is continuous with the
+            // pinned identity: same pid AND still the same process.
+            authenticated: peer_pid == Some(pid_file_pid)
+                && pinned_start
+                    .is_some_and(|start| crate::proc_info::identity_matches(pid_file_pid, start)),
+        }
+    };
+    let unauthenticated_old_daemon = resolve_old_daemon(None);
+    let old_pid = pid_file_pid;
+
+    let (session_infos, fds, used_version, old_daemon) = match request_handoff(
         socket_path,
         HANDOFF_VERSION,
-        old_pid,
+        pid_file_pid,
+        pinned_start,
     )
     .await
     {
-        Ok((session_infos, fds)) => (session_infos, fds, HANDOFF_VERSION),
+        Ok((session_infos, fds, peer_pid)) => (
+            session_infos,
+            fds,
+            HANDOFF_VERSION,
+            resolve_old_daemon(peer_pid),
+        ),
         Err(error) => {
             log::info!("[handoff] version {} failed: {}", HANDOFF_VERSION, error);
             if !should_try_compat_handoff_after_error(&error) {
@@ -424,18 +537,31 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                     adopted: vec![],
                     adopted_agents: vec![],
                     lost: lost_sessions_from_handoff_error(&error),
+                    old_daemon: Some(unauthenticated_old_daemon),
                     abort_start: Some(format!(
                         "old daemon pid {old_pid} is alive but handoff failed ambiguously: {error}"
                     )),
                 };
             }
-            match request_handoff(socket_path, HANDOFF_COMPAT_VERSION, old_pid).await {
-                Ok((session_infos, fds)) => {
+            match request_handoff(
+                socket_path,
+                HANDOFF_COMPAT_VERSION,
+                pid_file_pid,
+                pinned_start,
+            )
+            .await
+            {
+                Ok((session_infos, fds, peer_pid)) => {
                     log::info!(
                         "[handoff] fell back to compatible handoff version {}",
                         HANDOFF_COMPAT_VERSION
                     );
-                    (session_infos, fds, HANDOFF_COMPAT_VERSION)
+                    (
+                        session_infos,
+                        fds,
+                        HANDOFF_COMPAT_VERSION,
+                        resolve_old_daemon(peer_pid),
+                    )
                 }
                 Err(compat_error) => {
                     log::info!(
@@ -447,6 +573,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                         adopted: vec![],
                         adopted_agents: vec![],
                         lost: lost_sessions_from_handoff_error(&compat_error),
+                        old_daemon: Some(unauthenticated_old_daemon),
                         abort_start: Some(format!(
                             "old daemon pid {old_pid} is alive but compatible handoff failed: {compat_error}"
                         )),
@@ -458,7 +585,10 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
 
     if session_infos.is_empty() {
         log::info!("[handoff] no sessions to adopt");
-        return HandoffResult::empty();
+        return HandoffResult {
+            old_daemon: Some(old_daemon),
+            ..HandoffResult::empty()
+        };
     }
 
     for (i, info) in session_infos.iter().enumerate() {
@@ -497,6 +627,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         );
         return HandoffResult {
             lost,
+            old_daemon: Some(old_daemon),
             abort_start: Some(format!(
                 "old daemon pid {old_pid} sent an invalid handoff fd count"
             )),
@@ -528,7 +659,12 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                     break;
                 };
                 let session_id = info.session_id.clone();
-                let alive = unsafe { libc::kill(info.pid as i32, 0) } == 0;
+                // Liveness is only probed through a validated pid: a raw 0 or
+                // out-of-range value would turn kill(pid, 0) into a process-
+                // group or broadcast probe.
+                let alive = pty::validated_child_pid(info.pid)
+                    .map(|pid| unsafe { libc::kill(pid, 0) } == 0)
+                    .unwrap_or(false);
                 log::info!(
                     "[handoff] adopting session {} (fd={}, child_pid={}, alive={}, rows={}, cols={}, snapshot={})",
                     session_id,
@@ -542,7 +678,8 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                 let owned_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
                 let session = pty::PtySession::adopt(
                     owned_fd,
-                    info.pid as libc::pid_t,
+                    info.pid,
+                    info.child_start,
                     info.cwd.clone(),
                     info.rows,
                     info.cols,
@@ -561,6 +698,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         adopted,
         adopted_agents,
         lost: HashMap::new(),
+        old_daemon: Some(old_daemon),
         abort_start: None,
     }
 }
@@ -601,8 +739,18 @@ pub(crate) async fn handle_handoff(
 
     // Snapshot and clone fds without removing ownership. The old daemon keeps
     // serving sessions unless the adopting daemon explicitly ACKs success.
+    // Fence concurrent PTY Spawn/Kill for the duration of the transfer: a
+    // session spawned after this snapshot would never have its master fd
+    // transferred (silently lost when this daemon exits), and a killed
+    // session must not be reinserted behind the snapshot. The seal lifts on
+    // every abort path below; a committed handoff keeps it until exit.
+    let pty_epoch = sessions.lock().await.seal_for_handoff();
     let handles = sessions.lock().await.handles();
-    log::info!("[handoff] found {} sessions in manager", handles.len());
+    log::info!(
+        "[handoff] found {} sessions in manager (epoch {})",
+        handles.len(),
+        pty_epoch
+    );
     let mut controls = Vec::new();
     for (_, handle) in &handles {
         if let Some(control) = handle.stream_control().await {
@@ -677,6 +825,7 @@ pub(crate) async fn handle_handoff(
                 infos.push(protocol::HandoffSession {
                     session_id: id.clone(),
                     pid,
+                    child_start: parts.child_start,
                     cwd,
                     rows,
                     cols,
@@ -703,15 +852,62 @@ pub(crate) async fn handle_handoff(
     }
     // Collect agent sessions (v2 payloads only — v1 daemons cannot adopt
     // them; their children keep running detached with journals on disk).
+    // Duplicated agent pipe fds owned by this function: they stay valid
+    // through sendmsg and the adoption acknowledgement even if a child exits
+    // and its record closes the originals in between (a closed-and-reused
+    // raw fd number must never be transferred). Dropped — and closed — when
+    // this function returns on any path.
+    let mut agent_fd_guards: Vec<std::os::fd::OwnedFd> = Vec::new();
+    let mut handoff_seal: Option<crate::agent_runtime::AgentHandoffSealGuard> = None;
     if version == HANDOFF_VERSION {
+        // Seal the agent registry before snapshotting it: an in-flight
+        // (re)spawn installer that lands after this point cleans up its
+        // child instead of installing into a daemon that is about to exit
+        // (the child resumes via its journal on the adopting daemon).
+        // The seal is lifted again only if this handoff fails and the
+        // daemon keeps serving.
+        handoff_seal = Some(crate::agent_runtime::AgentHandoffSealGuard::arm());
+        // Give in-flight spawns a bounded window to resolve so the snapshot
+        // sees their final state instead of a spawning placeholder with no
+        // transferable fds.
+        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let still_spawning = agent_sessions
+                .lock()
+                .await
+                .values()
+                .any(|record| record.spawning);
+            if !still_spawning || std::time::Instant::now() >= settle_deadline {
+                if still_spawning {
+                    log::warn!(
+                        "[handoff] agent spawns still in flight at snapshot; transferring them as exited"
+                    );
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
         let agent_records = agent_sessions.lock().await;
         for (id, record) in agent_records.iter() {
-            let fd_bundle = record.handoff_fds;
-            let (agent_fd_count, session_fds) = match (record.exited, fd_bundle) {
-                (false, Some(bundle)) => {
-                    let session_fds = bundle.as_vec();
-                    (session_fds.len() as u8, session_fds)
-                }
+            let (agent_fd_count, session_fds) = match (record.exited, record.handoff_fds) {
+                (false, Some(bundle)) => match bundle.duplicate_owned() {
+                    Ok(owned) => {
+                        use std::os::unix::io::AsRawFd;
+                        let raw: Vec<std::os::fd::RawFd> =
+                            owned.iter().map(|fd| fd.as_raw_fd()).collect();
+                        agent_fd_guards.extend(owned);
+                        (raw.len() as u8, raw)
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[handoff] failed to duplicate pipe bundle for agent session {}: {}; transferring as exited",
+                            id,
+                            error
+                        );
+                        (0, Vec::new())
+                    }
+                },
                 _ => (0, Vec::new()),
             };
             log::info!(
@@ -723,6 +919,7 @@ pub(crate) async fn handle_handoff(
             infos.push(protocol::HandoffSession {
                 session_id: id.clone(),
                 pid: record.pid,
+                child_start: record.child_start,
                 cwd: record.params.cwd.clone(),
                 rows: 0,
                 cols: 0,
@@ -816,6 +1013,7 @@ pub(crate) async fn handle_handoff(
                 for fd in cloned_pty_fds {
                     unsafe { libc::close(fd) };
                 }
+                sessions.lock().await.unseal_for_handoff();
                 return false;
             }
         }
@@ -829,12 +1027,18 @@ pub(crate) async fn handle_handoff(
             version: ack_version,
         })) if ack_version == version => {
             log::info!("[handoff] adopting daemon acknowledged handoff");
+            // The transfer is committed: keep the agent registry sealed for
+            // the remainder of this (exiting) daemon's life.
+            if let Some(seal) = handoff_seal.take() {
+                seal.defuse();
+            }
         }
         Ok(Some(other)) => {
             log::warn!("[handoff] expected HandoffAdopted, got {:?}", other);
             for fd in cloned_pty_fds {
                 unsafe { libc::close(fd) };
             }
+            sessions.lock().await.unseal_for_handoff();
             return false;
         }
         Ok(None) => {
@@ -842,6 +1046,7 @@ pub(crate) async fn handle_handoff(
             for fd in cloned_pty_fds {
                 unsafe { libc::close(fd) };
             }
+            sessions.lock().await.unseal_for_handoff();
             return false;
         }
         Err(_) => {
@@ -849,8 +1054,26 @@ pub(crate) async fn handle_handoff(
             for fd in cloned_pty_fds {
                 unsafe { libc::close(fd) };
             }
+            sessions.lock().await.unseal_for_handoff();
             return false;
         }
+    }
+
+    // Fault-injection hook for the delayed-old-reader regression: simulate a
+    // daemon that is slow to relinquish its PTY readers after acknowledging
+    // adoption. The adopting daemon must not publish (pid file/socket) until
+    // this process has exited, so a delay here must delay publication, not
+    // split output. No effect unless the test env var is set.
+    if let Some(delay_ms) = std::env::var("KANNA_TEST_HANDOFF_RELEASE_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&value| value > 0)
+    {
+        log::warn!(
+            "[handoff] TEST HOOK: delaying reader release by {}ms",
+            delay_ms
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
 
     for control in &controls {

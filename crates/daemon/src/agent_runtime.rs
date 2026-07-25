@@ -4,7 +4,7 @@
 mod adoption;
 mod commands;
 mod lifecycle;
-mod readers;
+pub(crate) mod readers;
 
 use std::sync::Arc;
 
@@ -15,6 +15,10 @@ use kanna_daemon::agent::{AgentClientWriter, AgentSessionRecord, AgentShared};
 use kanna_daemon::protocol::{self, Event, SessionStatus};
 
 pub use adoption::adopt_agent_session;
+#[cfg(test)]
+pub(crate) use commands::deliver_planned_input_for_test;
+#[cfg(test)]
+pub(crate) use commands::install_respawned_child;
 pub use commands::{
     handle_agent_input, handle_agent_interrupt, handle_agent_permission, handle_agent_set_model,
     handle_attach_agent, handle_spawn_agent,
@@ -24,6 +28,63 @@ pub use lifecycle::{
 };
 
 use crate::socket::write_event;
+
+/// Sealed while this daemon is (or has finished) transferring its agent
+/// sessions to a successor. Once sealed, in-flight spawn installers must
+/// treat their record as lost and clean up the spawned child: an install
+/// landing after the transfer snapshot would strand a live child in a
+/// process that is about to exit. Unsealed again only if the handoff fails
+/// and this daemon keeps serving.
+static AGENT_HANDOFF_SEAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn agent_handoff_sealed() -> bool {
+    AGENT_HANDOFF_SEAL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub(crate) fn seal_agent_handoff() {
+    AGENT_HANDOFF_SEAL.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub(crate) fn unseal_agent_handoff() {
+    AGENT_HANDOFF_SEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The seal is process-global (a daemon hands off exactly once), so tests
+/// that either arm it or assert that an install succeeds must not overlap.
+/// Both kinds acquire this serializer.
+#[cfg(test)]
+pub(crate) fn seal_test_serializer() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// RAII seal for an in-progress agent handoff: arming seals the registry;
+/// dropping the guard lifts the seal again (the handoff failed and this
+/// daemon keeps serving) unless it was defused on the success path.
+pub(crate) struct AgentHandoffSealGuard {
+    defused: bool,
+}
+
+impl AgentHandoffSealGuard {
+    pub(crate) fn arm() -> Self {
+        seal_agent_handoff();
+        AgentHandoffSealGuard { defused: false }
+    }
+
+    /// Keep the seal permanently (successful handoff; this daemon exits).
+    pub(crate) fn defuse(mut self) {
+        self.defused = true;
+    }
+}
+
+impl Drop for AgentHandoffSealGuard {
+    fn drop(&mut self) {
+        if !self.defused {
+            unseal_agent_handoff();
+        }
+    }
+}
 
 fn agent_error(code: protocol::ErrorCode, message: impl Into<String>) -> Event {
     Event::Error {
