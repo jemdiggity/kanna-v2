@@ -732,6 +732,142 @@ describe("createMobileController", () => {
     });
   });
 
+  it("keeps the last-good command catalog when its refresh fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRepoCommands
+      .mockResolvedValueOnce({
+        repoId: "repo-1",
+        revision: "catalog-v1",
+        commands: [{
+          id: "factory:create-agent",
+          label: "Create Agent",
+          description: "Create a new agent definition",
+          group: "configure"
+        }]
+      })
+      .mockRejectedValueOnce(new Error("Relay connection closed."));
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    await controller.loadRepoCommands();
+    await controller.loadRepoCommands();
+
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-1",
+      repoCommandCatalog: {
+        repoId: "repo-1",
+        revision: "catalog-v1"
+      },
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      unavailableRepoCommandIds: []
+    });
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores cached commands while a repository refresh is in flight", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const repoOneRefresh = createDeferred<Awaited<
+      ReturnType<KannaClient["listRepoCommands"]>
+    >>();
+    client.listRepoCommands
+      .mockResolvedValueOnce({
+        repoId: "repo-1",
+        revision: "repo-1-v1",
+        commands: []
+      })
+      .mockResolvedValueOnce({
+        repoId: "repo-2",
+        revision: "repo-2-v1",
+        commands: []
+      })
+      .mockReturnValueOnce(repoOneRefresh.promise);
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await vi.waitFor(() => {
+      expect(store.getState().repoCommandCatalog?.revision).toBe("repo-1-v1");
+    });
+    await controller.selectRepo("repo-2");
+
+    const selection = controller.selectRepo("repo-1");
+    await vi.waitFor(() => {
+      expect(store.getState()).toMatchObject({
+        selectedRepoId: "repo-1",
+        repoCommandCatalog: { revision: "repo-1-v1" },
+        repoCommandStatus: "ready"
+      });
+    });
+
+    repoOneRefresh.resolve({
+      repoId: "repo-1",
+      revision: "repo-1-v2",
+      commands: []
+    });
+    await selection;
+    expect(store.getState().repoCommandCatalog?.revision).toBe("repo-1-v2");
+  });
+
+  it("replaces a cached command catalog after a successful refresh", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRepoCommands
+      .mockResolvedValueOnce({
+        repoId: "repo-1",
+        revision: "catalog-v1",
+        commands: []
+      })
+      .mockResolvedValueOnce({
+        repoId: "repo-1",
+        revision: "catalog-v2",
+        commands: []
+      });
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+
+    await controller.loadRepoCommands();
+    await controller.loadRepoCommands();
+
+    expect(store.getState().repoCommandCatalog?.revision).toBe("catalog-v2");
+  });
+
+  it("does not retain commands after the server rejects their catalog revision", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    client.listRepoCommands
+      .mockResolvedValueOnce({
+        repoId: "repo-1",
+        revision: "catalog-v1",
+        commands: [
+          {
+            id: "factory:create-agent",
+            label: "Create Agent",
+            description: "Create a new agent definition",
+            group: "configure"
+          }
+        ]
+      })
+      .mockRejectedValue(new Error("Relay connection closed."));
+    client.runRepoCommand.mockRejectedValueOnce(
+      new Error("Remote desktop request failed with status 409.")
+    );
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    await controller.loadRepoCommands();
+    store.setRepos([{ id: "repo-1", name: "Repo One" }]);
+
+    await controller.runRepoCommand("factory:create-agent");
+
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-1",
+      repoCommandCatalog: null,
+      repoCommandStatus: "error",
+      repoCommandErrorMessage: "Relay connection closed."
+    });
+  });
+
   it("keeps an empty successful catalog instead of falling through", async () => {
     const store = createSessionStore();
     const client = createClientMock();
