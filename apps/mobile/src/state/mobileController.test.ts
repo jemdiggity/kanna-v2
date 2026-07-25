@@ -3228,6 +3228,104 @@ describe("createMobileController", () => {
     });
   });
 
+  it("does not dispatch create after abort removes the attempt before persistence resolves", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const persistence = createDeferred<void>();
+    const abort = createDeferred<void>();
+    client.abortTaskCreation.mockReturnValue(abort.promise);
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "dddddddddddddddddddddddddddddddd",
+      createTaskSlotId: () => "create:slot-abort-before-persist",
+      persistSessionContext: () => persistence.promise
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Abort before persistence");
+    const createPromise = controller.createTask();
+    await flushMicrotasks();
+    const abortPromise = controller.abortTaskCreation(
+      "create:slot-abort-before-persist"
+    );
+
+    abort.resolve();
+    await abortPromise;
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      taskCreationAttempts: [],
+      taskUiSlots: []
+    });
+
+    persistence.resolve();
+    await createPromise;
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: null,
+      taskCreationAttempts: [],
+      taskUiSlots: []
+    });
+  });
+
+  it("does not dispatch create or recovery when persistence resolves during abort and permits retry after abort fails", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const persistence = createDeferred<void>();
+    const abort = createDeferred<void>();
+    client.abortTaskCreation.mockReturnValue(abort.promise);
+    client.createTask.mockResolvedValue({
+      taskId: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      repoId: "repo-2",
+      title: "Recover after abort fails",
+      stage: "in progress"
+    });
+    const controller = createMobileController(client, store, undefined, {
+      createTaskId: () => "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      createTaskSlotId: () => "create:slot-abort-during-persist",
+      persistSessionContext: () => persistence.promise
+    });
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Recover after abort fails");
+    const createPromise = controller.createTask();
+    await flushMicrotasks();
+    const waitingRecovery = controller.recoverTaskCreation(
+      "create:slot-abort-during-persist"
+    );
+    const abortPromise = controller.abortTaskCreation(
+      "create:slot-abort-during-persist"
+    );
+
+    persistence.resolve();
+    await Promise.all([createPromise, waitingRecovery]);
+    const createCallsWhileAbortPending = client.createTask.mock.calls.length;
+
+    abort.reject(new Error("Desktop is offline"));
+    await abortPromise;
+    await controller.recoverTaskCreation(
+      "create:slot-abort-during-persist"
+    );
+
+    expect(createCallsWhileAbortPending).toBe(0);
+    expect(client.createTask).toHaveBeenCalledOnce();
+    expect(store.getState()).toMatchObject({
+      composerErrorMessage: null,
+      taskCreationAttempts: [],
+      taskUiSlots: [
+        {
+          slotId: "create:slot-abort-during-persist",
+          taskId: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          state: "ready"
+        }
+      ]
+    });
+  });
+
   it("does not replay creation while abort is in flight and preserves the slot if abort fails", async () => {
     const store = createSessionStore();
     const attempt = {

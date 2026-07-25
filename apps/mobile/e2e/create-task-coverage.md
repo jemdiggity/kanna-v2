@@ -67,13 +67,15 @@ The narrower automated coverage is:
   verifies that task rows continue to open through the stable UI slot after
   acknowledgement.
 - `src/state/mobileController.test.ts` covers persist-before-dispatch and
-  single-flight creation, optimistic slot selection, exact-id recovery and
-  response fencing, definite-failure slot removal, authoritative
-  canonicalization, non-authoritative and first-authoritative publication gaps,
-  in-place authoritative hydration, exact-attempt abort routing, create/abort
-  response races, failed-abort recovery preservation, duplicate-action
-  single-flight behavior, eventual removal after authoritative deletion, and
-  keeping the acknowledged task visible when terminal startup fails.
+  single-flight creation, the pre-dispatch persistence/abort race that suppresses
+  both original and waiting-recovery requests, optimistic slot selection,
+  exact-id recovery and response fencing, definite-failure slot removal,
+  authoritative canonicalization, non-authoritative and first-authoritative
+  publication gaps, in-place authoritative hydration, exact-attempt abort
+  routing, create/abort response races, failed-abort recovery preservation,
+  duplicate-action single-flight behavior, eventual removal after authoritative
+  deletion, and keeping the acknowledged task visible when terminal startup
+  fails.
 - `src/lib/transports/lanTransport.test.ts`,
   `src/lib/transports/remoteTransport.test.ts`, and
   `src/lib/sources/cloudLanClient.test.ts` cover the LAN and relay abort request

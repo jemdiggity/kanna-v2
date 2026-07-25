@@ -2030,6 +2030,12 @@ export function createMobileController(
         let requestDispatched = false;
         try {
           await persistenceReady;
+          if (
+            !isCurrentTaskCreationAttempt(attempt) ||
+            isTaskCreationAbortPending(attempt)
+          ) {
+            return null;
+          }
           requestDispatched = true;
           const created = await submitFrozenTaskCreation(attempt);
           return completeTaskCreation(attempt, created);
@@ -2092,7 +2098,8 @@ export function createMobileController(
         try {
           await persistenceReady;
           if (
-            !isCurrentTaskCreationAttempt(attempt)
+            !isCurrentTaskCreationAttempt(attempt) ||
+            isTaskCreationAbortPending(attempt)
           ) {
             return null;
           }
