@@ -1,5 +1,6 @@
 import { taskUiSlotToSidebarItem } from "../stores/taskUiSlots";
 import type { SidebarTaskItem, TaskUiSlot } from "../types/taskUi";
+import { workspaceTaskOwnerTaskId } from "./buildWorkspace";
 import type { WorkspaceTask } from "./types";
 
 export interface ProjectWorkspaceTasksForSidebarInput {
@@ -290,7 +291,7 @@ function workspaceTaskDurableCandidates(workspaceTask: WorkspaceTask): Set<strin
     addAlias(candidates, source.terminalRef?.ownerLocalTaskId);
   }
   addAlias(candidates, workspaceTask.terminal.remoteRef?.ownerLocalTaskId);
-  addAlias(candidates, logicalOwnerTaskId(workspaceTask));
+  addAlias(candidates, workspaceTaskOwnerTaskId(workspaceTask));
   return candidates;
 }
 
@@ -362,7 +363,7 @@ function addWorkspaceTaskAliases(
     addAlias(taskAliases, source.terminalRef?.ownerLocalTaskId);
   }
   addAlias(taskAliases, workspaceTask.terminal.remoteRef?.ownerLocalTaskId);
-  addAlias(taskAliases, logicalOwnerTaskId(workspaceTask));
+  addAlias(taskAliases, workspaceTaskOwnerTaskId(workspaceTask));
   addAlias(taskAliases, workspaceTask.logicalTaskKey);
 
   for (const alias of taskAliases) {
@@ -375,14 +376,6 @@ function addWorkspaceTaskAliases(
     }
     aliases.set(alias, workspaceTask);
   }
-}
-
-function logicalOwnerTaskId(workspaceTask: WorkspaceTask): string | null {
-  const marker = ":owner-local:";
-  const markerIndex = workspaceTask.logicalTaskKey.indexOf(marker);
-  if (markerIndex < 0) return null;
-  const ownerTaskId = workspaceTask.logicalTaskKey.slice(markerIndex + marker.length);
-  return ownerTaskId || null;
 }
 
 function addAlias(aliases: Set<string>, alias: string | null | undefined): void {

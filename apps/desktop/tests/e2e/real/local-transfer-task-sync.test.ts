@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -5,9 +6,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
+import { dragSortableTaskToTarget } from "../helpers/sidebarDrag";
+import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi } from "../helpers/transferFlow";
-import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 
 interface TransferPeer {
   peer_id?: string;
@@ -155,17 +158,37 @@ async function selectSidebarTaskByTitle(client: typeof primary, title: string): 
 
 async function waitForSelectedItem(client: typeof primary, itemId: string, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  let selectedItemId: string | null = null;
+  let lastSelection: unknown = null;
   while (Date.now() < deadline) {
-    selectedItemId = await client.executeSync<string | null>(`
+    // Selection tracks the presentation slot id, so resolve the selected
+    // workspace task and match against any of its durable identities.
+    lastSelection = await client.executeSync(`
       const ctx = window.__KANNA_E2E__.setupState;
-      const store = ctx.store?.__v_isRef ? ctx.store.value : ctx.store;
-      return store?.selectedItemId ?? null;
+      const read = (value) => value?.__v_isRef ? value.value : value;
+      const task = read(ctx.selectedWorkspaceTask);
+      if (!task) return null;
+      return JSON.parse(JSON.stringify({
+        itemId: task.item?.id ?? null,
+        localTaskId: task.localTaskId,
+        remoteTaskIds: task.remoteTaskIds ?? [],
+      }));
     `);
-    if (selectedItemId === itemId) return;
+    const selection = lastSelection as {
+      itemId: string | null;
+      localTaskId: string | null;
+      remoteTaskIds: string[];
+    } | null;
+    if (
+      selection &&
+      (selection.itemId === itemId ||
+        selection.localTaskId === itemId ||
+        selection.remoteTaskIds.includes(itemId))
+    ) {
+      return;
+    }
     await sleep(100);
   }
-  throw new Error(`timed out waiting for selected item ${itemId}; last selected item was ${selectedItemId}`);
+  throw new Error(`timed out waiting for selected item ${itemId}; last selection was ${JSON.stringify(lastSelection)}`);
 }
 
 async function countLocalTasksOnSecondary(): Promise<number> {
@@ -180,15 +203,18 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
   stage: string;
   isRemote: boolean;
 }>> {
+  // Sidebar rows carry their durable identity as task_id (slot_id is the
+  // presentation identity); for remote-only tasks task_id is the synthetic
+  // cloud/lan item id.
   return await client.executeSync(`
     const ctx = window.__KANNA_E2E__.setupState;
     const value = ctx.sidebarItems?.__v_isRef ? ctx.sidebarItems.value : ctx.sidebarItems;
     return JSON.parse(JSON.stringify(value.filter((item) => item.prompt === ${JSON.stringify(prompt)}).map((item) => ({
-      id: item.id,
+      id: item.task_id,
       prompt: item.prompt,
       repo_id: item.repo_id,
       stage: item.stage,
-      isRemote: item.id.startsWith("cloud:") || item.id.startsWith("lan:"),
+      isRemote: (item.task_id || "").startsWith("cloud:") || (item.task_id || "").startsWith("lan:"),
     }))));
   `);
 }
@@ -317,6 +343,129 @@ async function waitForPrimaryTaskStage(taskId: string, stage: string, timeoutMs 
   throw new Error(`timed out waiting for owner task ${taskId} stage ${stage}; rows=${JSON.stringify(lastRows)}`);
 }
 
+async function remoteTaskPinsSetting(client: typeof primary): Promise<Record<string, number>> {
+  const rows = await queryDb(
+    client,
+    "SELECT value FROM settings WHERE key = 'remoteTaskPins'",
+  ) as Array<{ value?: string }>;
+  const raw = rows[0]?.value;
+  if (!raw) return {};
+  return JSON.parse(raw) as Record<string, number>;
+}
+
+async function pinnedZoneTaskIds(repoId: string): Promise<string[]> {
+  return await secondary.executeSync<string[]>(`
+    const zone = document.querySelector(
+      '.sidebar .repo-section[data-repo-id="' + ${JSON.stringify(repoId)} + '"] .pinned-zone',
+    );
+    return Array.from(zone?.querySelectorAll(".task-subtree") ?? [])
+      .map((element) => element.getAttribute("data-task-id") || "");
+  `);
+}
+
+async function waitForPinnedZoneMembership(
+  repoId: string,
+  taskId: string,
+  pinned: boolean,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastIds: string[] = [];
+  while (Date.now() < deadline) {
+    lastIds = await pinnedZoneTaskIds(repoId);
+    if (lastIds.includes(taskId) === pinned) return;
+    await sleep(250);
+  }
+  throw new Error(
+    `timed out waiting for task ${taskId} pinned-zone membership to become ${pinned}; zone=${JSON.stringify(lastIds)}`,
+  );
+}
+
+async function waitForRemoteTaskPinSetting(
+  ownerTaskId: string,
+  pinned: boolean,
+  timeoutMs = 15_000,
+): Promise<Record<string, number>> {
+  const deadline = Date.now() + timeoutMs;
+  let lastPins: Record<string, number> = {};
+  while (Date.now() < deadline) {
+    lastPins = await remoteTaskPinsSetting(secondary);
+    if ((ownerTaskId in lastPins) === pinned) return lastPins;
+    await sleep(250);
+  }
+  const diagnostics = await secondary.executeSync(`
+    const ctx = window.__KANNA_E2E__.setupState;
+    const read = (value) => value?.__v_isRef ? value.value : value;
+    return JSON.parse(JSON.stringify({
+      toasts: Array.from(document.querySelectorAll(".toast")).map((el) => el.textContent || ""),
+      pinnedZoneIds: Array.from(document.querySelectorAll(".sidebar .pinned-zone .task-subtree"))
+        .map((el) => el.getAttribute("data-task-id") || ""),
+      sidebarItems: (read(ctx.sidebarItems) ?? []).map((item) => ({
+        slot_id: item.slot_id,
+        task_id: item.task_id,
+        pinned: item.pinned,
+        pin_order: item.pin_order,
+        remote_task: item.remote_task,
+      })),
+      workspaceAliasHasRemote: Boolean(read(ctx.workspaceTasksByItemId)),
+    }));
+  `).catch((error: unknown) => ({ diagnosticError: String(error) }));
+  throw new Error(
+    `timed out waiting for remoteTaskPins[${ownerTaskId}] presence to become ${pinned}; setting=${JSON.stringify(lastPins)}; diagnostics=${JSON.stringify(diagnostics)}`,
+  );
+}
+
+async function waitForSelectedTask(client: typeof primary, taskId: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let selectedTaskId: string | null = null;
+  while (Date.now() < deadline) {
+    selectedTaskId = await client.executeSync<string | null>(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      const store = ctx.store?.__v_isRef ? ctx.store.value : ctx.store;
+      const value = store?.selectedTaskId;
+      return (value?.__v_isRef ? value.value : value) ?? null;
+    `);
+    if (selectedTaskId === taskId) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for selected task ${taskId}; last selected task was ${selectedTaskId}`);
+}
+
+async function clearImportSeededTasks(client: typeof primary, targetRepoId: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const rows = await queryDb(
+      client,
+      "SELECT id FROM pipeline_item WHERE repo_id = ?",
+      [targetRepoId],
+    ) as unknown[];
+    if (rows.length > 0) break;
+    await sleep(200);
+  }
+  await execDb(client, "DELETE FROM pipeline_item WHERE repo_id = ?", [targetRepoId]);
+  const reloadResult = await callVueMethod(client, "store.reloadSnapshot");
+  if (isVueCallError(reloadResult)) {
+    throw new Error(reloadResult.__error);
+  }
+}
+
+async function closeOpenPrimaryTaskByPrompt(prompt: string): Promise<void> {
+  const rows = await queryDb(
+    primary,
+    "SELECT id FROM pipeline_item WHERE prompt = ? AND closed_at IS NULL",
+    [prompt],
+  ) as Array<{ id: string }>;
+  const taskId = rows[0]?.id;
+  if (!taskId) return;
+  await selectSidebarTaskByTitle(primary, prompt);
+  await waitForSelectedTask(primary, taskId);
+  const closeResult = await callVueMethod(primary, "closeSelectedWorkspaceTask");
+  if (isVueCallError(closeResult)) {
+    throw new Error(closeResult.__error);
+  }
+  await waitForSidebarTaskToDisappear(prompt);
+}
+
 async function waitForSecondaryRemoteTaskStage(prompt: string, stage: string, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastItems: unknown[] = [];
@@ -355,8 +504,26 @@ describe("local transfer task sync", () => {
         ],
       }),
     );
+    // Repo definitions are resolved from origin/<default_branch>, so the
+    // pipeline must be committed and pushed to the fixture origin.
+    for (const args of [
+      ["add", ".kanna"],
+      ["commit", "-m", "test: add LAN advance stage pipeline"],
+      ["push", "origin", "main"],
+    ]) {
+      const result = spawnSync("git", args, { cwd: testRepoPath, encoding: "utf8" });
+      if (result.status !== 0) {
+        throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+      }
+    }
     repoId = await importTestRepo(primary, testRepoPath, "local-transfer-task-sync-source");
     secondaryRepoId = await importTestRepo(secondary, testRepoPath, "local-transfer-task-sync-secondary");
+    // Repo import seeds a setup task on each instance (asynchronously, after
+    // the import call returns). These tests assert LAN-only task visibility,
+    // so wait for each seeded task and clear both instances back to zero
+    // local tasks.
+    await clearImportSeededTasks(primary, repoId);
+    await clearImportSeededTasks(secondary, secondaryRepoId);
     await ensurePairedPeers();
   });
 
@@ -439,11 +606,13 @@ describe("local transfer task sync", () => {
     `);
     const item = snapshot.items?.find((candidate) => candidate.prompt === "LAN visible task");
     expect(item).toBeTruthy();
-    expect(Object.values(snapshot.terminalRefs ?? {})).toContainEqual({
-      ownerDesktopId: "peer-primary",
-      ownerLocalTaskId: createResult,
-      transport: "lan",
-    });
+    expect(Object.values(snapshot.terminalRefs ?? {})).toContainEqual(
+      expect.objectContaining({
+        ownerDesktopId: "peer-primary",
+        ownerLocalTaskId: createResult,
+        transport: "lan",
+      }),
+    );
 
     const primaryLanSnapshot = await lanSnapshotItemsForPrompt(primary, "LAN visible task");
     expect(primaryLanSnapshot.items).toEqual([]);
@@ -553,5 +722,150 @@ describe("local transfer task sync", () => {
         stage: "qa",
       }),
     ]);
+  });
+
+  it("pins a remote-only LAN task on the viewer, persists it across reload, and never mutates the owner", async () => {
+    // The published LAN snapshot derives one synthetic id per peer task
+    // stream, so keep a single open owner task while this test drives pins.
+    // Close every open owner task, including leftovers from earlier tests.
+    const openPrimaryRows = await queryDb(
+      primary,
+      "SELECT prompt FROM pipeline_item WHERE closed_at IS NULL",
+    ) as Array<{ prompt: string }>;
+    for (const row of openPrimaryRows) {
+      await closeOpenPrimaryTaskByPrompt(row.prompt);
+    }
+
+    // Seed a pinned local anchor on the viewer: it gives the pinned zone a
+    // real drop rect for the drag gesture and makes the reorder path persist
+    // a mixed local/remote pinned list.
+    const anchorTaskId = "lan-pin-local-anchor";
+    await execDb(
+      secondary,
+      `INSERT INTO pipeline_item
+         (id, repo_id, prompt, display_name, stage, agent_type, activity, pinned, pin_order, parent_task_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        anchorTaskId,
+        secondaryRepoId,
+        "Local pinned anchor",
+        "Local pinned anchor",
+        "in progress",
+        "agent",
+        "idle",
+        1,
+        0,
+        null,
+        "2026-05-01T00:00:00.000Z",
+        "2026-05-01T00:00:00.000Z",
+      ],
+    );
+    const reloadResult = await callVueMethod(secondary, "store.reloadSnapshot");
+    if (isVueCallError(reloadResult)) {
+      throw new Error(reloadResult.__error);
+    }
+    await secondary.waitForText(".sidebar", "Local pinned anchor", 10_000);
+    await waitForPinnedZoneMembership(secondaryRepoId, anchorTaskId, true);
+
+    const createResult = await callVueMethod(
+      primary,
+      "store.createItem",
+      repoId,
+      testRepoPath,
+      "LAN pin persistence task",
+      "agent",
+      { agentProvider: "codex", baseRef: "origin/main" },
+    );
+    if (isVueCallError(createResult)) {
+      throw new Error(createResult.__error);
+    }
+    const ownerTaskId = String(createResult);
+
+    await waitForSidebarTask("LAN pin persistence task");
+    await waitForSidebarTaskGroupedUnderRepo("LAN pin persistence task", secondaryRepoId);
+    const remoteItems = await sidebarItemsForPrompt(secondary, "LAN pin persistence task");
+    expect(remoteItems).toEqual([
+      expect.objectContaining({
+        id: expect.stringMatching(/^cloud:lan:/),
+        repo_id: secondaryRepoId,
+        isRemote: true,
+      }),
+    ]);
+    const remoteItemId = remoteItems[0].id;
+    expect(await remoteTaskPinsSetting(secondary)).toEqual({});
+    await waitForPinnedZoneMembership(secondaryRepoId, remoteItemId, false);
+
+    // Drag the remote task from its stage group into the pinned zone.
+    const repoSelector = `.sidebar .repo-section[data-repo-id="${secondaryRepoId}"]`;
+    const remoteStageRowSelector = `${repoSelector} .type-zone .task-subtree[data-task-id="${remoteItemId}"]`;
+    const pinnedAnchorSelector = `${repoSelector} .pinned-zone .task-subtree[data-task-id="${anchorTaskId}"]`;
+    await secondary.waitForElement(remoteStageRowSelector, 10_000);
+    await secondary.waitForElement(pinnedAnchorSelector, 10_000);
+    // Cross-list drops must land off the target's exact vertical center or
+    // SortableJS treats the hover as a no-op; bias into the lower half.
+    await dragSortableTaskToTarget(secondary, remoteStageRowSelector, pinnedAnchorSelector, {
+      targetVerticalBias: 0.25,
+    });
+
+    // The viewer persists the pin in its remoteTaskPins setting, keyed by the
+    // owner-side durable task id, and renders the task in the pinned zone.
+    const pins = await waitForRemoteTaskPinSetting(ownerTaskId, true);
+    await waitForPinnedZoneMembership(secondaryRepoId, remoteItemId, true);
+
+    // The mixed pinned list persists one consistent order across the local
+    // pipeline_item row and the remote overlay entry.
+    const anchorRows = await queryDb(
+      secondary,
+      "SELECT pinned, pin_order FROM pipeline_item WHERE id = ?",
+      [anchorTaskId],
+    ) as Array<{ pinned: number; pin_order: number | null }>;
+    expect(anchorRows[0]?.pinned).toBe(1);
+    const anchorOrder = anchorRows[0]?.pin_order;
+    const remoteOrder = pins[ownerTaskId];
+    expect([remoteOrder, anchorOrder].sort()).toEqual([0, 1]);
+    const zoneIds = await pinnedZoneTaskIds(secondaryRepoId);
+    expect(zoneIds.indexOf(remoteItemId) < zoneIds.indexOf(anchorTaskId))
+      .toBe(remoteOrder < (anchorOrder ?? 0));
+
+    // The owning desktop's task and settings stay untouched, and the viewer
+    // still has no local row for the remote task.
+    expect(await queryDb(
+      primary,
+      "SELECT pinned, pin_order FROM pipeline_item WHERE id = ?",
+      [ownerTaskId],
+    )).toEqual([{ pinned: 0, pin_order: null }]);
+    expect(await remoteTaskPinsSetting(primary)).toEqual({});
+    expect(await countLocalTasksOnSecondary()).toBe(1);
+
+    // The pin survives a full viewer reload: the setting is read back from
+    // the settings table and reapplied to the freshly synced LAN task.
+    await secondary.executeSync("location.reload()");
+    await secondary.waitForAppReady();
+    await dismissStartupShortcutsModal(secondary);
+    await waitForSidebarTask("LAN pin persistence task");
+    await waitForPinnedZoneMembership(secondaryRepoId, remoteItemId, true, 30_000);
+    expect((await remoteTaskPinsSetting(secondary))[ownerTaskId]).toBe(remoteOrder);
+
+    // Unpin by dragging back out of the pinned zone into the unpin receiver.
+    const pinnedRemoteSelector = `${repoSelector} .pinned-zone .task-subtree[data-task-id="${remoteItemId}"]`;
+    const unpinReceiverSelector = `${repoSelector} .empty-unpin-zone`;
+    await secondary.waitForElement(pinnedRemoteSelector, 10_000);
+    await secondary.waitForElement(unpinReceiverSelector, 10_000);
+    await dragSortableTaskToTarget(secondary, pinnedRemoteSelector, unpinReceiverSelector);
+
+    await waitForRemoteTaskPinSetting(ownerTaskId, false);
+    await waitForPinnedZoneMembership(secondaryRepoId, remoteItemId, false);
+    const anchorAfterUnpin = await queryDb(
+      secondary,
+      "SELECT pinned, pin_order FROM pipeline_item WHERE id = ?",
+      [anchorTaskId],
+    ) as Array<{ pinned: number; pin_order: number | null }>;
+    expect(anchorAfterUnpin).toEqual([{ pinned: 1, pin_order: 0 }]);
+    expect(await queryDb(
+      primary,
+      "SELECT pinned, pin_order FROM pipeline_item WHERE id = ?",
+      [ownerTaskId],
+    )).toEqual([{ pinned: 0, pin_order: null }]);
+    expect(await remoteTaskPinsSetting(primary)).toEqual({});
   });
 });

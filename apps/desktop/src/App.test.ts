@@ -1296,6 +1296,134 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it("pins a remote-only task through the viewer-local overlay instead of the local pin API", async () => {
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-remote",
+        repo_id: "cloud:repo-remote",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+    });
+
+    const settings = new Map<string, string>();
+    updateDesktopServerClientHandlersForTests({
+      getSetting: (key) => settings.get(key) ?? null,
+      putSetting: (key, value) => {
+        settings.set(key, value);
+      },
+      deleteSetting: (key) => {
+        settings.delete(key);
+      },
+    });
+
+    const SidebarPinStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        repos: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["pin-item", "unpin-item", "reorder-pinned"],
+      template: `
+        <div data-testid="sidebar">
+          <button
+            v-for="item in taskSlots"
+            :key="item.slot_id"
+            data-testid="pin-remote-task"
+            type="button"
+            @click="$emit('pin-item', item.task_id, 0); $emit('reorder-pinned', item.repo_id, [item.task_id])"
+          >
+            {{ item.display_name }}
+          </button>
+          <button
+            v-for="item in taskSlots"
+            :key="'unpin-' + item.slot_id"
+            data-testid="unpin-remote-task"
+            type="button"
+            @click="$emit('unpin-item', item.task_id)"
+          >
+            unpin
+          </button>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarPinStub, {});
+    await flushPromises();
+    await flushPromises();
+
+    try {
+      store.pinItem.mockClear();
+      store.reorderPinned.mockClear();
+      store.reloadSnapshot.mockClear();
+
+      await wrapper.get('[data-testid="pin-remote-task"]').trigger("click");
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await flushPromises();
+      }
+
+      expect(store.pinItem).not.toHaveBeenCalled();
+      expect(store.reorderPinned).not.toHaveBeenCalled();
+      expect(JSON.parse(settings.get("remoteTaskPins") ?? "{}")).toEqual({ "task-remote": 0 });
+      expect(store.reloadSnapshot).toHaveBeenCalled();
+      expect(toastErrorMock).not.toHaveBeenCalled();
+
+      await wrapper.get('[data-testid="unpin-remote-task"]').trigger("click");
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await flushPromises();
+      }
+
+      expect(store.unpinItem).not.toHaveBeenCalled();
+      expect(settings.has("remoteTaskPins")).toBe(false);
+    } finally {
+      // Restore the global test-setup defaults clobbered by this test's
+      // settings-backed handlers.
+      updateDesktopServerClientHandlersForTests({
+        getSetting: async () => null,
+        putSetting: async (key, value) => ({ key, value }),
+        deleteSetting: async () => {},
+      });
+      wrapper.unmount();
+    }
+  });
+
   it("clears and persists a remote selection after closing its stable presentation slot", async () => {
     cloudTasksMock.mockResolvedValue({
       repos: [{

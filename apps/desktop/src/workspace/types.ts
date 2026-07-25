@@ -95,6 +95,8 @@ export interface BuildWorkspaceInput {
   localClosedItems?: Array<Pick<PipelineItem, "id" | "repo_id">>;
   cloudSnapshot: DesktopCloudSnapshot;
   lanSnapshot: DesktopCloudSnapshot;
+  /** Viewer-local pin overlay for remote-only tasks, keyed by owner-side task id. */
+  remoteTaskPins?: ReadonlyMap<string, number>;
 }
 
 export interface BuildWorkspaceResult {

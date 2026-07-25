@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PipelineItem, Repo } from "../types/kanna";
-import { buildWorkspace } from "./buildWorkspace";
+import { buildWorkspace, workspaceTaskOwnerTaskId } from "./buildWorkspace";
 
 function repo(overrides: Partial<Repo> = {}): Repo {
   return {
@@ -579,5 +579,99 @@ describe("buildWorkspace", () => {
       source: "mixed",
     });
     expect(result.tasks[0].repoKey).toBe("repo-local");
+  });
+
+  it("applies the viewer-local pin overlay to a remote-only task", () => {
+    const cloudItem = item({ id: "cloud:remote-repo:task-2", repo_id: "cloud:remote-repo" });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudItem],
+        terminalRefs: {
+          "cloud:remote-repo:task-2": {
+            ownerDesktopId: "desktop-a",
+            ownerLocalTaskId: "task-2",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+      remoteTaskPins: new Map([["task-2", 3]]),
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0].item).toMatchObject({ pinned: 1, pin_order: 3 });
+  });
+
+  it("applies the pin overlay to an unreachable remote task via its id suffix", () => {
+    const cloudItem = item({ id: "cloud:remote-repo:task-9", repo_id: "cloud:remote-repo" });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: { repos: [], items: [cloudItem], terminalRefs: {} },
+      lanSnapshot: emptySnapshot(),
+      remoteTaskPins: new Map([["task-9", 0]]),
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0].reachability).toBe("unknown");
+    expect(result.tasks[0].item).toMatchObject({ pinned: 1, pin_order: 0 });
+  });
+
+  it("keeps local pin state authoritative when the task also exists locally", () => {
+    const local = item({ id: "task-1", branch: "task-1", pinned: 0, pin_order: null });
+    const cloud = item({ id: "cloud:repo-local:task-1", repo_id: "repo-local", branch: "task-1" });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo(), remoteUrlHash: "remote-hash", remoteUrl: "git@example.com:kanna.git" }],
+      localItems: [local],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloud],
+        terminalRefs: {
+          "cloud:repo-local:task-1": {
+            ownerDesktopId: "desktop-a",
+            ownerLocalTaskId: "task-1",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+      remoteTaskPins: new Map([["task-1", 5]]),
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0].localTaskId).toBe("task-1");
+    expect(result.tasks[0].item).toMatchObject({ pinned: 0, pin_order: null });
+  });
+
+  it("leaves remote tasks unpinned without an overlay entry", () => {
+    const cloudItem = item({ id: "cloud:remote-repo:task-2", repo_id: "cloud:remote-repo" });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: { repos: [], items: [cloudItem], terminalRefs: {} },
+      lanSnapshot: emptySnapshot(),
+      remoteTaskPins: new Map([["task-other", 0]]),
+    });
+
+    expect(result.tasks[0].item).toMatchObject({ pinned: 0, pin_order: null });
+  });
+});
+
+describe("workspaceTaskOwnerTaskId", () => {
+  it("extracts the owner-side task id from the logical key", () => {
+    expect(workspaceTaskOwnerTaskId({ logicalTaskKey: "repo-local:owner-local:task-1" }))
+      .toBe("task-1");
+  });
+
+  it("returns null when no owner marker is present", () => {
+    expect(workspaceTaskOwnerTaskId({ logicalTaskKey: "repo-local" })).toBeNull();
+    expect(workspaceTaskOwnerTaskId({ logicalTaskKey: "repo-local:owner-local:" })).toBeNull();
   });
 });
