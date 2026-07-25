@@ -1,41 +1,48 @@
 import { ActionSheetIOS, Alert, Platform } from "react-native";
 import type { TaskStageAction } from "../state/sessionStore";
 
-export type TaskAction = "view-diff" | TaskStageAction;
+export type TaskAction = "mentioned-files" | "view-diff" | TaskStageAction;
 
-const TASK_ACTIONS: ReadonlyArray<{
+interface TaskActionDefinition {
   id: TaskAction;
   label: string;
   style?: "destructive";
-}> = [
-  { id: "view-diff", label: "View Diff" },
-  { id: "advance-stage", label: "Advance Stage" },
-  { id: "close-task", label: "Close Task", style: "destructive" }
-];
+}
+
+export interface TaskActionMenuOptions {
+  mentionedFilesLabel: string;
+  taskCreation?: boolean;
+}
 
 const MENU_TITLE = "Task Actions";
 const CANCEL_LABEL = "Cancel";
 
 export function showTaskActionMenu(
+  options: TaskActionMenuOptions,
   onSelect: (action: TaskAction) => void,
-  onDismiss: () => void = () => undefined,
-  options: { taskCreation?: boolean } = {}
+  onDismiss: () => void = () => undefined
 ): void {
-  const actions = options.taskCreation
-    ? TASK_ACTIONS.filter((action) => action.id === "close-task")
-    : TASK_ACTIONS;
+  const allTaskActions: readonly TaskActionDefinition[] = [
+    { id: "mentioned-files", label: options.mentionedFilesLabel },
+    { id: "view-diff", label: "View Diff" },
+    { id: "advance-stage", label: "Advance Stage" },
+    { id: "close-task", label: "Close Task", style: "destructive" }
+  ];
+  const taskActions = options.taskCreation
+    ? allTaskActions.filter((action) => action.id === "close-task")
+    : allTaskActions;
   if (Platform.OS === "ios") {
     ActionSheetIOS.showActionSheetWithOptions(
       {
         title: MENU_TITLE,
-        options: [...actions.map((action) => action.label), CANCEL_LABEL],
-        cancelButtonIndex: actions.length,
-        destructiveButtonIndex: actions.findIndex(
+        options: [...taskActions.map((action) => action.label), CANCEL_LABEL],
+        cancelButtonIndex: taskActions.length,
+        destructiveButtonIndex: taskActions.findIndex(
           (action) => action.style === "destructive"
         )
       },
       (buttonIndex) => {
-        const action = actions[buttonIndex];
+        const action = taskActions[buttonIndex];
         if (action) {
           onSelect(action.id);
         } else {
@@ -50,7 +57,7 @@ export function showTaskActionMenu(
     MENU_TITLE,
     undefined,
     [
-      ...actions.map((action) => ({
+      ...taskActions.map((action) => ({
         text: action.label,
         style: action.style,
         onPress: () => onSelect(action.id)

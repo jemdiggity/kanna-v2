@@ -18,6 +18,8 @@ import type {
   TaskDiffContent,
   TaskDiffRequest,
   TaskFileContent,
+  TaskFileMentionInput,
+  TaskFileMentionResolution,
   TaskSummary
 } from "../lib/api/types";
 import { isTaskBlocked, type BlockerTaskRef } from "../lib/api/taskIdentity";
@@ -38,8 +40,13 @@ import type {
 import { AgentMessageView } from "./AgentMessageView";
 import { TaskDiffPreview } from "./TaskDiffPreview";
 import { TaskFilePreview } from "./TaskFilePreview";
+import { TaskMentionedFiles } from "./TaskMentionedFiles";
 import { TerminalWebView } from "./TerminalWebView";
 import { showTaskActionMenu, type TaskAction } from "./taskActionMenu";
+import {
+  mentionedFilesActionLabel,
+  type TerminalFileMentionHistory
+} from "./terminalFileMentions";
 import { VisualCompanionModal } from "./VisualCompanionModal";
 import {
   clampTaskComposerHeight,
@@ -55,6 +62,11 @@ import {
 } from "./taskQuickReplies";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
 import { getTerminalBottomInset } from "./terminalSafeArea";
+
+const EMPTY_MENTIONED_FILES: TerminalFileMentionHistory = {
+  mentions: [],
+  overflow: false
+};
 
 interface TaskScreenProps {
   task: TaskSummary;
@@ -88,6 +100,9 @@ interface TaskScreenProps {
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
+  onResolveTaskFileMentions(
+    mentions: readonly TaskFileMentionInput[]
+  ): Promise<TaskFileMentionResolution>;
   onReadTaskFile(path: string): Promise<TaskFileContent>;
   onReadTaskDiff(request: TaskDiffRequest): Promise<TaskDiffContent>;
   onSendInput(input: string): void;
@@ -134,6 +149,7 @@ export function TaskScreen({
   onBack,
   onAdvanceTaskStage,
   onCloseTask,
+  onResolveTaskFileMentions,
   onReadTaskFile,
   onReadTaskDiff,
   onSendInput,
@@ -160,6 +176,18 @@ export function TaskScreen({
   const [selectedFile, setSelectedFile] = useState<{
     path: string;
     line?: number;
+    previewRevision: number;
+  } | null>(null);
+  const [mentionedFiles, setMentionedFiles] = useState<{
+    history: TerminalFileMentionHistory;
+    previewRevision: number;
+  }>({
+    history: { mentions: [], overflow: false },
+    previewRevision: 0
+  });
+  const [mentionedFilesRequest, setMentionedFilesRequest] = useState<{
+    autoSelectUnique: boolean;
+    history: TerminalFileMentionHistory;
     previewRevision: number;
   } | null>(null);
   const [expandedTitleTaskId, setExpandedTitleTaskId] = useState<string | null>(
@@ -211,6 +239,15 @@ export function TaskScreen({
   const activeSelectedFile =
     !isAgentTask && selectedFile?.previewRevision === previewRevision
       ? selectedFile
+      : null;
+  const activeMentionedFiles =
+    !isAgentTask && mentionedFiles.previewRevision === previewRevision
+      ? mentionedFiles.history
+      : EMPTY_MENTIONED_FILES;
+  const activeMentionedFilesRequest =
+    !isAgentTask &&
+    mentionedFilesRequest?.previewRevision === previewRevision
+      ? mentionedFilesRequest
       : null;
   const isTitleExpanded = expandedTitleTaskId === task.id;
   const expandedTaskId = displayTaskId(task);
@@ -285,8 +322,19 @@ export function TaskScreen({
       return;
     }
     showTaskActionMenu(
+      {
+        mentionedFilesLabel: mentionedFilesActionLabel(activeMentionedFiles),
+        ...(taskCreationPhase !== "idle" ? { taskCreation: true } : {})
+      },
       (action: TaskAction) => {
         switch (action) {
+          case "mentioned-files":
+            setMentionedFilesRequest({
+              autoSelectUnique: false,
+              history: activeMentionedFiles,
+              previewRevision
+            });
+            break;
           case "view-diff":
             setDiffModalTaskId(task.id);
             break;
@@ -297,9 +345,7 @@ export function TaskScreen({
             onCloseTask();
             break;
         }
-      },
-      undefined,
-      { taskCreation: taskCreationPhase !== "idle" }
+      }
     );
   };
   const selectQuickReply = (replyId: string) => {
@@ -465,8 +511,24 @@ export function TaskScreen({
             taskId={task.id}
             bottomInset={terminalBottomInset}
             onConsolePress={Keyboard.dismiss}
+            onMentionedFilesChange={(history) => {
+              setMentionedFiles({ history, previewRevision });
+            }}
             onOpenFile={(path, line) => {
-              setSelectedFile({ path, line, previewRevision });
+              setMentionedFilesRequest({
+                autoSelectUnique: true,
+                history: {
+                  mentions: [
+                    {
+                      path,
+                      raw: line === undefined ? path : `${path}:${line}`,
+                      ...(line === undefined ? {} : { line })
+                    }
+                  ],
+                  overflow: false
+                },
+                previewRevision
+              });
             }}
             onTerminalInput={onSendTerminalInput}
           />
@@ -681,6 +743,27 @@ export function TaskScreen({
           path={activeSelectedFile.path}
           readFile={() => onReadTaskFile(activeSelectedFile.path)}
           onClose={() => setSelectedFile(null)}
+        />
+      ) : null}
+      {activeMentionedFilesRequest ? (
+        <TaskMentionedFiles
+          autoSelectUnique={activeMentionedFilesRequest.autoSelectUnique}
+          history={activeMentionedFilesRequest.history}
+          resolveMentions={onResolveTaskFileMentions}
+          onClose={() => setMentionedFilesRequest(null)}
+          onSelect={({ path, line }) => {
+            if (
+              activeMentionedFilesRequest.previewRevision !== previewRevision
+            ) {
+              return;
+            }
+            setMentionedFilesRequest(null);
+            setSelectedFile({
+              path,
+              ...(line === undefined ? {} : { line }),
+              previewRevision
+            });
+          }}
         />
       ) : null}
       {diffModalTaskId === task.id ? (
