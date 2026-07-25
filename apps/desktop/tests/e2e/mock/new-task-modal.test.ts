@@ -896,4 +896,53 @@ describe("new task modal", () => {
     expect(await agentChoiceLabel(client)).toBe("claude sdk");
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
   });
+
+  it("creates a dormant task blocked by an existing task through the blocked-by picker", async () => {
+    const blockerPrompt = "Blocked-by picker blocker task";
+    const dependentPrompt = "Blocked-by picker dependent task";
+
+    await openNewTaskModal(client);
+    await cycleToAgentChoice(client, "claude");
+    await submitTaskFromModal(client, blockerPrompt);
+    const blockerTask = await waitForTaskCreated(client, blockerPrompt);
+    await waitForTaskInStore(client, blockerTask.id);
+
+    await openNewTaskModal(client);
+    const promptInput = await client.waitForElement(".prompt-input", 2_000);
+    await client.sendKeys(promptInput, dependentPrompt);
+
+    expect(await client.executeSync<string>(
+      `return document.querySelector('[data-testid="blocked-by-value"]')?.textContent?.trim() ?? "";`,
+    )).toBe("None");
+
+    await client.click(await client.waitForElement('[data-testid="blocked-by-toggle"]', 2_000));
+    const pickerInput = await client.waitForElement(".inline-input", 2_000);
+    await client.sendKeys(pickerInput, "Blocked-by picker blocker");
+    await client.click(await client.waitForElement(".command-item", 2_000));
+    await client.executeSync(buildSelectorKeydownScript(".inline-input", { key: "Enter" }));
+    await client.waitForNoElement(".inline-input", 2_000);
+
+    expect(await client.executeSync<string>(
+      `return document.querySelector('[data-testid="blocked-by-value"]')?.textContent?.trim() ?? "";`,
+    )).toBe(blockerPrompt);
+
+    await client.click(await client.waitForElement(".modal-overlay .btn-primary", 2_000));
+    const dependentTask = await waitForTaskCreated(client, dependentPrompt);
+
+    const blockerRows = await queryDb(
+      client,
+      "SELECT blocker_item_id FROM task_blocker WHERE blocked_item_id = ?",
+      [dependentTask.id],
+    ) as Array<{ blocker_item_id: string }>;
+    expect(blockerRows).toEqual([{ blocker_item_id: blockerTask.id }]);
+
+    // The blocker is still open, so the dependent task takes the dormant
+    // creation path: no worktree until the blocker resolves.
+    const worktreeRows = await queryDb(
+      client,
+      "SELECT id FROM worktree WHERE pipeline_item_id = ?",
+      [dependentTask.id],
+    );
+    expect(worktreeRows).toEqual([]);
+  });
 });
