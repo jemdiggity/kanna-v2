@@ -405,7 +405,9 @@ pub(super) async fn create_task_with_requested_id(
     Ok(Json(created))
 }
 
-fn validate_requested_task_id(task_id: &str) -> Result<(), (axum::http::StatusCode, String)> {
+pub(super) fn validate_requested_task_id(
+    task_id: &str,
+) -> Result<(), (axum::http::StatusCode, String)> {
     let valid_length = (8..=64).contains(&task_id.len());
     let lowercase_hex = task_id
         .bytes()

@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(debug_assertions)]
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 
 #[derive(Clone, Copy)]
 pub(super) struct TunneledHttpInvoke;
@@ -21,7 +21,7 @@ pub struct AppState {
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
-    requested_task_creation_flights: Arc<StdMutex<HashSet<String>>>,
+    requested_task_operations: Arc<RequestedTaskOperations>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
@@ -41,17 +41,25 @@ pub struct AppState {
     pub(super) revision_requester: Option<TestRevisionRequester>,
 }
 
-pub(super) struct RequestedTaskCreationFlight {
-    task_id: String,
-    flights: Arc<StdMutex<HashSet<String>>>,
+#[derive(Default)]
+struct RequestedTaskOperations {
+    active: StdMutex<HashSet<String>>,
+    changed: Notify,
 }
 
-impl Drop for RequestedTaskCreationFlight {
+pub(super) struct RequestedTaskOperation {
+    task_id: String,
+    operations: Arc<RequestedTaskOperations>,
+}
+
+impl Drop for RequestedTaskOperation {
     fn drop(&mut self) {
-        self.flights
+        self.operations
+            .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.task_id);
+        self.operations.changed.notify_waiters();
     }
 }
 
@@ -159,7 +167,7 @@ impl AppState {
             session_replacements: crate::session_replacements::SessionReplacements::default(),
             terminal_attachments: crate::terminal_attachments::TerminalAttachments::default(),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
-            requested_task_creation_flights: Arc::new(StdMutex::new(HashSet::new())),
+            requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
             task_creator: None,
@@ -195,18 +203,39 @@ impl AppState {
     pub(super) fn begin_requested_task_creation(
         &self,
         task_id: &str,
-    ) -> Option<RequestedTaskCreationFlight> {
+    ) -> Option<RequestedTaskOperation> {
         let mut flights = self
-            .requested_task_creation_flights
+            .requested_task_operations
+            .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !flights.insert(task_id.to_string()) {
             return None;
         }
-        Some(RequestedTaskCreationFlight {
+        Some(RequestedTaskOperation {
             task_id: task_id.to_string(),
-            flights: Arc::clone(&self.requested_task_creation_flights),
+            operations: Arc::clone(&self.requested_task_operations),
         })
+    }
+
+    pub(super) async fn begin_requested_task_abort(&self, task_id: &str) -> RequestedTaskOperation {
+        loop {
+            let changed = self.requested_task_operations.changed.notified();
+            {
+                let mut active = self
+                    .requested_task_operations
+                    .active
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if active.insert(task_id.to_string()) {
+                    return RequestedTaskOperation {
+                        task_id: task_id.to_string(),
+                        operations: Arc::clone(&self.requested_task_operations),
+                    };
+                }
+            }
+            changed.await;
+        }
     }
 
     #[cfg(test)]
