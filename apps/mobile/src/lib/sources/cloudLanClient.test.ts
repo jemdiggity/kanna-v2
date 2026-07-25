@@ -79,6 +79,7 @@ function createClientMock(overrides: Partial<KannaClient> = {}): KannaClient {
     runMergeAgent: vi.fn().mockResolvedValue({ taskId: "task-merge" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-advanced" }),
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
+    abortTaskCreation: vi.fn().mockResolvedValue(undefined),
     closeTask: vi.fn().mockResolvedValue(undefined),
     sendTaskInput: vi.fn().mockResolvedValue(undefined),
     readTaskFile: vi.fn().mockResolvedValue({
@@ -1893,6 +1894,47 @@ describe("createCloudLanClient", () => {
     expect(cloud.createTask).not.toHaveBeenCalled();
     expect(cloud.observeTaskAgent).not.toHaveBeenCalled();
     expect(cloud.closeTask).not.toHaveBeenCalled();
+  });
+
+  it("routes creation abort to the frozen destination without a task snapshot", async () => {
+    const request = {
+      taskId: "a1b2c3d4",
+      desktopId: "desktop-a"
+    };
+    const cloud = createClientMock();
+    const probeLan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-a"))
+    });
+    const desktopALan = createClientMock();
+    const client = createCloudLanClient(cloud, probeLan, {
+      isLanEnabled: () => true,
+      lanClientForDesktop: (desktopId) =>
+        desktopId === "desktop-a" ? desktopALan : null
+    });
+
+    await client.abortTaskCreation(request);
+
+    expect(desktopALan.abortTaskCreation).toHaveBeenCalledWith(request);
+    expect(probeLan.abortTaskCreation).not.toHaveBeenCalled();
+    expect(cloud.abortTaskCreation).not.toHaveBeenCalled();
+  });
+
+  it("falls back to cloud creation abort when the frozen LAN destination is unavailable", async () => {
+    const request = {
+      taskId: "a1b2c3d4",
+      desktopId: "desktop-a"
+    };
+    const cloud = createClientMock();
+    const lan = createClientMock();
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      lanClientForDesktop: () => null
+    });
+
+    await client.abortTaskCreation(request);
+
+    expect(cloud.abortTaskCreation).toHaveBeenCalledWith(request);
+    expect(lan.abortTaskCreation).not.toHaveBeenCalled();
   });
 
   it("returns and preserves a canonical identity for a LAN-created task before cloud publication", async () => {

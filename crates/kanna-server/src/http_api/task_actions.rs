@@ -476,6 +476,46 @@ pub(super) async fn close_task(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+pub(super) async fn abort_task_creation(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    super::tasks::validate_requested_task_id(&task_id)?;
+    let _operation = state.begin_requested_task_abort(&task_id).await;
+
+    #[cfg(test)]
+    if let Some(task_closer) = state.task_closer.clone() {
+        return task_closer(task_id)
+            .map(|_| axum::http::StatusCode::NO_CONTENT)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+
+    let task = {
+        let state = Arc::clone(&state);
+        let lookup_task_id = task_id.clone();
+        super::blocking::run_handler_blocking("task creation abort lookup", move || {
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            db.get_pipeline_item(&lookup_task_id).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })
+        })
+        .await?
+    };
+    if task.is_none() || task.is_some_and(|task| task.closed_at.is_some()) {
+        return Ok(axum::http::StatusCode::NO_CONTENT);
+    }
+
+    close_task(State(state), axum::extract::Path(task_id)).await
+}
+
 pub(super) async fn reopen_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,

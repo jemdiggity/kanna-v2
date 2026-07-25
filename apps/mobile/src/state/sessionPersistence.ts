@@ -17,6 +17,8 @@ export interface PersistedSessionContext {
   authUser?: MobileAuthUser | null;
   trustedDesktops?: TrustedDesktopRecord[];
   repoCreationProfiles?: RepoCreationProfile[];
+  taskCreationAttempts?: PendingTaskCreation[];
+  /** Legacy singleton retained for migration from older mobile builds. */
   pendingTaskCreation?: PendingTaskCreation | null;
 }
 
@@ -85,6 +87,9 @@ function parsePersistedSessionContext(
       return null;
     }
 
+    const taskCreationAttempts = Array.isArray(parsed.taskCreationAttempts)
+      ? parsePendingTaskCreations(parsed.taskCreationAttempts)
+      : parsePendingTaskCreations([parsed.pendingTaskCreation]);
     return {
       mobileDeviceId: isNonBlankString(parsed.mobileDeviceId)
         ? parsed.mobileDeviceId.trim()
@@ -96,7 +101,8 @@ function parsePersistedSessionContext(
       authUser: parsePersistedAuthUser(parsed.authUser),
       trustedDesktops: parseTrustedDesktops(parsed.trustedDesktops),
       repoCreationProfiles: parseRepoCreationProfiles(parsed.repoCreationProfiles),
-      pendingTaskCreation: parsePendingTaskCreation(parsed.pendingTaskCreation)
+      taskCreationAttempts,
+      pendingTaskCreation: taskCreationAttempts[0] ?? null
     };
   } catch {
     return null;
@@ -249,6 +255,26 @@ function parsePendingTaskCreation(value: unknown): PendingTaskCreation | null {
         }
       : {})
   };
+}
+
+function parsePendingTaskCreations(value: readonly unknown[]): PendingTaskCreation[] {
+  const attempts: PendingTaskCreation[] = [];
+  const slotIds = new Set<string>();
+  const taskIds = new Set<string>();
+  for (const entry of value) {
+    const attempt = parsePendingTaskCreation(entry);
+    if (
+      !attempt ||
+      slotIds.has(attempt.slotId) ||
+      taskIds.has(attempt.taskId)
+    ) {
+      continue;
+    }
+    slotIds.add(attempt.slotId);
+    taskIds.add(attempt.taskId);
+    attempts.push(attempt);
+  }
+  return attempts;
 }
 
 function isNonBlankString(value: unknown): value is string {

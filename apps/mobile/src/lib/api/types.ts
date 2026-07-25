@@ -91,6 +91,11 @@ export interface CreateTaskRequest {
   terminalRows?: number;
 }
 
+export interface AbortTaskCreationRequest {
+  taskId: string;
+  desktopId: string;
+}
+
 export interface CreateTaskResponse {
   taskId: string;
   repoId: string;

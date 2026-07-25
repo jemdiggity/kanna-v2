@@ -105,6 +105,73 @@ async fn close_task_route_uses_task_closer() {
 }
 
 #[tokio::test]
+async fn abort_task_creation_succeeds_when_requested_id_is_absent() {
+    let app = super::test_router("desktop-1", "Studio Mac");
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/a1b2c3d4/actions/abort-creation")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn abort_task_creation_succeeds_when_requested_id_is_already_closed() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "a1b2c3d4",
+            "repo-1",
+            "Interrupted create",
+            Some("Interrupted create"),
+            "in progress",
+            "2026-07-25T00:00:00Z",
+        )
+        .unwrap();
+        db.close_pipeline_item("a1b2c3d4").unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/a1b2c3d4/actions/abort-creation")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn abort_task_creation_closes_an_existing_requested_id() {
+    let app = super::test_router_with_task_closer(
+        "desktop-1",
+        "Studio Mac",
+        Arc::new(|task_id| {
+            assert_eq!(task_id, "a1b2c3d4");
+            Ok(())
+        }),
+    );
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/a1b2c3d4/actions/abort-creation")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn close_task_route_releases_claimed_ports() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

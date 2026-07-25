@@ -1231,6 +1231,17 @@ export function createCloudLanClient(
     return cloud.createTask(input);
   };
 
+  const abortTaskCreation: KannaClient["abortTaskCreation"] = async (input) => {
+    if (options.isLanEnabled()) {
+      const destinationLan = lanClientForDesktop(input.desktopId);
+      if (destinationLan) {
+        await destinationLan.abortTaskCreation(input);
+        return;
+      }
+    }
+    await cloud.abortTaskCreation(input);
+  };
+
   return {
     getTaskRouteIdentity(taskId: string): string {
       const route = routeForTask(taskId);
@@ -1333,6 +1344,7 @@ export function createCloudLanClient(
       );
     },
     createTask,
+    abortTaskCreation,
     runMergeAgent: (taskId) =>
       invokeTaskActionRoute(taskId, (client, routedTaskId) =>
         client.runMergeAgent(routedTaskId)

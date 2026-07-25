@@ -208,6 +208,36 @@ async fn concurrent_requested_task_creation_is_rejected_until_owner_failure_rele
 }
 
 #[tokio::test]
+async fn abort_waits_for_requested_creation_and_owns_the_id_until_release() {
+    let task_id = "c1d2e3f4a5b60718";
+    let state = super::test_state_with_seed("desktop-abort-create-flight", "Studio Mac", |_| {});
+    let create_flight = state
+        .begin_requested_task_creation(task_id)
+        .expect("begin requested create");
+    let abort_state = Arc::clone(&state);
+    let abort = tokio::spawn(async move { abort_state.begin_requested_task_abort(task_id).await });
+
+    tokio::task::yield_now().await;
+    assert!(!abort.is_finished());
+
+    drop(create_flight);
+    let abort_flight = tokio::time::timeout(std::time::Duration::from_secs(1), abort)
+        .await
+        .expect("abort should acquire released task id")
+        .expect("abort acquisition task");
+    assert!(
+        state.begin_requested_task_creation(task_id).is_none(),
+        "create must be rejected while abort owns the requested id"
+    );
+
+    drop(abort_flight);
+    assert!(
+        state.begin_requested_task_creation(task_id).is_some(),
+        "requested id should be reusable after abort releases it"
+    );
+}
+
+#[tokio::test]
 async fn create_task_route_replays_requested_task_id_without_preparing_or_spawning_twice() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

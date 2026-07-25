@@ -7,7 +7,10 @@ After submission, the composer closes immediately and the app opens a normal
 task-shaped optimistic workspace backed by a stable local UI slot. A successful
 create acknowledges the durable task in that slot without replacing the visible
 workspace, then starts its terminal. An ambiguous result keeps the workspace's
-task action disabled and offers exact-id recovery; a definite pre-creation
+creation-specific task action menu available with a destructive Close Task
+action, alongside exact-id recovery. Closing aborts creation with the reserved
+task id on the frozen owning desktop; while that abort is in flight, both
+recovery and duplicate task actions are disabled. A definite pre-creation
 failure removes the optimistic workspace and preserves the draft for a later
 retry.
 
@@ -17,12 +20,17 @@ create API is not a dry-run boundary: it persists a durable task, creates a
 worktree and branch, starts an agent session, and proceeds into terminal startup
 on the selected desktop. Deterministically distinguishing a request that is
 still pending, a response lost after durable creation, an idempotent recovery,
-a definite rejection, and a terminal-startup failure requires control between
-those boundaries. The current harness cannot inject those outcomes, inspect the
-client-generated task identity, control authoritative task publication or
-terminal startup, or reset all resulting state. Running the cases against an
-ordinary desktop would also depend on a real repo and agent CLI while leaving
-durable task, worktree, branch, and session side effects.
+a user-requested abort that races either create outcome, a definite rejection,
+and a terminal-startup failure requires control between those boundaries. In
+particular, an abort E2E must hold creation in a known pending or response-lost
+state long enough for Appium to open its menu, then observe the exact reserved
+task id and frozen desktop sent by Close Task before releasing server-side
+creation. The current harness cannot inject or pause those outcomes, inspect the
+client-generated task identity, redirect the owning desktop after submission,
+control authoritative task publication or terminal startup, or reset all
+resulting state. Running the case against an ordinary desktop would also depend
+on a real repo and agent CLI while leaving durable task, worktree, branch, and
+session side effects.
 
 Making this journey testable through Appium requires a fixture surface with:
 
@@ -31,8 +39,11 @@ Making this journey testable through Appium requires a fixture surface with:
 - request recording that exposes the client-generated task id and replayed
   payload;
 - deterministic controls to defer creation, lose the response after durable
-  creation, return an explicit pre-creation rejection, and release exact-id
-  recovery;
+  creation, hold and inspect an abort request, return an explicit pre-creation
+  rejection, and independently release creation, exact-id recovery, or abort;
+- at least two fixture desktop identities so the test can change the currently
+  selected desktop after submission and verify abort still targets the
+  attempt's frozen owner;
 - controls for authoritative task publication and terminal startup success,
   delay, or failure after acknowledgement;
 - reset and cleanup APIs for every created task, worktree, branch, and session.
@@ -43,20 +54,40 @@ The narrower automated coverage is:
   deferred client. It covers the immediate optimistic workspace, in-place
   durable-task acknowledgement, an empty collection publication followed by
   authoritative hydration without replacing the selected `TaskScreen` or its
-  stable list slot, unavailable creation controls during ambiguity, exact-id
-  recovery, and exact draft restoration after a definite pre-creation failure.
-- `src/screens/TaskScreen.test.tsx` covers pending and uncertain creation inside
-  the task workspace, including a disabled task action and recovery being
-  offered only for an uncertain result. `src/screens/TasksScreen.test.tsx`
-  verifies that task rows continue to open through the stable UI slot after
+  stable list slot, exact-id recovery, and exact draft restoration after a
+  definite pre-creation failure.
+- `src/navigation/RootNavigator.integration.test.tsx`,
+  `src/screens/TaskScreen.test.tsx`, and `src/screens/taskActionMenu.test.ts`
+  cover the uncertain workspace's creation-specific Close Task menu, routing
+  from the selected local slot into `abortTaskCreation(slotId)`, and the
+  ordinary ready-task path into `closeDesktopTask(durableTaskId)`. They also
+  verify the abort request uses the reserved task id and frozen owning desktop,
+  and that the busy presentation blocks Recover, duplicate menu opens, and
+  duplicate actions until the abort settles. The navigation integration test
+  additionally holds aborts for two unresolved attempts at once and verifies
+  that each route owns its busy state and error text while both frozen-desktop
+  requests dispatch independently. `src/screens/TasksScreen.test.tsx` verifies
+  that task rows continue to open through the stable UI slot after
   acknowledgement.
 - `src/state/mobileController.test.ts` covers persist-before-dispatch and
-  single-flight creation, optimistic slot selection, exact-id recovery and
-  response fencing, definite-failure slot removal, authoritative
-  canonicalization, non-authoritative and first-authoritative publication gaps,
-  in-place authoritative hydration, eventual removal after authoritative
-  deletion, and keeping the acknowledged task visible when terminal startup
-  fails.
+  single-flight creation, the pre-dispatch persistence/abort race that suppresses
+  both original and waiting-recovery requests, optimistic slot selection,
+  exact-id recovery and response fencing, definite-failure slot removal,
+  authoritative canonicalization, non-authoritative and first-authoritative
+  publication gaps, in-place authoritative hydration, exact-attempt abort
+  routing, concurrent per-attempt abort dispatch and failure isolation,
+  create/abort response races, failed-abort recovery preservation,
+  duplicate-action single-flight behavior, eventual removal after
+  authoritative deletion, and keeping the acknowledged task visible when
+  terminal startup fails.
+- `src/lib/transports/lanTransport.test.ts`,
+  `src/lib/transports/remoteTransport.test.ts`, and
+  `src/lib/sources/cloudLanClient.test.ts` cover the LAN and relay abort request
+  shapes plus owner-desktop routing. The server tests
+  `http_api::tests::actions::abort_task_creation` and
+  `http_api::tests::create_task::abort_waits_for_requested_creation` cover the
+  desktop HTTP boundary and the race where abort waits for the requested
+  creation before closing it.
 - `src/state/sessionPersistence.test.ts` and `src/state/sessionStore.test.ts`
   cover durable attempt validation and round-tripping, legacy slot migration,
   restart hydration as a closed uncertain workspace, draft restoration, and a
@@ -86,5 +117,5 @@ The focused command also retains the editable drawer coverage in
 `src/e2eTestIds.test.ts`:
 
 ```bash
-pnpm --dir apps/mobile test -- src/App.component.test.tsx src/appModel.cloudFallback.test.ts src/components/CreateTaskComposer.test.tsx src/screens/TaskScreen.test.tsx src/screens/TasksScreen.test.tsx src/state/mobileController.test.ts src/state/sessionPersistence.test.ts src/state/sessionStore.test.ts src/state/taskUiSlots.test.ts src/e2eTestIds.test.ts
+pnpm --dir apps/mobile test -- src/App.component.test.tsx src/appModel.cloudFallback.test.ts src/components/CreateTaskComposer.test.tsx src/navigation/RootNavigator.integration.test.tsx src/navigation/RootNavigator.component.test.tsx src/screens/TaskScreen.test.tsx src/screens/TasksScreen.test.tsx src/screens/taskActionMenu.test.ts src/state/mobileController.test.ts src/state/sessionPersistence.test.ts src/state/sessionStore.test.ts src/state/taskUiSlots.test.ts src/lib/transports/lanTransport.test.ts src/lib/transports/remoteTransport.test.ts src/lib/sources/cloudLanClient.test.ts src/e2eTestIds.test.ts
 ```

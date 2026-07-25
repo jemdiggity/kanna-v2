@@ -142,6 +142,11 @@ export function createLanTransport(
         body: JSON.stringify(taskInput)
       });
     },
+    abortTaskCreation: ({ taskId }) =>
+      request<void>(
+        `/v1/tasks/${encodeURIComponent(taskId)}/actions/abort-creation`,
+        { method: "POST" }
+      ),
     runMergeAgent: (taskId: string) =>
       request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/run-merge-agent`, {
         method: "POST"

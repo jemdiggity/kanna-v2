@@ -24,6 +24,7 @@ import { isTaskBlocked, type BlockerTaskRef } from "../lib/api/taskIdentity";
 import type {
   TaskCompanionEventStatus,
   TaskCompanionStatus,
+  TaskCreationAction,
   TaskCreationPhase,
   TaskStageAction,
   TaskTerminalStatus
@@ -83,7 +84,7 @@ interface TaskScreenProps {
   companionEventStatus?: TaskCompanionEventStatus;
   quickReplies: readonly TaskQuickReply[];
   quickRepliesHydrated: boolean;
-  pendingTaskAction?: TaskStageAction | null;
+  pendingTaskAction?: TaskStageAction | TaskCreationAction | null;
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
@@ -283,19 +284,23 @@ export function TaskScreen({
     if (isTaskActionPending) {
       return;
     }
-    showTaskActionMenu((action: TaskAction) => {
-      switch (action) {
-        case "view-diff":
-          setDiffModalTaskId(task.id);
-          break;
-        case "advance-stage":
-          onAdvanceTaskStage();
-          break;
-        case "close-task":
-          onCloseTask();
-          break;
-      }
-    });
+    showTaskActionMenu(
+      (action: TaskAction) => {
+        switch (action) {
+          case "view-diff":
+            setDiffModalTaskId(task.id);
+            break;
+          case "advance-stage":
+            onAdvanceTaskStage();
+            break;
+          case "close-task":
+            onCloseTask();
+            break;
+        }
+      },
+      undefined,
+      { taskCreation: taskCreationPhase !== "idle" }
+    );
   };
   const selectQuickReply = (replyId: string) => {
     const currentSnapshot = composerSnapshotRef.current;
@@ -396,6 +401,11 @@ export function TaskScreen({
               {model.canRecoverTaskCreation ? (
                 <Pressable
                   accessibilityRole="button"
+                  accessibilityState={{
+                    busy: isTaskActionPending,
+                    disabled: isTaskActionPending
+                  }}
+                  disabled={isTaskActionPending}
                   style={styles.taskCreationRecoverButton}
                   testID={MOBILE_E2E_IDS.taskCreationRecoverButton}
                   onPress={onRecoverTaskCreation}

@@ -12,6 +12,36 @@ describe("createSessionStore", () => {
     agentProvider: "codex" as const
   };
 
+  it("tracks task creation attempts independently by slot", () => {
+    const store = createSessionStore();
+    const secondAttempt = {
+      ...pendingTaskCreation,
+      slotId: "create:slot-b2c3d4e5",
+      taskId: "b2c3d4e5",
+      prompt: "Create another task"
+    };
+
+    store.addTaskCreationAttempt({
+      ...pendingTaskCreation,
+      phase: "pending"
+    });
+    store.addTaskCreationAttempt({
+      ...secondAttempt,
+      phase: "uncertain"
+    });
+    store.setTaskCreationAttemptPhase(pendingTaskCreation.slotId, "recovering");
+    store.removeTaskCreationAttempt(secondAttempt.slotId);
+
+    expect(store.getState().taskCreationAttempts).toEqual([
+      {
+        ...pendingTaskCreation,
+        phase: "recovering",
+        pendingAction: null,
+        errorMessage: null
+      }
+    ]);
+  });
+
   it("tracks first task collection readiness", () => {
     const store = createSessionStore();
 
@@ -48,6 +78,77 @@ describe("createSessionStore", () => {
     store.finishTaskAction("task-1", "close-task");
     expect(store.getState().pendingTaskAction).toBeNull();
     expect(store.beginTaskAction("task-1", "advance-stage")).toBe(true);
+  });
+
+  it("isolates pending actions and errors between task creation attempts", () => {
+    const store = createSessionStore();
+    const secondAttempt = {
+      ...pendingTaskCreation,
+      slotId: "create:slot-b2c3d4e5",
+      taskId: "b2c3d4e5",
+      prompt: "Create another task"
+    };
+    store.addTaskCreationAttempt({
+      ...pendingTaskCreation,
+      phase: "uncertain"
+    });
+    store.addTaskCreationAttempt({
+      ...secondAttempt,
+      phase: "uncertain"
+    });
+
+    expect(
+      store.beginTaskCreationAction(
+        pendingTaskCreation.slotId,
+        "close-task"
+      )
+    ).toBe(true);
+    expect(
+      store.beginTaskCreationAction(secondAttempt.slotId, "close-task")
+    ).toBe(true);
+    expect(
+      store.beginTaskCreationAction(
+        pendingTaskCreation.slotId,
+        "close-task"
+      )
+    ).toBe(false);
+
+    store.setTaskCreationAttemptError(
+      pendingTaskCreation.slotId,
+      "First desktop is offline"
+    );
+
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: secondAttempt.slotId,
+        pendingAction: "close-task",
+        errorMessage: null
+      }),
+      expect.objectContaining({
+        slotId: pendingTaskCreation.slotId,
+        pendingAction: "close-task",
+        errorMessage: "First desktop is offline"
+      })
+    ]);
+    expect(store.getState().pendingTaskAction).toBeNull();
+
+    store.finishTaskCreationAction(
+      pendingTaskCreation.slotId,
+      "close-task"
+    );
+
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: secondAttempt.slotId,
+        pendingAction: "close-task",
+        errorMessage: null
+      }),
+      expect.objectContaining({
+        slotId: pendingTaskCreation.slotId,
+        pendingAction: null,
+        errorMessage: "First desktop is offline"
+      })
+    ]);
   });
 
   it("preserves repository command ownership until the run settles", () => {
@@ -325,7 +426,7 @@ describe("createSessionStore", () => {
     });
   });
 
-  it("hydrates a pending attempt as closed and uncertain with its draft restored", () => {
+  it("hydrates a pending attempt as uncertain without taking over the composer", () => {
     const store = createSessionStore();
     store.setComposerState(true, "Stale draft");
 
@@ -339,10 +440,10 @@ describe("createSessionStore", () => {
 
     expect(store.getState()).toMatchObject({
       isComposerOpen: false,
-      composerRepoId: pendingTaskCreation.repoId,
-      composerPrompt: pendingTaskCreation.prompt,
-      composerDesktopId: pendingTaskCreation.desktopId,
-      composerAgentProvider: pendingTaskCreation.agentProvider,
+      composerRepoId: null,
+      composerPrompt: "",
+      composerDesktopId: null,
+      composerAgentProvider: "claude",
       pendingTaskCreation,
       taskUiSlots: [
         {
@@ -366,7 +467,8 @@ describe("createSessionStore", () => {
 
     const persisted = store.getPersistedContext();
 
-    expect(persisted.pendingTaskCreation).toEqual(pendingTaskCreation);
+    expect(persisted.taskCreationAttempts).toEqual([pendingTaskCreation]);
+    expect(persisted).not.toHaveProperty("pendingTaskCreation");
     expect(persisted).not.toHaveProperty("taskCreationPhase");
     expect(persisted).not.toHaveProperty("isComposerOpen");
     expect(persisted).not.toHaveProperty("composerPrompt");

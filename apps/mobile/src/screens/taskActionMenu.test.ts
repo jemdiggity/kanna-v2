@@ -39,6 +39,20 @@ describe("showTaskActionMenu", () => {
     );
   });
 
+  it("offers only close for an unresolved task creation", () => {
+    showTaskActionMenu(vi.fn(), undefined, { taskCreation: true });
+
+    expect(nativeMocks.actionSheet).toHaveBeenCalledWith(
+      {
+        title: "Task Actions",
+        options: ["Close Task", "Cancel"],
+        cancelButtonIndex: 1,
+        destructiveButtonIndex: 0
+      },
+      expect.any(Function)
+    );
+  });
+
   it.each([
     [0, "view-diff"],
     [1, "advance-stage"],

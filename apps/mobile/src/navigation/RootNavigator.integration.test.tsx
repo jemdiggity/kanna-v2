@@ -141,7 +141,13 @@ vi.mock("@react-navigation/native-stack", async () => {
         if (!active) return null;
         const navigation = {
           canGoBack: () => route.name !== "MainTabs",
-          goBack: () => setRoute({ name: "MainTabs", params: undefined }),
+          goBack: () => {
+            setRoute({ name: "MainTabs", params: undefined });
+            navigationHarness.onStateChange?.({
+              index: 0,
+              routes: [{ name: "MainTabs" }]
+            });
+          },
           setParams: (params: { taskId?: string }) =>
             setRoute((current) => ({
               ...current,
@@ -326,6 +332,8 @@ function createClientMock(): KannaClient {
     listRepoTasks: vi.fn().mockResolvedValue([]),
     listRecentTasks: vi.fn().mockResolvedValue([]),
     searchTasks: vi.fn().mockResolvedValue([]),
+    createTask: vi.fn(),
+    abortTaskCreation: vi.fn().mockResolvedValue(undefined),
     markTaskRead: vi.fn().mockResolvedValue({ taskId: "task-1", activity: "idle" }),
     advanceTaskStage: vi.fn().mockResolvedValue({ taskId: "task-1" }),
     closeTask: vi.fn().mockResolvedValue(undefined),
@@ -765,6 +773,239 @@ describe("RootNavigator task action integration", () => {
     vi.mocked(showTaskActionMenu).mockClear();
   });
 
+  it("aborts an uncertain creation through its slot with the reserved id and frozen desktop", async () => {
+    const attempt = {
+      slotId: "create:slot-abort",
+      taskId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      repoId: "repo-1",
+      prompt: "Abort this partial task",
+      desktopId: "desktop-owner",
+      agentProvider: "codex" as const
+    };
+    const abort = createDeferred<void>();
+    const client = createClientMock();
+    vi.mocked(client.abortTaskCreation).mockReturnValue(abort.promise);
+    const store = createSessionStore();
+    store.hydrateContext({
+      mobileDeviceId: null,
+      selectedDesktopId: "desktop-1",
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      activeView: "tasks",
+      taskCreationAttempts: [attempt]
+    });
+    controller = createMobileController(client, store);
+    const abortTaskCreation = vi.spyOn(controller, "abortTaskCreation");
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempt.slotId));
+      await flushMicrotasks();
+    });
+    expect(findByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton))
+      .toBeDefined();
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    expect(showTaskActionMenu).toHaveBeenCalledWith(
+      expect.any(Function),
+      undefined,
+      { taskCreation: true }
+    );
+    const selectAction = vi.mocked(showTaskActionMenu).mock.calls[0]![0];
+
+    await act(async () => {
+      selectAction("close-task");
+      await flushMicrotasks();
+    });
+
+    expect(abortTaskCreation).toHaveBeenCalledWith(attempt.slotId);
+    expect(client.abortTaskCreation).toHaveBeenCalledOnce();
+    expect(client.abortTaskCreation).toHaveBeenCalledWith({
+      taskId: attempt.taskId,
+      desktopId: attempt.desktopId
+    });
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: attempt.slotId,
+        pendingAction: "close-task"
+      })
+    ]);
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(true);
+    expect(
+      findByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton).props.disabled
+    ).toBe(true);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+      selectAction("close-task");
+      pressByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton);
+      await flushMicrotasks();
+    });
+    expect(showTaskActionMenu).toHaveBeenCalledTimes(1);
+    expect(client.abortTaskCreation).toHaveBeenCalledOnce();
+    expect(client.createTask).not.toHaveBeenCalled();
+
+    abort.resolve();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.getState().taskCreationAttempts).toEqual([]);
+    expect(countByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toBe(0);
+  });
+
+  it("isolates abort busy state and errors between two creation routes", async () => {
+    const attempts = [
+      {
+        slotId: "create:slot-abort-a",
+        taskId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        repoId: "repo-1",
+        prompt: "Abort first partial task",
+        desktopId: "desktop-a",
+        agentProvider: "claude" as const
+      },
+      {
+        slotId: "create:slot-abort-b",
+        taskId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        repoId: "repo-1",
+        prompt: "Abort second partial task",
+        desktopId: "desktop-b",
+        agentProvider: "codex" as const
+      }
+    ];
+    const firstAbort = createDeferred<void>();
+    const secondAbort = createDeferred<void>();
+    const client = createClientMock();
+    vi.mocked(client.abortTaskCreation)
+      .mockReturnValueOnce(firstAbort.promise)
+      .mockReturnValueOnce(secondAbort.promise);
+    const store = createSessionStore();
+    store.hydrateContext({
+      mobileDeviceId: null,
+      selectedDesktopId: "desktop-a",
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      activeView: "tasks",
+      taskCreationAttempts: attempts
+    });
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempts[0].slotId));
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    const selectFirstAction =
+      vi.mocked(showTaskActionMenu).mock.calls[0]![0];
+    await act(async () => {
+      selectFirstAction("close-task");
+      await flushMicrotasks();
+    });
+
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(true);
+    expect(
+      findByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton).props.disabled
+    ).toBe(true);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskBackButton);
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempts[1].slotId));
+      await flushMicrotasks();
+    });
+
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(false);
+    expect(
+      findByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton).props.disabled
+    ).toBe(false);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    const selectSecondAction =
+      vi.mocked(showTaskActionMenu).mock.calls[1]![0];
+    await act(async () => {
+      selectSecondAction("close-task");
+      await flushMicrotasks();
+    });
+
+    expect(client.abortTaskCreation).toHaveBeenCalledTimes(2);
+    expect(client.abortTaskCreation).toHaveBeenNthCalledWith(1, {
+      taskId: attempts[0].taskId,
+      desktopId: attempts[0].desktopId
+    });
+    expect(client.abortTaskCreation).toHaveBeenNthCalledWith(2, {
+      taskId: attempts[1].taskId,
+      desktopId: attempts[1].desktopId
+    });
+
+    secondAbort.reject(new Error("Second desktop is offline"));
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(false);
+    expect(visibleText()).toContain("Second desktop is offline");
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskBackButton);
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempts[0].slotId));
+      await flushMicrotasks();
+    });
+
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(true);
+    expect(visibleText()).not.toContain("Second desktop is offline");
+
+    firstAbort.resolve();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: attempts[1].slotId,
+        pendingAction: null,
+        errorMessage: "Second desktop is offline"
+      })
+    ]);
+    expect(countByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toBe(0);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempts[1].slotId));
+      await flushMicrotasks();
+    });
+    expect(visibleText()).toContain("Second desktop is offline");
+  });
+
   it("closes a task exactly once from the + menu, shows the spinner, and blocks duplicates until success", async () => {
     const close = createDeferred<void>();
     const client = createClientMock();
@@ -777,12 +1018,14 @@ describe("RootNavigator task action integration", () => {
     vi.mocked(client.closeTask).mockReturnValue(close.promise);
     const store = createSessionStore();
     const selectAction = await openTaskDetailAndCaptureMenu(client, store);
+    const closeDesktopTask = vi.spyOn(controller!, "closeDesktopTask");
 
     await act(async () => {
       selectAction("close-task");
       await flushMicrotasks();
     });
 
+    expect(closeDesktopTask).toHaveBeenCalledWith(task.id);
     expect(client.closeTask).toHaveBeenCalledTimes(1);
     expect(client.closeTask).toHaveBeenCalledWith("task-1");
     expect(store.getState().pendingTaskAction).toEqual({

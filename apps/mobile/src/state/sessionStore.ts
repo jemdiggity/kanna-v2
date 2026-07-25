@@ -110,6 +110,20 @@ export interface PendingTaskCreation {
   terminalRows?: number;
 }
 
+export type ActiveTaskCreationPhase = Exclude<TaskCreationPhase, "idle">;
+
+export type TaskCreationAction = "close-task";
+
+export interface TaskCreationAttempt extends PendingTaskCreation {
+  phase: ActiveTaskCreationPhase;
+  pendingAction: TaskCreationAction | null;
+  errorMessage: string | null;
+}
+
+type TaskCreationAttemptInput =
+  Omit<TaskCreationAttempt, "pendingAction" | "errorMessage"> &
+  Partial<Pick<TaskCreationAttempt, "pendingAction" | "errorMessage">>;
+
 export type TaskCreationState =
   | { phase: "idle"; pendingTaskCreation: null }
   | {
@@ -165,6 +179,8 @@ export interface SessionState {
   composerAgentProvider: ComposerAgentProvider;
   isComposerOptionsExpanded: boolean;
   composerErrorMessage: string | null;
+  taskCreationAttempts: TaskCreationAttempt[];
+  /** Compatibility projection for callers not yet migrated to per-slot attempts. */
   pendingTaskCreation: PendingTaskCreation | null;
   taskCreationPhase: TaskCreationPhase;
   taskUiSlots: TaskUiSlot[];
@@ -258,6 +274,24 @@ export interface SessionStore {
   setComposerOptionsExpanded(isExpanded: boolean): void;
   setComposerErrorMessage(message: string | null): void;
   setTaskCreationState(taskCreationState: TaskCreationState): void;
+  addTaskCreationAttempt(attempt: TaskCreationAttemptInput): void;
+  setTaskCreationAttemptPhase(
+    slotId: string,
+    phase: ActiveTaskCreationPhase
+  ): void;
+  beginTaskCreationAction(
+    slotId: string,
+    action: TaskCreationAction
+  ): boolean;
+  finishTaskCreationAction(
+    slotId: string,
+    action: TaskCreationAction
+  ): void;
+  setTaskCreationAttemptError(
+    slotId: string,
+    message: string | null
+  ): void;
+  removeTaskCreationAttempt(slotId: string): void;
   addTaskUiSlot(slot: TaskUiSlot): void;
   acknowledgeTaskUiSlot(slotId: string, task: TaskSummary): void;
   reconcileTaskUiSlots(
@@ -329,6 +363,7 @@ export function createSessionStore(): SessionStore {
     composerAgentProvider: "claude",
     isComposerOptionsExpanded: true,
     composerErrorMessage: null,
+    taskCreationAttempts: [],
     pendingTaskCreation: null,
     taskCreationPhase: "idle",
     taskUiSlots: [],
@@ -445,17 +480,34 @@ export function createSessionStore(): SessionStore {
         authUser: state.auth.status === "signedIn" ? state.auth.user : null,
         trustedDesktops: state.trustedDesktops,
         repoCreationProfiles: state.repoCreationProfiles,
-        pendingTaskCreation: state.pendingTaskCreation
+        taskCreationAttempts: state.taskCreationAttempts.map(
+          ({
+            phase: _phase,
+            pendingAction: _pendingAction,
+            errorMessage: _errorMessage,
+            ...attempt
+          }) => attempt
+        )
       };
     },
     hydrateContext(context) {
-      const pendingTaskCreation = context.pendingTaskCreation ?? null;
+      const persistedAttempts =
+        context.taskCreationAttempts ??
+        (context.pendingTaskCreation ? [context.pendingTaskCreation] : []);
+      const taskCreationAttempts: TaskCreationAttempt[] =
+        persistedAttempts.map((attempt) => ({
+          ...attempt,
+          phase: "uncertain",
+          pendingAction: null,
+          errorMessage: null
+        }));
+      const pendingTaskCreation = taskCreationAttempts[0] ?? null;
       const selectedTaskId =
-        pendingTaskCreation &&
-        (context.selectedTaskId === pendingTaskCreation.taskId ||
-          context.selectedTaskId === pendingTaskCreation.slotId)
-          ? pendingTaskCreation.slotId
-          : context.selectedTaskId;
+        taskCreationAttempts.find(
+          (attempt) =>
+            context.selectedTaskId === attempt.taskId ||
+            context.selectedTaskId === attempt.slotId
+        )?.slotId ?? context.selectedTaskId;
       state = {
         ...state,
         mobileDeviceId: context.mobileDeviceId,
@@ -468,21 +520,24 @@ export function createSessionStore(): SessionStore {
           : state.auth,
         trustedDesktops: context.trustedDesktops ?? [],
         repoCreationProfiles: context.repoCreationProfiles ?? [],
-        isComposerOpen: pendingTaskCreation ? false : state.isComposerOpen,
-        composerPrompt: pendingTaskCreation?.prompt ?? state.composerPrompt,
-        composerRepoId: pendingTaskCreation?.repoId ?? state.composerRepoId,
-        composerDesktopId:
-          pendingTaskCreation?.desktopId ?? state.composerDesktopId,
-        composerAgentProvider:
-          pendingTaskCreation?.agentProvider ?? state.composerAgentProvider,
-        composerErrorMessage: pendingTaskCreation
-          ? null
-          : state.composerErrorMessage,
+        isComposerOpen: false,
+        composerPrompt: "",
+        composerRepoId: null,
+        composerDesktopId: null,
+        composerAgentProvider: "claude",
+        composerErrorMessage: null,
+        taskCreationAttempts,
         pendingTaskCreation,
         taskCreationPhase: pendingTaskCreation ? "uncertain" : "idle",
-        taskUiSlots: pendingTaskCreation
-          ? [buildCreatingTaskUiSlot(pendingTaskCreation)]
-          : state.taskUiSlots
+        taskUiSlots: [
+          ...taskCreationAttempts.map(buildCreatingTaskUiSlot),
+          ...state.taskUiSlots.filter(
+            (slot) =>
+              !taskCreationAttempts.some(
+                (attempt) => attempt.slotId === slot.slotId
+              )
+          )
+        ]
       };
       publish();
     },
@@ -959,10 +1014,127 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     setTaskCreationState(taskCreationState) {
+      const attempts =
+        taskCreationState.pendingTaskCreation === null
+          ? []
+          : [{
+              ...taskCreationState.pendingTaskCreation,
+              phase: taskCreationState.phase as ActiveTaskCreationPhase,
+              pendingAction: null,
+              errorMessage: null
+            }];
       state = {
         ...state,
+        taskCreationAttempts: attempts,
         pendingTaskCreation: taskCreationState.pendingTaskCreation,
         taskCreationPhase: taskCreationState.phase
+      };
+      publish();
+    },
+    addTaskCreationAttempt(attempt) {
+      const normalizedAttempt = {
+        ...attempt,
+        pendingAction: attempt.pendingAction ?? null,
+        errorMessage: attempt.errorMessage ?? null
+      };
+      const taskCreationAttempts = [
+        normalizedAttempt,
+        ...state.taskCreationAttempts.filter(
+          (candidate) =>
+            candidate.slotId !== normalizedAttempt.slotId &&
+            candidate.taskId !== normalizedAttempt.taskId
+        )
+      ];
+      state = {
+        ...state,
+        taskCreationAttempts,
+        pendingTaskCreation: normalizedAttempt,
+        taskCreationPhase: normalizedAttempt.phase
+      };
+      publish();
+    },
+    setTaskCreationAttemptPhase(slotId, phase) {
+      const taskCreationAttempts = state.taskCreationAttempts.map((attempt) =>
+        attempt.slotId === slotId ? { ...attempt, phase } : attempt
+      );
+      const projected =
+        taskCreationAttempts.find(
+          (attempt) => attempt.slotId === state.pendingTaskCreation?.slotId
+        ) ?? taskCreationAttempts[0] ?? null;
+      state = {
+        ...state,
+        taskCreationAttempts,
+        pendingTaskCreation: projected,
+        taskCreationPhase: projected?.phase ?? "idle"
+      };
+      publish();
+    },
+    beginTaskCreationAction(slotId, action) {
+      const attempt = state.taskCreationAttempts.find(
+        (candidate) => candidate.slotId === slotId
+      );
+      if (!attempt || attempt.pendingAction) {
+        return false;
+      }
+      state = {
+        ...state,
+        taskCreationAttempts: state.taskCreationAttempts.map((candidate) =>
+          candidate.slotId === slotId
+            ? { ...candidate, pendingAction: action }
+            : candidate
+        )
+      };
+      publish();
+      return true;
+    },
+    finishTaskCreationAction(slotId, action) {
+      const attempt = state.taskCreationAttempts.find(
+        (candidate) => candidate.slotId === slotId
+      );
+      if (!attempt || attempt.pendingAction !== action) {
+        return;
+      }
+      state = {
+        ...state,
+        taskCreationAttempts: state.taskCreationAttempts.map((candidate) =>
+          candidate.slotId === slotId
+            ? { ...candidate, pendingAction: null }
+            : candidate
+        )
+      };
+      publish();
+    },
+    setTaskCreationAttemptError(slotId, errorMessage) {
+      if (
+        !state.taskCreationAttempts.some(
+          (attempt) => attempt.slotId === slotId
+        )
+      ) {
+        return;
+      }
+      state = {
+        ...state,
+        taskCreationAttempts: state.taskCreationAttempts.map((attempt) =>
+          attempt.slotId === slotId
+            ? { ...attempt, errorMessage }
+            : attempt
+        )
+      };
+      publish();
+    },
+    removeTaskCreationAttempt(slotId) {
+      const taskCreationAttempts = state.taskCreationAttempts.filter(
+        (attempt) => attempt.slotId !== slotId
+      );
+      const projected =
+        taskCreationAttempts.find(
+          (attempt) => attempt.slotId === state.pendingTaskCreation?.slotId
+        ) ?? taskCreationAttempts[0] ?? null;
+      state = {
+        ...state,
+        taskCreationAttempts,
+        pendingTaskCreation: projected,
+        taskCreationPhase: projected?.phase ?? "idle"
       };
       publish();
     },
