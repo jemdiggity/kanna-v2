@@ -9,6 +9,10 @@ import {
   type DesktopRelayTerminalSubscription,
 } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
+import {
+  createRemoteTerminalFileLinkProvider,
+  type RemoteTerminalFileLinkProvider,
+} from "../composables/remoteTerminalFileLinks";
 import { getTerminalTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
@@ -29,6 +33,18 @@ let resizeObserver: ResizeObserver | null = null;
 let relayClient: DesktopRelayTerminalClient | null = null;
 let subscription: DesktopRelayTerminalSubscription | null = null;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
+let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
+
+async function readRemoteTaskFile(path: string): Promise<string | null> {
+  const client = relayClient;
+  if (!client) return null;
+  const file = await client.readTaskFile({
+    desktopId: props.ownerDesktopId,
+    taskId: props.ownerTaskId,
+    path,
+  });
+  return file.content;
+}
 
 function writeRemoteTerminalError(message: string) {
   status.value = "error";
@@ -51,6 +67,7 @@ function fitAndResizeRemote() {
 
 async function start() {
   stopSubscription();
+  fileLinkProvider?.clearFileCache();
   status.value = "connecting";
   errorMessage.value = null;
   terminal?.reset();
@@ -133,6 +150,12 @@ onMounted(() => {
   if (containerRef.value) {
     terminal.open(containerRef.value);
     registerTerminalBufferForE2E();
+    fileLinkProvider = createRemoteTerminalFileLinkProvider({
+      term: terminal,
+      readFile: readRemoteTaskFile,
+      getContainer: () => containerRef.value,
+    });
+    fileLinkProvider.register();
     fitAndResizeRemote();
     resizeObserver = new ResizeObserver(() => fitAndResizeRemote());
     resizeObserver.observe(containerRef.value);
@@ -162,6 +185,7 @@ onUnmounted(() => {
   terminal?.dispose();
   terminal = null;
   fitAddon = null;
+  fileLinkProvider = null;
 });
 </script>
 

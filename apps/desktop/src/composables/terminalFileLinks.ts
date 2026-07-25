@@ -3,7 +3,42 @@ import { fileExistsSafe } from "../utils/invokeHelpers"
 import type { TerminalOptions } from "./terminalTypes"
 
 const FILE_PATH_RE = /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.[a-zA-Z][a-zA-Z0-9]*(?::\d+){0,2})/g
-const IMAGE_FILE_EXTENSION = /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i
+export const IMAGE_FILE_EXTENSION = /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i
+
+export interface TerminalFileLinkCandidate {
+  text: string
+  start: number
+  path: string
+  line?: number
+}
+
+export function parseTerminalFileLink(raw: string): { path: string; line?: number } {
+  const parts = raw.split(":")
+  const suffixes: number[] = []
+  while (parts.length > 1) {
+    const maybeNumber = parts[parts.length - 1]
+    if (!maybeNumber || !/^\d+$/.test(maybeNumber)) break
+    suffixes.unshift(parseInt(maybeNumber, 10))
+    parts.pop()
+  }
+  return { path: parts.join(":"), line: suffixes[0] }
+}
+
+export function detectTerminalFileLinkCandidates(lineText: string): TerminalFileLinkCandidate[] {
+  const candidates: TerminalFileLinkCandidate[] = []
+  FILE_PATH_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = FILE_PATH_RE.exec(lineText)) !== null) {
+    const fullMatch = match[0]
+    const pathMatch = match[1]
+    candidates.push({
+      text: pathMatch,
+      start: match.index + (fullMatch.length - pathMatch.length),
+      ...parseTerminalFileLink(pathMatch),
+    })
+  }
+  return candidates
+}
 
 export interface ResolvedTerminalFileLink {
   text: string
@@ -29,23 +64,11 @@ export function createTerminalFileLinkProvider(params: {
 }): TerminalFileLinkProvider {
   const fileExistsCache = new Map<string, boolean>()
 
-  function parseFileLink(raw: string): { path: string; line?: number } {
-    const parts = raw.split(":")
-    const suffixes: number[] = []
-    while (parts.length > 1) {
-      const maybeNumber = parts[parts.length - 1]
-      if (!maybeNumber || !/^\d+$/.test(maybeNumber)) break
-      suffixes.unshift(parseInt(maybeNumber, 10))
-      parts.pop()
-    }
-    return { path: parts.join(":"), line: suffixes[0] }
-  }
-
   function resolveFileLink(
-    raw: string,
+    candidate: TerminalFileLinkCandidate,
     worktreePath: string,
   ): Omit<ResolvedTerminalFileLink, "text" | "start"> | null {
-    const { path, line } = parseFileLink(raw)
+    const { path, line } = candidate
     const normalizedWorktreePath = worktreePath.replace(/\/+$/, "")
     if (path.startsWith("/")) {
       if (!path.startsWith(`${normalizedWorktreePath}/`)) return null
@@ -70,16 +93,12 @@ export function createTerminalFileLinkProvider(params: {
 
   function detectLineLinks(lineText: string, worktreePath: string): ResolvedTerminalFileLink[] {
     const matches: ResolvedTerminalFileLink[] = []
-    FILE_PATH_RE.lastIndex = 0
-    let match: RegExpExecArray | null
-    while ((match = FILE_PATH_RE.exec(lineText)) !== null) {
-      const fullMatch = match[0]
-      const pathMatch = match[1]
-      const resolved = resolveFileLink(pathMatch, worktreePath)
+    for (const candidate of detectTerminalFileLinkCandidates(lineText)) {
+      const resolved = resolveFileLink(candidate, worktreePath)
       if (!resolved) continue
       matches.push({
-        text: pathMatch,
-        start: match.index + (fullMatch.length - pathMatch.length),
+        text: candidate.text,
+        start: candidate.start,
         ...resolved,
       })
     }
