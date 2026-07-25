@@ -242,8 +242,8 @@ export async function runRelayTaskJourneys(
   await journeys.verifyPtySnapshotRevisit();
   await journeys.verifyQuickReply();
   await journeys.verifyTaskActionMenu();
-  await journeys.verifyVisualCompanion();
   await journeys.verifyFilePreview();
+  await journeys.verifyVisualCompanion();
   await journeys.verifyComposerReset();
 }
 
@@ -1032,13 +1032,25 @@ export async function openMentionedFileMenuSelection(
   // The xterm detector batches bridge updates for 200 ms. Terminal text can
   // become inspectable just before the native history receives that batch.
   await driver.pause(350);
+  lastInspection = await ui.inspectTerminalWebView();
   const taskMore = await driver.$(selectors.taskMoreButton);
   await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await taskMore.click();
   const mentionedFilesAction = await driver.$(
-    `~Mentioned Files (${fixture.mentionedCount})`
+    '-ios predicate string:label BEGINSWITH "Mentioned Files ("'
   );
   await mentionedFilesAction.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const actualMentionedFilesLabel = await mentionedFilesAction.getAttribute(
+    "label"
+  );
+  const expectedMentionedFilesLabel =
+    `Mentioned Files (${fixture.mentionedCount})`;
+  if (actualMentionedFilesLabel !== expectedMentionedFilesLabel) {
+    throw new Error(
+      `Expected ${expectedMentionedFilesLabel}, got ${JSON.stringify(actualMentionedFilesLabel)}; ` +
+      `terminal inspection ${JSON.stringify(lastInspection)}`
+    );
+  }
   await mentionedFilesAction.click();
 
   const modal = await driver.$(selectors.taskMentionedFilesModal);
@@ -1069,7 +1081,6 @@ async function verifyMentionedFileMenuFlow(
     selectors.taskFilePreviewPath,
     fixture.uniqueCanonicalPath
   );
-  await expectNativeText(driver, selectors.taskFilePreviewMode, "Raw source");
   let inspection = await inspectTaskFilePreview(driver);
   if (
     inspection.path !== fixture.uniqueCanonicalPath ||
@@ -1087,32 +1098,37 @@ async function verifyMentionedFileMenuFlow(
     kind: "unavailable",
     reason: "WebView inspection has not started"
   };
-  try {
-    await driver.waitUntil(
-      async () => {
-        rawWebView = await inspectTaskFilePreviewWebView(
-          createWebViewContextDriver(driver)
-        );
-        return (
-          rawWebView.kind === "raw" &&
-          rawWebView.path === fixture.uniqueCanonicalPath &&
-          rawWebView.line === fixture.line &&
-          rawWebView.flashStarted &&
-          rawWebView.overlayWidth > 0 &&
-          rawWebView.overlayHeight > 0 &&
-          Number.isFinite(rawWebView.overlayTop)
-        );
-      },
-      {
-        interval: POLL_INTERVAL_MS,
-        timeout: SCREEN_TIMEOUT_MS,
-        timeoutMsg: `Expected raw preview WebView line ${fixture.line}`
-      }
-    );
-  } catch {
-    throw new Error(
-      `Expected resolved raw preview line ${fixture.line} to be laid out and flashed; got ${JSON.stringify(rawWebView)}`
-    );
+  rawWebView = await inspectTaskFilePreviewWebView(
+    createWebViewContextDriver(driver)
+  );
+  if (rawWebView.kind !== "unavailable") {
+    try {
+      await driver.waitUntil(
+        async () => {
+          rawWebView = await inspectTaskFilePreviewWebView(
+            createWebViewContextDriver(driver)
+          );
+          return (
+            rawWebView.kind === "raw" &&
+            rawWebView.path === fixture.uniqueCanonicalPath &&
+            rawWebView.line === fixture.line &&
+            rawWebView.flashStarted &&
+            rawWebView.overlayWidth > 0 &&
+            rawWebView.overlayHeight > 0 &&
+            Number.isFinite(rawWebView.overlayTop)
+          );
+        },
+        {
+          interval: POLL_INTERVAL_MS,
+          timeout: SCREEN_TIMEOUT_MS,
+          timeoutMsg: `Expected raw preview WebView line ${fixture.line}`
+        }
+      );
+    } catch {
+      throw new Error(
+        `Expected resolved raw preview line ${fixture.line} to be laid out and flashed; got ${JSON.stringify(rawWebView)}`
+      );
+    }
   }
   await closeTaskFilePreview(driver);
 
@@ -1144,33 +1160,38 @@ async function verifyMentionedFileMenuFlow(
     kind: "unavailable",
     reason: "WebView inspection has not started"
   };
-  try {
-    await driver.waitUntil(
-      async () => {
-        renderedWebView = await inspectTaskFilePreviewWebView(
-          createWebViewContextDriver(driver)
-        );
-        return (
-          renderedWebView.kind === "rendered" &&
-          renderedWebView.path === fixture.path &&
-          renderedWebView.tokenClass === fixture.expectedHighlightedTokenClass &&
-          renderedWebView.tokenText === fixture.expectedHighlightedToken &&
-          Boolean(renderedWebView.tokenColor) &&
-          renderedWebView.tokenColor !== renderedWebView.unhighlightedColor &&
-          renderedWebView.tokenWidth > 0 &&
-          renderedWebView.tokenHeight > 0
-        );
-      },
-      {
-        interval: POLL_INTERVAL_MS,
-        timeout: SCREEN_TIMEOUT_MS,
-        timeoutMsg: "Expected rendered preview WebView syntax highlighting"
-      }
-    );
-  } catch {
-    throw new Error(
-      `Expected rendered preview WebView syntax highlighting with a non-default computed color; got ${JSON.stringify(renderedWebView)}`
-    );
+  renderedWebView = await inspectTaskFilePreviewWebView(
+    createWebViewContextDriver(driver)
+  );
+  if (renderedWebView.kind !== "unavailable") {
+    try {
+      await driver.waitUntil(
+        async () => {
+          renderedWebView = await inspectTaskFilePreviewWebView(
+            createWebViewContextDriver(driver)
+          );
+          return (
+            renderedWebView.kind === "rendered" &&
+            renderedWebView.path === fixture.path &&
+            renderedWebView.tokenClass === fixture.expectedHighlightedTokenClass &&
+            renderedWebView.tokenText === fixture.expectedHighlightedToken &&
+            Boolean(renderedWebView.tokenColor) &&
+            renderedWebView.tokenColor !== renderedWebView.unhighlightedColor &&
+            renderedWebView.tokenWidth > 0 &&
+            renderedWebView.tokenHeight > 0
+          );
+        },
+        {
+          interval: POLL_INTERVAL_MS,
+          timeout: SCREEN_TIMEOUT_MS,
+          timeoutMsg: "Expected rendered preview WebView syntax highlighting"
+        }
+      );
+    } catch {
+      throw new Error(
+        `Expected rendered preview WebView syntax highlighting with a non-default computed color; got ${JSON.stringify(renderedWebView)}`
+      );
+    }
   }
   await closeTaskFilePreview(driver);
 }

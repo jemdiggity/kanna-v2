@@ -113,6 +113,7 @@ export function buildTerminalDocument({
       const MAX_RETAINED_FILE_MENTIONS = 20;
       const MAX_FILE_MENTION_PAYLOAD = 21;
       const MAX_INITIAL_FILE_MENTION_SCAN_ROWS = 1000;
+      const MAX_REWRITTEN_FILE_MENTION_SCAN_ROWS = 200;
       const FILE_MENTION_SCAN_OVERLAP_ROWS = 2;
       const FILE_MENTION_SCAN_DEBOUNCE_MS = 200;
       const UNSUPPORTED_FILE_MENTION_EXTENSIONS = new Set([
@@ -182,6 +183,7 @@ export function buildTerminalDocument({
       const terminalFileMentionHistory = new Map();
       let terminalFileMentionOverflow = false;
       let pendingFileMentionScanStart = null;
+      let pendingAlternateFileMentionScan = false;
       let pendingFileMentionScanTimer = null;
       let lastPostedFileMentionSnapshot = "";
 
@@ -376,10 +378,19 @@ export function buildTerminalDocument({
       }
 
       function recordTerminalFileMention(candidate) {
+        const mention = terminalFileMention(candidate);
+        const existing = terminalFileMentionHistory.get(candidate.parsed.path);
+        if (
+          existing &&
+          existing.raw === mention.raw &&
+          existing.line === mention.line
+        ) {
+          return;
+        }
         terminalFileMentionHistory.delete(candidate.parsed.path);
         terminalFileMentionHistory.set(
           candidate.parsed.path,
-          terminalFileMention(candidate)
+          mention
         );
         if (terminalFileMentionHistory.size > MAX_RETAINED_FILE_MENTIONS) {
           terminalFileMentionOverflow = true;
@@ -403,6 +414,7 @@ export function buildTerminalDocument({
         }
         lastPostedFileMentionSnapshot = snapshot;
         window.ReactNativeWebView.postMessage(snapshot);
+        ${enableE2EInspection ? "notifyTerminalInspection();" : ""}
       }
 
       function rebuildTerminalFileMentions() {
@@ -411,37 +423,63 @@ export function buildTerminalDocument({
           pendingFileMentionScanTimer = null;
         }
         pendingFileMentionScanStart = null;
+        pendingAlternateFileMentionScan = false;
         terminalFileMentionHistory.clear();
         terminalFileMentionOverflow = false;
 
-        const buffer = normalBuffer();
-        const firstLine = Math.max(
-          0,
-          buffer.length - MAX_INITIAL_FILE_MENTION_SCAN_ROWS
-        );
+        const activeBuffer = term.buffer.active;
+        const buffers =
+          activeBuffer.type === "alternate"
+            ? [
+                { buffer: activeBuffer, firstLine: 0 },
+                {
+                  buffer: normalBuffer(),
+                  firstLine: Math.max(
+                    0,
+                    normalBuffer().length -
+                      MAX_INITIAL_FILE_MENTION_SCAN_ROWS
+                  )
+                }
+              ]
+            : [
+                {
+                  buffer: normalBuffer(),
+                  firstLine: Math.max(
+                    0,
+                    normalBuffer().length -
+                      MAX_INITIAL_FILE_MENTION_SCAN_ROWS
+                  )
+                }
+              ];
         const newestMentions = [];
         const seenPaths = new Set();
         scan:
-        for (let index = buffer.length - 1; index >= firstLine; index -= 1) {
-          const line = buffer.getLine(index);
-          if (!line) continue;
-          const candidates = terminalFileCandidates(
-            line.translateToString(true)
-          );
+        for (const entry of buffers) {
           for (
-            let candidateIndex = candidates.length - 1;
-            candidateIndex >= 0;
-            candidateIndex -= 1
+            let index = entry.buffer.length - 1;
+            index >= entry.firstLine;
+            index -= 1
           ) {
-            const candidate = candidates[candidateIndex];
-            if (seenPaths.has(candidate.parsed.path)) {
-              continue;
-            }
-            seenPaths.add(candidate.parsed.path);
-            newestMentions.push(candidate);
-            if (newestMentions.length >= MAX_FILE_MENTION_PAYLOAD) {
-              terminalFileMentionOverflow = true;
-              break scan;
+            const line = entry.buffer.getLine(index);
+            if (!line) continue;
+            const candidates = terminalFileCandidates(
+              line.translateToString(true)
+            );
+            for (
+              let candidateIndex = candidates.length - 1;
+              candidateIndex >= 0;
+              candidateIndex -= 1
+            ) {
+              const candidate = candidates[candidateIndex];
+              if (seenPaths.has(candidate.parsed.path)) {
+                continue;
+              }
+              seenPaths.add(candidate.parsed.path);
+              newestMentions.push(candidate);
+              if (newestMentions.length >= MAX_FILE_MENTION_PAYLOAD) {
+                terminalFileMentionOverflow = true;
+                break scan;
+              }
             }
           }
         }
@@ -463,30 +501,65 @@ export function buildTerminalDocument({
         postTerminalFileMentionsIfChanged();
       }
 
-      function scheduleIncrementalFileMentionScan(previousLength) {
-        const scanStart = Math.max(
-          0,
-          previousLength - FILE_MENTION_SCAN_OVERLAP_ROWS
-        );
-        pendingFileMentionScanStart =
-          pendingFileMentionScanStart === null
-            ? scanStart
-            : Math.min(pendingFileMentionScanStart, scanStart);
+      function scheduleIncrementalFileMentionScan(
+        previousLength,
+        scanNormalBuffer,
+        scanAlternateBuffer
+      ) {
+        if (scanNormalBuffer) {
+          const currentLength = normalBuffer().length;
+          const scanStart =
+            currentLength === previousLength
+              ? Math.max(
+                  0,
+                  currentLength -
+                    MAX_REWRITTEN_FILE_MENTION_SCAN_ROWS
+                )
+              : Math.max(
+                  0,
+                  previousLength - FILE_MENTION_SCAN_OVERLAP_ROWS
+                );
+          pendingFileMentionScanStart =
+            pendingFileMentionScanStart === null
+              ? scanStart
+              : Math.min(pendingFileMentionScanStart, scanStart);
+        }
+        pendingAlternateFileMentionScan ||= scanAlternateBuffer;
         if (pendingFileMentionScanTimer !== null) {
           window.clearTimeout(pendingFileMentionScanTimer);
         }
         pendingFileMentionScanTimer = window.setTimeout(() => {
           pendingFileMentionScanTimer = null;
-          const buffer = normalBuffer();
-          const firstLine = pendingFileMentionScanStart ?? 0;
+          const normalScanStart = pendingFileMentionScanStart;
+          const scanAlternate = pendingAlternateFileMentionScan;
           pendingFileMentionScanStart = null;
-          for (let index = firstLine; index < buffer.length; index += 1) {
-            const line = buffer.getLine(index);
-            if (!line) continue;
-            for (const candidate of terminalFileCandidates(
-              line.translateToString(true)
-            )) {
-              recordTerminalFileMention(candidate);
+          pendingAlternateFileMentionScan = false;
+          const buffers = [];
+          if (normalScanStart !== null) {
+            buffers.push({
+              buffer: normalBuffer(),
+              firstLine: normalScanStart
+            });
+          }
+          if (scanAlternate) {
+            buffers.push({
+              buffer: term.buffer.alternate,
+              firstLine: 0
+            });
+          }
+          for (const entry of buffers) {
+            for (
+              let index = entry.firstLine;
+              index < entry.buffer.length;
+              index += 1
+            ) {
+              const line = entry.buffer.getLine(index);
+              if (!line) continue;
+              for (const candidate of terminalFileCandidates(
+                line.translateToString(true)
+              )) {
+                recordTerminalFileMention(candidate);
+              }
             }
           }
           postTerminalFileMentionsIfChanged();
@@ -1135,6 +1208,10 @@ export function buildTerminalDocument({
             byteCount: Number.parseInt(root.dataset.kannaByteCount || "0", 10) || 0,
             cols: Number.parseInt(root.dataset.kannaCols || "", 10) || null,
             frameCount: Number.parseInt(root.dataset.kannaFrameCount || "0", 10) || 0,
+            mentionedFiles: {
+              mentions: Array.from(terminalFileMentionHistory.values()).reverse(),
+              overflow: terminalFileMentionOverflow
+            },
             rows: Number.parseInt(root.dataset.kannaRows || "", 10) || null,
             text: renderedTerminalText()
           }
@@ -1292,11 +1369,20 @@ export function buildTerminalDocument({
           fitTerminal();
           finalizeRender(shouldStick);
           const currentNormalLength = normalBuffer().length;
-          if (
+          const scanNormalBuffer =
             term.buffer.active.type !== "alternate" ||
-            currentNormalLength !== previousNormalLength
+            currentNormalLength !== previousNormalLength;
+          const scanAlternateBuffer =
+            term.buffer.active.type === "alternate";
+          if (
+            scanNormalBuffer ||
+            scanAlternateBuffer
           ) {
-            scheduleIncrementalFileMentionScan(previousNormalLength);
+            scheduleIncrementalFileMentionScan(
+              previousNormalLength,
+              scanNormalBuffer,
+              scanAlternateBuffer
+            );
           }
         });
       };

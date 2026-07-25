@@ -94,8 +94,8 @@ describe("relay task flow orchestration", () => {
       "quick-reply",
       "transport",
       "task-actions",
-      "visual-companion",
       "file-preview",
+      "visual-companion",
       "composer-reset",
     ]);
     expect(screen).toBe("detail");
@@ -381,6 +381,12 @@ describe("mentioned file menu", () => {
           click: vi.fn(async () => {
             clicked.push(selector);
           }),
+          getAttribute: vi.fn(async (attribute: string) =>
+            attribute === "label" &&
+            selector.includes('label BEGINSWITH "Mentioned Files ("')
+              ? "Mentioned Files (3)"
+              : null
+          ),
           isExisting: vi.fn(async () => exists),
           waitForDisplayed: vi.fn(async () => {
             if (!exists) throw new Error(`Missing control ${selector}`);
@@ -414,7 +420,7 @@ describe("mentioned file menu", () => {
 
     expect(clicked).toEqual([
       "~mobile.task-more-button",
-      "~Mentioned Files (3)",
+      '-ios predicate string:label BEGINSWITH "Mentioned Files ("',
       "~mobile.task-mentioned-files.row.fixtures/unique/TaskScreen.tsx"
     ]);
     for (const path of [

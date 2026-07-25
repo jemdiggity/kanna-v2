@@ -779,7 +779,7 @@ describe("buildTerminalDocument", () => {
     }
   });
 
-  it("ignores alternate-buffer-only writes and unchanged history", async () => {
+  it("tracks alternate-buffer mentions without reposting unchanged history", async () => {
     vi.useFakeTimers();
     try {
       const { messages, terminal, window } = createExecutedTerminalDocument();
@@ -800,12 +800,46 @@ describe("buildTerminalDocument", () => {
 
       expect(messages.filter(
         (message) => JSON.parse(message).type === "terminal-file-mentions"
-      )).toHaveLength(initialMessages);
+      )).toHaveLength(initialMessages + 1);
+      expect(lastMessageOfType(messages, "terminal-file-mentions")).toEqual({
+        type: "terminal-file-mentions",
+        mentions: [
+          {
+            raw: "src/AlternateOnly.ts",
+            path: "src/AlternateOnly.ts"
+          },
+          {
+            raw: "src/Existing.ts",
+            path: "src/Existing.ts"
+          }
+        ],
+        overflow: false
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tracks mentions when terminal output rewrites rows without growing scrollback", async () => {
+    vi.useFakeTimers();
+    try {
+      const { messages, terminal, window } = createExecutedTerminalDocument();
+      window.__replaceTerminalState({ text: "ordinary output\n" });
+      await vi.runAllTimersAsync();
+      const previousLength = terminal.buffer.normal.length;
+
+      window.__appendTerminalChunk({
+        chunksB64: [b64("src/Rewritten.ts:14")]
+      });
+      expect(terminal.buffer.normal.length).toBe(previousLength);
+      await vi.runAllTimersAsync();
+
       expect(lastMessageOfType(messages, "terminal-file-mentions")).toEqual({
         type: "terminal-file-mentions",
         mentions: [{
-          raw: "src/Existing.ts",
-          path: "src/Existing.ts"
+          raw: "src/Rewritten.ts:14",
+          path: "src/Rewritten.ts",
+          line: 14
         }],
         overflow: false
       });
@@ -847,8 +881,8 @@ describe("buildTerminalDocument", () => {
     expect(script).toContain(
       "const MAX_INITIAL_FILE_MENTION_SCAN_ROWS = 1000;"
     );
-    expect(script).toContain(
-      "buffer.length - MAX_INITIAL_FILE_MENTION_SCAN_ROWS"
+    expect(script).toMatch(
+      /normalBuffer\(\)\.length\s*-\s*MAX_INITIAL_FILE_MENTION_SCAN_ROWS/
     );
     expect(script).not.toContain("const firstLine = 0");
     expect(script).not.toContain("recordTerminalFrame");
@@ -872,12 +906,16 @@ describe("buildTerminalDocument", () => {
     const inspections = messages
       .map((message) => JSON.parse(message))
       .filter((message) => message.type === "terminal-inspection");
-    expect(inspections).toHaveLength(2);
+    expect(inspections.length).toBeGreaterThanOrEqual(2);
     expect(script).toContain("term.buffer.active");
     expect(script).toContain("recordTerminalFrame");
     expect(inspections.at(-1)?.inspection).toMatchObject({
       byteCount: 25,
-      frameCount: 2
+      frameCount: 2,
+      mentionedFiles: {
+        mentions: [],
+        overflow: false
+      }
     });
   });
 

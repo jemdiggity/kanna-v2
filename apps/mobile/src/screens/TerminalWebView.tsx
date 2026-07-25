@@ -58,6 +58,7 @@ interface TerminalInspection {
   byteCount: number;
   cols: number | null;
   frameCount: number;
+  mentionedFiles?: TerminalFileMentionHistory;
   rows: number | null;
   text: string;
 }
