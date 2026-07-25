@@ -1,4 +1,3 @@
-import { watchDebounced } from "@vueuse/core";
 import { shallowRef, watch, type ComputedRef, type Ref } from "vue";
 import type { WorkspaceTask } from "../workspace/types";
 
@@ -65,21 +64,31 @@ export function useRemoteTaskReadDwell({
     { flush: "sync", immediate: true },
   );
 
-  watchDebounced(
+  watch(
     observedSelection,
-    async (observation) => {
-      if (!observation || selectedItemId.value !== observation.itemId) return;
-      const task = workspaceTasksByItemId.value.get(observation.itemId);
-      if (!task || task.owner.kind === "local" || task.item.activity !== "unread") return;
-      const remoteRef = task.terminal.remoteRef;
-      if (
-        !remoteRef
-        || remoteRef.ownerDesktopId !== observation.ownerDesktopId
-        || remoteRef.ownerLocalTaskId !== observation.ownerLocalTaskId
-      ) return;
-      if (task.item.activity_revision !== observation.activityRevision) return;
-      await markTaskRead(task, observation.activityRevision);
+    (observation, _previousObservation, onCleanup) => {
+      if (!observation) return;
+
+      let cancelled = false;
+      const timer = setTimeout(async () => {
+        if (cancelled || selectedItemId.value !== observation.itemId) return;
+        const task = workspaceTasksByItemId.value.get(observation.itemId);
+        if (!task || task.owner.kind === "local" || task.item.activity !== "unread") return;
+        const remoteRef = task.terminal.remoteRef;
+        if (
+          !remoteRef
+          || remoteRef.ownerDesktopId !== observation.ownerDesktopId
+          || remoteRef.ownerLocalTaskId !== observation.ownerLocalTaskId
+        ) return;
+        if (task.item.activity_revision !== observation.activityRevision) return;
+        await markTaskRead(task, observation.activityRevision);
+      }, 1000);
+
+      onCleanup(() => {
+        cancelled = true;
+        clearTimeout(timer);
+      });
     },
-    { debounce: 1000, immediate: true },
+    { immediate: true },
   );
 }
