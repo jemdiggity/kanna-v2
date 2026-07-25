@@ -258,7 +258,16 @@ fn snapshot_selects_latest_relevant_transfer_for_open_task() {
     )
     .expect("insert task");
     db.insert_test_task_transfer_with_desktops(
-        "transfer-completed",
+        "transfer-older-outgoing",
+        "outgoing",
+        "pending",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert older relevant outgoing transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-completed-incoming",
         "incoming",
         "completed",
         Some("task-destination"),
@@ -266,11 +275,59 @@ fn snapshot_selects_latest_relevant_transfer_for_open_task() {
         Some("desktop-b"),
     )
     .expect("insert completed incoming transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-newer-rejected",
+        "incoming",
+        "rejected",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert newer irrelevant rejected transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-newest-completed-outgoing",
+        "outgoing",
+        "completed",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert newest irrelevant completed outgoing transfer");
+    for (id, started_at, completed_at) in [
+        ("transfer-older-outgoing", "2026-07-26 00:01:00", None),
+        (
+            "transfer-completed-incoming",
+            "2026-07-26 00:02:00",
+            Some("2026-07-26 00:03:00"),
+        ),
+        (
+            "transfer-newer-rejected",
+            "2026-07-26 00:04:00",
+            Some("2026-07-26 00:05:00"),
+        ),
+        (
+            "transfer-newest-completed-outgoing",
+            "2026-07-26 00:06:00",
+            Some("2026-07-26 00:07:00"),
+        ),
+    ] {
+        db.conn
+            .execute(
+                "UPDATE task_transfer
+                 SET started_at = ?, completed_at = ?
+                 WHERE id = ?",
+                (started_at, completed_at, id),
+            )
+            .expect("set deterministic transfer timestamps");
+    }
 
     let snapshot = db.ui_snapshot().expect("load snapshot");
     let item = &snapshot.entries[0].items[0];
     assert_eq!(item.cloud_task_id, "task-destination");
-    assert_eq!(item.transfer_id.as_deref(), Some("transfer-completed"));
+    assert_eq!(
+        item.transfer_id.as_deref(),
+        Some("transfer-completed-incoming")
+    );
     assert_eq!(item.transfer_direction.as_deref(), Some("incoming"));
     assert_eq!(item.transfer_status.as_deref(), Some("completed"));
     assert_eq!(item.transfer_source_peer_id.as_deref(), Some("peer-1"));

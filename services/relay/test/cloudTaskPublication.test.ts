@@ -126,6 +126,28 @@ describe("cloud task publication validation", () => {
     )).toThrow(new RegExp(`transfer\\.${field}`));
   });
 
+  it.each([
+    ["transferId", "empty", ""],
+    ["transferId", "whitespace-only", " \t "],
+    ["sourceDesktopId", "empty", ""],
+    ["sourceDesktopId", "whitespace-only", "\n  "],
+    ["destinationDesktopId", "empty", ""],
+    ["destinationDesktopId", "whitespace-only", "   "],
+  ])("rejects outgoing transfer with %s %s", (field, _kind, invalidValue) => {
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state: "outgoing",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-a",
+          destinationDesktopId: "desktop-b",
+          [field]: invalidValue,
+        },
+      })]),
+      "desktop-1",
+    )).toThrow(new RegExp(`transfer\\.${field}`));
+  });
+
   it("accepts legacy missing revisions but rejects malformed activity revisions", () => {
     const legacy = validateCloudTaskPublication(
       publication([task({ activityRevision: undefined })]),
