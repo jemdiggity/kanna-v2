@@ -9,10 +9,11 @@ impl Db {
                 path: row.get(1)?,
                 name: row.get(2)?,
                 default_branch: row.get(3)?,
-                hidden: row.get(4)?,
-                sort_order: row.get(5)?,
-                created_at: row.get(6)?,
-                last_opened_at: row.get(7)?,
+                remote_url_hash: row.get(4)?,
+                hidden: row.get(5)?,
+                sort_order: row.get(6)?,
+                created_at: row.get(7)?,
+                last_opened_at: row.get(8)?,
             })
         })?;
         rows.collect()
@@ -20,21 +21,24 @@ impl Db {
 
     pub fn list_repos(&self) -> Result<Vec<Repo>, rusqlite::Error> {
         self.collect_repos(
-            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
+            "SELECT id, path, name, default_branch, remote_url_hash, hidden, sort_order, \
+                    created_at, last_opened_at \
              FROM repo WHERE hidden = 0 OR hidden IS NULL ORDER BY last_opened_at DESC",
         )
     }
 
     pub fn list_repos_for_maintenance(&self) -> Result<Vec<Repo>, rusqlite::Error> {
         self.collect_repos(
-            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
+            "SELECT id, path, name, default_branch, remote_url_hash, hidden, sort_order, \
+                    created_at, last_opened_at \
              FROM repo ORDER BY last_opened_at DESC",
         )
     }
 
     pub fn get_repo(&self, id: &str) -> Result<Option<Repo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at
+            "SELECT id, path, name, default_branch, remote_url_hash, hidden, sort_order,
+                    created_at, last_opened_at
              FROM repo WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -43,10 +47,11 @@ impl Db {
                 path: row.get(1)?,
                 name: row.get(2)?,
                 default_branch: row.get(3)?,
-                hidden: row.get(4)?,
-                sort_order: row.get(5)?,
-                created_at: row.get(6)?,
-                last_opened_at: row.get(7)?,
+                remote_url_hash: row.get(4)?,
+                hidden: row.get(5)?,
+                sort_order: row.get(6)?,
+                created_at: row.get(7)?,
+                last_opened_at: row.get(8)?,
             })
         })?;
         match rows.next() {

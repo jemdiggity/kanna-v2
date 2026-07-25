@@ -287,6 +287,32 @@ describe("cloud task index", () => {
     closedAt: null,
   };
 
+  it("displays repos with a remote url hash under the canonical cross-machine repo id", () => {
+    expect(
+      mapCloudTaskSnapshot({
+        ...legacySnapshot,
+        repo: { cloudRepoId: "repo-1", name: "kanna", remoteUrlHash: "hash-kanna" },
+      }),
+    ).toMatchObject({
+      id: "cloud:desktop-1:repo-1:task-1",
+      repoId: "git:hash-kanna",
+      ownerLocalRepoId: "repo-1",
+    });
+  });
+
+  it("keeps the owner-local repo id for routing when only the hash canonicalizes", () => {
+    const { localRepoId: _localRepoId, ...withoutLocalRepoId } = legacySnapshot;
+    expect(
+      mapCloudTaskSnapshot({
+        ...withoutLocalRepoId,
+        repo: { cloudRepoId: "repo-1", name: "kanna", remoteUrlHash: "hash-kanna" },
+      }),
+    ).toMatchObject({
+      repoId: "git:hash-kanna",
+      ownerLocalRepoId: "repo-1",
+    });
+  });
+
   it("uses owner identity as the mobile task id when cloudTaskId is absent", () => {
     expect(mapCloudTaskSnapshot(legacySnapshot)).toMatchObject({
       id: "cloud:desktop-1:repo-1:task-1",

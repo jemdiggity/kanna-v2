@@ -31,6 +31,10 @@ export interface DesktopSummary {
 export interface RepoSummary {
   id: string;
   name: string;
+  /** Cross-machine repo identity: hash of the git remote URL. The same
+   * repository registered on several desktops shares this hash while each
+   * desktop mints its own local id. */
+  remoteUrlHash?: string | null;
 }
 
 export type RepoCommandGroup = "automation" | "configure";

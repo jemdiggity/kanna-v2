@@ -8,6 +8,7 @@ fn builtin_qa_pipeline_ships_approve_as_pr_stage_post() {
         path: repo_root.to_string_lossy().into_owned(),
         name: "Builtin QA".to_string(),
         default_branch: Some("main".to_string()),
+        remote_url_hash: None,
         hidden: None,
         sort_order: None,
         created_at: None,
