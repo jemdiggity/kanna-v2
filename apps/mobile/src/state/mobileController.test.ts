@@ -3228,6 +3228,104 @@ describe("createMobileController", () => {
     });
   });
 
+  it("isolates concurrent aborts and failures between unresolved creations", async () => {
+    const store = createSessionStore();
+    const attempts = [
+      {
+        slotId: "create:slot-1",
+        taskId: "11111111111111111111111111111111",
+        repoId: "repo-2",
+        prompt: "First uncertain task",
+        desktopId: "desktop-1",
+        agentProvider: "claude" as const
+      },
+      {
+        slotId: "create:slot-2",
+        taskId: "22222222222222222222222222222222",
+        repoId: "repo-2",
+        prompt: "Second uncertain task",
+        desktopId: "desktop-2",
+        agentProvider: "codex" as const
+      }
+    ];
+    store.hydrateContext({
+      mobileDeviceId: null,
+      selectedDesktopId: "desktop-1",
+      selectedRepoId: "repo-2",
+      selectedTaskId: attempts[0].slotId,
+      activeView: "tasks",
+      taskCreationAttempts: attempts
+    });
+    const firstAbort = createDeferred<void>();
+    const secondAbort = createDeferred<void>();
+    const client = createClientMock();
+    client.abortTaskCreation
+      .mockReturnValueOnce(firstAbort.promise)
+      .mockReturnValueOnce(secondAbort.promise);
+    const controller = createMobileController(client, store);
+
+    const firstAbortPromise = controller.abortTaskCreation(attempts[0].slotId);
+    const secondAbortPromise = controller.abortTaskCreation(attempts[1].slotId);
+    void controller.abortTaskCreation(attempts[0].slotId);
+    await flushMicrotasks();
+
+    expect(client.abortTaskCreation).toHaveBeenCalledTimes(2);
+    expect(client.abortTaskCreation).toHaveBeenNthCalledWith(1, {
+      taskId: attempts[0].taskId,
+      desktopId: attempts[0].desktopId
+    });
+    expect(client.abortTaskCreation).toHaveBeenNthCalledWith(2, {
+      taskId: attempts[1].taskId,
+      desktopId: attempts[1].desktopId
+    });
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: attempts[0].slotId,
+        pendingAction: "close-task",
+        errorMessage: null
+      }),
+      expect.objectContaining({
+        slotId: attempts[1].slotId,
+        pendingAction: "close-task",
+        errorMessage: null
+      })
+    ]);
+
+    secondAbort.reject(new Error("Second desktop is offline"));
+    await secondAbortPromise;
+
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: attempts[0].slotId,
+        pendingAction: "close-task",
+        errorMessage: null
+      }),
+      expect.objectContaining({
+        slotId: attempts[1].slotId,
+        phase: "uncertain",
+        pendingAction: null,
+        errorMessage: "Second desktop is offline"
+      })
+    ]);
+
+    firstAbort.resolve();
+    await firstAbortPromise;
+
+    expect(store.getState()).toMatchObject({
+      composerErrorMessage: null,
+      taskCreationAttempts: [
+        {
+          slotId: attempts[1].slotId,
+          phase: "uncertain",
+          pendingAction: null,
+          errorMessage: "Second desktop is offline"
+        }
+      ],
+      taskUiSlots: [{ slotId: attempts[1].slotId, state: "creating" }]
+    });
+  });
+
   it("does not dispatch create after abort removes the attempt before persistence resolves", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -3359,11 +3457,13 @@ describe("createMobileController", () => {
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: attempt.slotId,
-      composerErrorMessage: "Desktop is offline",
+      composerErrorMessage: null,
       taskCreationAttempts: [
         {
           ...attempt,
-          phase: "uncertain"
+          phase: "uncertain",
+          pendingAction: null,
+          errorMessage: "Desktop is offline"
         }
       ],
       taskUiSlots: [{ slotId: attempt.slotId, state: "creating" }]
@@ -3406,12 +3506,14 @@ describe("createMobileController", () => {
     await abortPromise;
 
     expect(store.getState()).toMatchObject({
-      composerErrorMessage: "Could not close the desktop task",
+      composerErrorMessage: null,
       taskCreationAttempts: [
         {
           slotId: "create:slot-abort-failure",
           taskId: "cccccccccccccccccccccccccccccccc",
-          phase: "uncertain"
+          phase: "uncertain",
+          pendingAction: null,
+          errorMessage: "Could not close the desktop task"
         }
       ],
       taskUiSlots: [
@@ -4780,8 +4882,14 @@ describe("createMobileController", () => {
       composerPrompt: "Ship mobile shell",
       composerDesktopId: "desktop-2",
       composerAgentProvider: "codex",
-      composerErrorMessage: "Desktop unavailable",
+      composerErrorMessage: null,
       taskCreationPhase: "uncertain",
+      taskCreationAttempts: [
+        {
+          slotId: "create:slot-ambiguous",
+          errorMessage: "Desktop unavailable"
+        }
+      ],
       pendingTaskCreation: {
         slotId: "create:slot-ambiguous",
         taskId: "44444444444444444444444444444444",

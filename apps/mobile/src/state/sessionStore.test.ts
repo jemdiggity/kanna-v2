@@ -33,7 +33,12 @@ describe("createSessionStore", () => {
     store.removeTaskCreationAttempt(secondAttempt.slotId);
 
     expect(store.getState().taskCreationAttempts).toEqual([
-      { ...pendingTaskCreation, phase: "recovering" }
+      {
+        ...pendingTaskCreation,
+        phase: "recovering",
+        pendingAction: null,
+        errorMessage: null
+      }
     ]);
   });
 
@@ -73,6 +78,77 @@ describe("createSessionStore", () => {
     store.finishTaskAction("task-1", "close-task");
     expect(store.getState().pendingTaskAction).toBeNull();
     expect(store.beginTaskAction("task-1", "advance-stage")).toBe(true);
+  });
+
+  it("isolates pending actions and errors between task creation attempts", () => {
+    const store = createSessionStore();
+    const secondAttempt = {
+      ...pendingTaskCreation,
+      slotId: "create:slot-b2c3d4e5",
+      taskId: "b2c3d4e5",
+      prompt: "Create another task"
+    };
+    store.addTaskCreationAttempt({
+      ...pendingTaskCreation,
+      phase: "uncertain"
+    });
+    store.addTaskCreationAttempt({
+      ...secondAttempt,
+      phase: "uncertain"
+    });
+
+    expect(
+      store.beginTaskCreationAction(
+        pendingTaskCreation.slotId,
+        "close-task"
+      )
+    ).toBe(true);
+    expect(
+      store.beginTaskCreationAction(secondAttempt.slotId, "close-task")
+    ).toBe(true);
+    expect(
+      store.beginTaskCreationAction(
+        pendingTaskCreation.slotId,
+        "close-task"
+      )
+    ).toBe(false);
+
+    store.setTaskCreationAttemptError(
+      pendingTaskCreation.slotId,
+      "First desktop is offline"
+    );
+
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: secondAttempt.slotId,
+        pendingAction: "close-task",
+        errorMessage: null
+      }),
+      expect.objectContaining({
+        slotId: pendingTaskCreation.slotId,
+        pendingAction: "close-task",
+        errorMessage: "First desktop is offline"
+      })
+    ]);
+    expect(store.getState().pendingTaskAction).toBeNull();
+
+    store.finishTaskCreationAction(
+      pendingTaskCreation.slotId,
+      "close-task"
+    );
+
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: secondAttempt.slotId,
+        pendingAction: "close-task",
+        errorMessage: null
+      }),
+      expect.objectContaining({
+        slotId: pendingTaskCreation.slotId,
+        pendingAction: null,
+        errorMessage: "First desktop is offline"
+      })
+    ]);
   });
 
   it("preserves repository command ownership until the run settles", () => {

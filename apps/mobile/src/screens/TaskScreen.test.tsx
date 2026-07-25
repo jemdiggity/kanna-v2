@@ -212,7 +212,10 @@ interface RenderTaskScreenOptions {
   companionEventStatus?: "idle" | "sending" | "sent" | "error";
   onCompanionOpenChange?: (isOpen: boolean) => void;
   onSendCompanionEvent?: (...args: unknown[]) => void;
-  pendingTaskAction?: "advance-stage" | "close-task" | null;
+  pendingTaskAction?:
+    | "advance-stage"
+    | "close-task"
+    | null;
 }
 
 function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {

@@ -112,9 +112,17 @@ export interface PendingTaskCreation {
 
 export type ActiveTaskCreationPhase = Exclude<TaskCreationPhase, "idle">;
 
+export type TaskCreationAction = "close-task";
+
 export interface TaskCreationAttempt extends PendingTaskCreation {
   phase: ActiveTaskCreationPhase;
+  pendingAction: TaskCreationAction | null;
+  errorMessage: string | null;
 }
+
+type TaskCreationAttemptInput =
+  Omit<TaskCreationAttempt, "pendingAction" | "errorMessage"> &
+  Partial<Pick<TaskCreationAttempt, "pendingAction" | "errorMessage">>;
 
 export type TaskCreationState =
   | { phase: "idle"; pendingTaskCreation: null }
@@ -266,10 +274,22 @@ export interface SessionStore {
   setComposerOptionsExpanded(isExpanded: boolean): void;
   setComposerErrorMessage(message: string | null): void;
   setTaskCreationState(taskCreationState: TaskCreationState): void;
-  addTaskCreationAttempt(attempt: TaskCreationAttempt): void;
+  addTaskCreationAttempt(attempt: TaskCreationAttemptInput): void;
   setTaskCreationAttemptPhase(
     slotId: string,
     phase: ActiveTaskCreationPhase
+  ): void;
+  beginTaskCreationAction(
+    slotId: string,
+    action: TaskCreationAction
+  ): boolean;
+  finishTaskCreationAction(
+    slotId: string,
+    action: TaskCreationAction
+  ): void;
+  setTaskCreationAttemptError(
+    slotId: string,
+    message: string | null
   ): void;
   removeTaskCreationAttempt(slotId: string): void;
   addTaskUiSlot(slot: TaskUiSlot): void;
@@ -461,7 +481,12 @@ export function createSessionStore(): SessionStore {
         trustedDesktops: state.trustedDesktops,
         repoCreationProfiles: state.repoCreationProfiles,
         taskCreationAttempts: state.taskCreationAttempts.map(
-          ({ phase: _phase, ...attempt }) => attempt
+          ({
+            phase: _phase,
+            pendingAction: _pendingAction,
+            errorMessage: _errorMessage,
+            ...attempt
+          }) => attempt
         )
       };
     },
@@ -470,7 +495,12 @@ export function createSessionStore(): SessionStore {
         context.taskCreationAttempts ??
         (context.pendingTaskCreation ? [context.pendingTaskCreation] : []);
       const taskCreationAttempts: TaskCreationAttempt[] =
-        persistedAttempts.map((attempt) => ({ ...attempt, phase: "uncertain" }));
+        persistedAttempts.map((attempt) => ({
+          ...attempt,
+          phase: "uncertain",
+          pendingAction: null,
+          errorMessage: null
+        }));
       const pendingTaskCreation = taskCreationAttempts[0] ?? null;
       const selectedTaskId =
         taskCreationAttempts.find(
@@ -989,7 +1019,9 @@ export function createSessionStore(): SessionStore {
           ? []
           : [{
               ...taskCreationState.pendingTaskCreation,
-              phase: taskCreationState.phase as ActiveTaskCreationPhase
+              phase: taskCreationState.phase as ActiveTaskCreationPhase,
+              pendingAction: null,
+              errorMessage: null
             }];
       state = {
         ...state,
@@ -1000,19 +1032,24 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     addTaskCreationAttempt(attempt) {
+      const normalizedAttempt = {
+        ...attempt,
+        pendingAction: attempt.pendingAction ?? null,
+        errorMessage: attempt.errorMessage ?? null
+      };
       const taskCreationAttempts = [
-        attempt,
+        normalizedAttempt,
         ...state.taskCreationAttempts.filter(
           (candidate) =>
-            candidate.slotId !== attempt.slotId &&
-            candidate.taskId !== attempt.taskId
+            candidate.slotId !== normalizedAttempt.slotId &&
+            candidate.taskId !== normalizedAttempt.taskId
         )
       ];
       state = {
         ...state,
         taskCreationAttempts,
-        pendingTaskCreation: attempt,
-        taskCreationPhase: attempt.phase
+        pendingTaskCreation: normalizedAttempt,
+        taskCreationPhase: normalizedAttempt.phase
       };
       publish();
     },
@@ -1029,6 +1066,59 @@ export function createSessionStore(): SessionStore {
         taskCreationAttempts,
         pendingTaskCreation: projected,
         taskCreationPhase: projected?.phase ?? "idle"
+      };
+      publish();
+    },
+    beginTaskCreationAction(slotId, action) {
+      const attempt = state.taskCreationAttempts.find(
+        (candidate) => candidate.slotId === slotId
+      );
+      if (!attempt || attempt.pendingAction) {
+        return false;
+      }
+      state = {
+        ...state,
+        taskCreationAttempts: state.taskCreationAttempts.map((candidate) =>
+          candidate.slotId === slotId
+            ? { ...candidate, pendingAction: action }
+            : candidate
+        )
+      };
+      publish();
+      return true;
+    },
+    finishTaskCreationAction(slotId, action) {
+      const attempt = state.taskCreationAttempts.find(
+        (candidate) => candidate.slotId === slotId
+      );
+      if (!attempt || attempt.pendingAction !== action) {
+        return;
+      }
+      state = {
+        ...state,
+        taskCreationAttempts: state.taskCreationAttempts.map((candidate) =>
+          candidate.slotId === slotId
+            ? { ...candidate, pendingAction: null }
+            : candidate
+        )
+      };
+      publish();
+    },
+    setTaskCreationAttemptError(slotId, errorMessage) {
+      if (
+        !state.taskCreationAttempts.some(
+          (attempt) => attempt.slotId === slotId
+        )
+      ) {
+        return;
+      }
+      state = {
+        ...state,
+        taskCreationAttempts: state.taskCreationAttempts.map((attempt) =>
+          attempt.slotId === slotId
+            ? { ...attempt, errorMessage }
+            : attempt
+        )
       };
       publish();
     },

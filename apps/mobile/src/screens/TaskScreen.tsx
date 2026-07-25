@@ -24,6 +24,7 @@ import { isTaskBlocked, type BlockerTaskRef } from "../lib/api/taskIdentity";
 import type {
   TaskCompanionEventStatus,
   TaskCompanionStatus,
+  TaskCreationAction,
   TaskCreationPhase,
   TaskStageAction,
   TaskTerminalStatus
@@ -83,7 +84,7 @@ interface TaskScreenProps {
   companionEventStatus?: TaskCompanionEventStatus;
   quickReplies: readonly TaskQuickReply[];
   quickRepliesHydrated: boolean;
-  pendingTaskAction?: TaskStageAction | null;
+  pendingTaskAction?: TaskStageAction | TaskCreationAction | null;
   onBack(): void;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;

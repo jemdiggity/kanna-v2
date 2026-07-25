@@ -506,12 +506,23 @@ function TaskDetailRoute({
     return <View style={styles.taskPlaceholder} />;
   }
 
+  const creationSlot = taskUiSlotForSelection(
+    state.taskUiSlots,
+    routeTaskId
+  );
+  const creationAttempt =
+    creationSlot?.state === "creating"
+      ? state.taskCreationAttempts.find(
+          (attempt) => attempt.slotId === creationSlot.slotId
+        ) ?? null
+      : null;
   const pendingTaskAction =
-    state.pendingTaskAction &&
+    creationAttempt?.pendingAction ??
+    (state.pendingTaskAction &&
     state.pendingTaskAction.taskId ===
       (resolveDurableTaskId(state, routeTaskId) ?? routeTaskId)
       ? state.pendingTaskAction.action
-      : null;
+      : null);
 
   return (
     <TaskScreen
@@ -537,7 +548,7 @@ function TaskDetailRoute({
       quickRepliesHydrated={quickRepliesHydrated}
       pendingTaskAction={pendingTaskAction}
       taskCreationPhase={resolveTaskCreationPhase(state, routeTaskId)}
-      taskCreationErrorMessage={state.composerErrorMessage}
+      taskCreationErrorMessage={creationAttempt?.errorMessage ?? null}
       onBack={() => navigation.goBack()}
       onAdvanceTaskStage={() => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);

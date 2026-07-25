@@ -141,7 +141,13 @@ vi.mock("@react-navigation/native-stack", async () => {
         if (!active) return null;
         const navigation = {
           canGoBack: () => route.name !== "MainTabs",
-          goBack: () => setRoute({ name: "MainTabs", params: undefined }),
+          goBack: () => {
+            setRoute({ name: "MainTabs", params: undefined });
+            navigationHarness.onStateChange?.({
+              index: 0,
+              routes: [{ name: "MainTabs" }]
+            });
+          },
           setParams: (params: { taskId?: string }) =>
             setRoute((current) => ({
               ...current,
@@ -826,10 +832,13 @@ describe("RootNavigator task action integration", () => {
       taskId: attempt.taskId,
       desktopId: attempt.desktopId
     });
-    expect(store.getState().pendingTaskAction).toEqual({
-      taskId: attempt.slotId,
-      action: "close-task"
-    });
+    expect(store.getState().pendingTaskAction).toBeNull();
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: attempt.slotId,
+        pendingAction: "close-task"
+      })
+    ]);
     expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
       .toBe(true);
     expect(
@@ -854,6 +863,147 @@ describe("RootNavigator task action integration", () => {
     expect(store.getState().pendingTaskAction).toBeNull();
     expect(store.getState().taskCreationAttempts).toEqual([]);
     expect(countByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toBe(0);
+  });
+
+  it("isolates abort busy state and errors between two creation routes", async () => {
+    const attempts = [
+      {
+        slotId: "create:slot-abort-a",
+        taskId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        repoId: "repo-1",
+        prompt: "Abort first partial task",
+        desktopId: "desktop-a",
+        agentProvider: "claude" as const
+      },
+      {
+        slotId: "create:slot-abort-b",
+        taskId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        repoId: "repo-1",
+        prompt: "Abort second partial task",
+        desktopId: "desktop-b",
+        agentProvider: "codex" as const
+      }
+    ];
+    const firstAbort = createDeferred<void>();
+    const secondAbort = createDeferred<void>();
+    const client = createClientMock();
+    vi.mocked(client.abortTaskCreation)
+      .mockReturnValueOnce(firstAbort.promise)
+      .mockReturnValueOnce(secondAbort.promise);
+    const store = createSessionStore();
+    store.hydrateContext({
+      mobileDeviceId: null,
+      selectedDesktopId: "desktop-a",
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      activeView: "tasks",
+      taskCreationAttempts: attempts
+    });
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempts[0].slotId));
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    const selectFirstAction =
+      vi.mocked(showTaskActionMenu).mock.calls[0]![0];
+    await act(async () => {
+      selectFirstAction("close-task");
+      await flushMicrotasks();
+    });
+
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(true);
+    expect(
+      findByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton).props.disabled
+    ).toBe(true);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskBackButton);
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempts[1].slotId));
+      await flushMicrotasks();
+    });
+
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(false);
+    expect(
+      findByTestId(MOBILE_E2E_IDS.taskCreationRecoverButton).props.disabled
+    ).toBe(false);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskMoreButton);
+    });
+    const selectSecondAction =
+      vi.mocked(showTaskActionMenu).mock.calls[1]![0];
+    await act(async () => {
+      selectSecondAction("close-task");
+      await flushMicrotasks();
+    });
+
+    expect(client.abortTaskCreation).toHaveBeenCalledTimes(2);
+    expect(client.abortTaskCreation).toHaveBeenNthCalledWith(1, {
+      taskId: attempts[0].taskId,
+      desktopId: attempts[0].desktopId
+    });
+    expect(client.abortTaskCreation).toHaveBeenNthCalledWith(2, {
+      taskId: attempts[1].taskId,
+      desktopId: attempts[1].desktopId
+    });
+
+    secondAbort.reject(new Error("Second desktop is offline"));
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(false);
+    expect(visibleText()).toContain("Second desktop is offline");
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskBackButton);
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempts[0].slotId));
+      await flushMicrotasks();
+    });
+
+    expect(findByTestId(MOBILE_E2E_IDS.taskMoreButton).props.disabled)
+      .toBe(true);
+    expect(visibleText()).not.toContain("Second desktop is offline");
+
+    firstAbort.resolve();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(store.getState().taskCreationAttempts).toEqual([
+      expect.objectContaining({
+        slotId: attempts[1].slotId,
+        pendingAction: null,
+        errorMessage: "Second desktop is offline"
+      })
+    ]);
+    expect(countByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toBe(0);
+
+    await act(async () => {
+      pressByTestId(MOBILE_E2E_IDS.taskListItem(attempts[1].slotId));
+      await flushMicrotasks();
+    });
+    expect(visibleText()).toContain("Second desktop is offline");
   });
 
   it("closes a task exactly once from the + menu, shows the spinner, and blocks duplicates until success", async () => {

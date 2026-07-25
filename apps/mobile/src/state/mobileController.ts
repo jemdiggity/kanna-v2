@@ -1582,11 +1582,8 @@ export function createMobileController(
     );
 
   const isTaskCreationAbortPending = (attempt: PendingTaskCreation) => {
-    const action = store.getState().pendingTaskAction;
-    return (
-      action?.taskId === attempt.slotId &&
-      action.action === "close-task"
-    );
+    return findTaskCreationAttempt(attempt.slotId)?.pendingAction ===
+      "close-task";
   };
 
   const completeTaskCreation = (
@@ -2056,10 +2053,11 @@ export function createMobileController(
             (error instanceof TaskCreationError && error.outcome === "not-created")
           ) {
             failTaskCreationDefinitely(attempt, message);
+            store.setComposerErrorMessage(message);
           } else {
             store.setTaskCreationAttemptPhase(attempt.slotId, "uncertain");
+            store.setTaskCreationAttemptError(attempt.slotId, message);
           }
-          store.setComposerErrorMessage(message);
           return null;
         }
       })().finally(() => {
@@ -2091,7 +2089,7 @@ export function createMobileController(
       const persistenceReady =
         taskCreationPersistenceFlights.get(attempt.taskId) ?? Promise.resolve();
       store.setTaskCreationAttemptPhase(attempt.slotId, "recovering");
-      store.setComposerErrorMessage(null);
+      store.setTaskCreationAttemptError(attempt.slotId, null);
       let recoveryPromise!: Promise<string | null>;
       recoveryPromise = (async () => {
         let requestDispatched = false;
@@ -2127,7 +2125,7 @@ export function createMobileController(
             return null;
           }
           store.setTaskCreationAttemptPhase(attempt.slotId, "uncertain");
-          store.setComposerErrorMessage(message);
+          store.setTaskCreationAttemptError(attempt.slotId, message);
           return null;
         }
       })().finally(() => {
@@ -2143,7 +2141,10 @@ export function createMobileController(
 
     async abortTaskCreation(slotId) {
       const attempt = findTaskCreationAttempt(slotId);
-      if (!attempt || !store.beginTaskAction(slotId, "close-task")) {
+      if (
+        !attempt ||
+        !store.beginTaskCreationAction(slotId, "close-task")
+      ) {
         return;
       }
       try {
@@ -2184,8 +2185,6 @@ export function createMobileController(
           store.clearTaskAgent();
           store.clearTaskCompanion();
         }
-        store.setComposerErrorMessage(null);
-        setUnownedErrorMessage(null);
       } catch (error) {
         const message =
           error instanceof Error
@@ -2193,11 +2192,10 @@ export function createMobileController(
             : "Could not abort task creation";
         if (isCurrentTaskCreationAttempt(attempt)) {
           store.setTaskCreationAttemptPhase(attempt.slotId, "uncertain");
+          store.setTaskCreationAttemptError(attempt.slotId, message);
         }
-        store.setComposerErrorMessage(message);
-        setUnownedErrorMessage(message);
       } finally {
-        store.finishTaskAction(slotId, "close-task");
+        store.finishTaskCreationAction(slotId, "close-task");
       }
     },
 

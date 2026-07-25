@@ -63,8 +63,11 @@ The narrower automated coverage is:
   ordinary ready-task path into `closeDesktopTask(durableTaskId)`. They also
   verify the abort request uses the reserved task id and frozen owning desktop,
   and that the busy presentation blocks Recover, duplicate menu opens, and
-  duplicate actions until the abort settles. `src/screens/TasksScreen.test.tsx`
-  verifies that task rows continue to open through the stable UI slot after
+  duplicate actions until the abort settles. The navigation integration test
+  additionally holds aborts for two unresolved attempts at once and verifies
+  that each route owns its busy state and error text while both frozen-desktop
+  requests dispatch independently. `src/screens/TasksScreen.test.tsx` verifies
+  that task rows continue to open through the stable UI slot after
   acknowledgement.
 - `src/state/mobileController.test.ts` covers persist-before-dispatch and
   single-flight creation, the pre-dispatch persistence/abort race that suppresses
@@ -72,10 +75,11 @@ The narrower automated coverage is:
   exact-id recovery and response fencing, definite-failure slot removal,
   authoritative canonicalization, non-authoritative and first-authoritative
   publication gaps, in-place authoritative hydration, exact-attempt abort
-  routing, create/abort response races, failed-abort recovery preservation,
-  duplicate-action single-flight behavior, eventual removal after authoritative
-  deletion, and keeping the acknowledged task visible when terminal startup
-  fails.
+  routing, concurrent per-attempt abort dispatch and failure isolation,
+  create/abort response races, failed-abort recovery preservation,
+  duplicate-action single-flight behavior, eventual removal after
+  authoritative deletion, and keeping the acknowledged task visible when
+  terminal startup fails.
 - `src/lib/transports/lanTransport.test.ts`,
   `src/lib/transports/remoteTransport.test.ts`, and
   `src/lib/sources/cloudLanClient.test.ts` cover the LAN and relay abort request
