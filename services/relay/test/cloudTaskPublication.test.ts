@@ -159,17 +159,20 @@ describe("cloud task publication reconciliation", () => {
     await handleCloudTaskPublication({
       userId: "user-owner",
       desktopId: "desktop-1",
+      generation: { session: 4, sequence: 2 },
       snapshot: publication(),
       store,
-    });
+    } as Parameters<typeof handleCloudTaskPublication>[0]);
 
     expect(reconcile).toHaveBeenCalledWith({
       userId: "user-owner",
       desktopId: "desktop-1",
+      generation: { session: 4, sequence: 2 },
       displayName: "Studio Mac",
       tasks: expect.arrayContaining([
         expect.objectContaining({ ownerDesktopId: "desktop-1", ownerLocalTaskId: "task-1" }),
       ]),
     });
   });
+
 });

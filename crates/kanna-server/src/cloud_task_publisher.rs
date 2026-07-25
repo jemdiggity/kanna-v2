@@ -663,4 +663,32 @@ mod tests {
             PublisherStep::Publish(_)
         ));
     }
+
+    #[test]
+    fn publisher_reconciles_latest_snapshot_after_timeout_and_disconnect() {
+        let now = Instant::now();
+        let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
+        let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
+        let mut state = PublisherState::new();
+        state.on_authenticated();
+        state.observe(idle);
+
+        let PublisherStep::Publish(abandoned) = state.next_step(now) else {
+            panic!("expected abandoned publication")
+        };
+        state.observe(working.clone());
+        assert!(matches!(
+            state.next_step(now + Duration::from_secs(16)),
+            PublisherStep::Wait
+        ));
+
+        state.on_disconnected();
+        state.on_authenticated();
+        let PublisherStep::Publish(reconnected) = state.next_step(now + Duration::from_secs(16))
+        else {
+            panic!("expected reconnect reconciliation")
+        };
+        assert_ne!(reconnected.id, abandoned.id);
+        assert_eq!(reconnected.snapshot.fingerprint(), working.fingerprint(),);
+    }
 }
