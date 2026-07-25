@@ -82,3 +82,31 @@ Add regression coverage that proves:
 
 Run the focused desktop TypeScript and task-transfer Rust tests, followed by the
 repository's practical broader checks for the touched packages.
+
+## 2026-07-25 Revision: Lifecycle, Provenance, and Request Safety
+
+Keep the original owner-bound CAS design, with these additional invariants:
+
+- A dwell belongs to the tuple `(presentation slot, owner desktop, owner-local
+  task, activity revision)`. Replacing a snapshot object without changing that
+  tuple preserves the elapsed dwell; changing any tuple member invalidates it.
+- Selection watchers and their debounced callbacks stop with the owning Vue
+  effect scope. No callback may start after App teardown.
+- Every relay or LAN mark-read client is registered while its request is
+  active. App teardown closes all registered clients immediately; each request
+  still removes and closes its own client idempotently when it settles.
+- When duplicate logical advertisements are merged, the displayed item,
+  activity revision, owner, capabilities, and terminal route are selected from
+  one exact source candidate. LAN remains preferred over cloud only when the
+  LAN candidate itself supplies that coherent tuple.
+- The task-transfer owner request validates task IDs before opening a socket:
+  IDs with ASCII control characters or more than 1,024 UTF-8 bytes are
+  rejected. Accepted IDs are percent-encoded as one URL path segment, so
+  slashes, spaces, percent signs, and request delimiters cannot alter the HTTP
+  target.
+
+Revision tests cover App-level navigation cancellation, identity-stable
+snapshot refresh, presentation-slot owner rebinding, effect-scope teardown,
+unresolved-client teardown, equal-revision duplicate owners, encoded path
+segments, invalid/oversized IDs, and a request-smuggling payload that cannot
+create a second request.
