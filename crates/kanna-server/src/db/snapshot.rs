@@ -88,12 +88,17 @@ impl Db {
                WHERE candidate.local_task_id = pipeline_item.id
                  AND (
                    (
-                     candidate.direction IN ('incoming', 'outgoing')
+                     candidate.direction = 'outgoing'
                      AND candidate.status IN ('pending', 'streaming')
                    )
                    OR (
                      candidate.direction = 'incoming'
-                     AND candidate.status = 'completed'
+                     AND candidate.status IN (
+                       'pending',
+                       'streaming',
+                       'importing',
+                       'awaiting_acknowledgment'
+                     )
                    )
                  )
                ORDER BY datetime(COALESCE(candidate.completed_at, candidate.started_at)) DESC,

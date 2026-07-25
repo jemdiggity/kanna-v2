@@ -83,8 +83,8 @@ describe("cloud task publication validation", () => {
         : {
             state,
             transferId: "transfer-1",
-            sourceDesktopId: "desktop-a",
-            destinationDesktopId: "desktop-b",
+            sourceDesktopId: state === "outgoing" ? "desktop-1" : "desktop-a",
+            destinationDesktopId: state === "outgoing" ? "desktop-b" : "desktop-1",
           };
       const parsed = validateCloudTaskPublication(
         publication([task({ transfer })]),
@@ -108,6 +108,28 @@ describe("cloud task publication validation", () => {
   });
 
   it.each([
+    ["outgoing", "desktop-other", "desktop-target"],
+    ["incoming", "desktop-source", "desktop-other"],
+    ["finalization_pending", "desktop-source", "desktop-other"],
+  ])("rejects %s publication by a desktop that does not own its role", (
+    state,
+    sourceDesktopId,
+    destinationDesktopId,
+  ) => {
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state,
+          transferId: "transfer-1",
+          sourceDesktopId,
+          destinationDesktopId,
+        },
+      })]),
+      "desktop-1",
+    )).toThrow(/authenticated desktop/);
+  });
+
+  it.each([
     ["transferId", null],
     ["sourceDesktopId", null],
     ["destinationDesktopId", null],
@@ -117,7 +139,7 @@ describe("cloud task publication validation", () => {
         transfer: {
           state: "outgoing",
           transferId: "transfer-1",
-          sourceDesktopId: "desktop-a",
+          sourceDesktopId: "desktop-1",
           destinationDesktopId: "desktop-b",
           [field]: missingValue,
         },
@@ -139,7 +161,7 @@ describe("cloud task publication validation", () => {
         transfer: {
           state: "outgoing",
           transferId: "transfer-1",
-          sourceDesktopId: "desktop-a",
+          sourceDesktopId: "desktop-1",
           destinationDesktopId: "desktop-b",
           [field]: invalidValue,
         },

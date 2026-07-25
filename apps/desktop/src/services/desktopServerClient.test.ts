@@ -463,8 +463,10 @@ describe("desktopServerClient", () => {
           transfers: [
             {
               id: "transfer-1",
+              status: "pending",
               sourcePeerId: "peer-source",
               sourceTaskId: "task-source",
+              localTaskId: null,
               payloadJson: "{\"task\":{},\"repo\":{}}",
             },
           ],
@@ -480,8 +482,10 @@ describe("desktopServerClient", () => {
     await expect(fetchPendingIncomingTransfers()).resolves.toEqual([
       {
         id: "transfer-1",
+        status: "pending",
         source_peer_id: "peer-source",
         source_task_id: "task-source",
+        local_task_id: null,
         payload_json: "{\"task\":{},\"repo\":{}}",
       },
     ]);

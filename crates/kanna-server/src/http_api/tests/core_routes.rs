@@ -1179,7 +1179,55 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
     let claim_json: serde_json::Value = from_slice(&claim_body).unwrap();
     assert_eq!(claim_json["updated"], true);
 
+    let importing_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/importing")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(importing_response.status(), StatusCode::OK);
+
+    let awaiting_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/awaiting-acknowledgment")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(awaiting_response.status(), StatusCode::OK);
+
+    let resumable_response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/transfers/incoming/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let resumable_body = axum::body::to_bytes(resumable_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resumable_json: serde_json::Value = from_slice(&resumable_body).unwrap();
+    assert_eq!(
+        resumable_json["transfers"][0]["status"],
+        "awaiting_acknowledgment"
+    );
+    assert_eq!(resumable_json["transfers"][0]["localTaskId"], "task-local");
+
     let fail_response = app
+        .clone()
         .oneshot(
             Request::post("/v1/transfers/transfer-1/actions/fail")
                 .header("content-type", "application/json")
@@ -1195,7 +1243,34 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
         .await
         .unwrap();
     let fail_json: serde_json::Value = from_slice(&fail_body).unwrap();
-    assert_eq!(fail_json["updated"], true);
+    assert_eq!(fail_json["updated"], false);
+
+    let complete_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete_response.status(), StatusCode::OK);
+    let completed_list = app
+        .oneshot(
+            Request::get("/v1/transfers/incoming/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let completed_body = axum::body::to_bytes(completed_list.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let completed_json: serde_json::Value = from_slice(&completed_body).unwrap();
+    assert!(completed_json["transfers"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

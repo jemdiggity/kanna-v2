@@ -116,6 +116,30 @@ pub(super) async fn complete_task_transfer(
     Ok(Json(TransferUpdateResponse { updated }))
 }
 
+pub(super) async fn mark_incoming_transfer_importing(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<CompleteTransferRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .mark_incoming_transfer_importing(&transfer_id, &payload.local_task_id)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn mark_incoming_transfer_awaiting_acknowledgment(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<CompleteTransferRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .mark_incoming_transfer_awaiting_acknowledgment(&transfer_id, &payload.local_task_id)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
 pub(super) async fn reject_task_transfer(
     State(state): State<Arc<AppState>>,
     Path(transfer_id): Path<String>,

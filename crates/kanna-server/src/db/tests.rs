@@ -1,7 +1,7 @@
 use super::NewStageRun;
 use super::{
     add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
-    CURRENT_SCHEMA_MIGRATIONS,
+    NewTaskTransferProvenance, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -267,46 +267,46 @@ fn snapshot_selects_latest_relevant_transfer_for_open_task() {
     )
     .expect("insert older relevant outgoing transfer");
     db.insert_test_task_transfer_with_desktops(
-        "transfer-completed-incoming",
+        "transfer-awaiting-incoming",
+        "incoming",
+        "awaiting_acknowledgment",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert awaiting incoming transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-newer-completed-incoming",
         "incoming",
         "completed",
         Some("task-destination"),
         Some("desktop-a"),
         Some("desktop-b"),
     )
-    .expect("insert completed incoming transfer");
+    .expect("insert newer terminal incoming transfer");
     db.insert_test_task_transfer_with_desktops(
-        "transfer-newer-rejected",
-        "incoming",
-        "rejected",
-        Some("task-destination"),
-        Some("desktop-a"),
-        Some("desktop-b"),
-    )
-    .expect("insert newer irrelevant rejected transfer");
-    db.insert_test_task_transfer_with_desktops(
-        "transfer-newest-completed-outgoing",
+        "transfer-newest-invalid-importing-outgoing",
         "outgoing",
-        "completed",
+        "importing",
         Some("task-destination"),
         Some("desktop-a"),
         Some("desktop-b"),
     )
-    .expect("insert newest irrelevant completed outgoing transfer");
+    .expect("insert newest invalid importing outgoing transfer");
     for (id, started_at, completed_at) in [
         ("transfer-older-outgoing", "2026-07-26 00:01:00", None),
         (
-            "transfer-completed-incoming",
+            "transfer-awaiting-incoming",
             "2026-07-26 00:02:00",
             Some("2026-07-26 00:03:00"),
         ),
         (
-            "transfer-newer-rejected",
+            "transfer-newer-completed-incoming",
             "2026-07-26 00:04:00",
             Some("2026-07-26 00:05:00"),
         ),
         (
-            "transfer-newest-completed-outgoing",
+            "transfer-newest-invalid-importing-outgoing",
             "2026-07-26 00:06:00",
             Some("2026-07-26 00:07:00"),
         ),
@@ -326,10 +326,13 @@ fn snapshot_selects_latest_relevant_transfer_for_open_task() {
     assert_eq!(item.cloud_task_id, "task-destination");
     assert_eq!(
         item.transfer_id.as_deref(),
-        Some("transfer-completed-incoming")
+        Some("transfer-awaiting-incoming")
     );
     assert_eq!(item.transfer_direction.as_deref(), Some("incoming"));
-    assert_eq!(item.transfer_status.as_deref(), Some("completed"));
+    assert_eq!(
+        item.transfer_status.as_deref(),
+        Some("awaiting_acknowledgment")
+    );
     assert_eq!(item.transfer_source_peer_id.as_deref(), Some("peer-1"));
     assert_eq!(item.transfer_target_peer_id.as_deref(), Some("peer-2"));
     assert_eq!(
@@ -340,6 +343,78 @@ fn snapshot_selects_latest_relevant_transfer_for_open_task() {
         item.transfer_target_desktop_id.as_deref(),
         Some("desktop-b")
     );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
+    let path = Db::test_db_path("incoming-transfer-state-machine");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.conn
+        .execute_batch(
+            "CREATE TABLE task_transfer_provenance (
+               pipeline_item_id TEXT PRIMARY KEY,
+               source_peer_id TEXT NOT NULL,
+               source_task_id TEXT NOT NULL,
+               source_machine_task_label TEXT,
+               imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .expect("create provenance table");
+    db.insert_test_task_transfer("transfer-1", "incoming", "streaming", Some("{}"))
+        .expect("insert transfer");
+
+    assert!(db
+        .mark_incoming_transfer_importing("transfer-1", "task-local")
+        .expect("mark importing"));
+    let importing = db
+        .get_task_transfer("transfer-1")
+        .expect("read importing")
+        .expect("transfer exists");
+    assert_eq!(importing.status, "importing");
+    assert_eq!(importing.local_task_id.as_deref(), Some("task-local"));
+
+    let provenance = NewTaskTransferProvenance {
+        pipeline_item_id: "task-local".into(),
+        source_peer_id: "peer-source".into(),
+        source_task_id: "task-source".into(),
+        source_machine_task_label: Some("source-branch".into()),
+    };
+    db.insert_task_transfer_provenance(&provenance)
+        .expect("insert provenance");
+    db.insert_task_transfer_provenance(&provenance)
+        .expect("repeat provenance");
+    let provenance_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_transfer_provenance WHERE pipeline_item_id = ?",
+            ["task-local"],
+            |row| row.get(0),
+        )
+        .expect("count provenance");
+    assert_eq!(provenance_count, 1);
+
+    assert!(db
+        .mark_incoming_transfer_awaiting_acknowledgment("transfer-1", "task-local")
+        .expect("mark awaiting"));
+    let resumable = db
+        .list_pending_incoming_transfers()
+        .expect("list resumable transfers");
+    assert_eq!(resumable.len(), 1);
+    assert_eq!(resumable[0].status, "awaiting_acknowledgment");
+    assert_eq!(resumable[0].local_task_id.as_deref(), Some("task-local"));
+    assert!(db
+        .claim_pending_incoming_transfer("transfer-1")
+        .expect("claim resumable awaiting transfer"));
+
+    assert!(db
+        .mark_task_transfer_completed("transfer-1", "task-local")
+        .expect("mark complete"));
+    assert!(db
+        .list_pending_incoming_transfers()
+        .expect("list after complete")
+        .is_empty());
 
     let _ = std::fs::remove_file(path);
 }

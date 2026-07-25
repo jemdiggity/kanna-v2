@@ -618,8 +618,43 @@ export async function markTaskTransferCompleted(
   localTaskId: string,
 ): Promise<void> {
   await db.execute(
-    `UPDATE task_transfer SET status = 'completed', local_task_id = ?, completed_at = datetime('now'), error = NULL WHERE id = ?`,
-    [localTaskId, transferId],
+    `UPDATE task_transfer
+     SET status = 'completed', local_task_id = ?, completed_at = datetime('now'), error = NULL
+     WHERE id = ?
+       AND (
+         (direction = 'outgoing' AND status IN ('pending', 'streaming'))
+         OR
+         (direction = 'incoming' AND local_task_id = ? AND status IN ('awaiting_acknowledgment', 'completed'))
+       )`,
+    [localTaskId, transferId, localTaskId],
+  );
+}
+
+export async function markTaskTransferImporting(
+  db: DbHandle,
+  transferId: string,
+  localTaskId: string,
+): Promise<void> {
+  await db.execute(
+    `UPDATE task_transfer
+     SET status = 'importing', local_task_id = ?, error = NULL
+     WHERE id = ? AND direction = 'incoming'
+       AND (status IN ('pending', 'streaming') OR (status = 'importing' AND local_task_id = ?))`,
+    [localTaskId, transferId, localTaskId],
+  );
+}
+
+export async function markTaskTransferAwaitingAcknowledgment(
+  db: DbHandle,
+  transferId: string,
+  localTaskId: string,
+): Promise<void> {
+  await db.execute(
+    `UPDATE task_transfer
+     SET status = 'awaiting_acknowledgment', error = NULL
+     WHERE id = ? AND direction = 'incoming' AND local_task_id = ?
+       AND status IN ('importing', 'awaiting_acknowledgment')`,
+    [transferId, localTaskId],
   );
 }
 
@@ -645,7 +680,8 @@ export async function insertTaskTransferProvenance(
   await db.execute(
     `INSERT INTO task_transfer_provenance
        (pipeline_item_id, source_peer_id, source_task_id, source_machine_task_label)
-     VALUES (?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(pipeline_item_id) DO NOTHING`,
     [
       provenance.pipeline_item_id,
       provenance.source_peer_id,

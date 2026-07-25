@@ -81,6 +81,8 @@ export interface DesktopServerClientHandlersForTests {
   insertTaskTransfer?: (transfer: NewTaskTransferInput) => MaybePromise<void>;
   getTaskTransfer?: (transferId: string) => MaybePromise<TaskTransfer | null>;
   updateTaskTransferPayload?: (transferId: string, payloadJson: string) => MaybePromise<boolean>;
+  markTaskTransferImporting?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
+  markTaskTransferAwaitingAcknowledgment?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
   completeTaskTransfer?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
   rejectTaskTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
   insertTaskTransferProvenance?: (provenance: NewTaskTransferProvenanceInput) => MaybePromise<void>;
@@ -765,26 +767,33 @@ export async function reorderPinnedDesktopTasks(repoId: string, orderedIds: stri
 
 export interface PendingIncomingTransfer {
   id: string;
+  status: TaskTransfer["status"];
   source_peer_id: string | null;
   source_task_id: string | null;
+  local_task_id: string | null;
   payload_json: string | null;
 }
 
 interface PendingIncomingTransferResponse {
   id: string;
+  status: TaskTransfer["status"];
   sourcePeerId?: string | null;
   sourceTaskId?: string | null;
   payloadJson?: string | null;
   source_peer_id?: string | null;
   source_task_id?: string | null;
+  localTaskId?: string | null;
+  local_task_id?: string | null;
   payload_json?: string | null;
 }
 
 function normalizePendingIncomingTransfer(row: PendingIncomingTransferResponse): PendingIncomingTransfer {
   return {
     id: row.id,
+    status: row.status,
     source_peer_id: row.source_peer_id ?? row.sourcePeerId ?? null,
     source_task_id: row.source_task_id ?? row.sourceTaskId ?? null,
+    local_task_id: row.local_task_id ?? row.localTaskId ?? null,
     payload_json: row.payload_json ?? row.payloadJson ?? null,
   };
 }
@@ -893,6 +902,37 @@ export async function completeDesktopTaskTransfer(
       method: "POST",
       body: { localTaskId },
     },
+  );
+  return response.updated;
+}
+
+export async function markDesktopTaskTransferImporting(
+  transferId: string,
+  localTaskId: string,
+): Promise<boolean> {
+  if (clientHandlersForTests?.markTaskTransferImporting) {
+    return await clientHandlersForTests.markTaskTransferImporting(transferId, localTaskId);
+  }
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/importing`,
+    { method: "POST", body: { localTaskId } },
+  );
+  return response.updated;
+}
+
+export async function markDesktopTaskTransferAwaitingAcknowledgment(
+  transferId: string,
+  localTaskId: string,
+): Promise<boolean> {
+  if (clientHandlersForTests?.markTaskTransferAwaitingAcknowledgment) {
+    return await clientHandlersForTests.markTaskTransferAwaitingAcknowledgment(
+      transferId,
+      localTaskId,
+    );
+  }
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/awaiting-acknowledgment`,
+    { method: "POST", body: { localTaskId } },
   );
   return response.updated;
 }

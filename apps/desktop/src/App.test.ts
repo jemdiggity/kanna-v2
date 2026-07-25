@@ -675,8 +675,10 @@ function buildIncomingTransferEvent() {
 function buildPendingIncomingTransferRow() {
   return {
     id: "transfer-1",
+    status: "pending" as const,
     source_peer_id: "peer-source",
     source_task_id: "task-source",
+    local_task_id: null,
     payload_json: JSON.stringify(buildIncomingTransferEvent().payload.payload),
   };
 }

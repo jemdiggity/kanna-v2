@@ -4,6 +4,8 @@ import {
   getDesktopTaskTransfer,
   insertDesktopTaskTransfer,
   insertDesktopTaskTransferProvenance,
+  markDesktopTaskTransferAwaitingAcknowledgment,
+  markDesktopTaskTransferImporting,
   rejectDesktopTaskTransfer,
   setDesktopTaskCloudIdentity,
   updateDesktopTaskTransferPayload,
@@ -690,8 +692,10 @@ export function createTransferApi(
     const artifacts = await stageTransferredSessionArtifacts(transferId, refreshedItem, repo.path);
     const payload = buildOutgoingTransferPayload({
       sourcePeerId,
+      sourceDesktopId: transfer.source_desktop_id ?? existingPayload.task.source_desktop_id,
       sourceTaskId,
       targetPeerId: transfer.target_peer_id ?? existingPayload.target_peer_id,
+      targetDesktopId: transfer.target_desktop_id ?? existingPayload.target_desktop_id,
       item: refreshedItem,
       repoPath: repo.path,
       repoName: repo.name,
@@ -721,48 +725,64 @@ export function createTransferApi(
     if (transfer.direction !== "incoming") {
       throw new Error(`transfer is not incoming: ${transferId}`);
     }
-    if (transfer.status !== "pending" && transfer.status !== "streaming") {
-      throw new Error(`incoming transfer is not pending: ${transferId}`);
+    if (!["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(transfer.status)) {
+      throw new Error(`incoming transfer is not resumable: ${transferId}`);
     }
 
-    const finalized = parseFinalizedOutgoingTransferResult(await invoke("finalize_outgoing_transfer", {
-      transferId,
-    }));
-    const payload = finalized.payload;
-    const { repoId, repoPath } = await ensureIncomingTransferRepo(transferId, payload);
-    const resumeSessionId = await importTransferredResumeState(transferId, payload, repoPath);
-    const localTaskId = await tasks.createItem(
-      repoId,
-      repoPath,
-      payload.task.prompt ?? "",
-      payload.task.agent_type === "agent" || payload.task.agent_type === "sdk" ? "agent" : "pty",
-      {
-        agentProvider: payload.task.agent_provider,
-        baseBranch: resolveIncomingTransferBaseBranch(payload),
-        pipelineName: payload.task.pipeline,
-        stage: payload.task.stage,
-        displayName: payload.task.display_name,
-        resumeSessionId,
-        recoverySnapshot: payload.recovery,
-      },
-    );
+    let payload: OutgoingTransferPayload;
+    let localTaskId = transfer.local_task_id;
+    if (localTaskId) {
+      payload = parsePersistedOutgoingTransferPayload(transfer.payload_json);
+    } else {
+      const finalized = parseFinalizedOutgoingTransferResult(await invoke("finalize_outgoing_transfer", {
+        transferId,
+      }));
+      payload = finalized.payload;
+      if (!await updateDesktopTaskTransferPayload(transferId, JSON.stringify(payload))) {
+        throw new Error(`failed to persist finalized incoming transfer payload: ${transferId}`);
+      }
+      const { repoId, repoPath } = await ensureIncomingTransferRepo(transferId, payload);
+      const resumeSessionId = await importTransferredResumeState(transferId, payload, repoPath);
+      localTaskId = await tasks.createItem(
+        repoId,
+        repoPath,
+        payload.task.prompt ?? "",
+        payload.task.agent_type === "agent" || payload.task.agent_type === "sdk" ? "agent" : "pty",
+        {
+          agentProvider: payload.task.agent_provider,
+          baseBranch: resolveIncomingTransferBaseBranch(payload),
+          pipelineName: payload.task.pipeline,
+          stage: payload.task.stage,
+          displayName: payload.task.display_name,
+          resumeSessionId,
+          recoverySnapshot: payload.recovery,
+        },
+      );
+      if (!await markDesktopTaskTransferImporting(transferId, localTaskId)) {
+        throw new Error(`failed to claim imported task for transfer: ${transferId}`);
+      }
+    }
 
     await setDesktopTaskCloudIdentity(localTaskId, payload.task.cloud_task_id);
-    await completeDesktopTaskTransfer(transferId, localTaskId);
     await insertDesktopTaskTransferProvenance({
       pipeline_item_id: localTaskId,
       source_peer_id: payload.task.source_peer_id,
       source_task_id: payload.task.source_task_id,
       source_machine_task_label: payload.task.branch,
     });
+    if (!await markDesktopTaskTransferAwaitingAcknowledgment(transferId, localTaskId)) {
+      throw new Error(`failed to mark incoming transfer awaiting acknowledgment: ${transferId}`);
+    }
+    await queries.reloadSnapshot();
 
     await invoke("acknowledge_incoming_transfer_commit", {
       transferId,
       sourceTaskId: payload.task.source_task_id,
       destinationLocalTaskId: localTaskId,
-    }).catch((error: unknown) => {
-      console.error("[store] failed to acknowledge incoming transfer commit:", error);
     });
+    if (!await completeDesktopTaskTransfer(transferId, localTaskId)) {
+      throw new Error(`failed to complete acknowledged incoming transfer: ${transferId}`);
+    }
     await queries.reloadSnapshot();
 
     return localTaskId;

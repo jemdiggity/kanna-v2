@@ -227,8 +227,10 @@ fn map_transfer(item: &SnapshotPipelineItem) -> CloudTransferSnapshot {
         item.transfer_status.as_deref(),
     ) {
         (Some("outgoing"), Some("pending" | "streaming")) => "outgoing",
-        (Some("incoming"), Some("pending" | "streaming")) => "incoming",
-        (Some("incoming"), Some("completed")) if item.closed_at.is_none() => "finalization_pending",
+        (Some("incoming"), Some("pending" | "streaming" | "importing")) => "incoming",
+        (Some("incoming"), Some("awaiting_acknowledgment")) if item.closed_at.is_none() => {
+            "finalization_pending"
+        }
         _ => return none(),
     };
 
@@ -524,7 +526,12 @@ mod tests {
             ("outgoing", "streaming", "outgoing"),
             ("incoming", "pending", "incoming"),
             ("incoming", "streaming", "incoming"),
-            ("incoming", "completed", "finalization_pending"),
+            ("incoming", "importing", "incoming"),
+            (
+                "incoming",
+                "awaiting_acknowledgment",
+                "finalization_pending",
+            ),
         ] {
             let mut source = ui_snapshot("idle");
             let item = &mut source.entries[0].items[0];
@@ -547,6 +554,17 @@ mod tests {
                 "desktop-b"
             );
         }
+
+        let mut completed = ui_snapshot("idle");
+        let item = &mut completed.entries[0].items[0];
+        item.transfer_id = Some("transfer-1".into());
+        item.transfer_direction = Some("incoming".into());
+        item.transfer_status = Some("completed".into());
+        item.transfer_source_desktop_id = Some("desktop-a".into());
+        item.transfer_target_desktop_id = Some("desktop-b".into());
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", completed);
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json["tasks"][0]["transfer"]["state"], "none");
     }
 
     #[test]

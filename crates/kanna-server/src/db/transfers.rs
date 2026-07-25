@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct PendingIncomingTransfer {
     pub id: String,
+    pub status: String,
     pub source_peer_id: Option<String>,
     pub source_task_id: Option<String>,
+    pub local_task_id: Option<String>,
     pub payload_json: Option<String>,
 }
 
@@ -124,8 +126,50 @@ impl Db {
         local_task_id: &str,
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
-            "UPDATE task_transfer SET status = 'completed', local_task_id = ?, completed_at = datetime('now'), error = NULL WHERE id = ?",
-            (local_task_id, transfer_id),
+            "UPDATE task_transfer
+             SET status = 'completed', local_task_id = ?, completed_at = datetime('now'), error = NULL
+             WHERE id = ?
+               AND (
+                 (direction = 'outgoing' AND status IN ('pending', 'streaming'))
+                 OR
+                 (direction = 'incoming'
+                   AND local_task_id = ?
+                   AND status IN ('awaiting_acknowledgment', 'completed'))
+               )",
+            (local_task_id, transfer_id, local_task_id),
+        )?;
+        Ok(rows_affected == 1)
+    }
+
+    pub fn mark_incoming_transfer_importing(
+        &self,
+        transfer_id: &str,
+        local_task_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET status = 'importing', local_task_id = ?, error = NULL
+             WHERE id = ? AND direction = 'incoming'
+               AND (
+                 status IN ('pending', 'streaming')
+                 OR (status = 'importing' AND local_task_id = ?)
+               )",
+            (local_task_id, transfer_id, local_task_id),
+        )?;
+        Ok(rows_affected == 1)
+    }
+
+    pub fn mark_incoming_transfer_awaiting_acknowledgment(
+        &self,
+        transfer_id: &str,
+        local_task_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET status = 'awaiting_acknowledgment', error = NULL
+             WHERE id = ? AND direction = 'incoming' AND local_task_id = ?
+               AND status IN ('importing', 'awaiting_acknowledgment')",
+            (transfer_id, local_task_id),
         )?;
         Ok(rows_affected == 1)
     }
@@ -149,7 +193,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO task_transfer_provenance
              (pipeline_item_id, source_peer_id, source_task_id, source_machine_task_label)
-             VALUES (?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(pipeline_item_id) DO NOTHING",
             (
                 &provenance.pipeline_item_id,
                 &provenance.source_peer_id,
@@ -164,17 +209,20 @@ impl Db {
         &self,
     ) -> Result<Vec<PendingIncomingTransfer>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_peer_id, source_task_id, payload_json
+            "SELECT id, status, source_peer_id, source_task_id, local_task_id, payload_json
              FROM task_transfer
-             WHERE direction = 'incoming' AND status = 'pending'
+             WHERE direction = 'incoming'
+               AND status IN ('pending', 'importing', 'awaiting_acknowledgment')
              ORDER BY started_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(PendingIncomingTransfer {
                 id: row.get(0)?,
-                source_peer_id: row.get(1)?,
-                source_task_id: row.get(2)?,
-                payload_json: row.get(3)?,
+                status: row.get(1)?,
+                source_peer_id: row.get(2)?,
+                source_task_id: row.get(3)?,
+                local_task_id: row.get(4)?,
+                payload_json: row.get(5)?,
             })
         })?;
         rows.collect()
@@ -186,8 +234,10 @@ impl Db {
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
-             SET status = 'streaming', error = NULL
-             WHERE id = ? AND direction = 'incoming' AND status = 'pending'",
+             SET status = CASE WHEN status = 'pending' THEN 'streaming' ELSE status END,
+                 error = NULL
+             WHERE id = ? AND direction = 'incoming'
+               AND status IN ('pending', 'importing', 'awaiting_acknowledgment')",
             [transfer_id],
         )?;
         Ok(rows_affected == 1)

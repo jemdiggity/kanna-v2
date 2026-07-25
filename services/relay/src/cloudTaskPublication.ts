@@ -125,6 +125,18 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
           128,
         ),
       };
+  if (
+    transferState === "outgoing"
+    && validatedTransfer.sourceDesktopId !== desktopId
+  ) {
+    throw new Error(`${path}.transfer.sourceDesktopId must match the authenticated desktop`);
+  }
+  if (
+    (transferState === "incoming" || transferState === "finalization_pending")
+    && validatedTransfer.destinationDesktopId !== desktopId
+  ) {
+    throw new Error(`${path}.transfer.destinationDesktopId must match the authenticated desktop`);
+  }
   if (!Array.isArray(task.blockedByTaskIds) || task.blockedByTaskIds.length > 100) {
     throw new Error(`${path}.blockedByTaskIds must be an array of at most 100 ids`);
   }

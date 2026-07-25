@@ -40,7 +40,8 @@ use super::tasks::{
 use super::transfers::{
     claim_pending_incoming_transfer, complete_task_transfer, fail_pending_incoming_transfer,
     get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
-    list_pending_incoming_transfers, reject_task_transfer, set_task_cloud_identity,
+    list_pending_incoming_transfers, mark_incoming_transfer_awaiting_acknowledgment,
+    mark_incoming_transfer_importing, reject_task_transfer, set_task_cloud_identity,
     update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
@@ -200,6 +201,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/transfers/{transfer_id}/actions/complete",
             post(complete_task_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/importing",
+            post(mark_incoming_transfer_importing),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/awaiting-acknowledgment",
+            post(mark_incoming_transfer_awaiting_acknowledgment),
         )
         .route(
             "/v1/transfers/{transfer_id}/actions/reject",

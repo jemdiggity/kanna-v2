@@ -365,6 +365,21 @@ function createTransferDb(initial: {
       row.error = null;
       return true;
     },
+    markTaskTransferImporting: async (transferId: string, localTaskId: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row) return false;
+      row.status = "importing";
+      row.local_task_id = localTaskId;
+      row.error = null;
+      return true;
+    },
+    markTaskTransferAwaitingAcknowledgment: async (transferId: string, localTaskId: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row || row.local_task_id !== localTaskId) return false;
+      row.status = "awaiting_acknowledgment";
+      row.error = null;
+      return true;
+    },
     completeTaskTransfer: async (transferId: string, localTaskId: string) => {
       const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
       if (!row) return false;
@@ -383,7 +398,11 @@ function createTransferDb(initial: {
       return true;
     },
     insertTaskTransferProvenance: async (provenance: NewTaskTransferProvenanceInput) => {
-      tables.task_transfer_provenance.push(provenance);
+      if (!tables.task_transfer_provenance.some(
+        (row) => row.pipeline_item_id === provenance.pipeline_item_id,
+      )) {
+        tables.task_transfer_provenance.push(provenance);
+      }
     },
   });
 
@@ -1474,6 +1493,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") {
         return null;
       }
+      if (cmd === "acknowledge_incoming_transfer_commit") return null;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
@@ -1521,6 +1541,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") {
         return null;
       }
+      if (cmd === "acknowledge_incoming_transfer_commit") return null;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
@@ -1606,8 +1627,8 @@ describe("incoming transfer approval", () => {
 
     expect(events).toEqual([
       `identity:${destinationTaskId}:cloud-stable`,
-      `complete:transfer-1:${destinationTaskId}`,
       "ack:transfer-1",
+      `complete:transfer-1:${destinationTaskId}`,
     ]);
   });
 
@@ -1664,6 +1685,112 @@ describe("incoming transfer approval", () => {
     );
   });
 
+  it("reuses a durably claimed local task when the identity write applies then throws", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = {
+      ...buildIncomingTransferPayload(),
+      task: {
+        ...buildIncomingTransferPayload().task,
+        cloud_task_id: "cloud-stable",
+      },
+    };
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+    await store.init(fakeDb);
+
+    let identityCalls = 0;
+    updateDesktopServerClientHandlersForTests({
+      setTaskCloudIdentity: async (taskId, cloudTaskId) => {
+        identityCalls += 1;
+        const item = fakeDb.tables.pipeline_item.find((candidate) => candidate.id === taskId);
+        if (!item) throw new Error(`task not found: ${taskId}`);
+        item.cloud_task_id = cloudTaskId;
+        if (identityCalls === 1) throw new Error("identity response lost");
+      },
+    });
+    const acknowledge = vi.fn(async () => null);
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") return null;
+      if (cmd === "acknowledge_incoming_transfer_commit") return acknowledge();
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    await expect(store.approveIncomingTransfer("transfer-1")).rejects.toThrow("identity response lost");
+    const claimedTaskId = fakeDb.tables.task_transfer[0]?.local_task_id;
+    expect(claimedTaskId).toBeTruthy();
+    expect(fakeDb.tables.task_transfer[0]?.status).toBe("importing");
+    expect(fakeDb.tables.pipeline_item).toHaveLength(1);
+
+    await expect(store.approveIncomingTransfer("transfer-1")).resolves.toBe(claimedTaskId);
+    expect(fakeDb.tables.pipeline_item).toHaveLength(1);
+    expect(fakeDb.tables.task_transfer_provenance).toHaveLength(1);
+    expect(fakeDb.tables.task_transfer[0]?.status).toBe("completed");
+    expect(acknowledge).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains awaiting acknowledgment for retry and completes only after acknowledgment succeeds", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = buildIncomingTransferPayload();
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+    await store.init(fakeDb);
+
+    let acknowledgmentCalls = 0;
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") return null;
+      if (cmd === "acknowledge_incoming_transfer_commit") {
+        acknowledgmentCalls += 1;
+        if (acknowledgmentCalls === 1) throw new Error("source unavailable");
+        return null;
+      }
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    await expect(store.approveIncomingTransfer("transfer-1")).rejects.toThrow("source unavailable");
+    const claimedTaskId = fakeDb.tables.task_transfer[0]?.local_task_id;
+    expect(fakeDb.tables.task_transfer[0]?.status).toBe("awaiting_acknowledgment");
+    expect(fakeDb.tables.pipeline_item).toHaveLength(1);
+
+    await expect(store.approveIncomingTransfer("transfer-1")).resolves.toBe(claimedTaskId);
+    expect(fakeDb.tables.pipeline_item).toHaveLength(1);
+    expect(fakeDb.tables.task_transfer[0]?.status).toBe("completed");
+    expect(acknowledgmentCalls).toBe(2);
+  });
+
   it("clones the repo remotely before importing a clone-remote transfer", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
@@ -1710,6 +1837,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "which_binary") {
         return "/usr/bin/claude";
       }
+      if (cmd === "acknowledge_incoming_transfer_commit") return null;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
@@ -1773,6 +1901,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") {
         return null;
       }
+      if (cmd === "acknowledge_incoming_transfer_commit") return null;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
@@ -1841,6 +1970,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "which_binary") {
         return "/usr/bin/claude";
       }
+      if (cmd === "acknowledge_incoming_transfer_commit") return null;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
@@ -2783,6 +2913,61 @@ describe("source transfer finalization", () => {
     expect(result.transferId).toBe("transfer-123");
     expect(result.finalizedCleanly).toBe(false);
     expect(result.payload.task.source_task_id).toBe("task-source");
+  });
+
+  it("preserves authenticated desktop identities while rebuilding the finalized payload", async () => {
+    vi.useFakeTimers();
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const sourceItem = buildItem();
+    const payload = buildOutgoingTransferPayload({
+      sourcePeerId: "peer-source",
+      sourceDesktopId: "desktop-source",
+      sourceTaskId: sourceItem.id,
+      targetPeerId: "peer-target",
+      targetDesktopId: "desktop-target",
+      item: sourceItem,
+      repoPath: "/tmp/repo-1",
+      repoName: "repo-1",
+      repoDefaultBranch: "main",
+      repoRemoteUrl: null,
+      recovery: null,
+      artifacts: [],
+      targetHasRepo: true,
+      bundle: null,
+    });
+    const fakeDb = createTransferDb({
+      repos: [buildRepo()],
+      items: [sourceItem],
+      transfers: [{
+        id: "transfer-123",
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: "peer-target",
+        source_desktop_id: "desktop-source",
+        target_desktop_id: "desktop-target",
+        source_task_id: sourceItem.id,
+        local_task_id: sourceItem.id,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [sourceItem];
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+    invokeMock.mockResolvedValue(null);
+
+    const finalizePromise = store.finalizeOutgoingTransfer("transfer-123");
+    await vi.advanceTimersByTimeAsync(1500);
+    const result = await finalizePromise;
+
+    expect(result.payload.task.source_desktop_id).toBe("desktop-source");
+    expect(result.payload.target_desktop_id).toBe("desktop-target");
   });
 });
 
