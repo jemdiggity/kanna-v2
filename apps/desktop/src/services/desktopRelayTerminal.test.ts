@@ -262,7 +262,7 @@ describe("createDesktopRelayTerminalClient", () => {
     await expect(promise).resolves.toBeUndefined();
   });
 
-  it("sends terminal resize, close task, and advance stage through the relay", async () => {
+  it("sends terminal resize, close task, advance stage, and mark read through the relay", async () => {
     const socket = new FakeSocket();
     const client = createDesktopRelayTerminalClient({
       createSocket: () => socket,
@@ -284,6 +284,10 @@ describe("createDesktopRelayTerminalClient", () => {
       desktopId: "desktop-owner",
       taskId: "task-1",
     });
+    const markReadPromise = client.markTaskRead({
+      desktopId: "desktop-owner",
+      taskId: "task/read",
+    });
 
     await openRelayTunnel(socket);
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
@@ -298,15 +302,19 @@ describe("createDesktopRelayTerminalClient", () => {
     });
     const closeRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/close");
     const advanceRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/advance-stage");
+    const markReadRequest = sent.find((entry) => entry.path === "/v1/tasks/task%2Fread/actions/mark-read");
     expect(closeRequest).toMatchObject({ type: "request", method: "POST", body: null });
     expect(advanceRequest).toMatchObject({ type: "request", method: "POST", body: null });
+    expect(markReadRequest).toMatchObject({ type: "request", method: "POST", body: null });
 
     socket.onmessage?.({ data: JSON.stringify({ type: "response", id: closeRequest.id, status: 200, body: null }) });
     socket.onmessage?.({ data: JSON.stringify({ type: "response", id: advanceRequest.id, status: 200, body: null }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "response", id: markReadRequest.id, status: 200, body: null }) });
 
     await expect(resizePromise).resolves.toBeUndefined();
     await expect(closePromise).resolves.toBeUndefined();
     await expect(advancePromise).resolves.toBeUndefined();
+    await expect(markReadPromise).resolves.toBeUndefined();
   });
 
   it("reads a remote task file through the relay tunnel", async () => {

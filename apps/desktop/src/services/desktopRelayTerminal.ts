@@ -74,6 +74,7 @@ export interface DesktopRelayTerminalClient {
   closeTask(options: RemoteTerminalActionOptions): Promise<void>;
   advanceStage(options: RemoteTerminalActionOptions): Promise<void>;
   readTaskFile(options: ReadRemoteTaskFileOptions): Promise<RemoteTaskFileContent>;
+  markTaskRead(options: RemoteTerminalActionOptions): Promise<void>;
 }
 
 export async function createConfiguredDesktopRelayTerminalClient(): Promise<DesktopRelayTerminalClient | null> {
@@ -197,6 +198,13 @@ export function createDesktopRelayTerminalClient({
         throw new Error("Remote task file response was malformed.");
       }
       return { path: body.path, content: body.content };
+    },
+    async markTaskRead(options) {
+      await clientForDesktop(options.desktopId).request(
+        "POST",
+        `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/mark-read`,
+        null,
+      );
     },
   };
 }
