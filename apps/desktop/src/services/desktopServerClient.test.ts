@@ -395,6 +395,22 @@ describe("desktopServerClient", () => {
     );
   });
 
+  it("allows tests to override task cloud identity writes", async () => {
+    const setTaskCloudIdentity = vi.fn(async () => {});
+    const fetchMock = vi.fn(() => {
+      throw new Error("unexpected fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setDesktopServerClientHandlersForTests({ setTaskCloudIdentity });
+
+    await expect(
+      setDesktopTaskCloudIdentity("task-1", "task-source-stable"),
+    ).resolves.toBeUndefined();
+
+    expect(setTaskCloudIdentity).toHaveBeenCalledWith("task-1", "task-source-stable");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("retries transient setting read failures during startup", async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError("Load failed"))

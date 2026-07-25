@@ -1333,6 +1333,55 @@ async fn cloud_task_identity_route_rejects_invalid_identity_and_missing_task() {
     assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn cloud_task_identity_route_stays_responsive_while_database_write_is_blocked() {
+    let state = super::test_state_with_seed("desktop-cloud-identity-blocked", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "transferred prompt",
+            None,
+            "in progress",
+            "2026-07-25 10:00:00",
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let locker = std::thread::spawn(move || {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    locked_rx.recv().unwrap();
+
+    let started_at = Instant::now();
+    let request = tokio::spawn(
+        app.oneshot(
+            Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        ),
+    );
+    tokio::task::yield_now().await;
+    let scheduler_delay = started_at.elapsed();
+    let response = request.await.unwrap().unwrap();
+    locker.join().unwrap();
+
+    assert!(
+        scheduler_delay < Duration::from_millis(100),
+        "cloud identity write blocked the async runtime for {scheduler_delay:?}"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn closed_task_identities_route_returns_closed_tasks() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {

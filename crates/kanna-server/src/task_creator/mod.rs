@@ -2084,27 +2084,58 @@ fn persist_task_ports(
         .map_err(|e| format!("db error: {}", e))
 }
 
-pub(crate) fn reopen_task_for_api(db: &Db, task_or_branch_id: &str) -> Result<String, String> {
+#[derive(Debug)]
+pub(crate) enum ReopenTaskError {
+    OwnershipConflict,
+    Internal(String),
+}
+
+impl ReopenTaskError {
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+}
+
+pub(crate) fn reopen_task_for_api(
+    db: &Db,
+    task_or_branch_id: &str,
+) -> Result<String, ReopenTaskError> {
     let task_id = db
         .resolve_pipeline_item_id(task_or_branch_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("task not found: {task_or_branch_id}"))?;
+        .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
+        .ok_or_else(|| ReopenTaskError::internal(format!("task not found: {task_or_branch_id}")))?;
     let item = db
         .get_pipeline_item(&task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("task not found: {task_id}"))?;
+        .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
+        .ok_or_else(|| ReopenTaskError::internal(format!("task not found: {task_id}")))?;
     let repo = db
         .get_repo(&item.repo_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("repo not found for task: {task_id}"))?;
-    let definitions = RepoDefinitions::resolve(&repo)?;
+        .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
+        .ok_or_else(|| ReopenTaskError::internal(format!("repo not found for task: {task_id}")))?;
+    let definitions = RepoDefinitions::resolve(&repo).map_err(ReopenTaskError::internal)?;
 
-    db.release_task_ports(&task_id)
-        .map_err(|e| format!("db error: {}", e))?;
-    let port_env = claim_task_ports(db, &task_id, definitions.config())?;
-    persist_task_ports(db, &task_id, &port_env)?;
-    db.reopen_pipeline_item(&task_id)
-        .map_err(|e| format!("db error: {}", e))?;
+    match db.reopen_pipeline_item(&task_id) {
+        Ok(()) => {}
+        Err(crate::db::ReopenPipelineItemError::OwnershipConflict) => {
+            return Err(ReopenTaskError::OwnershipConflict);
+        }
+        Err(crate::db::ReopenPipelineItemError::Database(error)) => {
+            return Err(ReopenTaskError::internal(format!("db error: {error}")));
+        }
+    }
+    if let Err(error) = (|| {
+        db.release_task_ports(&task_id)
+            .map_err(|e| format!("db error: {e}"))?;
+        let port_env = claim_task_ports(db, &task_id, definitions.config())?;
+        persist_task_ports(db, &task_id, &port_env)
+    })() {
+        if let Err(compensation_error) = db.close_pipeline_item(&task_id) {
+            return Err(ReopenTaskError::internal(format!(
+                "{error}; failed to restore closed task after reopen: {compensation_error}"
+            )));
+        }
+        return Err(ReopenTaskError::internal(error));
+    }
     Ok(task_id)
 }
 

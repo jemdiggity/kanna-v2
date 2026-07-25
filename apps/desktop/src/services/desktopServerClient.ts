@@ -46,6 +46,7 @@ export interface DesktopServerClientHandlersForTests {
   releaseTaskPorts?: (taskId: string) => MaybePromise<void>;
   createTask?: (request: CreateDesktopTaskRequest) => MaybePromise<CreateDesktopTaskResponse>;
   closeTask?: (taskId: string) => MaybePromise<void>;
+  setTaskCloudIdentity?: (taskId: string, cloudTaskId: string) => MaybePromise<void>;
   reopenTask?: (taskId: string) => MaybePromise<void>;
   blockTask?: (taskId: string, blockerTaskIds: string[]) => MaybePromise<void>;
   unblockTask?: (taskId: string) => MaybePromise<void>;
@@ -602,6 +603,10 @@ export async function setDesktopTaskCloudIdentity(
   taskId: string,
   cloudTaskId: string,
 ): Promise<void> {
+  if (clientHandlersForTests?.setTaskCloudIdentity) {
+    await clientHandlersForTests.setTaskCloudIdentity(taskId, cloudTaskId);
+    return;
+  }
   await requestJson<{ cloudTaskId: string }>(
     `/v1/tasks/${encodeURIComponent(taskId)}/actions/cloud-task-identity`,
     {

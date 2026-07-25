@@ -177,20 +177,26 @@ pub(super) async fn set_task_cloud_identity(
         ));
     }
 
-    let db = open_db(&state)?;
-    match db
-        .set_cloud_task_identity(&task_id, &payload.cloud_task_id)
-        .map_err(db_error)?
-    {
-        crate::db::CloudTaskIdentityWrite::Updated
-        | crate::db::CloudTaskIdentityWrite::Unchanged => Ok(Json(
-            serde_json::json!({ "cloudTaskId": payload.cloud_task_id }),
-        )),
-        crate::db::CloudTaskIdentityWrite::Conflict => Err((
+    let cloud_task_id = payload.cloud_task_id;
+    let db_path = state.config.db_path.clone();
+    let task_id_for_write = task_id.clone();
+    let write = super::blocking::run_handler_blocking("cloud task identity write", move || {
+        let db = Db::open(&db_path).map_err(db_error)?;
+        db.set_cloud_task_identity(&task_id_for_write, &cloud_task_id)
+            .map_err(db_error)
+            .map(|write| (write, cloud_task_id))
+    })
+    .await?;
+    match write {
+        (crate::db::CloudTaskIdentityWrite::Updated, cloud_task_id)
+        | (crate::db::CloudTaskIdentityWrite::Unchanged, cloud_task_id) => {
+            Ok(Json(serde_json::json!({ "cloudTaskId": cloud_task_id })))
+        }
+        (crate::db::CloudTaskIdentityWrite::Conflict, _) => Err((
             axum::http::StatusCode::CONFLICT,
             "cloud task identity conflicts with existing ownership".to_string(),
         )),
-        crate::db::CloudTaskIdentityWrite::TaskNotFound => Err((
+        (crate::db::CloudTaskIdentityWrite::TaskNotFound, _) => Err((
             axum::http::StatusCode::NOT_FOUND,
             format!("task not found: {task_id}"),
         )),

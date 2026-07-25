@@ -399,6 +399,121 @@ async fn reopen_task_route_reopens_and_reclaims_ports_from_remote_default_config
 }
 
 #[tokio::test]
+async fn reopen_task_route_rejects_cloud_identity_conflict_without_claiming_ports() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-reopen-identity-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"ports":{"KANNA_DEV_PORT":1420}}"#,
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna/config.json"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "publish port config"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+
+    let db_path = Db::test_db_path(&format!("http-reopen-identity-{unique}"));
+    let db = Db::open_for_tests(&db_path).expect("open test db");
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-old",
+        "repo-1",
+        "old prompt",
+        Some("Old Task"),
+        "in progress",
+        "2026-07-25 07:00:00",
+    )
+    .unwrap();
+    assert_eq!(
+        db.set_cloud_task_identity("task-old", "task-source-stable")
+            .unwrap(),
+        crate::db::CloudTaskIdentityWrite::Updated
+    );
+    db.close_pipeline_item("task-old").unwrap();
+    let original = db.get_pipeline_item("task-old").unwrap().unwrap();
+    let original_ports = db.get_test_pipeline_item_ports("task-old").unwrap();
+
+    db.insert_test_pipeline_item(
+        "task-new",
+        "repo-1",
+        "new prompt",
+        Some("New Task"),
+        "in progress",
+        "2026-07-25 08:00:00",
+    )
+    .unwrap();
+    assert_eq!(
+        db.set_cloud_task_identity("task-new", "task-source-stable")
+            .unwrap(),
+        crate::db::CloudTaskIdentityWrite::Updated
+    );
+    drop(db);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: "/tmp/kanna-daemon".to_string(),
+        db_path: db_path.clone(),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-reopen-identity-{unique}.json"),
+    };
+    let app = super::router(Arc::new(super::AppState::new(config)));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-old/actions/reopen")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let db = Db::open(&db_path).unwrap();
+    let unchanged = db.get_pipeline_item("task-old").unwrap().unwrap();
+    assert_eq!(unchanged.closed_at, original.closed_at);
+    assert_eq!(unchanged.updated_at, original.updated_at);
+    assert_eq!(
+        db.get_test_pipeline_item_ports("task-old").unwrap(),
+        original_ports
+    );
+    assert!(
+        db.list_task_ports_for_item("task-old").unwrap().is_empty(),
+        "ownership conflict must not leave claimed task ports"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn mark_read_route_sets_unread_task_idle() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

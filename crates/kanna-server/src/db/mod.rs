@@ -201,6 +201,18 @@ pub enum CloudTaskIdentityWrite {
     TaskNotFound,
 }
 
+#[derive(Debug)]
+pub enum ReopenPipelineItemError {
+    OwnershipConflict,
+    Database(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for ReopenPipelineItemError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotEntry {

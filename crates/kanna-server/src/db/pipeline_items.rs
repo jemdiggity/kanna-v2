@@ -1,5 +1,6 @@
 use super::{
-    CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem, TaskStageSource,
+    CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem,
+    ReopenPipelineItemError, TaskStageSource,
 };
 use rusqlite::{params, OptionalExtension};
 
@@ -640,20 +641,32 @@ impl Db {
         Ok(())
     }
 
-    pub fn reopen_pipeline_item(&self, id: &str) -> Result<(), rusqlite::Error> {
+    pub fn reopen_pipeline_item(&self, id: &str) -> Result<(), ReopenPipelineItemError> {
         let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
+            return Err(ReopenPipelineItemError::Database(
+                rusqlite::Error::QueryReturnedNoRows,
+            ));
         };
-        let rows_affected = self.conn.execute(
+        let rows_affected = match self.conn.execute(
             "UPDATE pipeline_item
              SET teardown_started_at = NULL,
                  closed_at = NULL,
                  updated_at = datetime('now')
              WHERE id = ?",
             [&pipeline_item_id],
-        )?;
+        ) {
+            Ok(rows_affected) => rows_affected,
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                return Err(ReopenPipelineItemError::OwnershipConflict);
+            }
+            Err(error) => return Err(ReopenPipelineItemError::Database(error)),
+        };
         if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
+            return Err(ReopenPipelineItemError::Database(
+                rusqlite::Error::QueryReturnedNoRows,
+            ));
         }
         Ok(())
     }
