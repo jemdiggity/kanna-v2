@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { publishDesktopLanTaskSnapshot } from "./desktopLanTaskIndex";
+import type { DesktopCloudTaskSnapshot } from "./desktopCloudTaskIndex";
+import {
+  listDesktopLanTasks,
+  publishDesktopLanTaskSnapshot,
+} from "./desktopLanTaskIndex";
 import { setDesktopSnapshotFetcherForTests } from "./desktopServerClient";
 import { __resetRepoRemoteUrlCacheForTests } from "./repoRemoteUrl";
 
@@ -52,6 +56,41 @@ function openItem(id: string) {
     created_at: "2026-06-13T00:00:00.000Z",
     updated_at: "2026-06-13T00:00:01.000Z",
     closed_at: null,
+  };
+}
+
+function remoteLanTaskSnapshot(
+  overrides: Partial<DesktopCloudTaskSnapshot> = {},
+): DesktopCloudTaskSnapshot {
+  return {
+    cloudTaskId: "spoofed-shared-id",
+    localRepoId: "repo-1",
+    ownerDesktopId: "spoofed-peer",
+    ownerLocalTaskId: "task-a",
+    title: "Remote LAN task",
+    promptSnippet: "Remote LAN task prompt",
+    waitingPromptSnippet: null,
+    displayName: null,
+    stage: "in progress",
+    activity: "working",
+    activityRevision: 4,
+    status: "active",
+    repo: {
+      cloudRepoId: "repo-1",
+      name: "Repo One",
+      remoteUrl: "git@github.com:owner/repo.git",
+      remoteUrlHash: "b1cd17c6cfc6f18ca212b7e8ac47cfe7429102823006de2bc18203527bfb711e",
+      defaultBranch: "main",
+    },
+    branch: "task-task-a",
+    baseRef: "main",
+    prNumber: null,
+    prUrl: null,
+    agent: { provider: "codex", type: "pty" },
+    createdAt: "2026-06-13T00:00:00.000Z",
+    updatedAt: "2026-06-13T00:01:00.000Z",
+    closedAt: null,
+    ...overrides,
   };
 }
 
@@ -160,5 +199,104 @@ describe("desktop LAN task index publisher", () => {
       (task: { ownerLocalTaskId: string }) => task.ownerLocalTaskId === "task-open",
     );
     expect(publishedTask.blockedByTaskIds).toEqual([]);
+  });
+});
+
+describe("desktop LAN task index reader", () => {
+  it("keeps arbitrary canonical task identities paired with their terminal refs and activity revisions", async () => {
+    const fallbackRepoTask = remoteLanTaskSnapshot({
+      ownerDesktopId: "fourth-spoofed-peer",
+      ownerLocalTaskId: "a:b",
+      title: "Fallback repo LAN task",
+      promptSnippet: "Fallback repo LAN task prompt",
+      activityRevision: 15,
+      repo: {
+        cloudRepoId: "repo",
+        name: "Fallback Repo",
+        remoteUrl: "git@github.com:owner/fallback.git",
+        remoteUrlHash: "63ce1a35c84d8028dffb2fb93c5997506e0f5e4f460319183666540103e4fc46",
+        defaultBranch: "main",
+      },
+      branch: "task-a-b",
+      updatedAt: "2026-06-13T00:04:00.000Z",
+    });
+    delete fallbackRepoTask.localRepoId;
+
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_transfer_task_snapshots") {
+        return [{
+          peer_id: "peer-owner",
+          snapshot: {
+            schemaVersion: 1,
+            tasks: [
+              remoteLanTaskSnapshot(),
+              remoteLanTaskSnapshot({
+                ownerDesktopId: "other-spoofed-peer",
+                ownerLocalTaskId: "task-b",
+                title: "Second remote LAN task",
+                promptSnippet: "Second remote LAN task prompt",
+                activityRevision: 9,
+                branch: "task-task-b",
+                updatedAt: "2026-06-13T00:02:00.000Z",
+              }),
+              remoteLanTaskSnapshot({
+                localRepoId: "repo:a",
+                ownerDesktopId: "third-spoofed-peer",
+                ownerLocalTaskId: "b",
+                title: "Delimiter collision LAN task",
+                promptSnippet: "Delimiter collision LAN task prompt",
+                activityRevision: 12,
+                branch: "task-b",
+                updatedAt: "2026-06-13T00:03:00.000Z",
+              }),
+              fallbackRepoTask,
+            ],
+            publishedAt: "2026-06-13T00:05:00.000Z",
+          },
+        }];
+      }
+      return null;
+    });
+
+    const snapshot = await listDesktopLanTasks({
+      currentDesktopId: "peer-local",
+    });
+
+    expect(snapshot.items).toHaveLength(4);
+    expect(new Set(snapshot.items.map((item) => item.id)).size).toBe(4);
+
+    const expectedByPrompt = new Map([
+      ["Remote LAN task prompt", {
+        ownerLocalRepoId: "repo-1",
+        ownerLocalTaskId: "task-a",
+        activityRevision: 4,
+      }],
+      ["Second remote LAN task prompt", {
+        ownerLocalRepoId: "repo-1",
+        ownerLocalTaskId: "task-b",
+        activityRevision: 9,
+      }],
+      ["Delimiter collision LAN task prompt", {
+        ownerLocalRepoId: "repo:a",
+        ownerLocalTaskId: "b",
+        activityRevision: 12,
+      }],
+      ["Fallback repo LAN task prompt", {
+        ownerLocalRepoId: "repo",
+        ownerLocalTaskId: "a:b",
+        activityRevision: 15,
+      }],
+    ]);
+    for (const item of snapshot.items) {
+      const expected = expectedByPrompt.get(item.prompt);
+      expect(expected).toBeDefined();
+      expect(item.activity_revision).toBe(expected?.activityRevision);
+      expect(snapshot.terminalRefs[item.id]).toEqual({
+        transport: "lan",
+        ownerDesktopId: "peer-owner",
+        ownerLocalRepoId: expected?.ownerLocalRepoId,
+        ownerLocalTaskId: expected?.ownerLocalTaskId,
+      });
+    }
   });
 });
