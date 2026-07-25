@@ -234,6 +234,95 @@ pub(super) async fn advance_owner_task_stage(
     post_local_kanna_task_action(port, task_id, "advance-stage").await
 }
 
+pub(super) async fn read_owner_task_file(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    task_id: &str,
+    path: &str,
+) -> Result<(String, String), RuntimeError> {
+    ensure_requester_peer_trusted(context, requester_peer_id).await?;
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    get_local_kanna_task_file(port, task_id, path).await
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+async fn get_local_kanna_task_file(
+    port: u16,
+    task_id: &str,
+    path: &str,
+) -> Result<(String, String), RuntimeError> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+    let request_path = format!(
+        "/v1/tasks/{}/files/content?path={}",
+        percent_encode_query_value(task_id),
+        percent_encode_query_value(path),
+    );
+    let request = format!(
+        "GET {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n",
+    );
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    let read = reader.read_line(&mut status_line).await?;
+    if read == 0 {
+        return Err(RuntimeError::Protocol(
+            "Kanna server closed without a response".into(),
+        ));
+    }
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| {
+            RuntimeError::Protocol(format!("invalid Kanna server response: {status_line}"))
+        })?;
+
+    let mut rest = String::new();
+    reader.read_to_string(&mut rest).await?;
+    let body = rest
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or_default();
+
+    if !(200..300).contains(&status) {
+        return Err(RuntimeError::Protocol(format!(
+            "Kanna server task file read failed with HTTP {status}: {body}"
+        )));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(body).map_err(|error| {
+        RuntimeError::Protocol(format!("invalid Kanna server task file response: {error}"))
+    })?;
+    let file_path = parsed
+        .get("path")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            RuntimeError::Protocol("Kanna server task file response is missing path".into())
+        })?;
+    let content = parsed
+        .get("content")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            RuntimeError::Protocol("Kanna server task file response is missing content".into())
+        })?;
+    Ok((file_path.to_owned(), content.to_owned()))
+}
+
 async fn post_local_kanna_task_action(
     port: u16,
     task_id: &str,
@@ -553,5 +642,78 @@ mod tests {
 
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    async fn spawn_fake_kanna_server(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (u16, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake kanna server");
+        let port = listener.local_addr().expect("local addr").port();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request_line = String::new();
+            {
+                let mut reader = BufReader::new(&mut stream);
+                reader
+                    .read_line(&mut request_line)
+                    .await
+                    .expect("read request line");
+            }
+            let response = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            request_line
+        });
+        (port, handle)
+    }
+
+    /// The owner-side file read percent-encodes the query, parses the JSON
+    /// body, and returns the served path and content.
+    #[tokio::test]
+    async fn local_kanna_task_file_read_parses_response_body() {
+        let (port, request) = spawn_fake_kanna_server(
+            "HTTP/1.1 200 OK",
+            r#"{"path":"src dir/app.ts","content":"remote body"}"#,
+        )
+        .await;
+
+        let (path, content) = get_local_kanna_task_file(port, "task-1", "src dir/app.ts")
+            .await
+            .expect("read task file");
+        assert_eq!(path, "src dir/app.ts");
+        assert_eq!(content, "remote body");
+
+        let request_line = request.await.expect("request line");
+        assert!(
+            request_line
+                .starts_with("GET /v1/tasks/task-1/files/content?path=src%20dir%2Fapp.ts HTTP/1.1"),
+            "unexpected request line: {request_line:?}"
+        );
+    }
+
+    /// Non-2xx responses surface the status and body as a protocol error
+    /// instead of being parsed as file content.
+    #[tokio::test]
+    async fn local_kanna_task_file_read_reports_http_errors() {
+        let (port, _request) =
+            spawn_fake_kanna_server("HTTP/1.1 404 Not Found", r#"{"error":"file not found"}"#)
+                .await;
+
+        let error = get_local_kanna_task_file(port, "task-1", "missing.ts")
+            .await
+            .expect_err("expected http error");
+        let message = error.to_string();
+        assert!(
+            message.contains("HTTP 404") && message.contains("file not found"),
+            "unexpected error: {message}"
+        );
     }
 }

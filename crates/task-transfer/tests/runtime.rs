@@ -506,6 +506,71 @@ async fn trusted_peer_advance_stage_posts_to_owner_kanna_server() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_read_task_file_fetches_from_owner_kanna_server() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).await.unwrap();
+            if header == "\r\n" {
+                break;
+            }
+        }
+        request_tx.send(request_line).unwrap();
+
+        let body = r#"{"path":"src dir/app.ts","content":"remote body"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        reader
+            .get_mut()
+            .write_all(response.as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    pair_peers(&secondary, &owner, "peer-owner").await;
+
+    let (path, content) = secondary
+        .read_peer_task_file("peer-owner", "owner-task-1", "src dir/app.ts")
+        .await
+        .unwrap();
+    assert_eq!(path, "src dir/app.ts");
+    assert_eq!(content, "remote body");
+
+    let request_line = request_rx.await.unwrap();
+    assert_eq!(
+        request_line,
+        "GET /v1/tasks/owner-task-1/files/content?path=src%20dir%2Fapp.ts HTTP/1.1\r\n"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unpaired_peers_cannot_start_transfer_preflight() {
     let temp = tempfile::tempdir().unwrap();
 
