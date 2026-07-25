@@ -10,6 +10,7 @@ use kanna_task_transfer::runtime::{
     DiscoveryMode, PairingResult, RuntimeConfig, RuntimeError, RuntimeEvent, TransferRuntime,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1291,7 +1292,7 @@ async fn source_reloads_outgoing_reservation_after_sidecar_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unapplied_import_commit_receipt_replays_after_source_restart() {
+async fn unapplied_import_commit_receipt_older_than_pending_ttl_replays_after_source_restart() {
     let temp = tempfile::tempdir().unwrap();
     let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
         "peer-secondary",
@@ -1316,6 +1317,7 @@ async fn unapplied_import_commit_receipt_replays_after_source_restart() {
         .await
         .unwrap();
     drop(primary);
+    age_import_commit_receipt_past_pending_ttl(temp.path(), "peer-primary", &preflight.transfer_id);
     let primary = TransferRuntime::spawn(primary_config).await.unwrap();
 
     let replay = tokio::time::timeout(
@@ -1395,7 +1397,7 @@ async fn lost_import_commit_response_accepts_identical_retry_and_rejects_mismatc
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn applied_receipt_is_an_idempotent_tombstone_without_event_replay() {
+async fn applied_receipt_older_than_pending_ttl_remains_an_idempotent_tombstone() {
     let temp = tempfile::tempdir().unwrap();
     let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
         "peer-secondary",
@@ -1405,14 +1407,10 @@ async fn applied_receipt_is_an_idempotent_tombstone_without_event_replay() {
     ))
     .await
     .unwrap();
-    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
-        "peer-primary",
-        "Primary",
-        temp.path(),
-        0,
-    ))
-    .await
-    .unwrap();
+    let primary_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let primary = TransferRuntime::spawn(primary_config.clone())
+        .await
+        .unwrap();
     pair_peers(&primary, &secondary, "peer-secondary").await;
     let preflight = primary
         .prepare_transfer_preflight("peer-secondary", "task-source")
@@ -1427,6 +1425,9 @@ async fn applied_receipt_is_an_idempotent_tombstone_without_event_replay() {
         .mark_import_commit_applied(&preflight.transfer_id)
         .await
         .unwrap();
+    drop(primary);
+    age_import_commit_receipt_past_pending_ttl(temp.path(), "peer-primary", &preflight.transfer_id);
+    let primary = TransferRuntime::spawn(primary_config).await.unwrap();
 
     let retry = send_raw_import_committed(
         temp.path(),
@@ -1440,6 +1441,18 @@ async fn applied_receipt_is_an_idempotent_tombstone_without_event_replay() {
     .await
     .expect("applied duplicate response");
     assert!(matches!(retry, PeerResponse::ImportCommitted { .. }));
+    let mismatch = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "different-task-dest",
+        true,
+    )
+    .await
+    .expect("mismatched applied duplicate response");
+    assert!(matches!(mismatch, PeerResponse::Error { .. }));
     tokio::time::timeout(Duration::from_millis(100), primary.next_event())
         .await
         .expect_err("applied duplicate emitted another event");
@@ -2136,6 +2149,32 @@ async fn next_outgoing_transfer_committed(
             RuntimeEvent::TerminalEvent { .. } => {}
         }
     }
+}
+
+fn age_import_commit_receipt_past_pending_ttl(
+    registry_root: &Path,
+    peer_id: &str,
+    transfer_id: &str,
+) {
+    let digest = Sha256::digest(transfer_id.as_bytes());
+    let transfer_key = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let receipt_path = registry_root
+        .join("transfer-replay")
+        .join(URL_SAFE_NO_PAD.encode(peer_id))
+        .join("receipts")
+        .join(format!("{transfer_key}.json"));
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).expect("read receipt"))
+            .expect("parse receipt");
+    receipt["created_at_unix_ms"] = json!(1);
+    std::fs::write(
+        receipt_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize aged receipt"),
+    )
+    .expect("age receipt");
 }
 
 async fn send_raw_import_committed(

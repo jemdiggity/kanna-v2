@@ -79,14 +79,13 @@ impl TransferReplayStore {
     pub(super) fn load_receipts(
         &self,
     ) -> Result<HashMap<String, ImportCommitReceipt>, RuntimeError> {
-        let now_ms = unix_ms();
         let mut loaded = HashMap::new();
         for (path, stored) in
             self.load_records::<StoredImportCommitReceipt>(&self.root.join("receipts"))?
         {
-            if self.is_expired(stored.created_at_unix_ms, now_ms)
-                || path != self.receipt_path(&stored.transfer_id)
-            {
+            // Receipts are durable protocol history, not pending reservations:
+            // unapplied entries must replay and applied entries remain idempotency tombstones.
+            if path != self.receipt_path(&stored.transfer_id) {
                 let _ = fs::remove_file(path);
                 continue;
             }
