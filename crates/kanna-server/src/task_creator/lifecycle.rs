@@ -111,16 +111,45 @@ pub(crate) async fn spawn_prepared_task_for_api(
 pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(
     db_path: &str,
     daemon: &mut DaemonClient,
-    prepared: PreparedTaskSpawn,
+    mut prepared: PreparedTaskSpawn,
 ) -> Result<crate::mobile_api::CreateTaskResponse, String> {
-    let created = spawn_prepared_task_for_api(daemon, prepared.clone()).await?;
-    // Spawn bookkeeping is a synchronous SQLite write; several callers run on
-    // the shared runtime, so keep it on the blocking pool.
+    let run_id = generate_stage_run_id(&prepared.created_task.task_id);
+    prepared
+        .env
+        .insert("KANNA_STAGE_RUN_ID".to_string(), run_id.clone());
     let record_db_path = db_path.to_string();
-    tokio::task::spawn_blocking(move || record_spawned_stage_run(&record_db_path, &prepared))
-        .await
-        .map_err(|join_error| format!("stage run record worker failed: {join_error}"))??;
-    Ok(created)
+    let pending = prepared.clone();
+    let pending_run_id = run_id.clone();
+    tokio::task::spawn_blocking(move || {
+        record_spawned_stage_run(&record_db_path, &pending, &pending_run_id)
+    })
+    .await
+    .map_err(|join_error| format!("stage run record worker failed: {join_error}"))??;
+
+    match spawn_prepared_task_for_api(daemon, prepared.clone()).await {
+        Ok(created) => {
+            let record_db_path = db_path.to_string();
+            tokio::task::spawn_blocking(move || {
+                let db = Db::open(&record_db_path).map_err(|e| format!("db error: {e}"))?;
+                db.start_stage_run(&run_id)
+                    .map_err(|e| format!("db error: {e}"))
+            })
+            .await
+            .map_err(|join_error| format!("stage run start worker failed: {join_error}"))??;
+            Ok(created)
+        }
+        Err(error) => {
+            let record_db_path = db_path.to_string();
+            let failure = error.clone();
+            tokio::task::spawn_blocking(move || {
+                let db = Db::open(&record_db_path).map_err(|e| format!("db error: {e}"))?;
+                record_prepared_task_spawn_failure(&db, &prepared, &run_id, &failure)
+            })
+            .await
+            .map_err(|join_error| format!("spawn diagnostics worker failed: {join_error}"))??;
+            Err(error)
+        }
+    }
 }
 
 pub(crate) async fn spawn_prepared_task_for_api_with_diagnostics(
@@ -130,21 +159,10 @@ pub(crate) async fn spawn_prepared_task_for_api_with_diagnostics(
 ) -> Result<crate::mobile_api::CreateTaskResponse, String> {
     match spawn_prepared_task_for_api_recording_stage_run(db_path, daemon, prepared.clone()).await {
         Ok(created) => Ok(created),
-        Err(err) => {
-            let record_db_path = db_path.to_string();
-            let spawn_err = err.clone();
-            let task_id = prepared.created_task.task_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let db = Db::open(&record_db_path).map_err(|open_err| {
-                    format!("{spawn_err}; diagnostics failed: db error: {open_err}")
-                })?;
-                record_prepared_task_spawn_failure(&db, &prepared, &spawn_err)
-                    .map_err(|record_err| format!("{spawn_err}; diagnostics failed: {record_err}"))
-            })
-            .await
-            .map_err(|join_error| format!("spawn diagnostics worker failed: {join_error}"))??;
-            Err(format!("task {task_id} failed to spawn: {err}"))
-        }
+        Err(err) => Err(format!(
+            "task {} failed to spawn: {err}",
+            prepared.created_task.task_id
+        )),
     }
 }
 
@@ -159,7 +177,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     db_path: &str,
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
-    prepared: PreparedStageRunSpawn,
+    mut prepared: PreparedStageRunSpawn,
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
     let session_id = prepared.session_id.clone();
@@ -167,6 +185,14 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         .workspace_teardown
         .as_ref()
         .map(|teardown| teardown.session_id.clone());
+
+    if prepared.resumed_from_run_id.is_some() {
+        let capabilities = daemon
+            .capabilities()
+            .await
+            .map_err(|error| format!("daemon capability negotiation failed: {error}"))?;
+        crate::daemon_client::require_provider_resume(&capabilities)?;
+    }
 
     // A manual advance can leave the previous stage's run open (no explicit
     // agent verdict); moving forward treats that work as accepted. Revision
@@ -179,10 +205,49 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             .map_err(|e| format!("db error: {}", e))?;
     }
 
+    // Establish immutable ownership before the daemon can emit lifecycle
+    // events. The same token is inherited by the child process and echoed by
+    // the daemon on SessionCreated, ProviderSessionChanged, and Exit.
+    let run_id = generate_stage_run_id(&task_id);
+    prepared
+        .env
+        .insert("KANNA_STAGE_RUN_ID".to_string(), run_id.clone());
+    if let Some(provider_session_id) = prepared.provider_session_id.as_ref() {
+        prepared.env.insert(
+            "KANNA_PROVIDER_SESSION_ID".to_string(),
+            provider_session_id.clone(),
+        );
+    }
+    {
+        let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+        db.insert_stage_run_with_completion_transition(
+            NewStageRun {
+                id: &run_id,
+                task_id: &task_id,
+                stage: &prepared.run_stage,
+                kind: prepared.run_kind,
+                agent: prepared.stage_agent.as_deref(),
+                agent_provider: Some(prepared.agent_provider.as_str()),
+                model: prepared.model.as_deref(),
+                status: "pending",
+                result: None,
+                feedback: prepared.feedback.as_deref(),
+                session_id: Some(&session_id),
+                provider_session_id: prepared.provider_session_id.as_deref(),
+                cwd: Some(&prepared.cwd),
+                resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
+            },
+            Some(prepared.completion_transition.as_str()),
+        )
+        .map_err(|e| format!("db error: {}", e))?;
+    }
+
     // Only a freshly forked workspace is rolled back on failure; a resumed
     // workspace pre-exists this spawn and must survive it.
     if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
-        return Err(rollback_prepared_stage_fork(&prepared, error));
+        return Err(fail_prepared_stage_spawn(
+            db_path, &run_id, &prepared, error,
+        ));
     }
     if !matches!(prepared.workspace, PreparedRunWorkspace::Current) {
         // The prewarmed shell session points at the previous worktree; kill
@@ -190,7 +255,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         if let Err(error) =
             kill_session_replacing(daemon, replacements, &format!("shell-wt-{task_id}")).await
         {
-            return Err(rollback_prepared_stage_fork(&prepared, error));
+            return Err(fail_prepared_stage_spawn(
+                db_path, &run_id, &prepared, error,
+            ));
         }
         if let Some(teardown_session_id) = teardown_session_id.as_deref() {
             if let Err(error) =
@@ -213,22 +280,54 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     let event = match daemon.send_command(&command).await {
         Ok(event) => event,
         Err(e) => {
-            return Err(rollback_prepared_stage_fork(
+            return Err(fail_prepared_stage_spawn(
+                db_path,
+                &run_id,
                 &prepared,
                 format!("daemon error: {}", e),
             ))
         }
     };
     match event {
-        DaemonEvent::SessionCreated { .. } => {}
+        DaemonEvent::SessionCreated {
+            run_id: Some(created_run_id),
+            ..
+        } if created_run_id == run_id => {}
+        DaemonEvent::SessionCreated { run_id: None, .. }
+            if prepared.resumed_from_run_id.is_none() => {}
+        DaemonEvent::SessionCreated {
+            run_id: created_run_id,
+            ..
+        } => {
+            let ownership_error = format!(
+                "daemon returned mismatched run ownership (expected {run_id}, got {created_run_id:?})"
+            );
+            if let Err(cleanup_error) =
+                kill_session_replacing(daemon, replacements, &session_id).await
+            {
+                log::warn!(
+                    "failed to clean up mismatched stage session {session_id}: {cleanup_error}"
+                );
+            }
+            return Err(fail_prepared_stage_spawn(
+                db_path,
+                &run_id,
+                &prepared,
+                ownership_error,
+            ));
+        }
         DaemonEvent::Error { message, .. } => {
-            return Err(rollback_prepared_stage_fork(
+            return Err(fail_prepared_stage_spawn(
+                db_path,
+                &run_id,
                 &prepared,
                 format!("daemon error: {}", message),
             ))
         }
         other => {
-            return Err(rollback_prepared_stage_fork(
+            return Err(fail_prepared_stage_spawn(
+                db_path,
+                &run_id,
                 &prepared,
                 format!("unexpected daemon response: {:?}", other),
             ))
@@ -245,7 +344,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
             log::warn!("failed to clean up stale stage session {session_id}: {error}");
         }
-        return Err(rollback_prepared_stage_fork(
+        return Err(fail_prepared_stage_spawn(
+            db_path,
+            &run_id,
             &prepared,
             format!("task {task_id} closed before stage transition landed"),
         ));
@@ -265,7 +366,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                             "failed to clean up stale stage session {session_id}: {kill_error}"
                         );
                     }
-                    return Err(rollback_prepared_stage_fork(
+                    return Err(fail_prepared_stage_spawn(
+                        db_path,
+                        &run_id,
                         &prepared,
                         format!("task {task_id} closed before stage transition landed"),
                     ));
@@ -290,7 +393,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                             "failed to clean up stale stage session {session_id}: {kill_error}"
                         );
                     }
-                    return Err(rollback_prepared_stage_fork(
+                    return Err(fail_prepared_stage_spawn(
+                        db_path,
+                        &run_id,
                         &prepared,
                         format!("task {task_id} closed before stage transition landed"),
                     ));
@@ -303,27 +408,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_agent_session_id(&task_id, prepared.provider_session_id.as_deref())
         .map_err(|e| format!("db error: {}", e))?;
-    let run_id = generate_stage_run_id(&task_id);
-    db.insert_stage_run_with_completion_transition(
-        NewStageRun {
-            id: &run_id,
-            task_id: &task_id,
-            stage: &prepared.run_stage,
-            kind: prepared.run_kind,
-            agent: prepared.stage_agent.as_deref(),
-            agent_provider: Some(prepared.agent_provider.as_str()),
-            model: prepared.model.as_deref(),
-            status: "running",
-            result: None,
-            feedback: prepared.feedback.as_deref(),
-            session_id: Some(&session_id),
-            provider_session_id: prepared.provider_session_id.as_deref(),
-            cwd: Some(&prepared.cwd),
-            resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
-        },
-        Some(prepared.completion_transition.as_str()),
-    )
-    .map_err(|e| format!("db error: {}", e))?;
+    db.start_stage_run(&run_id)
+        .map_err(|e| format!("db error: {}", e))?;
 
     spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
 
@@ -332,6 +418,21 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         follow_task: None,
         revision_budget: None,
     })
+}
+
+fn fail_prepared_stage_spawn(
+    db_path: &str,
+    run_id: &str,
+    prepared: &PreparedStageRunSpawn,
+    error: String,
+) -> String {
+    let recorded_error = match Db::open(db_path).and_then(|db| {
+        db.finish_stage_run(run_id, "failed", Some(&error), Some("stage spawn failed"))
+    }) {
+        Ok(()) => error,
+        Err(db_error) => format!("{error}; failed to record stage spawn failure: {db_error}"),
+    };
+    rollback_prepared_stage_fork(prepared, recorded_error)
 }
 
 fn rollback_prepared_stage_fork(prepared: &PreparedStageRunSpawn, error: String) -> String {
@@ -669,9 +770,12 @@ fn spawn_session_command(
     }
 }
 
-fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Result<(), String> {
+fn record_spawned_stage_run(
+    db_path: &str,
+    prepared: &PreparedTaskSpawn,
+    run_id: &str,
+) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    let run_id = generate_stage_run_id(&prepared.created_task.task_id);
     db.with_immediate_transaction(|db| {
         db.update_pipeline_item_agent_session_id(
             &prepared.created_task.task_id,
@@ -679,14 +783,14 @@ fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Resu
         )?;
         db.insert_stage_run_with_completion_transition(
             NewStageRun {
-                id: &run_id,
+                id: run_id,
                 task_id: &prepared.created_task.task_id,
                 stage: &prepared.created_task.stage,
                 kind: "main",
                 agent: prepared.stage_agent.as_deref(),
                 agent_provider: Some(prepared.agent_provider.as_str()),
                 model: prepared.model.as_deref(),
-                status: "running",
+                status: "pending",
                 result: None,
                 feedback: None,
                 session_id: Some(&prepared.session_id),
@@ -704,6 +808,7 @@ fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Resu
 fn record_prepared_task_spawn_failure(
     db: &Db,
     prepared: &PreparedTaskSpawn,
+    run_id: &str,
     error: &str,
 ) -> Result<(), String> {
     let task_id = prepared.created_task.task_id.as_str();
@@ -714,24 +819,8 @@ fn record_prepared_task_spawn_failure(
         .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_agent_session_id(task_id, prepared.provider_session_id.as_deref())
         .map_err(|e| format!("db error: {}", e))?;
-    let run_id = generate_stage_run_id(task_id);
-    db.insert_stage_run(NewStageRun {
-        id: &run_id,
-        task_id,
-        stage: &prepared.created_task.stage,
-        kind: "main",
-        agent: prepared.stage_agent.as_deref(),
-        agent_provider: Some(prepared.agent_provider.as_str()),
-        model: prepared.model.as_deref(),
-        status: "failed",
-        result: Some(&result),
-        feedback: Some("task spawn failed"),
-        session_id: Some(&prepared.session_id),
-        provider_session_id: prepared.provider_session_id.as_deref(),
-        cwd: Some(&prepared.cwd),
-        resumed_from_run_id: None,
-    })
-    .map_err(|e| format!("db error: {}", e))
+    db.finish_stage_run(run_id, "failed", Some(&result), Some("task spawn failed"))
+        .map_err(|e| format!("db error: {}", e))
 }
 
 #[allow(clippy::too_many_arguments)]

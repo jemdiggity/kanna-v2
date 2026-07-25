@@ -238,9 +238,15 @@ pub(crate) async fn run_daemon() {
             let rows = handoff.rows;
             let cols = handoff.cols;
             let stream_control = StreamControl::new();
+            let codex_session_locator = crate::codex_session::CodexSessionLocator::from_handoff(
+                handoff.agent_provider,
+                &handoff.cwd,
+                handoff.provider_session_id.clone(),
+            );
             let handle = Arc::new(SessionHandle::new(SessionRecord {
                 pty: pty_session,
                 run_id: handoff.run_id,
+                codex_session_locator,
                 headless_terminal,
                 stream_control: None,
                 agent_provider: handoff.agent_provider,

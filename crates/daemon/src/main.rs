@@ -2,6 +2,7 @@ mod agent_runtime;
 #[cfg(test)]
 mod bench;
 mod client;
+mod codex_session;
 mod connection;
 mod fanout;
 mod fd;

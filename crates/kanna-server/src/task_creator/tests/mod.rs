@@ -290,13 +290,27 @@ async fn spawn_fake_daemon_fork_transition(
             let command: kanna_daemon::protocol::Command =
                 serde_json::from_str(line.trim()).unwrap();
             let response = match &command {
+                kanna_daemon::protocol::Command::List => {
+                    kanna_daemon::protocol::Event::SessionList {
+                        sessions: Vec::new(),
+                        capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+                    }
+                }
                 kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
-                kanna_daemon::protocol::Command::Spawn { session_id, .. }
-                | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
+                kanna_daemon::protocol::Command::Spawn {
+                    session_id, env, ..
+                } => {
                     spawns += 1;
                     kanna_daemon::protocol::Event::SessionCreated {
                         session_id: session_id.clone(),
-                        run_id: None,
+                        run_id: env.get("KANNA_STAGE_RUN_ID").cloned(),
+                    }
+                }
+                kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+                    spawns += 1;
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                        run_id: params.env.get("KANNA_STAGE_RUN_ID").cloned(),
                     }
                 }
                 other => panic!("unexpected daemon command: {other:?}"),

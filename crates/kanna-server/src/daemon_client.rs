@@ -50,6 +50,7 @@ fn list_from_event(event: Event) -> Result<DaemonList, String> {
     }
 }
 
+#[cfg(test)]
 fn capabilities_from_list_event(event: Event) -> Result<DaemonCapabilities, String> {
     Ok(list_from_event(event)?.capabilities)
 }

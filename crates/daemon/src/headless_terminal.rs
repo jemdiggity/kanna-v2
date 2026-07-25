@@ -280,12 +280,6 @@ impl HeadlessTerminal {
         Ok(waiting_prompt_from_lines(&footer_lines, provider))
     }
 
-    pub fn codex_resume_session_id(&mut self) -> HeadlessTerminalResult<Option<String>> {
-        let footer_lines = self.visible_footer_lines(16)?;
-        let joined = footer_lines.join(" ");
-        Ok(extract_codex_resume_session_id(&joined))
-    }
-
     pub fn from_snapshot(
         snapshot: &TerminalSnapshot,
         scrollback: usize,
@@ -355,55 +349,6 @@ pub fn bound_waiting_prompt(value: &str) -> Option<String> {
         .collect::<String>();
     bounded.push('…');
     Some(bounded)
-}
-
-fn extract_codex_resume_session_id(text: &str) -> Option<String> {
-    let tokens: Vec<String> = text
-        .split_whitespace()
-        .map(|token| {
-            token
-                .trim_matches(|ch: char| {
-                    matches!(ch, '"' | '\'' | '`' | ',' | '.' | ';' | ':' | '(' | ')')
-                })
-                .to_string()
-        })
-        .collect();
-
-    for window in tokens.windows(3) {
-        if !window[0].eq_ignore_ascii_case("codex") {
-            continue;
-        }
-        if !window[1].eq_ignore_ascii_case("resume") {
-            continue;
-        }
-        if is_uuid_like(&window[2]) {
-            return Some(window[2].clone());
-        }
-    }
-
-    None
-}
-
-fn is_uuid_like(value: &str) -> bool {
-    if value.len() != 36 {
-        return false;
-    }
-
-    for (index, ch) in value.chars().enumerate() {
-        let expects_dash = matches!(index, 8 | 13 | 18 | 23);
-        if expects_dash {
-            if ch != '-' {
-                return false;
-            }
-            continue;
-        }
-
-        if !ch.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-
-    true
 }
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
@@ -1328,26 +1273,6 @@ mod tests {
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
-        );
-    }
-
-    #[test]
-    fn codex_resume_session_id_comes_from_visible_footer_content() {
-        let mut headless_terminal = HeadlessTerminal::new(48, 6, 10_000).unwrap();
-        headless_terminal.write(
-            concat!(
-                "Header\r\n",
-                "Done\r\n",
-                "To continue this session, run codex\r\n",
-                "resume 019d99a5-aa94-7c73-b786-644cc095c037\r\n",
-                "›\r\n"
-            )
-            .as_bytes(),
-        );
-
-        assert_eq!(
-            headless_terminal.codex_resume_session_id().unwrap(),
-            Some("019d99a5-aa94-7c73-b786-644cc095c037".to_string())
         );
     }
 

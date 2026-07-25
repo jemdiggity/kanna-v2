@@ -208,6 +208,19 @@ impl Db {
         Ok(())
     }
 
+    pub fn start_stage_run(&self, id: &str) -> Result<(), rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE stage_run
+             SET status = 'running'
+             WHERE id = ?1 AND status = 'pending'",
+            [id],
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
     /// Finish the task's most recent `running` run, returning its kind so
     /// callers can tell whether a main run or a post completed.
     /// Returns `Ok(None)` without writing when no run is running.

@@ -612,6 +612,78 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+#[tokio::test]
+async fn old_daemon_cannot_record_a_resumed_revision_run() {
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    let config = test_config("revision-resume-old-daemon");
+    let (repo_root, db) = init_resume_revision_fixture("revision-resume-old-daemon", &config);
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
+    let claude_config_dir = repo_root.join("claude-config");
+    write_resume_transcript(&claude_config_dir, &impl_worktree);
+    std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Retry safely against a legacy daemon.",
+    )
+    .unwrap();
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::List
+        ));
+        let response = serde_json::to_string(&kanna_daemon::protocol::Event::SessionList {
+            sessions: Vec::new(),
+            capabilities: None,
+        })
+        .unwrap();
+        write_half.write_all(response.as_bytes()).await.unwrap();
+        write_half.write_all(b"\n").await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept())
+                .await
+                .is_err(),
+            "resume rejection must not open another daemon connection"
+        );
+    });
+
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .unwrap_err();
+    fake_daemon.await.unwrap();
+
+    assert!(error.contains("daemon does not support provider resume"));
+    assert_eq!(db.list_stage_runs_for_task("review-task").unwrap().len(), 1);
+    assert_eq!(
+        db.get_task_stage_source("review-task")
+            .unwrap()
+            .unwrap()
+            .stage
+            .as_deref(),
+        Some("review")
+    );
+    assert!(impl_worktree.is_dir());
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[test]
 fn request_revision_resumes_supported_provider_sessions_in_their_worktree() {
     for (provider, command_fragment) in [

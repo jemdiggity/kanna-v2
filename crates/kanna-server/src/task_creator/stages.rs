@@ -568,8 +568,8 @@ pub(crate) fn prepare_revision_task_for_api(
 /// Try to prepare a revision as a resumed run of the target stage's previous
 /// agent session, in that run's own worktree. Returns `Ok(None)` — fresh-fork
 /// fallback — when any precondition fails: no recorded resumable run, a
-/// non-Claude provider, the worktree or CLI transcript gone, or the worktree
-/// no longer holding exactly the task's committed tip.
+/// provider without resume support, the worktree or required CLI transcript
+/// gone, or the worktree no longer holding exactly the task's committed tip.
 fn prepare_revision_resume(
     db: &Db,
     config: &Config,

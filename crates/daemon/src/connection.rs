@@ -293,6 +293,8 @@ pub(crate) async fn handle_command(
 
             lost_handoff_sessions.lock().await.remove(&session_id);
             let run_id = env.get("KANNA_STAGE_RUN_ID").cloned();
+            let codex_session_locator =
+                crate::codex_session::CodexSessionLocator::before_spawn(agent_provider, &cwd, &env);
 
             match pty::PtySession::spawn(&executable, &args, &cwd, &env, cols, rows) {
                 Ok(mut pty_session) => {
@@ -367,6 +369,7 @@ pub(crate) async fn handle_command(
                     let handle = Arc::new(SessionHandle::new(SessionRecord {
                         pty: pty_session,
                         run_id: run_id.clone(),
+                        codex_session_locator,
                         headless_terminal,
                         stream_control: Some(stream_control.clone()),
                         agent_provider,

@@ -897,7 +897,7 @@ pub(crate) async fn handle_handoff(
                     agent_provider: parts.agent_provider,
                     status: parts.status,
                     kind: protocol::SessionKind::Pty,
-                    provider_session_id: None,
+                    provider_session_id: parts.provider_session_id,
                     agent_fd_count: 0,
                     agent_spawn: None,
                 });

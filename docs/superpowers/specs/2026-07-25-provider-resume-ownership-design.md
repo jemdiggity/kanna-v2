@@ -50,7 +50,7 @@ before launching the process. It then discovers the new conversation through
 Codex-owned `session_meta` records under the effective Codex home. A candidate is
 accepted only when:
 
-- its origin is the Codex TUI;
+- its origin is the Codex CLI (`codex_cli_rs`);
 - its canonical working directory equals the spawned worktree;
 - its UUID was not present in the pre-spawn snapshot; and
 - it was created during the current spawn lifetime.

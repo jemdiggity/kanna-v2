@@ -397,7 +397,9 @@ fn headless_session_broadcasts_discovered_provider_session_id() {
     let daemon = DaemonHandle::start_in(&dir);
 
     let mut subscriber = daemon.connect();
-    subscriber.send(&Command::Subscribe);
+    subscriber.send(&Command::SubscribeEvents {
+        version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
+    });
     assert!(matches!(subscriber.recv(), Event::Ok));
 
     let mut control = daemon.connect();

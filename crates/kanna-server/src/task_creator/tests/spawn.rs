@@ -1,5 +1,53 @@
 use super::*;
 
+async fn spawn_fake_daemon_asserting_pending_run(
+    daemon_dir: String,
+    db_path: String,
+) -> tokio::task::JoinHandle<()> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        let (session_id, run_id) = match command {
+            kanna_daemon::protocol::Command::Spawn {
+                session_id, env, ..
+            }
+            | kanna_daemon::protocol::Command::SpawnAgent {
+                session_id,
+                params: kanna_daemon::protocol::AgentSpawnParams { env, .. },
+            } => {
+                let run_id = env
+                    .get("KANNA_STAGE_RUN_ID")
+                    .cloned()
+                    .expect("spawn must carry immutable stage-run ownership");
+                (session_id, run_id)
+            }
+            other => panic!("expected spawn command, got {other:?}"),
+        };
+        let runs = Db::open(&db_path)
+            .unwrap()
+            .list_stage_runs_for_task("task-1")
+            .unwrap();
+        assert_eq!(runs.len(), 1, "run must exist before daemon spawn");
+        assert_eq!(runs[0].id, run_id);
+        assert_eq!(runs[0].status, "pending");
+
+        let response = serde_json::to_string(&kanna_daemon::protocol::Event::SessionCreated {
+            session_id,
+            run_id: Some(run_id),
+        })
+        .unwrap();
+        write_half.write_all(response.as_bytes()).await.unwrap();
+        write_half.write_all(b"\n").await.unwrap();
+    })
+}
+
 #[tokio::test]
 async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
     let config = test_config("spawn-prepared-agent-command");
@@ -62,7 +110,7 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
 }
 
 #[tokio::test]
-async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
+async fn spawn_records_pending_stage_run_before_daemon_can_emit_events() {
     let config = test_config("spawn-records-stage-run");
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -75,7 +123,9 @@ async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
         "2026-07-02 00:00:00",
     )
     .unwrap();
-    let daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+    let daemon =
+        spawn_fake_daemon_asserting_pending_run(config.daemon_dir.clone(), config.db_path.clone())
+            .await;
     let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let prepared = PreparedTaskSpawn {
         created_task: CreatedTask {

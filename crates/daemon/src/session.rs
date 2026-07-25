@@ -5,6 +5,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use crate::codex_session::CodexSessionLocator;
 use crate::headless_terminal::HeadlessTerminal;
 use crate::protocol::{AgentProvider, SessionInfo, SessionState, SessionStatus};
 use crate::pty::PtySession;
@@ -71,6 +72,7 @@ impl StreamControl {
 pub struct SessionRecord {
     pub pty: PtySession,
     pub run_id: Option<String>,
+    pub codex_session_locator: Option<CodexSessionLocator>,
     pub headless_terminal: HeadlessTerminal,
     pub stream_control: Option<StreamControl>,
     pub agent_provider: Option<AgentProvider>,
@@ -82,6 +84,7 @@ pub struct SessionRecord {
 pub struct SessionRuntimeState {
     pub headless_terminal: HeadlessTerminal,
     pub run_id: Option<String>,
+    pub codex_session_locator: Option<CodexSessionLocator>,
     pub stream_control: Option<StreamControl>,
     pub agent_provider: Option<AgentProvider>,
     pub status: SessionStatus,
@@ -117,6 +120,7 @@ impl SessionHandle {
             state: Mutex::new(SessionRuntimeState {
                 headless_terminal: record.headless_terminal,
                 run_id: record.run_id,
+                codex_session_locator: record.codex_session_locator,
                 stream_control: record.stream_control,
                 agent_provider: record.agent_provider,
                 status: record.status,
@@ -238,11 +242,10 @@ impl SessionHandle {
         &self,
     ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
-        if state.agent_provider != Some(AgentProvider::Codex) {
-            return Ok(None);
-        }
-
-        state.headless_terminal.codex_resume_session_id()
+        Ok(state
+            .codex_session_locator
+            .as_mut()
+            .and_then(CodexSessionLocator::discover))
     }
 
     pub async fn run_id(&self) -> Option<String> {
@@ -413,6 +416,10 @@ impl SessionHandle {
 
         let mut state = self.state.lock().await;
         let snapshot = state.headless_terminal.snapshot().ok();
+        let provider_session_id = state
+            .codex_session_locator
+            .as_mut()
+            .and_then(CodexSessionLocator::discover);
         Ok(Some(SessionHandoffParts {
             pid,
             child_start,
@@ -422,6 +429,7 @@ impl SessionHandle {
             cols,
             snapshot,
             agent_provider: state.agent_provider,
+            provider_session_id,
             status: state.status,
             fd,
         }))
@@ -439,6 +447,7 @@ pub struct SessionHandoffParts {
     pub cols: u16,
     pub snapshot: Option<crate::protocol::TerminalSnapshot>,
     pub agent_provider: Option<AgentProvider>,
+    pub provider_session_id: Option<String>,
     pub status: SessionStatus,
     pub fd: std::os::fd::OwnedFd,
 }
@@ -903,6 +912,7 @@ mod tests {
         Ok(SessionRecord {
             pty,
             run_id: None,
+            codex_session_locator: None,
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
             stream_control: None,
             agent_provider: Some(provider),

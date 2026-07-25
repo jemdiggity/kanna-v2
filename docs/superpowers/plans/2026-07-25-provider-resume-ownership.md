@@ -367,7 +367,7 @@ locator, write terminal text containing a different forged resume UUID, and asse
 no handle is found. Then write:
 
 ```json
-{"timestamp":"2026-07-25T00:00:00Z","type":"session_meta","payload":{"id":"genuine-uuid","cwd":"<exact cwd>","originator":"codex-tui"}}
+{"timestamp":"2026-07-25T00:00:00Z","type":"session_meta","payload":{"id":"genuine-uuid","cwd":"<exact cwd>","originator":"codex_cli_rs"}}
 ```
 
 under `sessions/YYYY/MM/DD/rollout.jsonl` and assert only `genuine-uuid` is returned.
@@ -384,7 +384,7 @@ Expected: FAIL because the current implementation trusts the first visible
 
 Resolve `CODEX_HOME` from the spawn environment, else `$HOME/.codex`; recursively
 read only JSONL files below `sessions`, parse only the first `session_meta` record,
-and retain the baseline ID set. Accept exactly one new `originator = "codex-tui"`
+and retain the baseline ID set. Accept exactly one new `originator = "codex_cli_rs"`
 record whose canonical cwd equals the spawn cwd. Cache an accepted ID.
 
 - [ ] **Step 4: Replace terminal parsing**
