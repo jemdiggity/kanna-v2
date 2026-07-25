@@ -51,7 +51,7 @@ function createTaskCreationHarness() {
     createItem: vi.fn(async () => {}),
     createRepo: vi.fn(async () => "repo-1"),
     importRepo: vi.fn(async () => "repo-1"),
-    cloneAndImportRepo: vi.fn(async () => {}),
+    cloneAndImportRepo: vi.fn(async () => "repo-1"),
     listBlockersForItem: vi.fn(async () => []),
     loadAgent: vi.fn(async () => ({
       prompt: "Configure the GitHub flow by composing stock flavors.",
@@ -681,12 +681,32 @@ describe("useAppTaskCreation", () => {
     expect(creation.newTaskSubmissionPending.value).toBe(false);
   });
 
-  it("launches the setup agent after importing a repository", async () => {
+  it("skips the setup agent when an imported repository already has .kanna", async () => {
+    invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
+      if (command === "file_exists" && args?.path === "/repo/.kanna") return true;
+      return "";
+    });
     const { creation, store } = createTaskCreationHarness();
 
     await creation.handleImportRepo("/repo", "repo", "main");
 
     expect(store.importRepo).toHaveBeenCalledWith("/repo", "repo", "main");
+    expect(invokeMock).toHaveBeenCalledWith("file_exists", { path: "/repo/.kanna" });
+    expect(store.loadAgent).not.toHaveBeenCalled();
+    expect(store.createItem).not.toHaveBeenCalled();
+  });
+
+  it("launches the setup agent when an imported repository has no .kanna", async () => {
+    invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
+      if (command === "file_exists" && args?.path === "/repo/.kanna") return false;
+      return "";
+    });
+    const { creation, store } = createTaskCreationHarness();
+
+    await creation.handleImportRepo("/repo", "repo", "main");
+
+    expect(store.importRepo).toHaveBeenCalledWith("/repo", "repo", "main");
+    expect(invokeMock).toHaveBeenCalledWith("file_exists", { path: "/repo/.kanna" });
     expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "setup");
     expect(store.createItem).toHaveBeenCalledWith(
       "repo-1",
@@ -702,5 +722,46 @@ describe("useAppTaskCreation", () => {
       }),
     );
     expect(store.createItem.mock.calls[0]?.[4]).not.toHaveProperty("agentProvider");
+  });
+
+  it("skips the setup agent when a cloned repository already has .kanna", async () => {
+    invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
+      if (command === "file_exists" && args?.path === "/clone/.kanna") return true;
+      return "";
+    });
+    const { creation, store } = createTaskCreationHarness();
+
+    await creation.handleCloneRepo("git@github.com:kanna/repo.git", "/clone");
+
+    expect(store.cloneAndImportRepo).toHaveBeenCalledWith(
+      "git@github.com:kanna/repo.git",
+      "/clone",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("file_exists", { path: "/clone/.kanna" });
+    expect(store.loadAgent).not.toHaveBeenCalled();
+    expect(store.createItem).not.toHaveBeenCalled();
+  });
+
+  it("still launches the setup agent for a newly created repository", async () => {
+    const { creation, store } = createTaskCreationHarness();
+
+    await creation.handleCreateRepo("repo", "/repo");
+
+    expect(store.createRepo).toHaveBeenCalledWith("repo", "/repo");
+    expect(invokeMock).not.toHaveBeenCalledWith("file_exists", { path: "/repo/.kanna" });
+    expect(store.loadAgent).toHaveBeenCalledWith("repo-1", "setup");
+    expect(store.createItem).toHaveBeenCalledWith(
+      "repo-1",
+      "/repo",
+      "Set up Kanna for this repository.",
+      "pty",
+      expect.objectContaining({
+        customTask: expect.objectContaining({
+          name: "Set Up Repository",
+          agent: "setup",
+          prompt: "Set up Kanna for this repository.",
+        }),
+      }),
+    );
   });
 });

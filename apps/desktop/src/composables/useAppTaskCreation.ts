@@ -320,6 +320,15 @@ export function useAppTaskCreation({
     }
   }
 
+  async function launchSetupTaskIfNeeded(
+    repoId: string | null | undefined,
+    repoPath: string,
+  ) {
+    const hasKannaConfig = await fileExistsSafe(`${repoPath}/.kanna`);
+    if (hasKannaConfig) return;
+    await launchSetupTask(repoId, repoPath);
+  }
+
   async function handleCreateRepo(name: string, path: string) {
     try {
       const repoId = await store.createRepo(name, path);
@@ -335,7 +344,7 @@ export function useAppTaskCreation({
     try {
       const repoId = await store.importRepo(path, name, defaultBranch);
       showAddRepoModal.value = false;
-      await launchSetupTask(repoId, path);
+      await launchSetupTaskIfNeeded(repoId, path);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       toast.error(`${t('toasts.repoImportFailed')}: ${msg}`);
@@ -347,7 +356,7 @@ export function useAppTaskCreation({
     try {
       const repoId = await store.cloneAndImportRepo(url, destination);
       showAddRepoModal.value = false;
-      await launchSetupTask(repoId, destination);
+      await launchSetupTaskIfNeeded(repoId, destination);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       toast.error(`${t('toasts.cloneFailed')}: ${msg}`);
