@@ -1,5 +1,6 @@
 import type {
   CreateTaskResponse,
+  RepoCommandCatalog,
   RepoSummary,
   TaskActivity,
   TaskDiffContent,
@@ -232,6 +233,7 @@ export function createMobileController(
     | null = null;
   let recoveryStartedTaskId: string | null = null;
   let repoCommandLoadGeneration = 0;
+  const repoCommandCatalogs = new Map<string, RepoCommandCatalog>();
   const pendingTaskIdentities = new Map<
     string,
     {
@@ -787,7 +789,12 @@ export function createMobileController(
     }
     const generation = ++repoCommandLoadGeneration;
     while (repoId) {
-      store.setRepoCommandLoading(repoId);
+      const cachedCatalog = repoCommandCatalogs.get(repoId);
+      if (cachedCatalog) {
+        store.setRepoCommandCatalog(cachedCatalog);
+      } else {
+        store.setRepoCommandLoading(repoId);
+      }
       try {
         const catalog = await client.listRepoCommands(repoId);
         if (
@@ -796,13 +803,18 @@ export function createMobileController(
         ) {
           return;
         }
-        store.setRepoCommandCatalog({ ...catalog, repoId });
+        const normalizedCatalog = { ...catalog, repoId };
+        repoCommandCatalogs.set(repoId, normalizedCatalog);
+        store.setRepoCommandCatalog(normalizedCatalog);
         return;
       } catch (error) {
         if (
           generation !== repoCommandLoadGeneration ||
           store.getState().selectedRepoId !== repoId
         ) {
+          return;
+        }
+        if (cachedCatalog) {
           return;
         }
 
@@ -1809,6 +1821,8 @@ export function createMobileController(
         store.finishRepoCommandRun(commandId);
       }
       if (reloadCatalog) {
+        repoCommandCatalogs.delete(repoId);
+        store.setRepoCommandLoading(repoId);
         await loadRepoCommands();
       }
       return openedTaskId;
