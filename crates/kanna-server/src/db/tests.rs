@@ -1,5 +1,7 @@
 use super::NewStageRun;
-use super::{database_open_flags, Db, NewPipelineItem};
+use super::{
+    add_column, database_open_flags, run_migration, Db, NewPipelineItem, CURRENT_SCHEMA_MIGRATIONS,
+};
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -175,6 +177,169 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(stage_run_sql.contains("resumed_from_run_id"));
     assert!(stage_run_sql.contains("completion_transition"));
 
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn add_column_failure_rolls_back_migration_for_retry() {
+    let conn = Connection::open_in_memory().expect("open in-memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE schema_migrations (
+          id TEXT PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE retry_probe (id INTEGER PRIMARY KEY);
+        INSERT INTO retry_probe (id) VALUES (1);
+        "#,
+    )
+    .expect("seed migration probe");
+
+    let migration_id = "test_add_column_retry";
+    let first_result = run_migration(&conn, migration_id, |conn| {
+        add_column(conn, "retry_probe", "nullable_value", "TEXT")?;
+        add_column(conn, "retry_probe", "required_value", "TEXT NOT NULL")
+    });
+    assert!(
+        first_result.is_err(),
+        "invalid ALTER TABLE must fail the migration"
+    );
+
+    let rolled_back_column_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM pragma_table_xinfo('retry_probe')
+             WHERE name = 'nullable_value'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count rolled back columns");
+    assert_eq!(rolled_back_column_count, 0);
+
+    let failed_record_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
+            [migration_id],
+            |row| row.get(0),
+        )
+        .expect("count failed migration records");
+    assert_eq!(failed_record_count, 0);
+
+    run_migration(&conn, migration_id, |conn| {
+        add_column(conn, "retry_probe", "nullable_value", "TEXT")?;
+        add_column(
+            conn,
+            "retry_probe",
+            "required_value",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+    })
+    .expect("retry migration");
+
+    let successful_column_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM pragma_table_xinfo('retry_probe')
+             WHERE name IN ('nullable_value', 'required_value')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count successful columns");
+    assert_eq!(successful_column_count, 2);
+
+    let successful_record_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
+            [migration_id],
+            |row| row.get(0),
+        )
+        .expect("count successful migration records");
+    assert_eq!(successful_record_count, 1);
+}
+
+#[test]
+fn open_migrates_origin_main_028_activity_revision() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open origin/main fixture db");
+    conn.execute_batch(include_str!("fixtures/origin_main_028.sql"))
+        .expect("load origin/main schema fixture");
+    let migration_029_index = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|id| *id == "029_pipeline_item_activity_revision")
+        .expect("029 activity revision migration exists");
+    for migration_id in &CURRENT_SCHEMA_MIGRATIONS[..migration_029_index] {
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (?1)",
+            [migration_id],
+        )
+        .expect("record migration through 028");
+    }
+    drop(conn);
+
+    let db =
+        Db::open_migrated(path.to_str().expect("utf8 path")).expect("migrate origin/main fixture");
+
+    let activity_revision_metadata: (String, i64, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT type, \"notnull\", dflt_value
+             FROM pragma_table_info('pipeline_item')
+             WHERE name = 'activity_revision'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("activity revision metadata");
+    assert_eq!(
+        activity_revision_metadata,
+        ("INTEGER".to_string(), 1, Some("0".to_string()))
+    );
+
+    let stored_revision: i64 = db
+        .conn
+        .query_row(
+            "SELECT activity_revision FROM pipeline_item WHERE id = 'origin-main-task'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("backfilled activity revision");
+    assert_eq!(stored_revision, 0);
+
+    let item = db
+        .get_pipeline_item("origin-main-task")
+        .expect("load migrated pipeline item")
+        .expect("migrated pipeline item exists");
+    assert_eq!(item.activity_revision, 0);
+
+    let snapshot = db.ui_snapshot().expect("load migrated ui snapshot");
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].items.len(), 1);
+    assert_eq!(snapshot.entries[0].items[0].id, "origin-main-task");
+    assert_eq!(snapshot.entries[0].items[0].activity_revision, 0);
+    drop(db);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path"))
+        .expect("reopen migrated origin/main fixture");
+    let migration_029_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations
+             WHERE id = '029_pipeline_item_activity_revision'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count activity revision migrations");
+    assert_eq!(migration_029_count, 1);
+
+    db.update_pipeline_item_activity("origin-main-task", "working")
+        .expect("transition migrated activity");
+    let item = db
+        .get_pipeline_item("origin-main-task")
+        .expect("reload transitioned pipeline item")
+        .expect("transitioned pipeline item exists");
+    assert_eq!(item.activity.as_deref(), Some("working"));
+    assert_eq!(item.activity_revision, 1);
+
+    drop(db);
     let _ = std::fs::remove_file(path);
 }
 
