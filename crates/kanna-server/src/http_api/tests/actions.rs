@@ -199,7 +199,9 @@ async fn close_task_route_releases_claimed_ports() {
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
+                DaemonCommand::Kill { session_id, .. } => {
+                    assert_eq!(session_id, expected_session_id)
+                }
                 other => panic!("expected kill command, got {other:?}"),
             }
             write_half
@@ -1068,7 +1070,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::Kill { session_id } => {
+                DaemonCommand::Kill { session_id, .. } => {
                     assert_eq!(session_id, expected_session_id)
                 }
                 other => panic!("expected kill command, got {:?}", other),
@@ -1258,7 +1260,9 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
+                DaemonCommand::Kill { session_id, .. } => {
+                    assert_eq!(session_id, expected_session_id)
+                }
                 other => panic!("expected kill command, got {other:?}"),
             }
             write_half
@@ -3922,7 +3926,9 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
+                DaemonCommand::Kill { session_id, .. } => {
+                    assert_eq!(session_id, expected_session_id)
+                }
                 other => panic!("expected kill command, got {other:?}"),
             }
             write_half

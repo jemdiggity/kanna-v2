@@ -7,6 +7,13 @@ pub struct FinishedStageRun {
     pub completion_transition: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskActionState {
+    pub stage: String,
+    pub branch: String,
+    pub active_run_id: Option<String>,
+}
+
 /// Result of attaching a provider-native handle to its immutable owning run.
 pub struct ProviderSessionUpdate {
     pub changed: bool,
@@ -29,6 +36,89 @@ impl Db {
             [task_id],
             |row| row.get(0),
         )
+    }
+
+    /// Snapshot the ownership tuple every mutating task action must compare
+    /// before inserting or landing a replacement run.
+    pub fn task_action_state(&self, task_id: &str) -> Result<TaskActionState, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT p.stage, p.branch,
+                    (
+                      SELECT id
+                      FROM stage_run
+                      WHERE task_id = p.id
+                      ORDER BY datetime(started_at) DESC, rowid DESC
+                      LIMIT 1
+                    )
+             FROM pipeline_item p
+             WHERE p.id = ?1 AND p.closed_at IS NULL",
+            [task_id],
+            |row| {
+                Ok(TaskActionState {
+                    stage: row.get(0)?,
+                    branch: row.get(1)?,
+                    active_run_id: row.get(2)?,
+                })
+            },
+        )
+    }
+
+    /// Apply a completion verdict only to the latest run, optionally
+    /// requiring the immutable run id supplied by the agent process.
+    pub fn finish_active_stage_run(
+        &self,
+        task_id: &str,
+        expected_run_id: Option<&str>,
+        status: &str,
+        result: Option<&str>,
+        feedback: Option<&str>,
+    ) -> Result<Option<FinishedStageRun>, rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let run = transaction
+            .query_row(
+                "SELECT id, kind, completion_transition, status
+                 FROM stage_run
+                 WHERE task_id = ?1
+                 ORDER BY datetime(started_at) DESC, rowid DESC
+                 LIMIT 1",
+                [task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((run_id, kind, completion_transition, current_status)) = run else {
+            return Ok(None);
+        };
+        if expected_run_id.is_some_and(|expected| expected != run_id) {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        if !matches!(
+            current_status.as_str(),
+            "pending" | "running" | "succeeded" | "failed"
+        ) {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let changed = transaction.execute(
+            "UPDATE stage_run
+             SET status = ?2, result = ?3, feedback = ?4,
+                 finished_at = datetime('now')
+             WHERE id = ?1 AND task_id = ?5",
+            (&run_id, status, result, feedback, task_id),
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        transaction.commit()?;
+        Ok(Some(FinishedStageRun {
+            kind,
+            completion_transition,
+        }))
     }
 
     pub fn insert_stage_run(&self, run: NewStageRun<'_>) -> Result<(), rusqlite::Error> {
@@ -64,6 +154,92 @@ impl Db {
             ),
         )?;
         Ok(())
+    }
+
+    /// Reserve a successor run only while the task still has the exact
+    /// stage, branch, and latest-run ownership observed during preparation.
+    /// Finishing the source run and inserting the pending successor share
+    /// the same SQLite write transaction, so concurrent/retried actions
+    /// cannot both win.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_current_run_with_pending(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+        expected: &TaskActionState,
+        source_status: &str,
+        source_result: Option<&str>,
+        source_feedback: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT p.stage, p.branch,
+                        (
+                          SELECT id
+                          FROM stage_run
+                          WHERE task_id = p.id
+                          ORDER BY datetime(started_at) DESC, rowid DESC
+                          LIMIT 1
+                        )
+                 FROM pipeline_item p
+                 WHERE p.id = ?1 AND p.closed_at IS NULL",
+                [run.task_id],
+                |row| {
+                    Ok(TaskActionState {
+                        stage: row.get(0)?,
+                        branch: row.get(1)?,
+                        active_run_id: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        if current.as_ref() != Some(expected) {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+
+        if let Some(source_run_id) = expected.active_run_id.as_deref() {
+            transaction.execute(
+                "UPDATE stage_run
+                 SET status = ?2,
+                     result = COALESCE(?3, result),
+                     feedback = COALESCE(?4, feedback),
+                     finished_at = COALESCE(finished_at, datetime('now'))
+                 WHERE id = ?1 AND task_id = ?5 AND status IN ('pending', 'running')",
+                (
+                    source_run_id,
+                    source_status,
+                    source_result,
+                    source_feedback,
+                    run.task_id,
+                ),
+            )?;
+        }
+
+        transaction.execute(
+            "INSERT INTO stage_run
+             (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
+              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run.id,
+                run.task_id,
+                run.stage,
+                run.kind,
+                run.agent,
+                run.agent_provider,
+                run.model,
+                run.status,
+                run.result,
+                run.feedback,
+                run.session_id,
+                run.provider_session_id,
+                run.cwd,
+                run.resumed_from_run_id,
+                completion_transition,
+            ),
+        )?;
+        transaction.commit()
     }
 
     #[allow(dead_code)]
@@ -185,6 +361,42 @@ impl Db {
         Ok(ProviderSessionUpdate { changed: true })
     }
 
+    /// True only when `run_id` is the newest main run that owns the reusable
+    /// daemon session. Posts may be newer rows while continuing that same
+    /// process, but a newer main run permanently supersedes this owner.
+    pub fn is_active_main_run_owner(
+        &self,
+        run_id: &str,
+        session_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS (
+               SELECT 1
+               FROM stage_run owner
+               JOIN pipeline_item task ON task.id = owner.task_id
+               WHERE owner.id = ?1
+                 AND owner.kind = 'main'
+                 AND owner.session_id = ?2
+                 AND task.closed_at IS NULL
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM stage_run newer
+                   WHERE newer.task_id = owner.task_id
+                     AND newer.kind = 'main'
+                     AND (
+                       datetime(newer.started_at) > datetime(owner.started_at)
+                       OR (
+                         datetime(newer.started_at) = datetime(owner.started_at)
+                         AND newer.rowid > owner.rowid
+                       )
+                     )
+                 )
+             )",
+            (run_id, session_id),
+            |row| row.get(0),
+        )
+    }
+
     pub fn finish_stage_run(
         &self,
         id: &str,
@@ -221,6 +433,7 @@ impl Db {
     /// Updating the task first acquires SQLite's write lock while proving the
     /// task is still open; close therefore cannot interleave between the
     /// guarded task update, worktree ownership, and starting the exact run.
+    #[allow(dead_code)]
     pub fn land_stage_run(
         &self,
         task_id: &str,
@@ -229,7 +442,48 @@ impl Db {
         branch: Option<&str>,
         worktree: Option<(&str, &str, &str)>,
     ) -> Result<(), rusqlite::Error> {
+        self.land_stage_run_if_reserved(task_id, run_id, stage, branch, worktree, None)
+    }
+
+    pub fn land_stage_run_if_reserved(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        stage: &str,
+        branch: Option<&str>,
+        worktree: Option<(&str, &str, &str)>,
+        expected_source: Option<&TaskActionState>,
+    ) -> Result<(), rusqlite::Error> {
         let transaction = self.conn.unchecked_transaction()?;
+        if let Some(expected) = expected_source {
+            let reservation_is_current = transaction.query_row(
+                "SELECT EXISTS(
+                   SELECT 1
+                   FROM pipeline_item p
+                   WHERE p.id = ?1
+                     AND p.closed_at IS NULL
+                     AND p.stage = ?2
+                     AND p.branch = ?3
+                     AND (
+                       SELECT id
+                       FROM stage_run
+                       WHERE task_id = p.id
+                       ORDER BY datetime(started_at) DESC, rowid DESC
+                       LIMIT 1
+                     ) = ?4
+                 )",
+                (
+                    task_id,
+                    expected.stage.as_str(),
+                    expected.branch.as_str(),
+                    run_id,
+                ),
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !reservation_is_current {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
         let task_changed = match branch {
             Some(branch) => transaction.execute(
                 "UPDATE pipeline_item
@@ -341,51 +595,6 @@ impl Db {
                 "SELECT id, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status = 'running'
-                 ORDER BY datetime(started_at) DESC, rowid DESC
-                 LIMIT 1",
-                [task_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional();
-        let run = match run_result {
-            Ok(run) => run,
-            Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let Some((run_id, kind, completion_transition)) = run else {
-            return Ok(None);
-        };
-        self.finish_stage_run(&run_id, status, result, feedback)?;
-        Ok(Some(FinishedStageRun {
-            kind,
-            completion_transition,
-        }))
-    }
-
-    /// Re-finish the task's most recent already-finished run with a late
-    /// verdict. A parked task has no running run: an agent that reported
-    /// failure, fixed the problem, and reported success would otherwise lose
-    /// the verdict (and, for posts, the deferred transition). The latest
-    /// verdict wins.
-    pub fn refinish_latest_stage_run(
-        &self,
-        task_id: &str,
-        status: &str,
-        result: Option<&str>,
-        feedback: Option<&str>,
-    ) -> Result<Option<FinishedStageRun>, rusqlite::Error> {
-        let run_result = self
-            .conn
-            .query_row(
-                "SELECT id, kind, completion_transition
-                 FROM stage_run
-                 WHERE task_id = ? AND status IN ('succeeded', 'failed')
                  ORDER BY datetime(started_at) DESC, rowid DESC
                  LIMIT 1",
                 [task_id],

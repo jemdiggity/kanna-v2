@@ -18,6 +18,8 @@ pub enum AgentKillOutcome {
     /// A handoff transfer is in flight and this session is already inside the
     /// successor's snapshot. Refuse; the client retries against the new daemon.
     HandoffInFlight,
+    /// The session belongs to a different immutable stage run.
+    OwnershipMismatch,
 }
 
 /// Kill an agent session (task close): SIGKILL the child's process group,
@@ -25,6 +27,7 @@ pub enum AgentKillOutcome {
 /// task cleanup.
 pub async fn kill_agent_session(
     session_id: &str,
+    expected_run_id: Option<&str>,
     agents: &AgentSessions,
     broadcast_tx: &broadcast::Sender<String>,
 ) -> AgentKillOutcome {
@@ -46,6 +49,11 @@ pub async fn kill_agent_session(
         if super::agent_handoff_sealed() {
             Err(())
         } else {
+            if let (Some(expected), Some(record)) = (expected_run_id, registry.get(session_id)) {
+                if record.run_id.as_deref() != Some(expected) {
+                    return AgentKillOutcome::OwnershipMismatch;
+                }
+            }
             Ok(registry.remove(session_id))
         }
     };

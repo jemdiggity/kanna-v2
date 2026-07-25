@@ -12,6 +12,7 @@ use std::io::Write as IoWrite;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -28,6 +29,17 @@ pub type AgentClientWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
 
 /// Registry of agent sessions, separate from the PTY `SessionManager`.
 pub type AgentSessions = Arc<Mutex<HashMap<String, AgentSessionRecord>>>;
+
+static NEXT_AGENT_SPAWN_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_agent_spawn_generation() -> u64 {
+    NEXT_AGENT_SPAWN_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+pub fn reserve_agent_spawn_generation(generation: u64) {
+    let next = generation.saturating_add(1);
+    let _ = NEXT_AGENT_SPAWN_GENERATION.fetch_max(next, Ordering::Relaxed);
+}
 
 pub fn make_adapter(provider: AgentProvider) -> Option<Box<dyn ProviderAdapter + Send>> {
     match provider {
@@ -368,6 +380,9 @@ impl AgentJournal {
 pub struct AgentShared {
     pub journal: AgentJournal,
     pub writers: Vec<AgentClientWriter>,
+    /// Mirrors the registry owner's generation so a reader that passed an
+    /// earlier registry check cannot append after a replacement lands.
+    pub spawn_generation: u64,
 }
 
 /// One `AgentShared` — and therefore exactly one journal and one sequence
@@ -427,6 +442,8 @@ pub fn live_shared_agent_states() -> usize {
 pub struct AgentSessionRecord {
     pub provider: AgentProvider,
     pub run_id: Option<String>,
+    /// Immutable identity of the child whose pipes/readers own this record.
+    pub spawn_generation: u64,
     pub params: AgentSpawnParams,
     /// Adapter is shared with the reader thread (sync mutex: parse_line is
     /// CPU-only and never blocks).

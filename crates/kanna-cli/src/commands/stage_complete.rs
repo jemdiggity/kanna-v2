@@ -17,6 +17,7 @@ pub(crate) fn build_complete_stage_request(
         status,
         summary,
         metadata,
+        run_id: None,
     }
 }
 
@@ -39,6 +40,7 @@ pub(crate) async fn run(
     status: String,
     summary: String,
     metadata: Option<String>,
+    run_id: Option<String>,
     server_url: Option<&str>,
 ) {
     // Validate status
@@ -61,7 +63,12 @@ pub(crate) async fn run(
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
     let base_url = resolve_server_base_url(&borrowed_pairs, server_url);
-    let request = build_complete_stage_request(status.clone(), summary.clone(), metadata_value);
+    let mut request = build_complete_stage_request(status.clone(), summary.clone(), metadata_value);
+    request.run_id = run_id.filter(|value| !value.trim().is_empty()).or_else(|| {
+        env::var("KANNA_STAGE_RUN_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    });
     let response = complete_stage_via_api(&base_url, &task_id, &request)
         .await
         .unwrap_or_else(|e| {

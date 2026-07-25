@@ -209,6 +209,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("status", "status"),
                     ("summary", "summary"),
                     ("metadata", "metadata"),
+                    ("run_id", "run_id"),
                 ],
             },
         ),

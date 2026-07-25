@@ -29,10 +29,10 @@ use tokio::net::UnixListener;
 /// Serializes tests that point `CLAUDE_CONFIG_DIR` at a test-local session
 /// store: the variable is process-global, so concurrent writers would read
 /// each other's stores.
-static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod core;
-mod revision;
+pub(crate) mod revision;
 mod setup;
 mod spawn;
 mod stage;

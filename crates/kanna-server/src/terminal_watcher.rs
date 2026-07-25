@@ -47,6 +47,20 @@ fn persist_waiting_prompt(
     Ok(())
 }
 
+fn exit_still_owns_active_run(
+    state: &http_api::AppState,
+    session_id: &str,
+    run_id: Option<&str>,
+) -> Result<bool, String> {
+    let Some(run_id) = run_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(false);
+    };
+    crate::db::Db::open(&state.config().db_path)
+        .map_err(|error| format!("db error: {error}"))?
+        .is_active_main_run_owner(run_id, session_id)
+        .map_err(|error| format!("db error: {error}"))
+}
+
 fn apply_watcher_runtime_status(
     state: &http_api::AppState,
     session_id: &str,
@@ -333,6 +347,25 @@ async fn terminal_state_watcher_once(
                     // agent finishing.
                     continue;
                 }
+                match exit_still_owns_active_run(state, &session_id, run_id.as_deref()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        log::info!(
+                            "ignoring stale or unowned terminal exit for session {} run {:?}",
+                            session_id,
+                            run_id
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "failed to verify terminal exit ownership for {}: {}",
+                            session_id,
+                            error
+                        );
+                        continue;
+                    }
+                }
                 let success = code == 0;
                 if let Err(error) =
                     http_api::handle_task_terminal_state(state, &session_id, success).await
@@ -593,6 +626,71 @@ mod tests {
                     code: 0,
                     resume_session_id: None,
                     killed: true,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            expect_no_notification_connection(&listener).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config.clone()),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        assert_task_not_completed(&config);
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_ignores_delayed_exit_from_replaced_run() {
+        let unique = unique_name("terminal-watcher-delayed-old-exit");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_notifying_task(&config);
+        let db = Db::open(&config.db_path).unwrap();
+        for (id, stage, status) in [
+            ("run-old", "in progress", "succeeded"),
+            ("run-replacement", "review", "running"),
+        ] {
+            db.insert_stage_run(NewStageRun {
+                id,
+                task_id: "task-child",
+                stage,
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status,
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        }
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::Exit {
+                    session_id: "task-child".to_string(),
+                    run_id: Some("run-old".to_string()),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
                 },
             )
             .await;
@@ -959,6 +1057,25 @@ mod tests {
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_notifying_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(NewStageRun {
+                id: "run-current",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
         let replacements = session_replacements::SessionReplacements::default();
         replacements.begin("task-child");
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
@@ -969,7 +1086,7 @@ mod tests {
                 &mut subscriber,
                 &DaemonEvent::Exit {
                     session_id: "task-child".to_string(),
-                    run_id: None,
+                    run_id: Some("run-current".to_string()),
                     code: -1,
                     resume_session_id: None,
                     killed: true,
@@ -980,7 +1097,7 @@ mod tests {
                 &mut subscriber,
                 &DaemonEvent::Exit {
                     session_id: "task-child".to_string(),
-                    run_id: None,
+                    run_id: Some("run-current".to_string()),
                     code: 0,
                     resume_session_id: None,
                     killed: false,

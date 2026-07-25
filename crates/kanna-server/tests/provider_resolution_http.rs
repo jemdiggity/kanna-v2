@@ -643,11 +643,11 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         .error_for_status()
         .expect("stage advance should reload the durable snapshot");
     match next_daemon_command(&mut commands).await {
-        DaemonCommand::Kill { session_id } => assert_eq!(session_id, task_id),
+        DaemonCommand::Kill { session_id, .. } => assert_eq!(session_id, task_id),
         other => panic!("expected task-session kill, got {other:?}"),
     }
     match next_daemon_command(&mut commands).await {
-        DaemonCommand::Kill { session_id } => {
+        DaemonCommand::Kill { session_id, .. } => {
             assert_eq!(session_id, format!("shell-wt-{task_id}"))
         }
         other => panic!("expected shell-session kill, got {other:?}"),
@@ -669,7 +669,7 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         other => panic!("expected post input, got {other:?}"),
     }
     match next_daemon_command(&mut commands).await {
-        DaemonCommand::Kill { session_id } => assert_eq!(session_id, task_id),
+        DaemonCommand::Kill { session_id, .. } => assert_eq!(session_id, task_id),
         other => panic!("expected post fallback kill, got {other:?}"),
     }
     assert_claude_agent_spawn(next_daemon_command(&mut commands).await, &task_id);

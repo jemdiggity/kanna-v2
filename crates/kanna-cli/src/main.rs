@@ -44,6 +44,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         metadata: Option<String>,
 
+        /// Owning stage run ID (defaults to KANNA_STAGE_RUN_ID)
+        #[arg(long)]
+        run_id: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,
@@ -429,6 +433,7 @@ async fn main() {
             status,
             summary,
             metadata,
+            run_id,
             server_url,
         } => {
             commands::stage_complete::run(
@@ -436,6 +441,7 @@ async fn main() {
                 status,
                 summary,
                 metadata,
+                run_id,
                 server_url.as_deref(),
             )
             .await;

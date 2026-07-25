@@ -385,7 +385,10 @@ fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() 
 /// holding a finished stage run, and a review worktree (`task-review`) at the
 /// same committed tip — the state a task is in when the review agent
 /// requests a revision.
-fn init_resume_revision_fixture(label: &str, config: &Config) -> (std::path::PathBuf, Db) {
+pub(crate) fn init_resume_revision_fixture(
+    label: &str,
+    config: &Config,
+) -> (std::path::PathBuf, Db) {
     init_resume_revision_fixture_for_provider(label, config, "claude")
 }
 
@@ -480,7 +483,7 @@ const RESUME_SESSION_UUID: &str = "6f7d2f7a-1b2e-4c3d-9a8b-123456789abc";
 /// Points the Claude session store at a test directory and writes the
 /// transcript file the CLI would have for `RESUME_SESSION_UUID` under the
 /// implement worktree.
-fn write_resume_transcript(config_dir: &std::path::Path, worktree: &std::path::Path) {
+pub(crate) fn write_resume_transcript(config_dir: &std::path::Path, worktree: &std::path::Path) {
     let slug: String = worktree
         .to_string_lossy()
         .chars()

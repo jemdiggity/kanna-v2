@@ -424,7 +424,7 @@ mod tests {
                 reader.read_line(&mut line).await.unwrap();
                 let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
                 match command {
-                    DaemonCommand::Kill { session_id } => {
+                    DaemonCommand::Kill { session_id, .. } => {
                         assert_eq!(session_id, expected_session_id)
                     }
                     other => panic!("expected kill command, got {:?}", other),
@@ -523,7 +523,7 @@ mod tests {
                 reader.read_line(&mut line).await.unwrap();
                 let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
                 match command {
-                    DaemonCommand::Kill { session_id } => {
+                    DaemonCommand::Kill { session_id, .. } => {
                         assert_eq!(session_id, expected_session_id)
                     }
                     other => panic!("expected kill command, got {:?}", other),

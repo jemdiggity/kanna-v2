@@ -1648,6 +1648,137 @@ fn landing_stage_run_preserves_provider_handle_discovered_after_spawn() {
 }
 
 #[test]
+fn successor_run_reservation_is_single_winner_for_expected_task_state() {
+    let path = Db::test_db_path("stage-action-cas");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement CAS",
+        Some("CAS"),
+        "review",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-review",
+        task_id: "task-1",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: Some("provider-review"),
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let expected = db.task_action_state("task-1").unwrap();
+
+    let reserve = |id: &str| {
+        db.replace_current_run_with_pending(
+            NewStageRun {
+                id,
+                task_id: "task-1",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "pending",
+                result: None,
+                feedback: None,
+                session_id: Some("task-1"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-1"),
+                resumed_from_run_id: None,
+            },
+            Some("manual"),
+            &expected,
+            "failed",
+            Some(r#"{"status":"failure"}"#),
+            Some("review feedback"),
+        )
+    };
+
+    reserve("run-revision-a").expect("first action reserves");
+    assert!(matches!(
+        reserve("run-revision-b"),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(
+        runs.iter()
+            .filter(|run| run.status == "pending")
+            .map(|run| run.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["run-revision-a"]
+    );
+    assert_eq!(
+        runs.iter()
+            .find(|run| run.id == "run-review")
+            .unwrap()
+            .status,
+        "failed"
+    );
+}
+
+#[test]
+fn delayed_completion_cannot_finish_replacement_run() {
+    let path = Db::test_db_path("stage-completion-run-cas");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement completion CAS",
+        None,
+        "in progress",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    for id in ["old-run", "replacement-run"] {
+        db.insert_stage_run(NewStageRun {
+            id,
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    }
+
+    assert!(matches!(
+        db.finish_active_stage_run(
+            "task-1",
+            Some("old-run"),
+            "succeeded",
+            Some("{}"),
+            Some("late"),
+        ),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[test]
 fn insert_pipeline_item_stores_stage_metadata() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");

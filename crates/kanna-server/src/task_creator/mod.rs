@@ -14,7 +14,7 @@ mod types;
 mod worktree;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::config::Config;
 use crate::db::{Db, NewPipelineItem, NewStageRun, Repo};
@@ -278,6 +278,9 @@ pub(crate) fn prepare_rerun_stage_for_api(
     if source_task.closed_at.is_some() {
         return Err(format!("task is closed: {}", task_id));
     }
+    let expected_source = db
+        .task_action_state(task_id)
+        .map_err(|e| format!("db error: {e}"))?;
     let branch = source_task
         .branch
         .as_deref()
@@ -444,6 +447,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         },
         recovery_snapshot: None,
         session,
+        expected_source,
     })
 }
 
@@ -728,6 +732,9 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     explicit_provider: Option<String>,
     fallback_provider: Option<&str>,
 ) -> Result<PreparedStageRunSpawn, String> {
+    let expected_source = db
+        .task_action_state(task_id)
+        .map_err(|e| format!("db error: {e}"))?;
     let agent = match target_stage.agent.as_deref() {
         Some(agent_name) => Some(definitions.agent(agent_name)?),
         None => None,
@@ -917,6 +924,10 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         env: spawn_env,
         terminal_prelude: None,
         session,
+        expected_source,
+        source_completion_status: "succeeded",
+        source_completion_result: None,
+        source_completion_feedback: None,
     })
 }
 

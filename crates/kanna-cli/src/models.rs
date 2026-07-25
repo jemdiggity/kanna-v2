@@ -161,6 +161,8 @@ pub(crate) struct CompleteStageRequest {
     pub(crate) summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) metadata: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) run_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

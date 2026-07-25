@@ -26,6 +26,7 @@ pub enum ErrorCode {
     AgentSpawnFailed,
     NotAgentSession,
     UnknownPermissionRequest,
+    SessionOwnershipMismatch,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
@@ -99,15 +100,32 @@ pub struct HandoffSession {
     /// from the stream by the old daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
+    /// Interactive Codex sessions: process-bound discovery state. This keeps
+    /// custom CODEX_HOME and spawn correlation intact across daemon handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_session: Option<CodexSessionHandoff>,
     /// Agent sessions: number of pipe fds transferred for this session
     /// (stdout, stderr, stdin — 0 for already-exited children). PTY sessions
     /// always transfer exactly one master fd and leave this 0.
     #[serde(default)]
     pub agent_fd_count: u8,
+    /// Agent sessions: immutable reader/process generation.
+    #[serde(default)]
+    pub agent_spawn_generation: u64,
     /// Agent sessions: serialized spawn context so the adopting daemon can
     /// resume-respawn after a crash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_spawn: Option<AgentSpawnParams>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexSessionHandoff {
+    pub sessions_root: String,
+    pub cwd: String,
+    pub spawned_at_millis: i64,
+    pub process_group_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_id: Option<String>,
 }
 
 /// Everything needed to (re)build a provider adapter spawn for an agent
@@ -239,6 +257,8 @@ pub enum Command {
     },
     Kill {
         session_id: String,
+        #[serde(default)]
+        expected_run_id: Option<String>,
     },
     List,
     Subscribe,
@@ -922,7 +942,9 @@ mod tests {
                 status: SessionStatus::Idle,
                 kind: SessionKind::Pty,
                 provider_session_id: None,
+                codex_session: None,
                 agent_fd_count: 0,
+                agent_spawn_generation: 0,
                 agent_spawn: None,
             }],
         };

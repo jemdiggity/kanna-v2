@@ -390,7 +390,7 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     let commands = fake_daemon.await.unwrap();
     assert!(matches!(
         commands.first(),
-        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "task-1"
+        Some(kanna_daemon::protocol::Command::Kill { session_id, .. }) if session_id == "task-1"
     ));
     let run_id = match commands.get(1) {
         Some(kanna_daemon::protocol::Command::Spawn {
@@ -1097,11 +1097,11 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     // Kill agent session, kill the stale worktree shell, spawn in the fork.
     assert!(matches!(
         commands.first(),
-        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "task-1"
+        Some(kanna_daemon::protocol::Command::Kill { session_id, .. }) if session_id == "task-1"
     ));
     assert!(matches!(
         commands.get(1),
-        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "shell-wt-task-1"
+        Some(kanna_daemon::protocol::Command::Kill { session_id, .. }) if session_id == "shell-wt-task-1"
     ));
     match commands.get(2) {
         Some(kanna_daemon::protocol::Command::Spawn {
@@ -1504,15 +1504,15 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
 
     assert!(matches!(
         commands.first(),
-        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "task-1"
+        Some(kanna_daemon::protocol::Command::Kill { session_id, .. }) if session_id == "task-1"
     ));
     assert!(matches!(
         commands.get(1),
-        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "shell-wt-task-1"
+        Some(kanna_daemon::protocol::Command::Kill { session_id, .. }) if session_id == "shell-wt-task-1"
     ));
     assert!(matches!(
         commands.get(2),
-        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "td-task-source"
+        Some(kanna_daemon::protocol::Command::Kill { session_id, .. }) if session_id == "td-task-source"
     ));
     match commands.get(3) {
         Some(kanna_daemon::protocol::Command::Spawn {

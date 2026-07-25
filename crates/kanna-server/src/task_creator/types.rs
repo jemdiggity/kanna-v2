@@ -168,6 +168,7 @@ pub(crate) struct PreparedStageRerun {
     pub(super) deferred_setup: Vec<String>,
     pub(super) recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     pub(super) session: PreparedSessionSpawn,
+    pub(super) expected_source: crate::db::TaskActionState,
 }
 
 /// A stage-run workspace forked from the task's committed tip: swaps get a
@@ -251,6 +252,10 @@ pub(crate) struct PreparedStageRunSpawn {
     /// the new stage's process output. Absent for non-transition spawns.
     pub(super) terminal_prelude: Option<Vec<u8>>,
     pub(super) session: PreparedSessionSpawn,
+    pub(super) expected_source: crate::db::TaskActionState,
+    pub(super) source_completion_status: &'static str,
+    pub(super) source_completion_result: Option<String>,
+    pub(super) source_completion_feedback: Option<String>,
 }
 
 /// Detached best-effort cleanup for a workspace that the task is leaving.
@@ -264,6 +269,21 @@ pub(crate) struct PreparedWorkspaceTeardown {
 }
 
 impl PreparedStageRunSpawn {
+    pub(crate) fn resumed_from_run_id(&self) -> Option<&str> {
+        self.resumed_from_run_id.as_deref()
+    }
+
+    pub(crate) fn set_source_completion(
+        &mut self,
+        status: &'static str,
+        result: Option<String>,
+        feedback: Option<String>,
+    ) {
+        self.source_completion_status = status;
+        self.source_completion_result = result;
+        self.source_completion_feedback = feedback;
+    }
+
     /// The freshly created workspace, when this run forked one.
     #[cfg(test)]
     pub(crate) fn forked_workspace(&self) -> Option<&ForkedWorkspace> {

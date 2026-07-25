@@ -66,7 +66,9 @@ fn parse_handoff_response_accepts_v2_payload() {
             status: SessionStatus::Idle,
             kind: protocol::SessionKind::Pty,
             provider_session_id: None,
+            codex_session: None,
             agent_fd_count: 0,
+            agent_spawn_generation: 0,
             agent_spawn: None,
         }],
     })

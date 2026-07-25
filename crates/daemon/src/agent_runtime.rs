@@ -146,6 +146,27 @@ async fn journal_and_fan_out(
     entry.seq
 }
 
+/// Append only while the originating child still owns the shared journal.
+async fn journal_and_fan_out_for_generation(
+    session_id: &str,
+    shared: &Arc<Mutex<AgentShared>>,
+    spawn_generation: u64,
+    event: AgentEvent,
+) -> bool {
+    let mut sh = shared.lock().await;
+    if sh.spawn_generation != spawn_generation {
+        return false;
+    }
+    let entry = sh.journal.append(event);
+    let wire = Event::AgentEvent {
+        session_id: session_id.to_string(),
+        seq: entry.seq,
+        event: entry.event,
+    };
+    fan_out(&mut sh.writers, &wire).await;
+    true
+}
+
 fn set_status(
     record: &mut AgentSessionRecord,
     broadcast_tx: &broadcast::Sender<String>,

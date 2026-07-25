@@ -424,6 +424,7 @@ async fn kill_daemon_session_if_present(
         &mut daemon,
         &DaemonCommand::Kill {
             session_id: session_id.to_owned(),
+            expected_run_id: None,
         },
     )
     .await?;

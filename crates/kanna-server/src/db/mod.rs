@@ -27,7 +27,7 @@ pub use analytics::RepoAnalytics;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
-pub use stage_runs::FinishedStageRun;
+pub use stage_runs::{FinishedStageRun, TaskActionState};
 #[allow(unused_imports)]
 pub use transfers::{
     NewTaskTransfer, NewTaskTransferProvenance, PendingIncomingTransfer, TaskTransfer,

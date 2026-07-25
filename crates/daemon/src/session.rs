@@ -420,6 +420,10 @@ impl SessionHandle {
             .codex_session_locator
             .as_mut()
             .and_then(CodexSessionLocator::discover);
+        let codex_session = state
+            .codex_session_locator
+            .as_ref()
+            .map(CodexSessionLocator::handoff_state);
         Ok(Some(SessionHandoffParts {
             pid,
             child_start,
@@ -430,6 +434,7 @@ impl SessionHandle {
             snapshot,
             agent_provider: state.agent_provider,
             provider_session_id,
+            codex_session,
             status: state.status,
             fd,
         }))
@@ -448,6 +453,7 @@ pub struct SessionHandoffParts {
     pub snapshot: Option<crate::protocol::TerminalSnapshot>,
     pub agent_provider: Option<AgentProvider>,
     pub provider_session_id: Option<String>,
+    pub codex_session: Option<crate::protocol::CodexSessionHandoff>,
     pub status: SessionStatus,
     pub fd: std::os::fd::OwnedFd,
 }

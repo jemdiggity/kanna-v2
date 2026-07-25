@@ -242,6 +242,7 @@ pub(crate) async fn run_daemon() {
                 handoff.agent_provider,
                 &handoff.cwd,
                 handoff.provider_session_id.clone(),
+                handoff.codex_session.clone(),
             );
             let handle = Arc::new(SessionHandle::new(SessionRecord {
                 pty: pty_session,
