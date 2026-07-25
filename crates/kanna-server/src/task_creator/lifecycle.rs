@@ -459,6 +459,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
             let inherited = db
                 .latest_stage_run(&task_id)
                 .map_err(|e| format!("db error: {}", e))?;
+            let completion_owner_run_id = inherited.as_ref().map(|run| run.id.clone());
             db.finish_latest_running_stage_run(&task_id, "succeeded", None, None)
                 .map_err(|e| format!("db error: {}", e))?;
             // The post continues the inherited run's live agent session, so
@@ -495,7 +496,10 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                     session_id: Some(&prepared.session_id),
                     provider_session_id: provider_session_id.as_deref(),
                     cwd: cwd.as_deref(),
-                    resumed_from_run_id: None,
+                    // The live process cannot change its immutable environment
+                    // when a post is injected. Record the main run that owns
+                    // this post so its CLI-shaped verdict remains authorized.
+                    resumed_from_run_id: completion_owner_run_id.as_deref(),
                 },
                 Some(prepared.fallback.completion_transition.as_str()),
             )
@@ -663,7 +667,7 @@ pub(crate) async fn kill_session_replacing(
     session_id: &str,
 ) -> Result<(), String> {
     replacements.begin(session_id);
-    let kill = daemon
+    let mut kill = daemon
         .send_command(&DaemonCommand::Kill {
             session_id: session_id.to_string(),
         })
@@ -672,6 +676,44 @@ pub(crate) async fn kill_session_replacing(
             replacements.cancel(session_id);
             format!("daemon error: {}", e)
         })?;
+    if matches!(
+        kill,
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::SessionOwnershipMismatch),
+            ..
+        }
+    ) && expected_run_id.is_some()
+    {
+        let capabilities = daemon
+            .send_command(&DaemonCommand::List)
+            .await
+            .map_err(|error| {
+                replacements.cancel(session_id);
+                format!("daemon capability negotiation failed after ownership mismatch: {error}")
+            })?;
+        if matches!(
+            capabilities,
+            DaemonEvent::SessionList {
+                ref sessions,
+                capabilities: Some(ref capabilities),
+                ..
+            } if !capabilities.immutable_run_ownership
+                && sessions.iter().any(|session| {
+                    session.session_id == session_id && session.run_id.is_none()
+                })
+        ) {
+            kill = daemon
+                .send_command(&DaemonCommand::Kill {
+                    session_id: session_id.to_string(),
+                    expected_run_id: None,
+                })
+                .await
+                .map_err(|error| {
+                    replacements.cancel(session_id);
+                    format!("daemon error after legacy ownership negotiation: {error}")
+                })?;
+        }
+    }
     match kill {
         DaemonEvent::Ok => Ok(()),
         DaemonEvent::Error {
@@ -860,8 +902,6 @@ fn start_rerun_stage_run(
     provider_session_id: Option<&str>,
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_activity(task_id, "working")
-        .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_agent_session_id(task_id, provider_session_id)
         .map_err(|e| format!("db error: {}", e))?;
     db.start_stage_run(run_id)

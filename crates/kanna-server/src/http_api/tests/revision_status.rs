@@ -711,7 +711,8 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
                 .body(Body::from(
                     serde_json::json!({
                         "status": "success",
-                        "summary": "revision complete"
+                        "summary": "revision complete",
+                        "runId": revision_run.id
                     })
                     .to_string(),
                 ))

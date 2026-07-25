@@ -1745,7 +1745,6 @@ async fn stream_agent_once(
             }
             Ok(DaemonEvent::Exit {
                 session_id: event_session,
-                run_id: None,
                 code,
                 ..
             }) if event_session == session_id => {
@@ -1960,7 +1959,6 @@ async fn stream_terminal_once(
             }
             Ok(DaemonEvent::Exit {
                 session_id: event_session,
-                run_id: None,
                 code,
                 ..
             }) if event_session == session_id => {
@@ -4174,7 +4172,7 @@ mod tests {
                 },
                 DaemonEvent::Exit {
                     session_id: "daemon-terminal-status".to_string(),
-                    run_id: None,
+                    run_id: Some("run-owned-terminal".to_string()),
                     code: 0,
                     resume_session_id: None,
                     killed: false,
@@ -4321,7 +4319,7 @@ mod tests {
             };
             let exit = DaemonEvent::Exit {
                 session_id: "daemon-terminal-1".to_string(),
-                run_id: None,
+                run_id: Some("run-owned-terminal".to_string()),
                 code: 0,
                 resume_session_id: None,
                 killed: false,
@@ -4703,6 +4701,13 @@ mod tests {
                                 truncated: false,
                             },
                         },
+                        DaemonEvent::Exit {
+                            session_id: "daemon-agent-reattach-1".to_string(),
+                            run_id: Some("run-owned-agent".to_string()),
+                            code: 0,
+                            resume_session_id: None,
+                            killed: false,
+                        },
                     ]
                 };
                 for event in events {
@@ -4775,6 +4780,13 @@ mod tests {
         match recv_frame(&mut socket).await {
             ServerFrame::AgentEvent { seq, .. } => assert_eq!(seq, 3),
             other => panic!("expected post-restart agent event, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::SessionExit { task_id, code } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(code, 0);
+            }
+            other => panic!("expected owned agent session exit, got {other:?}"),
         }
 
         daemon.await.expect("fake daemon task failed");

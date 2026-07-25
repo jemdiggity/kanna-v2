@@ -312,6 +312,7 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
             body: Some(json!({
                 "status": "success",
                 "summary": "QA passed",
+                "runId": "run-current",
                 "metadata": { "review": "stdio-http" }
             })),
             response_status: "200 OK",
@@ -319,7 +320,7 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
         },
     ]);
 
-    let responses = run_kanna_mcp(
+    let responses = run_kanna_mcp_with_env(
         &base_url,
         &[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
@@ -353,6 +354,7 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
                 }
             }),
         ],
+        &[("KANNA_STAGE_RUN_ID", "run-current")],
     );
 
     let observed = server.join().expect("fixture server");

@@ -46,14 +46,18 @@ struct DaemonHandle {
 
 impl DaemonHandle {
     fn start_in(dir: &Path) -> Self {
+        Self::start_in_with_env(dir, &[])
+    }
+
+    fn start_in_with_env(dir: &Path, env_pairs: &[(&str, &str)]) -> Self {
         let daemon_bin = PathBuf::from(env!("CARGO_BIN_EXE_kanna-daemon"));
         let socket_path = compute_socket_path(dir);
         let pid_path = dir.join("daemon.pid");
 
-        let child = StdCommand::new(&daemon_bin)
-            .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
-            .spawn()
-            .expect("failed to start daemon");
+        let mut command = StdCommand::new(&daemon_bin);
+        command.env("KANNA_DAEMON_DIR", dir.to_str().unwrap());
+        command.envs(env_pairs.iter().copied());
+        let child = command.spawn().expect("failed to start daemon");
         let expected_pid = child.id();
 
         for _ in 0..100 {
@@ -238,6 +242,14 @@ read -r first
 echo '{"type":"system","subtype":"init","session_id":"fake-sess-resume","model":"fake-model"}'
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"turn done"}]}}'
 echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"fake-sess-resume"}'
+"#;
+
+const COUNTED_ONE_SHOT_AGENT: &str = r#"#!/bin/sh
+printf '%s\n' "$$" >> "$SPAWN_LOG"
+read -r first
+echo '{"type":"system","subtype":"init","session_id":"fake-sess-counted","model":"fake-model"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"counted turn done"}]}}'
+echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"fake-sess-counted"}'
 "#;
 
 /// Fake agent for resume persistence. The initial run emits provider session id
@@ -560,6 +572,150 @@ fn input_after_exit_resumes_via_respawn() {
 }
 
 #[test]
+fn concurrent_per_turn_inputs_install_only_one_respawn_child() {
+    let dir = temp_dir("concurrent-respawn");
+    let script = write_script(&dir, "counted-one-shot.sh", COUNTED_ONE_SHOT_AGENT);
+    let spawn_log = dir.join("spawn.log");
+    let barrier = dir.join("respawn-install-barrier");
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut first = daemon.connect();
+    first
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut params = spawn_params(&dir, &script, "first prompt");
+    params.env.insert(
+        "SPAWN_LOG".to_string(),
+        spawn_log.to_string_lossy().into_owned(),
+    );
+    params.env.insert(
+        "KANNA_TEST_RESPAWN_INSTALL_BARRIER".to_string(),
+        barrier.to_string_lossy().into_owned(),
+    );
+    first.send(&Command::SpawnAgent {
+        session_id: "agent-concurrent".to_string(),
+        params,
+    });
+    first.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+    first.send(&Command::AttachAgent {
+        session_id: "agent-concurrent".to_string(),
+        from_seq: 0,
+    });
+    first.recv_until(|event| matches!(event, Event::AgentSnapshot { .. }));
+    first.collect_agent_events_until(is_turn_completed);
+    std::thread::sleep(Duration::from_millis(250));
+
+    first.send(&Command::AgentInput {
+        session_id: "agent-concurrent".to_string(),
+        text: "winner prompt".to_string(),
+    });
+    let barrier_deadline = Instant::now() + Duration::from_secs(5);
+    while !barrier.join("spawned").exists() {
+        assert!(
+            Instant::now() < barrier_deadline,
+            "respawn install barrier was never reached"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut second = daemon.connect();
+    second
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    second.send(&Command::AgentInput {
+        session_id: "agent-concurrent".to_string(),
+        text: "losing prompt".to_string(),
+    });
+    assert!(matches!(
+        second.recv_until(|event| matches!(event, Event::Error { .. })),
+        Event::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+            ..
+        }
+    ));
+
+    std::fs::write(barrier.join("release"), b"").unwrap();
+    // Reader output may beat the command reply once the install barrier is
+    // released, so retain both signals instead of discarding agent events
+    // while waiting for Ok.
+    let mut saw_ok = false;
+    let mut saw_turn_completed = false;
+    while !saw_ok || !saw_turn_completed {
+        match first.recv() {
+            Event::Ok => saw_ok = true,
+            Event::AgentEvent { event, .. } if is_turn_completed(&event) => {
+                saw_turn_completed = true;
+            }
+            _ => {}
+        }
+    }
+
+    let journal = std::fs::read_to_string(daemon.journal_path("agent-concurrent")).unwrap();
+    assert!(journal.contains("winner prompt"), "{journal}");
+    assert!(!journal.contains("losing prompt"), "{journal}");
+    let child_count = std::fs::read_to_string(spawn_log).unwrap().lines().count();
+    assert_eq!(
+        child_count, 2,
+        "initial child plus exactly one respawn child should run"
+    );
+}
+
+#[test]
+fn fast_agent_exit_is_broadcast_after_session_created() {
+    let dir = temp_dir("fast-exit-created-order");
+    let script = write_script(&dir, "one-shot.sh", ONE_SHOT_AGENT);
+    let barrier = dir.join("session-created-barrier");
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Command::Subscribe);
+    assert!(matches!(subscriber.recv(), Event::Ok));
+
+    let mut control = daemon.connect();
+    let mut params = spawn_params(&dir, &script, "fast prompt");
+    params.env.insert(
+        "KANNA_TEST_SESSION_CREATED_BARRIER".to_string(),
+        barrier.to_string_lossy().into_owned(),
+    );
+    control.send(&Command::SpawnAgent {
+        session_id: "agent-fast-exit".to_string(),
+        params,
+    });
+
+    let barrier_deadline = Instant::now() + Duration::from_secs(5);
+    while !barrier.join("reached").exists() {
+        assert!(
+            Instant::now() < barrier_deadline,
+            "SessionCreated ordering barrier was never reached"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(barrier.join("release"), b"").unwrap();
+    control.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    let mut saw_created = false;
+    loop {
+        match subscriber.recv() {
+            Event::SessionCreated { session_id, .. } if session_id == "agent-fast-exit" => {
+                saw_created = true;
+            }
+            Event::Exit { session_id, .. } if session_id == "agent-fast-exit" => {
+                assert!(
+                    saw_created,
+                    "fast child Exit must not precede SessionCreated"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
 fn input_after_handoff_uses_persisted_provider_session_id() {
     let dir = temp_dir("resume-persisted");
     let script = write_script(&dir, "resume-id-agent.sh", RESUME_ID_ASSERTING_AGENT);
@@ -579,7 +735,12 @@ fn input_after_handoff_uses_persisted_provider_session_id() {
     conn.collect_agent_events_until(is_turn_completed);
     std::thread::sleep(Duration::from_millis(500));
 
+    let handoff_started = Instant::now();
     let new_daemon = DaemonHandle::start_in(&dir);
+    assert!(
+        handoff_started.elapsed() < Duration::from_secs(3),
+        "successful handoff readiness must not wait for the five-second pid fallback"
+    );
     drop(conn);
     drop(old_daemon);
 
@@ -598,6 +759,72 @@ fn input_after_handoff_uses_persisted_provider_session_id() {
         e,
         AgentEvent::AssistantText { text, .. } if text == "resumed with persisted id"
     )));
+}
+
+#[test]
+fn adopted_legacy_unowned_session_downgrades_ownership_capability() {
+    let dir = temp_dir("legacy-handoff-ownership");
+    let old_daemon =
+        DaemonHandle::start_in_with_env(&dir, &[("KANNA_TEST_HANDOFF_OMIT_RUN_ID", "1")]);
+    let mut old = old_daemon.connect();
+    old.send(&Command::Spawn {
+        session_id: "legacy-owned-session".to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), "sleep 30".to_string()],
+        cwd: dir.to_string_lossy().into_owned(),
+        env: HashMap::from([("KANNA_STAGE_RUN_ID".to_string(), "legacy-run".to_string())]),
+        cols: 80,
+        rows: 24,
+        agent_provider: Some(AgentProvider::Claude),
+        terminal_prelude: None,
+    });
+    old.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    let new_daemon = DaemonHandle::start_in(&dir);
+    drop(old);
+    drop(old_daemon);
+    let mut current = new_daemon.connect();
+    current.send(&Command::List);
+    match current.recv_until(|event| matches!(event, Event::SessionList { .. })) {
+        Event::SessionList {
+            sessions,
+            capabilities: Some(capabilities),
+            ..
+        } => {
+            assert!(
+                !capabilities.immutable_run_ownership,
+                "a daemon with an adopted unowned session must negotiate legacy kill semantics"
+            );
+            assert_eq!(
+                sessions
+                    .iter()
+                    .find(|session| session.session_id == "legacy-owned-session")
+                    .and_then(|session| session.run_id.as_deref()),
+                None,
+                "the list response must identify the target as an ownershipless legacy session"
+            );
+        }
+        other => panic!("expected SessionList capabilities, got {other:?}"),
+    }
+    current.send(&Command::Kill {
+        session_id: "legacy-owned-session".to_string(),
+        expected_run_id: Some("legacy-run".to_string()),
+    });
+    assert!(matches!(
+        current.recv_until(|event| matches!(event, Event::Error { .. })),
+        Event::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::SessionOwnershipMismatch),
+            ..
+        }
+    ));
+    current.send(&Command::Kill {
+        session_id: "legacy-owned-session".to_string(),
+        expected_run_id: None,
+    });
+    assert!(matches!(
+        current.recv_until(|event| matches!(event, Event::Ok)),
+        Event::Ok
+    ));
 }
 
 #[test]

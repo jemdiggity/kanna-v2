@@ -387,6 +387,7 @@ impl SessionHandle {
         let cwd = pty.cwd.clone();
         drop(pty);
         let status = self.status().await;
+        let run_id = self.run_id().await;
 
         SessionInfo {
             session_id,
@@ -396,6 +397,7 @@ impl SessionHandle {
             idle_seconds,
             status,
             kind: crate::protocol::SessionKind::Pty,
+            run_id,
         }
     }
 

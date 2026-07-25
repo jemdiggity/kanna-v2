@@ -723,7 +723,6 @@ async fn observer_loop(
             },
             Ok(DaemonEvent::Exit {
                 session_id: sid,
-                run_id: None,
                 code,
                 ..
             }) => {
@@ -876,7 +875,7 @@ mod tests {
                 },
                 DaemonEvent::Exit {
                     session_id: "sess-observer".to_string(),
-                    run_id: None,
+                    run_id: Some("run-owned".to_string()),
                     code: 0,
                     resume_session_id: None,
                     killed: false,

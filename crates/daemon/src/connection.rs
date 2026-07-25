@@ -824,17 +824,29 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
-        Command::Kill { session_id } => {
+        Command::Kill {
+            session_id,
+            expected_run_id,
+        } => {
             let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
             let _lifecycle_guard = lifecycle.lock().await;
-            log::info!("[kill] session={}", session_id);
+            log::info!(
+                "[kill] session={} expected_run_id={:?}",
+                session_id,
+                expected_run_id
+            );
             // Fence Kill with the handoff transaction: the snapshot has
             // already been taken and sent, so removing the session here would
             // let the successor resurrect it from that snapshot. Refuse and
             // let the client retry against the new daemon.
             if session_handle(&sessions, &session_id).await.is_none() {
-                match agent_runtime::kill_agent_session(&session_id, &agent_sessions, &broadcast_tx)
-                    .await
+                match agent_runtime::kill_agent_session(
+                    &session_id,
+                    expected_run_id.as_deref(),
+                    &agent_sessions,
+                    &broadcast_tx,
+                )
+                .await
                 {
                     agent_runtime::AgentKillOutcome::Killed => {
                         let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
@@ -857,8 +869,34 @@ pub(crate) async fn handle_command(
                         let _ = write_event(&mut *writer.lock().await, &evt).await;
                         return;
                     }
+                    agent_runtime::AgentKillOutcome::OwnershipMismatch => {
+                        let evt = error_event(
+                            Some(protocol::ErrorCode::SessionOwnershipMismatch),
+                            format!(
+                                "session ownership changed: {session_id} is not owned by run {}",
+                                expected_run_id.as_deref().unwrap_or_default()
+                            ),
+                        );
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        return;
+                    }
                     // Not an agent session — fall through to the PTY registry.
                     agent_runtime::AgentKillOutcome::NotFound => {}
+                }
+            }
+            if let Some(expected) = expected_run_id.as_deref() {
+                let candidate = sessions.lock().await.get(&session_id);
+                if let Some(candidate) = candidate {
+                    if candidate.run_id().await.as_deref() != Some(expected) {
+                        let evt = error_event(
+                            Some(protocol::ErrorCode::SessionOwnershipMismatch),
+                            format!(
+                                "session ownership changed: {session_id} is not owned by run {expected}"
+                            ),
+                        );
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        return;
+                    }
                 }
             }
             // Claim the exact incarnation BEFORE tearing it down, and do it in
@@ -922,6 +960,23 @@ pub(crate) async fn handle_command(
                 }
                 None => None,
             };
+            let (owned_run_id, cached_resume_session_id) = match &session {
+                Some(session) => (
+                    session.run_id().await,
+                    match session.codex_resume_session_id().await {
+                        Ok(value) => value,
+                        Err(error) => {
+                            log::warn!(
+                                "[kill] failed to cache codex resume session id for {}: {}",
+                                session_id,
+                                error
+                            );
+                            None
+                        }
+                    },
+                ),
+                None => (None, None),
+            };
             let result = match &session {
                 Some(session) => session.kill().await,
                 None => Err(std::io::Error::new(
@@ -944,17 +999,9 @@ pub(crate) async fn handle_command(
                 // agree on the exact outgoing incarnation.
                 let exit_evt = Event::Exit {
                     session_id: session_id.clone(),
-                    run_id: match &session {
-                        Some(session) => session.run_id().await,
-                        None => None,
-                    },
+                    run_id: owned_run_id,
                     code: 128 + libc::SIGKILL,
-                    resume_session_id: match &session {
-                        Some(session) => {
-                            session.codex_resume_session_id().await.unwrap_or_default()
-                        }
-                        None => None,
-                    },
+                    resume_session_id: cached_resume_session_id,
                     killed: true,
                 };
                 if let Ok(json) = serde_json::to_string(&exit_evt) {

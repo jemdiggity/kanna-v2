@@ -550,6 +550,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
                         "KANNA_SERVER_BASE_URL": "http://workspace.invalid",
                         "KANNA_CLI_PATH": "/tmp/workspace-cli-override",
                         "KANNA_MCP_PATH": "/tmp/workspace-mcp-override",
+                        "KANNA_PROVIDER_SESSION_ID": "019d99a5-aa94-7c73-b786-644cc095c099",
                         "PATH": format!("{prefix}_WORKSPACE_PATH")
                     },
                     "path": {
@@ -658,6 +659,10 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
     assert_eq!(
         prepared.env.get("KANNA_TASK_ID").map(String::as_str),
         Some(prepared.created_task.task_id.as_str())
+    );
+    assert!(
+        !prepared.env.contains_key("KANNA_PROVIDER_SESSION_ID"),
+        "repo-controlled workspace env must not seed trusted provider ownership"
     );
     let expected_socket_path = kanna_runtime_defaults::socket_path(
         &std::path::Path::new(&config.daemon_dir).join("pipeline"),

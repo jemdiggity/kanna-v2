@@ -4150,6 +4150,7 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
                     serde_json::json!({
                         "status": "success",
                         "summary": "implemented",
+                        "runId": "run-1",
                         "metadata": { "pr_url": "https://github.com/acme/repo/pull/41" }
                     })
                     .to_string(),
@@ -4182,6 +4183,65 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
         Some("https://github.com/acme/repo/pull/41")
     );
     assert_eq!(item.pr_number, Some(41));
+}
+
+#[tokio::test]
+async fn stale_owned_completion_cannot_finish_replacement_run_through_http() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Replace the active run",
+            Some("Replace the active run"),
+            "in progress",
+            "2026-07-25 00:00:00",
+        )
+        .unwrap();
+        for id in ["stale-run", "replacement-run"] {
+            db.insert_stage_run(crate::db::NewStageRun {
+                id,
+                task_id: "task-1",
+                stage: "in progress",
+                kind: "main",
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-1"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        }
+    });
+    let db_path = state.config.db_path.clone();
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "late MCP verdict",
+                        "runId": "stale-run"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "running"
+    );
 }
 
 #[tokio::test]
@@ -4235,7 +4295,8 @@ async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
                 .body(Body::from(
                     serde_json::json!({
                         "status": "success",
-                        "summary": "Created PR https://github.com/acme/repo/pull/7 from add-feature."
+                        "summary": "Created PR https://github.com/acme/repo/pull/7 from add-feature.",
+                        "runId": "run-1"
                     })
                     .to_string(),
                 ))
@@ -4440,7 +4501,8 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
                 .body(Body::from(
                     serde_json::json!({
                         "status": "success",
-                        "summary": "cleaned up and committed"
+                        "summary": "cleaned up and committed",
+                        "runId": "run-post"
                     })
                     .to_string(),
                 ))
@@ -4741,6 +4803,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
 
     // The post's successful completion — not the advance — performs the
     // final-stage transition and closes the task.
+    let post_run_id = db.latest_stage_run("task-1").unwrap().unwrap().id;
     let response = app
         .oneshot(
             Request::post("/v1/tasks/task-1/actions/complete-stage")
@@ -4748,7 +4811,8 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
                 .body(Body::from(
                     serde_json::json!({
                         "status": "success",
-                        "summary": "PR approved and merge master signaled"
+                        "summary": "PR approved and merge master signaled",
+                        "runId": post_run_id
                     })
                     .to_string(),
                 ))

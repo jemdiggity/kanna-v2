@@ -402,6 +402,12 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     #[serde(default)]
     pub kind: SessionKind,
+    /// Immutable owner of the current run, when the creating daemon knew it.
+    ///
+    /// Older daemons omit this field, which intentionally decodes as an
+    /// ownershipless legacy session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1023,12 +1029,14 @@ mod tests {
             idle_seconds: 30,
             status: SessionStatus::Idle,
             kind: SessionKind::Pty,
+            run_id: Some("run-1".to_string()),
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: SessionInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.session_id, "s1");
         assert_eq!(decoded.pid, 12345);
         assert_eq!(decoded.idle_seconds, 30);
+        assert_eq!(decoded.run_id.as_deref(), Some("run-1"));
         assert!(matches!(decoded.state, SessionState::Active));
     }
 
@@ -1051,6 +1059,7 @@ mod tests {
                 idle_seconds: 10,
                 status: SessionStatus::Idle,
                 kind: SessionKind::Pty,
+                run_id: None,
             }],
             capabilities: None,
         };

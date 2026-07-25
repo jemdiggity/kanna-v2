@@ -1729,6 +1729,98 @@ fn successor_run_reservation_is_single_winner_for_expected_task_state() {
 }
 
 #[test]
+fn exit_before_stage_landing_is_not_overwritten_back_to_working() {
+    let path = Db::test_db_path("stage-landing-fast-exit");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Handle fast replacement exit",
+        None,
+        "review",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    db.update_pipeline_item_activity("task-1", "unread")
+        .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-review",
+        task_id: "task-1",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let expected = db.task_action_state("task-1").unwrap();
+    db.replace_current_run_with_pending(
+        NewStageRun {
+            id: "run-revision",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1"),
+            resumed_from_run_id: Some("run-review"),
+        },
+        Some("auto"),
+        &expected,
+        "failed",
+        None,
+        Some("revision"),
+    )
+    .unwrap();
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("working"),
+        "reservation owns runtime activity before daemon events can arrive"
+    );
+
+    // Fault injection: the replacement exits after daemon spawn but before
+    // SessionCreated is processed and the pending stage is landed.
+    db.update_pipeline_item_activity("task-1", "unread")
+        .unwrap();
+    db.land_stage_run_if_reserved(
+        "task-1",
+        "run-revision",
+        "in progress",
+        None,
+        None,
+        Some(&expected),
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("unread")
+    );
+}
+
+#[test]
 fn delayed_completion_cannot_finish_replacement_run() {
     let path = Db::test_db_path("stage-completion-run-cas");
     let db = Db::open_for_tests(&path).expect("open test db");
@@ -1775,6 +1867,108 @@ fn delayed_completion_cannot_finish_replacement_run() {
     assert_eq!(
         db.latest_stage_run("task-1").unwrap().unwrap().status,
         "running"
+    );
+}
+
+#[test]
+fn owned_stage_completion_requires_immutable_run_id() {
+    let path = Db::test_db_path("stage-completion-requires-run-id");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement completion ownership",
+        None,
+        "in progress",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "owned-run",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    assert!(matches!(
+        db.finish_active_stage_run(
+            "task-1",
+            None,
+            "succeeded",
+            Some("{}"),
+            Some("unowned verdict"),
+        ),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[test]
+fn live_main_process_can_complete_its_injected_post_run() {
+    let path = Db::test_db_path("stage-completion-injected-post-owner");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Run an Antigravity post",
+        None,
+        "pr",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    for (id, kind, status) in [
+        ("main-run", "main", "succeeded"),
+        ("post-run", "post", "running"),
+    ] {
+        db.insert_stage_run(NewStageRun {
+            id,
+            task_id: "task-1",
+            stage: "pr",
+            kind,
+            agent: None,
+            agent_provider: Some("antigravity"),
+            model: None,
+            status,
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1"),
+            resumed_from_run_id: (kind == "post").then_some("main-run"),
+        })
+        .unwrap();
+    }
+
+    let finished = db
+        .finish_active_stage_run(
+            "task-1",
+            Some("main-run"),
+            "succeeded",
+            Some("{}"),
+            Some("post completed from inherited CLI environment"),
+        )
+        .expect("main process ownership should authorize its injected post")
+        .expect("post run");
+    assert_eq!(finished.kind, "post");
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "succeeded"
     );
 }
 

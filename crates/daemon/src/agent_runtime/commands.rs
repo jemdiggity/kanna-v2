@@ -103,6 +103,8 @@ pub async fn handle_spawn_agent(
             AgentSessionRecord {
                 provider: params.agent_provider,
                 run_id: run_id.clone(),
+                spawn_generation: 0,
+                respawn_reservation: None,
                 params,
                 adapter: Arc::new(std::sync::Mutex::new(adapter)),
                 shared: shared.clone(),

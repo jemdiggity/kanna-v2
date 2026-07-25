@@ -76,7 +76,8 @@ impl Db {
         let transaction = self.conn.unchecked_transaction()?;
         let run = transaction
             .query_row(
-                "SELECT id, kind, completion_transition, status
+                "SELECT id, kind, completion_transition, status, session_id,
+                        resumed_from_run_id
                  FROM stage_run
                  WHERE task_id = ?1
                  ORDER BY datetime(started_at) DESC, rowid DESC
@@ -88,14 +89,34 @@ impl Db {
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((run_id, kind, completion_transition, current_status)) = run else {
+        let Some((
+            run_id,
+            kind,
+            completion_transition,
+            current_status,
+            session_id,
+            completion_owner_run_id,
+        )) = run
+        else {
             return Ok(None);
         };
-        if expected_run_id.is_some_and(|expected| expected != run_id) {
+        let ownership_matches = expected_run_id.is_some_and(|expected| {
+            expected == run_id
+                || (kind == "post"
+                    && completion_owner_run_id
+                        .as_deref()
+                        .is_some_and(|owner| owner == expected))
+        });
+        if session_id.is_some() && !ownership_matches {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        if session_id.is_none() && expected_run_id.is_some_and(|expected| expected != run_id) {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         if !matches!(
@@ -214,6 +235,18 @@ impl Db {
                     run.task_id,
                 ),
             )?;
+        }
+
+        let task_changed = transaction.execute(
+            "UPDATE pipeline_item
+             SET activity = 'working',
+                 activity_changed_at = datetime('now'),
+                 updated_at = datetime('now')
+             WHERE id = ?1 AND closed_at IS NULL",
+            [run.task_id],
+        )?;
+        if task_changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
         }
 
         transaction.execute(
@@ -489,8 +522,6 @@ impl Db {
                 "UPDATE pipeline_item
                  SET stage = ?2,
                      branch = ?3,
-                     activity = 'working',
-                     activity_changed_at = datetime('now'),
                      agent_session_id = (
                        SELECT provider_session_id
                        FROM stage_run
@@ -503,8 +534,6 @@ impl Db {
             None => transaction.execute(
                 "UPDATE pipeline_item
                      SET stage = ?2,
-                     activity = 'working',
-                     activity_changed_at = datetime('now'),
                      agent_session_id = (
                        SELECT provider_session_id
                        FROM stage_run

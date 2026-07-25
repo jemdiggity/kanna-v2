@@ -316,8 +316,8 @@ pub struct StageRun {
     /// Worktree the run executed in; a resumed revision reopens the provider
     /// session here (CLI transcripts are keyed by working directory).
     pub cwd: Option<String>,
-    /// Set when this run resumed a previous run's provider session instead
-    /// of starting a fresh agent; records which run's session it continued.
+    /// Set when this run continues ownership from a previous run: either a
+    /// resumed provider session or a post injected into its live process.
     pub resumed_from_run_id: Option<String>,
     /// Effective completion policy chosen when this run was prepared.
     /// Legacy rows leave this null and fall back to the pinned stage policy.

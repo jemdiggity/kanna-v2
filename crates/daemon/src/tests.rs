@@ -728,6 +728,7 @@ pub(crate) fn agent_record_fixture(
         shared: Arc::new(Mutex::new(AgentShared {
             journal,
             writers: Vec::new(),
+            spawn_generation: 0,
         })),
         child: None,
         stdin: None,

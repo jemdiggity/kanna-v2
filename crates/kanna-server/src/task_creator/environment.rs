@@ -131,6 +131,7 @@ pub(super) fn build_spawn_env(
         "KANNA_CLI_PATH",
         "KANNA_MCP_PATH",
         "KANNA_MCP_CONFIG",
+        "KANNA_PROVIDER_SESSION_ID",
     ] {
         env.remove(key);
     }

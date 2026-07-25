@@ -415,6 +415,7 @@ pub fn shared_agent_state(data_dir: &Path, session_id: &str) -> Arc<Mutex<AgentS
     let fresh = Arc::new(Mutex::new(AgentShared {
         journal: AgentJournal::open(data_dir, session_id),
         writers: Vec::new(),
+        spawn_generation: 0,
     }));
     guard.insert(session_id.to_string(), Arc::downgrade(&fresh));
     fresh
@@ -444,6 +445,9 @@ pub struct AgentSessionRecord {
     pub run_id: Option<String>,
     /// Immutable identity of the child whose pipes/readers own this record.
     pub spawn_generation: u64,
+    /// Generation reserved by an AgentInput that is spawning the next
+    /// per-turn child. Only that input may install and journal the child.
+    pub respawn_reservation: Option<u64>,
     pub params: AgentSpawnParams,
     /// Adapter is shared with the reader thread (sync mutex: parse_line is
     /// CPU-only and never blocks).

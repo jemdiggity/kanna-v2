@@ -1479,6 +1479,7 @@ mod tests {
                         idle_seconds: 0,
                         status: kanna_daemon::protocol::SessionStatus::Idle,
                         kind: Default::default(),
+                        run_id: None,
                     }],
                     capabilities: None,
                 },
@@ -1551,6 +1552,7 @@ mod tests {
                     idle_seconds: 0,
                     status: kanna_daemon::protocol::SessionStatus::Busy,
                     kind: Default::default(),
+                    run_id: None,
                 }],
             )
             .await;
@@ -1645,6 +1647,7 @@ mod tests {
                         idle_seconds: 0,
                         status: kanna_daemon::protocol::SessionStatus::Busy,
                         kind: Default::default(),
+                        run_id: None,
                     }],
                     capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
                 },

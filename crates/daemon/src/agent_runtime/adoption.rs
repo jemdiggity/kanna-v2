@@ -180,6 +180,8 @@ pub async fn adopt_agent_session(
             .run_id
             .clone()
             .or_else(|| params.env.get("KANNA_STAGE_RUN_ID").cloned()),
+        spawn_generation: info.agent_spawn_generation,
+        respawn_reservation: None,
         params,
         adapter: Arc::new(std::sync::Mutex::new(adapter)),
         shared,

@@ -168,6 +168,7 @@ pub async fn agent_session_infos(agents: &AgentSessions) -> Vec<protocol::Sessio
                 idle_seconds: record.last_activity_at.elapsed().as_secs(),
                 status: record.status,
                 kind: protocol::SessionKind::Agent,
+                run_id: record.run_id.clone(),
             }
         })
         .collect()

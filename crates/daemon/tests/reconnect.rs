@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -96,6 +97,8 @@ enum Evt {
     Exit {
         session_id: String,
         code: i32,
+        #[serde(default)]
+        resume_session_id: Option<String>,
         #[serde(default)]
         killed: bool,
     },
@@ -428,7 +431,7 @@ impl ClientConn {
         }
     }
 
-    fn send(&mut self, cmd: &Cmd) {
+    fn send<T: Serialize>(&mut self, cmd: &T) {
         let mut json = serde_json::to_string(cmd).unwrap();
         json.push('\n');
         self.writer.write_all(json.as_bytes()).unwrap();
@@ -772,6 +775,7 @@ fn test_subscriber_receives_exit_for_pty_sessions() {
                 session_id,
                 code,
                 killed,
+                ..
             } => {
                 assert!(!killed, "natural exit must not be marked killed");
                 assert_eq!(session_id, "sess-exit-broadcast");
@@ -822,6 +826,7 @@ fn test_kill_delivers_killed_exit_to_attached_clients_and_subscribers() {
                 session_id,
                 code,
                 killed,
+                ..
             }) => {
                 assert_eq!(session_id, "sess-kill-notify");
                 assert_eq!(code, 128 + libc::SIGKILL);
@@ -848,6 +853,105 @@ fn test_kill_delivers_killed_exit_to_attached_clients_and_subscribers() {
                 break;
             }
             other => panic!("expected killed Exit broadcast, got: {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn codex_exit_events_keep_handle_discovered_before_owner_termination() {
+    let daemon = DaemonHandle::start();
+    let root = daemon._dir.join("codex-lifecycle");
+    let cwd = root.join("worktree");
+    let codex_home = root.join("codex-home");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let script = root.join("fake-codex.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+mkdir -p "$CODEX_HOME/sessions/2099/01/01"
+rollout="$CODEX_HOME/sessions/2099/01/01/$SESSION_NAME.jsonl"
+printf '%s\n' "$SESSION_METADATA" > "$rollout"
+exec 3>>"$rollout"
+: > "$READY_FILE"
+while [ ! -f "$EXIT_FILE" ]; do sleep 0.01; done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    assert!(matches!(subscriber.recv(), Evt::Ok));
+    let mut control = daemon.connect();
+
+    for (suffix, provider_id, orchestrated_kill) in [
+        ("natural", "019d99a5-aa94-7c73-b786-644cc095c051", false),
+        ("killed", "019d99a5-aa94-7c73-b786-644cc095c052", true),
+    ] {
+        let session_id = format!("codex-{suffix}");
+        let ready = root.join(format!("{suffix}.ready"));
+        let exit = root.join(format!("{suffix}.exit"));
+        let metadata = serde_json::json!({
+            "timestamp": "2099-01-01T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": provider_id,
+                "cwd": cwd,
+                "originator": "codex-tui"
+            }
+        })
+        .to_string();
+        control.send(&DaemonCommand::Spawn {
+            session_id: session_id.clone(),
+            executable: script.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            env: HashMap::from([
+                (
+                    "CODEX_HOME".to_string(),
+                    codex_home.to_string_lossy().into_owned(),
+                ),
+                ("SESSION_NAME".to_string(), suffix.to_string()),
+                ("SESSION_METADATA".to_string(), metadata),
+                (
+                    "READY_FILE".to_string(),
+                    ready.to_string_lossy().into_owned(),
+                ),
+                ("EXIT_FILE".to_string(), exit.to_string_lossy().into_owned()),
+                ("KANNA_STAGE_RUN_ID".to_string(), format!("run-{suffix}")),
+            ]),
+            cols: 80,
+            rows: 24,
+            agent_provider: Some(AgentProvider::Codex),
+            terminal_prelude: None,
+        });
+        expect_session_created(&mut control, &session_id);
+        wait_for_file(&ready);
+
+        if orchestrated_kill {
+            kill_session(&mut control, &session_id);
+        } else {
+            // Give the daemon a live-owner observation window, then let the
+            // process exit before inspecting the lifecycle event.
+            thread::sleep(Duration::from_millis(750));
+            std::fs::write(&exit, b"").unwrap();
+        }
+
+        loop {
+            match subscriber.recv() {
+                Evt::Exit {
+                    session_id: exited,
+                    resume_session_id,
+                    killed,
+                    ..
+                } if exited == session_id => {
+                    assert_eq!(killed, orchestrated_kill);
+                    assert_eq!(resume_session_id.as_deref(), Some(provider_id));
+                    break;
+                }
+                _ => {}
+            }
         }
     }
 }
