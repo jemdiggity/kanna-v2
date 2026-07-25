@@ -686,12 +686,22 @@ describe("useAppTaskCreation", () => {
       if (command === "file_exists" && args?.path === "/repo/.kanna") return true;
       return "";
     });
-    const { creation, store } = createTaskCreationHarness();
+    const {
+      creation,
+      store,
+      selectedCloudRepoId,
+      selectedCloudItemId,
+    } = createTaskCreationHarness();
+    selectedCloudRepoId.value = "cloud:repo-stale";
+    selectedCloudItemId.value = "cloud:repo-stale:task-stale";
 
     await creation.handleImportRepo("/repo", "repo", "main");
 
     expect(store.importRepo).toHaveBeenCalledWith("/repo", "repo", "main");
     expect(invokeMock).toHaveBeenCalledWith("file_exists", { path: "/repo/.kanna" });
+    expect(selectedCloudRepoId.value).toBeNull();
+    expect(selectedCloudItemId.value).toBeNull();
+    expect(store.persistSelection).toHaveBeenCalled();
     expect(store.loadAgent).not.toHaveBeenCalled();
     expect(store.createItem).not.toHaveBeenCalled();
   });
@@ -729,7 +739,14 @@ describe("useAppTaskCreation", () => {
       if (command === "file_exists" && args?.path === "/clone/.kanna") return true;
       return "";
     });
-    const { creation, store } = createTaskCreationHarness();
+    const {
+      creation,
+      store,
+      selectedCloudRepoId,
+      selectedCloudItemId,
+    } = createTaskCreationHarness();
+    selectedCloudRepoId.value = "cloud:repo-stale";
+    selectedCloudItemId.value = "cloud:repo-stale:task-stale";
 
     await creation.handleCloneRepo("git@github.com:kanna/repo.git", "/clone");
 
@@ -738,6 +755,9 @@ describe("useAppTaskCreation", () => {
       "/clone",
     );
     expect(invokeMock).toHaveBeenCalledWith("file_exists", { path: "/clone/.kanna" });
+    expect(selectedCloudRepoId.value).toBeNull();
+    expect(selectedCloudItemId.value).toBeNull();
+    expect(store.persistSelection).toHaveBeenCalled();
     expect(store.loadAgent).not.toHaveBeenCalled();
     expect(store.createItem).not.toHaveBeenCalled();
   });
