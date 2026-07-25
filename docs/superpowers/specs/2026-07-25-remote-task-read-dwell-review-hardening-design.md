@@ -76,4 +76,3 @@ Use red-green regressions at each boundary:
 - the origin/main-era database upgrade satisfies the schema, backfill, query,
   snapshot, reopen, migration-record, and activity-transition assertions; and
 - focused Rust and Vitest suites pass before broader repository checks.
-
