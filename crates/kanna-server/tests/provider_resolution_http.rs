@@ -310,7 +310,7 @@ async fn fake_daemon_until_spawn(daemon_dir: PathBuf) -> DaemonCommand {
         let command: DaemonCommand =
             serde_json::from_str(line.trim()).expect("daemon command should be JSON");
         match command {
-            DaemonCommand::Subscribe => {
+            DaemonCommand::Subscribe | DaemonCommand::SubscribeEvents { .. } => {
                 write_half
                     .write_all(
                         format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
@@ -381,7 +381,7 @@ async fn serve_fake_daemon_connection(
         let command: DaemonCommand =
             serde_json::from_str(line.trim()).expect("daemon command should be JSON");
         let response = match &command {
-            DaemonCommand::Subscribe => DaemonEvent::Ok,
+            DaemonCommand::Subscribe | DaemonCommand::SubscribeEvents { .. } => DaemonEvent::Ok,
             DaemonCommand::List => DaemonEvent::SessionList {
                 sessions: Vec::new(),
                 capabilities: None,
@@ -401,7 +401,10 @@ async fn serve_fake_daemon_connection(
             .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
             .await
             .expect("daemon response should be written");
-        if !matches!(&command, DaemonCommand::Subscribe | DaemonCommand::List) {
+        if !matches!(
+            &command,
+            DaemonCommand::Subscribe | DaemonCommand::SubscribeEvents { .. } | DaemonCommand::List
+        ) {
             let _ = commands.send(command);
         }
     }
