@@ -5,6 +5,8 @@ import { AGENT_PROVIDERS, AGENT_PROVIDER_SPECS } from "@kanna/agent-protocol";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NewTaskModal from "../NewTaskModal.vue";
+import BlockerSelectModal from "../BlockerSelectModal.vue";
+import type { PipelineItem } from "../../types/kanna";
 import { clearContextShortcuts, getContextShortcuts } from "../../composables/useShortcutContext";
 
 async function flushPromises() {
@@ -88,7 +90,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")?.[0]).toEqual([
-      "Use the configured pipeline", "claude", "qa-review", "origin/main", "pty",
+      "Use the configured pipeline", "claude", "qa-review", "origin/main", "pty", [],
     ]);
   });
 
@@ -296,7 +298,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")?.[0]).toEqual([
-      "Use OpenCode headlessly", "opencode", "default", "main", "agent",
+      "Use OpenCode headlessly", "opencode", "default", "main", "agent", [],
     ]);
   });
 
@@ -451,7 +453,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch picker", "claude", "default", "feature/task-base-branch", "pty"],
+      ["Ship branch picker", "claude", "default", "feature/task-base-branch", "pty", []],
     ]);
   });
 
@@ -471,7 +473,7 @@ describe("NewTaskModal", () => {
 
     const labels = wrapper.findAll(".pipeline-row .pipeline-label").map((label) => label.text());
 
-    expect(labels).toEqual(["tasks.baseBranch", "Pipeline"]);
+    expect(labels).toEqual(["tasks.baseBranch", "Pipeline", "tasks.blockedBy"]);
   });
 
   it("shows the selected pipeline inline before the picker is opened", async () => {
@@ -538,7 +540,7 @@ describe("NewTaskModal", () => {
     expect(wrapper.find('[data-testid="pipeline-option-review"]').exists()).toBe(false);
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main", "pty"]]);
+    expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main", "pty", []]]);
   });
 
   it("uses combined chat and CLI agent choices when submitting", async () => {
@@ -562,7 +564,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").setValue("Keep raw");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Keep raw", "claude", "default", "origin/main", "pty"]);
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Keep raw", "claude", "default", "origin/main", "pty", []]);
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
@@ -571,7 +573,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").setValue("Use codex raw");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use codex raw", "codex", "default", "origin/main", "pty"]);
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use codex raw", "codex", "default", "origin/main", "pty", []]);
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
@@ -584,7 +586,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").setValue("Use claude chat");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use claude chat", "claude", "default", "origin/main", "agent"]);
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use claude chat", "claude", "default", "origin/main", "agent", []]);
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
@@ -593,7 +595,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").setValue("Use codex chat");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use codex chat", "codex", "default", "origin/main", "agent"]);
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use codex chat", "codex", "default", "origin/main", "agent", []]);
   });
 
   it("supports keyboard navigation in the pipeline picker and returns focus to the toggle", async () => {
@@ -755,7 +757,7 @@ describe("NewTaskModal", () => {
     await search.trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch picker submit", "claude", "default", "origin/main", "pty"],
+      ["Ship branch picker submit", "claude", "default", "origin/main", "pty", []],
     ]);
 
     wrapper.unmount();
@@ -847,7 +849,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch fallback", "claude", "default", "origin/main", "pty"],
+      ["Ship branch fallback", "claude", "default", "origin/main", "pty", []],
     ]);
   });
 
@@ -918,5 +920,79 @@ describe("NewTaskModal", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("feature/task-base-branch");
+  });
+
+  describe("blocked by selector", () => {
+    const blockerCandidates = [
+      { id: "task-a", display_name: "Fix login", issue_title: null, prompt: "fix the login flow" },
+      { id: "task-b", display_name: null, issue_title: null, prompt: "Ship dark mode" },
+    ] as unknown as PipelineItem[];
+
+    function mountWithCandidates(candidates: PipelineItem[]) {
+      return mount(NewTaskModal, {
+        props: {
+          defaultAgentProvider: "claude" as const,
+          pipelines: ["default"],
+          defaultPipeline: "default",
+          baseBranches: ["origin/main"],
+          defaultBaseBranch: "origin/main",
+          blockerCandidates: candidates,
+        },
+        global: { mocks: { $t: (key: string) => key }, stubs: { BlockerSelectModal: true } },
+      });
+    }
+
+    it("shows no blockers by default and disables the picker without candidates", async () => {
+      const wrapper = mountWithCandidates([]);
+      await flushPromises();
+
+      expect(wrapper.get('[data-testid="blocked-by-value"]').text()).toBe("tasks.blockedByNone");
+      expect(wrapper.get('[data-testid="blocked-by-toggle"]').attributes("disabled")).toBeDefined();
+      expect(wrapper.findComponent(BlockerSelectModal).exists()).toBe(false);
+    });
+
+    it("selects blockers through the picker and emits their ids on submit", async () => {
+      const wrapper = mountWithCandidates(blockerCandidates);
+      await flushPromises();
+
+      expect(wrapper.get('[data-testid="blocked-by-value"]').text()).toBe("tasks.blockedByNone");
+
+      await wrapper.get('[data-testid="blocked-by-toggle"]').trigger("click");
+      const picker = wrapper.getComponent(BlockerSelectModal);
+      expect(picker.props("candidates")).toEqual(blockerCandidates);
+      picker.vm.$emit("confirm", ["task-a", "task-b"]);
+      await flushPromises();
+
+      expect(wrapper.findComponent(BlockerSelectModal).exists()).toBe(false);
+      expect(wrapper.get('[data-testid="blocked-by-value"]').text()).toBe("Fix login, Ship dark mode");
+
+      await wrapper.get("textarea").setValue("Ship blocked task");
+      await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+      expect(wrapper.emitted("submit")?.at(-1)).toEqual([
+        "Ship blocked task", "claude", "default", "origin/main", "pty", ["task-a", "task-b"],
+      ]);
+    });
+
+    it("drops selected blockers that are no longer candidates before submit", async () => {
+      const wrapper = mountWithCandidates(blockerCandidates);
+      await flushPromises();
+
+      await wrapper.get('[data-testid="blocked-by-toggle"]').trigger("click");
+      wrapper.getComponent(BlockerSelectModal).vm.$emit("confirm", ["task-a", "task-b"]);
+      await flushPromises();
+
+      await wrapper.setProps({ blockerCandidates: [blockerCandidates[0]] });
+      await flushPromises();
+
+      expect(wrapper.get('[data-testid="blocked-by-value"]').text()).toBe("Fix login");
+
+      await wrapper.get("textarea").setValue("Ship pruned blockers");
+      await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+      expect(wrapper.emitted("submit")?.at(-1)).toEqual([
+        "Ship pruned blockers", "claude", "default", "origin/main", "pty", ["task-a"],
+      ]);
+    });
   });
 });

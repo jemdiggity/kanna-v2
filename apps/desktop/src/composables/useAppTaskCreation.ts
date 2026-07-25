@@ -191,6 +191,13 @@ export function useAppTaskCreation({
     }
   }
 
+  // Open tasks in the selected repo that a new task can declare as blockers.
+  const newTaskBlockerCandidates = computed(() => {
+    const repoId = store.selectedRepoId;
+    if (!repoId) return [];
+    return store.items.filter((item) => item.repo_id === repoId && item.closed_at == null);
+  });
+
   // Handlers that mix UI state + store
   async function handleNewTaskSubmit(
     prompt: string,
@@ -198,6 +205,7 @@ export function useAppTaskCreation({
     pipelineName?: string,
     baseBranch?: string,
     agentType: "pty" | "agent" = "pty",
+    blockerTaskIds?: string[],
   ) {
     if (pendingNewTaskSubmit) return;
 
@@ -241,6 +249,7 @@ export function useAppTaskCreation({
         agentProvider,
         pipelineName,
         baseBranch,
+        blockerTaskIds,
       });
       try {
         await onAgentChoiceUsed?.({ provider: agentProvider, executionType: agentType });
@@ -382,6 +391,7 @@ export function useAppTaskCreation({
     newTaskSubmissionPending,
     currentBlockers,
     currentTaskIsBlocked,
+    newTaskBlockerCandidates,
     openNewTaskModal,
     handleNewTaskSubmit,
     handleCreateRepo,

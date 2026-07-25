@@ -116,6 +116,7 @@ export interface CreateItemOptions {
   selectOnCreate?: boolean;
   resumeSessionId?: string | null;
   recoverySnapshot?: SessionRecoveryState | null;
+  blockerTaskIds?: string[];
 }
 
 export interface StoreState {

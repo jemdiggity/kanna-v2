@@ -10,6 +10,8 @@
     "baseBranchRequired": "有効なベースブランチを選択してください",
     "baseBranchSearchPlaceholder": "ブランチを検索...",
     "loadingOptions": "タスクオプションを読み込んでいます…",
+    "blockedBy": "ブロック元",
+    "blockedByNone": "なし",
     "untitled": "無題",
     "renameTask": "タスク名を変更"
   },

@@ -130,6 +130,7 @@ export function createTaskItemActions(
         setupCmds: opts?.customTask?.setup,
         resumeSessionId: opts?.resumeSessionId,
         recoverySnapshot: opts?.recoverySnapshot,
+        blockerTaskIds: opts?.blockerTaskIds?.length ? opts.blockerTaskIds : undefined,
       });
       createdTaskId = created.taskId;
     } catch (error) {

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
-import type { AgentProvider } from "../types/kanna";
+import BlockerSelectModal from "./BlockerSelectModal.vue";
+import type { AgentProvider, PipelineItem } from "../types/kanna";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { macOsTextInputAttrs } from "../utils/textInput";
@@ -26,10 +27,11 @@ const props = defineProps<{
   defaultBranchName?: string;
   optionsLoading?: boolean;
   submissionPending?: boolean;
+  blockerCandidates?: PipelineItem[];
 }>();
 
 const emit = defineEmits<{
-  submit: [prompt: string, agentProvider: AgentProvider, pipelineName: string, baseBranch: string, agentType: AgentExecutionType];
+  submit: [prompt: string, agentProvider: AgentProvider, pipelineName: string, baseBranch: string, agentType: AgentExecutionType, blockerTaskIds: string[]];
   cancel: [];
 }>();
 
@@ -81,6 +83,19 @@ const visibleBaseBranches = computed(() =>
 );
 const textareaRef = ref<HTMLTextAreaElement>();
 const baseBranchSearchRef = ref<HTMLInputElement | null>(null);
+
+const showBlockerPicker = ref(false);
+const selectedBlockerIds = ref<string[]>([]);
+const blockerCandidateItems = computed(() => props.blockerCandidates ?? []);
+// Derive from candidates so blockers that disappear (e.g. closed tasks) are never submitted.
+const selectedBlockerItems = computed(() =>
+  blockerCandidateItems.value.filter((item) => selectedBlockerIds.value.includes(item.id)),
+);
+const blockedBySummary = computed(() =>
+  selectedBlockerItems.value
+    .map((item) => item.display_name || item.issue_title || item.prompt)
+    .join(", "),
+);
 
 const MAX_VISIBLE_BRANCH_ROWS = 7;
 const BRANCH_ROW_HEIGHT_PX = 36;
@@ -207,8 +222,26 @@ function handleSubmit() {
     || !hasValidBaseBranch.value
     || selectedBaseBranch.value === null
   ) return;
-  emit("submit", text, agentProvider.value, selectedPipeline.value, selectedBaseBranch.value, displayMode.value);
+  emit(
+    "submit",
+    text,
+    agentProvider.value,
+    selectedPipeline.value,
+    selectedBaseBranch.value,
+    displayMode.value,
+    selectedBlockerItems.value.map((item) => item.id),
+  );
   prompt.value = "";
+}
+
+function handleBlockerConfirm(ids: string[]) {
+  selectedBlockerIds.value = ids;
+  closeBlockerPicker();
+}
+
+function closeBlockerPicker() {
+  showBlockerPicker.value = false;
+  nextTick(() => textareaRef.value?.focus());
 }
 
 function handleBaseBranchSelect(branch: string) {
@@ -521,6 +554,31 @@ function handleKeydown(e: KeyboardEvent) {
             </div>
           </div>
         </div>
+
+        <div class="pipeline-row">
+          <label class="pipeline-label">{{ $t("tasks.blockedBy") }}</label>
+          <div class="base-branch-dropdown-shell">
+            <div class="base-branch-row">
+              <span
+                class="base-branch-value"
+                :class="{ muted: selectedBlockerItems.length === 0 }"
+                data-testid="blocked-by-value"
+              >
+                {{ selectedBlockerItems.length === 0 ? $t("tasks.blockedByNone") : (blockedBySummary || $t("tasks.untitled")) }}
+              </span>
+              <button
+                type="button"
+                class="change-link"
+                data-testid="blocked-by-toggle"
+                :disabled="blockerCandidateItems.length === 0 && selectedBlockerItems.length === 0"
+                @mousedown.prevent
+                @click="showBlockerPicker = true"
+              >
+                {{ $t("addRepo.change") }}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="modal-footer">
         <span class="hint">{{ $t('modals.submitHint', { action: $t('actions.submit').toLowerCase() }) }}</span>
@@ -536,6 +594,14 @@ function handleKeydown(e: KeyboardEvent) {
         </div>
       </div>
     </div>
+    <BlockerSelectModal
+      v-if="showBlockerPicker"
+      :candidates="blockerCandidateItems"
+      :preselected="selectedBlockerIds"
+      :title="$t('app.selectBlockingTasks')"
+      @confirm="handleBlockerConfirm"
+      @cancel="closeBlockerPicker"
+    />
   </div>
 </template>
 
@@ -673,6 +739,10 @@ function handleKeydown(e: KeyboardEvent) {
 
 .base-branch-value.invalid {
   color: var(--kn-warning);
+}
+
+.base-branch-value.muted {
+  color: var(--kn-text-muted);
 }
 
 .change-link {
