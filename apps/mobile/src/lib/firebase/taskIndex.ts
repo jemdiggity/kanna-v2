@@ -10,6 +10,7 @@ import {
 } from "firebase/firestore";
 import type { TaskActivity, TaskSummary } from "../api/types";
 import { buildCloudTaskId } from "../api/taskIdentity";
+import { canonicalRepoIdForHash } from "../api/repoIdentity";
 import {
   parseMobileFirebaseConfig,
   type MobileFirestoreEmulatorConfig
@@ -27,7 +28,7 @@ export interface CloudTaskSnapshot {
   stage: string;
   activity?: string | null;
   status?: string;
-  repo: { cloudRepoId: string; name: string };
+  repo: { cloudRepoId: string; name: string; remoteUrlHash?: string | null };
   agent?: { provider?: string | null; type?: string | null } | null;
   parentTaskId?: string | null;
   blockedByTaskIds?: string[];
@@ -273,6 +274,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     repo: {
       cloudRepoId: requiredString(value.repo.cloudRepoId, "repo.cloudRepoId"),
       name: requiredString(value.repo.name, "repo.name"),
+      remoteUrlHash: optionalNullableString(value.repo.remoteUrlHash),
     },
     agent: parseCloudTaskAgent(value.agent),
     parentTaskId: optionalNullableString(value.parentTaskId),
@@ -325,9 +327,18 @@ function optionalNullableString(value: unknown): string | null | undefined {
 }
 
 export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSummary {
+  // Repos with a remote URL hash display under the machine-independent
+  // canonical repo id so the same repository on several desktops folds into
+  // one entry; ownerLocalRepoId keeps the owner desktop's local id for routing.
+  const repoId = snapshot.repo.remoteUrlHash
+    ? canonicalRepoIdForHash(snapshot.repo.remoteUrlHash)
+    : snapshot.repo.cloudRepoId;
+  const ownerLocalRepoId =
+    snapshot.localRepoId ??
+    (repoId === snapshot.repo.cloudRepoId ? undefined : snapshot.repo.cloudRepoId);
   return {
     id: cloudTaskSummaryId(snapshot),
-    repoId: snapshot.repo.cloudRepoId,
+    repoId,
     repoName: snapshot.repo.name,
     title: snapshot.displayName ?? snapshot.title,
     prompt: snapshot.promptSnippet ?? undefined,
@@ -340,9 +351,7 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     parentTaskId: snapshot.parentTaskId ?? null,
     blockedByTaskIds: snapshot.blockedByTaskIds ?? [],
     ownerDesktopId: snapshot.ownerDesktopId,
-    ...(snapshot.localRepoId
-      ? { ownerLocalRepoId: snapshot.localRepoId }
-      : {}),
+    ...(ownerLocalRepoId ? { ownerLocalRepoId } : {}),
     ownerLocalTaskId: snapshot.ownerLocalTaskId,
     ownerOnline: false,
   };

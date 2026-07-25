@@ -50,10 +50,12 @@ async fn list_repos_route_returns_repo_summaries() {
             crate::mobile_api::RepoSummary {
                 id: "repo-1".to_string(),
                 name: "Repo One".to_string(),
+                remote_url_hash: None,
             },
             crate::mobile_api::RepoSummary {
                 id: "repo-2".to_string(),
                 name: "Repo Two".to_string(),
+                remote_url_hash: None,
             },
         ]
     );
@@ -2600,7 +2602,8 @@ async fn http_invoke_dispatches_shared_mobile_get_routes() {
         Some(serde_json::json!([
             {
                 "id": "repo-1",
-                "name": "Repo One"
+                "name": "Repo One",
+                "remoteUrlHash": null
             }
         ]))
     );

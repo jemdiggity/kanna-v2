@@ -20,6 +20,7 @@ import {
   buildCloudTaskId,
   canonicalizeTaskActionId
 } from "../api/taskIdentity";
+import { canonicalRepoId, mergeRepoSummaries } from "../api/repoIdentity";
 
 export type DisplayTaskRoute =
   | { source: "cloud"; taskId: string }
@@ -437,6 +438,47 @@ export function createCloudLanClient(
     string,
     { desktopId: string; localRepoId: string }
   >();
+  // Desktop-local repo id -> canonical display id (`git:<hash>`) for LAN
+  // repos with a remote URL hash, so LAN-only tasks list under the same
+  // repository entry as their cloud-published siblings from other machines.
+  const lanRepoDisplayIds = new Map<string, string>();
+
+  const rememberLanRepos = (snapshot: LanRepoSnapshot) => {
+    for (const repo of snapshot.repos) {
+      const displayRepoId = canonicalRepoId(repo);
+      lanRepoOwners.set(displayRepoId, {
+        desktopId: snapshot.desktopId,
+        localRepoId: repo.id
+      });
+      if (displayRepoId === repo.id) {
+        lanRepoDisplayIds.delete(repo.id);
+      } else {
+        lanRepoDisplayIds.set(repo.id, displayRepoId);
+      }
+    }
+  };
+
+  const canonicalizeLanTaskRepoIds = (
+    merged: MergedTaskSnapshot
+  ): MergedTaskSnapshot => {
+    if (lanRepoDisplayIds.size === 0) {
+      return merged;
+    }
+    let changed = false;
+    const tasks = merged.tasks.map((task) => {
+      const displayRepoId = lanRepoDisplayIds.get(task.repoId);
+      if (!displayRepoId) {
+        return task;
+      }
+      changed = true;
+      return {
+        ...task,
+        repoId: displayRepoId,
+        ownerLocalRepoId: task.ownerLocalRepoId ?? task.repoId
+      };
+    });
+    return changed ? { tasks, routes: merged.routes } : merged;
+  };
 
   const reportDesktopSourceWarnings = (
     updates: Partial<DesktopSourceWarnings>
@@ -512,7 +554,7 @@ export function createCloudLanClient(
     if (readEpoch !== latestReadEpoch && acceptedTaskSnapshot) {
       return acceptedTaskSnapshot;
     }
-    merged = projectProvisionalTaskIdentities(merged);
+    merged = canonicalizeLanTaskRepoIds(projectProvisionalTaskIdentities(merged));
     acceptedTaskSnapshot = merged;
     snapshotTaskRoutes = merged.routes;
     for (const [displayTaskId, provisionalRoute] of provisionalTaskRoutes) {
@@ -948,12 +990,7 @@ export function createCloudLanClient(
               options.isLanEnabled()
             ) {
               lastLanRepoSnapshot = lateSnapshot;
-              for (const repo of lateSnapshot.repos) {
-                lanRepoOwners.set(repo.id, {
-                  desktopId: lateSnapshot.desktopId,
-                  localRepoId: repo.id
-                });
-              }
+              rememberLanRepos(lateSnapshot);
             }
           }
         )
@@ -984,12 +1021,7 @@ export function createCloudLanClient(
       lanResult?.status === "fulfilled"
     ) {
       lastLanRepoSnapshot = lanResult.value;
-      for (const repo of lanResult.value.repos) {
-        lanRepoOwners.set(repo.id, {
-          desktopId: lanResult.value.desktopId,
-          localRepoId: repo.id
-        });
-      }
+      rememberLanRepos(lanResult.value);
     }
 
     const cloudRepos =
@@ -1010,7 +1042,7 @@ export function createCloudLanClient(
       throw firstReadFailure(cloudResult, lanResult, tasksResult);
     }
 
-    return mergeRepos(availableRepos.flat());
+    return mergeRepoSummaries(availableRepos.flat());
   };
 
   const listDesktops = async (): Promise<DesktopSummary[]> => {
@@ -1099,6 +1131,7 @@ export function createCloudLanClient(
       ) {
         const destinationLan = lanClientForDesktop(status.desktopId);
         if (destinationLan) {
+          const lanRepoOwner = lanRepoOwners.get(input.repoId);
           const localRepoId = [
             ...(acceptedTaskSnapshot?.tasks ?? []),
             ...(lastCloudTasks ?? [])
@@ -1107,7 +1140,11 @@ export function createCloudLanClient(
               task.repoId === input.repoId &&
               task.ownerDesktopId === status.desktopId &&
               task.ownerLocalRepoId
-          )?.ownerLocalRepoId ?? input.repoId;
+          )?.ownerLocalRepoId ??
+            (lanRepoOwner?.desktopId === status.desktopId
+              ? lanRepoOwner.localRepoId
+              : undefined) ??
+            input.repoId;
           const createdTask = await destinationLan.createTask({
             ...input,
             repoId: localRepoId
@@ -1351,16 +1388,6 @@ function reposFromTasks(tasks: TaskSummary[]): RepoSummary[] {
     id: task.repoId,
     name: task.repoName?.trim() || task.repoId
   }));
-}
-
-function mergeRepos(repos: RepoSummary[]): RepoSummary[] {
-  const reposById = new Map<string, RepoSummary>();
-  for (const repo of repos) {
-    if (!reposById.has(repo.id)) {
-      reposById.set(repo.id, repo);
-    }
-  }
-  return Array.from(reposById.values());
 }
 
 function mergeDesktops(

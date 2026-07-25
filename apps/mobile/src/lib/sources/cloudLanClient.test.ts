@@ -2566,6 +2566,53 @@ describe("createCloudLanClient", () => {
     expect(lan.searchTasks).not.toHaveBeenCalled();
   });
 
+  it("merges the same repository from cloud and LAN machines by remote url hash", async () => {
+    const cloudTask = task({
+      id: "cloud:desktop-cloud:repo-cloud:cloud-local-task",
+      repoId: "git:hash-kanna",
+      repoName: "kanna",
+      title: "Task on the other machine",
+      ownerDesktopId: "desktop-cloud",
+      ownerLocalRepoId: "repo-cloud",
+      ownerLocalTaskId: "cloud-local-task"
+    });
+    const lanOnlyTask = task({
+      id: "lan-only-task",
+      repoId: "repo-lan",
+      title: "Unpublished LAN task"
+    });
+    const cloud = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([cloudTask]),
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+      ])
+    });
+    const lan = createClientMock({
+      listRecentTasks: vi.fn().mockResolvedValue([lanOnlyTask]),
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-lan", name: "kanna", remoteUrlHash: "hash-kanna" }
+      ])
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true
+    });
+
+    await expect(client.listRepos()).resolves.toEqual([
+      { id: "git:hash-kanna", name: "kanna", remoteUrlHash: "hash-kanna" }
+    ]);
+
+    // The LAN-only task lists under the canonical repo entry while keeping
+    // its desktop-local repo id for routing.
+    await expect(client.listRepoTasks("git:hash-kanna")).resolves.toEqual([
+      cloudTask,
+      {
+        ...lanOnlyTask,
+        repoId: "git:hash-kanna",
+        ownerLocalRepoId: "repo-lan"
+      }
+    ]);
+  });
+
   it("uses last-good repository source data when a later explicit read fails", async () => {
     const cloud = createClientMock({
       listRepos: vi

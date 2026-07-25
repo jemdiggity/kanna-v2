@@ -27,6 +27,11 @@ import {
   buildCloudTaskId,
   canonicalizeTaskActionId,
 } from "../api/taskIdentity";
+import {
+  canonicalRepoId,
+  isRemoteRepoId,
+  mergeRepoSummaries
+} from "../api/repoIdentity";
 import { buildTaskDiffQuery } from "./lanTransport";
 
 export interface RemoteDesktopRecord {
@@ -131,7 +136,7 @@ export function createRemoteTransport({
   const provisionalTaskRoutes = new Map<string, CloudTaskRoute>();
   let latestAcceptedCloudTasks: CloudIndexedTaskSummary[] = [];
   let latestCloudReadEpoch = 0;
-  const cloudRepoOwners = new Map<string, string>();
+  const cloudRepoOwners = new Map<string, CloudRepoRoute>();
   const desktopRepoSnapshots = new Map<string, RepoSummary[]>();
   const desktopRepoFetchedAt = new Map<string, number>();
   const desktopRepoReads = new Map<string, Promise<void>>();
@@ -227,15 +232,42 @@ export function createRemoteTransport({
       };
     }
     if (requestedDesktopId) {
-      return { desktopId: requestedDesktopId, localRepoId: repoId };
+      return {
+        desktopId: requestedDesktopId,
+        localRepoId: isRemoteRepoId(repoId)
+          ? (await resolveDesktopLocalRepoId(requestedDesktopId, repoId)) ??
+            repoId
+          : repoId
+      };
     }
     if (!cloudRepoOwners.has(repoId)) {
       await listReachableDesktopRepos();
     }
-    const ownerDesktopId = cloudRepoOwners.get(repoId);
-    return ownerDesktopId
-      ? { desktopId: ownerDesktopId, localRepoId: repoId }
-      : null;
+    return cloudRepoOwners.get(repoId) ?? null;
+  };
+
+  const desktopLocalRepoId = (
+    desktopId: string,
+    repoId: string
+  ): string | null => {
+    const member = desktopRepoSnapshots
+      .get(desktopId)
+      ?.find((repo) => canonicalRepoId(repo) === repoId);
+    return member?.id ?? null;
+  };
+
+  // A canonical repo id (`git:<hash>`) is machine-independent; the desktop
+  // needs its own local repo id, resolved from that desktop's repo snapshot.
+  const resolveDesktopLocalRepoId = async (
+    desktopId: string,
+    repoId: string
+  ): Promise<string | null> => {
+    const localRepoId = desktopLocalRepoId(desktopId, repoId);
+    if (localRepoId || desktopRepoSnapshots.has(desktopId)) {
+      return localRepoId;
+    }
+    await listReachableDesktopRepos();
+    return desktopLocalRepoId(desktopId, repoId);
   };
 
   const requestDesktop = async <T>(
@@ -268,15 +300,18 @@ export function createRemoteTransport({
     forgetDesktopRepos(desktopId);
     desktopRepoSnapshots.set(desktopId, repos);
     for (const repo of repos) {
-      cloudRepoOwners.set(repo.id, desktopId);
+      cloudRepoOwners.set(canonicalRepoId(repo), {
+        desktopId,
+        localRepoId: repo.id
+      });
     }
   };
 
   const forgetDesktopRepos = (desktopId: string) => {
     desktopRepoSnapshots.delete(desktopId);
     desktopRepoFetchedAt.delete(desktopId);
-    for (const [repoId, ownerDesktopId] of cloudRepoOwners) {
-      if (ownerDesktopId === desktopId) {
+    for (const [repoId, owner] of cloudRepoOwners) {
+      if (owner.desktopId === desktopId) {
         cloudRepoOwners.delete(repoId);
       }
     }
@@ -520,18 +555,16 @@ export function createRemoteTransport({
         listFreshCloudTasks(),
         listReachableDesktopRepos()
       ]);
-      const reposById = new Map<string, string>();
+      const taskRepos = new Map<string, RepoSummary>();
       for (const task of tasks) {
-        if (!reposById.has(task.repoId)) {
-          reposById.set(task.repoId, task.repoName?.trim() || task.repoId);
+        if (!taskRepos.has(task.repoId)) {
+          taskRepos.set(task.repoId, {
+            id: task.repoId,
+            name: task.repoName?.trim() || task.repoId
+          });
         }
       }
-      for (const repo of desktopRepos) {
-        if (!reposById.has(repo.id)) {
-          reposById.set(repo.id, repo.name);
-        }
-      }
-      return Array.from(reposById, ([id, name]) => ({ id, name }));
+      return mergeRepoSummaries([...taskRepos.values(), ...desktopRepos]);
     },
     listRepoTasks: async (repoId: string) => {
       if (listCloudTasks) {
@@ -1111,7 +1144,13 @@ function parseRepoSummaries(value: unknown): RepoSummary[] {
       entry.id &&
       typeof entry.name === "string"
     ) {
-      repos.push({ id: entry.id, name: entry.name });
+      repos.push({
+        id: entry.id,
+        name: entry.name,
+        ...(typeof entry.remoteUrlHash === "string" && entry.remoteUrlHash
+          ? { remoteUrlHash: entry.remoteUrlHash }
+          : {})
+      });
     }
   }
   return repos;

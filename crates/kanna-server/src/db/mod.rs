@@ -104,6 +104,7 @@ pub struct Repo {
     pub path: String,
     pub name: String,
     pub default_branch: Option<String>,
+    pub remote_url_hash: Option<String>,
     pub hidden: Option<i64>,
     pub sort_order: Option<i64>,
     pub created_at: Option<String>,

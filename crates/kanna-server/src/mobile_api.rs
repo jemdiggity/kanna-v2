@@ -19,6 +19,9 @@ pub struct DesktopDescriptor {
 pub struct RepoSummary {
     pub id: String,
     pub name: String,
+    /// Cross-machine repo identity: hash of the git remote URL. Lets mobile
+    /// clients recognize the same repository registered on several desktops.
+    pub remote_url_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -569,6 +572,7 @@ fn map_repo_summary(repo: crate::db::Repo) -> RepoSummary {
     RepoSummary {
         id: repo.id,
         name: repo.name,
+        remote_url_hash: repo.remote_url_hash,
     }
 }
 
@@ -868,6 +872,8 @@ mod tests {
         let db = Db::open_for_tests(&config.db_path).unwrap();
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_repo("repo-2", "Repo Two").unwrap();
+        db.patch_repo("repo-1", None, None, Some(Some("hash-repo-one")), None)
+            .unwrap();
 
         let api = super::MobileApi::new(config, db);
         let repos = api.list_repos().unwrap();
@@ -878,10 +884,12 @@ mod tests {
                 super::RepoSummary {
                     id: "repo-1".to_string(),
                     name: "Repo One".to_string(),
+                    remote_url_hash: Some("hash-repo-one".to_string()),
                 },
                 super::RepoSummary {
                     id: "repo-2".to_string(),
                     name: "Repo Two".to_string(),
+                    remote_url_hash: None,
                 },
             ]
         );
