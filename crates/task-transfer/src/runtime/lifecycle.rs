@@ -7,7 +7,7 @@ use super::state::{ListenerContext, TransferRuntime};
 use super::utils::{
     load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
 };
-use crate::crypto::public_key_to_string;
+use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
 use crate::protocol::{DiscoveredPeer, PeerTaskSnapshot};
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
@@ -364,9 +364,19 @@ impl TransferRuntime {
         &self,
         target_peer_id: &str,
         task_id: &str,
+        activity_cutoff: &str,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let target_public_key = parse_public_key(&target_peer.public_key)?;
+        let sealed_payload = seal_json(
+            &self.identity,
+            &target_public_key,
+            &serde_json::json!({
+                "task_id": task_id,
+                "activity_cutoff": activity_cutoff,
+            }),
+        )?;
         let request_id = self.next_request_id("mark-read");
         let response = self
             .send_peer_request(
@@ -374,7 +384,7 @@ impl TransferRuntime {
                 PeerRequest::MarkTaskRead {
                     request_id: request_id.clone(),
                     requester_peer_id: self.config.peer_id.clone(),
-                    task_id: task_id.to_owned(),
+                    sealed_payload,
                 },
             )
             .await?;

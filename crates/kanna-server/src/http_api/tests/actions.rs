@@ -366,6 +366,100 @@ async fn mark_read_route_sets_unread_task_idle() {
 }
 
 #[tokio::test]
+async fn mark_read_route_keeps_unread_activity_newer_than_cutoff() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "task prompt",
+            Some("Task"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_activity("task-1", "unread")
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "UPDATE pipeline_item SET activity_changed_at = '2026-07-25 01:00:00.500' WHERE id = 'task-1'",
+            [],
+        )
+        .unwrap();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/mark-read")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "activityCutoff": "2026-07-25T01:00:00.000Z",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("unread"));
+}
+
+#[tokio::test]
+async fn mark_read_route_clears_unread_activity_at_or_before_cutoff() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "task prompt",
+            Some("Task"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_activity("task-1", "unread")
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "UPDATE pipeline_item SET activity_changed_at = '2026-07-25 01:00:00.000' WHERE id = 'task-1'",
+            [],
+        )
+        .unwrap();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/mark-read")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "activityCutoff": "2026-07-25T01:00:00.000Z",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("idle"));
+}
+
+#[tokio::test]
 async fn agent_session_id_route_persists_provider_session_id() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

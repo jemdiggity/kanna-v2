@@ -237,6 +237,7 @@ impl TransferSidecarClient {
         &mut self,
         peer_id: String,
         task_id: String,
+        activity_cutoff: String,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("mark-read");
         self.send_request(
@@ -245,6 +246,7 @@ impl TransferSidecarClient {
                 "request_id": request_id,
                 "target_peer_id": peer_id,
                 "task_id": task_id,
+                "activity_cutoff": activity_cutoff,
             }),
             &request_id,
         )

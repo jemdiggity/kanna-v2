@@ -1,11 +1,11 @@
 import { watchDebounced } from "@vueuse/core";
-import type { ComputedRef, Ref } from "vue";
+import { watch, type ComputedRef, type Ref } from "vue";
 import type { WorkspaceTask } from "../workspace/types";
 
 interface UseRemoteTaskReadDwellOptions {
   selectedItemId: Ref<string | null>;
   workspaceTasksByItemId: ComputedRef<Map<string, WorkspaceTask>>;
-  markTaskRead: (task: WorkspaceTask) => Promise<void>;
+  markTaskRead: (task: WorkspaceTask, activityCutoff: string) => Promise<void>;
 }
 
 export function useRemoteTaskReadDwell({
@@ -13,11 +13,20 @@ export function useRemoteTaskReadDwell({
   workspaceTasksByItemId,
   markTaskRead,
 }: UseRemoteTaskReadDwellOptions): void {
+  let selectionTime = Date.now();
+  watch(
+    selectedItemId,
+    () => {
+      selectionTime = Date.now();
+    },
+    { flush: "sync" },
+  );
+
   watchDebounced(
     selectedItemId,
     async (itemId) => {
       if (!itemId) return;
-      const selectionTime = Date.now() - 1000;
+      const activityCutoff = new Date(selectionTime).toISOString();
       const task = workspaceTasksByItemId.value.get(itemId);
       if (!task || task.owner.kind === "local" || task.item.activity !== "unread") return;
       if (
@@ -26,7 +35,7 @@ export function useRemoteTaskReadDwell({
       ) {
         return;
       }
-      await markTaskRead(task);
+      await markTaskRead(task, activityCutoff);
     },
     { debounce: 1000 },
   );

@@ -1427,6 +1427,7 @@ describe("App", () => {
     expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
       desktopId: "relay-owner",
       taskId: "relay-owner-task",
+      activityCutoff: "2026-07-25T01:00:00.000Z",
     });
     expect(lanTerminalClientFactoryMock).not.toHaveBeenCalled();
     expect(lanMarkTaskReadMock).not.toHaveBeenCalled();
@@ -1451,6 +1452,7 @@ describe("App", () => {
     expect(lanMarkTaskReadMock).toHaveBeenCalledWith({
       desktopId: "lan-owner",
       taskId: "lan-owner-task",
+      activityCutoff: "2026-07-25T01:00:00.000Z",
     });
     expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
     expect(relayMarkTaskReadMock).not.toHaveBeenCalled();
@@ -1475,6 +1477,7 @@ describe("App", () => {
     expect(relayMarkTaskReadMock).toHaveBeenCalledWith({
       desktopId: "restored-owner",
       taskId: "restored-owner-task",
+      activityCutoff: "2026-07-25T01:00:00.000Z",
     });
     expect(relayCloseMock).toHaveBeenCalledOnce();
 
