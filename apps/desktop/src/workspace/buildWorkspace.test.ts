@@ -54,7 +54,7 @@ function item(overrides: Partial<PipelineItem> = {}): PipelineItem {
 }
 
 function emptySnapshot() {
-  return { repos: [], items: [], terminalRefs: {} };
+  return { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} };
 }
 
 describe("buildWorkspace", () => {
@@ -486,11 +486,13 @@ describe("buildWorkspace", () => {
             transport: "cloud",
           },
         },
+        blockedByTaskIds: {},
       },
       lanSnapshot: {
         repos: [],
         items: [lanItem],
         terminalRefs: {},
+        blockedByTaskIds: {},
       },
     });
 
@@ -584,6 +586,7 @@ describe("buildWorkspace", () => {
         }],
         items: [cloudItem],
         terminalRefs: {},
+        blockedByTaskIds: {},
       },
       lanSnapshot: emptySnapshot(),
     });

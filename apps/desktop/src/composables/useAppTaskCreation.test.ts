@@ -34,7 +34,12 @@ function createTaskCreationHarness() {
   const onAgentChoiceUsed = vi.fn(async () => {});
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
-  const remoteSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
+  const remoteSnapshot = ref<DesktopCloudSnapshot>({
+    repos: [],
+    items: [],
+    terminalRefs: {},
+    blockedByTaskIds: {},
+  });
   const cloudOnlyRepoIds = new Set<string>();
   const toast = { warning: vi.fn(), error: vi.fn() };
   const store = {
@@ -317,7 +322,12 @@ describe("useAppTaskCreation", () => {
       created_at: "2026-07-21T00:00:00Z",
       last_opened_at: "2026-07-21T00:00:00Z",
     };
-    remoteSnapshot.value = { repos: [cloudRepo], items: [], terminalRefs: {} };
+    remoteSnapshot.value = {
+      repos: [cloudRepo],
+      items: [],
+      terminalRefs: {},
+      blockedByTaskIds: {},
+    };
     cloudOnlyRepoIds.add(cloudRepoId);
     store.selectedRepoId = cloudRepoId;
     invokeMock.mockImplementation(async (command: string) => {
@@ -333,6 +343,7 @@ describe("useAppTaskCreation", () => {
       repos: [{ ...cloudRepo, default_branch: "trunk" }],
       items: [],
       terminalRefs: {},
+      blockedByTaskIds: {},
     };
     invokeMock.mockImplementation((command: string) => {
       if (command === "git_list_remote_base_branches") return refreshedBranches.promise;

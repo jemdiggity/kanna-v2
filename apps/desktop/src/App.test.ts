@@ -100,7 +100,7 @@ const desktopCloudTaskSnapshotListeners = vi.hoisted(
 const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   vi.fn((_uid: string, onSnapshot: (snapshot: DesktopCloudSnapshot) => void) => {
     desktopCloudTaskSnapshotListeners.add(onSnapshot);
-    onSnapshot({ repos: [], items: [], terminalRefs: {} });
+    onSnapshot({ repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} });
     return () => desktopCloudTaskSnapshotListeners.delete(onSnapshot);
   }),
 );
@@ -421,7 +421,12 @@ vi.mock("./services/desktopAuthSdk", () => ({
 
 vi.mock("./services/desktopCloudTaskIndex", () => ({
   listDesktopCloudTasks: cloudTasksMock,
-  mapDesktopCloudTasks: vi.fn((tasks: unknown[]) => ({ repos: [], items: tasks, terminalRefs: {} })),
+  mapDesktopCloudTasks: vi.fn((tasks: unknown[]) => ({
+    repos: [],
+    items: tasks,
+    terminalRefs: {},
+    blockedByTaskIds: {},
+  })),
   subscribeDesktopCloudTasks: subscribeDesktopCloudTasksMock,
 }));
 

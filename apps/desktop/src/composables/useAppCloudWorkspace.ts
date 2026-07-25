@@ -59,8 +59,18 @@ const REMOTE_MARK_READ_TIMEOUT_MS = 10_000;
 export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseAppCloudWorkspaceOptions) {
   const desktopAuthSession = ref<DesktopAuthSession | null>(null);
   const desktopAuthState = ref<DesktopAuthState>({ status: "signedOut" });
-  const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
-  const lanSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
+  const cloudSnapshot = ref<DesktopCloudSnapshot>({
+    repos: [],
+    items: [],
+    terminalRefs: {},
+    blockedByTaskIds: {},
+  });
+  const lanSnapshot = ref<DesktopCloudSnapshot>({
+    repos: [],
+    items: [],
+    terminalRefs: {},
+    blockedByTaskIds: {},
+  });
   const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
   let unsubscribeDesktopAuth: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
@@ -138,6 +148,10 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           !remoteTaskIsLocallyClosed({ id: taskId }, ref, locallyClosedRemoteTaskIds.value),
         ),
     ),
+    blockedByTaskIds: {
+      ...cloudSnapshot.value.blockedByTaskIds,
+      ...lanSnapshot.value.blockedByTaskIds,
+    },
   }));
 
   const remoteTaskPins = computed(() => parseRemoteTaskPins(store.snapshotSettings));
@@ -229,14 +243,21 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   function filterClosedRemoteSnapshot(snapshot: DesktopCloudSnapshot): DesktopCloudSnapshot {
     const closedIds = locallyClosedRemoteTaskIds.value;
     if (closedIds.size === 0) return snapshot;
+    const items = snapshot.items.filter((item) =>
+      !remoteTaskIsLocallyClosed(item, snapshot.terminalRefs[item.id], closedIds),
+    );
+    const retainedTaskIds = new Set(items.map((item) => item.id));
     return {
       repos: snapshot.repos,
-      items: snapshot.items.filter((item) =>
-        !remoteTaskIsLocallyClosed(item, snapshot.terminalRefs[item.id], closedIds),
-      ),
+      items,
       terminalRefs: Object.fromEntries(
         Object.entries(snapshot.terminalRefs).filter(([taskId, ref]) =>
           !remoteTaskIsLocallyClosed({ id: taskId }, ref, closedIds),
+        ),
+      ),
+      blockedByTaskIds: Object.fromEntries(
+        Object.entries(snapshot.blockedByTaskIds).filter(([taskId]) =>
+          retainedTaskIds.has(taskId),
         ),
       ),
     };
@@ -313,6 +334,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       repos: snapshot.repos,
       items: snapshot.items,
       terminalRefs: snapshot.terminalRefs ?? {},
+      blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
     };
   }
 
@@ -335,6 +357,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           repos: snapshot.repos,
           items: snapshot.items,
           terminalRefs: snapshot.terminalRefs ?? {},
+          blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
         };
       },
       {
@@ -365,6 +388,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       repos: snapshot.repos,
       items: snapshot.items,
       terminalRefs: snapshot.terminalRefs ?? {},
+      blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
     };
   }
 
@@ -400,7 +424,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         associatedCloudUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshotRevision += 1;
-        cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
+        cloudSnapshot.value = { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} };
       }
     });
     void runDesktopAutoSignIn({
