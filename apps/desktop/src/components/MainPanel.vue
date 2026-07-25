@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from "vue";
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
-import type { AgentProvider, PipelineItem } from "../types/kanna";
+import type { AgentProvider, BlockerDisplayItem } from "../types/kanna";
 import type { TaskUiSlot } from "../types/taskUi";
 import { isBlockerResolved } from "../utils/blockerResolution";
 import { invoke } from "../invoke";
@@ -15,7 +15,7 @@ const props = defineProps<{
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
   recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
   maximized?: boolean;
-  blockers?: PipelineItem[];
+  blockers?: BlockerDisplayItem[];
   blocked?: boolean;
   hasRepos?: boolean;
   cloudTask?: boolean;

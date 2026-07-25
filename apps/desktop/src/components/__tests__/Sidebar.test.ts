@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 
-import type { PipelineItem, Repo } from "../../types/kanna";
+import type {
+  BlockerTaskStates,
+  PipelineItem,
+  Repo,
+  TaskBlocker,
+} from "../../types/kanna";
 import type { SidebarTaskItem } from "../../types/taskUi";
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
@@ -155,7 +160,15 @@ function creatingItem(
   };
 }
 
-function mountSidebar(taskSlots: SidebarTaskItem[], selectedSlotId: string | null = "slot:task-1") {
+function mountSidebar(
+  taskSlots: SidebarTaskItem[],
+  selectedSlotId: string | null = "slot:task-1",
+  blockerProps: {
+    taskBlockers?: TaskBlocker[];
+    blockerTaskStates?: BlockerTaskStates;
+    blockerNames?: Record<string, string>;
+  } = {},
+) {
   return mount(Sidebar, {
     props: {
       repos: [repo],
@@ -163,6 +176,7 @@ function mountSidebar(taskSlots: SidebarTaskItem[], selectedSlotId: string | nul
       selectedRepoId: repo.id,
       selectedSlotId,
       blockerNames: {},
+      ...blockerProps,
     },
     global: {
       stubs: {
@@ -221,6 +235,39 @@ describe("Sidebar", () => {
     vi.clearAllMocks();
     getStageOrder.mockReset();
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
+  });
+
+  it("places a remotely blocked task in the blocked section with its blocker name", () => {
+    const blocked = item("remote-blocked", {
+      display_name: "Blocked remote",
+      remote_task: true,
+    });
+    const blocker = item("remote-blocker", {
+      display_name: "Build dependency",
+      remote_task: true,
+    });
+    const wrapper = mountSidebar([blocked, blocker], null, {
+      taskBlockers: [{
+        blocked_item_id: blocked.task_id,
+        blocker_item_id: blocker.task_id,
+      }],
+      blockerTaskStates: {
+        [blocker.task_id]: {
+          closed_at: null,
+          stage: "in progress",
+          pr_url: null,
+        },
+      },
+      blockerNames: {
+        [blocked.task_id]: "Build dependency",
+      },
+    });
+
+    const blockedRow = wrapper.get(`[data-task-id="${blocked.task_id}"]`);
+    expect(blockedRow.text()).toContain("sidebar.blockedBy Build dependency");
+    expect(blockedRow.element.previousElementSibling).toBeNull();
+    expect(wrapper.text()).toContain("sidebar.sectionBlocked");
+    expect(wrapper.findAll(`[data-task-id="${blocked.task_id}"]`)).toHaveLength(1);
   });
 
   it("keeps one selected DOM row when a creating slot hydrates into its durable task", async () => {

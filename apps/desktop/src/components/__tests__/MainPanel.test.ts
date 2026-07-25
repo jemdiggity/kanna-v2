@@ -382,4 +382,38 @@ describe("MainPanel", () => {
     expect(wrapper.find(".blocked-placeholder").exists()).toBe(true);
     expect(wrapper.find('[data-testid="terminal-tabs"]').exists()).toBe(false);
   });
+
+  it("shows remote blocker details instead of mounting the cloud terminal", async () => {
+    const { default: MainPanel } = await import("../MainPanel.vue");
+
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(),
+        hasRepos: true,
+        cloudTask: true,
+        cloudTerminalRef: {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "task-pending",
+          transport: "cloud",
+        },
+        blockers: [durableTask({
+          id: "remote-blocker",
+          display_name: "Build dependency",
+        })],
+        blocked: true,
+      },
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+          CloudTerminalView: { template: '<div data-testid="cloud-terminal" />' },
+        },
+      },
+    });
+
+    expect(wrapper.find(".blocked-placeholder").exists()).toBe(true);
+    expect(wrapper.text()).toContain("Build dependency");
+    expect(wrapper.find('[data-testid="cloud-terminal"]').exists()).toBe(false);
+  });
 });

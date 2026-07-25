@@ -29,6 +29,7 @@ interface UseAppKeyboardActionsOptions {
   windowWorkspace: WindowWorkspaceController;
   sidebarRepos: ComputedRef<SidebarRepoProjection[]>;
   selectedWorkspaceTask: ComputedRef<WorkspaceTask | null>;
+  selectedWorkspaceTaskBlocked: ComputedRef<boolean>;
   currentShortcutContext: ComputedRef<ShortcutContext>;
   showNewTaskModal: Ref<boolean>;
   showAddRepoModal: Ref<boolean>;
@@ -97,6 +98,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     windowWorkspace,
     sidebarRepos,
     selectedWorkspaceTask,
+    selectedWorkspaceTaskBlocked,
     currentShortcutContext,
     showNewTaskModal,
     showAddRepoModal,
@@ -234,6 +236,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     advanceStage: () => {
       const workspaceTask = selectedWorkspaceTask.value;
       if (workspaceTask) {
+        if (selectedWorkspaceTaskBlocked.value) {
+          toast.warning(t("mainPanel.taskBlocked"));
+          return;
+        }
         if (!workspaceTask.capabilities.canAdvanceStage) return;
         if (!workspaceTask.localTaskId) {
           void advanceSelectedRemoteWorkspaceTask(workspaceTask);

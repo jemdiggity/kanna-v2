@@ -46,12 +46,15 @@ const {
   remoteSnapshot,
   remoteTaskDiagnostics,
   workspaceTasksByItemId,
+  workspaceBlockers,
   sidebarRepos,
   sidebarItems,
   mainPanelRepo,
   mainPanelItem,
   mainPanelIsCloudTask,
   selectedWorkspaceTask,
+  selectedRemoteBlockers,
+  selectedRemoteTaskIsBlocked,
   mainPanelCloudTerminalRef,
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
@@ -218,6 +221,14 @@ const {
   startSystemThemeListener,
   stopSystemThemeListener,
 } = appPreferences;
+const sidebarTaskBlockers = computed(() => [
+  ...store.taskBlockers,
+  ...workspaceBlockers.value.taskBlockers,
+]);
+const sidebarBlockerTaskStates = computed(() => ({
+  ...store.blockerTaskStates,
+  ...workspaceBlockers.value.blockerTaskStates,
+}));
 const appTaskNavigation = useAppTaskNavigation({
   store,
   toast,
@@ -226,6 +237,8 @@ const appTaskNavigation = useAppTaskNavigation({
   sidebarRef,
   sidebarRepos,
   sidebarItems,
+  taskBlockers: sidebarTaskBlockers,
+  blockerTaskStates: sidebarBlockerTaskStates,
   workspaceTasksByItemId,
   selectedCloudRepoId,
   selectedCloudItemId,
@@ -244,10 +257,14 @@ const {
   selectUnreadTaskWithReadFallback,
   handleBlockTask,
   handleEditBlockedTask,
-  sidebarBlockerNames,
+  sidebarBlockerNames: localSidebarBlockerNames,
   handleSelectRepo,
   selectSidebarItemById,
 } = appTaskNavigation;
+const sidebarBlockerNames = computed(() => ({
+  ...localSidebarBlockerNames.value,
+  ...workspaceBlockers.value.blockerNames,
+}));
 const appTaskCreation = useAppTaskCreation({
   store,
   toast,
@@ -273,6 +290,14 @@ const {
   currentTaskIsBlocked,
   openNewTaskModal,
 } = appTaskCreation;
+const mainPanelBlockers = computed(() =>
+  mainPanelIsCloudTask.value ? selectedRemoteBlockers.value : currentBlockers.value,
+);
+const mainPanelTaskIsBlocked = computed(() =>
+  mainPanelIsCloudTask.value
+    ? selectedRemoteTaskIsBlocked.value
+    : currentTaskIsBlocked.value,
+);
 
 let keyboardActions = {} as KeyboardActions;
 const {
@@ -312,6 +337,7 @@ const appKeyboardActions = useAppKeyboardActions({
   windowWorkspace,
   sidebarRepos,
   selectedWorkspaceTask,
+  selectedWorkspaceTaskBlocked: selectedRemoteTaskIsBlocked,
   currentShortcutContext,
   showNewTaskModal,
   showAddRepoModal,
@@ -406,6 +432,8 @@ const modalLayerController = {
         :selected-repo-id="store.selectedRepoId"
         :selected-slot-id="selectedSidebarSlotId"
         :blocker-names="sidebarBlockerNames"
+        :task-blockers="sidebarTaskBlockers"
+        :blocker-task-states="sidebarBlockerTaskStates"
         @select-repo="handleSelectRepo"
         @select-item="selectSidebarItemById"
         @new-task="(repoId: string) => openNewTaskModal(repoId).catch((e) => console.error('[App] openNewTaskModal failed:', e))"
@@ -437,8 +465,8 @@ const modalLayerController = {
         :spawn-pty-session="store.spawnPtySession"
         :recover-task-session="store.recoverTaskSession"
         :maximized="maximized"
-        :blockers="currentBlockers"
-        :blocked="currentTaskIsBlocked"
+        :blockers="mainPanelBlockers"
+        :blocked="mainPanelTaskIsBlocked"
         :has-repos="sidebarRepos.length > 0"
         :cloud-task="mainPanelIsCloudTask"
         :cloud-terminal-ref="mainPanelCloudTerminalRef"

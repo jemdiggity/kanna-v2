@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import type { Repo } from "../types/kanna";
+import type {
+  BlockerTaskStates,
+  Repo,
+  TaskBlocker,
+} from "../types/kanna";
 import type { ReadySidebarTaskItem, SidebarTaskItem } from "../types/taskUi";
 import { computed, ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -26,6 +30,8 @@ const props = defineProps<{
   selectedRepoId: string | null;
   selectedSlotId: string | null;
   blockerNames?: Record<string, string>;
+  taskBlockers?: readonly TaskBlocker[];
+  blockerTaskStates?: Readonly<BlockerTaskStates>;
 }>();
 
 const emit = defineEmits<{
@@ -94,8 +100,8 @@ function sidebarOrderingOptions(repoId: string) {
   return {
     repoId,
     items: props.taskSlots,
-    blockers: store.taskBlockers,
-    blockerTaskStates: store.blockerTaskStates,
+    blockers: props.taskBlockers ?? store.taskBlockers,
+    blockerTaskStates: props.blockerTaskStates ?? store.blockerTaskStates,
     getStageOrder: store.getStageOrder,
     searchQuery: searchQuery.value,
   };
