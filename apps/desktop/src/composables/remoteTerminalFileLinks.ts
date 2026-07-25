@@ -64,10 +64,23 @@ export function createRemoteTerminalFileLinkProvider(params: {
   function fetchFileContent(previewPath: string, refresh = false): Promise<string | null> {
     const cached = fileContentCache.get(previewPath)
     if (cached && !refresh) return cached
-    const pending = params.readFile(previewPath).catch((error: unknown) => {
-      console.debug(`[remote-file-links] failed to read remote file ${previewPath}:`, error)
-      return null
-    })
+    const pending: Promise<string | null> = params.readFile(previewPath)
+      .catch((error: unknown) => {
+        console.debug(`[remote-file-links] failed to read remote file ${previewPath}:`, error)
+        return null
+      })
+      .then((content) => {
+        // Only successful reads stay cached, mirroring the local provider. A
+        // missing file or a failed transport must not pin the path as
+        // unresolvable — the next probe retries once the agent writes the file
+        // or the relay/LAN connection recovers. The identity check keeps a
+        // settling probe from evicting a newer refresh started over it.
+        if (content === null && fileContentCache.get(previewPath) === pending) {
+          fileContentCache.delete(previewPath)
+        }
+        return content
+      })
+    // Cached while in flight so concurrent provideLinks probes share one read.
     fileContentCache.set(previewPath, pending)
     return pending
   }

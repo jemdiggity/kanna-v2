@@ -265,6 +265,71 @@ describe("terminal file links", () => {
     expect(highlightedLine).toContain("line 31 target from terminal file link");
   });
 
+  it("previews a remote task file link from the payload without reading local disk", async () => {
+    await client.executeSync(
+      `document.dispatchEvent(new KeyboardEvent("keydown", {
+         key: "Escape",
+         bubbles: true,
+         cancelable: true,
+       }));`,
+    );
+    await client.waitForNoElement(".preview-modal", 5_000);
+
+    // This path exists in no worktree on this machine. A task owned by another
+    // desktop is streamed through CloudTerminalView, whose link provider reads
+    // the file over the relay/LAN transport and hands the snapshot to the
+    // preview. Anything rendered here therefore came from the payload, not from
+    // a local filesystem read.
+    const remotePath = "src/remote-only/OwnedByAnotherDesktop.ts";
+    const remoteContent = [
+      "// line 1 of the remote-owned file",
+      "// line 2 of the remote-owned file",
+      "export const remoteOnlyMarker = \"served from the owning desktop\";",
+      "// line 4 of the remote-owned file",
+    ].join("\n");
+
+    await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
+    await client.executeSync(
+      `// xterm link providers expose buffer ranges and activation callbacks rather
+       // than stable DOM anchors, so this covers the same document-level activation
+       // path the remote provider dispatches after its unit tests verify detection,
+       // caching, and cmd+click activation.
+       document.dispatchEvent(new CustomEvent("file-link-activate", {
+         bubbles: true,
+         detail: {
+           path: ${JSON.stringify(remotePath)},
+           line: 3,
+           remoteContent: ${JSON.stringify(remoteContent)},
+         },
+       }));`,
+    );
+
+    await waitForPreviewVisible();
+    expect(await previewedFilePath()).toBe(remotePath);
+    await waitForLineTarget(3);
+    await waitForPreviewText("served from the owning desktop");
+
+    const previewState = await client.executeSync<{
+      localReads: string[];
+      openInIdeButtons: number;
+      renderedLine: string | null;
+    }>(
+      `const calls = window.__KANNA_E2E__.invokes.getAll();
+       return {
+         localReads: calls
+           .filter(function(call) { return call.cmd === "read_text_file"; })
+           .map(function(call) { return call.args.path; }),
+         openInIdeButtons: document.querySelectorAll(".preview-modal .btn-open").length,
+         renderedLine: document.querySelector('.preview-modal [data-line="3"]')?.textContent ?? null,
+       };`,
+    );
+
+    expect(previewState.localReads).toEqual([]);
+    // Open in IDE would shell out against a path that does not exist here.
+    expect(previewState.openInIdeButtons).toBe(0);
+    expect(previewState.renderedLine).toContain("served from the owning desktop");
+  });
+
   it("opens a local task worktree image link in the image preview through the backend reader", async () => {
     await client.executeSync(
       `document.dispatchEvent(new KeyboardEvent("keydown", {

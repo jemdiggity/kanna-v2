@@ -4,12 +4,14 @@ import {
   resolveRemoteTerminalFileLinkPath,
 } from "./remoteTerminalFileLinks"
 
-function createProviderForLine(lineText: string, files: Record<string, string>) {
+function createProviderWithReadFile(
+  lineText: string,
+  readFile: (path: string) => Promise<string | null>,
+) {
   let registeredProvider: {
     provideLinks(bufferLineNumber: number, callback: (links: unknown[] | undefined) => void): void
   } | null = null
   const container = document.createElement("div")
-  const readFile = vi.fn(async (path: string) => files[path] ?? null)
 
   const term = {
     buffer: {
@@ -36,14 +38,25 @@ function createProviderForLine(lineText: string, files: Record<string, string>) 
     throw new Error("expected terminal link provider to be registered")
   }
 
-  return { container, provider, registeredProvider, readFile }
+  return { container, provider, registeredProvider }
+}
+
+function createProviderForLine(lineText: string, files: Record<string, string>) {
+  const readFile = vi.fn(async (path: string) => files[path] ?? null)
+  return { ...createProviderWithReadFile(lineText, readFile), readFile }
+}
+
+function probeLinks(registeredProvider: {
+  provideLinks(bufferLineNumber: number, callback: (links: unknown[] | undefined) => void): void
+}): Promise<unknown[] | undefined> {
+  return new Promise((resolve) => {
+    registeredProvider.provideLinks(1, resolve)
+  })
 }
 
 async function provideLinks(lineText: string, files: Record<string, string>) {
   const { container, provider, registeredProvider, readFile } = createProviderForLine(lineText, files)
-  const links = await new Promise<unknown[] | undefined>((resolve) => {
-    registeredProvider.provideLinks(1, resolve)
-  })
+  const links = await probeLinks(registeredProvider)
   return { container, provider, links, readFile }
 }
 
@@ -127,41 +140,83 @@ describe("remoteTerminalFileLinks", () => {
       "wrote src/app.ts",
       { "src/app.ts": "content" },
     )
-    await new Promise((resolve) => registeredProvider.provideLinks(1, resolve))
-    await new Promise((resolve) => registeredProvider.provideLinks(1, resolve))
+    await probeLinks(registeredProvider)
+    await probeLinks(registeredProvider)
     expect(readFile).toHaveBeenCalledTimes(1)
 
     provider.clearFileCache()
-    await new Promise((resolve) => registeredProvider.provideLinks(1, resolve))
+    await probeLinks(registeredProvider)
     expect(readFile).toHaveBeenCalledTimes(2)
   })
 
+  it("shares one in-flight read across concurrent probes of the same path", async () => {
+    const readFile = vi.fn(async () => "content")
+    const { registeredProvider } = createProviderWithReadFile("wrote src/app.ts", readFile)
+
+    const [first, second] = await Promise.all([
+      probeLinks(registeredProvider),
+      probeLinks(registeredProvider),
+    ])
+
+    expect(readFile).toHaveBeenCalledTimes(1)
+    expect(first).toHaveLength(1)
+    expect(second).toHaveLength(1)
+  })
+
+  it("retries a path that was missing during an earlier probe", async () => {
+    // A path the agent has not written yet must not be pinned as unresolvable:
+    // the next probe has to retry so the link appears once the file lands.
+    const readFile = vi.fn<(path: string) => Promise<string | null>>()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce("content that landed later")
+    const { registeredProvider } = createProviderWithReadFile("wrote src/app.ts", readFile)
+
+    await expect(probeLinks(registeredProvider)).resolves.toBeUndefined()
+    expect(await probeLinks(registeredProvider)).toHaveLength(1)
+    expect(readFile).toHaveBeenCalledTimes(2)
+  })
+
+  it("retries a path whose earlier read failed on the transport", async () => {
+    // A relay/LAN read that failed must not pin the path either — the next
+    // probe retries once the connection recovers.
+    const readFile = vi.fn<(path: string) => Promise<string | null>>()
+      .mockRejectedValueOnce(new Error("relay offline"))
+      .mockResolvedValueOnce("content after recovery")
+    const { registeredProvider } = createProviderWithReadFile("wrote src/app.ts", readFile)
+
+    await expect(probeLinks(registeredProvider)).resolves.toBeUndefined()
+    expect(await probeLinks(registeredProvider)).toHaveLength(1)
+    expect(readFile).toHaveBeenCalledTimes(2)
+  })
+
+  it("activates a recovered path without needing the cache cleared", async () => {
+    const readFile = vi.fn<(path: string) => Promise<string | null>>()
+      .mockRejectedValueOnce(new Error("relay offline"))
+      .mockResolvedValue("recovered body")
+    const { container, registeredProvider } = createProviderWithReadFile(
+      "wrote src/app.ts:7",
+      readFile,
+    )
+
+    await expect(probeLinks(registeredProvider)).resolves.toBeUndefined()
+    const links = await probeLinks(registeredProvider)
+
+    const activation = waitForFileLinkActivation(container)
+    ;(links?.[0] as { activate(event: MouseEvent): void }).activate(
+      new MouseEvent("click", { metaKey: true }),
+    )
+    await expect(activation).resolves.toEqual({
+      path: "src/app.ts",
+      line: 7,
+      remoteContent: "recovered body",
+    })
+  })
+
   it("treats a failing remote read as a missing file", async () => {
-    let registeredProvider: {
-      provideLinks(bufferLineNumber: number, callback: (links: unknown[] | undefined) => void): void
-    } | null = null
-    const term = {
-      buffer: {
-        active: {
-          length: 1,
-          getLine: vi.fn(() => ({ translateToString: vi.fn(() => "wrote src/app.ts") })),
-        },
-      },
-      registerLinkProvider: vi.fn((provider) => {
-        registeredProvider = provider
-      }),
-    }
-    const provider = createRemoteTerminalFileLinkProvider({
-      term: term as never,
-      readFile: vi.fn(async () => {
-        throw new Error("relay offline")
-      }),
-      getContainer: () => null,
+    const { registeredProvider } = createProviderWithReadFile("wrote src/app.ts", async () => {
+      throw new Error("relay offline")
     })
-    provider.register()
-    const links = await new Promise<unknown[] | undefined>((resolve) => {
-      registeredProvider?.provideLinks(1, resolve)
-    })
-    expect(links).toBeUndefined()
+
+    await expect(probeLinks(registeredProvider)).resolves.toBeUndefined()
   })
 })
