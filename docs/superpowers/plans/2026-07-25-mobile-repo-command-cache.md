@@ -345,4 +345,3 @@ git status --short
 
 Expected: no whitespace errors; only the intended controller, controller test,
 design, and plan changes are present.
-

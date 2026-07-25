@@ -636,6 +636,75 @@ describe("RootNavigator More integration", () => {
       repoCommandStatus: "ready"
     });
   });
+
+  it("keeps rendered commands when a later More refresh transiently fails", async () => {
+    const client = createClientMock();
+    vi.mocked(client.listRepoCommands)
+      .mockReset()
+      .mockResolvedValueOnce({
+        repoId: "repo-1",
+        revision: "repo-1-catalog",
+        commands: [{
+          id: "custom:merge-master",
+          label: "Merge Master",
+          description: "Merge ready pull requests",
+          group: "automation"
+        }]
+      })
+      .mockRejectedValueOnce(new Error("Relay connection closed."));
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+
+    await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === "mobile.toolbar.tab.more"
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+    expect(
+      rendered.root.find(
+        (node) =>
+          node.props.testID === "mobile.more.command.custom:merge-master"
+      )
+    ).toBeDefined();
+
+    await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === "mobile.toolbar.tab.tasks"
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === "mobile.toolbar.tab.more"
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(client.listRepoCommands).toHaveBeenCalledTimes(2);
+    expect(
+      rendered.root.find(
+        (node) =>
+          node.props.testID === "mobile.more.command.custom:merge-master"
+      )
+    ).toBeDefined();
+    expect(visibleText()).not.toContain("Commands unavailable");
+    expect(store.getState()).toMatchObject({
+      repoCommandCatalog: {
+        repoId: "repo-1",
+        revision: "repo-1-catalog"
+      },
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null
+    });
+  });
 });
 
 describe("RootNavigator task action integration", () => {
