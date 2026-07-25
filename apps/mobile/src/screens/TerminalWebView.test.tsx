@@ -7,6 +7,7 @@ import {
   buildTerminalReplaceScript,
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
+import type { TerminalFileMentionHistory } from "./terminalFileMentions";
 
 interface EffectRecord {
   callback: () => void;
@@ -101,6 +102,18 @@ function findByAccessibilityLabel(
   return null;
 }
 
+function findByType(node: ElementNode | null, type: unknown): ElementNode | null {
+  if (!node) return null;
+  if (node.type === type) return node;
+  for (const child of React.Children.toArray(node.props.children)) {
+    if (typeof child === "object" && child !== null && "type" in child) {
+      const match = findByType(child as ElementNode, type);
+      if (match) return match;
+    }
+  }
+  return null;
+}
+
 function resetRenderState() {
   hookIndex = 0;
   stateHookIndex = 0;
@@ -137,6 +150,7 @@ async function renderTerminalWebView(input: {
   fullscreen?: boolean;
   bottomInset?: number;
   onConsolePress?: () => void;
+  onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTerminalInput?: (dataB64: string) => void;
 }): Promise<ElementNode> {
@@ -153,6 +167,7 @@ async function renderTerminalWebView(input: {
     fullscreen: input.fullscreen,
     bottomInset: input.bottomInset,
     onConsolePress: input.onConsolePress,
+    onMentionedFilesChange: input.onMentionedFilesChange,
     onOpenFile: input.onOpenFile,
     onTerminalInput: input.onTerminalInput
   }) as ElementNode;
@@ -197,83 +212,95 @@ describe("TerminalWebView", () => {
     expect(webView.props.webviewDebuggingEnabled).toBe(true);
   });
 
-  it("renders native controls only for discovered Markdown files", async () => {
-    const onOpenFile = vi.fn();
-    const webView = await renderTerminalWebView({ onOpenFile });
+  it("reports validated mention history without rendering a horizontal strip", async () => {
+    const onMentionedFilesChange = vi.fn();
+    const webView = await renderTerminalWebView({ onMentionedFilesChange });
 
     (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
       nativeEvent: {
         data: JSON.stringify({
-          type: "terminal-file-links",
-          links: [
-            { raw: "docs/SPEC.MD:42", path: "  docs/SPEC.MD  ", line: 42 },
-            { raw: "src/App.tsx:12", path: "src/App.tsx", line: 12 },
-            { raw: "config.json", path: "config.json" },
-            { raw: "src/lib.rs", path: "src/lib.rs" },
-            { raw: "pnpm-lock.yaml", path: "pnpm-lock.yaml" },
-            { raw: "Cargo.toml", path: "Cargo.toml" },
-            { raw: "src/theme.css", path: "src/theme.css" },
-            { raw: "src/Forged.tsx", path: "README.md" }
-          ]
+          type: "terminal-file-mentions",
+          mentions: [
+            { raw: "src/App.tsx:42", path: "src/App.tsx", line: 42 }
+          ],
+          overflow: false
         })
       }
     } as WebViewMessageEvent);
-    await renderTerminalWebView({ onOpenFile });
 
-    const strip = React.Children.toArray(lastTree?.props.children).find(
-      (child): child is ElementNode =>
-        typeof child === "object" && child !== null &&
-        "type" in child && (child as ElementNode).type === "ScrollView"
-    );
-    const buttons = React.Children.toArray(strip?.props.children).filter(
-      (child): child is ElementNode =>
-        typeof child === "object" && child !== null &&
-        "type" in child && (child as ElementNode).type === "Pressable"
-    );
-    expect(buttons.map((button) => button.props.accessibilityLabel)).toEqual([
-      "Open file docs/SPEC.MD at line 42"
-    ]);
-
-    (buttons[0]?.props.onPress as () => void)();
-    expect(onOpenFile).toHaveBeenCalledOnce();
-    expect(onOpenFile).toHaveBeenCalledWith("docs/SPEC.MD", 42);
+    expect(onMentionedFilesChange).toHaveBeenCalledWith({
+      mentions: [
+        { raw: "src/App.tsx:42", path: "src/App.tsx", line: 42 }
+      ],
+      overflow: false
+    });
+    expect(findByType(lastTree, "ScrollView")).toBeNull();
   });
 
-  it("clears discovered links when switching tasks", async () => {
-    const webView = await renderTerminalWebView({ taskId: "task-1" });
+  it("rejects malformed and oversized mention history", async () => {
+    const onMentionedFilesChange = vi.fn();
+    const webView = await renderTerminalWebView({ onMentionedFilesChange });
+    const send = (payload: unknown) => {
+      (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: { data: JSON.stringify(payload) }
+      } as WebViewMessageEvent);
+    };
+
+    send({
+      type: "terminal-file-mentions",
+      mentions: [{ raw: "forged.ts", path: "different.ts" }],
+      overflow: false
+    });
+    expect(onMentionedFilesChange).toHaveBeenCalledWith({
+      mentions: [],
+      overflow: false
+    });
+    onMentionedFilesChange.mockClear();
+    send({
+      type: "terminal-file-mentions",
+      mentions: new Array(22).fill({ raw: "file.ts", path: "file.ts" }),
+      overflow: false
+    });
+    send({
+      type: "terminal-file-mentions",
+      mentions: [],
+      overflow: "false"
+    });
+
+    expect(onMentionedFilesChange).not.toHaveBeenCalled();
+  });
+
+  it("clears mentioned-file history when switching tasks", async () => {
+    const onMentionedFilesChange = vi.fn();
+    const webView = await renderTerminalWebView({
+      taskId: "task-1",
+      onMentionedFilesChange
+    });
     runEffects();
     (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
       nativeEvent: {
         data: JSON.stringify({
-          type: "terminal-file-links",
-          links: [{ raw: "docs/old.md", path: "docs/old.md" }]
+          type: "terminal-file-mentions",
+          mentions: [{ raw: "src/Old.ts", path: "src/Old.ts" }],
+          overflow: false
         })
       }
     } as WebViewMessageEvent);
+    onMentionedFilesChange.mockClear();
 
-    await renderTerminalWebView({ taskId: "task-1" });
-    expect(
-      React.Children.toArray(lastTree?.props.children).some(
-        (child) =>
-          typeof child === "object" && child !== null &&
-          "type" in child && (child as ElementNode).type === "ScrollView"
-      )
-    ).toBe(true);
+    await renderTerminalWebView({
+      taskId: "task-2",
+      onMentionedFilesChange
+    });
     runEffects();
 
-    await renderTerminalWebView({ taskId: "task-2" });
-    runEffects();
-    await renderTerminalWebView({ taskId: "task-2" });
-    expect(
-      React.Children.toArray(lastTree?.props.children).some(
-        (child) =>
-          typeof child === "object" && child !== null &&
-          "type" in child && (child as ElementNode).type === "ScrollView"
-      )
-    ).toBe(false);
+    expect(onMentionedFilesChange).toHaveBeenCalledWith({
+      mentions: [],
+      overflow: false
+    });
   });
 
-  it("ignores terminal file links without a nonblank string path", async () => {
+  it("forwards validated source-file activations and rejects images", async () => {
     const onOpenFile = vi.fn();
     const webView = await renderTerminalWebView({ onOpenFile });
     const send = (payload: unknown) => {
@@ -284,7 +311,9 @@ describe("TerminalWebView", () => {
 
     send({ type: "terminal-file-link", path: "   ", line: 1 });
     send({ type: "terminal-file-link", path: 123, line: 1 });
-    send({ type: "terminal-file-link", path: "src/App.tsx", line: 1 });
+    send({ type: "terminal-file-link", path: "../escape.ts", line: 1 });
+    send({ type: "terminal-file-link", path: "assets/logo.png", line: 1 });
+    send({ type: "terminal-file-link", path: "src/App.tsx", line: 12 });
     send({ type: "terminal-file-link", path: "config.json" });
     send({ type: "terminal-file-link", path: "src/lib.rs" });
     send(null);
@@ -292,7 +321,11 @@ describe("TerminalWebView", () => {
       nativeEvent: { data: "not-json" }
     } as WebViewMessageEvent);
 
-    expect(onOpenFile).not.toHaveBeenCalled();
+    expect(onOpenFile.mock.calls).toEqual([
+      ["src/App.tsx", 12],
+      ["config.json"],
+      ["src/lib.rs"]
+    ]);
   });
 
   it("omits invalid line values while still forwarding valid paths", async () => {
