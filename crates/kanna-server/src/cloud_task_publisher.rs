@@ -388,6 +388,7 @@ mod tests {
                 },
                 items: vec![SnapshotPipelineItem {
                     id: "task-1".into(),
+                    cloud_task_id: None,
                     repo_id: "repo-1".into(),
                     issue_number: None,
                     issue_title: None,

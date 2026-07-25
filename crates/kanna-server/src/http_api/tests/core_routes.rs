@@ -1199,6 +1199,141 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
 }
 
 #[tokio::test]
+async fn cloud_task_identity_route_sets_once_and_rejects_open_task_collision() {
+    let app = super::test_router_with_seed("desktop-cloud-identity", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for task_id in ["task-1", "task-2"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-1",
+                "transferred prompt",
+                None,
+                "in progress",
+                "2026-07-25 10:00:00",
+            )
+            .unwrap();
+        }
+    });
+
+    let set_response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(set_response.status(), StatusCode::OK);
+
+    let snapshot_response = app
+        .clone()
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let snapshot_body = axum::body::to_bytes(snapshot_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot_json: serde_json::Value = from_slice(&snapshot_body).unwrap();
+    let task = snapshot_json["entries"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "task-1")
+        .unwrap();
+    assert_eq!(task["cloud_task_id"], "task-source-stable");
+
+    let unchanged_response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged_response.status(), StatusCode::OK);
+
+    let changed_response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-different" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed_response.status(), StatusCode::CONFLICT);
+
+    let collision_response = app
+        .oneshot(
+            Request::put("/v1/tasks/task-2/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(collision_response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn cloud_task_identity_route_rejects_invalid_identity_and_missing_task() {
+    let app = super::test_router_with_seed("desktop-cloud-identity-invalid", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "transferred prompt",
+            None,
+            "in progress",
+            "2026-07-25 10:00:00",
+        )
+        .unwrap();
+    });
+
+    for identity in ["   ", "task-source\nstable"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "cloudTaskId": identity }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let missing_response = app
+        .oneshot(
+            Request::put("/v1/tasks/task-missing/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn closed_task_identities_route_returns_closed_tasks() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

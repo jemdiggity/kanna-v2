@@ -5,6 +5,12 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetCloudTaskIdentityRequest {
+    cloud_task_id: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PendingIncomingTransfersResponse {
@@ -155,6 +161,40 @@ pub(super) async fn fail_pending_incoming_transfer(
         .fail_pending_incoming_transfer(&transfer_id, &payload.reason)
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn set_task_cloud_identity(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    Json(payload): Json<SetCloudTaskIdentityRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if payload.cloud_task_id.trim().is_empty()
+        || payload.cloud_task_id.chars().any(char::is_control)
+    {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "cloudTaskId must be non-blank and contain no control characters".to_string(),
+        ));
+    }
+
+    let db = open_db(&state)?;
+    match db
+        .set_cloud_task_identity(&task_id, &payload.cloud_task_id)
+        .map_err(db_error)?
+    {
+        crate::db::CloudTaskIdentityWrite::Updated
+        | crate::db::CloudTaskIdentityWrite::Unchanged => Ok(Json(
+            serde_json::json!({ "cloudTaskId": payload.cloud_task_id }),
+        )),
+        crate::db::CloudTaskIdentityWrite::Conflict => Err((
+            axum::http::StatusCode::CONFLICT,
+            "cloud task identity conflicts with existing ownership".to_string(),
+        )),
+        crate::db::CloudTaskIdentityWrite::TaskNotFound => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("task not found: {task_id}"),
+        )),
+    }
 }
 
 fn open_db(state: &AppState) -> Result<Db, (axum::http::StatusCode, String)> {

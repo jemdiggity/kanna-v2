@@ -1,4 +1,6 @@
-use super::{Db, NewPipelineItem, OpenAgentTask, PipelineItem, TaskStageSource};
+use super::{
+    CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem, TaskStageSource,
+};
 use rusqlite::{params, OptionalExtension};
 
 impl Db {
@@ -6,7 +8,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -40,6 +42,7 @@ impl Db {
                 parent_task_id: row.get(24)?,
                 pipeline_def: row.get(25)?,
                 activity_revision: row.get(26)?,
+                cloud_task_id: row.get(27)?,
             })
         })?;
         rows.collect()
@@ -50,7 +53,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -88,6 +91,7 @@ impl Db {
                 parent_task_id: row.get(24)?,
                 pipeline_def: row.get(25)?,
                 activity_revision: row.get(26)?,
+                cloud_task_id: row.get(27)?,
             })
         })?;
         rows.collect()
@@ -97,7 +101,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -130,6 +134,7 @@ impl Db {
                 parent_task_id: row.get(24)?,
                 pipeline_def: row.get(25)?,
                 activity_revision: row.get(26)?,
+                cloud_task_id: row.get(27)?,
             })
         })?;
         rows.collect()
@@ -139,7 +144,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -171,6 +176,7 @@ impl Db {
                 parent_task_id: row.get(24)?,
                 pipeline_def: row.get(25)?,
                 activity_revision: row.get(26)?,
+                cloud_task_id: row.get(27)?,
             })
         })?;
         match rows.next() {
@@ -196,6 +202,62 @@ impl Db {
             (prompt, &task_id, prompt),
         )?;
         Ok(changed > 0)
+    }
+
+    pub fn set_cloud_task_identity(
+        &self,
+        task_id: &str,
+        cloud_task_id: &str,
+    ) -> Result<CloudTaskIdentityWrite, rusqlite::Error> {
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT cloud_task_id FROM pipeline_item WHERE id = ?",
+                [task_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+
+        match existing {
+            None => return Ok(CloudTaskIdentityWrite::TaskNotFound),
+            Some(Some(existing)) if existing == cloud_task_id => {
+                return Ok(CloudTaskIdentityWrite::Unchanged);
+            }
+            Some(Some(_)) => return Ok(CloudTaskIdentityWrite::Conflict),
+            Some(None) => {}
+        }
+
+        match self.conn.execute(
+            "UPDATE pipeline_item
+             SET cloud_task_id = ?, updated_at = datetime('now')
+             WHERE id = ? AND cloud_task_id IS NULL",
+            (cloud_task_id, task_id),
+        ) {
+            Ok(1) => Ok(CloudTaskIdentityWrite::Updated),
+            Ok(_) => {
+                let current = self
+                    .conn
+                    .query_row(
+                        "SELECT cloud_task_id FROM pipeline_item WHERE id = ?",
+                        [task_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?;
+                Ok(match current {
+                    None => CloudTaskIdentityWrite::TaskNotFound,
+                    Some(Some(current)) if current == cloud_task_id => {
+                        CloudTaskIdentityWrite::Unchanged
+                    }
+                    Some(_) => CloudTaskIdentityWrite::Conflict,
+                })
+            }
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Ok(CloudTaskIdentityWrite::Conflict)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn resolve_pipeline_item_id(

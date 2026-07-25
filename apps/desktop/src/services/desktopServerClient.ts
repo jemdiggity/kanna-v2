@@ -598,6 +598,19 @@ export async function closeDesktopTask(taskId: string): Promise<void> {
   });
 }
 
+export async function setDesktopTaskCloudIdentity(
+  taskId: string,
+  cloudTaskId: string,
+): Promise<void> {
+  await requestJson<{ cloudTaskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/cloud-task-identity`,
+    {
+      method: "PUT",
+      body: { cloudTaskId },
+    },
+  );
+}
+
 export async function reopenDesktopTask(taskId: string): Promise<void> {
   if (clientHandlersForTests?.reopenTask) {
     await clientHandlersForTests.reopenTask(taskId);

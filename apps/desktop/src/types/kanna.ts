@@ -16,6 +16,7 @@ export interface Repo {
 
 export interface PipelineItem {
   id: string;
+  cloud_task_id?: string | null;
   repo_id: string;
   issue_number: number | null;
   issue_title: string | null;

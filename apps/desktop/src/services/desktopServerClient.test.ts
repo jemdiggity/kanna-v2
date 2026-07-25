@@ -12,6 +12,7 @@ import {
   fetchPendingIncomingTransfers,
   getDesktopSetting,
   mutateDesktopWindowWorkspace,
+  setDesktopTaskCloudIdentity,
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
 } from "./desktopServerClient";
@@ -367,6 +368,29 @@ describe("desktopServerClient", () => {
         method: "POST",
         headers: undefined,
         body: undefined,
+      },
+    );
+  });
+
+  it("sets a task cloud identity through the encoded task endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ cloudTaskId: "task-source-stable" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      setDesktopTaskCloudIdentity("task/with space", "task-source-stable"),
+    ).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/tasks/task%2Fwith%20space/actions/cloud-task-identity",
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cloudTaskId: "task-source-stable" }),
       },
     );
   });

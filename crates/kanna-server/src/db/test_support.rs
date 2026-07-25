@@ -65,6 +65,7 @@ impl Db {
 
             CREATE TABLE pipeline_item (
                 id TEXT PRIMARY KEY,
+                cloud_task_id TEXT,
                 repo_id TEXT NOT NULL,
                 issue_number INTEGER,
                 issue_title TEXT,
@@ -99,6 +100,9 @@ impl Db {
                 agent_spawn_options TEXT,
                 teardown_started_at TEXT
             );
+            CREATE UNIQUE INDEX idx_pipeline_item_open_cloud_task_id
+            ON pipeline_item(cloud_task_id)
+            WHERE closed_at IS NULL;
 
             CREATE TABLE worktree (
                 id TEXT PRIMARY KEY,

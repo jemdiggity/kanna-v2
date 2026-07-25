@@ -40,7 +40,8 @@ use super::tasks::{
 use super::transfers::{
     claim_pending_incoming_transfer, complete_task_transfer, fail_pending_incoming_transfer,
     get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
-    list_pending_incoming_transfers, reject_task_transfer, update_task_transfer_payload,
+    list_pending_incoming_transfers, reject_task_transfer, set_task_cloud_identity,
+    update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
@@ -177,6 +178,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/actions/run-merge-agent",
             post(run_merge_agent),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/cloud-task-identity",
+            axum::routing::put(set_task_cloud_identity),
         )
         .route(
             "/v1/transfers/incoming/pending",

@@ -67,11 +67,13 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "027_pipeline_item_pr_branch",
     "028_stage_run_completion_transition",
     "029_pipeline_item_activity_revision",
+    "030_pipeline_item_cloud_task_id",
 ];
 
 #[derive(Debug, Serialize)]
 pub struct PipelineItem {
     pub id: String,
+    pub cloud_task_id: Option<String>,
     pub repo_id: String,
     pub issue_number: Option<i64>,
     pub issue_title: Option<String>,
@@ -130,6 +132,7 @@ pub struct SnapshotRepo {
 #[derive(Debug, Serialize)]
 pub struct SnapshotPipelineItem {
     pub id: String,
+    pub cloud_task_id: Option<String>,
     pub repo_id: String,
     pub issue_number: Option<i64>,
     pub issue_title: Option<String>,
@@ -188,6 +191,14 @@ impl SnapshotBlockerTaskState {
 pub struct ClosedTaskIdentity {
     pub id: String,
     pub repo_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudTaskIdentityWrite {
+    Updated,
+    Unchanged,
+    Conflict,
+    TaskNotFound,
 }
 
 #[derive(Debug, Serialize)]
@@ -1190,6 +1201,20 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         Ok(())
+    })?;
+
+    run_migration(conn, "030_pipeline_item_cloud_task_id", |conn| {
+        add_column(conn, "pipeline_item", "cloud_task_id", "TEXT")?;
+        conn.execute_batch(
+            r#"
+            UPDATE pipeline_item
+            SET cloud_task_id = id
+            WHERE cloud_task_id IS NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_item_open_cloud_task_id
+            ON pipeline_item(cloud_task_id)
+            WHERE closed_at IS NULL;
+            "#,
+        )
     })?;
 
     Ok(())

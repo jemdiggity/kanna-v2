@@ -72,7 +72,8 @@ impl Db {
                         AND stage_run.kind = 'post'
                         AND stage_run.status = 'running'
                     ) AS has_running_post,
-                    pipeline_item.activity_revision
+                    pipeline_item.activity_revision,
+                    pipeline_item.cloud_task_id
              FROM pipeline_item
              WHERE repo_id = ? AND closed_at IS NULL
              ORDER BY created_at DESC",
@@ -113,6 +114,7 @@ impl Db {
                 updated_at: row.get(31)?,
                 has_running_post: row.get(32)?,
                 activity_revision: row.get(33)?,
+                cloud_task_id: row.get(34)?,
             })
         })?;
         rows.collect()

@@ -163,7 +163,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "029_pipeline_item_activity_revision");
+    assert_eq!(latest_migration, "030_pipeline_item_cloud_task_id");
 
     let stage_run_sql: String = db
         .conn
@@ -338,6 +338,104 @@ fn open_migrates_origin_main_028_activity_revision() {
         .expect("transitioned pipeline item exists");
     assert_eq!(item.activity.as_deref(), Some("working"));
     assert_eq!(item.activity_revision, 1);
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn migration_backfills_cloud_task_identity_from_local_task_id() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open pre-cloud-identity fixture db");
+    conn.execute_batch(include_str!("fixtures/origin_main_028.sql"))
+        .expect("load pre-cloud-identity schema fixture");
+    conn.execute(
+        "INSERT INTO pipeline_item (
+             id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider,
+             activity, pinned, display_name, created_at, updated_at
+         ) VALUES (
+             'task-local-uuid', 'origin-main-repo', 'Transferred task', 'default',
+             'in progress', 'task-local-uuid', 'claude', 'claude', 'idle', 0,
+             'Transferred Task', '2026-07-25 10:00:00', '2026-07-25 10:00:00'
+         )",
+        [],
+    )
+    .expect("insert task before cloud identity migration");
+    for migration_id in CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .take_while(|id| **id != "029_pipeline_item_activity_revision")
+    {
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (?1)",
+            [migration_id],
+        )
+        .expect("record migration before cloud identity");
+    }
+    drop(conn);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path"))
+        .expect("apply cloud identity migration");
+
+    let stored_identity: String = db
+        .conn
+        .query_row(
+            "SELECT cloud_task_id FROM pipeline_item WHERE id = 'task-local-uuid'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read backfilled cloud identity");
+    assert_eq!(stored_identity, "task-local-uuid");
+
+    let item = db
+        .get_pipeline_item("task-local-uuid")
+        .expect("load migrated task")
+        .expect("migrated task exists");
+    assert_eq!(item.cloud_task_id.as_deref(), Some("task-local-uuid"));
+
+    let snapshot = db.ui_snapshot().expect("load migrated snapshot");
+    assert_eq!(
+        snapshot.entries[0].items[0].cloud_task_id.as_deref(),
+        Some("task-local-uuid")
+    );
+
+    db.conn
+        .execute(
+            "UPDATE pipeline_item
+             SET closed_at = datetime('now')
+             WHERE id = 'task-local-uuid'",
+            [],
+        )
+        .expect("close historical task");
+    db.conn
+        .execute(
+            "INSERT INTO pipeline_item (
+                 id, cloud_task_id, repo_id, prompt, pipeline, stage, branch,
+                 agent_type, agent_provider, activity, pinned, created_at, updated_at
+             ) VALUES (
+                 'task-imported-copy', 'task-local-uuid', 'origin-main-repo',
+                 'Imported copy', 'default', 'in progress', 'task-imported-copy',
+                 'claude', 'claude', 'idle', 0,
+                 '2026-07-26 10:00:00', '2026-07-26 10:00:00'
+             )",
+            [],
+        )
+        .expect("reuse identity retained by a closed historical row");
+    let duplicate_open_identity = db.conn.execute(
+        "INSERT INTO pipeline_item (
+             id, cloud_task_id, repo_id, prompt, pipeline, stage, branch,
+             agent_type, agent_provider, activity, pinned, created_at, updated_at
+         ) VALUES (
+             'task-open-collision', 'task-local-uuid', 'origin-main-repo',
+             'Conflicting copy', 'default', 'in progress', 'task-open-collision',
+             'claude', 'claude', 'idle', 0,
+             '2026-07-26 11:00:00', '2026-07-26 11:00:00'
+         )",
+        [],
+    );
+    assert!(
+        duplicate_open_identity.is_err(),
+        "two open tasks must not share one cloud identity"
+    );
 
     drop(db);
     let _ = std::fs::remove_file(path);
