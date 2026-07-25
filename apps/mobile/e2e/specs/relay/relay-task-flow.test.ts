@@ -4,6 +4,7 @@ import {
   assertRecentTaskRowShowsRepoLabel,
   assertRelayTaskRowPresentation,
   inspectTaskFilePreviewWebView,
+  openMentionedFileMenuSelection,
   openRelayFixtureTask,
   performFirstQuickReplyDrag,
   relaunchRelayAppPreservingData,
@@ -16,7 +17,6 @@ import {
   verifyRelayTaskActivityTransitions,
   verifyRelayTaskMarkedRead,
   verifyRecentTabShowsRepoLabel,
-  verifyTerminalMarkdownFileControls,
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
 import * as relayTaskFlow from "./relay-task-flow.e2e";
@@ -350,33 +350,44 @@ describe("relay visual companion journey", () => {
   });
 });
 
-describe("terminal file links", () => {
+describe("mentioned file menu", () => {
   const fixture = {
-    path: "docs/mobile-file-preview.md",
-    line: 4,
-    missingLink: "docs/mobile-preview-missing.md",
-    nonMarkdownLinks: [
-      "apps/mobile/src/screens/TerminalWebView.tsx:42",
-      "apps/mobile/package.json",
-      "crates/daemon/src/lib.rs:9",
+    ambiguousBarePath: "shared.ts",
+    ambiguousCanonicalPaths: [
+      "fixtures/a/shared.ts",
+      "fixtures/b/shared.ts"
     ],
-    rawLink: "docs/mobile-file-preview.md:4",
-    renderedLink: "docs/mobile-file-preview.md",
+    mentionedCount: 3,
+    mentionedLinks: [
+      "docs/spec.md",
+      "shared.ts",
+      "TaskScreen.tsx:7"
+    ],
+    path: "docs/spec.md",
+    line: 7,
+    missingLink: "docs/mobile-preview-missing.md",
+    rawLink: "TaskScreen.tsx:7",
+    renderedLink: "docs/spec.md",
+    uniqueBarePath: "TaskScreen.tsx",
+    uniqueCanonicalPath: "fixtures/unique/TaskScreen.tsx"
   };
 
-  it("waits for mixed terminal paths but exposes native controls only for Markdown", async () => {
-    const controls = new Map([
-      [`~Open file ${fixture.path}`, true],
-      [`~Open file ${fixture.path} at line 4`, true],
-      [`~Open file ${fixture.missingLink}`, true],
-    ]);
+  it("opens the dynamic menu, exposes canonical rows, and selects the unique file", async () => {
+    const clicked: string[] = [];
     const driver = {
-      $: vi.fn(async (selector: string) => ({
-        isExisting: vi.fn(async () => controls.get(selector) ?? false),
-        waitForDisplayed: vi.fn(async () => {
-          if (!controls.get(selector)) throw new Error(`Missing control ${selector}`);
-        }),
-      })),
+      $: vi.fn(async (selector: string) => {
+        const exists = selector !== "~Files mentioned in terminal";
+        return {
+          click: vi.fn(async () => {
+            clicked.push(selector);
+          }),
+          isExisting: vi.fn(async () => exists),
+          waitForDisplayed: vi.fn(async () => {
+            if (!exists) throw new Error(`Missing control ${selector}`);
+          })
+        };
+      }),
+      pause: vi.fn(async () => undefined)
     };
     const ui = {
       inspectTerminalWebView: vi.fn(async () => ({
@@ -385,12 +396,9 @@ describe("terminal file links", () => {
         cols: 220,
         frameCount: 2,
         rows: 40,
-        text: [
-          fixture.renderedLink,
-          fixture.rawLink,
-          fixture.missingLink,
-          ...fixture.nonMarkdownLinks,
-        ].map((path) => `SCRIPT_INPUT: ${path}`).join("\n"),
+        text: fixture.mentionedLinks
+          .map((path) => `SCRIPT_INPUT: ${path}`)
+          .join("\n")
       })),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (await condition()) return;
@@ -398,37 +406,42 @@ describe("terminal file links", () => {
       }),
     };
 
-    await verifyTerminalMarkdownFileControls(driver as never, ui as never, fixture);
+    await openMentionedFileMenuSelection(
+      driver as never,
+      ui as never,
+      fixture
+    );
 
-    expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.path}`);
-    expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.path} at line 4`);
-    expect(driver.$).toHaveBeenCalledWith(`~Open file ${fixture.missingLink}`);
-    for (const path of fixture.nonMarkdownLinks) {
-      const [filePath, line] = path.match(/^(.*?):(\d+)$/)?.slice(1) ?? [path];
+    expect(clicked).toEqual([
+      "~mobile.task-more-button",
+      "~Mentioned Files (3)",
+      "~mobile.task-mentioned-files.row.fixtures/unique/TaskScreen.tsx"
+    ]);
+    for (const path of [
+      fixture.uniqueCanonicalPath,
+      ...fixture.ambiguousCanonicalPaths,
+      fixture.path
+    ]) {
       expect(driver.$).toHaveBeenCalledWith(
-        `~Open file ${filePath}${line ? ` at line ${line}` : ""}`,
+        `~mobile.task-mentioned-files.row.${path}`
       );
     }
+    expect(driver.$).toHaveBeenCalledWith("~Files mentioned in terminal");
   });
 
-  it("fails when a Markdown native file-link control is missing", async () => {
+  it("fails when all expected mentions have not reached the terminal bridge", async () => {
     const driver = {
       $: vi.fn(async (selector: string) => ({
-        isExisting: vi.fn(async () => false),
-        waitForDisplayed: vi.fn(async () => {
-          throw new Error(`Missing control ${selector}`);
-        }),
+        click: vi.fn(async () => undefined),
+        isExisting: vi.fn(async () => true),
+        waitForDisplayed: vi.fn(async () => undefined)
       })),
+      pause: vi.fn(async () => undefined)
     };
     const ui = {
       inspectTerminalWebView: vi.fn(async () => ({
         kind: "rendered" as const,
-        text: [
-          fixture.renderedLink,
-          fixture.rawLink,
-          fixture.missingLink,
-          ...fixture.nonMarkdownLinks,
-        ].join(" "),
+        text: fixture.mentionedLinks.slice(0, 2).join(" ")
       })),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (await condition()) return;
@@ -437,36 +450,8 @@ describe("terminal file links", () => {
     };
 
     await expect(
-      verifyTerminalMarkdownFileControls(driver as never, ui as never, fixture),
-    ).rejects.toThrow(`Missing control ~Open file ${fixture.path}`);
-  });
-
-  it("fails when a non-Markdown native file-link control is exposed", async () => {
-    const driver = {
-      $: vi.fn(async (selector: string) => ({
-        isExisting: vi.fn(async () => selector.includes("TerminalWebView.tsx")),
-        waitForDisplayed: vi.fn(async () => undefined),
-      })),
-    };
-    const ui = {
-      inspectTerminalWebView: vi.fn(async () => ({
-        kind: "rendered" as const,
-        text: [
-          fixture.renderedLink,
-          fixture.rawLink,
-          fixture.missingLink,
-          ...fixture.nonMarkdownLinks,
-        ].join(" "),
-      })),
-      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
-        if (await condition()) return;
-        throw new Error(options.timeoutMsg);
-      }),
-    };
-
-    await expect(
-      verifyTerminalMarkdownFileControls(driver as never, ui as never, fixture),
-    ).rejects.toThrow(/non-Markdown.*TerminalWebView\.tsx/i);
+      openMentionedFileMenuSelection(driver as never, ui as never, fixture),
+    ).rejects.toThrow(/expected mentioned file paths/i);
   });
 });
 
@@ -527,6 +512,8 @@ describe("relay task action menu journey", () => {
     };
     const title = displayedElement("title");
     const options = new Map([
+      ["Mentioned Files (0)", displayedElement("Mentioned Files (0)")],
+      ["View Diff", displayedElement("View Diff")],
       ["Advance Stage", displayedElement("Advance Stage")],
       ["Close Task", displayedElement("Close Task")],
       [
@@ -554,6 +541,10 @@ describe("relay task action menu journey", () => {
       "more.waitForDisplayed",
       "more.click",
       "title.waitForDisplayed",
+      "ui.getTaskActionOption:Mentioned Files (0)",
+      "Mentioned Files (0).waitForDisplayed",
+      "ui.getTaskActionOption:View Diff",
+      "View Diff.waitForDisplayed",
       "ui.getTaskActionOption:Advance Stage",
       "Advance Stage.waitForDisplayed",
       "ui.getTaskActionOption:Close Task",

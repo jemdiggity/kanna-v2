@@ -40,6 +40,11 @@ export const MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE = {
 } as const;
 
 export const MOBILE_RELAY_FILE_PREVIEW_FIXTURE = {
+  ambiguousBarePath: "shared.ts",
+  ambiguousCanonicalPaths: [
+    "fixtures/a/shared.ts",
+    "fixtures/b/shared.ts"
+  ],
   content: [
     "# Mobile Relay Preview",
     "",
@@ -55,16 +60,28 @@ export const MOBILE_RELAY_FILE_PREVIEW_FIXTURE = {
   expectedHighlightedTokenClass: "hljs-keyword",
   expectedRenderedText: "Rendered through the authenticated owner relay.",
   expectedRawLine: "TARGET RAW LINE",
-  line: 8,
-  missingLink: "docs/mobile-preview-missing.md",
-  nonMarkdownLinks: [
-    "apps/mobile/src/screens/TerminalWebView.tsx:42",
-    "apps/mobile/package.json",
-    "crates/daemon/src/lib.rs:9"
+  line: 7,
+  mentionedCount: 3,
+  mentionedLinks: [
+    "docs/spec.md",
+    "shared.ts",
+    "TaskScreen.tsx:7"
   ],
-  path: "docs/mobile-file-preview.md",
-  rawLink: "docs/mobile-file-preview.md:8",
-  renderedLink: "docs/mobile-file-preview.md"
+  missingLink: "docs/mobile-preview-missing.md",
+  path: "docs/spec.md",
+  rawLink: "TaskScreen.tsx:7",
+  renderedLink: "docs/spec.md",
+  uniqueBarePath: "TaskScreen.tsx",
+  uniqueCanonicalPath: "fixtures/unique/TaskScreen.tsx",
+  uniqueContent: [
+    "export function relayFixture() {",
+    '  const status = "connected";',
+    "  return status;",
+    "}",
+    "",
+    "// Mentioned by bare filename.",
+    "TARGET RAW LINE"
+  ].join("\n")
 } as const;
 
 export type MobileRelayFilePreviewFixture =
@@ -525,12 +542,7 @@ export async function startMobileRelayHarness(
       localTask,
       createPairingSession: () => createHarnessPairingSession(harness.lanBaseUrl),
       async emitFilePreviewLinks() {
-        for (const link of [
-          MOBILE_RELAY_FILE_PREVIEW_FIXTURE.renderedLink,
-          MOBILE_RELAY_FILE_PREVIEW_FIXTURE.rawLink,
-          MOBILE_RELAY_FILE_PREVIEW_FIXTURE.missingLink,
-          ...MOBILE_RELAY_FILE_PREVIEW_FIXTURE.nonMarkdownLinks
-        ]) {
+        for (const link of MOBILE_RELAY_FILE_PREVIEW_FIXTURE.mentionedLinks) {
           // Emit after the simulator has attached so the paths cannot age out
           // of the bounded xterm scan while Metro and WebDriverAgent start.
           // The space also mirrors agent prose and creates a path boundary.
@@ -709,9 +721,29 @@ async function seedMobileRelayFilePreview(task: ScriptedTask): Promise<void> {
       `Scripted task ${task.taskId} did not return a worktree for file-preview E2E`
     );
   }
-  const target = join(task.worktreePath, MOBILE_RELAY_FILE_PREVIEW_FIXTURE.path);
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, MOBILE_RELAY_FILE_PREVIEW_FIXTURE.content, "utf8");
+  const files = [
+    {
+      content: MOBILE_RELAY_FILE_PREVIEW_FIXTURE.content,
+      path: MOBILE_RELAY_FILE_PREVIEW_FIXTURE.path
+    },
+    {
+      content: MOBILE_RELAY_FILE_PREVIEW_FIXTURE.uniqueContent,
+      path: MOBILE_RELAY_FILE_PREVIEW_FIXTURE.uniqueCanonicalPath
+    },
+    {
+      content: "export const shared = 'a';\n",
+      path: MOBILE_RELAY_FILE_PREVIEW_FIXTURE.ambiguousCanonicalPaths[0]
+    },
+    {
+      content: "export const shared = 'b';\n",
+      path: MOBILE_RELAY_FILE_PREVIEW_FIXTURE.ambiguousCanonicalPaths[1]
+    }
+  ];
+  for (const file of files) {
+    const target = join(task.worktreePath, file.path);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, file.content, "utf8");
+  }
 }
 
 async function postScriptedTaskInput(

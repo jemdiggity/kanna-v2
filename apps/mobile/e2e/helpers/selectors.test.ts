@@ -48,6 +48,22 @@ describe("mobile E2E selector helpers", () => {
     });
   });
 
+  it("exposes the mentioned-file menu and canonical row controls", () => {
+    expect(selectorHelpers.selectors).toMatchObject({
+      taskMentionedFilesClose: "~mobile.task-mentioned-files.close",
+      taskMentionedFilesError: "~mobile.task-mentioned-files.error",
+      taskMentionedFilesModal: "~mobile.task-mentioned-files.modal",
+      taskMentionedFilesRetry: "~mobile.task-mentioned-files.retry"
+    });
+    expect(
+      selectorHelpers.taskMentionedFilesRowSelector(
+        "fixtures/unique/TaskScreen.tsx"
+      )
+    ).toBe(
+      "~mobile.task-mentioned-files.row.fixtures/unique/TaskScreen.tsx"
+    );
+  });
+
   it("exposes the prompt expansion controls through stable Appium selectors", () => {
     expect(selectorHelpers.selectors.taskTitleButton).toBe(
       "~mobile.task-title-button"
