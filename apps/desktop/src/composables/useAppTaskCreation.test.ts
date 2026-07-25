@@ -558,6 +558,31 @@ describe("useAppTaskCreation", () => {
     expect(creation.availableAgentProviders.value).toEqual(["opencode"]);
   });
 
+  it("passes selected blocker task ids through to task creation", async () => {
+    const { creation, store } = createTaskCreationHarness();
+
+    await creation.handleNewTaskSubmit("Ship blocked", "claude", "default", "origin/main", "pty", ["task-blocker"]);
+
+    expect(store.createItem).toHaveBeenCalledWith(
+      "repo-1",
+      "/repo",
+      "Ship blocked",
+      "pty",
+      expect.objectContaining({ blockerTaskIds: ["task-blocker"] }),
+    );
+  });
+
+  it("offers only open tasks in the selected repo as new-task blocker candidates", () => {
+    const { creation, store } = createTaskCreationHarness();
+    store.items = [
+      { id: "task-open", repo_id: "repo-1", closed_at: null },
+      { id: "task-closed", repo_id: "repo-1", closed_at: "2026-07-01T00:00:00.000Z" },
+      { id: "task-other-repo", repo_id: "repo-2", closed_at: null },
+    ] as never;
+
+    expect(creation.newTaskBlockerCandidates.value.map((item) => item.id)).toEqual(["task-open"]);
+  });
+
   it("records the exact agent choice after a task is created", async () => {
     const { creation, onAgentChoiceUsed } = createTaskCreationHarness();
 

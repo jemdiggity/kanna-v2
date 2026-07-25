@@ -10,6 +10,8 @@
     "baseBranchRequired": "Select a valid base branch",
     "baseBranchSearchPlaceholder": "Search branches...",
     "loadingOptions": "Loading task options…",
+    "blockedBy": "Blocked by",
+    "blockedByNone": "None",
     "untitled": "Untitled",
     "renameTask": "Rename Task"
   },
