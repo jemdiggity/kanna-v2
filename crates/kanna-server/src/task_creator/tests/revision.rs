@@ -73,7 +73,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         .success());
     publish_origin_main(&repo_root, "publish revision spawn definitions");
     assert!(Command::new("git")
-        .args(["branch", "task-reviewed-branch"])
+        .args(["branch", "task-review-task-2ed-branch"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
@@ -86,7 +86,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
     db.insert_test_pipeline_item(
         "review-task",
         "repo-1",
-        "Review branch task-reviewed-branch.",
+        "Review branch task-review-task-2ed-branch.",
         Some("Mobile shell"),
         "review",
         "2026-04-17 07:00:00",
@@ -94,7 +94,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
     .unwrap();
     db.update_test_pipeline_item_stage_context(
         "review-task",
-        "task-reviewed-branch",
+        "task-review-task-2ed-branch",
         "qa",
         Some("{\"status\":\"failure\",\"summary\":\"missing e2e\"}"),
         "claude",
@@ -191,18 +191,18 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
     .unwrap();
     publish_origin_main(&repo_root, "publish revision feedback definitions");
     assert!(Command::new("git")
-        .args(["branch", "task-reviewed"])
+        .args(["branch", "task-review-task-2ed"])
         .current_dir(&repo_root)
         .status()
         .unwrap()
         .success());
-    let worktree = repo_root.join(".kanna-worktrees/task-reviewed");
+    let worktree = repo_root.join(".kanna-worktrees/task-review-task-2ed");
     assert!(Command::new("git")
         .args([
             "worktree",
             "add",
             worktree.to_string_lossy().as_ref(),
-            "task-reviewed",
+            "task-review-task-2ed",
         ])
         .current_dir(&repo_root)
         .status()
@@ -226,7 +226,7 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
     .unwrap();
     db.update_test_pipeline_item_stage_context(
         "review-task",
-        "task-reviewed",
+        "task-review-task-2ed",
         "qa",
         Some("{\"status\":\"failure\",\"summary\":\"needs fixes\"}"),
         "claude",
@@ -236,7 +236,7 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
         "wt-review-task",
         "review-task",
         &worktree.to_string_lossy(),
-        "task-reviewed",
+        "task-review-task-2ed",
     )
     .unwrap();
     db.insert_stage_run(NewStageRun {
@@ -349,7 +349,7 @@ fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() 
     .unwrap();
     db.update_test_pipeline_item_stage_context(
         "review-task",
-        "task-reviewed-branch",
+        "task-review-task-2ed-branch",
         "qa",
         Some("{\"status\":\"failure\",\"summary\":\"needs revision\"}"),
         "claude",
@@ -381,8 +381,8 @@ fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() 
     );
 }
 
-/// Repo with a claude implement stage, an implement worktree (`task-impl`)
-/// holding a finished stage run, and a review worktree (`task-review`) at the
+/// Repo with a claude implement stage, an implement worktree (`task-review-task`)
+/// holding a finished stage run, and a review worktree (`task-review-task-2`) at the
 /// same committed tip — the state a task is in when the review agent
 /// requests a revision.
 pub(crate) fn init_resume_revision_fixture(
@@ -418,10 +418,10 @@ fn init_resume_revision_fixture_for_provider(
     )
     .unwrap();
     publish_origin_main(&repo_root, "publish resume revision definitions");
-    for branch in ["task-impl", "task-review"] {
+    for branch in ["task-review-task", "task-review-task-2"] {
         run_git_fixture(&repo_root, &["branch", branch]);
     }
-    for branch in ["task-impl", "task-review"] {
+    for branch in ["task-review-task", "task-review-task-2"] {
         let worktree = repo_root.join(".kanna-worktrees").join(branch);
         assert!(Command::new("git")
             .args([
@@ -448,9 +448,15 @@ fn init_resume_revision_fixture_for_provider(
         "2026-07-04 07:00:00",
     )
     .unwrap();
-    db.update_test_pipeline_item_stage_context("review-task", "task-review", "qa", None, provider)
-        .unwrap();
-    let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
+    db.update_test_pipeline_item_stage_context(
+        "review-task",
+        "task-review-task-2",
+        "qa",
+        None,
+        provider,
+    )
+    .unwrap();
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
     db.insert_stage_run(NewStageRun {
         id: "run-impl",
         task_id: "review-task",
@@ -502,7 +508,7 @@ pub(crate) fn write_resume_transcript(config_dir: &std::path::Path, worktree: &s
 async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     let config = test_config("revision-resume-happy");
     let (repo_root, db) = init_resume_revision_fixture("revision-resume-happy", &config);
-    let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
     let claude_config_dir = repo_root.join("claude-config");
     write_resume_transcript(&claude_config_dir, &impl_worktree);
 
@@ -528,7 +534,7 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     let resumed = prepared
         .resumed_workspace()
         .expect("revision resumes the previous workspace");
-    assert_eq!(resumed.branch, "task-impl");
+    assert_eq!(resumed.branch, "task-review-task");
     assert_eq!(resumed.worktree_path, impl_worktree.to_string_lossy());
     assert!(prepared.forked_workspace().is_none());
     assert_eq!(prepared.cwd, impl_worktree.to_string_lossy());
@@ -581,7 +587,7 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     // records how it resumed.
     let updated = db.get_task_stage_source("review-task").unwrap().unwrap();
     assert_eq!(updated.stage.as_deref(), Some("in progress"));
-    assert_eq!(updated.branch.as_deref(), Some("task-impl"));
+    assert_eq!(updated.branch.as_deref(), Some("task-review-task"));
     let runs = db.list_stage_runs_for_task("review-task").unwrap();
     let revision_run = runs.last().expect("revision run recorded");
     assert_eq!(revision_run.stage, "in progress");
@@ -620,7 +626,7 @@ async fn old_daemon_cannot_record_a_resumed_revision_run() {
     let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
     let config = test_config("revision-resume-old-daemon");
     let (repo_root, db) = init_resume_revision_fixture("revision-resume-old-daemon", &config);
-    let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
     let claude_config_dir = repo_root.join("claude-config");
     write_resume_transcript(&claude_config_dir, &impl_worktree);
     std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
@@ -698,7 +704,7 @@ fn request_revision_resumes_supported_provider_sessions_in_their_worktree() {
         let label = format!("revision-resume-{provider}");
         let config = test_config(&label);
         let (repo_root, db) = init_resume_revision_fixture_for_provider(&label, &config, provider);
-        let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
+        let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
 
         let prepared = prepare_revision_task_for_api(
             &db,
@@ -716,7 +722,7 @@ fn request_revision_resumes_supported_provider_sessions_in_their_worktree() {
                 .resumed_workspace()
                 .expect("supported provider should resume")
                 .branch,
-            "task-impl"
+            "task-review-task"
         );
         assert_eq!(prepared.cwd, impl_worktree.to_string_lossy());
         assert_eq!(
@@ -786,7 +792,7 @@ async fn request_revision_falls_back_to_fork_when_worktree_tip_diverged() {
     let (repo_root, db) = init_resume_revision_fixture("revision-resume-diverged", &config);
     // The review worktree commits ahead of the implement worktree: the
     // recorded workspace no longer holds the task's committed tip.
-    let review_worktree = repo_root.join(".kanna-worktrees/task-review");
+    let review_worktree = repo_root.join(".kanna-worktrees/task-review-task-2");
     std::fs::write(review_worktree.join("review-fix.txt"), "fixed in review").unwrap();
     for args in [
         vec!["add", "review-fix.txt"],
@@ -814,7 +820,7 @@ async fn request_revision_falls_back_to_fork_when_worktree_tip_diverged() {
     let fork = prepared
         .forked_workspace()
         .expect("diverged tip falls back to a fresh fork");
-    assert_ne!(fork.branch, "task-impl");
+    assert_ne!(fork.branch, "task-review-task");
     // The fresh agent still sees the original task prompt via the composed
     // revision context.
     match &prepared.session {
@@ -830,6 +836,74 @@ async fn request_revision_falls_back_to_fork_when_worktree_tip_diverged() {
     let _ =
         crate::task_creator::worktree::remove_prepared_worktree(&fork.worktree_path, &fork.branch);
 
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn request_revision_falls_back_when_recorded_workspace_is_substituted_at_same_head() {
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    let config = test_config("revision-resume-substituted");
+    let (repo_root, db) = init_resume_revision_fixture("revision-resume-substituted", &config);
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
+    let original_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&impl_worktree)
+        .output()
+        .unwrap();
+    assert!(original_head.status.success());
+    let original_head = String::from_utf8_lossy(&original_head.stdout)
+        .trim()
+        .to_string();
+
+    // Replace the recorded path with a different registered worktree at the
+    // exact same commit. A HEAD-only check cannot distinguish this foreign
+    // workspace from the implementation run's original workspace.
+    run_git_fixture(
+        &repo_root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            impl_worktree.to_string_lossy().as_ref(),
+        ],
+    );
+    run_git_fixture(
+        &repo_root,
+        &["branch", "substituted-workspace", &original_head],
+    );
+    run_git_fixture(
+        &repo_root,
+        &[
+            "worktree",
+            "add",
+            impl_worktree.to_string_lossy().as_ref(),
+            "substituted-workspace",
+        ],
+    );
+
+    let claude_config_dir = repo_root.join("claude-config");
+    write_resume_transcript(&claude_config_dir, &impl_worktree);
+    std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Do not resume in a substituted worktree.",
+    );
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    let prepared = prepared.unwrap();
+
+    assert!(prepared.resumed_workspace().is_none());
+    assert_ne!(
+        prepared.provider_session_id.as_deref(),
+        Some(RESUME_SESSION_UUID)
+    );
+    let fork = prepared
+        .forked_workspace()
+        .expect("substituted worktree must force a fresh fork");
+    let _ =
+        crate::task_creator::worktree::remove_prepared_worktree(&fork.worktree_path, &fork.branch);
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
@@ -870,7 +944,7 @@ fn revision_does_not_skip_newer_null_handle_main_run() {
     let config = test_config("revision-resume-newer-null-handle");
     let (repo_root, db) =
         init_resume_revision_fixture("revision-resume-newer-null-handle", &config);
-    let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
     let claude_config_dir = repo_root.join("claude-config");
     write_resume_transcript(&claude_config_dir, &impl_worktree);
     std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
@@ -972,14 +1046,14 @@ fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
     )
     .unwrap();
     publish_origin_main(&repo_root, "publish provider inheritance definitions");
-    run_git_fixture(&repo_root, &["branch", "task-reviewed"]);
-    let worktree = repo_root.join(".kanna-worktrees/task-reviewed");
+    run_git_fixture(&repo_root, &["branch", "task-review-task-2ed"]);
+    let worktree = repo_root.join(".kanna-worktrees/task-review-task-2ed");
     assert!(Command::new("git")
         .args([
             "worktree",
             "add",
             worktree.to_string_lossy().as_ref(),
-            "task-reviewed",
+            "task-review-task-2ed",
         ])
         .current_dir(&repo_root)
         .status()
@@ -1001,7 +1075,7 @@ fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
     .unwrap();
     db.update_test_pipeline_item_stage_context(
         "review-task",
-        "task-reviewed",
+        "task-review-task-2ed",
         "qa",
         None,
         "opencode",

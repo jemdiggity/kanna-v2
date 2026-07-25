@@ -10,6 +10,122 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+fn git_path(worktree_path: &Path, args: &[&str]) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(worktree_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        worktree_path.join(path)
+    })
+}
+
+/// Verify that a recorded run cwd still identifies the same registered
+/// worktree in the task's repository. A matching HEAD alone is insufficient:
+/// another repository or worktree can be substituted at the recorded path at
+/// the same commit. Every failed check returns `None`, which makes revision
+/// resume fall back to a fresh fork.
+pub(super) fn verified_registered_worktree_branch(
+    repo_path: &str,
+    task_id: &str,
+    recorded_cwd: &str,
+) -> Option<String> {
+    let repo_path = Path::new(repo_path);
+    let recorded_cwd = Path::new(recorded_cwd);
+    let recorded_name = recorded_cwd.file_name()?.to_str()?;
+    let recorded_parent = recorded_cwd.parent()?;
+    if recorded_parent != repo_path.join(".kanna-worktrees") {
+        return None;
+    }
+
+    let canonical_repo = repo_path.canonicalize().ok()?;
+    let canonical_workspace_root = repo_path.join(".kanna-worktrees").canonicalize().ok()?;
+    let canonical_cwd = recorded_cwd.canonicalize().ok()?;
+    if canonical_cwd.parent()? != canonical_workspace_root
+        || canonical_cwd.file_name()?.to_str()? != recorded_name
+    {
+        return None;
+    }
+
+    let repo_common_dir = git_path(&canonical_repo, &["rev-parse", "--git-common-dir"])?
+        .canonicalize()
+        .ok()?;
+    let cwd_common_dir = git_path(&canonical_cwd, &["rev-parse", "--git-common-dir"])?
+        .canonicalize()
+        .ok()?;
+    if cwd_common_dir != repo_common_dir {
+        return None;
+    }
+    let cwd_top_level = git_path(&canonical_cwd, &["rev-parse", "--show-toplevel"])?
+        .canonicalize()
+        .ok()?;
+    if cwd_top_level != canonical_cwd {
+        return None;
+    }
+    let cwd_git_dir = git_path(&canonical_cwd, &["rev-parse", "--git-dir"])?
+        .canonicalize()
+        .ok()?;
+    if cwd_git_dir.parent()? != repo_common_dir.join("worktrees") {
+        return None;
+    }
+
+    let branch = current_branch(recorded_cwd.to_str()?)?;
+    if branch != recorded_name {
+        return None;
+    }
+    let task_branch = format!("task-{task_id}");
+    let belongs_to_task = branch == task_branch
+        || branch
+            .strip_prefix(&format!("{task_branch}-"))
+            .is_some_and(|counter| {
+                !counter.is_empty()
+                    && counter.chars().all(|character| character.is_ascii_digit())
+                    && counter.parse::<u64>().is_ok_and(|counter| counter >= 2)
+            });
+    if !belongs_to_task {
+        return None;
+    }
+
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&canonical_repo)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let expected_ref = format!("refs/heads/{branch}");
+    let registered = String::from_utf8_lossy(&output.stdout)
+        .split("\n\n")
+        .filter(|entry| !entry.trim().is_empty())
+        .any(|entry| {
+            let mut path_matches = false;
+            let mut branch_matches = false;
+            for line in entry.lines() {
+                if let Some(path) = line.strip_prefix("worktree ") {
+                    path_matches = Path::new(path)
+                        .canonicalize()
+                        .is_ok_and(|path| path == canonical_cwd);
+                } else if let Some(reference) = line.strip_prefix("branch ") {
+                    branch_matches = reference == expected_ref;
+                }
+            }
+            path_matches && branch_matches
+        });
+    registered.then_some(branch)
+}
+
 /// Root of the Claude CLI's per-project session store. Honors
 /// `CLAUDE_CONFIG_DIR` the same way the CLI does, defaulting to `~/.claude`.
 fn claude_projects_dir() -> Option<PathBuf> {

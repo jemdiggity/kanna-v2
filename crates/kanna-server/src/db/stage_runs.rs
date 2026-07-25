@@ -140,10 +140,7 @@ impl Db {
         {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        if !matches!(
-            current_status.as_str(),
-            "pending" | "running" | "succeeded" | "failed"
-        ) {
+        if !matches!(current_status.as_str(), "running" | "succeeded" | "failed") {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         let changed = transaction.execute(
@@ -443,24 +440,32 @@ impl Db {
             return Ok(ProviderSessionUpdate { changed: false });
         };
         let transaction = self.conn.unchecked_transaction()?;
-        let run_id = transaction
+        let run = transaction
             .query_row(
-                "SELECT run.id
+                "SELECT run.id, run.status
                  FROM stage_run run
                  JOIN pipeline_item task ON task.id = run.task_id
                  WHERE run.task_id = ?1
                    AND run.kind = 'main'
                    AND task.closed_at IS NULL
                  ORDER BY datetime(run.started_at) DESC, run.rowid DESC
-                 LIMIT 1",
+                LIMIT 1",
                 [&task_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
-        let Some(run_id) = run_id else {
+        let Some((run_id, run_status)) = run else {
             transaction.commit()?;
             return Ok(ProviderSessionUpdate { changed: false });
         };
+        if run_status == "pending" {
+            // An ownershipless lifecycle event cannot prove that it belongs
+            // to a reserved successor which has not landed. Resolving by the
+            // reused task session id here would attach the old process's
+            // provider handle to the replacement run.
+            transaction.commit()?;
+            return Ok(ProviderSessionUpdate { changed: false });
+        }
         let changed = transaction.execute(
             "UPDATE stage_run
              SET provider_session_id = ?2

@@ -390,13 +390,24 @@ async fn terminal_state_watcher_once(
                 // Consume the replacement entry even when the event is
                 // self-describing — a leftover entry would swallow a future
                 // legitimate Exit for the same session id.
-                let replaced = replacements.consume(&session_id);
+                let replacement = replacements.take(&session_id);
                 let persisted = if run_id.is_some() {
                     persist_provider_session_id(
                         state,
                         run_id.as_deref(),
                         resume_session_id.as_deref(),
                     )
+                } else if let Some(Some(source_run_id)) = replacement.as_ref() {
+                    persist_provider_session_id(
+                        state,
+                        Some(source_run_id),
+                        resume_session_id.as_deref(),
+                    )
+                } else if replacement.is_some() {
+                    // An orchestrated legacy kill without captured immutable
+                    // ownership must not resolve its stale handle against the
+                    // newest run for the reused task session id.
+                    Ok(())
                 } else if ownershipless {
                     persist_ownershipless_provider_session_id(
                         state,
@@ -413,7 +424,7 @@ async fn terminal_state_watcher_once(
                         error
                     );
                 }
-                if replaced || killed {
+                if replacement.is_some() || killed {
                     // Orchestrated kill (stage swap, rerun, close) — not the
                     // agent finishing.
                     continue;
@@ -962,6 +973,137 @@ mod tests {
                 run.provider_session_id.as_deref(),
                 Some("codex-thread-from-exit")
             );
+
+            let _ = std::fs::remove_file(socket_path);
+            let _ = std::fs::remove_dir_all(daemon_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_version_ownershipless_replacement_exit_does_not_stamp_pending_successor() {
+        for (label, capabilities) in [
+            (
+                "old-daemon",
+                kanna_daemon::protocol::DaemonCapabilities::legacy(),
+            ),
+            (
+                "adopted-session",
+                kanna_daemon::protocol::DaemonCapabilities::current(),
+            ),
+        ] {
+            let unique = unique_name(&format!("terminal-watcher-{label}-replacement-exit"));
+            let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+            let config = test_config(&unique, &daemon_dir);
+            seed_notifying_task(&config);
+            let db = Db::open(&config.db_path).unwrap();
+            db.insert_stage_run(NewStageRun {
+                id: "run-source",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+            let expected = db.task_action_state("task-child").unwrap();
+            db.replace_current_run_with_pending(
+                NewStageRun {
+                    id: "run-successor",
+                    task_id: "task-child",
+                    stage: "review",
+                    kind: "main",
+                    agent: None,
+                    agent_provider: Some("codex"),
+                    model: None,
+                    status: "pending",
+                    result: None,
+                    feedback: None,
+                    session_id: Some("task-child"),
+                    provider_session_id: None,
+                    cwd: Some("/tmp/task-child-2"),
+                    resumed_from_run_id: None,
+                },
+                Some("manual"),
+                &expected,
+                "cancelled",
+                None,
+                None,
+            )
+            .unwrap();
+            drop(db);
+
+            let replacements = session_replacements::SessionReplacements::default();
+            replacements.begin_for_run("task-child", Some("run-source"));
+            let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+            let server = tokio::spawn(async move {
+                let sessions = vec![SessionInfo {
+                    session_id: "task-child".to_string(),
+                    pid: 42,
+                    cwd: "/tmp/task-child".to_string(),
+                    state: SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    kind: Default::default(),
+                    run_id: None,
+                }];
+                let mut subscriber =
+                    expect_subscribe_with_list(&listener, sessions, capabilities).await;
+                write_event(
+                    &mut subscriber,
+                    &DaemonEvent::Exit {
+                        session_id: "task-child".to_string(),
+                        run_id: None,
+                        code: 0,
+                        resume_session_id: Some("old-codex-thread".to_string()),
+                        killed: false,
+                    },
+                )
+                .await;
+                write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+                expect_no_notification_connection(&listener).await;
+            });
+
+            timeout(
+                Duration::from_secs(2),
+                terminal_state_watcher_once(
+                    &http_api::AppState::new(config.clone()),
+                    &replacements,
+                ),
+            )
+            .await
+            .expect("watcher did not finish")
+            .unwrap();
+            server.await.unwrap();
+
+            let db = Db::open(&config.db_path).unwrap();
+            let runs = db.list_stage_runs_for_task("task-child").unwrap();
+            assert_eq!(
+                runs.iter()
+                    .find(|run| run.id == "run-successor")
+                    .and_then(|run| run.provider_session_id.as_deref()),
+                None,
+                "old ownershipless Exit must not stamp the pending successor"
+            );
+            let task_session_id: Option<String> = rusqlite::Connection::open(&config.db_path)
+                .unwrap()
+                .query_row(
+                    "SELECT agent_session_id FROM pipeline_item WHERE id = ?1",
+                    ["task-child"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(task_session_id, None);
+            let task = db.get_pipeline_item("task-child").unwrap().unwrap();
+            assert_eq!(task.activity.as_deref(), Some("working"));
+            assert!(task.notified_at.is_none());
 
             let _ = std::fs::remove_file(socket_path);
             let _ = std::fs::remove_dir_all(daemon_dir);

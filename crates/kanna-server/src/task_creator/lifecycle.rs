@@ -724,7 +724,16 @@ pub(crate) async fn kill_session_replacing(
     replacements: &SessionReplacements,
     session_id: &str,
 ) -> Result<(), String> {
-    replacements.begin(session_id);
+    kill_session_replacing_if_owned(daemon, replacements, session_id, None).await
+}
+
+pub(crate) async fn kill_session_replacing_if_owned(
+    daemon: &mut DaemonClient,
+    replacements: &SessionReplacements,
+    session_id: &str,
+    expected_run_id: Option<&str>,
+) -> Result<(), String> {
+    replacements.begin_for_run(session_id, expected_run_id);
     let mut kill = daemon
         .send_command(&DaemonCommand::Kill {
             session_id: session_id.to_string(),

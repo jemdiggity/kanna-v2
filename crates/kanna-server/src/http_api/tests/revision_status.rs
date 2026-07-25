@@ -123,7 +123,7 @@ async fn legacy_daemon_revision_rejection_preserves_active_run_through_http() {
     let claude_config_dir = repo_root.join("claude-config");
     crate::task_creator::tests::revision::write_resume_transcript(
         &claude_config_dir,
-        &repo_root.join(".kanna-worktrees/task-impl"),
+        &repo_root.join(".kanna-worktrees/task-review-task"),
     );
     std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
 

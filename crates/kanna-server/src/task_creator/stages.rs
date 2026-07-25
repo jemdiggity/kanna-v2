@@ -10,7 +10,9 @@ use super::prompt::{
     build_revision_resume_message, build_revision_task_prompt, build_target_stage_prompt,
     build_target_stage_prompt_with_instructions, RevisionRound,
 };
-use super::resume::{claude_transcript_exists, current_branch, rev_parse_head};
+use super::resume::{
+    claude_transcript_exists, rev_parse_head, verified_registered_worktree_branch,
+};
 use super::types::{
     PreparedPostDispatch, PreparedRunWorkspace, PreparedStageRunSpawn, PreparedStageTransition,
     ResumeWorkspaceSpec, RunWorkspaceSpec,
@@ -611,6 +613,11 @@ fn prepare_revision_resume(
     else {
         return fall_back("previous run recorded no session id or cwd");
     };
+    let Some(resume_branch) =
+        verified_registered_worktree_branch(&context.repo.path, context.source_task_id, &run_cwd)
+    else {
+        return fall_back("previous run's worktree identity is no longer valid");
+    };
     let Some(resume_head) = rev_parse_head(&run_cwd) else {
         return fall_back("previous run's worktree is gone");
     };
@@ -628,9 +635,6 @@ fn prepare_revision_resume(
     if resume_head != current_head {
         return fall_back("previous run's worktree diverged from the committed tip");
     }
-    let Some(resume_branch) = current_branch(&run_cwd) else {
-        return fall_back("previous run's worktree has no checked-out branch");
-    };
     if run_provider == "claude" && !claude_transcript_exists(&run_cwd, &provider_session_id) {
         return fall_back("no CLI transcript for the previous session");
     }

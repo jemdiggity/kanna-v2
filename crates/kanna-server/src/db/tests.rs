@@ -1883,6 +1883,66 @@ fn delayed_completion_cannot_finish_replacement_run() {
 }
 
 #[test]
+fn pending_initial_stage_run_cannot_complete_before_session_lands() {
+    let path = Db::test_db_path("pending-initial-stage-completion");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Complete immediately after SessionCreated",
+        None,
+        "in progress",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "initial-run",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "pending",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    assert!(matches!(
+        db.finish_active_stage_run(
+            "task-1",
+            Some("initial-run"),
+            "succeeded",
+            Some("{}"),
+            Some("completed before landing"),
+        ),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "pending"
+    );
+
+    db.start_stage_run("initial-run").unwrap();
+    assert!(db
+        .finish_active_stage_run(
+            "task-1",
+            Some("initial-run"),
+            "succeeded",
+            Some("{}"),
+            Some("completed after landing"),
+        )
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn owned_stage_completion_requires_immutable_run_id() {
     let path = Db::test_db_path("stage-completion-requires-run-id");
     let db = Db::open_for_tests(&path).expect("open test db");

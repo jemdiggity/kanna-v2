@@ -336,6 +336,9 @@ pub(super) async fn close_task(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
+    let task_id = resolve_task_action_id(&state, task_id).await?;
+    let _action_flight = begin_task_action(&state, &task_id)?;
+
     let (pipeline_item_id, blocker_close_instructions, workspace_teardown) = {
         let state = Arc::clone(&state);
         super::blocking::run_handler_blocking("task close prepare", move || {

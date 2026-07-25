@@ -93,6 +93,7 @@ async fn close_task_route_uses_task_closer() {
     );
 
     let response = app
+        .clone()
         .oneshot(
             Request::post("/v1/tasks/task-1/actions/close")
                 .body(Body::empty())
@@ -3560,7 +3561,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
 }
 
 #[tokio::test]
-async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_write() {
+async fn manual_close_is_barred_between_stage_kill_and_successor_land() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -3783,8 +3784,10 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
     .unwrap();
     drop(db);
 
-    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let state = Arc::new(super::AppState::new(config.clone()));
+    let app = super::router(Arc::clone(&state));
     let response = app
+        .clone()
         .oneshot(
             Request::post("/v1/tasks/source-1/actions/advance-stage")
                 .body(Body::empty())
@@ -3795,36 +3798,52 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
     assert_eq!(response.status(), StatusCode::OK);
 
     spawn_seen_rx.await.unwrap();
-    let db = Db::open(&config.db_path).unwrap();
-    db.close_pipeline_item("source-1").unwrap();
-    assert!(db
+    let close_before_land = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/v1/tasks/source-1/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let close_before_land =
+        tokio::time::timeout(std::time::Duration::from_millis(500), close_before_land)
+            .await
+            .expect("close must be rejected before it can reach the daemon")
+            .unwrap()
+            .unwrap();
+    assert_eq!(close_before_land.status(), StatusCode::CONFLICT);
+    assert!(Db::open(&config.db_path)
+        .unwrap()
         .get_pipeline_item("source-1")
         .unwrap()
         .unwrap()
         .closed_at
-        .is_some());
-    drop(db);
-    release_spawn_tx.send(()).unwrap();
+        .is_none());
 
-    let cleanup_session_id =
-        tokio::time::timeout(std::time::Duration::from_millis(500), cleanup_seen_rx)
-            .await
-            .ok()
-            .map(|received| received.unwrap());
-    if let Some(cleanup_session_id) = cleanup_session_id {
-        assert_eq!(cleanup_session_id, "source-1");
-        daemon_server.await.unwrap();
-    } else {
-        daemon_server.abort();
-    }
+    release_spawn_tx.send(()).unwrap();
+    let db = Db::open(&config.db_path).unwrap();
+    wait_for_task_stage(&db, "source-1", "review").await;
+    drop(db);
+
+    let close_after_land = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/source-1/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(close_after_land.status(), StatusCode::NO_CONTENT);
+    assert_eq!(cleanup_seen_rx.await.unwrap(), "td-source-1");
+    daemon_server.abort();
 
     let db = Db::open(&config.db_path).unwrap();
     let task = db.get_pipeline_item("source-1").unwrap().unwrap();
-    assert_eq!(task.stage.as_deref(), Some("in progress"));
-    assert_eq!(task.branch.as_deref(), Some("task-source"));
+    assert_eq!(task.stage.as_deref(), Some("review"));
     assert!(task.closed_at.is_some());
     let runs = db.list_stage_runs_for_task("source-1").unwrap();
-    assert!(runs.iter().all(|run| run.stage != "review"));
+    assert!(runs.iter().any(|run| run.stage == "review"));
 
     if created_sidecar {
         let _ = std::fs::remove_file(&kanna_cli_path);
@@ -4098,6 +4117,75 @@ async fn complete_stage_route_uses_stage_completer() {
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
     assert_eq!(created.task_id, "task-2");
+}
+
+#[tokio::test]
+async fn complete_stage_rejects_session_created_run_until_initial_land() {
+    let repo_temp = tempfile::Builder::new()
+        .prefix("kanna-http-complete-pending-initial-run-")
+        .tempdir()
+        .unwrap();
+    let repo_root = repo_temp.path().join("repo");
+    init_test_git_repo(&repo_root);
+    let repo_path = repo_root.to_string_lossy().to_string();
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", move |db| {
+        db.insert_test_repo_with_path("repo-1", &repo_path, "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Complete immediately after SessionCreated",
+            None,
+            "in progress",
+            "2026-07-25 00:00:00",
+        )
+        .unwrap();
+        // Fault-inject the exact window after the daemon has returned
+        // SessionCreated but before lifecycle lands the initial run.
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "initial-run",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "completed before initial land",
+                        "runId": "initial-run"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let run = Db::open(&db_path)
+        .unwrap()
+        .latest_stage_run("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, "pending");
+    assert!(run.finished_at.is_none());
 }
 
 #[tokio::test]

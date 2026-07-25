@@ -39,17 +39,18 @@
  *   injects snapshots through the App.vue setupState refs.
  */
 import { join } from "node:path";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
-import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
+import { resetDatabase, importTestRepoDirect, cleanupWorktrees } from "../helpers/reset";
 import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { advanceStageWithShortcut, pressAdvanceStageShortcut } from "../helpers/stageAdvance";
 import { resolveAppKannaServer, type AppKannaServer } from "../helpers/kannaServer";
+import { buildGlobalKeydownScript } from "../helpers/keyboard";
 
 const execFileAsync = promisify(execFile);
 
@@ -78,6 +79,7 @@ interface TaskRow {
   branch: string | null;
   agent_type: string | null;
   agent_provider: string | null;
+  activity: string | null;
   display_name: string | null;
   prompt: string | null;
 }
@@ -96,7 +98,7 @@ interface StageRunRow {
 async function getTaskRow(client: WebDriverClient, taskId: string): Promise<TaskRow> {
   const rows = (await queryDb(
     client,
-    `SELECT id, stage, closed_at, branch, agent_type, agent_provider, display_name, prompt
+    `SELECT id, stage, closed_at, branch, agent_type, agent_provider, activity, display_name, prompt
      FROM pipeline_item WHERE id = ?`,
     [taskId],
   )) as TaskRow[];
@@ -171,10 +173,30 @@ async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promis
     `const item = ${JSON.stringify(item)};
      const ctx = window.__KANNA_E2E__.setupState;
      const items = ctx.store?.items?.value ?? ctx.store?.items;
-     if (!Array.isArray(items)) return "items-unavailable";
+     const slots = ctx.store?.taskUiSlots?.value ?? ctx.store?.taskUiSlots;
+     if (!Array.isArray(items) || !Array.isArray(slots)) return "store-state-unavailable";
      const index = items.findIndex((candidate) => candidate.id === item.id);
      if (index >= 0) items.splice(index, 1, item);
      else items.push(item);
+     const readySlot = {
+       slot_id: item.id,
+       task_id: item.id,
+       state: "ready",
+       task: item,
+       draft: {
+         repo_id: item.repo_id,
+         prompt: item.prompt ?? "",
+         display_name: item.display_name ?? null,
+         pipeline: item.pipeline,
+         stage: item.stage,
+         agent_type: item.agent_type,
+         agent_provider: item.agent_provider,
+         created_at: item.created_at,
+       },
+     };
+     const slotIndex = slots.findIndex((candidate) => candidate.task_id === item.id);
+     if (slotIndex >= 0) slots.splice(slotIndex, 1, readySlot);
+     else slots.push(readySlot);
      return "ok";`,
   );
   if (result !== "ok") {
@@ -217,7 +239,164 @@ async function waitForSelectedTaskNotId(
 async function selectTask(client: WebDriverClient, taskId: string): Promise<void> {
   const result = await callVueMethod(client, "store.selectItem", taskId);
   if (isVueCallError(result)) throw new Error(result.__error);
+  if (await getVueState(client, "selectedItemId") !== taskId) {
+    const selector = `.sidebar .pipeline-item[data-task-id="${taskId}"]`;
+    await client.waitForElement(selector, 5_000);
+    await client.click(await client.findElement(selector));
+  }
   await waitForSelectedTaskId(client, taskId);
+}
+
+async function closeDiffModalIfOpen(client: WebDriverClient): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const isOpen = await client.executeSync<boolean>(
+      `return Boolean(document.querySelector(".diff-view"));`,
+    );
+    if (!isOpen) return;
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await sleep(100);
+  }
+  await client.waitForNoElement(".diff-view", 2_000);
+}
+
+async function requestChangesThroughDiffModal(
+  client: WebDriverClient,
+  worktreePath: string,
+  summary: string,
+  note: string,
+): Promise<void> {
+  const headCommit = await git(worktreePath, ["rev-parse", "HEAD"]);
+  const seeded = await client.executeSync<string>(
+    `const ctx = window.__KANNA_E2E__.setupState;
+     if (typeof ctx?.appModals?.updateCurrentDiffViewState !== "function") {
+       return "diff-state-unavailable";
+     }
+     ctx.appModals.updateCurrentDiffViewState({
+       scope: "branch",
+       reviewHeadCommit: ${JSON.stringify(headCommit)},
+       reviewComments: [{
+         id: "stage-advance-review-comment",
+         filePath: "README.md",
+         startLine: 1,
+         endLine: 1,
+         excerpt: "# fixture",
+         note: ${JSON.stringify(note)},
+         headCommit: ${JSON.stringify(headCommit)},
+       }],
+     });
+     return "ok";`,
+  );
+  if (seeded !== "ok") {
+    throw new Error(`failed to seed DiffModal review state: ${seeded}`);
+  }
+
+  await closeDiffModalIfOpen(client);
+  await client.executeSync(buildGlobalKeydownScript({ key: "d", meta: true }));
+  await client.waitForElement(".diff-view", 5_000);
+  await client.executeSync(
+    buildGlobalKeydownScript({ key: "s", meta: true, shift: true }),
+  );
+  await client.waitForElement(".summary-composer", 2_000);
+  const textarea = await client.findElement(".summary-composer textarea");
+  await client.sendKeys(textarea, summary);
+  await client.click(await client.findElement(".summary-actions .primary"));
+  const outcome = await client.executeAsync<string>(
+    `const cb = arguments[arguments.length - 1];
+     const deadline = Date.now() + 10000;
+     const check = () => {
+       if (!document.querySelector(".summary-composer")) { cb("ok"); return; }
+       if (Date.now() >= deadline) {
+         const toast = document.querySelector(".toast-container")?.textContent?.trim() || "";
+         cb("timeout:" + toast);
+         return;
+       }
+       setTimeout(check, 50);
+     };
+     check();`,
+  );
+  if (outcome !== "ok") {
+    throw new Error(`DiffModal request changes failed: ${outcome}`);
+  }
+}
+
+async function waitForVisibleSelectedTaskState(
+  client: WebDriverClient,
+  taskId: string,
+  stage: string,
+  branch: string,
+  worktreePath: string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown = null;
+  while (Date.now() < deadline) {
+    last = await client.executeSync(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const read = (value) => value?.__v_isRef ? value.value : value;
+       const sidebarRow = document.querySelector(${JSON.stringify(
+         `.sidebar .pipeline-item[data-task-id="${taskId}"]`,
+       )});
+       const title = sidebarRow?.querySelector(".item-title");
+       return {
+         selectedItemId: read(ctx.store?.selectedItemId),
+         stage: document.querySelector(".task-header .stage-badge")?.textContent?.trim() || "",
+         branch: document.querySelector(".task-header .branch")?.textContent?.trim() || "",
+         activeWorktreePath: read(ctx.appModals?.activeWorktreePath),
+         sidebarSelected: sidebarRow?.classList.contains("selected") || false,
+         activity: ctx.store?.currentItem?.activity || null,
+         fontStyle: title instanceof HTMLElement ? getComputedStyle(title).fontStyle : "",
+       };`,
+    );
+    const state = last as {
+      selectedItemId?: string;
+      stage?: string;
+      branch?: string;
+      activeWorktreePath?: string;
+      sidebarSelected?: boolean;
+      activity?: string;
+      fontStyle?: string;
+    };
+    if (
+      state.selectedItemId === taskId
+      && state.stage === stage
+      && state.branch?.includes(branch)
+      && state.activeWorktreePath === worktreePath
+      && state.sidebarSelected
+      && state.activity === "working"
+      && state.fontStyle === "italic"
+    ) {
+      return;
+    }
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for visible selected task state: ${JSON.stringify(last)}`);
+}
+
+async function removeOwnershiplessFixtureSessions(client: WebDriverClient): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  let quietSince = 0;
+  let lastSessionIds: string[] = [];
+  while (Date.now() < deadline) {
+    const sessions = await tauriInvoke(client, "list_sessions") as Array<{
+      session_id?: string;
+      run_id?: string | null;
+    }>;
+    const sessionIds = sessions
+      .filter((session) => !session.session_id?.startsWith("shell-") && !session.run_id)
+      .flatMap((session) => session.session_id ? [session.session_id] : []);
+    if (sessionIds.length === 0) {
+      if (quietSince === 0) quietSince = Date.now();
+      if (Date.now() - quietSince >= 500) return;
+    } else {
+      quietSince = 0;
+      lastSessionIds = sessionIds;
+      for (const sessionId of sessionIds) {
+        await tauriInvoke(client, "kill_session", { sessionId });
+      }
+    }
+    await sleep(50);
+  }
+  throw new Error(`ownershipless fixture sessions were not removed: ${lastSessionIds.join(", ")}`);
 }
 
 async function waitForSidebarToExcludeTaskId(
@@ -343,7 +522,7 @@ describe("stage advance", () => {
     await client.createSession();
     await resetDatabase(client);
     fixtureRepoRoot = await createFixtureRepo("stage-advance-test");
-    testRepoPath = fixtureRepoRoot;
+    testRepoPath = await realpath(fixtureRepoRoot);
 
     const kannaDir = join(testRepoPath, ".kanna");
     await mkdir(join(kannaDir, "pipelines"), { recursive: true });
@@ -412,6 +591,7 @@ describe("stage advance", () => {
         "#!/bin/sh",
         "mkdir -p .kanna",
         "printf '%s\\n' \"$@\" > .kanna/revision-codex-args.txt",
+        "while :; do sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -420,7 +600,7 @@ describe("stage advance", () => {
     await git(testRepoPath, ["commit", "-m", "test: add kanna stage fixtures"]);
     await git(testRepoPath, ["push", "origin", "main"]);
 
-    repoId = await importTestRepo(client, testRepoPath, "stage-advance-test");
+    repoId = await importTestRepoDirect(client, testRepoPath, "stage-advance-test");
   });
 
   afterAll(async () => {
@@ -683,72 +863,106 @@ describe("stage advance", () => {
     expect(freshRun).toMatchObject({ status: "running", session_id: taskId });
   });
 
-  it("requests a revision that reruns an earlier stage on the same task", async () => {
-    const taskId = "request-revision-task";
-    const branch = "task-request-revision";
-    const seedRunId = "run-request-revision-task-seed";
+  it("requests changes through DiffModal and forks a numbered fallback workspace", async () => {
+    const taskId = "request-revision-fallback-task";
+    const implementationBranch = `task-${taskId}`;
+    const reviewBranch = `task-${taskId}-2`;
+    const expectedBranch = `task-${taskId}-3`;
+    const implementationRunId = "run-request-revision-fallback-implementation";
+    const reviewRunId = "run-request-revision-fallback-review";
     const originalTitle = "Preserve reviewed task title";
     const reviewPrompt = "Original prompt that must stay on the task.";
     const revisionPrompt = "Add E2E coverage for the request-revision path.";
-    await addTaskWorktree(taskId, branch);
+    const implementationCwd = join(
+      testRepoPath,
+      ".kanna-worktrees",
+      implementationBranch,
+    );
+    const reviewCwd = join(testRepoPath, ".kanna-worktrees", reviewBranch);
+
+    await addTaskWorktree(taskId, implementationBranch);
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch: reviewBranch,
+      path: reviewCwd,
+      startPoint: "main",
+    });
     await insertTask({
       id: taskId,
       prompt: reviewPrompt,
       pipeline: REVISION_PIPELINE,
       stage: "review",
-      branch,
+      branch: reviewBranch,
       displayName: originalTitle,
     });
-    await insertRunningStageRun(taskId, seedRunId, "review");
+    await execDb(
+      client,
+      `INSERT INTO stage_run (
+         id, task_id, stage, kind, agent, agent_provider, status, session_id,
+         provider_session_id, cwd, started_at, run_ownership_version
+       ) VALUES (?, ?, 'in progress', 'main', 'revision-e2e', 'codex',
+                 'succeeded', ?, NULL, ?, datetime('now', '-1 minute'), 1)`,
+      [implementationRunId, taskId, taskId, implementationCwd],
+    );
+    await execDb(
+      client,
+      `INSERT INTO stage_run (
+         id, task_id, stage, kind, agent_provider, status, session_id,
+         started_at, run_ownership_version
+       ) VALUES (?, ?, 'review', 'main', 'codex', 'running', ?,
+                 datetime('now'), 1)`,
+      [reviewRunId, taskId, taskId],
+    );
 
-    await withAppKannaServer(async (server) => {
-      const response = await fetch(
-        `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            targetStage: "in progress",
-            summary: "needs another pass",
-            prompt: revisionPrompt,
-            metadata: { source: "e2e" },
-          }),
-        },
-      );
-      if (!response.ok) {
-        throw new Error(`request-revision failed: ${response.status} ${await response.text()}`);
-      }
-      // The revision reruns an earlier stage on the SAME durable task.
-      expect((await response.json() as { taskId: string }).taskId).toBe(taskId);
-
-      await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "in progress");
-    });
+    await selectTask(client, taskId);
+    await requestChangesThroughDiffModal(
+      client,
+      reviewCwd,
+      "needs another pass",
+      revisionPrompt,
+    );
+    await waitForTaskRow(
+      client,
+      taskId,
+      (candidate) =>
+        candidate.stage === "in progress"
+        && candidate.branch === expectedBranch
+        && candidate.activity === "working",
+    );
 
     const row = await getTaskRow(client, taskId);
     expect(row).toMatchObject({
       id: taskId,
       stage: "in progress",
       closed_at: null,
+      branch: expectedBranch,
+      activity: "working",
       display_name: originalTitle,
       prompt: reviewPrompt,
     });
-    // The revision forked a fresh workspace from the reviewed branch's tip.
-    expect(row.branch).not.toBe(branch);
-    expect(row.branch).toBe(`task-${taskId}-2`);
+    const expectedCwd = join(testRepoPath, ".kanna-worktrees", expectedBranch);
+    await waitForVisibleSelectedTaskState(
+      client,
+      taskId,
+      "in progress",
+      expectedBranch,
+      expectedCwd,
+    );
 
     const runs = await getStageRuns(client, taskId);
-    const seededRun = runs.find((run) => run.id === seedRunId);
-    expect(seededRun?.status).toBe("failed");
-    const revisionRun = runs.find((run) => run.stage === "in progress");
-    expect(revisionRun).toMatchObject({ status: "running", feedback: revisionPrompt });
+    expect(runs.find((run) => run.id === reviewRunId)?.status).toBe("failed");
+    const revisionRun = runs.find(
+      (run) => run.stage === "in progress" && run.id !== implementationRunId,
+    );
+    expect(revisionRun).toMatchObject({
+      status: "running",
+      cwd: expectedCwd,
+      feedback: expect.stringContaining(revisionPrompt),
+    });
+    expect(revisionRun?.resumed_from_run_id).toBeNull();
 
-    // The revision agent runs inside the freshly forked worktree: the fake
-    // `codex` (committed into the repo, so present in the fork's checkout)
-    // records its argv there.
     const capturedArgsPath = join(
-      testRepoPath,
-      ".kanna-worktrees",
-      row.branch as string,
+      expectedCwd,
       ".kanna",
       "revision-codex-args.txt",
     );
@@ -757,13 +971,15 @@ describe("stage advance", () => {
     expect(capturedArgs).toContain("--yolo\n");
     expect(capturedArgs).toContain("Implement revision:");
     expect(capturedArgs).toContain(`Original task:\n${reviewPrompt}`);
-    expect(capturedArgs).toContain(`Reviewer feedback:\n${revisionPrompt}`);
+    expect(capturedArgs).toContain("Reviewer feedback:\nRevision requested from review");
+    expect(capturedArgs).toContain(revisionPrompt);
+    await closeDiffModalIfOpen(client);
   });
 
-  it("resumes an earlier Codex run in its original workspace on review revision", async () => {
+  it("requests changes through DiffModal and resumes the original workspace", async () => {
     const taskId = "request-revision-resume-task";
-    const implementationBranch = "task-request-revision-resume";
-    const reviewBranch = "task-request-revision-resume-2";
+    const implementationBranch = `task-${taskId}`;
+    const reviewBranch = `task-${taskId}-2`;
     const implementationRunId = "run-request-revision-resume-implementation";
     const reviewRunId = "run-request-revision-resume-review";
     const providerSessionId = "6f7d2f7a-1b2e-4c3d-9a8b-123456789abc";
@@ -789,6 +1005,7 @@ describe("stage advance", () => {
       pipeline: REVISION_PIPELINE,
       stage: "review",
       branch: reviewBranch,
+      agentType: "agent",
       displayName: "Resume reviewed implementation",
     });
     await execDb(
@@ -815,33 +1032,32 @@ describe("stage advance", () => {
                  datetime('now'), 1)`,
       [reviewRunId, taskId, taskId],
     );
-    await withAppKannaServer(async (server) => {
-      const response = await fetch(
-        `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            targetStage: "in progress",
-            summary: "resume the implementation",
-            prompt: revisionPrompt,
-          }),
-        },
-      );
-      if (!response.ok) {
-        throw new Error(
-          `resumed request-revision failed: ${response.status} ${await response.text()}`,
-        );
-      }
-      expect((await response.json() as { taskId: string }).taskId).toBe(taskId);
-      await waitForTaskRow(
-        client,
-        taskId,
-        (candidate) =>
-          candidate.stage === "in progress" &&
-          candidate.branch === implementationBranch,
-      );
-    });
+    // Earlier selection-focused fixtures intentionally synthesize tasks
+    // without stage runs; their terminal fallback sessions therefore have no
+    // immutable owner and would downgrade daemon-wide resume negotiation.
+    await selectTask(client, taskId);
+    await removeOwnershiplessFixtureSessions(client);
+    // Keep selection from synthesizing an unowned PTY for the seeded review
+    // fixture, while preserving the real PTY target-stage execution.
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET agent_type = 'pty' WHERE id = ?",
+      [taskId],
+    );
+    await requestChangesThroughDiffModal(
+      client,
+      join(testRepoPath, ".kanna-worktrees", reviewBranch),
+      "resume the implementation",
+      revisionPrompt,
+    );
+    await waitForTaskRow(
+      client,
+      taskId,
+      (candidate) =>
+        candidate.stage === "in progress"
+        && candidate.branch === implementationBranch
+        && candidate.activity === "working",
+    );
 
     const row = await getTaskRow(client, taskId);
     expect(row).toMatchObject({
@@ -849,8 +1065,16 @@ describe("stage advance", () => {
       stage: "in progress",
       branch: implementationBranch,
       closed_at: null,
+      activity: "working",
       prompt: originalPrompt,
     });
+    await waitForVisibleSelectedTaskState(
+      client,
+      taskId,
+      "in progress",
+      implementationBranch,
+      implementationCwd,
+    );
     const runs = await waitForStageRuns(client, taskId, (candidateRuns) =>
       candidateRuns.some(
         (run) =>
@@ -870,7 +1094,7 @@ describe("stage advance", () => {
       provider_session_id: providerSessionId,
       cwd: implementationCwd,
       resumed_from_run_id: implementationRunId,
-      feedback: revisionPrompt,
+      feedback: expect.stringContaining(revisionPrompt),
     });
 
     const capturedArgsPath = join(
@@ -884,6 +1108,8 @@ describe("stage advance", () => {
     expect(capturedArgs).toContain("--yolo\n");
     expect(capturedArgs).toContain(`${providerSessionId}\n`);
     expect(capturedArgs).toContain(`Original task:\n${originalPrompt}`);
-    expect(capturedArgs).toContain(`Reviewer feedback:\n${revisionPrompt}`);
+    expect(capturedArgs).toContain("Reviewer feedback:\nRevision requested from review");
+    expect(capturedArgs).toContain(revisionPrompt);
+    await closeDiffModalIfOpen(client);
   });
 });
