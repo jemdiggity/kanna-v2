@@ -133,6 +133,7 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     activity: requiredString(task.activity, `${path}.activity`, 32),
     ...(activityRevision === undefined ? {} : { activityRevision }),
     status,
+    hasRunningPost: optionalBoolean(task.hasRunningPost, `${path}.hasRunningPost`),
     repo: {
       cloudRepoId: requiredString(repo.cloudRepoId, `${path}.repo.cloudRepoId`, 128),
       name: requiredString(repo.name, `${path}.repo.name`, 256),
@@ -426,6 +427,15 @@ function optionalNullableUnicodeString(
   if (value === undefined || value === null) return null;
   if (typeof value !== "string" || Array.from(value).length > maxLength) {
     throw new Error(`${field} must be null or a string of at most ${maxLength} characters`);
+  }
+  return value;
+}
+
+// Missing on snapshots from older desktop publishers; treated as "no running post".
+function optionalBoolean(value: unknown, field: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be a boolean`);
   }
   return value;
 }

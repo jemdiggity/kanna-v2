@@ -40,6 +40,7 @@ struct CloudTaskSnapshot {
     activity: String,
     activity_revision: i64,
     status: String,
+    has_running_post: bool,
     repo: CloudRepoSnapshot,
     branch: Option<String>,
     base_ref: Option<String>,
@@ -177,6 +178,7 @@ fn map_task(
         activity: truncate(&item.activity, 32),
         activity_revision: item.activity_revision,
         status: status.into(),
+        has_running_post: item.has_running_post != 0,
         repo: CloudRepoSnapshot {
             cloud_repo_id: repo.id.clone(),
             name: truncate(&repo.name, 256),
@@ -448,6 +450,7 @@ mod tests {
         );
         assert_eq!(json["tasks"][0]["activity"], "working");
         assert_eq!(json["tasks"][0]["activityRevision"], 7);
+        assert_eq!(json["tasks"][0]["hasRunningPost"], false);
         assert_eq!(json["tasks"][0]["waitingPromptSnippet"], "Ready for review");
         assert_eq!(json["tasks"][0]["status"], "blocked");
         assert_eq!(
@@ -467,6 +470,17 @@ mod tests {
             serde_json::json!({"provider":"codex","type":"pty"})
         );
         assert_eq!(json["tasks"][0]["parentTaskId"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn snapshot_mapping_publishes_running_post_flag() {
+        let mut source = ui_snapshot("working");
+        source.entries[0].items[0].has_running_post = 1;
+
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(json["tasks"][0]["hasRunningPost"], true);
     }
 
     #[test]

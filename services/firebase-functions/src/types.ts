@@ -33,6 +33,8 @@ export interface CloudTaskSnapshot {
   activity: CloudTaskActivity;
   activityRevision?: number;
   status: CloudTaskStatus;
+  // Missing on documents written by older desktop publishers.
+  hasRunningPost?: boolean;
   repo: {
     cloudRepoId: string;
     name: string;

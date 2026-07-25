@@ -292,6 +292,31 @@ describe("workspace sidebar projection", () => {
     });
   });
 
+  it("carries the running-post flag of a remote task into its sidebar item", () => {
+    const remote = workspaceTask({
+      repoKey: "cloud:remote-repo",
+      logicalOwnerId: "task-post",
+      localTaskId: null,
+      itemId: "cloud:remote-repo:task-post",
+      remoteTaskIds: ["cloud:remote-repo:task-post"],
+      ownerKind: "remote",
+      sources: [source("cloud", "cloud:remote-repo:task-post", "task-post")],
+    });
+    remote.item.has_running_post = 1;
+
+    const projection = createWorkspaceSidebarProjector().project({
+      taskUiSlots: [],
+      workspaceTasks: [remote],
+    });
+
+    expect(projection.sidebarItems).toEqual([
+      expect.objectContaining({
+        remote_task: true,
+        has_running_post: 1,
+      }),
+    ]);
+  });
+
   it("retains remote presentation identity and aliases when local matching rekeys the repo", () => {
     const remote = workspaceTask({
       repoKey: "cloud:remote-repo",

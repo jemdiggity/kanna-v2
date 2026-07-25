@@ -101,6 +101,25 @@ describe("cloud task publication validation", () => {
     )).toThrow(/waitingPromptSnippet/);
   });
 
+  it("normalizes missing running-post flags and passes present ones through", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ hasRunningPost: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.hasRunningPost).toBe(false);
+
+    const running = validateCloudTaskPublication(
+      publication([task({ hasRunningPost: true })]),
+      "desktop-1",
+    );
+    expect(running.tasks[0]?.hasRunningPost).toBe(true);
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({ hasRunningPost: "yes" })]),
+      "desktop-1",
+    )).toThrow(/hasRunningPost/);
+  });
+
   it("normalizes missing parent task ids and bounds present ones", () => {
     const legacy = validateCloudTaskPublication(
       publication([task({ parentTaskId: undefined })]),

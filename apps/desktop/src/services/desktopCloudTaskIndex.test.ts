@@ -111,6 +111,21 @@ describe("mapDesktopCloudTasks", () => {
     });
   });
 
+  it("maps the running-post flag so remote tasks show the transition-in-flight indicator", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({ hasRunningPost: true }),
+      remoteTaskSnapshot({
+        cloudTaskId: "remote-repo-id:task-2",
+        ownerLocalTaskId: "task-2",
+      }),
+    ]);
+
+    expect(snapshot.items).toMatchObject([
+      { id: "cloud:remote-repo-id:task-1", has_running_post: 1 },
+      { id: "cloud:remote-repo-id:task-2", has_running_post: 0 },
+    ]);
+  });
+
   it("preserves OpenCode as the cloud task agent provider", () => {
     const snapshot = mapDesktopCloudTasks([
       {

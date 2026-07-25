@@ -28,6 +28,7 @@ export interface DesktopCloudTaskSnapshot {
   activity?: string;
   activityRevision?: number;
   status: string;
+  hasRunningPost?: boolean;
   repo: {
     cloudRepoId: string;
     name: string;
@@ -295,6 +296,7 @@ export function mapDesktopCloudTasks(
         ? snapshot.activityRevision
         : undefined,
       activity_changed_at: snapshot.updatedAt,
+      has_running_post: snapshot.hasRunningPost ? 1 : 0,
       unread_at: null,
       port_offset: null,
       port_env: null,
