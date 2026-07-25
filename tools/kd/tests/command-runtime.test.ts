@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -215,6 +215,36 @@ describe("command runtime helpers", () => {
       { name: "pnpm", found: true, path: "/usr/bin/pnpm" },
       { name: "tmux", found: false }
     ]);
+  });
+
+  it("checks required commands with the real Node runner", async () => {
+    const executableDir = await mkdtemp(join(tmpdir(), "kd-doctor-path-"));
+    await symlink(process.execPath, join(executableDir, "node"));
+    const isolatedPathRunner: CommandRunner = {
+      run(command, args, options) {
+        return nodeCommandRunner.run(command, args, {
+          ...options,
+          env: { ...process.env, ...options?.env, PATH: executableDir }
+        });
+      }
+    };
+
+    try {
+      const result = await checkRequiredCommands(isolatedPathRunner, ["node"]);
+
+      expect(result).toEqual({
+        ok: true,
+        commands: [
+          {
+            name: "node",
+            found: true,
+            path: join(executableDir, "node")
+          }
+        ]
+      });
+    } finally {
+      await rm(executableDir, { recursive: true, force: true });
+    }
   });
 
   it("finds only this worktree's desktop dev processes for restart cleanup", () => {
