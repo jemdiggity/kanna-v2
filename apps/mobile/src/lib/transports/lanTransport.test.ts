@@ -149,6 +149,18 @@ describe("createLanTransport", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("fails closed instead of resolving mentioned files over unauthenticated LAN", async () => {
+    const fetchImpl = vi.fn<FetchLike>();
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(
+      transport.resolveTaskFileMentions("task/read", [
+        { path: "TaskScreen.tsx", line: 42 }
+      ])
+    ).rejects.toThrow(/authenticated relay/i);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("fails closed instead of requesting the task diff without device credentials", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

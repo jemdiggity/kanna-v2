@@ -6,6 +6,8 @@ import type {
   TaskDiffContent,
   TaskDiffRequest,
   TaskFileContent,
+  TaskFileMentionInput,
+  TaskFileMentionResolution,
   TaskSummary
 } from "../lib/api/types";
 import type {
@@ -69,6 +71,10 @@ export interface MobileController {
   runMergeAgent(taskId: string): Promise<string | null>;
   advanceDesktopTaskStage(taskId: string): Promise<string | null>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
+  resolveTaskFileMentions(
+    taskId: string,
+    mentions: readonly TaskFileMentionInput[]
+  ): Promise<TaskFileMentionResolution>;
   readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   sendTaskTerminalInput(taskId: string, dataB64: string): void;
@@ -2296,6 +2302,10 @@ export function createMobileController(
 
     readTaskFile(taskId, path) {
       return client.readTaskFile(taskId, path);
+    },
+
+    resolveTaskFileMentions(taskId, mentions) {
+      return client.resolveTaskFileMentions(taskId, mentions);
     },
 
     readTaskDiff(taskId, request) {

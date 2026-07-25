@@ -159,6 +159,42 @@ describe("remote transport", () => {
     });
   });
 
+  it("routes mentioned-file resolution to the owner desktop", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      mentions: [{
+        path: "TaskScreen.tsx",
+        line: 42,
+        matches: [{ path: "apps/mobile/src/screens/TaskScreen.tsx" }],
+        truncated: false
+      }]
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [{
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local/task-1",
+        ownerOnline: true
+      }]
+    });
+
+    await transport.resolveTaskFileMentions("cloud-task-1", [
+      { path: "TaskScreen.tsx", line: 42 }
+    ]);
+
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local%2Ftask-1/files/resolve-mentions",
+      body: { mentions: [{ path: "TaskScreen.tsx", line: 42 }] }
+    });
+  });
+
   it("routes cloud task diff reads to the owner desktop and encoded local task id", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
       taskId: "local/task-1",

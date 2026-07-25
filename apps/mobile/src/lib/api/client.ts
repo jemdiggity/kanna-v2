@@ -19,6 +19,8 @@ import type {
   TaskDiffContent,
   TaskDiffRequest,
   TaskFileContent,
+  TaskFileMentionInput,
+  TaskFileMentionResolution,
   TaskDetail,
   TaskSummary
 } from "./types";
@@ -106,6 +108,10 @@ export interface KannaTransport {
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
+  resolveTaskFileMentions(
+    taskId: string,
+    mentions: readonly TaskFileMentionInput[]
+  ): Promise<TaskFileMentionResolution>;
   readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
   observeTaskTerminal(
     taskId: string,
@@ -144,6 +150,10 @@ export interface KannaClient {
   closeTask(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
+  resolveTaskFileMentions(
+    taskId: string,
+    mentions: readonly TaskFileMentionInput[]
+  ): Promise<TaskFileMentionResolution>;
   readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
   observeTaskTerminal(
     taskId: string,
@@ -218,6 +228,8 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     closeTask: (taskId) => transport.closeTask(taskId),
     sendTaskInput: (taskId, input) => transport.sendTaskInput(taskId, input),
     readTaskFile: (taskId, path) => transport.readTaskFile(taskId, path),
+    resolveTaskFileMentions: (taskId, mentions) =>
+      transport.resolveTaskFileMentions(taskId, mentions),
     readTaskDiff: (taskId, request) => transport.readTaskDiff(taskId, request),
     observeTaskTerminal: (taskId, listener) =>
       transport.observeTaskTerminal(taskId, listener),

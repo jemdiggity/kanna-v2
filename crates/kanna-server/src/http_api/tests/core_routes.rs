@@ -1954,6 +1954,56 @@ impl TaskFileRouteFixture {
         )
         .await
     }
+
+    async fn post_resolve(
+        &self,
+        task_id: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/tasks/{task_id}/files/resolve-mentions"))
+                    .header("content-type", "application/json")
+                    .extension(AuthenticatedTaskFileAccess)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn post_resolve_unauthenticated(
+        &self,
+        task_id: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/tasks/{task_id}/files/resolve-mentions"))
+                    .header("content-type", "application/json")
+                    .header("origin", "https://attacker.example")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn post_resolve_through_authenticated_relay(
+        &self,
+        task_id: &str,
+        body: serde_json::Value,
+    ) -> crate::http_api::HttpInvokeResponse {
+        crate::http_api::dispatch_authenticated_http_invoke(
+            Arc::clone(&self.state),
+            "POST",
+            &format!("/v1/tasks/{task_id}/files/resolve-mentions"),
+            body,
+        )
+        .await
+    }
 }
 
 impl Drop for TaskFileRouteFixture {
@@ -1971,6 +2021,87 @@ async fn task_file_response_text(response: axum::response::Response) -> String {
         .await
         .unwrap();
     String::from_utf8(body.to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn task_file_resolver_route_returns_unique_and_ambiguous_matches() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/Unique.ts", b"unique");
+    fixture.write("a/Shared.ts", b"a");
+    fixture.write("b/Shared.ts", b"b");
+
+    let response = fixture
+        .post_resolve(
+            "task-file",
+            serde_json::json!({
+                "mentions": [
+                    { "path": "Unique.ts", "line": 7 },
+                    { "path": "Shared.ts" }
+                ]
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resolved: crate::task_files::TaskFileMentionResolution = from_slice(&body).unwrap();
+    assert_eq!(resolved.mentions[0].matches[0].path, "src/Unique.ts");
+    assert_eq!(resolved.mentions[0].line, Some(7));
+    assert_eq!(
+        resolved.mentions[1]
+            .matches
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a/Shared.ts", "b/Shared.ts"]
+    );
+}
+
+#[tokio::test]
+async fn task_file_resolver_route_requires_authenticated_relay_access() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/Unique.ts", b"unique");
+    let body = serde_json::json!({ "mentions": [{ "path": "Unique.ts" }] });
+
+    let unauthenticated = fixture
+        .post_resolve_unauthenticated("task-file", body.clone())
+        .await;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let authenticated = fixture
+        .post_resolve_through_authenticated_relay("task-file", body)
+        .await;
+    assert_eq!(authenticated.status, StatusCode::OK.as_u16());
+    assert_eq!(
+        authenticated.body.unwrap()["mentions"][0]["matches"][0]["path"],
+        "src/Unique.ts"
+    );
+}
+
+#[tokio::test]
+async fn task_file_resolver_route_maps_limits_and_missing_workspace() {
+    let fixture = TaskFileRouteFixture::new();
+    let oversized = fixture
+        .post_resolve(
+            "task-file",
+            serde_json::json!({
+                "mentions": (0..=crate::task_files::MAX_TASK_FILE_MENTIONS)
+                    .map(|index| serde_json::json!({ "path": format!("file-{index}.ts") }))
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .await;
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let unavailable = fixture
+        .post_resolve(
+            "task-file-no-workspace",
+            serde_json::json!({ "mentions": [{ "path": "README.md" }] }),
+        )
+        .await;
+    assert_eq!(unavailable.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
