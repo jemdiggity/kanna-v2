@@ -449,7 +449,12 @@ pub(super) async fn close_task(
                     format!("db error: {}", e),
                 )
             })?;
-            db.close_pipeline_item(&pipeline_item_id).map_err(|e| {
+            let close_result = if has_workspace_teardown {
+                db.close_pipeline_item_tearing_down(&pipeline_item_id)
+            } else {
+                db.close_pipeline_item(&pipeline_item_id)
+            };
+            close_result.map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("db error: {}", e),
@@ -527,6 +532,8 @@ pub(super) async fn reopen_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_action_id(&state, task_id).await?;
+    let _action_flight = begin_task_action(&state, &task_id)?;
     let task_id = {
         let state = Arc::clone(&state);
         super::blocking::run_handler_blocking("task reopen", move || {
@@ -542,6 +549,9 @@ pub(super) async fn reopen_task(
                     axum::http::StatusCode::CONFLICT,
                     "cloud task ownership conflicts with an open local task".to_string(),
                 )),
+                Err(crate::task_creator::ReopenTaskError::Conflict(error)) => {
+                    Err((axum::http::StatusCode::CONFLICT, error))
+                }
                 Err(crate::task_creator::ReopenTaskError::Internal(error)) => {
                     Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))
                 }
@@ -612,7 +622,12 @@ async fn close_task_after_final_stage(
             format!("db error: {}", e),
         )
     })?;
-    db.close_pipeline_item(&task_id).map_err(|e| {
+    let close_result = if has_workspace_teardown {
+        db.close_pipeline_item_tearing_down(&task_id)
+    } else {
+        db.close_pipeline_item(&task_id)
+    };
+    close_result.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("db error: {}", e),

@@ -489,6 +489,19 @@ impl Db {
         Ok(())
     }
 
+    pub fn pipeline_item_teardown_in_progress(&self, id: &str) -> Result<bool, rusqlite::Error> {
+        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        };
+        self.conn.query_row(
+            "SELECT teardown_started_at IS NOT NULL
+             FROM pipeline_item
+             WHERE id = ?1",
+            [&pipeline_item_id],
+            |row| row.get(0),
+        )
+    }
+
     pub fn pin_pipeline_item(&self, task_id: &str, pin_order: i64) -> Result<(), rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE pipeline_item SET pinned = 1, pin_order = ?, updated_at = datetime('now') WHERE id = ?",
@@ -694,17 +707,40 @@ impl Db {
     }
 
     pub fn close_pipeline_item(&self, id: &str) -> Result<(), rusqlite::Error> {
+        self.close_pipeline_item_with_teardown_state(id, false)
+    }
+
+    pub fn close_pipeline_item_tearing_down(&self, id: &str) -> Result<(), rusqlite::Error> {
+        self.close_pipeline_item_with_teardown_state(id, true)
+    }
+
+    fn close_pipeline_item_with_teardown_state(
+        &self,
+        id: &str,
+        tearing_down: bool,
+    ) -> Result<(), rusqlite::Error> {
         self.with_immediate_transaction(|db| {
             let Some(pipeline_item_id) = db.resolve_pipeline_item_id(id)? else {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             };
-            let rows_affected = db.conn.execute(
-                "UPDATE pipeline_item
-                 SET closed_at = datetime('now'),
-                     updated_at = datetime('now')
-                 WHERE id = ?",
-                [&pipeline_item_id],
-            )?;
+            let rows_affected = if tearing_down {
+                db.conn.execute(
+                    "UPDATE pipeline_item
+                     SET teardown_started_at = datetime('now'),
+                         closed_at = datetime('now'),
+                         updated_at = datetime('now')
+                     WHERE id = ?1",
+                    [&pipeline_item_id],
+                )?
+            } else {
+                db.conn.execute(
+                    "UPDATE pipeline_item
+                     SET closed_at = datetime('now'),
+                         updated_at = datetime('now')
+                     WHERE id = ?1",
+                    [&pipeline_item_id],
+                )?
+            };
             if rows_affected == 0 {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
@@ -712,6 +748,22 @@ impl Db {
             db.release_task_ports(&pipeline_item_id)?;
             Ok(())
         })
+    }
+
+    pub fn finish_pipeline_item_teardown(&self, id: &str) -> Result<(), rusqlite::Error> {
+        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        };
+        self.conn.execute(
+            "UPDATE pipeline_item
+             SET teardown_started_at = NULL,
+                 updated_at = datetime('now')
+             WHERE id = ?1
+               AND closed_at IS NOT NULL
+               AND teardown_started_at IS NOT NULL",
+            [&pipeline_item_id],
+        )?;
+        Ok(())
     }
 
     pub fn reopen_pipeline_item(&self, id: &str) -> Result<(), ReopenPipelineItemError> {
@@ -725,7 +777,9 @@ impl Db {
              SET teardown_started_at = NULL,
                  closed_at = NULL,
                  updated_at = datetime('now')
-             WHERE id = ?",
+             WHERE id = ?
+               AND closed_at IS NOT NULL
+               AND teardown_started_at IS NULL",
             [&pipeline_item_id],
         ) {
             Ok(rows_affected) => rows_affected,

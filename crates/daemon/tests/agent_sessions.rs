@@ -665,6 +665,104 @@ fn concurrent_per_turn_inputs_install_only_one_respawn_child() {
 }
 
 #[test]
+fn persistent_input_captured_before_kill_cannot_reach_or_journal_successor() {
+    let dir = temp_dir("persistent-input-generation");
+    let script = write_script(&dir, "stdin-logger.sh", STDIN_LOGGING_AGENT);
+    let old_stdin_log = dir.join("old-stdin.log");
+    let successor_stdin_log = dir.join("successor-stdin.log");
+    let barrier = dir.join("persistent-input-barrier");
+    let daemon = DaemonHandle::start_in_with_env(
+        &dir,
+        &[(
+            "KANNA_TEST_PERSISTENT_INPUT_BARRIER",
+            barrier.to_str().unwrap(),
+        )],
+    );
+
+    let mut owner = daemon.connect();
+    let mut old_params = spawn_params(&dir, &script, "old initial prompt");
+    old_params.env.insert(
+        "STDIN_LOG".to_string(),
+        old_stdin_log.to_string_lossy().into_owned(),
+    );
+    old_params
+        .env
+        .insert("KANNA_STAGE_RUN_ID".to_string(), "run-old".to_string());
+    owner.send(&Command::SpawnAgent {
+        session_id: "agent-reused".to_string(),
+        params: old_params,
+    });
+    owner.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    let mut delayed_input = daemon.connect();
+    delayed_input.send(&Command::AgentInput {
+        session_id: "agent-reused".to_string(),
+        text: "must stay with old run".to_string(),
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !barrier.join("captured").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "persistent input never reached the capture barrier"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    owner.send(&Command::Kill {
+        session_id: "agent-reused".to_string(),
+        expected_run_id: Some("run-old".to_string()),
+    });
+    owner.recv_until(|event| matches!(event, Event::Ok));
+
+    let mut successor_params = spawn_params(&dir, &script, "successor initial prompt");
+    successor_params.env.insert(
+        "STDIN_LOG".to_string(),
+        successor_stdin_log.to_string_lossy().into_owned(),
+    );
+    successor_params.env.insert(
+        "KANNA_STAGE_RUN_ID".to_string(),
+        "run-successor".to_string(),
+    );
+    owner.send(&Command::SpawnAgent {
+        session_id: "agent-reused".to_string(),
+        params: successor_params,
+    });
+    owner.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    std::fs::write(barrier.join("release"), b"").unwrap();
+    assert!(matches!(
+        delayed_input.recv_until(|event| matches!(event, Event::Error { .. } | Event::Ok)),
+        Event::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+            ..
+        }
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let successor_input = std::fs::read_to_string(&successor_stdin_log).unwrap_or_default();
+        if successor_input.contains("successor initial prompt") {
+            assert!(
+                !successor_input.contains("must stay with old run"),
+                "old-provider-encoded input reached successor stdin: {successor_input}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "successor did not receive its initial prompt"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let journal = std::fs::read_to_string(daemon.journal_path("agent-reused")).unwrap();
+    assert!(
+        !journal.contains("must stay with old run"),
+        "stale input was journaled after replacement: {journal}"
+    );
+}
+
+#[test]
 fn fast_agent_exit_is_broadcast_after_session_created() {
     let dir = temp_dir("fast-exit-created-order");
     let script = write_script(&dir, "one-shot.sh", ONE_SHOT_AGENT);

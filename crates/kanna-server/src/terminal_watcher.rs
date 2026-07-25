@@ -1,5 +1,5 @@
 use crate::{daemon_client, http_api, session_replacements};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -28,25 +28,13 @@ fn persist_provider_session_id(
     Ok(())
 }
 
-fn persist_ownershipless_provider_session_id(
+fn capture_ownershipless_run_id(
     state: &http_api::AppState,
     session_id: &str,
-    resume_session_id: Option<&str>,
-) -> Result<(), String> {
-    let Some(resume_session_id) = resume_session_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(());
-    };
+) -> Result<Option<String>, String> {
     let db = crate::db::Db::open(&state.config().db_path).map_err(|e| format!("db error: {e}"))?;
-    let update = db
-        .update_active_stage_run_provider_session_id_by_session(session_id, resume_session_id)
-        .map_err(|e| format!("db error: {e}"))?;
-    if update.changed {
-        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
-    }
-    Ok(())
+    db.landed_main_run_id_by_session(session_id)
+        .map_err(|e| format!("db error: {e}"))
 }
 
 fn persist_waiting_prompt(
@@ -81,24 +69,6 @@ fn exit_still_owns_active_run(
         .map_err(|error| format!("db error: {error}"))?
         .is_active_main_run_owner(run_id, session_id)
         .map_err(|error| format!("db error: {error}"))
-}
-
-fn ownershipless_exit_still_targets_open_task(
-    state: &http_api::AppState,
-    session_id: &str,
-) -> Result<bool, String> {
-    let db = crate::db::Db::open(&state.config().db_path)
-        .map_err(|error| format!("db error: {error}"))?;
-    let Some(task_id) = db
-        .resolve_pipeline_item_id(session_id)
-        .map_err(|error| format!("db error: {error}"))?
-    else {
-        return Ok(false);
-    };
-    Ok(db
-        .get_pipeline_item(&task_id)
-        .map_err(|error| format!("db error: {error}"))?
-        .is_some_and(|task| task.closed_at.is_none()))
 }
 
 fn apply_watcher_runtime_status(
@@ -306,10 +276,21 @@ async fn terminal_state_watcher_once(
         .await
         .map_err(|e| format!("daemon list failed: {}", e))?;
     let strict_run_ownership = daemon_list.capabilities.immutable_run_ownership;
-    let mut ownershipless_sessions = HashSet::new();
+    let mut ownershipless_sessions = HashMap::new();
     for session in daemon_list.sessions {
-        if session.run_id.is_none() {
-            ownershipless_sessions.insert(session.session_id.clone());
+        if !strict_run_ownership || session.run_id.is_none() {
+            let captured = match capture_ownershipless_run_id(state, &session.session_id) {
+                Ok(run_id) => run_id,
+                Err(error) => {
+                    log::warn!(
+                        "failed to capture legacy run ownership for {}: {}",
+                        session.session_id,
+                        error
+                    );
+                    None
+                }
+            };
+            ownershipless_sessions.insert(session.session_id.clone(), captured);
         }
         if let Err(error) = apply_watcher_runtime_status(state, &session.session_id, session.status)
         {
@@ -354,7 +335,7 @@ async fn terminal_state_watcher_once(
                 provider_session_id,
             } => {
                 let ownershipless =
-                    !strict_run_ownership || ownershipless_sessions.contains(&session_id);
+                    !strict_run_ownership || ownershipless_sessions.contains_key(&session_id);
                 let persisted = if run_id.is_some() {
                     persist_provider_session_id(
                         state,
@@ -362,9 +343,11 @@ async fn terminal_state_watcher_once(
                         Some(&provider_session_id),
                     )
                 } else if ownershipless {
-                    persist_ownershipless_provider_session_id(
+                    persist_provider_session_id(
                         state,
-                        &session_id,
+                        ownershipless_sessions
+                            .get(&session_id)
+                            .and_then(|run_id| run_id.as_deref()),
                         Some(&provider_session_id),
                     )
                 } else {
@@ -386,7 +369,8 @@ async fn terminal_state_watcher_once(
                 resume_session_id,
             } => {
                 let ownershipless =
-                    !strict_run_ownership || ownershipless_sessions.remove(&session_id);
+                    !strict_run_ownership || ownershipless_sessions.contains_key(&session_id);
+                let ownershipless_run_id = ownershipless_sessions.remove(&session_id).flatten();
                 // Consume the replacement entry even when the event is
                 // self-describing — a leftover entry would swallow a future
                 // legitimate Exit for the same session id.
@@ -409,9 +393,9 @@ async fn terminal_state_watcher_once(
                     // newest run for the reused task session id.
                     Ok(())
                 } else if ownershipless {
-                    persist_ownershipless_provider_session_id(
+                    persist_provider_session_id(
                         state,
-                        &session_id,
+                        ownershipless_run_id.as_deref(),
                         resume_session_id.as_deref(),
                     )
                 } else {
@@ -432,7 +416,7 @@ async fn terminal_state_watcher_once(
                 let owns_active_run = if run_id.is_some() {
                     exit_still_owns_active_run(state, &session_id, run_id.as_deref())
                 } else if ownershipless {
-                    ownershipless_exit_still_targets_open_task(state, &session_id)
+                    exit_still_owns_active_run(state, &session_id, ownershipless_run_id.as_deref())
                 } else {
                     Ok(false)
                 };
@@ -469,7 +453,18 @@ async fn terminal_state_watcher_once(
             }
             DaemonEvent::SessionCreated { session_id, run_id } => {
                 if run_id.is_none() {
-                    ownershipless_sessions.insert(session_id);
+                    let captured = match capture_ownershipless_run_id(state, &session_id) {
+                        Ok(run_id) => run_id,
+                        Err(error) => {
+                            log::warn!(
+                                "failed to capture legacy run ownership for {}: {}",
+                                session_id,
+                                error
+                            );
+                            None
+                        }
+                    };
+                    ownershipless_sessions.insert(session_id, captured);
                 } else {
                     ownershipless_sessions.remove(&session_id);
                 }
@@ -1108,6 +1103,153 @@ mod tests {
             let _ = std::fs::remove_file(socket_path);
             let _ = std::fs::remove_dir_all(daemon_dir);
         }
+    }
+
+    #[tokio::test]
+    async fn ownershipless_provider_event_stays_pinned_after_successor_lands() {
+        let unique = unique_name("terminal-watcher-ownershipless-provider-after-land");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(NewStageRun {
+                id: "run-source",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let server_db_path = config.db_path.clone();
+
+        let server = tokio::spawn(async move {
+            let sessions = vec![SessionInfo {
+                session_id: "task-child".to_string(),
+                pid: 42,
+                cwd: "/tmp/task-child".to_string(),
+                state: SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Busy,
+                kind: Default::default(),
+                run_id: None,
+            }];
+            let mut subscriber = expect_subscribe_with_list(
+                &listener,
+                sessions,
+                kanna_daemon::protocol::DaemonCapabilities::legacy(),
+            )
+            .await;
+
+            let db = Db::open(&server_db_path).unwrap();
+            for _ in 0..100 {
+                if db
+                    .get_pipeline_item("task-child")
+                    .unwrap()
+                    .is_some_and(|task| task.activity.as_deref() == Some("working"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(
+                db.get_pipeline_item("task-child")
+                    .unwrap()
+                    .unwrap()
+                    .activity
+                    .as_deref(),
+                Some("working"),
+                "watcher must capture subscribe-time ownership before successor landing"
+            );
+            let expected = db.task_action_state("task-child").unwrap();
+            db.replace_current_run_with_pending(
+                NewStageRun {
+                    id: "run-successor",
+                    task_id: "task-child",
+                    stage: "review",
+                    kind: "main",
+                    agent: None,
+                    agent_provider: Some("codex"),
+                    model: None,
+                    status: "pending",
+                    result: None,
+                    feedback: None,
+                    session_id: Some("task-child"),
+                    provider_session_id: None,
+                    cwd: Some("/tmp/task-child-2"),
+                    resumed_from_run_id: None,
+                },
+                Some("manual"),
+                &expected,
+                "cancelled",
+                None,
+                None,
+            )
+            .unwrap();
+            db.land_stage_run(
+                "task-child",
+                "run-successor",
+                "review",
+                Some("task-child-1"),
+                None,
+            )
+            .unwrap();
+            drop(db);
+
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::ProviderSessionChanged {
+                    session_id: "task-child".to_string(),
+                    run_id: None,
+                    provider_session_id: "provider-from-source".to_string(),
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config.clone()),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        let runs = Db::open(&config.db_path)
+            .unwrap()
+            .list_stage_runs_for_task("task-child")
+            .unwrap();
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == "run-source")
+                .and_then(|run| run.provider_session_id.as_deref()),
+            Some("provider-from-source")
+        );
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == "run-successor")
+                .and_then(|run| run.provider_session_id.as_deref()),
+            None,
+            "a delayed ownershipless event must not resolve against the landed successor"
+        );
+
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
     #[tokio::test]

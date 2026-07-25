@@ -45,12 +45,28 @@ impl StreamControl {
     }
 
     pub fn mark_stopped(&self) {
-        self.stopped.store(true, Ordering::SeqCst);
-        self.stopped_notify.notify_waiters();
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            self.stopped_notify.notify_waiters();
+        }
     }
 
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait_stopped(&self) {
+        loop {
+            if self.is_stopped() {
+                return;
+            }
+            let notified = self.stopped_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_stopped() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     pub fn is_same_instance(&self, other: &Self) -> bool {

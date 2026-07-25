@@ -19,7 +19,7 @@ use crate::commands::task::{
     build_send_task_input_request, find_task_status_row, format_task_list, format_task_status,
     task_not_found_error,
 };
-use crate::commands::tool::build_tool_call_args;
+use crate::commands::tool::{bind_stage_run_id, build_tool_call_args};
 use crate::config::resolve_server_base_url;
 use crate::models::{
     SetTaskParentRequest, SignalAgentRequest, TaskCreateOptions, TaskDetail, TaskInputResponse,

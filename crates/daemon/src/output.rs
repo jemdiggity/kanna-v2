@@ -24,6 +24,19 @@ const STAGE_MIRROR_OUTPUT: &str = "mirror_output";
 const STAGE_DETECT_STATUS: &str = "detect_status";
 const STAGE_RECOVERY_WRITE: &str = "recovery_write";
 
+#[cfg(debug_assertions)]
+async fn wait_at_output_chunk_test_barrier() {
+    let Some(root) = std::env::var_os("KANNA_TEST_OUTPUT_CHUNK_BARRIER") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let _ = std::fs::create_dir_all(root);
+    let _ = std::fs::write(root.join("captured"), b"");
+    while !root.join("release").exists() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 // `attached_writer` and `observer_write` are emitted by the per-subscriber
 // writer tasks in `fanout.rs`; they no longer run inside the ingestion loop.
 #[cfg(test)]
@@ -228,6 +241,17 @@ pub(crate) async fn stream_output(
                         if !session.owns_stream_control(&stream_control).await {
                             log::info!(
                                 "[stream] stale reader stopped before mirroring session={} bytes={}",
+                                session_id,
+                                n
+                            );
+                            stream_control.mark_stopped();
+                            return;
+                        }
+                        #[cfg(debug_assertions)]
+                        wait_at_output_chunk_test_barrier().await;
+                        if stream_control.stop_requested() {
+                            log::info!(
+                                "[stream] dropping buffered chunk after stop request session={} bytes={}",
                                 session_id,
                                 n
                             );

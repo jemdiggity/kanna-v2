@@ -111,16 +111,28 @@ fn run_kanna_mcp_with_env(
     messages: &[Value],
     env_pairs: &[(&str, &str)],
 ) -> Vec<Value> {
+    run_kanna_mcp_with_env_and_cwd(base_url, messages, env_pairs, None)
+}
+
+fn run_kanna_mcp_with_env_and_cwd(
+    base_url: &str,
+    messages: &[Value],
+    env_pairs: &[(&str, &str)],
+    cwd: Option<&std::path::Path>,
+) -> Vec<Value> {
     let binary = env!("CARGO_BIN_EXE_kanna-mcp");
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(["serve", "--server-url", base_url])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_remove("KANNA_STAGE_RUN_ID")
-        .envs(env_pairs.iter().copied())
-        .spawn()
-        .expect("spawn kanna-mcp");
+        .envs(env_pairs.iter().copied());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command.spawn().expect("spawn kanna-mcp");
 
     {
         let stdin = child.stdin.as_mut().expect("stdin");
@@ -419,6 +431,66 @@ fn pre_upgrade_mcp_process_can_send_old_format_stage_completion() {
 
     assert_eq!(server.join().expect("fixture server").len(), 1);
     assert_eq!(tool_text(&responses[0]), json!({ "taskId": "task-legacy" }));
+}
+
+#[test]
+fn current_mcp_process_binds_run_id_after_resolving_old_override_catalog() {
+    let root = std::env::temp_dir().join(format!(
+        "kanna-mcp-old-completion-override-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".kanna")).unwrap();
+    let mut catalog = kanna_tool_catalog::bundled_catalog();
+    catalog
+        .tools
+        .iter_mut()
+        .find(|tool| tool.name == "kanna_complete_stage")
+        .unwrap()
+        .params
+        .retain(|param| param.name != "run_id");
+    std::fs::write(
+        root.join(".kanna/mcp-tools.json"),
+        serde_json::to_vec(&catalog).unwrap(),
+    )
+    .unwrap();
+
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "POST",
+        path: "/v1/tasks/task-current/actions/complete-stage",
+        body: Some(json!({
+            "status": "success",
+            "summary": "completed through old override",
+            "runId": "run-current"
+        })),
+        response_status: "200 OK",
+        response_body: json!({ "taskId": "task-current" }),
+    }]);
+    let responses = run_kanna_mcp_with_env_and_cwd(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_complete_stage",
+                "arguments": {
+                    "task_id": "task-current",
+                    "status": "success",
+                    "summary": "completed through old override"
+                }
+            }
+        })],
+        &[("KANNA_STAGE_RUN_ID", "run-current")],
+        Some(&root),
+    );
+
+    assert_eq!(server.join().unwrap().len(), 1);
+    assert_eq!(
+        tool_text(&responses[0]),
+        json!({ "taskId": "task-current" })
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

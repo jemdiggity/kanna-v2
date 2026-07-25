@@ -1101,6 +1101,70 @@ fn close_pipeline_item_accepts_task_branch_name() {
 }
 
 #[test]
+fn reopen_pipeline_item_rejects_task_that_has_not_finished_closing() {
+    let path = Db::test_db_path("reopen-requires-closed-state");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Still closing",
+        Some("Still closing"),
+        "in progress",
+        "2026-07-26 00:00:00",
+    )
+    .unwrap();
+
+    let error = db
+        .reopen_pipeline_item("task-1")
+        .expect_err("an open task cannot be reopened over an in-flight close");
+
+    assert!(matches!(error, rusqlite::Error::QueryReturnedNoRows));
+    assert!(db
+        .get_pipeline_item("task-1")
+        .unwrap()
+        .unwrap()
+        .closed_at
+        .is_none());
+}
+
+#[test]
+fn reopen_pipeline_item_waits_for_close_teardown_generation_to_finish() {
+    let path = Db::test_db_path("reopen-waits-for-close-teardown");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Closing with teardown",
+        Some("Closing with teardown"),
+        "in progress",
+        "2026-07-26 00:00:00",
+    )
+    .unwrap();
+
+    db.close_pipeline_item_tearing_down("task-1").unwrap();
+    assert!(matches!(
+        db.reopen_pipeline_item("task-1"),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+
+    db.finish_pipeline_item_teardown("task-1").unwrap();
+    db.reopen_pipeline_item("task-1").unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert!(item.closed_at.is_none());
+    let teardown_started_at: Option<String> = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT teardown_started_at FROM pipeline_item WHERE id = ?1",
+            ["task-1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(teardown_started_at.is_none());
+}
+
+#[test]
 fn resolves_pipeline_item_id_from_task_branch_name() {
     let path = Db::test_db_path("resolve-task-branch-name");
     let db = Db::open_for_tests(&path).expect("open test db");

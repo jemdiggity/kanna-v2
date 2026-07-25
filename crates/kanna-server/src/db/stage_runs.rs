@@ -428,60 +428,28 @@ impl Db {
         Ok(ProviderSessionUpdate { changed: true })
     }
 
-    /// Compatibility path for a daemon session adopted without immutable run
-    /// ownership. The watcher calls this only after capability negotiation
-    /// identifies the live session as ownershipless.
-    pub fn update_active_stage_run_provider_session_id_by_session(
+    /// Capture the landed main run currently represented by an ownershipless
+    /// legacy daemon session. Callers retain this immutable id for later
+    /// lifecycle events instead of resolving the reusable session id again.
+    pub fn landed_main_run_id_by_session(
         &self,
         session_id: &str,
-        provider_session_id: &str,
-    ) -> Result<ProviderSessionUpdate, rusqlite::Error> {
-        let Some(task_id) = self.resolve_pipeline_item_id(session_id)? else {
-            return Ok(ProviderSessionUpdate { changed: false });
-        };
-        let transaction = self.conn.unchecked_transaction()?;
-        let run = transaction
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
             .query_row(
-                "SELECT run.id, run.status
+                "SELECT run.id
                  FROM stage_run run
                  JOIN pipeline_item task ON task.id = run.task_id
-                 WHERE run.task_id = ?1
+                 WHERE run.session_id = ?1
                    AND run.kind = 'main'
+                   AND run.status != 'pending'
                    AND task.closed_at IS NULL
                  ORDER BY datetime(run.started_at) DESC, run.rowid DESC
-                LIMIT 1",
-                [&task_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                 LIMIT 1",
+                [session_id],
+                |row| row.get(0),
             )
-            .optional()?;
-        let Some((run_id, run_status)) = run else {
-            transaction.commit()?;
-            return Ok(ProviderSessionUpdate { changed: false });
-        };
-        if run_status == "pending" {
-            // An ownershipless lifecycle event cannot prove that it belongs
-            // to a reserved successor which has not landed. Resolving by the
-            // reused task session id here would attach the old process's
-            // provider handle to the replacement run.
-            transaction.commit()?;
-            return Ok(ProviderSessionUpdate { changed: false });
-        }
-        let changed = transaction.execute(
-            "UPDATE stage_run
-             SET provider_session_id = ?2
-             WHERE id = ?1 AND provider_session_id IS NULL",
-            (&run_id, provider_session_id),
-        )? > 0;
-        transaction.execute(
-            "UPDATE pipeline_item
-             SET agent_session_id = (
-               SELECT provider_session_id FROM stage_run WHERE id = ?2
-             )
-             WHERE id = ?1 AND closed_at IS NULL",
-            (&task_id, &run_id),
-        )?;
-        transaction.commit()?;
-        Ok(ProviderSessionUpdate { changed })
+            .optional()
     }
 
     /// True only when `run_id` is the newest main run that owns the reusable

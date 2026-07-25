@@ -323,6 +323,21 @@ fn tool_call_args_merge_json_and_repeated_args() {
 }
 
 #[test]
+fn generic_complete_stage_tool_call_preserves_explicit_run_id() {
+    let args = bind_stage_run_id(
+        json!({
+            "task_id": "task-current",
+            "status": "success",
+            "run_id": "run-explicit"
+        }),
+        Some("run-from-environment"),
+    )
+    .unwrap();
+
+    assert_eq!(args["run_id"], json!("run-explicit"));
+}
+
+#[test]
 fn typed_cli_surfaces_match_catalog_tools_and_params() {
     let catalog = kanna_tool_catalog::bundled_catalog();
     let typed = typed_tool_surfaces();

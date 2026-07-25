@@ -253,38 +253,39 @@ async fn handle_mcp_tool_call(
     name: &str,
     args: Value,
 ) -> Result<Value, String> {
-    let args = maybe_augment_tool_args(base_url, name, args).await?;
+    let args = maybe_augment_create_task_args(base_url, name, args).await?;
+    let stage_run_id = env::var("KANNA_STAGE_RUN_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     let request = {
         let catalog = catalog
             .read()
             .map_err(|_| "catalog lock poisoned".to_string())?;
-        resolve_request(&catalog, name, &args)?
+        resolve_tool_request(&catalog, name, &args, stage_run_id.as_deref())?
     };
     execute_resolved_request(base_url, request).await
 }
 
-async fn maybe_augment_tool_args(
-    base_url: &str,
+fn resolve_tool_request(
+    catalog: &Catalog,
     name: &str,
-    mut args: Value,
-) -> Result<Value, String> {
+    args: &Value,
+    stage_run_id: Option<&str>,
+) -> Result<ResolvedRequest, String> {
+    let mut request = resolve_request(catalog, name, args)?;
     if name == "kanna_complete_stage" {
-        if let Some(run_id) = env::var("KANNA_STAGE_RUN_ID")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        if let Some(run_id) = stage_run_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
         {
-            args = bind_stage_run_id(args, &run_id)?;
+            let body = request
+                .body
+                .as_object_mut()
+                .ok_or_else(|| "resolved tool request body must be a JSON object".to_string())?;
+            body.insert("runId".to_string(), Value::String(run_id.to_string()));
         }
     }
-    maybe_augment_create_task_args(base_url, name, args).await
-}
-
-fn bind_stage_run_id(mut args: Value, run_id: &str) -> Result<Value, String> {
-    let object = args
-        .as_object_mut()
-        .ok_or_else(|| "tool arguments must be a JSON object".to_string())?;
-    object.insert("run_id".to_string(), Value::String(run_id.to_string()));
-    Ok(args)
+    Ok(request)
 }
 
 async fn maybe_augment_create_task_args(
@@ -700,11 +701,18 @@ mod tests {
         let args = json!({
             "task_id": "task-1",
             "status": "success",
+            "summary": "done",
             "run_id": "caller-spoof"
         });
-        let args = bind_stage_run_id(args, "run-from-environment").unwrap();
+        let request = resolve_tool_request(
+            &kanna_tool_catalog::bundled_catalog(),
+            "kanna_complete_stage",
+            &args,
+            Some("run-from-environment"),
+        )
+        .unwrap();
 
-        assert_eq!(args["run_id"], json!("run-from-environment"));
+        assert_eq!(request.body["runId"], json!("run-from-environment"));
     }
 
     #[test]
@@ -727,6 +735,38 @@ mod tests {
             json!({
                 "status": "success",
                 "summary": "completed by a pre-upgrade MCP process"
+            })
+        );
+    }
+
+    #[test]
+    fn old_override_catalog_accepts_process_owned_stage_completion() {
+        let mut catalog = kanna_tool_catalog::bundled_catalog();
+        let completion = catalog
+            .tools
+            .iter_mut()
+            .find(|tool| tool.name == "kanna_complete_stage")
+            .unwrap();
+        completion.params.retain(|param| param.name != "run_id");
+
+        let request = resolve_tool_request(
+            &catalog,
+            "kanna_complete_stage",
+            &json!({
+                "task_id": "task-1",
+                "status": "success",
+                "summary": "completed through an old override"
+            }),
+            Some("run-current"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.body,
+            json!({
+                "status": "success",
+                "summary": "completed through an old override",
+                "runId": "run-current"
             })
         );
     }

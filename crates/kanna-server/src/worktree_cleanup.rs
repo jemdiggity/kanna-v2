@@ -29,6 +29,8 @@ pub(crate) fn cleanup_closed_task_worktrees(
     if !repo_path.is_dir() {
         db.delete_worktree_rows_for_task(task_id)
             .map_err(|e| format!("db error: {e}"))?;
+        db.finish_pipeline_item_teardown(task_id)
+            .map_err(|e| format!("db error: {e}"))?;
         return Ok(());
     }
 
@@ -41,6 +43,8 @@ pub(crate) fn cleanup_closed_task_worktrees(
     db.delete_worktree_rows_for_task(task_id)
         .map_err(|e| format!("db error: {e}"))?;
     prune_repo_worktrees(repo_path)?;
+    db.finish_pipeline_item_teardown(task_id)
+        .map_err(|e| format!("db error: {e}"))?;
     Ok(())
 }
 

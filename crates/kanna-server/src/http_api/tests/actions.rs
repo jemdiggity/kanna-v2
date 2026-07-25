@@ -1003,6 +1003,131 @@ async fn set_task_parent_route_rejects_cycles_self_and_cross_repo() {
 }
 
 #[tokio::test]
+async fn reopen_task_route_rejects_while_close_owns_the_task_action_flight() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let db_path = Db::test_db_path(&format!("http-reopen-close-flight-{unique}"));
+    let db = Db::open_for_tests(&db_path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-closed",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-07-26 07:00:00",
+    )
+    .unwrap();
+    db.close_pipeline_item("task-closed").unwrap();
+    drop(db);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: "/tmp/kanna-daemon".to_string(),
+        db_path,
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-reopen-flight-{unique}.json"),
+    };
+    let state = Arc::new(super::AppState::new(config));
+    let _close_flight = state
+        .begin_task_action("task-closed")
+        .expect("close owns the task action flight");
+    let app = super::router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-closed/actions/reopen")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn reopen_task_route_rejects_until_detached_close_cleanup_finishes() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let db_path = Db::test_db_path(&format!("http-reopen-close-cleanup-{unique}"));
+    let db = Db::open_for_tests(&db_path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-closed",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-07-26 07:00:00",
+    )
+    .unwrap();
+    db.close_pipeline_item_tearing_down("task-closed").unwrap();
+    drop(db);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: "/tmp/kanna-daemon".to_string(),
+        db_path: db_path.clone(),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-reopen-cleanup-{unique}.json"),
+    };
+    let app = super::router(Arc::new(super::AppState::new(config)));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-closed/actions/reopen")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let db = Db::open(&db_path).unwrap();
+    assert!(db
+        .get_pipeline_item("task-closed")
+        .unwrap()
+        .unwrap()
+        .closed_at
+        .is_some());
+}
+
+#[tokio::test]
 async fn close_task_route_rejects_parent_with_open_subtasks() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

@@ -2482,6 +2482,7 @@ fn persist_task_ports(
 #[derive(Debug)]
 pub(crate) enum ReopenTaskError {
     OwnershipConflict,
+    Conflict(String),
     Internal(String),
 }
 
@@ -2526,6 +2527,17 @@ fn reopen_task_for_api_with_hook(
         .get_pipeline_item(&task_id)
         .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
         .ok_or_else(|| ReopenTaskError::internal(format!("task not found: {task_id}")))?;
+    if item.closed_at.is_none() {
+        return Err(ReopenTaskError::Conflict("task is not closed".to_string()));
+    }
+    if db
+        .pipeline_item_teardown_in_progress(&task_id)
+        .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
+    {
+        return Err(ReopenTaskError::Conflict(
+            "task close cleanup is still in progress".to_string(),
+        ));
+    }
     let repo = db
         .get_repo(&item.repo_id)
         .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
