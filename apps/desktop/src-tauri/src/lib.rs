@@ -303,6 +303,9 @@ pub fn run() {
             commands::shell::ensure_term_init,
             // Transfer commands
             commands::transfer::list_transfer_peers,
+            commands::transfer::upsert_external_transfer_peer,
+            commands::transfer::remove_external_transfer_peer,
+            commands::transfer::clear_external_transfer_peers,
             commands::transfer::get_transfer_identity,
             commands::transfer::set_transfer_task_snapshot,
             commands::transfer::list_transfer_task_snapshots,

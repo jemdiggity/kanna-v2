@@ -2,6 +2,7 @@ mod config;
 mod daemon;
 mod discovery;
 mod events;
+mod external_peers;
 mod lifecycle;
 mod listener;
 mod pairing;
@@ -20,4 +21,5 @@ pub use events::{
     OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent, PairingRequestedEvent,
     PairingResult, PairingStartedEvent, PreflightResult, RuntimeError, RuntimeEvent,
 };
+pub use external_peers::{ExternalPeer, PeerRoutes, TransferTransport};
 pub use state::{StagedTransferArtifact, TransferRuntime};

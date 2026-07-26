@@ -19,6 +19,10 @@ struct StoredOutgoingTransferReservation {
     transfer_id: String,
     target_peer_id: String,
     source_task_id: String,
+    #[serde(default)]
+    target_peer: Option<crate::protocol::PeerRegistryEntry>,
+    #[serde(default)]
+    transport: Option<super::external_peers::TransferTransport>,
     created_at_unix_ms: u64,
 }
 
@@ -26,6 +30,10 @@ struct StoredOutgoingTransferReservation {
 struct StoredImportCommitReceipt {
     transfer_id: String,
     target_peer_id: String,
+    #[serde(default)]
+    target_peer: Option<crate::protocol::PeerRegistryEntry>,
+    #[serde(default)]
+    transport: Option<super::external_peers::TransferTransport>,
     source_task_id: String,
     destination_local_task_id: String,
     created_at_unix_ms: u64,
@@ -98,6 +106,8 @@ impl TransferReplayStore {
                 OutgoingTransferReservation {
                     target_peer_id: stored.target_peer_id,
                     source_task_id: stored.source_task_id,
+                    target_peer: stored.target_peer,
+                    transport: stored.transport,
                     created_at: now.checked_sub(age).unwrap_or(now),
                 },
             );
@@ -189,6 +199,8 @@ impl TransferReplayStore {
             transfer_id: transfer_id.to_owned(),
             target_peer_id: reservation.target_peer_id.clone(),
             source_task_id: reservation.source_task_id.clone(),
+            target_peer: reservation.target_peer.clone(),
+            transport: reservation.transport,
             created_at_unix_ms: unix_ms(),
         };
         self.write_atomic(&self.reservation_path(transfer_id), &stored)
@@ -253,6 +265,8 @@ impl TransferReplayStore {
         let stored = StoredImportCommitReceipt {
             transfer_id: transfer_id.to_owned(),
             target_peer_id: receipt.target_peer_id.clone(),
+            target_peer: receipt.target_peer.clone(),
+            transport: receipt.transport,
             source_task_id: receipt.source_task_id.clone(),
             destination_local_task_id: receipt.destination_local_task_id.clone(),
             created_at_unix_ms: receipt.created_at_unix_ms,
@@ -378,6 +392,8 @@ impl From<StoredImportCommitReceipt> for ImportCommitReceipt {
     fn from(stored: StoredImportCommitReceipt) -> Self {
         Self {
             target_peer_id: stored.target_peer_id,
+            target_peer: stored.target_peer,
+            transport: stored.transport,
             source_task_id: stored.source_task_id,
             destination_local_task_id: stored.destination_local_task_id,
             created_at_unix_ms: stored.created_at_unix_ms,

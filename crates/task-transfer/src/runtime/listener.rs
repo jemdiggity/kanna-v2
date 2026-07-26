@@ -7,10 +7,14 @@ use super::events::{
     IncomingTransferEvent, OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent,
     PairingRequestedEvent, RuntimeError, RuntimeEvent,
 };
+use super::external_peers::{
+    ensure_peer_is_trusted, ensure_peer_is_trusted_for_transport, find_peer, ExternalPeerRegistry,
+    TransferTransport,
+};
 use super::replay_store::unix_ms;
 use super::state::{
-    ImportCommitReceipt, IncomingTransferReservation, ListenerContext, PairingDecision,
-    PendingPairingRequest,
+    ImportCommitReceipt, IncomingTransferReservation, ListenerContext, OutgoingTransferReservation,
+    PairingDecision, PendingPairingRequest,
 };
 use super::utils::{
     ensure_peer_is_trusted_for, extract_request_id, load_or_create_identity,
@@ -47,6 +51,73 @@ pub(super) async fn run_listener(listener: TcpListener, context: ListenerContext
             let _ = handle_connection(stream, connection_context).await;
         });
     }
+}
+
+async fn trusted_reserved_target(
+    context: &ListenerContext,
+    reservation: &OutgoingTransferReservation,
+) -> Result<crate::protocol::PeerRegistryEntry, RuntimeError> {
+    if let Some(peer) = reservation.target_peer.clone() {
+        ensure_peer_is_trusted_for_transport(
+            &context.registry_root,
+            &context.self_peer_id,
+            &context.external_peers,
+            &peer.peer_id,
+            &peer.public_key,
+            reservation.transport.unwrap_or(TransferTransport::Auto),
+        )?;
+        return Ok(peer);
+    }
+
+    let peer = find_peer(
+        &context.discovery,
+        &context.external_peers,
+        &context.self_peer_id,
+        &reservation.target_peer_id,
+        TransferTransport::Auto,
+    )
+    .await?;
+    ensure_peer_is_trusted(
+        &context.registry_root,
+        &context.self_peer_id,
+        &context.external_peers,
+        &peer.peer_id,
+        &peer.public_key,
+    )?;
+    Ok(peer)
+}
+
+async fn trusted_receipt_target(
+    context: &ListenerContext,
+    receipt: &ImportCommitReceipt,
+) -> Result<crate::protocol::PeerRegistryEntry, RuntimeError> {
+    if let Some(peer) = receipt.target_peer.clone() {
+        ensure_peer_is_trusted_for_transport(
+            &context.registry_root,
+            &context.self_peer_id,
+            &context.external_peers,
+            &peer.peer_id,
+            &peer.public_key,
+            receipt.transport.unwrap_or(TransferTransport::Auto),
+        )?;
+        return Ok(peer);
+    }
+    let peer = find_peer(
+        &context.discovery,
+        &context.external_peers,
+        &context.self_peer_id,
+        &receipt.target_peer_id,
+        TransferTransport::Auto,
+    )
+    .await?;
+    ensure_peer_is_trusted(
+        &context.registry_root,
+        &context.self_peer_id,
+        &context.external_peers,
+        &peer.peer_id,
+        &peer.public_key,
+    )?;
+    Ok(peer)
 }
 
 async fn handle_connection(
@@ -155,21 +226,18 @@ async fn handle_connection(
             source_peer_id,
             sealed_payload,
         }) => match async {
-            let source_peer = context
-                .discovery
-                .list_peers(&context.self_peer_id)
-                .await?
-                .into_iter()
-                .find(|peer| peer.peer_id == source_peer_id)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(format!(
-                        "source peer {} is not currently discovered",
-                        source_peer_id
-                    ))
-                })?;
-            ensure_peer_is_trusted_for(
+            let source_peer = find_peer(
+                &context.discovery,
+                &context.external_peers,
+                &context.self_peer_id,
+                &source_peer_id,
+                TransferTransport::Auto,
+            )
+            .await?;
+            ensure_peer_is_trusted(
                 &context.registry_root,
                 &context.self_peer_id,
+                &context.external_peers,
                 &source_peer_id,
                 &source_peer.public_key,
             )?;
@@ -236,6 +304,7 @@ async fn handle_connection(
                 &context.self_peer_id,
                 &context.registry_root,
                 &context.discovery,
+                &context.external_peers,
                 &transfer_id,
                 sealed_payload,
                 &context.incoming_reservations,
@@ -290,16 +359,14 @@ async fn handle_connection(
         }) => {
             let transfer_id_for_cleanup = transfer_id.clone();
             match async {
-                let expected_target_peer_id = {
+                let reservation = {
                     let mut transfers = context.outgoing_transfers.lock().await;
                     for expired in
                         prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
                     {
                         context.replay_store.remove_reservation(&expired);
                     }
-                    transfers
-                        .get(&transfer_id)
-                        .map(|reservation| reservation.target_peer_id.clone())
+                    transfers.get(&transfer_id).cloned()
                 }
                 .ok_or_else(|| {
                     RuntimeError::Protocol(format!(
@@ -308,31 +375,14 @@ async fn handle_connection(
                     ))
                 })?;
 
-                if requester_peer_id != expected_target_peer_id {
+                if requester_peer_id != reservation.target_peer_id {
                     return Err(RuntimeError::Protocol(format!(
                         "unexpected outgoing transfer finalization requester {} for transfer {}",
                         requester_peer_id, transfer_id
                     )));
                 }
 
-                let requester_peer = context
-                    .discovery
-                    .list_peers(&context.self_peer_id)
-                    .await?
-                    .into_iter()
-                    .find(|peer| peer.peer_id == requester_peer_id)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol(format!(
-                            "requester peer {} is not currently discovered",
-                            requester_peer_id
-                        ))
-                    })?;
-                ensure_peer_is_trusted_for(
-                    &context.registry_root,
-                    &context.self_peer_id,
-                    &requester_peer_id,
-                    &requester_peer.public_key,
-                )?;
+                let requester_peer = trusted_reserved_target(&context, &reservation).await?;
 
                 let (tx, rx) = oneshot::channel();
                 context
@@ -401,16 +451,14 @@ async fn handle_connection(
             sealed_payload,
         }) => {
             match async {
-                let expected_target_peer_id = {
+                let reservation = {
                     let mut transfers = context.outgoing_transfers.lock().await;
                     for expired in
                         prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
                     {
                         context.replay_store.remove_reservation(&expired);
                     }
-                    transfers
-                        .get(&transfer_id)
-                        .map(|reservation| reservation.target_peer_id.clone())
+                    transfers.get(&transfer_id).cloned()
                 }
                 .ok_or_else(|| {
                     RuntimeError::Protocol(format!(
@@ -419,31 +467,14 @@ async fn handle_connection(
                     ))
                 })?;
 
-                if requester_peer_id != expected_target_peer_id {
+                if requester_peer_id != reservation.target_peer_id {
                     return Err(RuntimeError::Protocol(format!(
                         "unexpected artifact fetch requester {} for transfer {}",
                         requester_peer_id, transfer_id
                     )));
                 }
 
-                let requester_peer = context
-                    .discovery
-                    .list_peers(&context.self_peer_id)
-                    .await?
-                    .into_iter()
-                    .find(|peer| peer.peer_id == requester_peer_id)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol(format!(
-                            "requester peer {} is not currently discovered",
-                            requester_peer_id
-                        ))
-                    })?;
-                ensure_peer_is_trusted_for(
-                    &context.registry_root,
-                    &context.self_peer_id,
-                    &requester_peer_id,
-                    &requester_peer.public_key,
-                )?;
+                let requester_peer = trusted_reserved_target(&context, &reservation).await?;
                 let requester_public_key = parse_public_key(&requester_peer.public_key)?;
                 let identity =
                     load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
@@ -545,24 +576,18 @@ async fn handle_connection(
                     )));
                 }
 
-                let requester_peer = context
-                    .discovery
-                    .list_peers(&context.self_peer_id)
-                    .await?
-                    .into_iter()
-                    .find(|peer| peer.peer_id == requester_peer_id)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol(format!(
-                            "requester peer {} is not currently discovered",
-                            requester_peer_id
-                        ))
-                    })?;
-                ensure_peer_is_trusted_for(
-                    &context.registry_root,
-                    &context.self_peer_id,
-                    &requester_peer_id,
-                    &requester_peer.public_key,
-                )?;
+                let requester_peer = match (&existing_receipt, &reservation) {
+                    (Some(receipt), _) => trusted_receipt_target(&context, receipt).await?,
+                    (None, Some(reservation)) => {
+                        trusted_reserved_target(&context, reservation).await?
+                    }
+                    (None, None) => {
+                        return Err(RuntimeError::Protocol(format!(
+                            "missing target peer for import acknowledgment {}",
+                            transfer_id
+                        )));
+                    }
+                };
                 let requester_public_key = parse_public_key(&requester_peer.public_key)?;
                 let identity =
                     load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
@@ -626,6 +651,8 @@ async fn handle_connection(
                 }
                 let receipt = ImportCommitReceipt {
                     target_peer_id: requester_peer_id,
+                    target_peer: reservation.target_peer.clone(),
+                    transport: reservation.transport,
                     source_task_id: source_task_id.clone(),
                     destination_local_task_id: destination_local_task_id.clone(),
                     created_at_unix_ms: unix_ms(),
@@ -658,18 +685,14 @@ async fn handle_connection(
             request_id,
             requester_peer_id,
         }) => match async {
-            let requester_peer = context
-                .discovery
-                .list_peers(&context.self_peer_id)
-                .await?
-                .into_iter()
-                .find(|peer| peer.peer_id == requester_peer_id)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(format!(
-                        "requester peer {} is not currently discovered",
-                        requester_peer_id
-                    ))
-                })?;
+            let requester_peer = find_peer(
+                &context.discovery,
+                &context.external_peers,
+                &context.self_peer_id,
+                &requester_peer_id,
+                TransferTransport::Auto,
+            )
+            .await?;
             ensure_peer_is_trusted_for(
                 &context.registry_root,
                 &context.self_peer_id,
@@ -787,21 +810,18 @@ async fn handle_connection(
             requester_peer_id,
             sealed_payload,
         }) => match async {
-            let requester_peer = context
-                .discovery
-                .list_peers(&context.self_peer_id)
-                .await?
-                .into_iter()
-                .find(|peer| peer.peer_id == requester_peer_id)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(format!(
-                        "requester peer {} is not currently discovered",
-                        requester_peer_id
-                    ))
-                })?;
-            ensure_peer_is_trusted_for(
+            let requester_peer = find_peer(
+                &context.discovery,
+                &context.external_peers,
+                &context.self_peer_id,
+                &requester_peer_id,
+                TransferTransport::Auto,
+            )
+            .await?;
+            ensure_peer_is_trusted(
                 &context.registry_root,
                 &context.self_peer_id,
+                &context.external_peers,
                 &requester_peer_id,
                 &requester_peer.public_key,
             )?;
@@ -856,6 +876,7 @@ async fn build_incoming_event(
     self_peer_id: &str,
     registry_root: &Path,
     discovery: &PeerDiscovery,
+    external_peers: &ExternalPeerRegistry,
     transfer_id: &str,
     sealed_payload: String,
     incoming_reservations: &Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
@@ -870,20 +891,18 @@ async fn build_incoming_event(
             .ok_or_else(|| RuntimeError::Protocol(format!("unknown transfer id {}", transfer_id)))?
     };
 
-    let source_peer = discovery
-        .list_peers(self_peer_id)
-        .await?
-        .into_iter()
-        .find(|peer| peer.peer_id == reservation.source_peer_id)
-        .ok_or_else(|| {
-            RuntimeError::Protocol(format!(
-                "source peer {} is not currently discovered",
-                reservation.source_peer_id
-            ))
-        })?;
-    ensure_peer_is_trusted_for(
+    let source_peer = find_peer(
+        discovery,
+        external_peers,
+        self_peer_id,
+        &reservation.source_peer_id,
+        TransferTransport::Auto,
+    )
+    .await?;
+    ensure_peer_is_trusted(
         registry_root,
         self_peer_id,
+        external_peers,
         &reservation.source_peer_id,
         &source_peer.public_key,
     )?;

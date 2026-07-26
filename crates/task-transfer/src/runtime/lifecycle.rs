@@ -2,6 +2,7 @@ use super::config::{DiscoveryMode, RuntimeConfig};
 use super::daemon::stream_peer_session;
 use super::discovery::{MdnsDiscovery, PeerDiscovery};
 use super::events::{RuntimeError, RuntimeEvent};
+use super::external_peers;
 use super::listener::run_listener;
 use super::replay_store::TransferReplayStore;
 use super::state::{ListenerContext, TransferRuntime};
@@ -75,6 +76,7 @@ impl TransferRuntime {
         let (receipt_sender, receipt_receiver) =
             mpsc::channel(config.max_unapplied_receipts.max(1));
         let pending_pairing_requests = Arc::new(Mutex::new(HashMap::new()));
+        let external_peers = external_peers::registry();
         let replay_store = Arc::new(TransferReplayStore::new(
             &config.registry_dir,
             &config.peer_id,
@@ -116,6 +118,7 @@ impl TransferRuntime {
             self_public_key: public_key,
             registry_root: config.registry_dir.clone(),
             discovery: discovery.clone(),
+            external_peers: Arc::clone(&external_peers),
             pending_transfer_ttl: config.pending_transfer_ttl,
             peer_request_timeout: config.peer_request_timeout,
             pending_pairing_requests: Arc::clone(&pending_pairing_requests),
@@ -158,6 +161,7 @@ impl TransferRuntime {
         Ok(Self {
             config,
             discovery,
+            external_peers,
             identity,
             pending_pairing_requests,
             outgoing_transfers,
@@ -179,9 +183,19 @@ impl TransferRuntime {
     }
 
     pub async fn list_peers(&self) -> Result<Vec<DiscoveredPeer>, RuntimeError> {
-        self.discovery
-            .list_peers(&self.config.peer_id)
-            .await?
+        let mut peers = self.discovery.list_peers(&self.config.peer_id).await?;
+        let mut external = external_peers::external_peers(&self.external_peers);
+        external.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+        for peer in external {
+            if !peers
+                .iter()
+                .any(|existing| existing.peer_id == peer.peer_id)
+            {
+                peers.push(external_peers::external_entry(&peer));
+            }
+        }
+        peers.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+        peers
             .into_iter()
             .map(|peer| self.discovered_peer(peer))
             .collect()
@@ -195,7 +209,13 @@ impl TransferRuntime {
     pub async fn list_peer_task_snapshots(&self) -> Result<Vec<PeerTaskSnapshot>, RuntimeError> {
         let peers = self.list_peers().await?;
         let mut snapshots = Vec::new();
-        for peer in peers.into_iter().filter(|peer| peer.trusted) {
+        for peer in peers.into_iter().filter(|peer| {
+            self.trusted_peer_record(&peer.peer_id)
+                .ok()
+                .flatten()
+                .map(|record| record.public_key == peer.public_key)
+                .unwrap_or(false)
+        }) {
             let request_id = self.next_request_id("task-snapshot");
             let response = match self
                 .send_peer_request(
@@ -267,7 +287,7 @@ impl TransferRuntime {
         session_id: &str,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let observer_key = terminal_observer_key(target_peer_id, session_id);
         if let Some(handle) = self.terminal_observers.lock().await.remove(&observer_key) {
             handle.abort();
@@ -326,7 +346,7 @@ impl TransferRuntime {
         data: Vec<u8>,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("send-input");
         let response = self
             .send_peer_request(
@@ -356,7 +376,7 @@ impl TransferRuntime {
         rows: u16,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("resize-session");
         let response = self
             .send_peer_request(
@@ -385,7 +405,7 @@ impl TransferRuntime {
         task_id: &str,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("close-task");
         let response = self
             .send_peer_request(
@@ -412,7 +432,7 @@ impl TransferRuntime {
         task_id: &str,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("advance-stage");
         let response = self
             .send_peer_request(
@@ -440,7 +460,7 @@ impl TransferRuntime {
         path: &str,
     ) -> Result<(String, String), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("read-task-file");
         let response = self
             .send_peer_request(

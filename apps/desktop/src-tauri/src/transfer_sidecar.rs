@@ -113,6 +113,40 @@ impl TransferSidecarClient {
         Ok(peers)
     }
 
+    pub async fn upsert_external_peer(&mut self, peer: Value) -> Result<Value, String> {
+        let request_id = self.next_request_id("external-upsert");
+        let request = build_upsert_external_peer_request(&request_id, &peer)?;
+        self.send_request(request, &request_id).await
+    }
+
+    pub async fn remove_external_peer(&mut self, peer_id: String) -> Result<Value, String> {
+        if peer_id.trim().is_empty() {
+            return Err("external peer id must not be blank".into());
+        }
+        let request_id = self.next_request_id("external-remove");
+        self.send_request(
+            json!({
+                "type": "remove_external_peer",
+                "request_id": request_id,
+                "peer_id": peer_id,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
+    pub async fn clear_external_peers(&mut self) -> Result<Value, String> {
+        let request_id = self.next_request_id("external-clear");
+        self.send_request(
+            json!({
+                "type": "clear_external_peers",
+                "request_id": request_id,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
     pub async fn set_task_snapshot(&mut self, snapshot: Value) -> Result<Value, String> {
         let request_id = self.next_request_id("set-task-snapshot");
         self.send_request(
@@ -582,6 +616,7 @@ impl TransferSidecarClient {
     async fn prepare_transfer_preflight(&mut self, payload: Value) -> Result<Value, String> {
         let source_task_id = required_string(&payload, &["sourceTaskId", "source_task_id"])?;
         let target_peer_id = required_string(&payload, &["targetPeerId", "target_peer_id"])?;
+        let transport = transfer_transport(&payload)?;
         let request_id = self.next_request_id("preflight");
         let response = self
             .send_request(
@@ -590,6 +625,7 @@ impl TransferSidecarClient {
                     "request_id": request_id,
                     "source_task_id": source_task_id,
                     "target_peer_id": target_peer_id,
+                    "transport": transport,
                 }),
                 &request_id,
             )
@@ -689,6 +725,42 @@ impl TransferSidecarClient {
             prefix,
             self.request_counter.fetch_add(1, Ordering::Relaxed)
         )
+    }
+}
+
+fn build_upsert_external_peer_request(request_id: &str, peer: &Value) -> Result<Value, String> {
+    let protocol_version = peer
+        .get("protocolVersion")
+        .or_else(|| peer.get("protocol_version"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "external peer missing protocol version".to_string())?;
+    let accepting_transfers = peer
+        .get("acceptingTransfers")
+        .or_else(|| peer.get("accepting_transfers"))
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "external peer missing accepting transfers state".to_string())?;
+    Ok(json!({
+        "type": "upsert_external_peer",
+        "request_id": request_id,
+        "peer": {
+            "peer_id": required_string(peer, &["peerId", "peer_id"])?,
+            "display_name": required_string(peer, &["displayName", "display_name"])?,
+            "endpoint": required_string(peer, &["endpoint"])?,
+            "public_key": required_string(peer, &["publicKey", "public_key"])?,
+            "protocol_version": protocol_version,
+            "accepting_transfers": accepting_transfers,
+        },
+    }))
+}
+
+fn transfer_transport(payload: &Value) -> Result<&str, String> {
+    let transport = payload
+        .get("transport")
+        .and_then(Value::as_str)
+        .unwrap_or("auto");
+    match transport {
+        "auto" | "lan" | "cloud" => Ok(transport),
+        other => Err(format!("unsupported transfer transport {other}")),
     }
 }
 
@@ -1021,6 +1093,54 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn external_peer_control_requests_normalize_frontend_fields() {
+        let request = build_upsert_external_peer_request(
+            "external-1",
+            &json!({
+                "peerId": "peer-cloud",
+                "displayName": "Cloud Mac",
+                "endpoint": "127.0.0.1:4456",
+                "publicKey": "public-key",
+                "protocolVersion": 1,
+                "acceptingTransfers": true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            json!({
+                "type": "upsert_external_peer",
+                "request_id": "external-1",
+                "peer": {
+                    "peer_id": "peer-cloud",
+                    "display_name": "Cloud Mac",
+                    "endpoint": "127.0.0.1:4456",
+                    "public_key": "public-key",
+                    "protocol_version": 1,
+                    "accepting_transfers": true,
+                },
+            })
+        );
+        assert!(
+            build_upsert_external_peer_request("external-2", &json!({"peerId": "peer-cloud"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transfer_preflight_transport_defaults_and_rejects_unknown_values() {
+        assert_eq!(
+            transfer_transport(&json!({"phase": "preflight"})).unwrap(),
+            "auto"
+        );
+        assert_eq!(
+            transfer_transport(&json!({"transport": "cloud"})).unwrap(),
+            "cloud"
+        );
+        assert!(transfer_transport(&json!({"transport": "bluetooth"})).is_err());
     }
 
     #[test]

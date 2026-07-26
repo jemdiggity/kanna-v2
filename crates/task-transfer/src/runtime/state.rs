@@ -4,6 +4,7 @@ use super::events::{
     FinalizedOutgoingTransfer, IncomingTransferEvent, OutgoingTransferCommittedEvent, RuntimeError,
     RuntimeEvent,
 };
+use super::external_peers::ExternalPeerRegistry;
 use super::replay_store::TransferReplayStore;
 use crate::crypto::TransferIdentity;
 use serde::{Deserialize, Serialize};
@@ -30,12 +31,16 @@ pub(super) struct IncomingTransferReservation {
 pub(super) struct OutgoingTransferReservation {
     pub(super) target_peer_id: String,
     pub(super) source_task_id: String,
+    pub(super) target_peer: Option<crate::protocol::PeerRegistryEntry>,
+    pub(super) transport: Option<super::external_peers::TransferTransport>,
     pub(super) created_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ImportCommitReceipt {
     pub(super) target_peer_id: String,
+    pub(super) target_peer: Option<crate::protocol::PeerRegistryEntry>,
+    pub(super) transport: Option<super::external_peers::TransferTransport>,
     pub(super) source_task_id: String,
     pub(super) destination_local_task_id: String,
     pub(super) created_at_unix_ms: u64,
@@ -103,6 +108,7 @@ pub(super) struct ListenerContext {
     pub(super) self_public_key: String,
     pub(super) registry_root: PathBuf,
     pub(super) discovery: PeerDiscovery,
+    pub(super) external_peers: ExternalPeerRegistry,
     pub(super) pending_transfer_ttl: Duration,
     pub(super) peer_request_timeout: Duration,
     pub(super) pending_pairing_requests: PendingPairingRequests,
@@ -125,6 +131,7 @@ pub(super) struct ListenerContext {
 pub struct TransferRuntime {
     pub(super) config: RuntimeConfig,
     pub(super) discovery: PeerDiscovery,
+    pub(super) external_peers: ExternalPeerRegistry,
     pub(super) identity: TransferIdentity,
     pub(super) pending_pairing_requests: PendingPairingRequests,
     pub(super) outgoing_transfers: Arc<Mutex<HashMap<String, OutgoingTransferReservation>>>,

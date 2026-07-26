@@ -7,7 +7,8 @@ use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
 use kanna_task_transfer::protocol::{PeerRequest, PeerResponse};
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
 use kanna_task_transfer::runtime::{
-    DiscoveryMode, PairingResult, RuntimeConfig, RuntimeError, RuntimeEvent, TransferRuntime,
+    DiscoveryMode, ExternalPeer, PairingResult, RuntimeConfig, RuntimeError, RuntimeEvent,
+    TransferRuntime, TransferTransport,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -19,6 +20,592 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_is_session_trusted_and_never_persisted() {
+    let temp = tempfile::tempdir().unwrap();
+    let identity = TransferIdentity::generate();
+    let public_key = public_key_to_string(&identity.public_key);
+    let runtime_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let runtime = TransferRuntime::spawn(runtime_config.clone())
+        .await
+        .unwrap();
+
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "127.0.0.1:4456".into(),
+            public_key: public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let peer = runtime.find_peer("peer-cloud").await.unwrap();
+    assert_eq!(peer.endpoint, "127.0.0.1:4456");
+    let listed = runtime
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-cloud")
+        .unwrap();
+    assert!(listed.trusted);
+    assert_eq!(
+        runtime
+            .peer_routes("peer-cloud")
+            .await
+            .unwrap()
+            .cloud_endpoint,
+        Some("127.0.0.1:4456".into())
+    );
+    assert!(
+        !trusted_peer_store_path(temp.path(), "peer-primary").exists(),
+        "external trust must remain runtime-only"
+    );
+
+    runtime.remove_external_peer("peer-cloud").await.unwrap();
+    assert!(runtime.find_peer("peer-cloud").await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_key_rotation_immediately_revokes_old_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_identity = TransferIdentity::generate();
+    let old_public_key = public_key_to_string(&old_identity.public_key);
+    let new_identity = TransferIdentity::generate();
+    let new_public_key = public_key_to_string(&new_identity.public_key);
+    let runtime_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let runtime = TransferRuntime::spawn(runtime_config.clone())
+        .await
+        .unwrap();
+
+    for public_key in [&old_public_key, &new_public_key] {
+        runtime
+            .upsert_external_peer(ExternalPeer {
+                peer_id: "peer-cloud".into(),
+                display_name: "Cloud Mac".into(),
+                endpoint: "127.0.0.1:4456".into(),
+                public_key: public_key.clone(),
+                protocol_version: 1,
+                accepting_transfers: true,
+            })
+            .await
+            .unwrap();
+    }
+
+    assert!(runtime
+        .ensure_peer_is_trusted("peer-cloud", &old_public_key)
+        .is_err());
+    runtime
+        .ensure_peer_is_trusted("peer-cloud", &new_public_key)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_validation_rejects_unsafe_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let valid_key = public_key_to_string(&TransferIdentity::generate().public_key);
+
+    for peer in [
+        ExternalPeer {
+            peer_id: " ".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "127.0.0.1:4456".into(),
+            public_key: valid_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        },
+        ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "192.168.1.10:4456".into(),
+            public_key: valid_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        },
+        ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "127.0.0.1:4456".into(),
+            public_key: valid_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        },
+        ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "127.0.0.1:4456".into(),
+            public_key: "not-a-key".into(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        },
+    ] {
+        assert!(runtime.upsert_external_peer(peer).await.is_err());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_merges_lan_and_cloud_routes_and_selects_requested_transport() {
+    let temp = tempfile::tempdir().unwrap();
+    let identity = TransferIdentity::generate();
+    let public_key = public_key_to_string(&identity.public_key);
+    let lan_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let lan_endpoint = lan_listener.local_addr().unwrap().to_string();
+    let cloud_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let cloud_endpoint = cloud_listener.local_addr().unwrap().to_string();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target LAN".into(),
+            endpoint: lan_endpoint.clone(),
+            pid: std::process::id(),
+            public_key: public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-target".into(),
+            display_name: "Target Cloud".into(),
+            endpoint: cloud_endpoint.clone(),
+            public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let routes = runtime.peer_routes("peer-target").await.unwrap();
+    assert_eq!(routes.lan_endpoint, Some(lan_endpoint));
+    assert_eq!(routes.cloud_endpoint, Some(cloud_endpoint));
+
+    let cloud_server = tokio::spawn(respond_to_preflight(cloud_listener, "transfer-cloud"));
+    runtime
+        .prepare_transfer_preflight_with_transport(
+            "peer-target",
+            "task-cloud",
+            TransferTransport::Cloud,
+        )
+        .await
+        .unwrap();
+    cloud_server.await.unwrap();
+
+    let lan_server = tokio::spawn(respond_to_preflight(lan_listener, "transfer-lan"));
+    runtime
+        .prepare_transfer_preflight_with_transport(
+            "peer-target",
+            "task-auto",
+            TransferTransport::Auto,
+        )
+        .await
+        .unwrap();
+    lan_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outgoing_reservation_pins_cloud_route_across_external_peer_updates() {
+    let temp = tempfile::tempdir().unwrap();
+    let identity = TransferIdentity::generate();
+    let public_key = public_key_to_string(&identity.public_key);
+    let pinned_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let pinned_endpoint = pinned_listener.local_addr().unwrap().to_string();
+    let replacement_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let replacement_endpoint = replacement_listener.local_addr().unwrap().to_string();
+    let runtime_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let runtime = TransferRuntime::spawn(runtime_config.clone())
+        .await
+        .unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: pinned_endpoint,
+            public_key: public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let pinned_server = tokio::spawn(async move {
+        let (preflight, _) = pinned_listener.accept().await.unwrap();
+        let mut reader = BufReader::new(preflight);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let PeerRequest::PrepareTransfer { request_id, .. } =
+            serde_json::from_str(line.trim()).unwrap()
+        else {
+            panic!("expected preflight");
+        };
+        let mut stream = reader.into_inner();
+        write_peer_response(
+            &mut stream,
+            &PeerResponse::PrepareTransfer {
+                request_id,
+                transfer_id: "transfer-pinned".into(),
+                source_peer_id: "peer-primary".into(),
+                target_has_repo: true,
+            },
+        )
+        .await;
+
+        let (commit, _) = pinned_listener.accept().await.unwrap();
+        let mut reader = BufReader::new(commit);
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let PeerRequest::SubmitTransferPayload {
+            request_id,
+            transfer_id,
+            ..
+        } = serde_json::from_str(line.trim()).unwrap()
+        else {
+            panic!("expected commit");
+        };
+        let mut stream = reader.into_inner();
+        write_peer_response(
+            &mut stream,
+            &PeerResponse::SubmitTransferPayload {
+                request_id,
+                transfer_id,
+            },
+        )
+        .await;
+    });
+
+    let preflight = runtime
+        .prepare_transfer_preflight_with_transport(
+            "peer-cloud",
+            "task-source",
+            TransferTransport::Cloud,
+        )
+        .await
+        .unwrap();
+    drop(runtime);
+    let runtime = TransferRuntime::spawn(runtime_config).await.unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: replacement_endpoint,
+            public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    runtime
+        .prepare_transfer_commit(&preflight.transfer_id, json!({"task": "payload"}))
+        .await
+        .unwrap();
+    pinned_server.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), replacement_listener.accept())
+            .await
+            .is_err(),
+        "commit unexpectedly switched to the replacement route"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_registry_authorizes_inbound_transfer_without_lan_trust() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let registry = PeerRegistry::new(temp.path().to_path_buf());
+    let source_entry = registry
+        .list_peers("peer-destination")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-source")
+        .unwrap();
+    let destination_entry = registry
+        .list_peers("peer-source")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-destination")
+        .unwrap();
+
+    destination
+        .upsert_external_peer(ExternalPeer {
+            peer_id: source_entry.peer_id.clone(),
+            display_name: source_entry.display_name.clone(),
+            endpoint: source_entry.endpoint.clone(),
+            public_key: source_entry.public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: destination_entry.peer_id.clone(),
+            display_name: destination_entry.display_name.clone(),
+            endpoint: destination_entry.endpoint.clone(),
+            public_key: destination_entry.public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    for peer_id in ["peer-source", "peer-destination"] {
+        std::fs::remove_file(
+            temp.path()
+                .join(format!("{}.json", URL_SAFE_NO_PAD.encode(peer_id))),
+        )
+        .unwrap();
+    }
+    assert!(!trusted_peer_store_path(temp.path(), "peer-source").exists());
+    assert!(!trusted_peer_store_path(temp.path(), "peer-destination").exists());
+
+    let result = source
+        .prepare_transfer_preflight_with_transport(
+            "peer-destination",
+            "task-source",
+            TransferTransport::Cloud,
+        )
+        .await
+        .unwrap();
+    assert!(!result.transfer_id.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copied_cloud_peer_identity_does_not_authorize_plaintext_lan_snapshot_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let copied_identity = TransferIdentity::generate();
+    let copied_public_key = public_key_to_string(&copied_identity.public_key);
+    let lan_spoof = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let lan_endpoint = lan_spoof.local_addr().unwrap().to_string();
+    let cloud_proxy = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let cloud_endpoint = cloud_proxy.local_addr().unwrap().to_string();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-cloud".into(),
+            display_name: "LAN Spoof".into(),
+            endpoint: lan_endpoint,
+            pid: std::process::id(),
+            public_key: copied_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Real Cloud Mac".into(),
+            endpoint: cloud_endpoint,
+            public_key: copied_public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let spoof_contact = tokio::spawn(async move {
+        let Ok(Ok((stream, _))) =
+            tokio::time::timeout(Duration::from_millis(150), lan_spoof.accept()).await
+        else {
+            return false;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let PeerRequest::GetTaskSnapshot { request_id, .. } =
+            serde_json::from_str(line.trim()).unwrap()
+        else {
+            panic!("expected task snapshot request");
+        };
+        let mut stream = reader.into_inner();
+        write_peer_response(
+            &mut stream,
+            &PeerResponse::TaskSnapshot {
+                request_id,
+                peer_id: "peer-cloud".into(),
+                display_name: "LAN Spoof".into(),
+                snapshot: json!({"stolen": true}),
+            },
+        )
+        .await;
+        true
+    });
+
+    assert!(runtime.list_peer_task_snapshots().await.unwrap().is_empty());
+    assert!(
+        !spoof_contact.await.unwrap(),
+        "plaintext task snapshot was sent using external cloud trust"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rotated_external_key_rejects_all_pinned_transfer_continuations() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_target = TransferIdentity::generate();
+    let old_public_key = public_key_to_string(&old_target.public_key);
+    let new_target = TransferIdentity::generate();
+    let new_public_key = public_key_to_string(&new_target.public_key);
+    let old_route = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let old_endpoint = old_route.local_addr().unwrap().to_string();
+    let replacement_route = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let replacement_endpoint = replacement_route.local_addr().unwrap().to_string();
+    let source_config = RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+        .with_peer_request_timeout(Duration::from_millis(50));
+    let source = TransferRuntime::spawn(source_config).await.unwrap();
+    let source_endpoint = PeerRegistry::new(temp.path().to_path_buf())
+        .list_peers("peer-observer")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-source")
+        .unwrap()
+        .endpoint;
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: old_endpoint,
+            public_key: old_public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let preflight_server = tokio::spawn(respond_to_preflight(old_route, "transfer-pinned-key"));
+    source
+        .prepare_transfer_preflight_with_transport(
+            "peer-target",
+            "task-source",
+            TransferTransport::Cloud,
+        )
+        .await
+        .unwrap();
+    preflight_server.await.unwrap();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: replacement_endpoint,
+            public_key: new_public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    for request in [
+        PeerRequest::FinalizeTransfer {
+            request_id: "rotate-finalize".into(),
+            transfer_id: "transfer-pinned-key".into(),
+            requester_peer_id: "peer-target".into(),
+        },
+        PeerRequest::FetchTransferArtifact {
+            request_id: "rotate-artifact".into(),
+            transfer_id: "transfer-pinned-key".into(),
+            requester_peer_id: "peer-target".into(),
+            sealed_payload: "not-reached".into(),
+        },
+        PeerRequest::ImportCommitted {
+            request_id: "rotate-ack".into(),
+            transfer_id: "transfer-pinned-key".into(),
+            requester_peer_id: "peer-target".into(),
+            sealed_payload: "not-reached".into(),
+        },
+    ] {
+        let PeerResponse::Error { message, .. } =
+            send_raw_peer_request(&source_endpoint, &request).await
+        else {
+            panic!("rotated continuation unexpectedly succeeded");
+        };
+        assert!(
+            message.contains("not trusted for cloud transfer"),
+            "unexpected continuation error: {message}"
+        );
+    }
+}
+
+async fn respond_to_preflight(listener: TcpListener, transfer_id: &str) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let PeerRequest::PrepareTransfer { request_id, .. } =
+        serde_json::from_str(line.trim()).unwrap()
+    else {
+        panic!("expected preflight request");
+    };
+    let mut stream = reader.into_inner();
+    write_peer_response(
+        &mut stream,
+        &PeerResponse::PrepareTransfer {
+            request_id,
+            transfer_id: transfer_id.into(),
+            source_peer_id: "peer-primary".into(),
+            target_has_repo: true,
+        },
+    )
+    .await;
+}
+
+async fn write_peer_response(stream: &mut TcpStream, response: &PeerResponse) {
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(response).unwrap()).as_bytes())
+        .await
+        .unwrap();
+}
+
+async fn send_raw_peer_request(endpoint: &str, request: &PeerRequest) -> PeerResponse {
+    let mut stream = TcpStream::connect(endpoint).await.unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    serde_json::from_str(line.trim()).unwrap()
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peers_become_trusted_after_explicit_pairing() {

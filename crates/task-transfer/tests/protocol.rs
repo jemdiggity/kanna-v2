@@ -1,6 +1,7 @@
 use kanna_task_transfer::protocol::{
     ControlRequest, ControlResponse, PeerRequest, PeerResponse, SidecarEvent,
 };
+use kanna_task_transfer::runtime::{ExternalPeer, TransferTransport};
 use serde_json::json;
 
 fn assert_roundtrip<T>(value: T)
@@ -55,11 +56,61 @@ fn control_messages_roundtrip_with_request_ids() {
         request_id: "req-1".into(),
         source_task_id: "task-source".into(),
         target_peer_id: "peer-target".into(),
+        transport: TransferTransport::Cloud,
     };
 
     let json = serde_json::to_string(&message).unwrap();
     let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, message);
+}
+
+#[test]
+fn external_peer_control_messages_roundtrip() {
+    let peer = ExternalPeer {
+        peer_id: "peer-cloud".into(),
+        display_name: "Cloud Mac".into(),
+        endpoint: "127.0.0.1:4456".into(),
+        public_key: "base64-key".into(),
+        protocol_version: 1,
+        accepting_transfers: true,
+    };
+    assert_roundtrip(ControlRequest::UpsertExternalPeer {
+        request_id: "external-upsert".into(),
+        peer: peer.clone(),
+    });
+    assert_roundtrip(ControlResponse::UpsertExternalPeer {
+        request_id: "external-upsert".into(),
+    });
+    assert_roundtrip(ControlRequest::RemoveExternalPeer {
+        request_id: "external-remove".into(),
+        peer_id: peer.peer_id.clone(),
+    });
+    assert_roundtrip(ControlResponse::RemoveExternalPeer {
+        request_id: "external-remove".into(),
+    });
+    assert_roundtrip(ControlRequest::ClearExternalPeers {
+        request_id: "external-clear".into(),
+    });
+    assert_roundtrip(ControlResponse::ClearExternalPeers {
+        request_id: "external-clear".into(),
+    });
+
+    assert_eq!(
+        serde_json::to_value(ControlRequest::PrepareTransferPreflight {
+            request_id: "preflight-cloud".into(),
+            source_task_id: "task-source".into(),
+            target_peer_id: "peer-cloud".into(),
+            transport: TransferTransport::Cloud,
+        })
+        .unwrap(),
+        json!({
+            "type": "prepare_transfer_preflight",
+            "request_id": "preflight-cloud",
+            "source_task_id": "task-source",
+            "target_peer_id": "peer-cloud",
+            "transport": "cloud",
+        })
+    );
 }
 
 #[test]
@@ -404,6 +455,7 @@ fn wire_messages_use_expected_json_shapes() {
         request_id: "req-1".into(),
         source_task_id: "task-source".into(),
         target_peer_id: "peer-target".into(),
+        transport: TransferTransport::Auto,
     };
     assert_eq!(
         serde_json::to_value(&request).unwrap(),
@@ -412,6 +464,7 @@ fn wire_messages_use_expected_json_shapes() {
             "request_id": "req-1",
             "source_task_id": "task-source",
             "target_peer_id": "peer-target",
+            "transport": "auto",
         })
     );
 

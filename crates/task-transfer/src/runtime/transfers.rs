@@ -2,6 +2,7 @@ use super::events::{FinalizedOutgoingTransfer, PreflightResult, RuntimeError, Ru
 use super::state::StagedTransferArtifact;
 use super::state::{OutgoingTransferReservation, TransferArtifactRecord, TransferRuntime};
 use super::utils::{prune_outgoing_transfers, prune_transfer_artifacts};
+use super::TransferTransport;
 use crate::crypto::{open_json, parse_public_key, seal_json};
 use crate::protocol::{PeerRequest, PeerResponse};
 use serde_json::Value;
@@ -14,8 +15,28 @@ impl TransferRuntime {
         target_peer_id: &str,
         source_task_id: &str,
     ) -> Result<PreflightResult, RuntimeError> {
-        let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.prepare_transfer_preflight_with_transport(
+            target_peer_id,
+            source_task_id,
+            TransferTransport::Auto,
+        )
+        .await
+    }
+
+    pub async fn prepare_transfer_preflight_with_transport(
+        &self,
+        target_peer_id: &str,
+        source_task_id: &str,
+        transport: TransferTransport,
+    ) -> Result<PreflightResult, RuntimeError> {
+        let (target_peer, resolved_transport) = self
+            .resolve_peer_with_transport(target_peer_id, transport)
+            .await?;
+        self.ensure_peer_is_trusted_for_transport(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            resolved_transport,
+        )?;
         let target_public_key = parse_public_key(&target_peer.public_key)?;
         let sealed_payload = seal_json(
             &self.identity,
@@ -59,6 +80,8 @@ impl TransferRuntime {
                 let reservation = OutgoingTransferReservation {
                     target_peer_id: target_peer_id.to_owned(),
                     source_task_id: source_task_id.to_owned(),
+                    target_peer: Some(target_peer),
+                    transport: Some(resolved_transport),
                     created_at: Instant::now(),
                 };
                 self.replay_store
@@ -110,16 +133,14 @@ impl TransferRuntime {
         transfer_id: &str,
         payload: Value,
     ) -> Result<(), RuntimeError> {
-        let target_peer_id = {
+        let reservation = {
             let mut transfers = self.outgoing_transfers.lock().await;
             for expired in
                 prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl)
             {
                 self.replay_store.remove_reservation(&expired);
             }
-            transfers
-                .get(transfer_id)
-                .map(|reservation| reservation.target_peer_id.clone())
+            transfers.get(transfer_id).cloned()
         }
         .ok_or_else(|| {
             RuntimeError::Protocol(format!(
@@ -128,8 +149,20 @@ impl TransferRuntime {
             ))
         })?;
 
-        let target_peer = self.find_peer(&target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let target_peer = match reservation.target_peer {
+            Some(peer) => peer,
+            None => self.find_peer(&reservation.target_peer_id).await?,
+        };
+        match reservation.transport {
+            Some(transport) => self.ensure_peer_is_trusted_for_transport(
+                &target_peer.peer_id,
+                &target_peer.public_key,
+                transport,
+            )?,
+            None => {
+                self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+            }
+        }
         let target_public_key = parse_public_key(&target_peer.public_key)?;
         let sealed_payload = seal_json(&self.identity, &target_public_key, &payload)?;
         let request_id = self.next_request_id("commit");

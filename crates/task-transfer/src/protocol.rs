@@ -9,6 +9,17 @@ pub enum ControlRequest {
     ListPeers {
         request_id: String,
     },
+    UpsertExternalPeer {
+        request_id: String,
+        peer: crate::runtime::ExternalPeer,
+    },
+    RemoveExternalPeer {
+        request_id: String,
+        peer_id: String,
+    },
+    ClearExternalPeers {
+        request_id: String,
+    },
     SetTaskSnapshot {
         request_id: String,
         snapshot: serde_json::Value,
@@ -89,6 +100,8 @@ pub enum ControlRequest {
         request_id: String,
         source_task_id: String,
         target_peer_id: String,
+        #[serde(default)]
+        transport: crate::runtime::TransferTransport,
     },
     PrepareTransferCommit {
         request_id: String,
@@ -140,6 +153,15 @@ pub enum ControlResponse {
     ListPeers {
         request_id: String,
         peers: Vec<DiscoveredPeer>,
+    },
+    UpsertExternalPeer {
+        request_id: String,
+    },
+    RemoveExternalPeer {
+        request_id: String,
+    },
+    ClearExternalPeers {
+        request_id: String,
     },
     SetTaskSnapshot {
         request_id: String,

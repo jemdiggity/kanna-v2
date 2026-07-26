@@ -120,6 +120,25 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             Ok(peers) => ControlResponse::ListPeers { request_id, peers },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::UpsertExternalPeer { request_id, peer } => {
+            match runtime.upsert_external_peer(peer).await {
+                Ok(()) => ControlResponse::UpsertExternalPeer { request_id },
+                Err(error) => control_error(request_id, error),
+            }
+        }
+        ControlRequest::RemoveExternalPeer {
+            request_id,
+            peer_id,
+        } => match runtime.remove_external_peer(&peer_id).await {
+            Ok(()) => ControlResponse::RemoveExternalPeer { request_id },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::ClearExternalPeers { request_id } => {
+            match runtime.clear_external_peers().await {
+                Ok(()) => ControlResponse::ClearExternalPeers { request_id },
+                Err(error) => control_error(request_id, error),
+            }
+        }
         ControlRequest::SetTaskSnapshot {
             request_id,
             snapshot,
@@ -301,8 +320,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             request_id,
             source_task_id,
             target_peer_id,
+            transport,
         } => match runtime
-            .prepare_transfer_preflight(&target_peer_id, &source_task_id)
+            .prepare_transfer_preflight_with_transport(&target_peer_id, &source_task_id, transport)
             .await
         {
             Ok(result) => ControlResponse::PrepareTransferPreflight {
