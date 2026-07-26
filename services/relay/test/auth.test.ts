@@ -309,14 +309,14 @@ describe("relay auth", () => {
     )).resolves.toBe(false);
   });
 
-  it("revalidates legacy device-token publication for its original account and desktop id", async () => {
+  it("rejects legacy device-token proofs for desktop-scoped publication", async () => {
     const { auth } = await importAuthWithFirebaseMock({ deviceUserId: "owner" });
 
     await expect(auth.revalidateServerAuth(
       { kind: "device", deviceToken: "token", desktopId: "desktop-1" },
       "owner",
       "desktop-1",
-    )).resolves.toBe(true);
+    )).resolves.toBe(false);
     await expect(auth.revalidateServerAuth(
       { kind: "device", deviceToken: "token", desktopId: "desktop-1" },
       "owner",

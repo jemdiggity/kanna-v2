@@ -431,6 +431,49 @@ pub fn release_transfer_event_consumer(
 }
 
 #[tauri::command]
+pub fn acknowledge_transfer_lifecycle_event(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::TransferEventConsumerState>,
+    delivery_id: String,
+) -> Result<bool, String> {
+    crate::transfer_sidecar::acknowledge_transfer_lifecycle_event_in_state(
+        &app,
+        state.inner(),
+        webview.label(),
+        &delivery_id,
+    )
+}
+
+#[tauri::command]
+pub fn nack_transfer_lifecycle_event(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::TransferEventConsumerState>,
+    delivery_id: String,
+) -> Result<bool, String> {
+    crate::transfer_sidecar::nack_transfer_lifecycle_event_in_state(
+        &app,
+        state.inner(),
+        webview.label(),
+        &delivery_id,
+    )
+}
+
+#[tauri::command]
+pub fn renew_transfer_lifecycle_event(
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::TransferEventConsumerState>,
+    delivery_id: String,
+) -> bool {
+    crate::transfer_sidecar::renew_transfer_lifecycle_event_in_state(
+        state.inner(),
+        webview.label(),
+        &delivery_id,
+    )
+}
+
+#[tauri::command]
 pub async fn acknowledge_incoming_transfer_commit(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,

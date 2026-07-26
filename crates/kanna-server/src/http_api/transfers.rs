@@ -51,6 +51,15 @@ pub(super) struct UpdateTransferPayloadRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct CompleteTransferRequest {
     local_task_id: String,
+    claim_owner_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ClaimIncomingTransferRequest {
+    owner_token: String,
+    #[serde(default)]
+    recovery: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,7 +147,11 @@ pub(super) async fn complete_task_transfer(
 ) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
     let updated = db
-        .mark_task_transfer_completed(&transfer_id, &payload.local_task_id)
+        .mark_task_transfer_completed(
+            &transfer_id,
+            &payload.local_task_id,
+            payload.claim_owner_token.as_deref(),
+        )
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
 }
@@ -150,7 +163,11 @@ pub(super) async fn mark_incoming_transfer_importing(
 ) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
     let updated = db
-        .mark_incoming_transfer_importing(&transfer_id, &payload.local_task_id)
+        .mark_incoming_transfer_importing(
+            &transfer_id,
+            &payload.local_task_id,
+            payload.claim_owner_token.as_deref().unwrap_or_default(),
+        )
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
 }
@@ -162,7 +179,11 @@ pub(super) async fn mark_incoming_transfer_awaiting_acknowledgment(
 ) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
     let updated = db
-        .mark_incoming_transfer_awaiting_acknowledgment(&transfer_id, &payload.local_task_id)
+        .mark_incoming_transfer_awaiting_acknowledgment(
+            &transfer_id,
+            &payload.local_task_id,
+            payload.claim_owner_token.as_deref().unwrap_or_default(),
+        )
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
 }
@@ -194,10 +215,29 @@ pub(super) async fn insert_task_transfer_provenance(
 pub(super) async fn claim_pending_incoming_transfer(
     State(state): State<Arc<AppState>>,
     Path(transfer_id): Path<String>,
+    Json(payload): Json<ClaimIncomingTransferRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    if payload.owner_token.trim().is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "ownerToken must not be empty".to_string(),
+        ));
+    }
+    let db = open_db(&state)?;
+    let updated = db
+        .claim_pending_incoming_transfer(&transfer_id, &payload.owner_token, payload.recovery)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn renew_incoming_transfer_claim(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<ClaimIncomingTransferRequest>,
 ) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
     let updated = db
-        .claim_pending_incoming_transfer(&transfer_id)
+        .renew_incoming_transfer_claim(&transfer_id, &payload.owner_token)
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
 }

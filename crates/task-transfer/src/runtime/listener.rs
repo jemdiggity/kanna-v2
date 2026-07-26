@@ -192,7 +192,7 @@ async fn handle_connection(
             );
             context
                 .incoming_sender
-                .send(RuntimeEvent::PairingRequested(PairingRequestedEvent {
+                .try_send(RuntimeEvent::PairingRequested(PairingRequestedEvent {
                     request_id: pairing_request_id.clone(),
                     peer_id: source_peer_id.clone(),
                     display_name: source_display_name.clone(),
@@ -231,7 +231,7 @@ async fn handle_connection(
                 })?;
                 context
                     .incoming_sender
-                    .send(RuntimeEvent::PairingCompleted(PairingCompletedEvent {
+                    .try_send(RuntimeEvent::PairingCompleted(PairingCompletedEvent {
                         peer_id: source_peer_id,
                         display_name: source_display_name,
                         verification_code: verification_code.clone(),
@@ -368,6 +368,12 @@ async fn handle_connection(
                     request_id: existing.request_id.clone(),
                 });
             }
+            if requests.len() >= context.max_task_pull_requests {
+                return Err(RuntimeError::Backpressure(format!(
+                    "pending task-pull request capacity {} is exhausted",
+                    context.max_task_pull_requests
+                )));
+            }
 
             let pull_request_id = format!(
                 "pull-{}-{}",
@@ -383,7 +389,7 @@ async fn handle_connection(
             );
             if context
                 .incoming_sender
-                .send(RuntimeEvent::TaskPullRequested(TaskPullRequestedEvent {
+                .try_send(RuntimeEvent::TaskPullRequested(TaskPullRequestedEvent {
                     request_id: pull_request_id.clone(),
                     requester_peer_id,
                     source_task_id,
@@ -449,7 +455,7 @@ async fn handle_connection(
                     if event_was_newly_committed {
                         context
                             .incoming_sender
-                            .send(RuntimeEvent::IncomingTransferRequest(event))
+                            .try_send(RuntimeEvent::IncomingTransferRequest(event))
                             .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
                     }
                     PeerResponse::SubmitTransferPayload {
@@ -505,30 +511,39 @@ async fn handle_connection(
                 let (emit_event, cached) = {
                     let mut finalizations =
                         context.pending_outgoing_transfer_finalizations.lock().await;
-                    match finalizations.entry(transfer_id.clone()) {
+                    let admission: Result<_, RuntimeError> =
+                        match finalizations.entry(transfer_id.clone()) {
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             entry.insert(OutgoingTransferFinalizationState::Pending {
                                 waiters: vec![tx],
                             });
-                            (true, None)
+                            Ok((true, None))
                         }
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                             match entry.get_mut() {
                                 OutgoingTransferFinalizationState::Pending { waiters } => {
+                                    waiters.retain(|waiter| !waiter.is_closed());
+                                    if waiters.len() >= context.max_finalization_waiters {
+                                        return Err(RuntimeError::Backpressure(format!(
+                                            "outgoing transfer finalization waiter capacity {} is exhausted",
+                                            context.max_finalization_waiters
+                                        )));
+                                    }
                                     waiters.push(tx);
-                                    (false, None)
+                                    Ok((false, None))
                                 }
                                 OutgoingTransferFinalizationState::Completed(result) => {
-                                    (false, Some(result.clone()))
+                                    Ok((false, Some(result.clone())))
                                 }
                             }
                         }
-                    }
+                        };
+                    admission?
                 };
                 if emit_event
                     && context
                         .incoming_sender
-                        .send(RuntimeEvent::OutgoingTransferFinalizationRequested(
+                        .try_send(RuntimeEvent::OutgoingTransferFinalizationRequested(
                             OutgoingTransferFinalizationRequestedEvent {
                                 transfer_id: transfer_id.clone(),
                             },
@@ -545,12 +560,18 @@ async fn handle_connection(
 
                 let result = match cached {
                     Some(result) => result,
-                    None => rx.await.map_err(|_| {
-                        RuntimeError::Protocol(format!(
-                            "desktop finalization receiver dropped for transfer {}",
-                            transfer_id
-                        ))
-                    })?,
+                    None => tokio::time::timeout(context.peer_request_timeout, rx)
+                        .await
+                        .map_err(|_| RuntimeError::PeerRequestTimeout {
+                            peer_id: requester_peer_id.clone(),
+                            timeout_ms: context.peer_request_timeout.as_millis(),
+                        })?
+                        .map_err(|_| {
+                            RuntimeError::Protocol(format!(
+                                "desktop finalization receiver dropped for transfer {}",
+                                transfer_id
+                            ))
+                        })?,
                 };
                 let identity =
                     load_or_create_identity(&context.registry_root, &context.self_peer_id)?;

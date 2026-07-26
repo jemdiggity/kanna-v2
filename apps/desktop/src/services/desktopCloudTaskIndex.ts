@@ -207,8 +207,10 @@ export function subscribeDesktopCloudTasks(
     string,
     { documentId: string; snapshot: DesktopCloudDesktopSnapshot }
   >();
+  let requestedEmission = 0;
 
   const emit = async () => {
+    const emission = ++requestedEmission;
     const base = options.getOptions();
     const [activeDesktopIds, currentDesktopId] = await Promise.all([
       base.activeDesktopIds === undefined
@@ -216,7 +218,7 @@ export function subscribeDesktopCloudTasks(
         : Promise.resolve(base.activeDesktopIds),
       base.currentDesktopId === undefined ? resolveDesktopId() : Promise.resolve(base.currentDesktopId),
     ]);
-    if (cancelled) return;
+    if (cancelled || emission !== requestedEmission) return;
     const snapshots = [...tasksByDesktop.values()].flat();
     onUpdate(mapDesktopCloudTasks(
       snapshots,

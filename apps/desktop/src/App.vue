@@ -223,6 +223,7 @@ const {
   openPeerPicker,
   openPairPeerPicker,
   closePeerPicker,
+  importIncomingTransfer,
   importPendingIncomingTransfers,
 } = appTaskTransfer;
 async function warmCloudTransferSidecar(): Promise<void> {
@@ -348,6 +349,7 @@ const {
   disposeDesktopCloudWorkspace,
   getKeyboardActions: () => keyboardActions,
   homePath,
+  importIncomingTransfer,
   importPendingIncomingTransfers,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,

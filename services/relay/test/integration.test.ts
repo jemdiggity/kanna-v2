@@ -545,11 +545,12 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
-  it("accepts previous-server device-token task publication with generation fencing", async () => {
+  it("rejects a same-account legacy device token publishing as another desktop", async () => {
     const desktopRef = testFirestore.doc(
       `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`,
     );
     const before = (await desktopRef.get()).data()?.publicationSessionGeneration ?? null;
+    const beforeTaskIds = (await desktopRef.collection("tasks").get()).docs.map((doc) => doc.id).sort();
     const { ws, userId } = await connectAndAuth({
       device_token: TEST_DEVICE_TOKEN,
       desktop_id: SECRET_DESKTOP_ID,
@@ -563,9 +564,14 @@ describe("Relay integration", () => {
       id: "legacy-publish",
       snapshot: publishedSnapshot("working"),
     }));
-    await expect(publicationAck).resolves.toMatchObject({ ok: true });
+    await expect(publicationAck).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("desktop-secret"),
+    });
     const after = (await desktopRef.get()).data()?.publicationSessionGeneration ?? null;
-    expect(after).toBeGreaterThan(before ?? 0);
+    expect(after).toBe(before);
+    expect((await desktopRef.collection("tasks").get()).docs.map((doc) => doc.id).sort())
+      .toEqual(beforeTaskIds);
     await closeAndWait(ws);
   });
 

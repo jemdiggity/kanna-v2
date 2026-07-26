@@ -8,13 +8,10 @@ use std::sync::Arc;
 pub(super) async fn legacy_ksp_stream(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> axum::response::Response {
-    // Deployed mobile clients connect to /v1/stream without a device
-    // credential. Keep that contract until the minimum supported mobile
-    // version can be raised; authenticated LAN streaming lives on v2.
-    ws.on_upgrade(move |socket| {
-        crate::ksp::handle_stream(socket, state, crate::ksp::AuthMode::AllowEmpty)
-    })
+    let auth_mode = direct_stream_auth_mode(peer);
+    ws.on_upgrade(move |socket| crate::ksp::handle_stream(socket, state, auth_mode))
 }
 
 pub(super) async fn ksp_stream(

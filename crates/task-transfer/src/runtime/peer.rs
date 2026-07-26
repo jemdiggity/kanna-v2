@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
@@ -237,14 +237,27 @@ impl TransferRuntime {
         request: PeerRequest,
         request_timeout: std::time::Duration,
     ) -> Result<PeerResponse, RuntimeError> {
-        self.send_peer_request_with_permits(
-            peer,
-            request,
-            request_timeout,
-            &self.peer_request_permits,
-            "peer request capacity",
-        )
-        .await
+        if matches!(&request, PeerRequest::FetchTransferArtifact { .. }) {
+            self.send_peer_request_with_permits(
+                peer,
+                request,
+                request_timeout,
+                &self.artifact_peer_request_permits,
+                "artifact peer request capacity",
+                self.config.max_artifact_response_bytes,
+            )
+            .await
+        } else {
+            self.send_peer_request_with_permits(
+                peer,
+                request,
+                request_timeout,
+                &self.peer_request_permits,
+                "peer request capacity",
+                self.config.max_peer_response_bytes,
+            )
+            .await
+        }
     }
 
     pub(super) async fn send_mark_read_peer_request_with_timeout(
@@ -259,6 +272,7 @@ impl TransferRuntime {
             request_timeout,
             &self.mark_read_peer_request_permits,
             "mark-read peer request capacity",
+            self.config.max_peer_response_bytes,
         )
         .await
     }
@@ -270,6 +284,7 @@ impl TransferRuntime {
         request_timeout: std::time::Duration,
         permits: &Arc<Semaphore>,
         capacity_name: &str,
+        max_response_bytes: usize,
     ) -> Result<PeerResponse, RuntimeError> {
         let _permit = Arc::clone(permits)
             .try_acquire_owned()
@@ -278,13 +293,26 @@ impl TransferRuntime {
             let mut stream = TcpStream::connect(&peer.endpoint).await?;
             write_json_line(&mut stream, &request).await?;
 
-            let mut response_line = String::new();
-            let mut reader = BufReader::new(stream);
+            let mut response_line = String::with_capacity(max_response_bytes.min(64 * 1024));
+            let mut reader =
+                BufReader::new(stream).take(max_response_bytes.saturating_add(1) as u64);
             let read = reader.read_line(&mut response_line).await?;
             if read == 0 {
                 return Err(RuntimeError::Protocol(format!(
                     "peer {} closed the connection without a response",
                     peer.peer_id
+                )));
+            }
+            if read > max_response_bytes {
+                return Err(RuntimeError::Protocol(format!(
+                    "peer {} response exceeds maximum peer response frame size of {} bytes",
+                    peer.peer_id, max_response_bytes
+                )));
+            }
+            if !response_line.ends_with('\n') {
+                return Err(RuntimeError::Protocol(format!(
+                    "peer {} response did not terminate within the peer response frame limit of {} bytes",
+                    peer.peer_id, max_response_bytes
                 )));
             }
 

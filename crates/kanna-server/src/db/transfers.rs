@@ -27,6 +27,8 @@ pub struct TaskTransfer {
     pub completed_at: Option<String>,
     pub error: Option<String>,
     pub payload_json: Option<String>,
+    pub claim_owner_token: Option<String>,
+    pub claim_expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,7 +85,8 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, direction, status, source_peer_id, target_peer_id,
                     source_desktop_id, target_desktop_id, source_task_id,
-                    local_task_id, started_at, completed_at, error, payload_json
+                    local_task_id, started_at, completed_at, error, payload_json,
+                    claim_owner_token, claim_expires_at
              FROM task_transfer WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([transfer_id], |row| {
@@ -101,6 +104,8 @@ impl Db {
                 completed_at: row.get(10)?,
                 error: row.get(11)?,
                 payload_json: row.get(12)?,
+                claim_owner_token: row.get(13)?,
+                claim_expires_at: row.get(14)?,
             })
         })?;
         match rows.next() {
@@ -125,6 +130,7 @@ impl Db {
         &self,
         transfer_id: &str,
         local_task_id: &str,
+        claim_owner_token: Option<&str>,
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
@@ -139,9 +145,16 @@ impl Db {
                  OR
                  (direction = 'incoming'
                    AND local_task_id = ?
+                   AND claim_owner_token = ?
                    AND status IN ('awaiting_acknowledgment', 'completed'))
                )",
-            (local_task_id, transfer_id, local_task_id, local_task_id),
+            (
+                local_task_id,
+                transfer_id,
+                local_task_id,
+                local_task_id,
+                claim_owner_token,
+            ),
         )?;
         Ok(rows_affected == 1)
     }
@@ -150,16 +163,17 @@ impl Db {
         &self,
         transfer_id: &str,
         local_task_id: &str,
+        claim_owner_token: &str,
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
              SET status = 'importing', local_task_id = ?, error = NULL
-             WHERE id = ? AND direction = 'incoming'
+             WHERE id = ? AND direction = 'incoming' AND claim_owner_token = ?
                AND (
-                 status IN ('pending', 'streaming')
+                 status = 'claimed'
                  OR (status = 'importing' AND local_task_id = ?)
                )",
-            (local_task_id, transfer_id, local_task_id),
+            (local_task_id, transfer_id, claim_owner_token, local_task_id),
         )?;
         Ok(rows_affected == 1)
     }
@@ -168,13 +182,15 @@ impl Db {
         &self,
         transfer_id: &str,
         local_task_id: &str,
+        claim_owner_token: &str,
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
              SET status = 'awaiting_acknowledgment', error = NULL
              WHERE id = ? AND direction = 'incoming' AND local_task_id = ?
+               AND claim_owner_token = ?
                AND status IN ('importing', 'awaiting_acknowledgment')",
-            (transfer_id, local_task_id),
+            (transfer_id, local_task_id, claim_owner_token),
         )?;
         Ok(rows_affected == 1)
     }
@@ -217,7 +233,7 @@ impl Db {
             "SELECT id, status, source_peer_id, source_task_id, local_task_id, payload_json
              FROM task_transfer
              WHERE direction = 'incoming'
-               AND status IN ('pending', 'streaming', 'importing', 'awaiting_acknowledgment')
+               AND status IN ('pending', 'claimed', 'importing', 'awaiting_acknowledgment')
              ORDER BY started_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -264,14 +280,41 @@ impl Db {
     pub fn claim_pending_incoming_transfer(
         &self,
         transfer_id: &str,
+        owner_token: &str,
+        recovery: bool,
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
-             SET status = CASE WHEN status = 'pending' THEN 'streaming' ELSE status END,
+             SET status = CASE WHEN status = 'pending' THEN 'claimed' ELSE status END,
+                 claim_owner_token = ?,
+                 claim_expires_at = datetime('now', '+30 seconds'),
                  error = NULL
              WHERE id = ? AND direction = 'incoming'
-               AND status IN ('pending', 'streaming', 'importing', 'awaiting_acknowledgment')",
-            [transfer_id],
+               AND (
+                 status = 'pending'
+                 OR (
+                   ? = 1
+                   AND status IN ('claimed', 'importing', 'awaiting_acknowledgment')
+                   AND (claim_expires_at IS NULL OR claim_expires_at <= datetime('now'))
+                 )
+               )",
+            (owner_token, transfer_id, i64::from(recovery)),
+        )?;
+        Ok(rows_affected == 1)
+    }
+
+    pub fn renew_incoming_transfer_claim(
+        &self,
+        transfer_id: &str,
+        owner_token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET claim_expires_at = datetime('now', '+30 seconds')
+             WHERE id = ? AND direction = 'incoming'
+               AND claim_owner_token = ?
+               AND status IN ('claimed', 'importing', 'awaiting_acknowledgment')",
+            (transfer_id, owner_token),
         )?;
         Ok(rows_affected == 1)
     }
@@ -284,7 +327,7 @@ impl Db {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
              SET status = 'failed', completed_at = datetime('now'), error = ?
-             WHERE id = ? AND direction = 'incoming' AND status IN ('pending', 'streaming')",
+             WHERE id = ? AND direction = 'incoming' AND status IN ('pending', 'claimed')",
             (reason, transfer_id),
         )?;
         Ok(rows_affected == 1)

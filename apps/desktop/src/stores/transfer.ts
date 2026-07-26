@@ -68,7 +68,7 @@ export interface TransferApi {
   ) => Promise<void>;
   recordIncomingTransfer: (request: IncomingTransferRequest) => Promise<void>;
   finalizeOutgoingTransfer: (transferId: string) => Promise<FinalizedOutgoingTransferResult>;
-  approveIncomingTransfer: (transferId: string) => Promise<string>;
+  approveIncomingTransfer: (transferId: string, ownerToken?: string) => Promise<string>;
   rejectIncomingTransfer: (transferId: string) => Promise<void>;
   handleOutgoingTransferCommitted: (event: OutgoingTransferCommittedEvent) => Promise<void>;
 }
@@ -533,7 +533,7 @@ export function createTransferApi(
     }
     if (
       item.closed_at != null
-      || ["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(
+      || ["pending", "claimed", "streaming", "importing", "awaiting_acknowledgment"].includes(
         item.transfer_status ?? "",
       )
       || outgoingPushesInFlight.has(taskId)
@@ -778,7 +778,10 @@ export function createTransferApi(
     };
   }
 
-  async function approveIncomingTransfer(transferId: string): Promise<string> {
+  async function approveIncomingTransfer(
+    transferId: string,
+    ownerToken = "",
+  ): Promise<string> {
     const transfer = await getDesktopTaskTransfer(transferId);
     if (!transfer) {
       throw new Error(`incoming transfer not found: ${transferId}`);
@@ -786,7 +789,7 @@ export function createTransferApi(
     if (transfer.direction !== "incoming") {
       throw new Error(`transfer is not incoming: ${transferId}`);
     }
-    if (!["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(transfer.status)) {
+    if (!["pending", "claimed", "streaming", "importing", "awaiting_acknowledgment"].includes(transfer.status)) {
       throw new Error(`incoming transfer is not resumable: ${transferId}`);
     }
 
@@ -825,7 +828,7 @@ export function createTransferApi(
           recoverySnapshot: payload.recovery,
         },
       );
-      if (!await markDesktopTaskTransferImporting(transferId, localTaskId)) {
+      if (!await markDesktopTaskTransferImporting(transferId, localTaskId, ownerToken)) {
         throw new Error(`failed to claim imported task for transfer: ${transferId}`);
       }
     }
@@ -837,7 +840,7 @@ export function createTransferApi(
       source_task_id: payload.task.source_task_id,
       source_machine_task_label: payload.task.branch,
     });
-    if (!await markDesktopTaskTransferAwaitingAcknowledgment(transferId, localTaskId)) {
+    if (!await markDesktopTaskTransferAwaitingAcknowledgment(transferId, localTaskId, ownerToken)) {
       throw new Error(`failed to mark incoming transfer awaiting acknowledgment: ${transferId}`);
     }
     await queries.reloadSnapshot();
@@ -847,7 +850,7 @@ export function createTransferApi(
       sourceTaskId: payload.task.source_task_id,
       destinationLocalTaskId: localTaskId,
     });
-    if (!await completeDesktopTaskTransfer(transferId, localTaskId)) {
+    if (!await completeDesktopTaskTransfer(transferId, localTaskId, ownerToken)) {
       throw new Error(`failed to complete acknowledged incoming transfer: ${transferId}`);
     }
     await invoke("mark_incoming_transfer_ack_completed", { transferId });

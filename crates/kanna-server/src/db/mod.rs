@@ -75,6 +75,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "033_create_task_intent",
     "034_pipeline_item_revision_rounds",
     "035_pipeline_item_blocker_revision",
+    "036_task_transfer_ownership_leases",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1341,6 +1342,39 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         create_blocker_revision_triggers(conn)
+    })?;
+
+    run_migration(conn, "036_task_transfer_ownership_leases", |conn| {
+        add_column(conn, "task_transfer", "claim_owner_token", "TEXT")?;
+        add_column(conn, "task_transfer", "claim_expires_at", "TEXT")?;
+        conn.execute_batch(
+            r#"
+            UPDATE task_transfer AS loser
+            SET status = 'failed',
+                completed_at = datetime('now'),
+                error = COALESCE(error, 'superseded duplicate active ownership transfer during migration')
+            WHERE direction = 'outgoing'
+              AND source_task_id IS NOT NULL
+              AND status IN ('pending', 'streaming')
+              AND EXISTS (
+                SELECT 1
+                FROM task_transfer AS winner
+                WHERE winner.direction = 'outgoing'
+                  AND winner.source_task_id = loser.source_task_id
+                  AND winner.status IN ('pending', 'streaming')
+                  AND (
+                    winner.started_at < loser.started_at
+                    OR (winner.started_at = loser.started_at AND winner.id < loser.id)
+                  )
+              );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_task_transfer_active_outgoing_source
+            ON task_transfer(source_task_id)
+            WHERE direction = 'outgoing'
+              AND source_task_id IS NOT NULL
+              AND status IN ('pending', 'streaming');
+            "#,
+        )
     })?;
 
     Ok(())

@@ -106,6 +106,7 @@ impl Db {
                      candidate.direction = 'incoming'
                      AND candidate.status IN (
                        'pending',
+                       'claimed',
                        'streaming',
                        'importing',
                        'awaiting_acknowledgment'

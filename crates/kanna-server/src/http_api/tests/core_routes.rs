@@ -1298,7 +1298,14 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
         .clone()
         .oneshot(
             Request::post("/v1/transfers/transfer-1/actions/claim")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "ownerToken": "window-owner",
+                        "recovery": false
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1316,7 +1323,11 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
             Request::post("/v1/transfers/transfer-1/actions/importing")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                    serde_json::json!({
+                        "localTaskId": "task-local",
+                        "claimOwnerToken": "window-owner"
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1330,7 +1341,11 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
             Request::post("/v1/transfers/transfer-1/actions/awaiting-acknowledgment")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                    serde_json::json!({
+                        "localTaskId": "task-local",
+                        "claimOwnerToken": "window-owner"
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1382,7 +1397,11 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
             Request::post("/v1/transfers/transfer-1/actions/complete")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                    serde_json::json!({
+                        "localTaskId": "task-local",
+                        "claimOwnerToken": "window-owner"
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )

@@ -85,7 +85,8 @@ impl TransferRuntime {
                 None,
             ),
         };
-        let (incoming_sender, incoming_receiver) = mpsc::unbounded_channel();
+        let (incoming_sender, incoming_receiver) =
+            mpsc::channel(config.max_lifecycle_events.max(1));
         let (receipt_sender, receipt_receiver) =
             mpsc::channel(config.max_unapplied_receipts.max(1));
         let pending_pairing_requests = Arc::new(Mutex::new(HashMap::new()));
@@ -116,7 +117,7 @@ impl TransferRuntime {
             if reservation.committed && !reservation.event_recorded {
                 if let Some(event) = reservation.event.clone() {
                     incoming_sender
-                        .send(RuntimeEvent::IncomingTransferRequest(event))
+                        .try_send(RuntimeEvent::IncomingTransferRequest(event))
                         .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
                 }
             }
@@ -136,6 +137,10 @@ impl TransferRuntime {
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
         let incoming_connection_permits = Arc::new(Semaphore::new(config.max_incoming_connections));
         let peer_request_permits = Arc::new(Semaphore::new(config.max_peer_requests));
+        // Artifact responses use a deliberately larger frame budget than task
+        // metadata. Keep them single-flight so that bound is not multiplied by
+        // the ordinary concurrent request limit.
+        let artifact_peer_request_permits = Arc::new(Semaphore::new(1));
         let mark_read_peer_request_permits =
             Arc::new(Semaphore::new(config.max_mark_read_peer_requests));
         let request_counter = Arc::new(AtomicU64::new(1));
@@ -152,6 +157,8 @@ impl TransferRuntime {
             peer_request_timeout: config.peer_request_timeout,
             incoming_connection_permits,
             max_peer_request_bytes: config.max_peer_request_bytes,
+            max_task_pull_requests: config.max_task_pull_requests,
+            max_finalization_waiters: config.max_finalization_waiters,
             pending_pairing_requests: Arc::clone(&pending_pairing_requests),
             pending_task_pull_requests: Arc::clone(&pending_task_pull_requests),
             outgoing_transfers: Arc::clone(&outgoing_transfers),
@@ -206,6 +213,7 @@ impl TransferRuntime {
             task_snapshot,
             terminal_observers,
             peer_request_permits,
+            artifact_peer_request_permits,
             mark_read_peer_request_permits,
             incoming_sender,
             incoming_events: Mutex::new(incoming_receiver),
@@ -462,7 +470,7 @@ impl TransferRuntime {
             )
             .await
             {
-                let _ = incoming_sender.send(RuntimeEvent::TerminalEvent {
+                let _ = incoming_sender.try_send(RuntimeEvent::TerminalEvent {
                     peer_id: peer_id_for_error,
                     session_id: session_id_for_error.clone(),
                     observer_lease_id: observer_lease_id_for_task,

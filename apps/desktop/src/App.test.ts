@@ -1037,13 +1037,14 @@ describe("App", () => {
         return true;
       },
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
-      claimPendingIncomingTransfer: async (transferId) => {
+      claimPendingIncomingTransfer: async (transferId, ownerToken, recovery) => {
         const result = await dbMock.execute(
-          "UPDATE task_transfer SET status = 'streaming' WHERE id = ? AND status = 'pending'",
-          [transferId],
+          "UPDATE task_transfer SET status = 'claimed', claim_owner_token = ? WHERE id = ? AND (status = 'pending' OR ? = 1)",
+          [ownerToken, transferId, recovery ? 1 : 0],
         );
         return result.rowsAffected > 0;
       },
+      renewIncomingTransferClaim: async () => true,
       failPendingIncomingTransfer: async (transferId, reason) => {
         await dbMock.execute(
           "UPDATE task_transfer SET status = 'failed', error = ? WHERE id = ?",
@@ -5056,6 +5057,7 @@ describe("App", () => {
   });
   it("auto-imports an incoming transfer as soon as it is received", async () => {
     dbSelectMock.mockResolvedValue([]);
+    dbMock.execute.mockResolvedValueOnce({ rowsAffected: 1 });
     const wrapper = await mountApp(SidebarWithRepoStub);
 
     await flushPromises();
@@ -5083,7 +5085,10 @@ describe("App", () => {
     expect(invokeMock.mock.invocationCallOrder[recordedCallIndex]).toBeLessThan(
       store.approveIncomingTransfer.mock.invocationCallOrder[0],
     );
-    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-1");
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      expect.any(String),
+    );
     expect(wrapper.text()).not.toContain("peer-source");
   });
 
@@ -5171,12 +5176,40 @@ describe("App", () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
 
-    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-db-1");
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-db-1",
+      expect.any(String),
+    );
     expect(dbMock.execute).toHaveBeenCalledWith(
-      expect.stringContaining("status = 'streaming'"),
-      ["transfer-db-1"],
+      expect.stringContaining("status = 'claimed'"),
+      [expect.any(String), "transfer-db-1", 1],
     );
     expect(wrapper.text()).not.toContain("peer-source");
+  });
+
+  it("does not finalize twice when startup recovery overlaps the live transfer event", async () => {
+    dbSelectMock.mockResolvedValue([
+      {
+        ...buildPendingIncomingTransferRow(),
+        id: "transfer-1",
+      },
+    ]);
+    dbMock.execute
+      .mockResolvedValueOnce({ rowsAffected: 1 })
+      .mockResolvedValueOnce({ rowsAffected: 0 });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    const handler = listenHandlers.get("transfer-request");
+    await handler?.(buildIncomingTransferEvent());
+    await flushPromises();
+
+    expect(store.approveIncomingTransfer).toHaveBeenCalledTimes(1);
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      expect.any(String),
+    );
+    wrapper.unmount();
   });
 
   it("cleans up completed, rejected, and failed incoming sidecar reservations on restart", async () => {
@@ -5266,7 +5299,10 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.approveIncomingTransfer).toHaveBeenCalledTimes(1);
-    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-db-1");
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-db-1",
+      expect.any(String),
+    );
 
     first.unmount();
     second.unmount();
@@ -5381,7 +5417,10 @@ describe("App", () => {
         transferId === "transfer-stale"),
     );
 
-    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-stale");
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-stale",
+      expect.any(String),
+    );
     expect(dbMock.execute).toHaveBeenCalledWith(
       expect.stringContaining("status = 'failed'"),
       [

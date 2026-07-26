@@ -180,6 +180,7 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
             "version": "0.0.69",
             "environment": "production",
             "serverVersion": "0.0.69",
+            "kspStreamVersion": 2,
             "lanHost": "127.0.0.1",
             "lanPort": production.port,
             "pairingCode": null
@@ -194,6 +195,7 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
             "version": "0.0.69-staging.1",
             "environment": "staging",
             "serverVersion": "0.0.69-staging.1",
+            "kspStreamVersion": 2,
             "lanHost": "127.0.0.1",
             "lanPort": staging.port,
             "pairingCode": null

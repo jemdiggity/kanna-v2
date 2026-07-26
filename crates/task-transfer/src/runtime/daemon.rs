@@ -23,7 +23,7 @@ pub(super) async fn stream_peer_session(
     session_id: String,
     sealed_payload: String,
     observer_lease_id: String,
-    incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
+    incoming_sender: mpsc::Sender<RuntimeEvent>,
 ) -> Result<(), RuntimeError> {
     let mut stream = TcpStream::connect(&peer.endpoint).await?;
     write_json_line(
@@ -65,7 +65,7 @@ pub(super) async fn stream_peer_session(
         let event = parse_peer_terminal_event_line(&peer.peer_id, &session_id, &event_line)?;
         let event_session_id = peer_terminal_event_session_id(&event).to_owned();
         incoming_sender
-            .send(RuntimeEvent::TerminalEvent {
+            .try_send(RuntimeEvent::TerminalEvent {
                 peer_id: peer.peer_id.clone(),
                 session_id: event_session_id,
                 observer_lease_id: observer_lease_id.clone(),

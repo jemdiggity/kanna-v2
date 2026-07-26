@@ -263,7 +263,7 @@ fn map_transfer(item: &SnapshotPipelineItem) -> CloudTransferSnapshot {
         item.transfer_status.as_deref(),
     ) {
         (Some("outgoing"), Some("pending" | "streaming")) => "outgoing",
-        (Some("incoming"), Some("pending" | "streaming" | "importing")) => "incoming",
+        (Some("incoming"), Some("pending" | "claimed" | "streaming" | "importing")) => "incoming",
         (Some("incoming"), Some("awaiting_acknowledgment")) if item.closed_at.is_none() => {
             "finalization_pending"
         }

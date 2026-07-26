@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "035_pipeline_item_blocker_revision");
+    assert_eq!(latest_migration, "036_task_transfer_ownership_leases");
 
     let stage_run_sql: String = db
         .conn
@@ -398,7 +398,7 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
              );",
         )
         .expect("create provenance table");
-    db.insert_test_task_transfer("transfer-1", "incoming", "streaming", Some("{}"))
+    db.insert_test_task_transfer("transfer-1", "incoming", "pending", Some("{}"))
         .expect("insert transfer");
     drop(db);
 
@@ -407,13 +407,13 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
         .list_pending_incoming_transfers()
         .expect("list streaming transfer after restart");
     assert_eq!(streaming.len(), 1);
-    assert_eq!(streaming[0].status, "streaming");
+    assert_eq!(streaming[0].status, "pending");
     assert!(db
-        .claim_pending_incoming_transfer("transfer-1")
-        .expect("reclaim streaming transfer after restart"));
+        .claim_pending_incoming_transfer("transfer-1", "owner-a", false)
+        .expect("claim pending transfer after restart"));
 
     assert!(db
-        .mark_incoming_transfer_importing("transfer-1", "task-local")
+        .mark_incoming_transfer_importing("transfer-1", "task-local", "owner-a")
         .expect("mark importing"));
     let importing = db
         .get_task_transfer("transfer-1")
@@ -443,7 +443,7 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     assert_eq!(provenance_count, 1);
 
     assert!(db
-        .mark_incoming_transfer_awaiting_acknowledgment("transfer-1", "task-local")
+        .mark_incoming_transfer_awaiting_acknowledgment("transfer-1", "task-local", "owner-a",)
         .expect("mark awaiting"));
     let resumable = db
         .list_pending_incoming_transfers()
@@ -451,12 +451,15 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     assert_eq!(resumable.len(), 1);
     assert_eq!(resumable[0].status, "awaiting_acknowledgment");
     assert_eq!(resumable[0].local_task_id.as_deref(), Some("task-local"));
+    assert!(!db
+        .claim_pending_incoming_transfer("transfer-1", "owner-b", true)
+        .expect("active lease prevents recovery takeover"));
     assert!(db
-        .claim_pending_incoming_transfer("transfer-1")
-        .expect("claim resumable awaiting transfer"));
+        .renew_incoming_transfer_claim("transfer-1", "owner-a")
+        .expect("owner renews resumable transfer"));
 
     assert!(db
-        .mark_task_transfer_completed("transfer-1", "task-local")
+        .mark_task_transfer_completed("transfer-1", "task-local", Some("owner-a"))
         .expect("mark complete"));
     assert!(db
         .list_pending_incoming_transfers()
@@ -502,13 +505,13 @@ fn outgoing_transfer_completion_replays_only_for_the_same_source_task() {
         .expect("insert transfer");
 
     assert!(db
-        .mark_task_transfer_completed("transfer-1", "task-source")
+        .mark_task_transfer_completed("transfer-1", "task-source", None)
         .expect("complete transfer"));
     assert!(db
-        .mark_task_transfer_completed("transfer-1", "task-source")
+        .mark_task_transfer_completed("transfer-1", "task-source", None)
         .expect("replay matching completion"));
     assert!(!db
-        .mark_task_transfer_completed("transfer-1", "different-source")
+        .mark_task_transfer_completed("transfer-1", "different-source", None)
         .expect("reject mismatched completion"));
 
     let transfer = db
@@ -517,6 +520,117 @@ fn outgoing_transfer_completion_replays_only_for_the_same_source_task() {
         .expect("transfer exists");
     assert_eq!(transfer.status, "completed");
     assert_eq!(transfer.local_task_id.as_deref(), Some("task-source"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn incoming_transfer_claim_is_single_owner_and_expired_recovery_can_take_over() {
+    let path = Db::test_db_path("incoming-transfer-owner-lease");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_task_transfer("transfer-lease", "incoming", "pending", Some("{}"))
+        .expect("insert pending transfer");
+    drop(db);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles = ["window-a", "window-b"].map(|owner| {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open shared db");
+            barrier.wait();
+            (
+                owner,
+                db.claim_pending_incoming_transfer("transfer-lease", owner, false)
+                    .expect("attempt claim"),
+            )
+        })
+    });
+    let results = handles.map(|handle| handle.join().expect("claim thread"));
+    assert_eq!(results.iter().filter(|(_, claimed)| *claimed).count(), 1);
+    let winner = results
+        .iter()
+        .find_map(|(owner, claimed)| claimed.then_some(*owner))
+        .expect("one winner");
+    let loser = if winner == "window-a" {
+        "window-b"
+    } else {
+        "window-a"
+    };
+
+    let db = Db::open(&path).expect("reopen lease db");
+    assert!(!db
+        .mark_incoming_transfer_importing("transfer-lease", "task-local", loser)
+        .expect("loser cannot materialize"));
+    assert!(db
+        .mark_incoming_transfer_importing("transfer-lease", "task-local", winner)
+        .expect("winner can materialize"));
+    db.conn
+        .execute(
+            "UPDATE task_transfer SET claim_expires_at = datetime('now', '-1 second')
+             WHERE id = 'transfer-lease'",
+            [],
+        )
+        .expect("expire lease");
+    assert!(db
+        .claim_pending_incoming_transfer("transfer-lease", loser, true)
+        .expect("recovery takes over expired lease"));
+    assert!(!db
+        .renew_incoming_transfer_claim("transfer-lease", winner)
+        .expect("former owner cannot renew"));
+    assert!(db
+        .renew_incoming_transfer_claim("transfer-lease", loser)
+        .expect("recovery owner renews"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn active_outgoing_transfer_lease_is_unique_across_connections() {
+    let path = Db::test_db_path("active-outgoing-transfer-lease");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    drop(db);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles = ["transfer-window-a", "transfer-window-b"].map(|id| {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open shared db");
+            let transfer = NewTaskTransfer {
+                id: id.to_string(),
+                direction: "outgoing".into(),
+                status: "pending".into(),
+                source_peer_id: Some("peer-source".into()),
+                target_peer_id: Some("peer-target".into()),
+                source_desktop_id: None,
+                target_desktop_id: None,
+                source_task_id: Some("same-source-task".into()),
+                local_task_id: Some("same-source-task".into()),
+                error: None,
+                payload_json: Some("{}".into()),
+            };
+            barrier.wait();
+            db.insert_task_transfer(&transfer)
+        })
+    });
+    let results = handles.map(|handle| handle.join().expect("insert thread"));
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+    let db = Db::open(&path).expect("reopen transfer db");
+    let active: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_transfer
+             WHERE source_task_id = 'same-source-task'
+               AND direction = 'outgoing'
+               AND status IN ('pending', 'streaming')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count active transfers");
+    assert_eq!(active, 1);
 
     let _ = std::fs::remove_file(path);
 }

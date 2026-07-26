@@ -68,12 +68,10 @@ export async function revalidateServerAuth(
     const principal = await verifyDesktopCredentials(proof.desktopId, proof.desktopSecret);
     return principal?.userId === expectedUserId && principal.desktopId === expectedDesktopId;
   }
-  // Migration compatibility: previous kanna-server releases authenticate with
-  // an account-scoped device token while still supplying a stable desktop ID.
-  // Generation fencing limits a live legacy publisher to its own leased
-  // session; revalidation also revokes publication as soon as the device token
-  // is removed or moved to another account.
-  return await verifyDeviceToken(proof.deviceToken) === expectedUserId;
+  // A legacy device token proves account membership only. It cannot prove that
+  // the caller owns the supplied desktop ID, so it is never valid for
+  // desktop-scoped snapshot or transfer-identity publication.
+  return false;
 }
 
 export function hashDesktopSecret(desktopSecret: string): string {

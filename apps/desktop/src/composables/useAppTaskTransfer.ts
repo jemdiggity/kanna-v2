@@ -16,6 +16,7 @@ import {
   fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
   markIncomingTransferSidecarCleanupCompleted,
+  renewIncomingTransferClaim,
   type PendingIncomingTransfer,
 } from "../services/desktopServerClient";
 import {
@@ -52,6 +53,35 @@ export function useAppTaskTransfer({
   const transferPeersLoading = ref(false);
   const transferPeerActionPending = ref(false);
   let transferPeerLoadRequestId = 0;
+
+  async function importIncomingTransfer(
+    transferId: string,
+    recovery: boolean,
+  ): Promise<boolean> {
+    const ownerToken = crypto.randomUUID();
+    if (!await claimPendingIncomingTransfer(transferId, ownerToken, recovery)) {
+      return false;
+    }
+
+    const renewal = window.setInterval(() => {
+      void renewIncomingTransferClaim(transferId, ownerToken).then((renewed) => {
+        if (!renewed) {
+          console.warn("[App] incoming transfer claim lease was lost:", { transferId });
+        }
+      }).catch((error: unknown) => {
+        console.warn("[App] failed to renew incoming transfer claim lease:", {
+          transferId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, 10_000);
+    try {
+      await store.approveIncomingTransfer(transferId, ownerToken);
+      return true;
+    } finally {
+      window.clearInterval(renewal);
+    }
+  }
 
   function transferMachineOption(machine: TransferMachine): TransferPeerOption {
     const subtitle = machine.trustSource === "same-account-cloud"
@@ -299,13 +329,10 @@ export function useAppTaskTransfer({
         continue;
       }
 
-      const claimed = await claimPendingIncomingTransfer(row.id);
-      if (!claimed) {
-        continue;
-      }
-
       try {
-        await store.approveIncomingTransfer(row.id);
+        if (!await importIncomingTransfer(row.id, true)) {
+          continue;
+        }
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message : String(error);
         if (await failPendingIncomingTransfer(row.id, reason)) {
@@ -332,6 +359,7 @@ export function useAppTaskTransfer({
     handlePeerSelected,
     handlePairPeer,
     pullSelectedWorkspaceTask,
+    importIncomingTransfer,
     importPendingIncomingTransfers,
   };
 }

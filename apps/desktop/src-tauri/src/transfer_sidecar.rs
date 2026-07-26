@@ -3,24 +3,46 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, EventTarget, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex};
 
 type PendingRequests = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 pub type TransferEventConsumerState = Arc<std::sync::Mutex<TransferEventConsumer>>;
 
-#[derive(Default)]
 pub struct TransferEventConsumer {
     ready_labels: VecDeque<String>,
     pending: VecDeque<PendingLifecycleEvent>,
+    pending_bytes: usize,
+    next_delivery_id: u64,
 }
 
 #[derive(Clone)]
 struct PendingLifecycleEvent {
+    delivery_id: String,
     name: String,
     payload: Value,
+    bytes: usize,
+    leased_to: Option<String>,
+    lease_expires_at: Option<Instant>,
+}
+
+const MAX_PENDING_LIFECYCLE_EVENTS: usize = 256;
+const MAX_PENDING_LIFECYCLE_BYTES: usize = 8 * 1024 * 1024;
+const LIFECYCLE_EVENT_LEASE: Duration = Duration::from_secs(30);
+const MAX_SIDECAR_STDOUT_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+impl Default for TransferEventConsumer {
+    fn default() -> Self {
+        Self {
+            ready_labels: VecDeque::new(),
+            pending: VecDeque::new(),
+            pending_bytes: 0,
+            next_delivery_id: 1,
+        }
+    }
 }
 
 impl TransferEventConsumer {
@@ -35,6 +57,12 @@ impl TransferEventConsumer {
 
     fn release(&mut self, candidate: &str) {
         self.ready_labels.retain(|label| label != candidate);
+        for event in &mut self.pending {
+            if event.leased_to.as_deref() == Some(candidate) {
+                event.leased_to = None;
+                event.lease_expires_at = None;
+            }
+        }
     }
 
     fn dispatch_with(
@@ -43,10 +71,26 @@ impl TransferEventConsumer {
         payload: Value,
         mut emit: impl FnMut(&str, &str, &Value) -> Result<(), String>,
     ) -> Result<(), String> {
+        let bytes = serde_json::to_vec(&payload)
+            .map_err(|error| format!("failed to size lifecycle event: {error}"))?
+            .len();
+        if bytes > MAX_PENDING_LIFECYCLE_BYTES
+            || self.pending.len() >= MAX_PENDING_LIFECYCLE_EVENTS
+            || self.pending_bytes.saturating_add(bytes) > MAX_PENDING_LIFECYCLE_BYTES
+        {
+            return Err("transfer lifecycle queue capacity is exhausted".into());
+        }
+        let delivery_id = format!("lifecycle-{}", self.next_delivery_id);
+        self.next_delivery_id = self.next_delivery_id.wrapping_add(1).max(1);
         self.pending.push_back(PendingLifecycleEvent {
+            delivery_id,
             name: event_name.to_string(),
             payload,
+            bytes,
+            leased_to: None,
+            lease_expires_at: None,
         });
+        self.pending_bytes += bytes;
         while let Some(label) = self.ready_labels.front().cloned() {
             if self
                 .flush_pending_to(&label, |target, name, value| emit(target, name, value))
@@ -63,14 +107,74 @@ impl TransferEventConsumer {
         label: &str,
         mut emit: impl FnMut(&str, &str, &Value) -> Result<(), String>,
     ) -> Result<(), String> {
-        while let Some(event) = self.pending.pop_front() {
-            if let Err(error) = emit(label, &event.name, &event.payload) {
-                self.pending.push_front(event);
-                self.release(label);
-                return Err(error);
+        let now = Instant::now();
+        let mut failed_emit = None;
+        for event in &mut self.pending {
+            if event
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at <= now)
+            {
+                event.leased_to = None;
+                event.lease_expires_at = None;
             }
+            if event.leased_to.is_some() {
+                return Ok(());
+            }
+            let mut delivered_payload = event.payload.clone();
+            if let Some(object) = delivered_payload.as_object_mut() {
+                object.insert(
+                    "__kannaLifecycleDeliveryId".into(),
+                    Value::String(event.delivery_id.clone()),
+                );
+            }
+            if let Err(error) = emit(label, &event.name, &delivered_payload) {
+                failed_emit = Some(error);
+                break;
+            }
+            event.leased_to = Some(label.to_string());
+            event.lease_expires_at = Some(now + LIFECYCLE_EVENT_LEASE);
+            // Preserve lifecycle order and keep renderer work bounded: the
+            // next event is offered only after this delivery is acknowledged.
+            break;
+        }
+        if let Some(error) = failed_emit {
+            self.release(label);
+            return Err(error);
         }
         Ok(())
+    }
+
+    fn acknowledge(&mut self, label: &str, delivery_id: &str) -> bool {
+        let Some(index) = self.pending.iter().position(|event| {
+            event.delivery_id == delivery_id && event.leased_to.as_deref() == Some(label)
+        }) else {
+            return false;
+        };
+        if let Some(event) = self.pending.remove(index) {
+            self.pending_bytes = self.pending_bytes.saturating_sub(event.bytes);
+        }
+        true
+    }
+
+    fn nack(&mut self, label: &str, delivery_id: &str) -> bool {
+        let Some(event) = self.pending.iter_mut().find(|event| {
+            event.delivery_id == delivery_id && event.leased_to.as_deref() == Some(label)
+        }) else {
+            return false;
+        };
+        event.leased_to = None;
+        event.lease_expires_at = None;
+        true
+    }
+
+    fn renew(&mut self, label: &str, delivery_id: &str) -> bool {
+        let Some(event) = self.pending.iter_mut().find(|event| {
+            event.delivery_id == delivery_id && event.leased_to.as_deref() == Some(label)
+        }) else {
+            return false;
+        };
+        event.lease_expires_at = Some(Instant::now() + LIFECYCLE_EVENT_LEASE);
+        true
     }
 }
 
@@ -80,6 +184,7 @@ pub struct TransferSidecarClient {
     pending: PendingRequests,
     dead: Arc<AtomicBool>,
     request_counter: AtomicU64,
+    redelivery_task: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl TransferSidecarClient {
@@ -119,6 +224,7 @@ impl TransferSidecarClient {
             .state::<crate::TransferEventConsumerState>()
             .inner()
             .clone();
+        let redelivery_task = spawn_lifecycle_redelivery(app.clone(), Arc::clone(&event_consumer));
         spawn_reader(
             app,
             stdout,
@@ -133,6 +239,7 @@ impl TransferSidecarClient {
             pending,
             dead,
             request_counter: AtomicU64::new(1),
+            redelivery_task,
         })
     }
 
@@ -862,6 +969,41 @@ impl TransferSidecarClient {
     }
 }
 
+impl Drop for TransferSidecarClient {
+    fn drop(&mut self) {
+        self.redelivery_task.abort();
+    }
+}
+
+fn spawn_lifecycle_redelivery(
+    app: AppHandle,
+    state: TransferEventConsumerState,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            ticker.tick().await;
+            let mut consumer = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            consumer
+                .ready_labels
+                .retain(|label| app.get_webview_window(label).is_some());
+            let Some(label) = consumer.ready_labels.front().cloned() else {
+                continue;
+            };
+            if let Err(error) = consumer.flush_pending_to(&label, |target, event_name, payload| {
+                app.emit_to(EventTarget::webview_window(target), event_name, payload)
+                    .map_err(|error| error.to_string())
+            }) {
+                eprintln!(
+                    "[transfer-sidecar] failed redelivering lifecycle event to {label}: {error}"
+                );
+            }
+        }
+    })
+}
+
 fn build_upsert_external_peer_request(request_id: &str, peer: &Value) -> Result<Value, String> {
     let protocol_version = peer
         .get("protocolVersion")
@@ -929,11 +1071,29 @@ fn spawn_reader(
     event_consumer: TransferEventConsumerState,
 ) {
     tauri::async_runtime::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
+        let mut reader = BufReader::new(stdout);
         loop {
-            let line = match lines.next_line().await {
-                Ok(Some(line)) => line,
-                Ok(None) => break,
+            let mut line = String::with_capacity(64 * 1024);
+            let mut bounded = reader.take(MAX_SIDECAR_STDOUT_FRAME_BYTES.saturating_add(1) as u64);
+            let read = bounded.read_line(&mut line).await;
+            reader = bounded.into_inner();
+            let line = match read {
+                Ok(0) => break,
+                Ok(read) if read > MAX_SIDECAR_STDOUT_FRAME_BYTES || !line.ends_with('\n') => {
+                    dead.store(true, Ordering::Relaxed);
+                    eprintln!(
+                        "[transfer-sidecar] stdout frame exceeded {} bytes or was unterminated",
+                        MAX_SIDECAR_STDOUT_FRAME_BYTES
+                    );
+                    break;
+                }
+                Ok(_) => {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                    line
+                }
                 Err(error) => {
                     dead.store(true, Ordering::Relaxed);
                     eprintln!("[transfer-sidecar] failed reading stdout: {}", error);
@@ -955,13 +1115,25 @@ fn spawn_reader(
 
             if let Some(event_name) = forwarded_event_name(&value) {
                 if is_state_mutating_lifecycle_event(event_name) {
-                    if let Err(error) =
-                        dispatch_lifecycle_event(&app, &event_consumer, event_name, value.clone())
-                    {
-                        eprintln!(
-                            "[transfer-sidecar] queued undelivered {} event: {}",
-                            event_name, error
-                        );
+                    loop {
+                        match dispatch_lifecycle_event(
+                            &app,
+                            &event_consumer,
+                            event_name,
+                            value.clone(),
+                        ) {
+                            Ok(()) => break,
+                            Err(error) if error.contains("queue capacity") => {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "[transfer-sidecar] queued undelivered {} event: {}",
+                                    event_name, error
+                                );
+                                break;
+                            }
+                        }
                     }
                 } else {
                     let _ = app.emit(event_name, &value);
@@ -1122,6 +1294,65 @@ pub fn release_transfer_event_consumer_in_state(
                 format!("failed delivering queued transfer lifecycle event to {target}: {error}")
             })
     })
+}
+
+pub fn acknowledge_transfer_lifecycle_event_in_state(
+    app: &AppHandle,
+    state: &TransferEventConsumerState,
+    label: &str,
+    delivery_id: &str,
+) -> Result<bool, String> {
+    let mut consumer = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !consumer.acknowledge(label, delivery_id) {
+        return Ok(false);
+    }
+    consumer.flush_pending_to(label, |target, event_name, payload| {
+        if app.get_webview_window(target).is_none() {
+            return Err(format!(
+                "transfer event consumer {target} is no longer available"
+            ));
+        }
+        app.emit_to(EventTarget::webview_window(target), event_name, payload)
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(true)
+}
+
+pub fn nack_transfer_lifecycle_event_in_state(
+    app: &AppHandle,
+    state: &TransferEventConsumerState,
+    label: &str,
+    delivery_id: &str,
+) -> Result<bool, String> {
+    let mut consumer = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !consumer.nack(label, delivery_id) {
+        return Ok(false);
+    }
+    consumer.flush_pending_to(label, |target, event_name, payload| {
+        if app.get_webview_window(target).is_none() {
+            return Err(format!(
+                "transfer event consumer {target} is no longer available"
+            ));
+        }
+        app.emit_to(EventTarget::webview_window(target), event_name, payload)
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(true)
+}
+
+pub fn renew_transfer_lifecycle_event_in_state(
+    state: &TransferEventConsumerState,
+    label: &str,
+    delivery_id: &str,
+) -> bool {
+    let mut consumer = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    consumer.renew(label, delivery_id)
 }
 
 #[cfg(test)]
@@ -1648,18 +1879,29 @@ mod tests {
                     "transfer-request".to_string(),
                     json!(1),
                 ),
-                (
-                    "window-ready".to_string(),
-                    "task-pull-requested".to_string(),
-                    json!(2),
-                ),
             ],
         );
         assert_eq!(
             consumer.ready_labels.front().map(String::as_str),
             Some("window-ready"),
         );
-        assert!(consumer.pending.is_empty());
+        assert_eq!(consumer.pending.len(), 2);
+        let first_delivery = consumer.pending[0].delivery_id.clone();
+        assert!(consumer.acknowledge("window-ready", &first_delivery));
+        consumer
+            .flush_pending_to("window-ready", |label, name, payload| {
+                attempts.push((
+                    label.to_string(),
+                    name.to_string(),
+                    payload["sequence"].clone(),
+                ));
+                Ok(())
+            })
+            .expect("ack should release the next event");
+        assert_eq!(
+            attempts.last().map(|attempt| attempt.1.as_str()),
+            Some("task-pull-requested")
+        );
     }
 
     #[test]
@@ -1682,15 +1924,136 @@ mod tests {
             })
             .expect("standby should accept queued event");
 
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].0, "window-standby");
+        assert_eq!(delivered[0].1, "transfer-request");
+        assert_eq!(delivered[0].2["sequence"], json!(1));
+        assert_eq!(consumer.pending.len(), 1);
         assert_eq!(
-            delivered,
-            [(
-                "window-standby".to_string(),
-                "transfer-request".to_string(),
-                json!({"sequence": 1}),
-            )],
+            consumer.pending[0].leased_to.as_deref(),
+            Some("window-standby")
         );
+    }
+
+    #[test]
+    fn lifecycle_delivery_survives_owner_close_before_ack() {
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer.claim("window-owner"));
+        let mut delivered_ids = Vec::new();
+        consumer
+            .dispatch_with(
+                "transfer-request",
+                json!({"sequence": 1}),
+                |_, _, payload| {
+                    delivered_ids.push(
+                        payload["__kannaLifecycleDeliveryId"]
+                            .as_str()
+                            .expect("delivery id")
+                            .to_string(),
+                    );
+                    Ok(())
+                },
+            )
+            .expect("deliver to owner");
+        assert!(!consumer.claim("window-standby"));
+
+        consumer.release("window-owner");
+        consumer
+            .flush_pending_to("window-standby", |_, _, payload| {
+                delivered_ids.push(
+                    payload["__kannaLifecycleDeliveryId"]
+                        .as_str()
+                        .expect("redelivery id")
+                        .to_string(),
+                );
+                Ok(())
+            })
+            .expect("redeliver to standby");
+
+        assert_eq!(delivered_ids.len(), 2);
+        assert_eq!(delivered_ids[0], delivered_ids[1]);
+        assert!(consumer.acknowledge("window-standby", &delivered_ids[1]));
         assert!(consumer.pending.is_empty());
+    }
+
+    #[test]
+    fn expired_lifecycle_delivery_lease_is_redelivered_with_the_same_id() {
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer.claim("main"));
+        let mut delivery_ids = Vec::new();
+        consumer
+            .dispatch_with(
+                "transfer-request",
+                json!({"sequence": 1}),
+                |_, _, payload| {
+                    delivery_ids.push(
+                        payload["__kannaLifecycleDeliveryId"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
+        consumer.pending[0].lease_expires_at = Some(Instant::now() - Duration::from_secs(1));
+        consumer
+            .flush_pending_to("main", |_, _, payload| {
+                delivery_ids.push(
+                    payload["__kannaLifecycleDeliveryId"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(delivery_ids.len(), 2);
+        assert_eq!(delivery_ids[0], delivery_ids[1]);
+    }
+
+    #[test]
+    fn active_lifecycle_consumer_can_renew_its_delivery_lease() {
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer.claim("main"));
+        consumer
+            .dispatch_with("transfer-request", json!({"sequence": 1}), |_, _, _| Ok(()))
+            .unwrap();
+        let delivery_id = consumer.pending[0].delivery_id.clone();
+        consumer.pending[0].lease_expires_at = Some(Instant::now() + Duration::from_millis(1));
+
+        assert!(consumer.renew("main", &delivery_id));
+        assert!(
+            consumer.pending[0].lease_expires_at.unwrap()
+                > Instant::now() + Duration::from_secs(20)
+        );
+        assert!(!consumer.renew("standby", &delivery_id));
+    }
+
+    #[test]
+    fn lifecycle_queue_applies_explicit_count_and_byte_backpressure() {
+        let mut consumer = TransferEventConsumer::default();
+        for sequence in 0..MAX_PENDING_LIFECYCLE_EVENTS {
+            let error = consumer
+                .dispatch_with(
+                    "task-pull-requested",
+                    json!({"sequence": sequence}),
+                    |_, _, _| unreachable!("no renderer is registered"),
+                )
+                .expect_err("queued without a renderer");
+            assert_eq!(error, "no ready transfer event consumer");
+        }
+        let error = consumer
+            .dispatch_with(
+                "task-pull-requested",
+                json!({"overflow": true}),
+                |_, _, _| unreachable!("capacity check precedes emit"),
+            )
+            .expect_err("queue must reject overload");
+        assert!(error.contains("capacity"));
+        assert_eq!(consumer.pending.len(), MAX_PENDING_LIFECYCLE_EVENTS);
+        assert!(consumer.pending_bytes <= MAX_PENDING_LIFECYCLE_BYTES);
     }
 
     #[test]

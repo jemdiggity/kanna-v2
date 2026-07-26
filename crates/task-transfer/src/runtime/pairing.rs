@@ -17,7 +17,7 @@ impl TransferRuntime {
             &target_peer.public_key,
         );
         self.incoming_sender
-            .send(RuntimeEvent::PairingStarted(PairingStartedEvent {
+            .try_send(RuntimeEvent::PairingStarted(PairingStartedEvent {
                 peer_id: target_peer.peer_id.clone(),
                 display_name: target_peer.display_name.clone(),
                 verification_code: expected_verification_code.clone(),

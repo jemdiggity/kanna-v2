@@ -62,6 +62,7 @@ interface UseAppLifecycleOptions {
   disposeDesktopCloudWorkspace: () => void;
   getKeyboardActions: () => NativeKeyboardActions;
   homePath: Ref<string>;
+  importIncomingTransfer: (transferId: string, recovery: boolean) => Promise<boolean>;
   importPendingIncomingTransfers: () => Promise<void>;
   initializeDesktopCloudAuth: () => Promise<void>;
   initializeDesktopLanTaskSync: () => void;
@@ -93,6 +94,35 @@ function eventPayload(event: unknown): unknown {
   return (event as { payload?: unknown })?.payload ?? event;
 }
 
+function lifecycleDeliveryId(event: unknown): string | null {
+  const payload = eventPayload(event);
+  if (!payload || typeof payload !== "object") return null;
+  const deliveryId = (payload as Record<string, unknown>).__kannaLifecycleDeliveryId;
+  return typeof deliveryId === "string" && deliveryId.length > 0 ? deliveryId : null;
+}
+
+async function settleLifecycleDelivery(event: unknown, succeeded: boolean): Promise<void> {
+  const deliveryId = lifecycleDeliveryId(event);
+  if (!deliveryId) return;
+  await invoke(
+    succeeded
+      ? "acknowledge_transfer_lifecycle_event"
+      : "nack_transfer_lifecycle_event",
+    { deliveryId },
+  );
+}
+
+function renewLifecycleDeliveryWhileHandling(event: unknown): () => void {
+  const deliveryId = lifecycleDeliveryId(event);
+  if (!deliveryId) return () => {};
+  const interval = window.setInterval(() => {
+    void invoke("renew_transfer_lifecycle_event", { deliveryId }).catch((error: unknown) => {
+      console.error("[App] failed to renew transfer lifecycle delivery:", error);
+    });
+  }, 10_000);
+  return () => window.clearInterval(interval);
+}
+
 export async function handleTaskPullRequested(
   request: TaskPullRequestedEvent,
   store: Pick<ReturnType<typeof useKannaStore>, "items" | "pushTaskToPeer">,
@@ -119,7 +149,7 @@ export async function handleTaskPullRequested(
     if (
       !source
       || source.closed_at != null
-      || ["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(
+      || ["pending", "claimed", "streaming", "importing", "awaiting_acknowledgment"].includes(
         source.transfer_status ?? "",
       )
     ) {
@@ -175,6 +205,7 @@ export function useAppLifecycle({
   disposeDesktopCloudWorkspace,
   getKeyboardActions,
   homePath,
+  importIncomingTransfer,
   importPendingIncomingTransfers,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
@@ -376,16 +407,24 @@ export function useAppLifecycle({
     let transferLifecycleListenersReady = true;
     try {
       const unlistenTransferRequest = await listen("transfer-request", async (event: unknown) => {
+        let succeeded = false;
+        const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
         try {
           const request = parseIncomingTransferRequest(eventPayload(event));
           await store.recordIncomingTransfer(request);
           await invoke("mark_incoming_transfer_event_recorded", {
             transferId: request.transferId,
           });
-          await store.approveIncomingTransfer(request.transferId);
+          await importIncomingTransfer(request.transferId, false);
+          succeeded = true;
         } catch (e: unknown) {
           console.error("[App] failed to import incoming transfer request:", e);
           toast.error(e instanceof Error ? e.message : String(e));
+        } finally {
+          stopRenewing();
+          await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
+            console.error("[App] failed to settle incoming transfer lifecycle delivery:", error);
+          });
         }
       });
       appUnlisteners.push(unlistenTransferRequest);
@@ -395,6 +434,8 @@ export function useAppLifecycle({
     }
     try {
       const unlistenTaskPullRequested = await listen("task-pull-requested", async (event: unknown) => {
+        let succeeded = false;
+        const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
         try {
           await handleTaskPullRequested(
             parseTaskPullRequestedEvent(eventPayload(event)),
@@ -406,9 +447,15 @@ export function useAppLifecycle({
               signal: taskPullAbortController.signal,
             },
           );
+          succeeded = true;
         } catch (e: unknown) {
           console.error("[App] failed to handle task pull request:", e);
           toast.error(e instanceof Error ? e.message : String(e));
+        } finally {
+          stopRenewing();
+          await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
+            console.error("[App] failed to settle task-pull lifecycle delivery:", error);
+          });
         }
       });
       appUnlisteners.push(unlistenTaskPullRequested);
@@ -531,10 +578,13 @@ export function useAppLifecycle({
     try {
       const unlistenOutgoingTransferCommitted = await listen("outgoing-transfer-committed", async (event: unknown) => {
         let transferId: string | null = null;
+        let succeeded = false;
+        const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
         try {
           const committed = parseOutgoingTransferCommittedEvent(eventPayload(event));
           transferId = committed.transferId;
           await store.handleOutgoingTransferCommitted(committed);
+          succeeded = true;
         } catch (e: unknown) {
           console.error("[App] failed to handle outgoing transfer commit acknowledgment:", e);
           if (transferId) {
@@ -544,6 +594,11 @@ export function useAppLifecycle({
               console.error("[App] failed to nack outgoing transfer commit acknowledgment:", nackError);
             }
           }
+        } finally {
+          stopRenewing();
+          await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
+            console.error("[App] failed to settle outgoing commit lifecycle delivery:", error);
+          });
         }
       });
       appUnlisteners.push(unlistenOutgoingTransferCommitted);
@@ -555,6 +610,8 @@ export function useAppLifecycle({
     try {
       const unlistenOutgoingTransferFinalizationRequested = await listen("outgoing-transfer-finalization-requested", async (event: unknown) => {
         const request = parseOutgoingTransferFinalizationRequestEvent(eventPayload(event));
+        let succeeded = false;
+        const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
         try {
           const finalized = await store.finalizeOutgoingTransfer(request.transferId);
           await invoke("complete_outgoing_transfer_finalization", {
@@ -563,15 +620,22 @@ export function useAppLifecycle({
             finalizedCleanly: finalized.finalizedCleanly,
             error: null,
           });
+          succeeded = true;
         } catch (error: unknown) {
           console.error("[App] failed to finalize outgoing transfer:", error);
-          await invoke("complete_outgoing_transfer_finalization", {
+          succeeded = await invoke("complete_outgoing_transfer_finalization", {
             transferId: request.transferId,
             payload: null,
             finalizedCleanly: false,
             error: error instanceof Error ? error.message : String(error),
-          }).catch((invokeError: unknown) => {
+          }).then(() => true).catch((invokeError: unknown) => {
             console.error("[App] failed to report outgoing transfer finalization error:", invokeError);
+            return false;
+          });
+        } finally {
+          stopRenewing();
+          await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
+            console.error("[App] failed to settle finalization lifecycle delivery:", error);
           });
         }
       });

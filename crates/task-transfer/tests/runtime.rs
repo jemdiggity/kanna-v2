@@ -89,6 +89,106 @@ async fn authenticated_request_epoch(endpoint: &str) -> String {
     }
 }
 
+async fn runtime_with_trusted_hostile_peer(root: &Path, listener: &TcpListener) -> TransferRuntime {
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    PeerRegistry::new(root.to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-hostile".into(),
+            display_name: "Hostile".into(),
+            endpoint: listener.local_addr().unwrap().to_string(),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(root, "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-hostile".into(),
+            display_name: "Hostile".into(),
+            public_key: target_public_key,
+            capabilities_json: json!({
+                "protocolVersion": 2,
+                "authenticatedTaskRequests": true,
+                "authenticatedTaskRequestVersion": 1,
+            })
+            .to_string(),
+            paired_at: "2026-07-27T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", root, 0)
+            .with_peer_request_timeout(Duration::from_secs(2)),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_peer_response_is_rejected_at_the_frame_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let runtime = runtime_with_trusted_hostile_peer(temp.path(), &listener).await;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = String::new();
+        BufReader::new(&mut stream)
+            .read_line(&mut request)
+            .await
+            .unwrap();
+        stream
+            .write_all(&vec![b'x'; 8 * 1024 * 1024 + 1])
+            .await
+            .unwrap();
+        stream.write_all(b"\n").await.unwrap();
+    });
+
+    let listing = runtime.list_peer_task_snapshots().await.unwrap();
+    assert_eq!(listing.issues.len(), 1);
+    assert!(
+        listing.issues[0]
+            .message
+            .contains("exceeds maximum peer response frame size"),
+        "unexpected hostile response error: {}",
+        listing.issues[0].message,
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unterminated_peer_response_is_rejected_as_a_frame() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let runtime = runtime_with_trusted_hostile_peer(temp.path(), &listener).await;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = String::new();
+        BufReader::new(&mut stream)
+            .read_line(&mut request)
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"type\":\"task_snapshot\"}")
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    let listing = runtime.list_peer_task_snapshots().await.unwrap();
+    assert_eq!(listing.issues.len(), 1);
+    assert!(
+        listing.issues[0]
+            .message
+            .contains("did not terminate within the peer response frame limit"),
+        "unexpected hostile response error: {}",
+        listing.issues[0].message,
+    );
+    server.await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unauthenticated_peer_connection_has_a_read_deadline() {
     let temp = tempfile::tempdir().unwrap();
@@ -513,6 +613,50 @@ async fn task_pull_is_sealed_idempotent_and_emitted_once_for_paired_peers() {
             .await
             .is_err(),
         "duplicate pull request emitted a second event"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_source_rejects_sustained_unique_requests_at_its_admission_cap() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+            .with_runtime_admission_limits(8, 1, 2),
+    )
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&destination, &source, "peer-source").await;
+    consume_pairing_completed(&source).await;
+
+    destination
+        .request_task_pull("peer-source", "task-first", TransferTransport::Lan)
+        .await
+        .expect("first pull is admitted");
+    let RuntimeEvent::TaskPullRequested(_) = source.next_event().await.unwrap() else {
+        panic!("expected first task-pull event");
+    };
+
+    let error = destination
+        .request_task_pull("peer-source", "task-hostile", TransferTransport::Lan)
+        .await
+        .expect_err("second unique pull must be rejected while first is retained");
+    assert!(
+        error.to_string().contains("task-pull request capacity 1"),
+        "unexpected overload error: {error}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err(),
+        "rejected pull must not emit renderer work"
     );
 }
 

@@ -86,7 +86,7 @@ export interface TaskPort {
 export interface TaskTransfer {
   id: string;
   direction: "incoming" | "outgoing";
-  status: "pending" | "streaming" | "importing" | "awaiting_acknowledgment" | "completed" | "failed" | "rejected";
+  status: "pending" | "claimed" | "streaming" | "importing" | "awaiting_acknowledgment" | "completed" | "failed" | "rejected";
   source_peer_id: string | null;
   target_peer_id: string | null;
   source_desktop_id: string | null;
@@ -97,6 +97,8 @@ export interface TaskTransfer {
   completed_at: string | null;
   error: string | null;
   payload_json: string | null;
+  claim_owner_token?: string | null;
+  claim_expires_at?: string | null;
 }
 
 export interface DbHandle {
