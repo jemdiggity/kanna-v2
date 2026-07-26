@@ -907,6 +907,7 @@ fn execute_stage_transition_detached_holding(
                     execute_stage_transition(&state, &mut daemon, transition).await
                 {
                     log::error!("stage transition for {} failed: {}", task_id, message);
+                    state.publish_state_changed(StateChangeScope::Tasks);
                 }
             })
         })
