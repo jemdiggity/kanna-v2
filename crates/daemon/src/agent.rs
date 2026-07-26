@@ -462,6 +462,12 @@ pub struct AgentSessionRecord {
     /// Permission request ids awaiting a decision.
     pub pending_permissions: HashSet<String>,
     pub exited: bool,
+    /// Whether a TERMINAL `Event::Exit` has actually been published for this
+    /// session. Distinct from `exited`: a per-turn provider exits cleanly
+    /// after every turn by design and deliberately publishes NO Exit, so
+    /// `exited` alone would make a later Kill of that idle session emit none
+    /// at all. Kill announces exactly when this is still false.
+    pub exit_published: bool,
     /// Set when the user asks to stop the agent. The child's resulting exit is
     /// then surfaced as an interruption rather than a crash.
     pub interrupt_requested: bool,

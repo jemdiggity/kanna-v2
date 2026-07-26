@@ -27,7 +27,9 @@ enum Pending {
         child: std::process::Child,
         /// Lets the reaper escalate to an identity-verified group kill.
         start: Option<StartTime>,
-        ticks: u32,
+        /// When this child was handed over; the escalation deadline is
+        /// measured from here so it is independent of poll cadence.
+        admitted: std::time::Instant,
         escalated: bool,
     },
     Pid {
@@ -52,17 +54,24 @@ struct Reaper {
     wake: Condvar,
 }
 
-/// Ticks a child may linger before the reaper escalates to an
+/// How long a child may linger before the reaper escalates to an
 /// identity-verified group SIGKILL. Its caller already asked it to die; this
 /// is the backstop for a child that ignored that request.
-const ESCALATE_AFTER_TICKS: u32 = 20;
+///
+/// This is deliberately an ELAPSED-TIME deadline, not a poll-tick count. The
+/// poll cadence below is adaptive (TICK_MIN -> TICK_MAX), so counting ticks
+/// made the effective threshold depend on how often the queue happened to be
+/// polled: with one lingering child the backoff stretched 20 ticks from the
+/// intended ~400ms out to ~26s, and the escalation regression only passed when
+/// unrelated admissions happened to reset the backoff.
+const ESCALATE_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
 /// Fast first poll: the overwhelming majority of children are already dead
 /// when handed over, so the first check should be immediate-ish.
 const TICK_MIN: std::time::Duration = std::time::Duration::from_millis(20);
 /// Ceiling for the adaptive backoff. A child stuck exiting in the kernel is
 /// polled at this rate forever rather than at a fixed 100ms — ownership is
 /// retained either way, but an idle-ish stuck child costs far fewer wakeups.
-const TICK_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+const TICK_MAX: std::time::Duration = std::time::Duration::from_millis(200);
 
 fn reaper() -> &'static Reaper {
     static REAPER: OnceLock<&'static Reaper> = OnceLock::new();
@@ -113,19 +122,18 @@ fn reaper_loop(reaper: &'static Reaper) {
                 Pending::Owned {
                     mut child,
                     start,
-                    ticks,
+                    admitted,
                     escalated,
                 } => match child.try_wait() {
                     Ok(Some(_)) => reaped += 1,
                     // The child is not ours / already reaped elsewhere.
                     Err(_) => reaped += 1,
                     Ok(None) => {
-                        let ticks = ticks.saturating_add(1);
-                        let escalated = if !escalated && ticks >= ESCALATE_AFTER_TICKS {
+                        let escalated = if !escalated && admitted.elapsed() >= ESCALATE_AFTER {
                             log::warn!(
                                 "[reaper] child {} still alive after {:?}; escalating to SIGKILL",
                                 child.id(),
-                                TICK_MIN * ESCALATE_AFTER_TICKS
+                                admitted.elapsed()
                             );
                             let _ = crate::agent::kill_agent_group_verified(child.id(), start);
                             let _ = child.kill();
@@ -136,7 +144,7 @@ fn reaper_loop(reaper: &'static Reaper) {
                         still_pending.push_back(Pending::Owned {
                             child,
                             start,
-                            ticks,
+                            admitted,
                             escalated,
                         });
                     }
@@ -227,7 +235,7 @@ pub fn reap_detached(child: std::process::Child, start: Option<StartTime>) {
     enqueue(Pending::Owned {
         child,
         start,
-        ticks: 0,
+        admitted: std::time::Instant::now(),
         escalated: false,
     });
 }

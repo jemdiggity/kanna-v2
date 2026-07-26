@@ -362,6 +362,32 @@ pub(crate) async fn stream_output(
             None
         }
     };
+    // A child that dies while a handoff transfer is in flight must not have
+    // its death published here. The snapshot already captured this session
+    // and sent its master fd, so the successor owns it: broadcasting an Exit
+    // now would tear down, in every connected client, a session the new
+    // daemon is about to serve — and the successor publishes its own Exit for
+    // the same death, so clients would see it twice.
+    //
+    // Park until the transfer resolves rather than dropping the death on the
+    // floor. A committed handoff exits this process, so this task dies with
+    // it and the successor is left as the single authority. An ABORTED
+    // handoff lifts the seal, and cleanup below proceeds normally — with the
+    // `Arc::ptr_eq` revalidation covering anything that reused the id while
+    // we were parked.
+    let sealed = {
+        let mgr = sessions.lock().await;
+        mgr.is_sealed_for_handoff().then(|| mgr.seal_lifted())
+    };
+    if let Some(seal_lifted) = sealed {
+        log::info!(
+            "[stream] session={} exited during a handoff transfer; deferring its Exit to the \
+             transfer outcome",
+            session_id
+        );
+        seal_lifted.await;
+    }
+
     {
         let mut mgr = sessions.lock().await;
         if mgr

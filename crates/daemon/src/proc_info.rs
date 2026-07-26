@@ -299,6 +299,43 @@ mod imp {
             Some(dev)
         }
     }
+
+    /// Authenticate one transferred descriptor as a genuine end of a pipe
+    /// shared with `pid`. Three independent facts must hold:
+    ///
+    /// 1. the descriptor really is a pipe (not a socket, file, or tty),
+    /// 2. our side is open in the direction the role requires — a descriptor
+    ///    we will READ (the child's stdout/stderr) must not be writable, and
+    ///    one we will WRITE (the child's stdin) must not be readable, and
+    /// 3. the kernel's peer handle for it is held by `pid`.
+    ///
+    /// Together these make the descriptor itself the authority, so no
+    /// sender-supplied claim about what an fd is has to be believed.
+    pub fn pipe_end_belongs_to(
+        fd: std::os::unix::io::RawFd,
+        pid: libc::pid_t,
+        end: super::PipeEnd,
+    ) -> bool {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+            return false;
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            return false;
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return false;
+        }
+        let expected = match end {
+            super::PipeEnd::Read => libc::O_RDONLY,
+            super::PipeEnd::Write => libc::O_WRONLY,
+        };
+        if flags & libc::O_ACCMODE != expected {
+            return false;
+        }
+        pipe_peer_handle(fd).map(|peer| pid_holds_pipe_end(pid, peer)) == Some(true)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -328,12 +365,34 @@ mod imp {
     pub fn pid_holds_pipe_end(_pid: libc::pid_t, _handle: u64) -> bool {
         false
     }
+
+    pub fn pipe_end_belongs_to(
+        _fd: std::os::unix::io::RawFd,
+        _pid: libc::pid_t,
+        _end: super::PipeEnd,
+    ) -> bool {
+        false
+    }
 }
 
+// `pipe_peer_handle`/`pid_holds_pipe_end` stay module-private on purpose:
+// on their own they answer "is this fd's far end held by that pid", which is
+// only half an authentication. Callers must go through
+// [`pipe_end_belongs_to`], which also proves the fd is a pipe and is open in
+// the direction its role requires.
 pub use imp::{
-    all_process_info, pid_holds_pipe_end, pipe_peer_handle, process_info, slave_device_of_master,
-    socket_peer_pid,
+    all_process_info, pipe_end_belongs_to, process_info, slave_device_of_master, socket_peer_pid,
 };
+
+/// Which end of a pipe WE hold, and therefore which access mode a genuine
+/// transferred descriptor for that role must have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeEnd {
+    /// We read from it: the child's stdout or stderr.
+    Read,
+    /// We write to it: the child's stdin.
+    Write,
+}
 
 /// True when `pid` currently refers to the process with the given start-time
 /// identity (zombie or live). This is the gate for any pid-targeted signal:

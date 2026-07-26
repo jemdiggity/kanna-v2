@@ -735,12 +735,34 @@ pub(crate) async fn handle_command(
             // already been taken and sent, so removing the session here would
             // let the successor resurrect it from that snapshot. Refuse and
             // let the client retry against the new daemon.
-            if session_handle(&sessions, &session_id).await.is_none()
-                && agent_runtime::kill_agent_session(&session_id, &agent_sessions, &broadcast_tx)
+            if session_handle(&sessions, &session_id).await.is_none() {
+                match agent_runtime::kill_agent_session(&session_id, &agent_sessions, &broadcast_tx)
                     .await
-            {
-                let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
-                return;
+                {
+                    agent_runtime::AgentKillOutcome::Killed => {
+                        let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
+                        return;
+                    }
+                    agent_runtime::AgentKillOutcome::HandoffInFlight => {
+                        // Same contract as the PTY branch below: the snapshot
+                        // already holds this session, so acknowledging the kill
+                        // would let the successor resurrect it.
+                        log::warn!(
+                            "[kill] refusing agent session {}: handoff transfer in flight",
+                            session_id
+                        );
+                        let evt = error_event(
+                            Some(protocol::ErrorCode::HandoffLost),
+                            format!(
+                                "daemon handoff in progress; retry killing session {session_id} against the new daemon"
+                            ),
+                        );
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        return;
+                    }
+                    // Not an agent session — fall through to the PTY registry.
+                    agent_runtime::AgentKillOutcome::NotFound => {}
+                }
             }
             // Claim the exact incarnation BEFORE tearing it down, and do it in
             // the same lock acquisition that resolved it. Teardown awaits the

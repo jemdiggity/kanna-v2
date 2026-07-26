@@ -111,6 +111,7 @@ pub async fn handle_spawn_agent(
                 session_allowed_tools: HashSet::new(),
                 pending_permissions: HashSet::new(),
                 exited: true,
+                exit_published: false,
                 interrupt_requested: false,
                 turn_model,
                 created_at: std::time::Instant::now(),

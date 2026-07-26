@@ -418,8 +418,11 @@ pub struct SessionManager {
     teardown_tombstones: std::collections::HashSet<String>,
     /// Bumped on every handoff snapshot; adoption revalidates against it.
     handoff_epoch: u64,
-    /// True between a handoff snapshot and its commit-or-abort.
-    sealed_for_handoff: bool,
+    /// True between a handoff snapshot and its commit-or-abort. Published
+    /// through a watch channel so a task that must not act while sealed can
+    /// park until the transfer resolves, with no lost-wakeup race and no
+    /// polling.
+    sealed_for_handoff: tokio::sync::watch::Sender<bool>,
 }
 
 impl Default for SessionManager {
@@ -457,7 +460,7 @@ impl SessionManager {
             sessions: HashMap::new(),
             teardown_tombstones: std::collections::HashSet::new(),
             handoff_epoch: 0,
-            sealed_for_handoff: false,
+            sealed_for_handoff: tokio::sync::watch::Sender::new(false),
         }
     }
 
@@ -468,18 +471,49 @@ impl SessionManager {
     /// not be reinserted behind the transfer. The seal lifts if the handoff
     /// aborts and this daemon keeps serving.
     pub fn seal_for_handoff(&mut self) -> u64 {
-        self.sealed_for_handoff = true;
+        // `send_replace`, never `send`: `send` reports failure and skips the
+        // update when no receiver exists, and receivers here are transient —
+        // they only exist while a task is parked on the seal.
+        self.sealed_for_handoff.send_replace(true);
         self.handoff_epoch += 1;
         self.handoff_epoch
     }
 
     pub fn unseal_for_handoff(&mut self) {
-        self.sealed_for_handoff = false;
+        // Wakes everyone parked in `seal_lifted` — the handoff aborted, so
+        // this daemon keeps serving and owns its sessions again.
+        self.sealed_for_handoff.send_replace(false);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_sealed_for_handoff(&self) -> bool {
-        self.sealed_for_handoff
+        *self.sealed_for_handoff.borrow()
+    }
+
+    /// How many tasks are currently parked waiting for the seal to lift.
+    /// Test-only: lets a regression prove a task really reached the fence
+    /// instead of sleeping and hoping.
+    #[cfg(test)]
+    pub fn seal_waiter_count(&self) -> usize {
+        self.sealed_for_handoff.receiver_count()
+    }
+
+    /// Wait until no handoff transfer is in flight.
+    ///
+    /// Returns a future deliberately detached from the manager lock: callers
+    /// take it while holding the lock and await it after releasing, and
+    /// `watch` re-reads the current value on entry, so a seal that lifts in
+    /// that gap resolves immediately instead of parking forever.
+    ///
+    /// A COMMITTED handoff never lifts the seal — this daemon exits instead —
+    /// so a waiter on the commit path is dropped with the process, which is
+    /// exactly the intent: the successor now owns that session.
+    pub fn seal_lifted(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.sealed_for_handoff.subscribe();
+        async move {
+            // An error means the manager is gone; the daemon is shutting down
+            // and there is nothing left to reconcile.
+            let _ = rx.wait_for(|sealed| !*sealed).await;
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -496,7 +530,7 @@ impl SessionManager {
         session_id: String,
         session: Arc<SessionHandle>,
     ) -> bool {
-        if self.sealed_for_handoff || self.teardown_tombstones.contains(&session_id) {
+        if self.is_sealed_for_handoff() || self.teardown_tombstones.contains(&session_id) {
             return false;
         }
         self.sessions.insert(session_id, session);
@@ -627,6 +661,30 @@ impl SessionManager {
 #[cfg(test)]
 pub mod test_support {
     use super::*;
+
+    /// A live PTY session whose child exits on its own almost immediately,
+    /// for tests that need to observe the natural-exit path.
+    pub fn spawn_exiting_record(
+        stream_control: &StreamControl,
+    ) -> Result<SessionRecord, Box<dyn std::error::Error + Send + Sync>> {
+        let pty = PtySession::spawn(
+            "/bin/sh",
+            &[String::from("-c"), String::from("exit 0")],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        )?;
+        Ok(SessionRecord {
+            pty,
+            headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
+            stream_control: Some(stream_control.clone()),
+            agent_provider: None,
+            status: SessionStatus::Idle,
+            status_observed: false,
+            last_status_check_at: None,
+        })
+    }
 
     /// A minimal live PTY session record for lifecycle tests.
     pub fn spawn_sleeper_record() -> Result<SessionRecord, Box<dyn std::error::Error + Send + Sync>>

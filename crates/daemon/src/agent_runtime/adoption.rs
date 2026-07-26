@@ -8,6 +8,52 @@ use kanna_daemon::protocol::{self, SessionStatus};
 use super::readers::start_agent_readers;
 use super::{log_error, log_info, log_warn};
 
+/// Authenticate EVERY descriptor in a transferred agent bundle against the
+/// claimed child pid — never just the first one.
+///
+/// The sender picks which descriptors accompany the pid, so a bundle whose
+/// stdout is a genuine pipe to the claimed child while its stderr or stdin
+/// points elsewhere is descriptor confusion with real consequences: the
+/// stderr reader would journal a foreign process's bytes as this agent's
+/// output, and the stdin handle would carry the operator's prompts — the
+/// agent's whole input stream — into a descriptor the child does not own.
+/// Each fd must be a pipe, open on our side in the direction its role
+/// requires, whose far end is held by that same pid.
+///
+/// Failure rejects the WHOLE bundle rather than adopting a half-authentic
+/// session: the caller then treats the child as exited, which closes every
+/// transferred fd and leaves the session resumable from its journal.
+fn bundle_is_authentic(
+    session_id: &str,
+    pid: libc::pid_t,
+    owned_fds: &[std::os::unix::io::OwnedFd],
+) -> bool {
+    use crate::proc_info::PipeEnd;
+    use std::os::unix::io::AsRawFd;
+
+    // An empty bundle authenticates nothing; stdout+stderr are mandatory.
+    if owned_fds.len() < 2 {
+        return false;
+    }
+    // Bundle order is fixed by the send path: stdout, stderr, optional stdin.
+    const ROLES: [(&str, PipeEnd); 3] = [
+        ("stdout", PipeEnd::Read),
+        ("stderr", PipeEnd::Read),
+        ("stdin", PipeEnd::Write),
+    ];
+    owned_fds.iter().zip(ROLES).all(|(fd, (role, end))| {
+        let ok = crate::proc_info::pipe_end_belongs_to(fd.as_raw_fd(), pid, end);
+        if !ok {
+            log_warn(format_args!(
+                "[agent] adopted session {}: transferred {} is not a pipe owned by pid {} \
+                     in the expected direction; rejecting the whole bundle",
+                session_id, role, pid
+            ));
+        }
+        ok
+    })
+}
+
 /// Adopt an agent session transferred from the old daemon: reopen the
 /// journal from disk (the old daemon flushed every append), rebuild the
 /// adapter, and — unlike adopted PTY sessions — restart the readers
@@ -85,8 +131,8 @@ pub async fn adopt_agent_session(
     // wire values — a forged pair naming an unrelated live process (whose
     // start time an attacker can read) must never gain signal authority.
     // The authority here is descriptor provenance: the claimed pid must
-    // itself hold the far end of the transferred stdout pipe, which the
-    // kernel reports (`pipe_peerhandle`) for the fd we received. This also
+    // itself hold the far end of every transferred pipe, which the kernel
+    // reports (`pipe_peerhandle`) for the fds we received. This also
     // authenticates live agents from older senders that never transferred
     // identity metadata, keeping them interruptable/killable across the
     // upgrade. A pid that fails provenance is treated as exited and stays
@@ -102,11 +148,7 @@ pub async fn adopt_agent_session(
         Some(pid) => match crate::proc_info::process_info(pid) {
             None => (false, None),
             Some(live) => {
-                let holds_pipe = owned_fds
-                    .first()
-                    .and_then(|stdout| crate::proc_info::pipe_peer_handle(stdout.as_raw_fd()))
-                    .map(|peer| crate::proc_info::pid_holds_pipe_end(pid, peer))
-                    == Some(true);
+                let holds_pipe = bundle_is_authentic(&info.session_id, pid, &owned_fds);
                 if holds_pipe {
                     if info.child_start.is_some() && info.child_start != Some(live.start) {
                         log_warn(format_args!(
@@ -119,8 +161,9 @@ pub async fn adopt_agent_session(
                 } else {
                     if !owned_fds.is_empty() {
                         log_warn(format_args!(
-                            "[agent] adopted session {}: pid {} does not hold the transferred \
-                             pipe; treating child as exited and refusing signal targeting",
+                            "[agent] adopted session {}: pid {} does not own the transferred \
+                             descriptor bundle; treating child as exited and refusing signal \
+                             targeting",
                             info.session_id, info.pid
                         ));
                     }
@@ -153,6 +196,7 @@ pub async fn adopt_agent_session(
         session_allowed_tools,
         pending_permissions,
         exited: !alive,
+        exit_published: false,
         interrupt_requested: false,
         turn_model,
         created_at: std::time::Instant::now(),
@@ -210,4 +254,155 @@ pub async fn adopt_agent_session(
     };
     agents.lock().await.insert(info.session_id, record);
     start_agent_readers(life, stdout, stderr, agents, broadcast_tx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+
+    /// A live child holding real pipes, plus its authentic bundle in send
+    /// order (stdout, stderr, stdin).
+    struct Piped {
+        child: std::process::Child,
+        pid: libc::pid_t,
+        fds: Vec<OwnedFd>,
+    }
+
+    impl Piped {
+        fn spawn() -> Self {
+            // `cat` blocks reading stdin, so the child stays alive holding
+            // all three pipe ends for the duration of the test.
+            let mut child = std::process::Command::new("/bin/cat")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn a piped child");
+            let pid = child.id() as libc::pid_t;
+            let fds = vec![
+                OwnedFd::from(child.stdout.take().expect("stdout")),
+                OwnedFd::from(child.stderr.take().expect("stderr")),
+                OwnedFd::from(child.stdin.take().expect("stdin")),
+            ];
+            Self { child, pid, fds }
+        }
+    }
+
+    impl Drop for Piped {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// A pipe whose far end WE hold — a forged descriptor: structurally a
+    /// real pipe, but not shared with the child.
+    fn foreign_pipe() -> (OwnedFd, OwnedFd) {
+        let mut ends = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "pipe()");
+        unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) }
+    }
+
+    #[test]
+    fn an_authentic_bundle_passes() {
+        let piped = Piped::spawn();
+        assert!(
+            bundle_is_authentic("auth", piped.pid, &piped.fds),
+            "every fd really is a pipe shared with the child"
+        );
+        // Optional stdin is genuinely optional.
+        assert!(bundle_is_authentic("auth", piped.pid, &piped.fds[..2]));
+    }
+
+    /// The exact gap this closes: authenticating only stdout accepted a
+    /// bundle whose OTHER descriptors came from anywhere at all.
+    #[test]
+    fn a_bundle_with_a_forged_stderr_is_rejected_whole() {
+        let piped = Piped::spawn();
+        let (foreign_read, _foreign_write) = foreign_pipe();
+
+        let forged = vec![
+            piped.fds[0].try_clone().expect("dup stdout"),
+            foreign_read,
+            piped.fds[2].try_clone().expect("dup stdin"),
+        ];
+        // Genuine stdout — the old check's entire basis.
+        assert!(crate::proc_info::pipe_end_belongs_to(
+            forged[0].as_raw_fd(),
+            piped.pid,
+            crate::proc_info::PipeEnd::Read
+        ));
+        assert!(
+            !bundle_is_authentic("forged-stderr", piped.pid, &forged),
+            "a genuine stdout must not launder a foreign stderr"
+        );
+    }
+
+    /// Same for stdin, where the consequence is worse: we WRITE the
+    /// operator's prompts into whatever that descriptor is.
+    #[test]
+    fn a_bundle_with_a_forged_stdin_is_rejected_whole() {
+        let piped = Piped::spawn();
+        let (_foreign_read, foreign_write) = foreign_pipe();
+
+        let forged = vec![
+            piped.fds[0].try_clone().expect("dup stdout"),
+            piped.fds[1].try_clone().expect("dup stderr"),
+            foreign_write,
+        ];
+        assert!(
+            !bundle_is_authentic("forged-stdin", piped.pid, &forged),
+            "agent input must never be written into a pipe the child does not own"
+        );
+    }
+
+    /// Direction is checked, not just ownership: handing the child's stdin
+    /// (our write end) in the stdout slot must fail even though that pipe IS
+    /// shared with the child.
+    #[test]
+    fn a_bundle_with_a_swapped_direction_is_rejected() {
+        let piped = Piped::spawn();
+        let swapped = vec![
+            piped.fds[2].try_clone().expect("dup stdin"),
+            piped.fds[1].try_clone().expect("dup stderr"),
+        ];
+        assert!(
+            !bundle_is_authentic("swapped", piped.pid, &swapped),
+            "a write end presented as stdout is not a readable child stream"
+        );
+    }
+
+    /// A descriptor that is not a pipe at all is rejected before any peer
+    /// lookup — sockets and files must never become agent streams.
+    #[test]
+    fn a_non_pipe_descriptor_is_rejected() {
+        let piped = Piped::spawn();
+        let mut socks = [0 as libc::c_int; 2];
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, socks.as_mut_ptr()) },
+            0,
+            "socketpair()"
+        );
+        let (sock, _peer) = unsafe {
+            (
+                OwnedFd::from_raw_fd(socks[0]),
+                OwnedFd::from_raw_fd(socks[1]),
+            )
+        };
+
+        let forged = vec![sock, piped.fds[1].try_clone().expect("dup stderr")];
+        assert!(
+            !bundle_is_authentic("socket", piped.pid, &forged),
+            "a socket is not a pipe"
+        );
+    }
+
+    /// An empty or truncated bundle authenticates nothing.
+    #[test]
+    fn an_incomplete_bundle_is_rejected() {
+        let piped = Piped::spawn();
+        assert!(!bundle_is_authentic("empty", piped.pid, &[]));
+        assert!(!bundle_is_authentic("short", piped.pid, &piped.fds[..1]));
+    }
 }

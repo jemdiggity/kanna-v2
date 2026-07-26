@@ -762,7 +762,15 @@ impl PtySession {
         }
     }
 
-    #[cfg(test)]
+    /// Tear this session down on its own — the whole verified plan, just
+    /// without a batch to share the freeze window with.
+    ///
+    /// Not `#[cfg(test)]`: that attribute only applies to THIS crate's test
+    /// build, so gating it hides the method from every other crate's tests
+    /// (`kanna-server` calls it) while looking like it is still available.
+    /// The daemon binary itself always kills in batches, so it is dead code
+    /// there while very much alive for the library's consumers.
+    #[allow(dead_code)]
     pub fn kill(&mut self) -> io::Result<()> {
         self.begin_kill().execute(None)
     }

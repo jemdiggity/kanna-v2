@@ -25,6 +25,7 @@ pub use commands::{
 };
 pub use lifecycle::{
     agent_session_infos, cleanup_agent_writer, detach_agent_writer, kill_agent_session,
+    AgentKillOutcome,
 };
 
 use crate::socket::write_event;

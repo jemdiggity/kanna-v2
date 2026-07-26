@@ -358,7 +358,7 @@ async fn handle_child_exit(
     // Phase 3 (relock): revalidate the incarnation before mutating session
     // state — a kill/recreate or respawn while we were reaping owns the
     // record now.
-    let (shared, per_turn, interrupted) = {
+    let (shared, reason) = {
         let mut registry = agents.lock().await;
         let Some(record) = registry.get_mut(session_id) else {
             return;
@@ -374,23 +374,32 @@ async fn handle_child_exit(
         let interrupted = std::mem::replace(&mut record.interrupt_requested, false);
         set_status(record, broadcast_tx, session_id, SessionStatus::Idle, None);
         let per_turn = matches!(record.turn_model, TurnModel::PerTurn);
-        (life.shared.clone(), per_turn, interrupted)
+        // A user-initiated stop signals the child to exit; surface it as an
+        // interruption (never a crash) and end the turn so the UI stops showing
+        // activity. Per-turn sessions stay usable — the next message respawns
+        // the provider.
+        let reason = if interrupted {
+            Some(SessionEndReason::Interrupted)
+        } else if per_turn && code == 0 {
+            // Per-turn providers exit after every turn by design — process
+            // churn is an implementation detail, not a session event, so this
+            // exit publishes NO terminal Exit.
+            None
+        } else if code == 0 {
+            Some(SessionEndReason::Completed)
+        } else {
+            Some(SessionEndReason::Crashed)
+        };
+        // Decide publication once, here, and record it: a later Kill needs to
+        // tell "the process exited" from "the session already announced its
+        // death", and re-deriving that predicate at the Kill site is exactly
+        // how the two drifted apart. Every early return above this line leaves
+        // the flag untouched (still false) — correct, since none published.
+        record.exit_published = reason.is_some();
+        (life.shared.clone(), reason)
     };
-
-    // A user-initiated stop signals the child to exit; surface it as an
-    // interruption (never a crash) and end the turn so the UI stops showing
-    // activity. Per-turn sessions stay usable — the next message respawns the
-    // provider.
-    let reason = if interrupted {
-        SessionEndReason::Interrupted
-    } else if per_turn && code == 0 {
-        // Per-turn providers exit after every turn by design — process churn is
-        // an implementation detail, not a session event.
+    let Some(reason) = reason else {
         return;
-    } else if code == 0 {
-        SessionEndReason::Completed
-    } else {
-        SessionEndReason::Crashed
     };
     journal_and_fan_out(
         session_id,

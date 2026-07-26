@@ -8,6 +8,18 @@ use kanna_daemon::protocol::{self, Event, SessionState, SessionStatus};
 
 use super::{broadcast_event, fan_out};
 
+/// Outcome of a Kill against the agent registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKillOutcome {
+    /// The session was removed and its single Exit published.
+    Killed,
+    /// No agent session by that id — the caller may try the PTY registry.
+    NotFound,
+    /// A handoff transfer is in flight and this session is already inside the
+    /// successor's snapshot. Refuse; the client retries against the new daemon.
+    HandoffInFlight,
+}
+
 /// Kill an agent session (task close): SIGKILL the child's process group,
 /// journal the end, drop the record. The journal file stays on disk until
 /// task cleanup.
@@ -15,20 +27,46 @@ pub async fn kill_agent_session(
     session_id: &str,
     agents: &AgentSessions,
     broadcast_tx: &broadcast::Sender<String>,
-) -> bool {
-    let record = agents.lock().await.remove(session_id);
+) -> AgentKillOutcome {
+    // Fence the Kill against an in-flight handoff, testing the seal in the
+    // SAME registry lock acquisition that removes the session. Reading the
+    // seal outside this critical section is not enough: the snapshot could
+    // capture the session between an unsealed read and the removal, so this
+    // daemon would answer Ok while the successor resurrected the very session
+    // it just acknowledged killing.
+    //
+    // The seal is armed before the snapshot acquires this lock, which leaves
+    // exactly two orderings, both correct:
+    //   - Kill takes the lock first: it reads an unsealed registry, removes
+    //     the session, and the later snapshot simply does not see it.
+    //   - The snapshot takes the lock first: the seal is already armed, so
+    //     Kill reads it as sealed and refuses.
+    let claim = {
+        let mut registry = agents.lock().await;
+        if super::agent_handoff_sealed() {
+            Err(())
+        } else {
+            Ok(registry.remove(session_id))
+        }
+    };
+    let record = match claim {
+        Err(()) => return AgentKillOutcome::HandoffInFlight,
+        Ok(record) => record,
+    };
     let Some(mut record) = record else {
-        return false;
+        return AgentKillOutcome::NotFound;
     };
     // Every successful termination must broadcast exactly one Exit —
     // consume-once kill orchestration (SessionReplacements) depends on it.
-    // `exited` alone is the wrong predicate: an INITIAL SpawnAgent reservation
-    // is created with `exited: true` and never announced a SessionCreated or
-    // an Exit, so removing one used to reply Ok while emitting nothing, and a
-    // consumer awaiting the Exit would wait forever (or a replacement entry
-    // would stay unconsumed). A record that exited naturally already
-    // broadcast its Exit from the reader; a reservation never did.
-    let must_announce_exit = !record.exited || record.reservation_is_initial;
+    // The predicate is "has a terminal Exit been PUBLISHED", never "has the
+    // process exited": two states carry `exited: true` while having announced
+    // nothing at all — an INITIAL SpawnAgent reservation (no child, no reader)
+    // and an idle PER-TURN session (its child exits cleanly after every turn
+    // and the reader deliberately publishes no Exit for that churn). Gating on
+    // `exited` emitted zero Exits for both, leaving any consumer awaiting the
+    // Exit to wait forever. A session that already published its Exit from the
+    // reader must not publish a second one.
+    let must_announce_exit = !record.exit_published;
     if !record.exited {
         // Group-kill only through a verified identity; the direct
         // `child.kill()` below is safe regardless (std tracks our own child).
@@ -93,7 +131,7 @@ pub async fn kill_agent_session(
             waiting_prompt_snippet: None,
         },
     );
-    true
+    AgentKillOutcome::Killed
 }
 
 /// Merge agent sessions into a List response.

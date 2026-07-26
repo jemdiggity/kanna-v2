@@ -708,6 +708,7 @@ pub(crate) fn agent_record_fixture(
         session_allowed_tools: std::collections::HashSet::new(),
         pending_permissions: std::collections::HashSet::new(),
         exited: true,
+        exit_published: false,
         interrupt_requested: false,
         turn_model,
         created_at: Instant::now(),
@@ -735,6 +736,10 @@ pub(crate) fn sleeper_spawned_child() -> kanna_daemon::agent::SpawnedAgentChild 
 /// leaking it forever.
 #[tokio::test]
 async fn install_respawned_child_kills_orphan_when_session_was_removed() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let spawned = sleeper_spawned_child();
     let orphan_pid = spawned.pid as libc::pid_t;
@@ -994,6 +999,10 @@ async fn concurrent_spawn_agent_creates_exactly_one_session() {
 /// the killed session or leaking the child.
 #[tokio::test]
 async fn kill_during_initial_spawn_cleans_up_the_loser() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-create-kill");
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
@@ -1011,7 +1020,8 @@ async fn kill_during_initial_spawn_cleans_up_the_loser() {
 
     // Kill lands while the spawn is in flight.
     assert!(
-        crate::agent_runtime::kill_agent_session("cksess", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("cksess", &agents, &broadcast_tx).await
+            == crate::agent_runtime::AgentKillOutcome::Killed,
         "kill should remove the reservation"
     );
     assert!(agents.lock().await.is_empty());
@@ -1041,6 +1051,10 @@ async fn kill_during_initial_spawn_cleans_up_the_loser() {
 /// so the new session is untouched and the stale child is cleaned up.
 #[tokio::test]
 async fn stale_installer_from_previous_life_cannot_take_over_recreated_session() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-aba");
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
@@ -1052,7 +1066,10 @@ async fn stale_installer_from_previous_life_cannot_take_over_recreated_session()
     first_life.spawning = true;
     agents.lock().await.insert("aba".to_string(), first_life);
     // ...is killed...
-    assert!(crate::agent_runtime::kill_agent_session("aba", &agents, &broadcast_tx).await);
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("aba", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::Killed
+    );
     // ...and recreated under the same id with a fresh incarnation.
     let mut second_life = agent_record_fixture(&dir, "aba");
     second_life.incarnation = kanna_daemon::agent::next_agent_incarnation();
@@ -1148,6 +1165,10 @@ async fn sealed_registry_rejects_in_flight_installs_until_unsealed() {
 /// survives the session's kill.
 #[tokio::test]
 async fn forged_agent_handoff_cannot_target_unrelated_processes() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-forged");
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
@@ -1199,7 +1220,10 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
             "forged pid must stay non-signalable"
         );
     }
-    assert!(crate::agent_runtime::kill_agent_session("forged", &agents, &broadcast_tx).await);
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("forged", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::Killed
+    );
     std::thread::sleep(Duration::from_millis(50));
     assert!(
         victim.try_wait().unwrap().is_none(),
@@ -1220,6 +1244,10 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
 /// the legacy termination path the identity semantics must not break.
 #[tokio::test]
 async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-legacy");
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
@@ -1263,7 +1291,10 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
             "provenance must authenticate the legacy pid for signaling"
         );
     }
-    assert!(crate::agent_runtime::kill_agent_session("legacy", &agents, &broadcast_tx).await);
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("legacy", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::Killed
+    );
     let status = spawned.child.wait().expect("legacy child reaped");
     assert!(!status.success(), "legacy live agent must have been killed");
     if let Some(fds) = spawned.handoff_fds.take() {
@@ -1279,6 +1310,10 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
 /// touch its state after a kill+recreate of the same session id.
 #[tokio::test]
 async fn stale_reader_from_previous_life_cannot_touch_the_recreated_session() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     use kanna_agent_protocol::AgentEvent;
 
     let dir = temp_daemon_dir("reader-life");
@@ -1299,7 +1334,10 @@ async fn stale_reader_from_previous_life_cannot_touch_the_recreated_session() {
     agents.lock().await.insert("life".to_string(), first);
 
     // Life 1 is killed and the id recreated with its own adapter/journal.
-    assert!(crate::agent_runtime::kill_agent_session("life", &agents, &broadcast_tx).await);
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("life", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::Killed
+    );
     let mut second = agent_record_fixture(&dir, "life");
     second.incarnation = kanna_daemon::agent::next_agent_incarnation();
     second.status = SessionStatus::Idle;
@@ -1809,6 +1847,10 @@ async fn session_churn_does_not_retain_shared_journal_state() {
 /// consumer awaiting the Exit waiting forever.
 #[tokio::test]
 async fn killing_an_initial_reservation_emits_exactly_one_exit() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("reservation-exit");
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
@@ -1822,7 +1864,8 @@ async fn killing_an_initial_reservation_emits_exactly_one_exit() {
     agents.lock().await.insert("resv".to_string(), reservation);
 
     assert!(
-        crate::agent_runtime::kill_agent_session("resv", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("resv", &agents, &broadcast_tx).await
+            == crate::agent_runtime::AgentKillOutcome::Killed,
         "removing a reservation is a successful kill"
     );
 
@@ -1852,6 +1895,10 @@ async fn killing_an_initial_reservation_emits_exactly_one_exit() {
 /// the new reservation-aware predicate).
 #[tokio::test]
 async fn killing_a_live_agent_session_still_emits_exactly_one_exit() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("live-exit");
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
@@ -1867,7 +1914,10 @@ async fn killing_a_live_agent_session_still_emits_exactly_one_exit() {
     record.handoff_fds = spawned.handoff_fds.take();
     agents.lock().await.insert("live".to_string(), record);
 
-    assert!(crate::agent_runtime::kill_agent_session("live", &agents, &broadcast_tx).await);
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("live", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::Killed
+    );
     let mut killed_exits = 0;
     while let Ok(line) = rx.try_recv() {
         if let Ok(Event::Exit { session_id, .. }) = serde_json::from_str::<Event>(&line) {
@@ -1878,6 +1928,305 @@ async fn killing_a_live_agent_session_still_emits_exactly_one_exit() {
     }
     assert_eq!(killed_exits, 1, "a live kill must not double-announce");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- Tenth review round ----
+
+/// Killing an IDLE PER-TURN session must still emit exactly one killed Exit.
+/// A per-turn provider's child exits cleanly after every turn and the reader
+/// deliberately publishes no Exit for that churn — but it did set
+/// `exited: true`. Gating the Kill announcement on `exited` therefore emitted
+/// NOTHING at all for the most common state a per-turn session sits in, so a
+/// consumer awaiting the Exit (consume-once kill orchestration) waited forever.
+#[tokio::test]
+async fn killing_an_idle_per_turn_session_emits_exactly_one_exit() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
+    let dir = temp_daemon_dir("per-turn-idle-exit");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
+
+    // Drive the REAL reader exit path so the test proves the reader's silence,
+    // not just a hand-set flag. A per-turn child that exits 0 (no child handle
+    // reaps as code 0's per-turn sibling: use an already-exited true(1)).
+    let mut record = agent_record_fixture(&dir, "perturn");
+    let incarnation = kanna_daemon::agent::next_agent_incarnation();
+    record.incarnation = incarnation;
+    record.turn_model = kanna_agent_protocol::TurnModel::PerTurn;
+    record.exited = false;
+    record.status = SessionStatus::Busy;
+    record.child = Some(
+        std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("spawn a child that exits 0"),
+    );
+    let life = crate::agent_runtime::readers::ReaderLife {
+        session_id: "perturn".to_string(),
+        incarnation,
+        adapter: record.adapter.clone(),
+        shared: record.shared.clone(),
+    };
+    agents.lock().await.insert("perturn".to_string(), record);
+
+    crate::agent_runtime::readers::handle_child_exit_for_test(&life, &agents, &broadcast_tx).await;
+    {
+        let registry = agents.lock().await;
+        let record = registry.get("perturn").expect("session survives its turn");
+        assert!(record.exited, "the per-turn child did exit");
+        assert!(
+            !record.exit_published,
+            "per-turn turn churn must publish no terminal Exit"
+        );
+    }
+    let turn_exits = drain_exits(&mut rx, "perturn");
+    assert_eq!(
+        turn_exits, 0,
+        "a per-turn turn boundary is not a session event"
+    );
+
+    // Now close the task. This is the state the session normally sits in.
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("perturn", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::Killed
+    );
+    assert_eq!(
+        drain_exits(&mut rx, "perturn"),
+        1,
+        "killing an idle per-turn session must emit exactly one Exit"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The converse: a session that ALREADY published its Exit from the reader
+/// (a persistent provider that exited on its own) must not have a second one
+/// announced if it is killed afterwards.
+#[tokio::test]
+async fn killing_an_already_announced_session_does_not_double_announce() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
+    let dir = temp_daemon_dir("announced-exit");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
+
+    let mut record = agent_record_fixture(&dir, "persistent");
+    let incarnation = kanna_daemon::agent::next_agent_incarnation();
+    record.incarnation = incarnation;
+    record.turn_model = kanna_agent_protocol::TurnModel::Persistent;
+    record.exited = false;
+    record.child = Some(
+        std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("spawn a child that exits 0"),
+    );
+    let life = crate::agent_runtime::readers::ReaderLife {
+        session_id: "persistent".to_string(),
+        incarnation,
+        adapter: record.adapter.clone(),
+        shared: record.shared.clone(),
+    };
+    agents.lock().await.insert("persistent".to_string(), record);
+
+    crate::agent_runtime::readers::handle_child_exit_for_test(&life, &agents, &broadcast_tx).await;
+    assert_eq!(
+        drain_exits(&mut rx, "persistent"),
+        1,
+        "a persistent provider's own exit is a session event"
+    );
+    assert!(
+        agents
+            .lock()
+            .await
+            .get("persistent")
+            .expect("record retained")
+            .exit_published,
+        "the reader recorded that it published the Exit"
+    );
+
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("persistent", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::Killed
+    );
+    assert_eq!(
+        drain_exits(&mut rx, "persistent"),
+        0,
+        "the death was already announced; Kill must not repeat it"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fault injection: a PTY child that dies AFTER the handoff snapshot captured
+/// its session must not have its Exit published by the outgoing daemon. The
+/// snapshot already sent that session's master fd, so the successor owns the
+/// death and publishes it — the old daemon publishing too would tear the
+/// session down in every connected client and double the Exit.
+///
+/// The death is deferred, not dropped: an ABORTED handoff lifts the seal and
+/// this daemon publishes normally, because it is still the only authority.
+#[tokio::test]
+async fn a_pty_exit_during_a_sealed_handoff_defers_to_the_transfer_outcome() {
+    use crate::session::{SessionHandle, SessionManager, StreamControl};
+
+    let stream_control = StreamControl::new();
+    let handle = Arc::new(SessionHandle::new(
+        crate::session::test_support::spawn_exiting_record(&stream_control).expect("record"),
+    ));
+    let io_fd = handle.try_clone_io_fd().await.expect("clone io fd");
+    let input_rx = handle.take_input_rx().await.expect("input queue");
+
+    let sessions = Arc::new(Mutex::new(SessionManager::new()));
+    assert!(sessions
+        .lock()
+        .await
+        .insert_unless_sealed("dying".to_string(), handle.clone()));
+    let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
+    let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
+    let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
+    let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
+    let recovery_manager = kanna_daemon::recovery::RecoveryManager::start().await;
+
+    // The snapshot has been taken and the fd sent; the transfer is in flight.
+    let _epoch = sessions.lock().await.seal_for_handoff();
+
+    let streamer = tokio::spawn(crate::output::stream_output(
+        "dying".to_string(),
+        io_fd,
+        input_rx,
+        stream_control.clone(),
+        broadcast_tx.clone(),
+        fanouts.clone(),
+        terminal_emulator_clients.clone(),
+        sessions.clone(),
+        session_sizes.clone(),
+        recovery_manager.clone(),
+        handle.clone(),
+    ));
+
+    // The child exits immediately. Wait for the streamer to actually reach
+    // the fence rather than sleeping and hoping.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if sessions.lock().await.seal_waiter_count() > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the exit path must park on the handoff seal"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // And give it every chance to publish anyway if the fence did not hold.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        drain_exits(&mut rx, "dying"),
+        0,
+        "the outgoing daemon must not publish an Exit for a transferred session"
+    );
+    assert!(
+        sessions.lock().await.contains("dying"),
+        "the session belongs to the snapshot until the transfer resolves"
+    );
+    assert!(
+        !stream_control.is_stopped(),
+        "the stream is parked on the transfer, not torn down"
+    );
+
+    // The handoff aborts: this daemon keeps serving and owns the death again.
+    sessions.lock().await.unseal_for_handoff();
+    let _ = tokio::time::timeout(Duration::from_secs(5), streamer)
+        .await
+        .expect("the deferred exit must complete once the seal lifts");
+
+    assert_eq!(
+        drain_exits(&mut rx, "dying"),
+        1,
+        "an aborted handoff must publish exactly one Exit, not lose it"
+    );
+    assert!(
+        !sessions.lock().await.contains("dying"),
+        "normal exit cleanup resumes after the abort"
+    );
+}
+
+/// Fault injection: a Kill that arrives AFTER the handoff snapshot has taken
+/// the agent registry must be refused, not acknowledged. The successor daemon
+/// adopts the session from that snapshot, so answering Ok here would report a
+/// session dead to the client while it came back to life in the new daemon.
+/// The PTY branch has always refused; the agent branch ran entirely outside
+/// the seal.
+#[tokio::test]
+async fn a_kill_after_the_handoff_snapshot_is_refused_not_acknowledged() {
+    let _serializer = crate::agent_runtime::seal_test_serializer().lock().await;
+    let dir = temp_daemon_dir("sealed-kill");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
+
+    let mut record = agent_record_fixture(&dir, "sealed");
+    record.incarnation = kanna_daemon::agent::next_agent_incarnation();
+    record.exited = false;
+    agents.lock().await.insert("sealed".to_string(), record);
+
+    // The snapshot is in flight: the seal is armed before it reads the
+    // registry, so every later Kill must see it.
+    let seal = crate::agent_runtime::AgentHandoffSealGuard::arm();
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("sealed", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::HandoffInFlight,
+        "a Kill racing a committed snapshot must be refused"
+    );
+    assert!(
+        agents.lock().await.contains_key("sealed"),
+        "a refused Kill must leave the session for the successor to adopt"
+    );
+    assert_eq!(
+        drain_exits(&mut rx, "sealed"),
+        0,
+        "a refused Kill must not announce a death that did not happen"
+    );
+
+    // The handoff failed and this daemon keeps serving: the same Kill now
+    // succeeds, so the refusal really is retryable rather than terminal.
+    drop(seal);
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("sealed", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::Killed
+    );
+    assert_eq!(drain_exits(&mut rx, "sealed"), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Kill for an id that is not an agent session must report NotFound so the
+/// dispatcher falls through to the PTY registry — the seal must not turn an
+/// ordinary miss into a refusal.
+#[tokio::test]
+async fn a_kill_for_an_unknown_agent_session_reports_not_found() {
+    // The handoff seal is process-global, and both Kill and install now
+    // consult it: a test that expects either to SUCCEED must not overlap a
+    // test that arms the seal.
+    let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(8);
+    assert_eq!(
+        crate::agent_runtime::kill_agent_session("nope", &agents, &broadcast_tx).await,
+        crate::agent_runtime::AgentKillOutcome::NotFound
+    );
+}
+
+/// Count the Exit events currently queued for one session id.
+fn drain_exits(rx: &mut tokio::sync::broadcast::Receiver<String>, session: &str) -> usize {
+    let mut seen = 0;
+    while let Ok(line) = rx.try_recv() {
+        if let Ok(Event::Exit { session_id, .. }) = serde_json::from_str::<Event>(&line) {
+            if session_id == session {
+                seen += 1;
+            }
+        }
+    }
+    seen
 }
 
 /// A same-id Spawn must not install while the outgoing incarnation's id-keyed
