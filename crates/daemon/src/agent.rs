@@ -36,7 +36,45 @@ fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
 }
 
 /// Registry of agent sessions, separate from the PTY `SessionManager`.
-pub type AgentSessions = Arc<Mutex<HashMap<String, AgentSessionRecord>>>;
+pub type AgentSessions = Arc<Mutex<AgentRegistry>>;
+
+#[derive(Default)]
+pub struct AgentRegistry {
+    sessions: HashMap<String, AgentSessionRecord>,
+    teardown_tombstones: HashSet<String>,
+}
+
+impl AgentRegistry {
+    pub fn can_create(&self, session_id: &str) -> bool {
+        !self.sessions.contains_key(session_id) && !self.teardown_tombstones.contains(session_id)
+    }
+
+    pub fn begin_teardown(&mut self, session_id: &str) -> bool {
+        self.teardown_tombstones.insert(session_id.to_string())
+    }
+
+    pub fn end_teardown(&mut self, session_id: &str) {
+        self.teardown_tombstones.remove(session_id);
+    }
+
+    pub fn is_tearing_down(&self, session_id: &str) -> bool {
+        self.teardown_tombstones.contains(session_id)
+    }
+}
+
+impl std::ops::Deref for AgentRegistry {
+    type Target = HashMap<String, AgentSessionRecord>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sessions
+    }
+}
+
+impl std::ops::DerefMut for AgentRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.sessions
+    }
+}
 
 pub fn make_adapter(provider: AgentProvider) -> Option<Box<dyn ProviderAdapter + Send>> {
     match provider {
@@ -682,6 +720,74 @@ pub fn live_shared_agent_states() -> usize {
         .count()
 }
 
+const EXIT_UNPUBLISHED: u8 = 0;
+const EXIT_PUBLISHING: u8 = 1;
+const EXIT_PUBLISHED: u8 = 2;
+
+struct ExitPublicationInner {
+    state: std::sync::atomic::AtomicU8,
+    published: tokio::sync::Notify,
+}
+
+/// Single-owner terminal Exit publication state for one incarnation.
+///
+/// Claiming and completion are distinct: publication becomes complete only
+/// after the terminal journal entry, fan-out, and Exit broadcast finish.
+#[derive(Clone)]
+pub struct ExitPublication {
+    inner: Arc<ExitPublicationInner>,
+}
+
+impl ExitPublication {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(ExitPublicationInner {
+                state: std::sync::atomic::AtomicU8::new(EXIT_UNPUBLISHED),
+                published: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    pub fn try_claim(&self) -> bool {
+        self.inner
+            .state
+            .compare_exchange(
+                EXIT_UNPUBLISHED,
+                EXIT_PUBLISHING,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn is_published(&self) -> bool {
+        self.inner.state.load(std::sync::atomic::Ordering::Acquire) == EXIT_PUBLISHED
+    }
+
+    pub fn complete(&self) {
+        self.inner
+            .state
+            .store(EXIT_PUBLISHED, std::sync::atomic::Ordering::Release);
+        self.inner.published.notify_waiters();
+    }
+
+    pub async fn wait_until_published(&self) {
+        loop {
+            let notified = self.inner.published.notified();
+            if self.is_published() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Default for ExitPublication {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct AgentSessionRecord {
     pub provider: AgentProvider,
     pub params: AgentSpawnParams,
@@ -720,12 +826,7 @@ pub struct AgentSessionRecord {
     /// Permission request ids awaiting a decision.
     pub pending_permissions: HashSet<String>,
     pub exited: bool,
-    /// Whether a TERMINAL `Event::Exit` has actually been published for this
-    /// session. Distinct from `exited`: a per-turn provider exits cleanly
-    /// after every turn by design and deliberately publishes NO Exit, so
-    /// `exited` alone would make a later Kill of that idle session emit none
-    /// at all. Kill announces exactly when this is still false.
-    pub exit_published: bool,
+    pub exit_publication: ExitPublication,
     /// Set when the user asks to stop the agent. The child's resulting exit is
     /// then surfaced as an interruption rather than a crash.
     pub interrupt_requested: bool,
@@ -736,11 +837,16 @@ pub struct AgentSessionRecord {
     pub handoff_fds: Option<AgentHandoffFds>,
 }
 
-/// Draw a process-globally unique incarnation token (never zero, never
-/// reused). See `AgentSessionRecord::incarnation`.
+/// Draw a process-global, never-reused incarnation token. Exhaustion is a
+/// fatal invariant violation rather than wrapping into an old token.
 pub fn next_agent_incarnation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    NEXT.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |current| current.checked_add(1),
+    )
+    .expect("agent incarnation space exhausted")
 }
 
 pub struct SpawnedAgentChild {
@@ -1911,5 +2017,37 @@ mod tests {
 
         let passthrough = resolve_executable("/opt/custom/claude", &env);
         assert_eq!(passthrough, PathBuf::from("/opt/custom/claude"));
+    }
+
+    #[test]
+    fn agent_incarnations_are_never_zero_or_reused() {
+        let mut seen = HashSet::new();
+        for _ in 0..10_000 {
+            let incarnation = next_agent_incarnation();
+            assert_ne!(incarnation, 0);
+            assert!(seen.insert(incarnation), "incarnation token was reused");
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_publication_is_single_owner_and_completes_last() {
+        let publication = ExitPublication::new();
+        assert!(publication.try_claim());
+        assert!(!publication.try_claim());
+        assert!(!publication.is_published());
+
+        publication.complete();
+        publication.wait_until_published().await;
+        assert!(publication.is_published());
+    }
+
+    #[test]
+    fn teardown_tombstone_reserves_the_session_id_until_cleanup_finishes() {
+        let mut registry = AgentRegistry::default();
+        assert!(registry.can_create("same-id"));
+        assert!(registry.begin_teardown("same-id"));
+        assert!(!registry.can_create("same-id"));
+        registry.end_teardown("same-id");
+        assert!(registry.can_create("same-id"));
     }
 }

@@ -6,7 +6,54 @@ use kanna_agent_protocol::{AgentEvent, PermissionDecision, SessionEndReason, Tur
 use kanna_daemon::agent::{event_status, AgentSessions};
 use kanna_daemon::protocol::{Event, SessionStatus};
 
-use super::{broadcast_event, journal_and_fan_out, log_info, set_status};
+use super::{
+    journal_and_fan_out, journal_without_fanout, log_info, publish_terminal_exit, set_status,
+};
+
+#[derive(Default)]
+struct ReaderCompletionState {
+    stdout_code: Option<i32>,
+    stderr_eof: bool,
+    finalizer_chosen: bool,
+}
+
+#[derive(Clone, Default)]
+struct ReaderCompletion {
+    state: std::sync::Arc<std::sync::Mutex<ReaderCompletionState>>,
+}
+
+impl ReaderCompletion {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn finish_stdout(&self, code: i32) -> Option<i32> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.stdout_code = Some(code);
+        Self::take_ready(&mut state)
+    }
+
+    fn finish_stderr(&self) -> Option<i32> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.stderr_eof = true;
+        Self::take_ready(&mut state)
+    }
+
+    fn take_ready(state: &mut ReaderCompletionState) -> Option<i32> {
+        if state.finalizer_chosen || !state.stderr_eof {
+            return None;
+        }
+        let code = state.stdout_code?;
+        state.finalizer_chosen = true;
+        Some(code)
+    }
+}
 
 /// Everything a reader owns for the exact child life it was started for.
 /// Readers never resolve these through the registry: a reader that outlives
@@ -20,6 +67,26 @@ pub struct ReaderLife {
     pub adapter:
         std::sync::Arc<std::sync::Mutex<Box<dyn kanna_agent_protocol::ProviderAdapter + Send>>>,
     pub shared: std::sync::Arc<tokio::sync::Mutex<kanna_daemon::agent::AgentShared>>,
+    completion: ReaderCompletion,
+}
+
+impl ReaderLife {
+    pub fn new(
+        session_id: String,
+        incarnation: u64,
+        adapter: std::sync::Arc<
+            std::sync::Mutex<Box<dyn kanna_agent_protocol::ProviderAdapter + Send>>,
+        >,
+        shared: std::sync::Arc<tokio::sync::Mutex<kanna_daemon::agent::AgentShared>>,
+    ) -> Self {
+        Self {
+            session_id,
+            incarnation,
+            adapter,
+            shared,
+            completion: ReaderCompletion::new(),
+        }
+    }
 }
 
 /// Spawn the stdout + stderr reader threads for a (re)spawned agent child.
@@ -87,8 +154,14 @@ fn run_agent_reader(
         "[agent] reader eof session={} incarnation={} stderr={}",
         session_id, generation, is_stderr
     ));
-    if !is_stderr {
-        rt.block_on(handle_child_exit(&life, &agents, &broadcast_tx));
+    let ready = if is_stderr {
+        life.completion.finish_stderr()
+    } else {
+        rt.block_on(prepare_child_exit(&life, &agents))
+            .and_then(|code| life.completion.finish_stdout(code))
+    };
+    if let Some(code) = ready {
+        rt.block_on(publish_child_exit(&life, code, &agents, &broadcast_tx));
     }
 }
 
@@ -121,7 +194,7 @@ async fn process_event(
         }
     };
     if !is_our_life {
-        journal_and_fan_out(session_id, &life.shared, event).await;
+        journal_without_fanout(&life.shared, event).await;
         return;
     }
 
@@ -133,7 +206,7 @@ async fn process_event(
             Some(record) if record.incarnation == generation => record,
             _ => {
                 drop(registry);
-                journal_and_fan_out(session_id, &life.shared, event).await;
+                journal_without_fanout(&life.shared, event).await;
                 return;
             }
         };
@@ -293,7 +366,9 @@ pub(crate) async fn handle_child_exit_for_test(
     agents: &AgentSessions,
     broadcast_tx: &broadcast::Sender<String>,
 ) {
-    handle_child_exit(life, agents, broadcast_tx).await
+    if let Some(code) = prepare_child_exit(life, agents).await {
+        publish_child_exit(life, code, agents, broadcast_tx).await;
+    }
 }
 
 /// Test-only entry point for the reader's per-event handling.
@@ -307,11 +382,7 @@ pub(crate) async fn process_event_for_test(
     process_event(life, event, agents, broadcast_tx).await
 }
 
-async fn handle_child_exit(
-    life: &ReaderLife,
-    agents: &AgentSessions,
-    broadcast_tx: &broadcast::Sender<String>,
-) {
+async fn prepare_child_exit(life: &ReaderLife, agents: &AgentSessions) -> Option<i32> {
     let session_id = life.session_id.as_str();
     let generation = life.incarnation;
     // Phase 1 (under the lock): verify the incarnation and take everything
@@ -342,7 +413,7 @@ async fn handle_child_exit(
             )),
         }
     }) else {
-        return;
+        return None;
     };
 
     // Phase 2 (off-lock): close stdin + handoff dups, then reap bounded.
@@ -357,71 +428,67 @@ async fn handle_child_exit(
         None => -1,
     };
 
-    // Phase 3 (relock): revalidate the incarnation before mutating session
-    // state — a kill/recreate or respawn while we were reaping owns the
-    // record now.
-    let (shared, reason) = {
+    let mut registry = agents.lock().await;
+    match registry.get_mut(session_id) {
+        Some(record) if record.incarnation == generation => {
+            record.exited = true;
+            Some(code)
+        }
+        _ => None,
+    }
+}
+
+async fn publish_child_exit(
+    life: &ReaderLife,
+    code: i32,
+    agents: &AgentSessions,
+    broadcast_tx: &broadcast::Sender<String>,
+) {
+    let session_id = life.session_id.as_str();
+    let (reason, publication) = {
         let mut registry = agents.lock().await;
         let Some(record) = registry.get_mut(session_id) else {
             return;
         };
-        if record.incarnation != generation {
-            log_info(format_args!(
-                "[agent] session {} changed incarnation during exit reaping; skipping state update",
-                session_id
-            ));
+        if record.incarnation != life.incarnation {
             return;
         }
-        record.exited = true;
         let interrupted = std::mem::replace(&mut record.interrupt_requested, false);
         set_status(record, broadcast_tx, session_id, SessionStatus::Idle, None);
         let per_turn = matches!(record.turn_model, TurnModel::PerTurn);
-        // A user-initiated stop signals the child to exit; surface it as an
-        // interruption (never a crash) and end the turn so the UI stops showing
-        // activity. Per-turn sessions stay usable — the next message respawns
-        // the provider.
         let reason = if interrupted {
             Some(SessionEndReason::Interrupted)
         } else if per_turn && code == 0 {
-            // Per-turn providers exit after every turn by design — process
-            // churn is an implementation detail, not a session event, so this
-            // exit publishes NO terminal Exit.
             None
         } else if code == 0 {
             Some(SessionEndReason::Completed)
         } else {
             Some(SessionEndReason::Crashed)
         };
-        // Decide publication once, here, and record it: a later Kill needs to
-        // tell "the process exited" from "the session already announced its
-        // death", and re-deriving that predicate at the Kill site is exactly
-        // how the two drifted apart. Every early return above this line leaves
-        // the flag untouched (still false) — correct, since none published.
-        record.exit_published = reason.is_some();
-        (life.shared.clone(), reason)
+        let Some(reason) = reason else {
+            return;
+        };
+        (reason, record.exit_publication.clone())
     };
-    let Some(reason) = reason else {
-        return;
-    };
-    journal_and_fan_out(
+
+    let _ = publish_terminal_exit(
         session_id,
-        &shared,
+        &life.shared,
+        &publication,
         AgentEvent::SessionEnded {
             reason,
             exit_code: Some(code),
             message: None,
         },
-    )
-    .await;
-    broadcast_event(
-        broadcast_tx,
-        &Event::Exit {
+        Event::Exit {
             session_id: session_id.to_string(),
             code,
             resume_session_id: None,
             killed: false,
         },
-    );
+        broadcast_tx,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -432,17 +499,71 @@ mod tests {
     async fn life_for(agents: &AgentSessions, session_id: &str, incarnation: u64) -> ReaderLife {
         let registry = agents.lock().await;
         let record = registry.get(session_id).expect("session present");
-        ReaderLife {
-            session_id: session_id.to_string(),
+        ReaderLife::new(
+            session_id.to_string(),
             incarnation,
-            adapter: record.adapter.clone(),
-            shared: record.shared.clone(),
-        }
+            record.adapter.clone(),
+            record.shared.clone(),
+        )
     }
 
     use std::collections::HashMap;
     use std::sync::Arc;
+    use tokio::io::AsyncBufReadExt;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn stdout_eof_waits_until_stderr_has_drained() {
+        let completion = ReaderCompletion::new();
+        assert_eq!(completion.finish_stdout(7), None);
+        assert_eq!(completion.finish_stderr(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn stale_life_journals_without_reaching_replacement_writers() {
+        let dir = crate::tests::temp_daemon_dir("stale-fanout");
+        let agents: AgentSessions = Arc::new(Mutex::new(Default::default()));
+        let mut record = crate::tests::agent_record_fixture(&dir, "stale-fanout");
+        record.incarnation = 2;
+
+        let (client, daemon) = tokio::net::UnixStream::pair().expect("socket pair");
+        let (client_read, _) = client.into_split();
+        let (_, daemon_write) = daemon.into_split();
+        record
+            .shared
+            .lock()
+            .await
+            .writers
+            .push(Arc::new(Mutex::new(daemon_write)));
+        agents
+            .lock()
+            .await
+            .insert("stale-fanout".to_string(), record);
+
+        let stale = life_for(&agents, "stale-fanout", 1).await;
+        let (broadcast_tx, _) = broadcast::channel(8);
+        process_event(
+            &stale,
+            AgentEvent::Diagnostic {
+                message: "old-life".to_string(),
+            },
+            &agents,
+            &broadcast_tx,
+        )
+        .await;
+
+        let mut lines = tokio::io::BufReader::new(client_read).lines();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), lines.next_line())
+                .await
+                .is_err(),
+            "stale output must not fan out through replacement writers"
+        );
+        assert!(stale.shared.lock().await.journal.events_from(0).iter().any(
+            |entry| matches!(&entry.event, AgentEvent::Diagnostic { message } if message == "old-life")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A reader that outlives a respawn must not clobber the newer child's
     /// state: exit bookkeeping from a superseded generation is ignored, while
@@ -450,20 +571,22 @@ mod tests {
     #[tokio::test]
     async fn stale_generation_exit_does_not_clobber_current_child() {
         let dir = crate::tests::temp_daemon_dir("reader-gen");
-        let agents: AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+        let agents: AgentSessions = Arc::new(Mutex::new(Default::default()));
         let mut record = crate::tests::agent_record_fixture(&dir, "sess");
         record.incarnation = 2;
         record.exited = false;
         agents.lock().await.insert("sess".to_string(), record);
         let (broadcast_tx, _rx) = broadcast::channel(16);
 
-        handle_child_exit(&life_for(&agents, "sess", 1).await, &agents, &broadcast_tx).await;
+        handle_child_exit_for_test(&life_for(&agents, "sess", 1).await, &agents, &broadcast_tx)
+            .await;
         assert!(
             !agents.lock().await.get("sess").unwrap().exited,
             "a stale reader's exit must not mark the live child exited"
         );
 
-        handle_child_exit(&life_for(&agents, "sess", 2).await, &agents, &broadcast_tx).await;
+        handle_child_exit_for_test(&life_for(&agents, "sess", 2).await, &agents, &broadcast_tx)
+            .await;
         assert!(
             agents.lock().await.get("sess").unwrap().exited,
             "the owning generation's exit must be applied"
@@ -476,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn stale_generation_events_journal_without_mutating_status() {
         let dir = crate::tests::temp_daemon_dir("reader-gen-status");
-        let agents: AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+        let agents: AgentSessions = Arc::new(Mutex::new(Default::default()));
         let mut record = crate::tests::agent_record_fixture(&dir, "sess");
         record.incarnation = 2;
         record.status = SessionStatus::Busy;
@@ -527,7 +650,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn lingering_child_is_reaped_without_holding_the_registry_lock() {
         let dir = crate::tests::temp_daemon_dir("reader-linger");
-        let agents: AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+        let agents: AgentSessions = Arc::new(Mutex::new(Default::default()));
         let (broadcast_tx, _rx) = broadcast::channel(16);
 
         // Child closes stdout immediately, then lives on.
@@ -570,7 +693,7 @@ mod tests {
             acquisitions
         });
 
-        handle_child_exit(
+        handle_child_exit_for_test(
             &life_for(&agents, "linger", incarnation).await,
             &agents,
             &broadcast_tx,

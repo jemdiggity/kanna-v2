@@ -163,7 +163,8 @@ pub(crate) async fn run_daemon() {
     let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
     let lost_handoff_sessions: LostHandoffSessions = Arc::new(Mutex::new(handoff_result.lost));
-    let agent_sessions: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agent_sessions: kanna_daemon::agent::AgentSessions =
+        Arc::new(Mutex::new(Default::default()));
     let recovery_manager = RecoveryManager::start().await;
     let (broadcast_tx, _) = broadcast::channel::<String>(256);
     let mut adopted_pty_readers = Vec::new();

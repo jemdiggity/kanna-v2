@@ -79,13 +79,13 @@ pub async fn handle_spawn_agent(
             .await;
             return;
         }
-        if registry.contains_key(&session_id) {
+        if !registry.can_create(&session_id) {
             drop(registry);
             reply(
                 &writer,
                 &agent_error(
                     protocol::ErrorCode::SessionAlreadyExists,
-                    format!("agent session already exists: {session_id}"),
+                    format!("agent session already exists or is tearing down: {session_id}"),
                 ),
             )
             .await;
@@ -111,7 +111,7 @@ pub async fn handle_spawn_agent(
                 session_allowed_tools: HashSet::new(),
                 pending_permissions: HashSet::new(),
                 exited: true,
-                exit_published: false,
+                exit_publication: agent::ExitPublication::new(),
                 interrupt_requested: false,
                 turn_model,
                 created_at: std::time::Instant::now(),
@@ -252,12 +252,12 @@ pub(crate) async fn install_respawned_child(
                     stale.close();
                 }
                 record.handoff_fds = handoff_fds;
-                InstallOutcome::Installed(super::readers::ReaderLife {
-                    session_id: session_id.to_string(),
+                InstallOutcome::Installed(super::readers::ReaderLife::new(
+                    session_id.to_string(),
                     incarnation,
-                    adapter: record.adapter.clone(),
-                    shared: record.shared.clone(),
-                })
+                    record.adapter.clone(),
+                    record.shared.clone(),
+                ))
             }
             other => {
                 // Roll the reservation back when the ONLY reason we lost is
@@ -502,6 +502,7 @@ pub async fn handle_agent_input(
             // ABA).
             record.spawning = true;
             record.incarnation = agent::next_agent_incarnation();
+            record.exit_publication = agent::ExitPublication::new();
             Plan::Respawn(spec, record.incarnation)
         };
         let shared = registry.get(&session_id).map(|r| r.shared.clone());

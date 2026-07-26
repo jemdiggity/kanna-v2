@@ -128,6 +128,12 @@ async fn fan_out(writers: &mut Vec<AgentClientWriter>, event: &Event) {
     *writers = alive;
 }
 
+/// Append stale-life output to the authoritative sequence without delivering
+/// it through writers now owned by a replacement incarnation.
+async fn journal_without_fanout(shared: &Arc<Mutex<AgentShared>>, event: AgentEvent) -> u64 {
+    shared.lock().await.journal.append(event).seq
+}
+
 /// Append an event to the session's journal and stream it to attached
 /// clients. Returns the assigned seq.
 async fn journal_and_fan_out(
@@ -144,6 +150,49 @@ async fn journal_and_fan_out(
     };
     fan_out(&mut sh.writers, &wire).await;
     entry.seq
+}
+
+async fn publish_terminal_exit(
+    session_id: &str,
+    shared: &Arc<Mutex<AgentShared>>,
+    publication: &kanna_daemon::agent::ExitPublication,
+    journal_event: AgentEvent,
+    exit_event: Event,
+    broadcast_tx: &broadcast::Sender<String>,
+) -> bool {
+    publish_terminal_exit_with_hook(
+        session_id,
+        shared,
+        publication,
+        journal_event,
+        exit_event,
+        broadcast_tx,
+        || async {},
+    )
+    .await
+}
+
+async fn publish_terminal_exit_with_hook<F, Fut>(
+    session_id: &str,
+    shared: &Arc<Mutex<AgentShared>>,
+    publication: &kanna_daemon::agent::ExitPublication,
+    journal_event: AgentEvent,
+    exit_event: Event,
+    broadcast_tx: &broadcast::Sender<String>,
+    after_delivery: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if !publication.try_claim() {
+        return false;
+    }
+    journal_and_fan_out(session_id, shared, journal_event).await;
+    broadcast_event(broadcast_tx, &exit_event);
+    after_delivery().await;
+    publication.complete();
+    true
 }
 
 fn set_status(
@@ -198,5 +247,60 @@ mod tests {
                 ..
             } if prompt == "Ready for review"
         ));
+    }
+
+    #[tokio::test]
+    async fn terminal_exit_becomes_published_only_after_all_delivery_steps() {
+        let data_dir =
+            std::env::temp_dir().join(format!("kanna-exit-publication-{}", std::process::id()));
+        let shared = kanna_daemon::agent::shared_agent_state(&data_dir, "publish-order");
+        let publication = kanna_daemon::agent::ExitPublication::new();
+        let publication_in_task = publication.clone();
+        let shared_in_task = shared.clone();
+        let (broadcast_tx, mut broadcast_rx) = broadcast::channel(8);
+        let broadcast_in_task = broadcast_tx.clone();
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let publisher = tokio::spawn(async move {
+            publish_terminal_exit_with_hook(
+                "publish-order",
+                &shared_in_task,
+                &publication_in_task,
+                AgentEvent::SessionEnded {
+                    reason: kanna_agent_protocol::SessionEndReason::Completed,
+                    exit_code: Some(0),
+                    message: None,
+                },
+                Event::Exit {
+                    session_id: "publish-order".to_string(),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+                &broadcast_in_task,
+                || async move {
+                    let _ = reached_tx.send(());
+                    let _ = release_rx.await;
+                },
+            )
+            .await
+        });
+
+        reached_rx.await.expect("delivery reached test fence");
+        assert!(!publication.is_published());
+        assert!(shared
+            .lock()
+            .await
+            .journal
+            .events_from(0)
+            .iter()
+            .any(|entry| matches!(entry.event, AgentEvent::SessionEnded { .. })));
+        let broadcast = broadcast_rx.recv().await.expect("Exit was broadcast");
+        assert!(broadcast.contains("\"type\":\"Exit\""));
+
+        release_tx.send(()).expect("release publisher");
+        assert!(publisher.await.expect("publisher task"));
+        assert!(publication.is_published());
     }
 }
