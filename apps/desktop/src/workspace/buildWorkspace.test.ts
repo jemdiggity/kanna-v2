@@ -152,6 +152,63 @@ describe("buildWorkspace", () => {
     expect(result.tasks[0].blockedByTaskIds).toEqual([]);
   });
 
+  it("updates blocker freshness without replacing an equal-precedence routed item", () => {
+    const firstCloudItem = item({
+      id: "cloud:first:repo-remote:blocked-owner",
+      repo_id: "cloud:repo-remote",
+      prompt: "Selected cloud route",
+      updated_at: "2026-07-25T00:00:00.000Z",
+    });
+    const newerCloudItem = item({
+      id: "cloud:second:repo-remote:blocked-owner",
+      repo_id: "cloud:repo-remote",
+      prompt: "Newer owner metadata",
+      updated_at: "2026-07-25T00:01:00.000Z",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [firstCloudItem, newerCloudItem],
+        terminalRefs: {
+          [firstCloudItem.id]: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "blocked-owner",
+            transport: "cloud",
+          },
+          [newerCloudItem.id]: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "blocked-owner",
+            transport: "cloud",
+          },
+        },
+        blockedByTaskIds: {
+          [firstCloudItem.id]: ["blocker-owner"],
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      id: firstCloudItem.id,
+      item: {
+        id: firstCloudItem.id,
+        prompt: "Selected cloud route",
+      },
+      blockedByTaskIds: [],
+      terminal: {
+        kind: "cloud",
+        remoteRef: {
+          ownerLocalTaskId: "blocked-owner",
+          transport: "cloud",
+        },
+      },
+    });
+  });
+
   it("keeps local blocker state authoritative for a matching remote task", () => {
     const localItem = item({ id: "blocked-owner" });
     const cloudItem = item({

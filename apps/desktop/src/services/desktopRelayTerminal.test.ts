@@ -321,6 +321,7 @@ describe("createDesktopRelayTerminalClient", () => {
     await expect(advancePromise).resolves.toBeUndefined();
     await expect(markReadPromise).resolves.toBeUndefined();
   });
+
   it("reads a remote task file through the relay tunnel", async () => {
     const socket = new FakeSocket();
     const client = createDesktopRelayTerminalClient({
@@ -398,6 +399,7 @@ describe("createDesktopRelayTerminalClient", () => {
     await expect(missingPromise).rejects.toThrow("Remote task file read failed with HTTP 404.");
     await expect(malformedPromise).rejects.toThrow("Remote task file response was malformed.");
   });
+
   it("rejects a blocked owner response with its message", async () => {
     const socket = new FakeSocket();
     const client = createDesktopRelayTerminalClient({
