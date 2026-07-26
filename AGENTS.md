@@ -171,6 +171,15 @@ Worktrees are fully isolated from the main branch instance:
 
 This means the main Kanna app and a dev worktree can run simultaneously without port or data conflicts.
 
+### kd installation cache
+
+`./kd` and `kd-mcp` install a self-contained bundle under
+`~/Library/Caches/kanna/tools/kd/<input-hash>/`. Worktrees with identical
+`tools/kd` sources and resolved kd dependencies share that immutable bundle;
+committed or dirty kd source changes select a new hash. Parallel cold launches
+serialize on one build. The cached code still runs with the invoking
+worktree's cwd, ports, database, daemon directory, and tmux identity.
+
 ### Rust build cache
 
 Kanache worktree warming is enabled by default for local macOS development. Kanna-managed worktree setup runs `./kd rust-cache warm` after environment sync. Kanache copies compatible Cargo intermediates from a clean worktree with the same Rust build-input identity into the destination's private `.build/cargo-build`, including across TypeScript/mobile/docs-only commits. Kd excludes the generated `apps/desktop/src-tauri/binaries` staging root identically when recording and warming exclusion-aware manifests so final sidecars remain private to the producing build. A true legacy manifest with neither the input hash nor exclusions field can still warm only an exact-HEAD worktree with an empty requested exclusion set; reseed it to gain exclusion-aware cross-commit matching. A missing, incompatible, or refused donor is a normal cache miss and falls back to a cold private build.
