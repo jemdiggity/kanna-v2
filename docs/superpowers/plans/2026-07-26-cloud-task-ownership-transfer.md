@@ -1,6 +1,6 @@
 # Cloud Task Ownership Transfer Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use completion checkboxes for tracking.
 
 **Goal:** Let signed-in Kanna desktops automatically push and pull task ownership over the cloud relay without manual machine pairing.
 
@@ -34,7 +34,7 @@
 - Modify: `apps/desktop/src/services/desktopServerClient.ts`
 - Modify: `apps/desktop/src/services/desktopServerClient.test.ts`
 
-- [ ] **Step 1: Write failing migration and API tests**
+- [x] **Step 1: Write failing migration and API tests**
 
 Add `030_pipeline_item_cloud_task_id` to `CURRENT_SCHEMA_MIGRATIONS`. In
 `crates/kanna-server/src/db/tests.rs`, open a migrated database, insert a task,
@@ -68,7 +68,7 @@ Assert `pipeline_item.cloud_task_id` becomes `task-source-stable`, and assert a
 second request with a different value returns `409` rather than silently
 changing an established identity.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -79,7 +79,7 @@ cargo test --manifest-path crates/kanna-server/Cargo.toml cloud_task_identity
 
 Expected: FAIL because the migration, column, and route do not exist.
 
-- [ ] **Step 3: Add the migration, snapshot field, and write-once API**
+- [x] **Step 3: Add the migration, snapshot field, and write-once API**
 
 Add:
 
@@ -130,7 +130,7 @@ export async function setDesktopTaskCloudIdentity(
 }
 ```
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run:
 
@@ -141,7 +141,7 @@ pnpm --dir apps/desktop test -- src/services/desktopServerClient.test.ts
 
 Expected: all focused tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/kanna-server packages/db/src/schema.ts apps/desktop/src/types/kanna.ts apps/desktop/src/services/desktopServerClient.ts apps/desktop/src/services/desktopServerClient.test.ts
@@ -166,7 +166,7 @@ git commit -m "feat(cloud): persist stable task ownership identity"
 - Modify: `services/relay/test/cloudTaskPublication.test.ts`
 - Modify: `services/firebase-functions/src/types.ts`
 
-- [ ] **Step 1: Write failing payload and publisher tests**
+- [x] **Step 1: Write failing payload and publisher tests**
 
 Add a transfer payload test asserting:
 
@@ -205,7 +205,7 @@ Add relay validator tests accepting `none`, `outgoing`, `incoming`, and
 `finalization_pending`, and rejecting an `outgoing` state with a null
 `transferId` or destination.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -218,7 +218,7 @@ pnpm --dir services/relay test -- cloudTaskPublication.test.ts
 Expected: FAIL on missing `cloud_task_id` and the relay's current
 `transfer.state must be none` guard.
 
-- [ ] **Step 3: Extend the payload, import order, and snapshot projection**
+- [x] **Step 3: Extend the payload, import order, and snapshot projection**
 
 Extend the portable task payload:
 
@@ -281,11 +281,11 @@ Update relay validation so each non-`none` state requires a transfer id,
 source desktop id, and destination desktop id. Preserve the authenticated owner
 desktop check.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the four commands from Step 2. Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/desktop/src/utils apps/desktop/src/stores apps/desktop/src/types/kanna.ts packages/db/src/schema.ts crates/kanna-server/src services/relay services/firebase-functions/src/types.ts
@@ -312,7 +312,7 @@ git commit -m "feat(transfer): publish portable cloud ownership state"
 - Modify: `apps/desktop/src/services/desktopCloudTaskIndex.ts`
 - Modify: `apps/desktop/src/services/desktopCloudTaskIndex.test.ts`
 
-- [ ] **Step 1: Write failing identity round-trip tests**
+- [x] **Step 1: Write failing identity round-trip tests**
 
 Add protocol serialization coverage for:
 
@@ -348,7 +348,7 @@ transfer: {
 Add cloud index mapping coverage asserting the desktop metadata is returned as
 `DesktopCloudTransferMachine`.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -360,7 +360,7 @@ pnpm --dir apps/desktop test -- src/services/desktopCloudTaskIndex.test.ts
 
 Expected: FAIL because identity is not exposed or published.
 
-- [ ] **Step 3: Expose and publish non-secret identity**
+- [x] **Step 3: Expose and publish non-secret identity**
 
 Add `ControlRequest::GetLocalIdentity` and
 `ControlResponse::GetLocalIdentity`, backed by:
@@ -407,7 +407,7 @@ export interface DesktopCloudTransferMachine {
 The Firestore subscription must derive these records from the same desktop
 documents already used to subscribe to nested tasks.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the three commands from Step 2 plus:
 
@@ -417,7 +417,7 @@ cargo test --manifest-path crates/kanna-server/Cargo.toml cloud_transfer_identit
 
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/task-transfer apps/desktop/src-tauri apps/desktop/src/services crates/kanna-server/src services/relay
@@ -437,7 +437,7 @@ git commit -m "feat(cloud): publish desktop transfer identity"
 - Modify: `crates/kanna-server/src/config.rs`
 - Modify: `apps/desktop/src-tauri/src/commands/mobile/config.rs`
 
-- [ ] **Step 1: Write failing service routing tests**
+- [x] **Step 1: Write failing service routing tests**
 
 In relay integration tests, authenticate two desktops under one user and assert:
 
@@ -462,7 +462,7 @@ user's desktop.
 In Rust, deserialize `TunnelEstablish` with `service: TaskTransfer` and assert
 the config parser requires a loopback `transfer_port`.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -473,7 +473,7 @@ cargo test --manifest-path crates/kanna-server/Cargo.toml relay_client
 
 Expected: FAIL because service is ignored/unknown.
 
-- [ ] **Step 3: Implement the fixed service discriminator**
+- [x] **Step 3: Implement the fixed service discriminator**
 
 Add:
 
@@ -506,7 +506,7 @@ Add `transfer_port: u16` to `Config`, write it from
 `KANNA_TRANSFER_PORT`, and reject zero/non-loopback forwarding targets.
 Keep the current KSP path unchanged for an absent/default service.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the two commands from Step 2 plus:
 
@@ -516,7 +516,7 @@ pnpm --dir packages/stream-client test
 
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add services/relay packages/stream-client crates/kanna-server apps/desktop/src-tauri/src/commands/mobile/config.rs
@@ -532,7 +532,7 @@ git commit -m "feat(relay): route service-scoped desktop tunnels"
 - Modify: `crates/kanna-server/src/lib.rs`
 - Modify: `crates/kanna-server/Cargo.toml`
 
-- [ ] **Step 1: Write a failing bridge integration test**
+- [x] **Step 1: Write a failing bridge integration test**
 
 Start a loopback `TcpListener`, create an in-memory WebSocket pair, and assert
 bytes pass in both directions:
@@ -561,7 +561,7 @@ async fn task_transfer_tunnel_bridges_binary_frames_and_tcp_bytes() {
 }
 ```
 
-- [ ] **Step 2: Run test and verify RED**
+- [x] **Step 2: Run test and verify RED**
 
 Run:
 
@@ -571,7 +571,7 @@ cargo test --manifest-path crates/kanna-server/Cargo.toml task_transfer_tunnel_b
 
 Expected: FAIL because the bridge module does not exist.
 
-- [ ] **Step 3: Implement bounded bidirectional forwarding**
+- [x] **Step 3: Implement bounded bidirectional forwarding**
 
 Before opening the sidecar bridge, consume and validate the relay's
 `tunnel_ready` text control frame for the expected tunnel id and
@@ -602,7 +602,7 @@ Because each send/write is awaited, there is no unbounded queue. In
 `TunnelService::TaskTransfer` to this bridge using only
 `127.0.0.1:config.transfer_port`.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run:
 
@@ -613,7 +613,7 @@ cargo test --manifest-path crates/kanna-server/Cargo.toml relay
 
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/kanna-server
@@ -630,7 +630,7 @@ git commit -m "feat(server): bridge relay tunnels to task transfer"
 - Modify: `Cargo.lock`
 - Modify: `apps/desktop/src/tauri-mock.ts`
 
-- [ ] **Step 1: Write failing proxy handshake and cleanup tests**
+- [x] **Step 1: Write failing proxy handshake and cleanup tests**
 
 Use a local `tokio_tungstenite` test relay and assert:
 
@@ -651,7 +651,7 @@ The expected request is:
 }
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -661,7 +661,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml cloud_transfer_prox
 
 Expected: FAIL because the module and commands are absent.
 
-- [ ] **Step 3: Implement proxy state and Tauri commands**
+- [x] **Step 3: Implement proxy state and Tauri commands**
 
 Add `tokio-tungstenite` and `futures-util` using the same vendored versions as
 `kanna-server`. Create managed state:
@@ -691,11 +691,11 @@ return the resulting endpoint. Reuse an existing proxy only when desktop id,
 relay URL, and auth generation match. Implement the same awaited 64 KiB binary
 bridge as the destination.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the command from Step 2. Expected: all proxy tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/desktop/src-tauri Cargo.lock apps/desktop/src/tauri-mock.ts
@@ -719,7 +719,7 @@ git commit -m "feat(desktop): proxy cloud transfer peers through relay"
 - Modify: `apps/desktop/src-tauri/src/commands/transfer.rs`
 - Modify: `apps/desktop/src-tauri/src/lib.rs`
 
-- [ ] **Step 1: Write failing external-peer tests**
+- [x] **Step 1: Write failing external-peer tests**
 
 Add runtime coverage:
 
@@ -748,7 +748,7 @@ immediately invalidates the previous key. Assert no record is written under
 both a LAN endpoint and a cloud-proxy endpoint and that an outgoing reservation
 pins the requested route for its lifetime.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -758,7 +758,7 @@ cargo test --manifest-path crates/task-transfer/Cargo.toml external_peer
 
 Expected: FAIL because the API does not exist.
 
-- [ ] **Step 3: Add the in-memory peer registry and control commands**
+- [x] **Step 3: Add the in-memory peer registry and control commands**
 
 Define:
 
@@ -808,7 +808,7 @@ clear_external_transfer_peers
 Validate loopback endpoints, protocol version `1`, nonblank identity fields,
 and a parseable X25519 public key.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run:
 
@@ -819,7 +819,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml transfer_sidecar
 
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/task-transfer apps/desktop/src-tauri
@@ -844,7 +844,7 @@ git commit -m "feat(transfer): trust session-scoped cloud peers"
 - Modify: `apps/desktop/src/utils/taskTransfer.ts`
 - Modify: `apps/desktop/src/utils/taskTransfer.test.ts`
 
-- [ ] **Step 1: Write failing pull request protocol tests**
+- [x] **Step 1: Write failing pull request protocol tests**
 
 Pair or externally trust two runtimes, then:
 
@@ -865,7 +865,7 @@ Repeat the request and assert the same request id is returned while pending and
 only one event is emitted. Add rejection tests for unknown peer, mismatched
 public key, blank/control-character task id, and self-request.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -875,7 +875,7 @@ cargo test --manifest-path crates/task-transfer/Cargo.toml task_pull
 
 Expected: FAIL because pull protocol variants do not exist.
 
-- [ ] **Step 3: Implement sealed, idempotent pull initiation**
+- [x] **Step 3: Implement sealed, idempotent pull initiation**
 
 Add `PeerRequest::RequestTaskPull` carrying requester id and sealed:
 
@@ -912,7 +912,7 @@ export interface TaskPullRequestedEvent {
 }
 ```
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the command from Step 2 plus:
 
@@ -922,7 +922,7 @@ pnpm --dir apps/desktop test -- src/utils/taskTransfer.test.ts
 
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/task-transfer apps/desktop/src-tauri apps/desktop/src/utils
@@ -939,7 +939,7 @@ git commit -m "feat(transfer): request remote task ownership pull"
 - Modify: `apps/desktop/src/composables/useAppCloudWorkspace.test.ts`
 - Modify: `apps/desktop/src/App.vue`
 
-- [ ] **Step 1: Write failing machine merge and auth-lifecycle tests**
+- [x] **Step 1: Write failing machine merge and auth-lifecycle tests**
 
 Test:
 
@@ -989,7 +989,7 @@ clear_external_transfer_peers
 clear_cloud_transfer_proxies
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -999,7 +999,7 @@ pnpm --dir apps/desktop test -- src/services/desktopTransferMachines.test.ts src
 
 Expected: FAIL because the machine catalog and synchronization do not exist.
 
-- [ ] **Step 3: Implement cloud machine synchronization**
+- [x] **Step 3: Implement cloud machine synchronization**
 
 Define:
 
@@ -1031,11 +1031,11 @@ snapshot.
 Expose `transferMachines` to `App.vue` and pass it into
 `useAppTaskTransfer`. Do not add cloud machines to `Pair Machine`.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the command from Step 2. Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/desktop/src/services apps/desktop/src/composables/useAppCloudWorkspace.ts apps/desktop/src/composables/useAppCloudWorkspace.test.ts apps/desktop/src/App.vue
@@ -1060,7 +1060,7 @@ git commit -m "feat(cloud): auto-register signed-in transfer machines"
 - Modify: `apps/desktop/src/stores/transfer.ts`
 - Modify: `apps/desktop/src/stores/kannaTransfer.test.ts`
 
-- [ ] **Step 1: Write failing push/pull behavior tests**
+- [x] **Step 1: Write failing push/pull behavior tests**
 
 Add navigation tests asserting:
 
@@ -1092,7 +1092,7 @@ store.pushTaskToPeer("task-source", "peer-requester");
 Reject closed, missing, remote-only, or already-transferring source tasks
 without starting push.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -1103,7 +1103,7 @@ pnpm --dir apps/desktop test -- src/composables/useAppTaskTransfer.test.ts src/c
 Expected: FAIL because pull UI/event handling is absent and push only lists
 sidecar LAN peers.
 
-- [ ] **Step 3: Implement unified actions and single-flight behavior**
+- [x] **Step 3: Implement unified actions and single-flight behavior**
 
 Change the picker to consume `TransferMachine[]`; cloud machines have
 `trusted: true` and subtitles `Cloud` or `Nearby · Cloud`. On push, pass the
@@ -1144,11 +1144,11 @@ once with `transport: "cloud"` before inserting a transfer row. Pass the cloud
 source/destination desktop ids into the transfer row and portable payload.
 Never retry after a row exists or commit/finalization has begun.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the command from Step 2. Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/desktop/src
@@ -1164,7 +1164,7 @@ git commit -m "feat(desktop): push and pull task ownership across machines"
 - Modify: `apps/desktop/tests/e2e/helpers/twoInstance.ts`
 - Modify: `services/relay/test/integration.test.ts`
 
-- [ ] **Step 1: Write the end-to-end scenarios**
+- [x] **Step 1: Write the end-to-end scenarios**
 
 Run two desktop instances signed into the same Firebase emulator user with
 `KANNA_TRANSFER_DISCOVERY=registry`, but separate transfer registry
@@ -1190,7 +1190,7 @@ Add cases that fail destination import before acknowledgment and interrupt
 acknowledgment after import. The former keeps source open; the latter retries
 without creating another destination task.
 
-- [ ] **Step 2: Run E2E and verify RED**
+- [x] **Step 2: Run E2E and verify RED**
 
 Run:
 
@@ -1200,7 +1200,7 @@ pnpm --dir apps/desktop test:e2e -- real/cloud-task-transfer.test.ts
 
 Expected: FAIL at automatic machine discovery or the first cloud transfer.
 
-- [ ] **Step 3: Add only the harness wiring required by the test**
+- [x] **Step 3: Add only the harness wiring required by the test**
 
 Teach `run.ts` that this test needs two app instances, Firebase emulators, and
 the relay. Give each instance:
@@ -1213,7 +1213,7 @@ the relay. Give each instance:
 Extend `transferFlow.ts` with `pullSelectedTaskToThisMachineThroughUi` and
 picker-row helpers. Do not bypass the product UI for push/pull actions.
 
-- [ ] **Step 4: Run E2E and verify GREEN**
+- [x] **Step 4: Run E2E and verify GREEN**
 
 Run:
 
@@ -1225,7 +1225,7 @@ pnpm --dir apps/desktop test:e2e -- real/local-transfer-repo-acquisition.test.ts
 
 Expected: cloud push/pull and existing LAN transfer tests all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/desktop/tests/e2e services/relay/test/integration.test.ts
@@ -1238,7 +1238,7 @@ git commit -m "test(e2e): prove cloud task ownership transfer"
 - Modify: `docs/superpowers/specs/2026-07-25-cloud-task-ownership-transfer-design.md` only if implementation names differ
 - Modify: `docs/superpowers/plans/2026-07-26-cloud-task-ownership-transfer.md` to mark completed checkboxes
 
-- [ ] **Step 1: Run focused subsystem suites**
+- [x] **Step 1: Run focused subsystem suites**
 
 ```bash
 cargo test --manifest-path crates/task-transfer/Cargo.toml
@@ -1250,7 +1250,7 @@ pnpm --dir apps/desktop test -- src
 
 Expected: all PASS.
 
-- [ ] **Step 2: Run canonical repository verification**
+- [x] **Step 2: Run canonical repository verification**
 
 ```bash
 pnpm test
@@ -1259,7 +1259,7 @@ pnpm test
 
 Expected: all PASS.
 
-- [ ] **Step 3: Run final transfer E2E matrix**
+- [x] **Step 3: Run final transfer E2E matrix**
 
 ```bash
 pnpm --dir apps/desktop test:e2e -- real/cloud-task-transfer.test.ts
@@ -1270,7 +1270,7 @@ pnpm --dir apps/desktop test:e2e -- real/local-transfer-source-handoff-failure.t
 
 Expected: all PASS.
 
-- [ ] **Step 4: Reconcile docs and inspect the final diff**
+- [x] **Step 4: Reconcile docs and inspect the final diff**
 
 ```bash
 rg -n "T[B]D|T[O]DO|implement lat[e]r" docs/superpowers/specs/2026-07-25-cloud-task-ownership-transfer-design.md docs/superpowers/plans/2026-07-26-cloud-task-ownership-transfer.md
@@ -1281,7 +1281,7 @@ git diff --stat "$(git merge-base HEAD origin/main)"..HEAD
 
 Expected: no placeholders, no whitespace errors, and only in-scope files.
 
-- [ ] **Step 5: Commit plan completion markers if needed**
+- [x] **Step 5: Commit plan completion markers if needed**
 
 ```bash
 git add docs/superpowers/specs/2026-07-25-cloud-task-ownership-transfer-design.md docs/superpowers/plans/2026-07-26-cloud-task-ownership-transfer.md
