@@ -55,6 +55,56 @@ async fn privileged_task_routes_reject_unauthenticated_non_loopback_clients() {
 }
 
 #[tokio::test]
+async fn transfer_control_plane_rejects_unauthenticated_non_loopback_cors_reads_and_mutations() {
+    let app =
+        super::test_router_with_seed("desktop-private-transfers", "Private Transfers Mac", |db| {
+            db.insert_test_task_transfer(
+                "transfer-private",
+                "incoming",
+                "pending",
+                Some(r#"{"secret":"transfer-payload"}"#),
+            )
+            .unwrap();
+        });
+
+    for (method, path) in [
+        (axum::http::Method::GET, "/v1/transfers/incoming/pending"),
+        (
+            axum::http::Method::POST,
+            "/v1/transfers/transfer-private/actions/reject",
+        ),
+    ] {
+        let mut request = direct_lan_request(method, path);
+        request.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("https://hostile.example"),
+        );
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated cross-origin direct-LAN request reached {path}",
+        );
+    }
+
+    let loopback_list = app
+        .oneshot(
+            Request::get("/v1/transfers/incoming/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loopback_list.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(loopback_list.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(list["transfers"][0]["id"], "transfer-private");
+    assert_eq!(list["transfers"][0]["status"], "pending");
+}
+
+#[tokio::test]
 async fn privileged_task_access_preserves_paired_loopback_and_authenticated_tunnel_dispatch() {
     let state =
         super::test_state_with_seed("desktop-private-positive", "Private Positive Mac", |_| {});

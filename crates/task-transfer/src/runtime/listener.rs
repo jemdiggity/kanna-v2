@@ -254,31 +254,26 @@ async fn handle_connection(
             source_peer_id,
             sealed_payload,
         }) => match async {
-            let source_peer = find_peer(
-                &context.discovery,
-                &context.external_peers,
-                &context.self_peer_id,
+            let authenticated = authenticate_peer_request(
+                &context,
                 &source_peer_id,
-                TransferTransport::Auto,
+                Some(&sealed_payload),
+                "prepare_transfer",
+                &request_id,
             )
             .await?;
-            ensure_peer_is_trusted(
-                &context.registry_root,
-                &context.self_peer_id,
-                &context.external_peers,
+            ensure_authenticated_argument(
+                &authenticated,
+                "source_peer_id",
                 &source_peer_id,
-                &source_peer.public_key,
             )?;
-            let source_public_key = parse_public_key(&source_peer.public_key)?;
-            let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
-            let decrypted_payload = open_json(&identity, &source_public_key, &sealed_payload)?;
-            let source_task_id = decrypted_payload
-                .get("source_task_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol("prepare-transfer payload missing source_task_id".into())
-                })?
-                .to_string();
+            ensure_authenticated_argument(
+                &authenticated,
+                "reserved_target_peer_id",
+                &context.self_peer_id,
+            )?;
+            let source_task_id =
+                authenticated_argument::<String>(&authenticated, "source_task_id")?;
             let mut reservations = context.incoming_reservations.lock().await;
             context
                 .replay_store
@@ -473,6 +468,7 @@ async fn handle_connection(
             request_id,
             transfer_id,
             requester_peer_id,
+            sealed_payload,
         }) => {
             match async {
                 let (reservation, expired) = {
@@ -506,6 +502,29 @@ async fn handle_connection(
                 }
 
                 let requester_peer = trusted_reserved_target(&context, &reservation).await?;
+                let authenticated = authenticate_peer_request(
+                    &context,
+                    &requester_peer_id,
+                    Some(&sealed_payload),
+                    "finalize_transfer",
+                    &request_id,
+                )
+                .await?;
+                ensure_authenticated_argument(
+                    &authenticated,
+                    "requester_peer_id",
+                    &requester_peer_id,
+                )?;
+                ensure_authenticated_argument(
+                    &authenticated,
+                    "transfer_id",
+                    &transfer_id,
+                )?;
+                ensure_authenticated_argument(
+                    &authenticated,
+                    "reserved_target_peer_id",
+                    &requester_peer_id,
+                )?;
 
                 let (tx, rx) = oneshot::channel();
                 let (emit_event, cached) = {
@@ -1206,7 +1225,10 @@ async fn authenticate_peer_request(
 
     let replay_key = format!("{requester_peer_id}\n{expected_action}\n{expected_request_id}");
     let expires_at = now_ms.max(issued_at_unix_ms).saturating_add(freshness_ms);
-    let durable = matches!(expected_action, "close_task" | "advance_task_stage");
+    let durable = matches!(
+        expected_action,
+        "close_task" | "advance_task_stage" | "prepare_transfer" | "finalize_transfer"
+    );
     let expired_durable = {
         let mut authenticated_requests = context.authenticated_peer_requests.lock().await;
         let expired = authenticated_requests

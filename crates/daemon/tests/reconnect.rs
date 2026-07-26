@@ -883,6 +883,180 @@ fn test_kill_delivers_killed_exit_to_attached_clients_and_subscribers() {
     }
 }
 
+#[test]
+fn observe_snapshot_registration_is_ordered_before_a_concurrent_kill_exit() {
+    let daemon = DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_REGISTRATION_PAUSE_MS", "250")]);
+    let mut creator = daemon.connect();
+    spawn_shell_session(
+        &mut creator,
+        "sess-observe-kill-race",
+        "printf 'OLD_READY\\r\\n'; sleep 30",
+    );
+
+    let mut observer = daemon.connect();
+    observer.send(&Cmd::ObserveSnapshot {
+        session_id: "sess-observe-kill-race".into(),
+    });
+    wait_for_daemon_log(
+        &daemon,
+        "[registration-test-pause] operation=observe_snapshot session=sess-observe-kill-race",
+        Duration::from_secs(2),
+    );
+
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: "sess-observe-kill-race".into(),
+    });
+
+    assert!(matches!(
+        observer.recv(),
+        Evt::Snapshot { ref session_id, .. } if session_id == "sess-observe-kill-race"
+    ));
+    loop {
+        match observer.recv() {
+            Evt::Exit {
+                session_id, killed, ..
+            } => {
+                assert_eq!(session_id, "sess-observe-kill-race");
+                assert!(killed);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected observer events followed by final Exit, got {other:?}"),
+        }
+    }
+    wait_for_ok(&mut killer, "kill after observe snapshot registration");
+    assert!(
+        observer
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "a stale observer must receive no Snapshot or StatusChanged after its final Exit",
+    );
+}
+
+#[test]
+fn attach_snapshot_registration_is_ordered_before_a_concurrent_kill_exit() {
+    let daemon = DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_REGISTRATION_PAUSE_MS", "250")]);
+    let mut creator = daemon.connect();
+    spawn_shell_session(
+        &mut creator,
+        "sess-attach-kill-race",
+        "printf 'OLD_READY\\r\\n'; sleep 30",
+    );
+
+    let mut attached = daemon.connect();
+    attached.send(&Cmd::AttachSnapshot {
+        session_id: "sess-attach-kill-race".into(),
+        emulate_terminal: false,
+    });
+    wait_for_daemon_log(
+        &daemon,
+        "[registration-test-pause] operation=attach_snapshot session=sess-attach-kill-race",
+        Duration::from_secs(2),
+    );
+
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: "sess-attach-kill-race".into(),
+    });
+
+    assert!(matches!(
+        attached.recv(),
+        Evt::Snapshot { ref session_id, .. } if session_id == "sess-attach-kill-race"
+    ));
+    loop {
+        match attached.recv() {
+            Evt::Exit {
+                session_id, killed, ..
+            } => {
+                assert_eq!(session_id, "sess-attach-kill-race");
+                assert!(killed);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected attached events followed by final Exit, got {other:?}"),
+        }
+    }
+    wait_for_ok(&mut killer, "kill after attach snapshot registration");
+    assert!(
+        attached
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "a stale attachment must receive no Snapshot or StatusChanged after its final Exit",
+    );
+}
+
+#[test]
+fn same_id_respawn_waits_until_kill_finishes_stale_fanout_cleanup() {
+    let daemon =
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_KILL_AFTER_EXIT_PAUSE_MS", "250")]);
+    let mut creator = daemon.connect();
+    spawn_shell_session(&mut creator, "sess-kill-respawn-race", "sleep 30");
+    let mut stale_attached = daemon.connect();
+    attach(&mut stale_attached, "sess-kill-respawn-race");
+
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: "sess-kill-respawn-race".into(),
+    });
+    wait_for_daemon_log(
+        &daemon,
+        "[kill-test-pause] session=sess-kill-respawn-race",
+        Duration::from_secs(2),
+    );
+
+    let mut respawner = daemon.connect();
+    respawner.send(&Cmd::Spawn {
+        session_id: "sess-kill-respawn-race".into(),
+        executable: "/bin/sh".into(),
+        args: vec!["-c".into(), "printf 'NEW_READY\\r\\n'; sleep 30".into()],
+        cwd: "/tmp".into(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    assert!(
+        respawner
+            .recv_with_timeout(Duration::from_millis(100))
+            .is_err(),
+        "same-id respawn must remain queued while killed incarnation cleanup holds lifecycle",
+    );
+
+    wait_for_ok(&mut killer, "kill before same-id respawn");
+    expect_session_created_with_timeout(
+        &mut respawner,
+        "sess-kill-respawn-race",
+        Duration::from_secs(2),
+    );
+    let snapshot = observe_snapshot(&mut respawner, "sess-kill-respawn-race");
+    let mut new_output = snapshot.vt;
+    while !new_output.contains("NEW_READY") {
+        match respawner.recv() {
+            Evt::Output { data, .. } => new_output.push_str(&String::from_utf8_lossy(&data)),
+            Evt::StatusChanged { .. } => {}
+            other => panic!("expected replacement output, got {other:?}"),
+        }
+    }
+
+    loop {
+        match stale_attached.recv() {
+            Evt::Exit { killed, .. } => {
+                assert!(killed);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected stale attachment Exit, got {other:?}"),
+        }
+    }
+    assert!(
+        stale_attached
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "replacement Snapshot or StatusChanged leaked into the stale incarnation fanout",
+    );
+}
+
 /// A stage swap kills a session id and immediately respawns it with the next
 /// stage's agent. Subscribers must observe the old incarnation's Exit before
 /// the new incarnation's SessionCreated — the desktop terminal rebinds on

@@ -2340,7 +2340,9 @@ describe("incoming transfer approval", () => {
     expect(typeof localTaskId).toBe("string");
   });
 
-  it("restores codex resume state when importing a transferred codex task", async () => {
+  it.each([true, false])(
+    "restores codex resume state when artifact publication returns %s",
+    async (materialized) => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
@@ -2423,7 +2425,7 @@ describe("incoming transfer approval", () => {
         return "";
       }
       if (cmd === "materialize_transfer_artifact") {
-        return true;
+        return materialized;
       }
       if (
         cmd === "git_worktree_add" ||
@@ -2458,7 +2460,8 @@ describe("incoming transfer approval", () => {
         }),
       }),
     );
-  });
+    },
+  );
 
   it("imports a transferred codex rollout artifact before resuming", async () => {
     setActivePinia(createPinia());

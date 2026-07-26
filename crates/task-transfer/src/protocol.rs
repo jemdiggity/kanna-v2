@@ -328,6 +328,7 @@ pub enum PeerRequest {
         request_id: String,
         transfer_id: String,
         requester_peer_id: String,
+        sealed_payload: String,
     },
     FetchTransferArtifact {
         request_id: String,

@@ -1,9 +1,9 @@
 use flate2::read::GzDecoder;
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::File;
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
@@ -64,11 +64,7 @@ pub fn materialize_transfer_artifact_at_home(
                 filename,
             } => {
                 let destination_dir = open_or_create_directories(&home_fd, &directories)?;
-                if entry_exists(destination_dir.as_raw_fd(), OsStr::new(&filename))? {
-                    return Ok(false);
-                }
-                copy_regular_file_exclusive(&source, destination_dir.as_raw_fd(), &filename)?;
-                Ok(true)
+                copy_regular_file_exclusive(&source, destination_dir.as_raw_fd(), &filename)
             }
             ArtifactDestination::Archive {
                 directories,
@@ -293,26 +289,144 @@ fn entry_exists(parent: RawFd, name: &OsStr) -> Result<bool, String> {
 }
 
 #[cfg(unix)]
-fn copy_regular_file_exclusive(source: &File, parent: RawFd, name: &str) -> Result<(), String> {
-    let destination = openat_owned(
-        parent,
-        OsStr::new(name),
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        0o600,
-    )
-    .map(File::from)
-    .map_err(|error| format!("failed to create transfer destination file: {error}"))?;
+fn copy_regular_file_exclusive(source: &File, parent: RawFd, name: &str) -> Result<bool, String> {
+    cleanup_stale_copy_temps(parent, name)?;
+    if entry_exists(parent, OsStr::new(name))? {
+        return Ok(false);
+    }
+    let (temporary_name, mut destination) = create_private_temp_file(parent, name)?;
     let mut source = source
         .try_clone()
         .map_err(|error| format!("failed to clone transfer artifact descriptor: {error}"))?;
-    let mut destination = destination;
     let result = std::io::copy(&mut source, &mut destination)
         .and_then(|_| destination.flush())
+        .and_then(|_| destination.sync_all())
         .map_err(|error| format!("failed to copy transfer artifact: {error}"));
     if result.is_err() {
-        let _ = unlinkat(parent, OsStr::new(name), 0);
+        let _ = unlinkat(parent, OsStr::new(&temporary_name), 0);
+        return result.map(|_| false);
     }
-    result
+    drop(destination);
+
+    match renameat_no_replace(
+        parent,
+        OsStr::new(&temporary_name),
+        parent,
+        OsStr::new(name),
+    ) {
+        Ok(()) => {
+            sync_directory(parent)?;
+            Ok(true)
+        }
+        Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+            let _ = unlinkat(parent, OsStr::new(&temporary_name), 0);
+            sync_directory(parent)?;
+            Ok(false)
+        }
+        Err(error) => {
+            let _ = unlinkat(parent, OsStr::new(&temporary_name), 0);
+            Err(format!(
+                "failed to publish transferred rollout atomically: {error}"
+            ))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn create_private_temp_file(parent: RawFd, name: &str) -> Result<(String, File), String> {
+    for _ in 0..100 {
+        let candidate = format!(
+            ".{name}.kanna-transfer-{}-{}.tmp",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        match openat_owned(
+            parent,
+            OsStr::new(&candidate),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        ) {
+            Ok(descriptor) => return Ok((candidate, File::from(descriptor))),
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to create private transfer destination file: {error}"
+                ));
+            }
+        }
+    }
+    Err("failed to allocate a unique transfer destination file".into())
+}
+
+#[cfg(unix)]
+fn cleanup_stale_copy_temps(parent: RawFd, name: &str) -> Result<(), String> {
+    let prefix = format!(".{name}.kanna-transfer-");
+    let suffix = ".tmp";
+    let duplicate = duplicate_fd(parent)
+        .map_err(|error| format!("failed to inspect transfer destination directory: {error}"))?;
+    let raw = duplicate.into_raw_fd();
+    let directory = unsafe { libc::fdopendir(raw) };
+    if directory.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(raw);
+        }
+        return Err(format!(
+            "failed to inspect transfer destination directory: {error}"
+        ));
+    }
+
+    let mut stale = Vec::new();
+    loop {
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            break;
+        }
+        let entry_name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let Ok(entry_name) = entry_name.to_str() else {
+            continue;
+        };
+        let Some(owner) = entry_name
+            .strip_prefix(&prefix)
+            .and_then(|value| value.strip_suffix(suffix))
+            .and_then(|value| value.split_once('-').map(|(pid, _)| pid))
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if !process_is_alive(owner) {
+            stale.push(entry_name.to_owned());
+        }
+    }
+    unsafe {
+        libc::closedir(directory);
+    }
+    for entry_name in stale {
+        unlinkat(parent, OsStr::new(&entry_name), 0)
+            .map_err(|error| format!("failed to clean stale transfer destination file: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: libc::pid_t) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn sync_directory(parent: RawFd) -> Result<(), String> {
+    File::from(
+        duplicate_fd(parent)
+            .map_err(|error| format!("failed to duplicate transfer destination: {error}"))?,
+    )
+    .sync_all()
+    .map_err(|error| format!("failed to sync transfer destination directory: {error}"))
 }
 
 #[cfg(unix)]
@@ -598,6 +712,7 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tar::{Builder, EntryType, Header};
 
@@ -605,6 +720,7 @@ mod tests {
     const CODEX_SESSION: &str = "019d9a8c-9f39-7240-818f-88367a7c31df";
     const CODEX_FILENAME: &str =
         "rollout-2026-04-18T06-27-04-019d9a8c-9f39-7240-818f-88367a7c31df.jsonl";
+    static TEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
     struct TempDir(PathBuf);
 
@@ -615,8 +731,9 @@ mod tests {
                 .expect("clock")
                 .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "kanna-transfer-artifact-test-{}-{unique}",
-                std::process::id()
+                "kanna-transfer-artifact-test-{}-{unique}-{}",
+                std::process::id(),
+                TEST_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
             ));
             std::fs::create_dir(&path).expect("create temp directory");
             Self(path)
@@ -740,6 +857,53 @@ mod tests {
         )
         .is_err());
         assert!(!outside.path().join(CODEX_FILENAME).exists());
+    }
+
+    #[test]
+    fn retries_an_interrupted_codex_copy_without_publishing_partial_state() {
+        let fixture = TempDir::new();
+        let rollout = fixture.path().join("rollout.jsonl");
+        let expected = b"{\"type\":\"session_meta\"}\n{\"type\":\"response_item\"}\n";
+        std::fs::write(&rollout, expected).expect("write rollout");
+        let destination_dir = fixture.path().join(".codex/sessions/2026/04/18");
+        std::fs::create_dir_all(&destination_dir).expect("create codex destination");
+        let stale_temp =
+            destination_dir.join(format!(".{CODEX_FILENAME}.kanna-transfer-2147483647-1.tmp"));
+        std::fs::write(&stale_temp, &expected[..8]).expect("write interrupted partial copy");
+
+        assert_eq!(
+            materialize_transfer_artifact_at_home(
+                fixture.path(),
+                &rollout,
+                "codex",
+                CODEX_SESSION,
+                CODEX_FILENAME,
+                "session-rollout",
+                "copy-file",
+            ),
+            Ok(true),
+        );
+        assert_eq!(
+            std::fs::read(destination_dir.join(CODEX_FILENAME)).expect("read published rollout"),
+            expected,
+        );
+        assert!(!stale_temp.exists(), "stale private temp should be cleaned");
+        assert_eq!(
+            materialize_transfer_artifact_at_home(
+                fixture.path(),
+                &rollout,
+                "codex",
+                CODEX_SESSION,
+                CODEX_FILENAME,
+                "session-rollout",
+                "copy-file",
+            ),
+            Ok(false),
+        );
+        assert_eq!(
+            std::fs::read(destination_dir.join(CODEX_FILENAME)).expect("read retried rollout"),
+            expected,
+        );
     }
 
     #[test]

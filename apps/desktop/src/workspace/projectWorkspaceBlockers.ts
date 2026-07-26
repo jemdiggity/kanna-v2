@@ -110,15 +110,16 @@ function buildOwnerTaskIndex(tasks: readonly WorkspaceTask[]): OwnerTaskIndex {
     const desktopIds = ownerDesktopIds(task);
     for (const ownerTaskId of taskOwnerIds) {
       for (const desktopId of desktopIds) {
-        index.scoped.set(ownerIdentityKey(desktopId, ownerTaskId), task);
+        index.scoped.set(ownerIdentityKey(task.repoKey, desktopId, ownerTaskId), task);
       }
-      if (index.ambiguousUnscoped.has(ownerTaskId)) continue;
-      const existing = index.unscoped.get(ownerTaskId);
+      const fallbackKey = repoOwnerTaskKey(task.repoKey, ownerTaskId);
+      if (index.ambiguousUnscoped.has(fallbackKey)) continue;
+      const existing = index.unscoped.get(fallbackKey);
       if (existing && existing !== task) {
-        index.unscoped.delete(ownerTaskId);
-        index.ambiguousUnscoped.add(ownerTaskId);
+        index.unscoped.delete(fallbackKey);
+        index.ambiguousUnscoped.add(fallbackKey);
       } else {
-        index.unscoped.set(ownerTaskId, task);
+        index.unscoped.set(fallbackKey, task);
       }
     }
   }
@@ -131,10 +132,12 @@ function resolveBlockerTask(
   ownerBlockerId: string,
 ): WorkspaceTask | undefined {
   for (const desktopId of ownerDesktopIds(blockedTask)) {
-    const scoped = index.scoped.get(ownerIdentityKey(desktopId, ownerBlockerId));
+    const scoped = index.scoped.get(
+      ownerIdentityKey(blockedTask.repoKey, desktopId, ownerBlockerId),
+    );
     if (scoped) return scoped;
   }
-  return index.unscoped.get(ownerBlockerId);
+  return index.unscoped.get(repoOwnerTaskKey(blockedTask.repoKey, ownerBlockerId));
 }
 
 function ownerDesktopIds(task: WorkspaceTask): Set<string> {
@@ -176,8 +179,12 @@ function logicalOwnerTaskId(logicalTaskKey: string): string | null {
   return ownerTaskId || null;
 }
 
-function ownerIdentityKey(desktopId: string, ownerTaskId: string): string {
-  return `${encodeURIComponent(desktopId)}:${encodeURIComponent(ownerTaskId)}`;
+function ownerIdentityKey(repoKey: string, desktopId: string, ownerTaskId: string): string {
+  return `${encodeURIComponent(repoKey)}:${encodeURIComponent(desktopId)}:${encodeURIComponent(ownerTaskId)}`;
+}
+
+function repoOwnerTaskKey(repoKey: string, ownerTaskId: string): string {
+  return `${encodeURIComponent(repoKey)}:${encodeURIComponent(ownerTaskId)}`;
 }
 
 function blockerDisplayItem(

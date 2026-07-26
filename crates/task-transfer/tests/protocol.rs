@@ -624,6 +624,7 @@ fn transfer_artifact_control_messages_roundtrip() {
         request_id: "req-peer-finalize".into(),
         transfer_id: "transfer-1".into(),
         requester_peer_id: "peer-destination".into(),
+        sealed_payload: "sealed-finalize-request".into(),
     });
 
     assert_roundtrip(PeerResponse::FinalizeTransfer {

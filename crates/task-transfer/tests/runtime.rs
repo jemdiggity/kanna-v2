@@ -362,11 +362,251 @@ fn current_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn stored_runtime_identity(registry_root: &Path, peer_id: &str) -> TransferIdentity {
+    let identity_path = registry_root
+        .join("transfer-identities")
+        .join(format!("{}.json", URL_SAFE_NO_PAD.encode(peer_id)));
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(identity_path).expect("read runtime identity"))
+            .expect("parse runtime identity");
+    TransferIdentity::from_secret_string(
+        stored["secret_key"]
+            .as_str()
+            .expect("runtime identity secret key"),
+    )
+    .expect("decode runtime identity")
+}
+
+fn seal_authenticated_transfer_request(
+    sender: &TransferIdentity,
+    receiver_public_key: &str,
+    action: &str,
+    request_id: &str,
+    owner_epoch: &str,
+    issued_at_unix_ms: u64,
+    arguments: serde_json::Value,
+) -> String {
+    let mut payload = arguments.as_object().cloned().expect("object arguments");
+    payload.insert("action".into(), json!(action));
+    payload.insert("request_id".into(), json!(request_id));
+    payload.insert("owner_epoch".into(), json!(owner_epoch));
+    payload.insert("issued_at_unix_ms".into(), json!(issued_at_unix_ms));
+    seal_json(
+        sender,
+        &parse_public_key(receiver_public_key).expect("receiver public key"),
+        &serde_json::Value::Object(payload),
+    )
+    .expect("seal authenticated transfer request")
+}
+
 fn peer_error_message(response: PeerResponse) -> String {
     let PeerResponse::Error { message, .. } = response else {
         panic!("expected peer error response");
     };
     message
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepare_transfer_rejects_forged_stale_and_replayed_envelopes_before_reserving() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination_config =
+        RuntimeConfig::for_tests("peer-destination", "Destination", temp.path(), 0);
+    let destination = TransferRuntime::spawn(destination_config.clone())
+        .await
+        .unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination").await;
+    let endpoint = runtime_endpoint(temp.path(), "peer-destination");
+    let owner_epoch = authenticated_request_epoch(&endpoint).await;
+    let source_identity = stored_runtime_identity(temp.path(), "peer-source");
+    let destination_public_key = destination.local_identity().public_key;
+
+    let request = |request_id: &str, issued_at_unix_ms: u64, reserved_target_peer_id: &str| {
+        let sealed_payload = seal_authenticated_transfer_request(
+            &source_identity,
+            &destination_public_key,
+            "prepare_transfer",
+            request_id,
+            &owner_epoch,
+            issued_at_unix_ms,
+            json!({
+                "source_peer_id": "peer-source",
+                "source_task_id": "task-source",
+                "reserved_target_peer_id": reserved_target_peer_id,
+            }),
+        );
+        json!({
+            "type": "prepare_transfer",
+            "request_id": request_id,
+            "source_peer_id": "peer-source",
+            "sealed_payload": sealed_payload,
+        })
+    };
+
+    let forged = send_raw_peer_value(
+        &endpoint,
+        &request(
+            "prepare-forged-target",
+            current_unix_ms(),
+            "peer-someone-else",
+        ),
+    )
+    .await;
+    assert!(
+        peer_error_message(forged).contains("reserved_target_peer_id"),
+        "forged target identity allocated a reservation",
+    );
+
+    let stale =
+        send_raw_peer_value(&endpoint, &request("prepare-stale", 1, "peer-destination")).await;
+    assert!(peer_error_message(stale).contains("stale authenticated prepare_transfer"));
+
+    let valid_request = request("prepare-replay", current_unix_ms(), "peer-destination");
+    let valid = send_raw_peer_value(&endpoint, &valid_request).await;
+    assert!(matches!(valid, PeerResponse::PrepareTransfer { .. }));
+    let replay = send_raw_peer_value(&endpoint, &valid_request).await;
+    assert!(peer_error_message(replay).contains("replayed authenticated prepare_transfer"));
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-destination", "incoming-reservations"),
+        1,
+        "forged, stale, or replayed prepare allocated another reservation",
+    );
+
+    drop(destination);
+    let _destination = TransferRuntime::spawn(destination_config).await.unwrap();
+    let replay_after_restart = send_raw_peer_value(
+        &runtime_endpoint(temp.path(), "peer-destination"),
+        &valid_request,
+    )
+    .await;
+    assert!(
+        matches!(replay_after_restart, PeerResponse::Error { .. }),
+        "captured prepare allocated a reservation after restart",
+    );
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-destination", "incoming-reservations"),
+        1,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finalize_transfer_authenticates_reserved_target_and_rejects_replay_before_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(100)),
+    )
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination").await;
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination", "task-source")
+        .await
+        .unwrap();
+    let endpoint = runtime_endpoint(temp.path(), "peer-source");
+    let owner_epoch = authenticated_request_epoch(&endpoint).await;
+    let destination_identity = stored_runtime_identity(temp.path(), "peer-destination");
+    let source_public_key = source.local_identity().public_key;
+
+    let request = |request_id: &str, transfer_id: &str, authenticated_transfer_id: &str| {
+        let sealed_payload = seal_authenticated_transfer_request(
+            &destination_identity,
+            &source_public_key,
+            "finalize_transfer",
+            request_id,
+            &owner_epoch,
+            current_unix_ms(),
+            json!({
+                "requester_peer_id": "peer-destination",
+                "transfer_id": authenticated_transfer_id,
+                "reserved_target_peer_id": "peer-destination",
+            }),
+        );
+        json!({
+            "type": "finalize_transfer",
+            "request_id": request_id,
+            "transfer_id": transfer_id,
+            "requester_peer_id": "peer-destination",
+            "sealed_payload": sealed_payload,
+        })
+    };
+
+    let forged = send_raw_peer_value(
+        &endpoint,
+        &request(
+            "finalize-forged-transfer",
+            &preflight.transfer_id,
+            "transfer-someone-else",
+        ),
+    )
+    .await;
+    assert!(
+        peer_error_message(forged).contains("transfer_id"),
+        "forged finalize reached renderer finalization",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), source.next_event())
+            .await
+            .is_err(),
+        "forged finalize emitted renderer work",
+    );
+
+    let valid_request = request(
+        "finalize-replay",
+        &preflight.transfer_id,
+        &preflight.transfer_id,
+    );
+    let endpoint_for_request = endpoint.clone();
+    let valid_for_request = valid_request.clone();
+    let response = tokio::spawn(async move {
+        send_raw_peer_value(&endpoint_for_request, &valid_for_request).await
+    });
+    let event = loop {
+        match source.next_event().await.unwrap() {
+            RuntimeEvent::OutgoingTransferFinalizationRequested(event) => break event,
+            RuntimeEvent::PairingCompleted(_) => {}
+            other => panic!("unexpected event before finalization: {other:?}"),
+        }
+    };
+    assert_eq!(event.transfer_id, preflight.transfer_id);
+    source
+        .complete_outgoing_transfer_finalization(
+            &preflight.transfer_id,
+            Ok(kanna_task_transfer::runtime::FinalizedOutgoingTransfer {
+                payload: json!({"task": "payload"}),
+                finalized_cleanly: true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        response.await.unwrap(),
+        PeerResponse::FinalizeTransfer { .. }
+    ));
+
+    let replay = send_raw_peer_value(&endpoint, &valid_request).await;
+    assert!(peer_error_message(replay).contains("replayed authenticated finalize_transfer"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), source.next_event())
+            .await
+            .is_err(),
+        "replayed finalize emitted a second renderer event",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -971,13 +1211,9 @@ async fn outgoing_reservation_pins_cloud_route_across_external_peer_updates() {
         .unwrap();
 
     let pinned_server = tokio::spawn(async move {
-        let (preflight, _) = pinned_listener.accept().await.unwrap();
-        let mut reader = BufReader::new(preflight);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let PeerRequest::PrepareTransfer { request_id, .. } =
-            serde_json::from_str(line.trim()).unwrap()
-        else {
+        let (reader, request) =
+            accept_authenticated_request(&pinned_listener, "pinned-owner-epoch").await;
+        let PeerRequest::PrepareTransfer { request_id, .. } = request else {
             panic!("expected preflight");
         };
         let mut stream = reader.into_inner();
@@ -994,7 +1230,7 @@ async fn outgoing_reservation_pins_cloud_route_across_external_peer_updates() {
 
         let (commit, _) = pinned_listener.accept().await.unwrap();
         let mut reader = BufReader::new(commit);
-        line.clear();
+        let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let PeerRequest::SubmitTransferPayload {
             request_id,
@@ -1325,6 +1561,7 @@ async fn rotated_external_key_rejects_all_pinned_transfer_continuations() {
             request_id: "rotate-finalize".into(),
             transfer_id: "transfer-pinned-key".into(),
             requester_peer_id: "peer-target".into(),
+            sealed_payload: "not-reached".into(),
         },
         PeerRequest::FetchTransferArtifact {
             request_id: "rotate-artifact".into(),
@@ -1352,13 +1589,8 @@ async fn rotated_external_key_rejects_all_pinned_transfer_continuations() {
 }
 
 async fn respond_to_preflight(listener: TcpListener, transfer_id: &str) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).await.unwrap();
-    let PeerRequest::PrepareTransfer { request_id, .. } =
-        serde_json::from_str(line.trim()).unwrap()
-    else {
+    let (reader, request) = accept_authenticated_request(&listener, "fixture-owner-epoch").await;
+    let PeerRequest::PrepareTransfer { request_id, .. } = request else {
         panic!("expected preflight request");
     };
     let mut stream = reader.into_inner();
@@ -4266,7 +4498,9 @@ async fn destination_must_also_trust_the_source_peer() {
             peer_id: secondary_peer.peer_id,
             display_name: secondary_peer.display_name,
             public_key: secondary_peer.public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-04-17T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -4290,7 +4524,9 @@ async fn destination_must_also_trust_the_source_peer() {
             peer_id: primary_peer.peer_id,
             display_name: primary_peer.display_name,
             public_key: primary_peer.public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-04-17T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -5726,7 +5962,7 @@ async fn prepare_transfer_preflight_does_not_leak_source_task_id_on_the_wire() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: public_key_to_string(&target_identity.public_key),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -5737,7 +5973,9 @@ async fn prepare_transfer_preflight_does_not_leak_source_task_id_on_the_wire() {
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: public_key_to_string(&target_identity.public_key),
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-04-17T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -5746,18 +5984,13 @@ async fn prepare_transfer_preflight_does_not_leak_source_task_id_on_the_wire() {
 
     let (line_tx, line_rx) = oneshot::channel();
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        let (mut reader, request) =
+            accept_authenticated_request(&listener, "fixture-owner-epoch").await;
+        let line = serde_json::to_string(&request).unwrap();
         line_tx.send(line.clone()).unwrap();
-        let request_id = serde_json::from_str::<serde_json::Value>(line.trim())
-            .unwrap()
-            .get("request_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap()
-            .to_string();
+        let PeerRequest::PrepareTransfer { request_id, .. } = request else {
+            panic!("expected authenticated prepare request");
+        };
         let response = json!({
             "type": "prepare_transfer",
             "request_id": request_id,
@@ -5765,7 +5998,8 @@ async fn prepare_transfer_preflight_does_not_leak_source_task_id_on_the_wire() {
             "source_peer_id": "peer-primary",
             "target_has_repo": false,
         });
-        writer
+        reader
+            .get_mut()
             .write_all(format!("{response}\n").as_bytes())
             .await
             .unwrap();
@@ -5807,7 +6041,7 @@ async fn prepare_transfer_commit_does_not_leak_payload_on_the_wire() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: public_key_to_string(&target_identity.public_key),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -5818,7 +6052,9 @@ async fn prepare_transfer_commit_does_not_leak_payload_on_the_wire() {
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: public_key_to_string(&target_identity.public_key),
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-04-17T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -5827,20 +6063,15 @@ async fn prepare_transfer_commit_does_not_leak_payload_on_the_wire() {
 
     let (commit_line_tx, commit_line_rx) = oneshot::channel();
     let server = tokio::spawn(async move {
-        let (preflight_stream, _) = listener.accept().await.unwrap();
-        let (preflight_reader, mut preflight_writer) = preflight_stream.into_split();
-        let mut preflight_reader = BufReader::new(preflight_reader);
-        let mut preflight_line = String::new();
-        preflight_reader
-            .read_line(&mut preflight_line)
-            .await
-            .unwrap();
-        let preflight_request_id = serde_json::from_str::<serde_json::Value>(preflight_line.trim())
-            .unwrap()
-            .get("request_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap()
-            .to_string();
+        let (mut preflight_reader, preflight_request) =
+            accept_authenticated_request(&listener, "fixture-owner-epoch").await;
+        let PeerRequest::PrepareTransfer {
+            request_id: preflight_request_id,
+            ..
+        } = preflight_request
+        else {
+            panic!("expected authenticated prepare request");
+        };
         let preflight_response = json!({
             "type": "prepare_transfer",
             "request_id": preflight_request_id,
@@ -5848,7 +6079,8 @@ async fn prepare_transfer_commit_does_not_leak_payload_on_the_wire() {
             "source_peer_id": "peer-primary",
             "target_has_repo": false,
         });
-        preflight_writer
+        preflight_reader
+            .get_mut()
             .write_all(format!("{preflight_response}\n").as_bytes())
             .await
             .unwrap();

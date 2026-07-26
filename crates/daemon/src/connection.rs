@@ -15,7 +15,9 @@ use crate::client::{
     TerminalEmulatorClients,
 };
 use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
-use crate::fanout::{session_fanout, SessionFanouts, SubscriberKind};
+use crate::fanout::{
+    existing_session_fanout, session_fanout, SessionFanout, SessionFanouts, SubscriberKind,
+};
 use crate::handoff::{blank_snapshot, handle_handoff};
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
@@ -29,6 +31,33 @@ async fn session_handle(
     session_id: &str,
 ) -> Option<Arc<SessionHandle>> {
     sessions.lock().await.get(session_id)
+}
+
+async fn registration_is_current(
+    sessions: &Arc<Mutex<SessionManager>>,
+    fanouts: &SessionFanouts,
+    session_id: &str,
+    session: &Arc<SessionHandle>,
+    fanout: &Arc<SessionFanout>,
+) -> bool {
+    if !sessions.lock().await.is_current(session_id, session) {
+        return false;
+    }
+    existing_session_fanout(fanouts, session_id)
+        .await
+        .is_some_and(|current| Arc::ptr_eq(&current, fanout))
+}
+
+async fn test_pause_from_env(variable: &str, message: String) {
+    let Some(milliseconds) = std::env::var(variable)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    else {
+        return;
+    };
+    log::info!("{message}");
+    tokio::time::sleep(std::time::Duration::from_millis(milliseconds)).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -99,27 +128,48 @@ pub(crate) async fn handle_connection(
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
             Some(Command::Observe { session_id }) => {
-                let mgr = sessions.lock().await;
-                if !mgr.contains(&session_id) {
+                let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+                let _lifecycle_guard = lifecycle.lock().await;
+                test_pause_from_env(
+                    "KANNA_DAEMON_TEST_REGISTRATION_PAUSE_MS",
+                    format!("[registration-test-pause] operation=observe session={session_id}"),
+                )
+                .await;
+                let Some(session) = session_handle(&sessions, &session_id).await else {
                     let evt = error_event(
                         Some(protocol::ErrorCode::SessionNotFound),
                         format!("session not found: {}", session_id),
                     );
-                    drop(mgr);
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    continue;
+                };
+                let fanout = session_fanout(&fanouts, &session_id).await;
+                let mut fanout_state = fanout.state.lock().await;
+                if !registration_is_current(&sessions, &fanouts, &session_id, &session, &fanout)
+                    .await
+                {
+                    let evt = error_event(
+                        Some(protocol::ErrorCode::SessionNotFound),
+                        format!("session incarnation changed: {}", session_id),
+                    );
+                    drop(fanout_state);
                     let _ = write_event(&mut *writer.lock().await, &evt).await;
                     continue;
                 }
-                drop(mgr);
-                let fanout = session_fanout(&fanouts, &session_id).await;
-                fanout.state.lock().await.register(
-                    &session_id,
-                    SubscriberKind::Observer,
-                    &writer,
-                    &[],
-                );
+                fanout_state.register(&session_id, SubscriberKind::Observer, &writer, &[]);
+                drop(fanout_state);
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
             Some(Command::ObserveSnapshot { session_id }) => {
+                let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+                let _lifecycle_guard = lifecycle.lock().await;
+                test_pause_from_env(
+                    "KANNA_DAEMON_TEST_REGISTRATION_PAUSE_MS",
+                    format!(
+                        "[registration-test-pause] operation=observe_snapshot session={session_id}"
+                    ),
+                )
+                .await;
                 let Some(session) = session_handle(&sessions, &session_id).await else {
                     let evt = error_event(
                         Some(protocol::ErrorCode::SessionNotFound),
@@ -148,6 +198,17 @@ pub(crate) async fn handle_connection(
                         blank_snapshot(rows, cols)
                     }
                 };
+                if !registration_is_current(&sessions, &fanouts, &session_id, &session, &fanout)
+                    .await
+                {
+                    let evt = error_event(
+                        Some(protocol::ErrorCode::SessionNotFound),
+                        format!("session incarnation changed: {}", session_id),
+                    );
+                    drop(fanout_state);
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    continue;
+                }
                 fanout_state.register(
                     &session_id,
                     SubscriberKind::Observer,
@@ -587,6 +648,13 @@ pub(crate) async fn handle_command(
             emulate_terminal,
         } => {
             log::info!("[attach_snapshot] session={}", session_id);
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
+            test_pause_from_env(
+                "KANNA_DAEMON_TEST_REGISTRATION_PAUSE_MS",
+                format!("[registration-test-pause] operation=attach_snapshot session={session_id}"),
+            )
+            .await;
             let Some(session) = session_handle(&sessions, &session_id).await else {
                 let lost_message = lost_handoff_sessions.lock().await.get(&session_id).cloned();
                 let evt = error_event(
@@ -686,6 +754,15 @@ pub(crate) async fn handle_command(
                     blank_snapshot(rows, cols)
                 }
             };
+            if !registration_is_current(&sessions, &fanouts, &session_id, &session, &fanout).await {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session incarnation changed: {}", session_id),
+                );
+                drop(fanout_state);
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             let initial_events = [
                 Event::Snapshot {
                     session_id: session_id.clone(),
@@ -957,6 +1034,11 @@ pub(crate) async fn handle_command(
                 if let Some(fanout) = &killed_fanout {
                     fanout.state.lock().await.deliver_final(&exit_evt);
                 }
+                test_pause_from_env(
+                    "KANNA_DAEMON_TEST_KILL_AFTER_EXIT_PAUSE_MS",
+                    format!("[kill-test-pause] session={session_id}"),
+                )
+                .await;
                 recovery_manager.end_session(&session_id).await;
             }
             drop(killed_fanout);

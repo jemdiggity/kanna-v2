@@ -5027,7 +5027,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_loopback_v1_stream_rejects_empty_auth_before_controls_or_http_dispatch() {
+    async fn previous_mobile_fixture_opens_credentialless_non_loopback_v1_stream() {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
             .await
             .expect("bind non-loopback KSP listener");
@@ -5046,47 +5046,16 @@ mod tests {
             .map(|interface| interface.ip())
             .find(|ip| ip.is_ipv4() && !ip.is_loopback())
             .expect("test host must expose a non-loopback IPv4 address");
-        let url = format!("ws://{lan_ip}:{port}/v1/stream");
-        let attempts = [
-            ClientFrame::Request {
-                id: 1,
-                method: "POST".into(),
-                path: "/v1/tasks/task-1/input".into(),
-                body: Some(serde_json::json!({ "message": "hostile" })),
-            },
-            ClientFrame::Request {
-                id: 2,
-                method: "POST".into(),
-                path: "/v1/tasks/task-1/actions/advance-stage".into(),
-                body: Some(serde_json::json!({})),
-            },
-            ClientFrame::Request {
-                id: 3,
-                method: "POST".into(),
-                path: "/v1/tasks/task-1/actions/close".into(),
-                body: Some(serde_json::json!({})),
-            },
-            ClientFrame::TermInput {
-                task_id: "task-1".into(),
-                data_b64: "aG9zdGlsZQ==".into(),
-            },
-            ClientFrame::Request {
-                id: 4,
-                method: "GET".into(),
-                path: "/v1/tasks/task-1/files/content?path=.env".into(),
-                body: None,
-            },
-        ];
+        let mut socket = ws_connect(&format!("ws://{lan_ip}:{port}/v1/stream")).await;
 
-        for attempt in attempts {
-            let mut socket = ws_connect(&url).await;
-            send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
-            send_frame(&mut socket, &attempt).await;
-            assert!(matches!(
-                recv_frame(&mut socket).await,
-                ServerFrame::Error { code, .. } if code == "unauthorized"
-            ));
-        }
+        // Exact first frame emitted by the deployed previous mobile client.
+        use futures_util::SinkExt;
+        socket
+            .send(TungsteniteMessage::Text(r#"{"type":"auth"}"#.into()))
+            .await
+            .expect("send previous-mobile auth frame");
+
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
         server.abort();
     }
 

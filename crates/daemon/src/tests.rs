@@ -365,18 +365,24 @@ fn attach_cutover_holds_fanout_lock_across_snapshot_and_registration() {
     let snapshot_index = attach_body
         .find("session.snapshot(&session_id)")
         .expect("attach cutover should take the authoritative snapshot");
+    let incarnation_guard_index = attach_body
+        .find("registration_is_current(&sessions, &fanouts")
+        .expect("attach cutover should revalidate the exact session and fanout incarnation");
     let register_index = attach_body
         .find("fanout_state.register(")
         .expect("attach cutover should register the subscriber");
-    let unlock_index = attach_body
-        .find("drop(fanout_state)")
-        .expect("attach cutover should release the fanout lock explicitly");
+    let unlock_index = register_index
+        + attach_body[register_index..]
+            .find("drop(fanout_state)")
+            .expect("attach cutover should release the fanout lock explicitly");
 
     assert!(
         fanout_lock_index < snapshot_index
+            && snapshot_index < incarnation_guard_index
+            && incarnation_guard_index < register_index
             && snapshot_index < register_index
             && register_index < unlock_index,
-        "the snapshot and subscriber registration must both happen under the \
+        "the snapshot, exact-incarnation guard, and subscriber registration must happen under the \
          session fanout lock so the ingestion loop (which holds it across \
          mirror -> enqueue) cannot interleave a chunk between them",
     );

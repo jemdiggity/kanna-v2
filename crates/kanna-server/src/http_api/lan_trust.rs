@@ -39,7 +39,7 @@ impl FromRequestParts<Arc<AppState>> for PrivilegedTaskAccess {
 fn unauthorized_privileged_task() -> (StatusCode, String) {
     (
         StatusCode::UNAUTHORIZED,
-        "privileged task control requires desktop loopback, a paired LAN device, or an authenticated relay".into(),
+        "privileged control requires desktop loopback, a paired LAN device, or an authenticated relay".into(),
     )
 }
 
@@ -75,6 +75,9 @@ pub(super) async fn require_privileged_task_access(request: Request<Body>, next:
 }
 
 fn is_privileged_task_route(method: &axum::http::Method, path: &str) -> bool {
+    if path == "/v1/transfers" || path.starts_with("/v1/transfers/") {
+        return method != axum::http::Method::OPTIONS;
+    }
     if path != "/v1/tasks" && !path.starts_with("/v1/tasks/") {
         return false;
     }

@@ -818,6 +818,51 @@ function buildRemoteBlockedWorkflowSnapshot({
   };
 }
 
+function buildCrossRepoCollidingBlockerSnapshot(): DesktopCloudSnapshot {
+  const snapshot = buildRemoteBlockedWorkflowSnapshot({
+    blocked: true,
+    updatedAt: "2026-07-27T00:00:00.000Z",
+  });
+  const blockedTask = snapshot.items[0];
+  const collidingTask = {
+    ...snapshot.items[1],
+    id: "cloud:repo-collision:task-blocker",
+    repo_id: "cloud:repo-collision",
+    display_name: "Resolved task from another repo",
+    stage: "pr",
+    pr_number: 999,
+    pr_url: "https://github.com/kanna/kanna/pull/999",
+  };
+  return {
+    ...snapshot,
+    repos: [
+      ...snapshot.repos,
+      {
+        ...snapshot.repos[0],
+        id: "cloud:repo-collision",
+        name: "Collision Repo",
+        remote_url: "git@github.com:owner/collision-repo.git",
+        remoteUrlHash: "collision-repo-hash",
+      },
+    ],
+    items: [blockedTask, collidingTask],
+    terminalRefs: {
+      [blockedTask.id]: {
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "repo-owner",
+        ownerLocalTaskId: "task-blocked",
+        transport: "cloud",
+      },
+      [collidingTask.id]: {
+        ownerDesktopId: "desktop-collision",
+        ownerLocalRepoId: "repo-collision",
+        ownerLocalTaskId: "task-blocker",
+        transport: "cloud",
+      },
+    },
+  };
+}
+
 async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof SidebarWithoutRepoStub) {
   vi.stubGlobal("__KANNA_MOBILE__", false);
   const { default: App } = await import("./App.vue");
@@ -3315,6 +3360,45 @@ describe("App", () => {
       taskId: "task-blocked",
       expectedTransitionRevision: "run-blocked-2",
     });
+
+    wrapper.unmount();
+  });
+
+  it("keeps a raw blocker blocked across Sidebar, MainPanel, and Cmd+S when another repo has a resolved identity collision", async () => {
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      Sidebar: false,
+      MainPanel: false,
+      TaskHeader: true,
+      TerminalTabs: true,
+      CloudTerminalView: true,
+    });
+    emitDesktopCloudSnapshot(buildCrossRepoCollidingBlockerSnapshot());
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("sidebar.sectionBlocked");
+    const blockedTask = wrapper.get(
+      '[data-task-id="cloud:repo-remote:task-blocked"]',
+    );
+    expect(blockedTask.get(".blocked-by-text").text()).toBe(
+      "sidebar.blockedBy tasks.taskId",
+    );
+    expect(blockedTask.text()).not.toContain("Resolved task from another repo");
+
+    await blockedTask.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".blocked-placeholder").text()).toContain("mainPanel.taskBlocked");
+    expect(wrapper.get(".blocker-name").text()).toBe("tasks.taskId");
+    expect(wrapper.text()).not.toContain("https://github.com/kanna/kanna/pull/999");
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+
+    expect(toastWarningMock).toHaveBeenCalledWith("mainPanel.taskBlocked");
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(lanAdvanceStageMock).not.toHaveBeenCalled();
+    expect(store.advanceStage).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });

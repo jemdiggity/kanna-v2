@@ -361,6 +361,9 @@ async function importTransferredResumeState(
       materialization: artifact.materialization,
     });
     if (!materialized) {
+      if (provider === "codex") {
+        return resumeSessionId;
+      }
       console.warn(
         "[store] skipping transferred session import because the provider destination already exists",
         { provider, resumeSessionId },
@@ -370,7 +373,7 @@ async function importTransferredResumeState(
     return resumeSessionId;
   } catch (error) {
     console.error("[store] failed to import transferred session artifact:", error);
-    return null;
+    throw error;
   }
 }
 

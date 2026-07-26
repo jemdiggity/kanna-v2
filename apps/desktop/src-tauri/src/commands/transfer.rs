@@ -382,7 +382,7 @@ pub async fn fetch_transfer_artifact(
 }
 
 #[tauri::command]
-pub fn materialize_transfer_artifact(
+pub async fn materialize_transfer_artifact(
     source_path: String,
     provider: String,
     resume_session_id: String,
@@ -393,15 +393,19 @@ pub fn materialize_transfer_artifact(
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| "HOME is unavailable for transfer artifact materialization".to_string())?;
-    crate::transfer_artifact::materialize_transfer_artifact_at_home(
-        &home,
-        std::path::Path::new(&source_path),
-        &provider,
-        &resume_session_id,
-        &filename,
-        &kind,
-        &materialization,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::transfer_artifact::materialize_transfer_artifact_at_home(
+            &home,
+            std::path::Path::new(&source_path),
+            &provider,
+            &resume_session_id,
+            &filename,
+            &kind,
+            &materialization,
+        )
+    })
+    .await
+    .map_err(|error| format!("transfer artifact materialization task failed: {error}"))?
 }
 
 #[tauri::command]

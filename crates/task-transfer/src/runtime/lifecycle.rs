@@ -35,6 +35,9 @@ impl TransferRuntime {
             peer_id: self.config.peer_id.clone(),
             display_name: self.config.display_name.clone(),
             public_key: public_key_to_string(&self.identity.public_key),
+            // The cloud/LAN bridge identity remains protocol v1 for the
+            // deployed mobile compatibility contract. Direct peer discovery
+            // advertises CURRENT_PROTOCOL_VERSION separately.
             protocol_version: 1,
             accepting_transfers: true,
         }
@@ -788,7 +791,7 @@ impl TransferRuntime {
         }
     }
 
-    async fn seal_authenticated_peer_request(
+    pub(super) async fn seal_authenticated_peer_request(
         &self,
         peer: &PeerRegistryEntry,
         action: &str,

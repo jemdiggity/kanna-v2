@@ -37,15 +37,19 @@ impl TransferRuntime {
             &target_peer.public_key,
             resolved_transport,
         )?;
-        let target_public_key = parse_public_key(&target_peer.public_key)?;
-        let sealed_payload = seal_json(
-            &self.identity,
-            &target_public_key,
-            &serde_json::json!({
-                "source_task_id": source_task_id,
-            }),
-        )?;
         let request_id = self.next_request_id("preflight");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "prepare_transfer",
+                &request_id,
+                serde_json::json!({
+                    "source_peer_id": self.config.peer_id,
+                    "source_task_id": source_task_id,
+                    "reserved_target_peer_id": target_peer.peer_id,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -261,8 +265,19 @@ impl TransferRuntime {
 
         let source_peer = self.find_peer(&source_peer_id).await?;
         self.ensure_peer_is_trusted(&source_peer.peer_id, &source_peer.public_key)?;
-        let source_public_key = parse_public_key(&source_peer.public_key)?;
         let request_id = self.next_request_id("finalize");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &source_peer,
+                "finalize_transfer",
+                &request_id,
+                serde_json::json!({
+                    "requester_peer_id": self.config.peer_id,
+                    "transfer_id": transfer_id,
+                    "reserved_target_peer_id": self.config.peer_id,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &source_peer,
@@ -270,6 +285,7 @@ impl TransferRuntime {
                     request_id: request_id.clone(),
                     transfer_id: transfer_id.to_owned(),
                     requester_peer_id: self.config.peer_id.clone(),
+                    sealed_payload,
                 },
             )
             .await?;
@@ -292,6 +308,7 @@ impl TransferRuntime {
                         transfer_id, response_transfer_id
                     )));
                 }
+                let source_public_key = parse_public_key(&source_peer.public_key)?;
                 let payload = open_json(&self.identity, &source_public_key, &sealed_payload)?;
                 let finalized_payload = payload.get("payload").cloned().ok_or_else(|| {
                     RuntimeError::Protocol("finalize response missing payload".into())
