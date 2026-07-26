@@ -532,7 +532,15 @@ export function createRemoteTransport({
           serverVersion: "cloud",
           lanHost: "cloud",
           lanPort: 0,
-          pairingCode: null
+          pairingCode: null,
+          writePathHealth: {
+            healthy: true,
+            status: "healthy",
+            activeWorkspaceCommands: 0,
+            maxWorkspaceCommands: 0,
+            longRunningWorkspaceCommands: 0,
+            oldestWorkspaceCommandSeconds: null
+          }
         };
       }
       return mapMobileServerStatus(await request("GET", "/v1/status", null));

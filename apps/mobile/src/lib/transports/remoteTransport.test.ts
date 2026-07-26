@@ -2497,7 +2497,15 @@ describe("remote transport", () => {
     await expect(transport.getStatus()).resolves.toMatchObject({
       desktopId: "cloud",
       desktopName: "Kanna Cloud",
-      lanHost: "cloud"
+      lanHost: "cloud",
+      writePathHealth: {
+        healthy: true,
+        status: "healthy",
+        activeWorkspaceCommands: 0,
+        maxWorkspaceCommands: 0,
+        longRunningWorkspaceCommands: 0,
+        oldestWorkspaceCommandSeconds: null
+      }
     });
     await expect(transport.listRepos()).resolves.toEqual([
       { id: "repo-1", name: "Repo One" }

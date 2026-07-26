@@ -20,9 +20,20 @@ function runningStatus(desktopId = "desktop-lan"): MobileServerStatus {
     state: "running",
     desktopId,
     desktopName: "LAN Desktop",
+    version: "test",
+    environment: "test",
+    serverVersion: "test",
     lanHost: "192.168.1.10",
     lanPort: 48120,
-    pairingCode: null
+    pairingCode: null,
+    writePathHealth: {
+      healthy: true,
+      status: "healthy",
+      activeWorkspaceCommands: 0,
+      maxWorkspaceCommands: 4,
+      longRunningWorkspaceCommands: 0,
+      oldestWorkspaceCommandSeconds: null
+    }
   };
 }
 

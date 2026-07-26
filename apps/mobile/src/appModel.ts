@@ -902,7 +902,15 @@ function createDisconnectedClient(): KannaClient {
       serverVersion: null,
       lanHost: "none",
       lanPort: 0,
-      pairingCode: null
+      pairingCode: null,
+      writePathHealth: {
+        healthy: false,
+        status: "unavailable",
+        activeWorkspaceCommands: 0,
+        maxWorkspaceCommands: 0,
+        longRunningWorkspaceCommands: 0,
+        oldestWorkspaceCommandSeconds: null
+      }
     }),
     listDesktops: async () => [],
     listRepos: async () => [],
