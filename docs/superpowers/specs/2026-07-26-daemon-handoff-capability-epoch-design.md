@@ -28,8 +28,8 @@ daemon.
   it hardened guarantees.
 - Authenticate and validate everything the adopter can verify independently,
   even in legacy mode.
-- Exercise a real shipped v2 daemon against the current daemon, including PTY
-  and agent Spawn/Kill churn during transfer.
+- Exercise a real shipped v2 daemon against the current daemon in both sender
+  directions, including PTY and agent Spawn/Kill churn during transfer.
 
 ## Non-goals
 
@@ -63,8 +63,9 @@ following:
    the adoption acknowledgement.
 4. The daemon peer is authenticated against its Unix-socket credentials and a
    pinned process identity.
-5. Descriptor counts, ancillary data, PTY provenance, and agent-pipe
-   provenance are validated before adoption.
+5. Descriptor counts and ancillary data are validated before acknowledgement;
+   PTY and agent-pipe provenance are validated before granting live session
+   authority during adoption.
 6. `HandoffAdopted { version: 3 }` is the commit point. Failure before that
    point leaves or returns the sender to service.
 7. The adopter does not publish its PID file and socket until the sender has
@@ -109,10 +110,11 @@ The current hardened flow remains the v3 implementation:
 4. Snapshot exact PTY handles and agent incarnations.
 5. Duplicate all transferred descriptors into owned close-on-exec handles.
 6. Send metadata and descriptors.
-7. Re-authenticate the peer and validate received descriptor provenance.
+7. Re-authenticate the peer and validate the descriptor transfer shape.
 8. ACK adoption.
 9. Keep the sender sealed, stop its readers, broadcast shutdown, and exit.
-10. Wait for the authenticated incumbent to exit before publishing the adopter.
+10. Wait for the authenticated incumbent to exit, validate per-session
+    descriptor provenance, and only then publish the adopter.
 
 Every abort before ACK closes temporary descriptors and lifts the sender's
 seals.
@@ -128,12 +130,14 @@ The adopter:
    received.
 2. Authenticates the incumbent daemon exactly as it does for v3.
 3. Parses the v2 metadata and strictly validates FD counts and ancillary data.
-4. Validates each received PTY master against the claimed terminal child and
-   each live agent pipe bundle against the claimed agent child before ACK.
-5. Aborts without ACK on any failed authentication or provenance check. The v2
-   daemon remains authoritative and all received descriptor copies are closed.
-6. ACKs and adopts when the independently verifiable checks pass, preserving
-   the snapshot's PTYs and agent session state.
+4. ACKs only after peer authentication and the metadata/ancillary FD transfer
+   shape pass validation.
+5. Validates each received PTY master against the claimed terminal child and
+   each live agent pipe bundle against the claimed agent child before granting
+   signal or live-stream authority.
+6. Keeps an unproven PTY usable but permanently non-signalable; closes an
+   unproven agent bundle and keeps the logical session resumable from its
+   journal.
 
 The adopter does not describe this result as transactional. A warning records
 that concurrent legacy Spawn/Kill operations were outside a provable snapshot
@@ -158,35 +162,48 @@ A fixture builder:
    source under `.build/daemon-cross-version/<commit>/source`.
 2. Builds `kanna-daemon` with an isolated Cargo target directory under the same
    cache root.
-3. Writes a small manifest containing the tag, commit, target triple, build
-   profile, and resulting binary path.
-4. Reuses the binary when the manifest and executable match.
-5. Uses a filesystem lock and atomic staging rename so concurrent test
+3. Keys the cache directory by commit, host OS, and architecture, and reuses
+   the binary at that exact path when present.
+4. Uses a filesystem lock and atomic staging rename so concurrent test
    processes cannot observe a partial fixture.
 
 The fixture is a development/test artifact and is never included in release
-packaging. The canonical `./kd test rust` workflow prepares it before daemon
-tests. The Rust harness can also prepare it on demand so a focused test works
-outside `kd`.
+packaging. The Rust harness prepares it on demand, so focused tests and
+`./kd test rust` use the same fixture. CI checks out full history so the fixed
+shipped tag is available without a network operation during the test.
 
 ## Cross-binary Regression
 
 The integration harness accepts explicit daemon binary paths instead of always
-using `CARGO_BIN_EXE_kanna-daemon`. It runs the following real-process case:
+using `CARGO_BIN_EXE_kanna-daemon`. It runs the following real-process cases.
+
+For a deployed-v2 sender and current adopter:
 
 1. Start the previous v2 daemon in an isolated daemon directory.
-2. Create stable PTY and agent sessions and prove both are usable.
-3. Start concurrent PTY and agent Spawn/Kill churn on separate client
-   connections.
-4. Start the current v3 daemon in the same directory.
-5. Verify the current daemon first requests v3 and reaches v2 only after the
+2. Create stable PTY and agent sessions, prove both are usable, and open a
+   dedicated lifecycle-management connection before takeover.
+3. Start the current v3 daemon in the same directory with a test-only delay
+   immediately before its adoption acknowledgement.
+4. Wait for the adopter's delay marker, proving it has received and validated
+   the snapshot and descriptors but has not ACKed.
+5. Over the pre-existing connection to the deployed sender, require a complete
+   PTY Spawn/Kill and agent Spawn/Kill cycle to return its expected successful
+   replies during that post-transfer/pre-ACK window. The test proves the race
+   really occurred without assigning transactional ordering to its result.
+6. Verify the current daemon first requested v3 and reached v2 only after the
    incumbent's explicit mismatch.
-6. Stop churn and accept either response for operations that overlapped the
-   legacy snapshot; no assertion assigns transactional semantics to them.
 7. Verify the incumbent exited, the current daemon alone owns the PID file and
    socket, the stable PTY still accepts input and produces output, and the
    stable agent session can replay its journal and accept another turn.
 8. Verify logs identify the transfer as legacy v2.
+
+For a current sender and deployed-v2 adopter, the harness creates stable PTY
+and agent sessions under the current daemon, starts the shipped daemon as the
+adopter, verifies the current sender accepted legacy-v2 mode and exited, then
+proves both adopted sessions remain live through PTY echo and agent steering.
+This covers the retained v2 serialization, descriptor transfer, and
+acknowledgement path end to end rather than inferring compatibility from unit
+types.
 
 Existing current-to-current handoff tests continue to cover successful
 transactional transfer. Focused unit tests cover negotiation: v3 success,

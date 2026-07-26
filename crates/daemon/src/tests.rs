@@ -14,8 +14,8 @@ use crate::client::{
 };
 use crate::fanout::{session_fanout, EventLine, SessionFanouts, SubscriberKind};
 use crate::handoff::{
-    blank_snapshot, parse_handoff_response, should_try_compat_handoff_after_error, HandoffEventV1,
-    HandoffRequestError, HandoffSessionV1,
+    blank_snapshot, handoff_mode_for_version, legacy_fallback_after_error, parse_handoff_response,
+    HandoffMode, HandoffRequestError,
 };
 use crate::output::{
     classify_output_gap, fanout_status_changed, format_status_observation_log,
@@ -23,20 +23,6 @@ use crate::output::{
     DaemonOutputGapCause, DAEMON_TERMINAL_PERF_STAGES,
 };
 use crate::paths::panic_log_path;
-
-fn sample_snapshot() -> protocol::TerminalSnapshot {
-    protocol::TerminalSnapshot {
-        version: 1,
-        rows: 24,
-        cols: 80,
-        cursor_row: 2,
-        cursor_col: 3,
-        cursor_visible: true,
-        saved_at: 0,
-        sequence: 0,
-        vt: "hello".to_string(),
-    }
-}
 
 #[test]
 fn parse_handoff_response_accepts_v2_payload() {
@@ -68,52 +54,7 @@ fn parse_handoff_response_accepts_v2_payload() {
 }
 
 #[test]
-fn parse_handoff_response_accepts_v1_payload() {
-    let line = serde_json::to_string(&HandoffEventV1::HandoffReady {
-        sessions: vec![HandoffSessionV1 {
-            session_id: "s1".to_string(),
-            pid: 42,
-            cwd: "/tmp".to_string(),
-            snapshot: sample_snapshot(),
-        }],
-    })
-    .unwrap();
-
-    let sessions = parse_handoff_response(&line).unwrap();
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].session_id, "s1");
-    assert_eq!(sessions[0].rows, 24);
-    assert_eq!(sessions[0].cols, 80);
-    assert_eq!(sessions[0].snapshot.as_ref().unwrap().vt, "hello");
-}
-
-#[test]
-fn parse_handoff_response_accepts_v0_0_30_session_info_payload() {
-    // Kanna 0.0.30 sent protocol::SessionInfo entries for handoff version 1.
-    let line = serde_json::json!({
-        "type": "HandoffReady",
-        "sessions": [{
-            "session_id": "s1",
-            "pid": 42,
-            "cwd": "/tmp",
-            "state": "Active",
-            "idle_seconds": 0
-        }]
-    })
-    .to_string();
-
-    let sessions = parse_handoff_response(&line).unwrap();
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].session_id, "s1");
-    assert_eq!(sessions[0].pid, 42);
-    assert_eq!(sessions[0].cwd, "/tmp");
-    assert_eq!(sessions[0].rows, 0);
-    assert_eq!(sessions[0].cols, 0);
-    assert!(sessions[0].snapshot.is_none());
-}
-
-#[test]
-fn blank_snapshot_uses_dimensions_for_compat_handoff() {
+fn blank_snapshot_uses_dimensions_for_snapshotless_handoff() {
     let snapshot = blank_snapshot(45, 120);
     assert_eq!(snapshot.rows, 45);
     assert_eq!(snapshot.cols, 120);
@@ -123,7 +64,7 @@ fn blank_snapshot_uses_dimensions_for_compat_handoff() {
 }
 
 #[test]
-fn blank_snapshot_normalizes_zero_dimensions_for_compat_handoff() {
+fn blank_snapshot_normalizes_zero_dimensions_for_snapshotless_handoff() {
     let snapshot = blank_snapshot(0, 0);
     assert_eq!(snapshot.rows, 24);
     assert_eq!(snapshot.cols, 80);
@@ -447,19 +388,47 @@ fn live_terminal_transitions_do_not_rebuild_recovery_sessions() {
 }
 
 #[test]
-fn timeout_after_handoff_command_is_not_safe_for_compat_retry() {
-    assert!(!should_try_compat_handoff_after_error(
-        &HandoffRequestError::ResponseTimeout
-    ));
+fn handoff_protocol_epochs_are_distinct() {
+    assert_eq!(protocol::HANDOFF_PROTOCOL_VERSION, 3);
+    assert_eq!(protocol::LEGACY_HANDOFF_PROTOCOL_VERSION, 2);
 }
 
 #[test]
-fn explicit_handoff_version_mismatch_is_safe_for_compat_retry() {
-    assert!(should_try_compat_handoff_after_error(
-        &HandoffRequestError::OldDaemonRefused(
-            "handoff version mismatch: expected 1, got 2".to_string(),
-        )
-    ));
+fn supported_handoff_versions_map_to_explicit_modes() {
+    assert_eq!(
+        handoff_mode_for_version(protocol::HANDOFF_PROTOCOL_VERSION),
+        Some(HandoffMode::TransactionalV3)
+    );
+    assert_eq!(
+        handoff_mode_for_version(protocol::LEGACY_HANDOFF_PROTOCOL_VERSION),
+        Some(HandoffMode::LegacyV2)
+    );
+    assert_eq!(handoff_mode_for_version(1), None);
+}
+
+#[test]
+fn explicit_v3_mismatch_selects_one_legacy_v2_fallback() {
+    let error = HandoffRequestError::VersionMismatch(
+        "handoff version mismatch: expected 1 or 2, got 3".to_string(),
+    );
+    assert_eq!(
+        legacy_fallback_after_error(&error),
+        Some(HandoffMode::LegacyV2)
+    );
+}
+
+#[test]
+fn ambiguous_handoff_failure_never_selects_legacy() {
+    assert_eq!(
+        legacy_fallback_after_error(&HandoffRequestError::ResponseTimeout),
+        None
+    );
+    assert_eq!(
+        legacy_fallback_after_error(&HandoffRequestError::OldDaemonRefused(
+            "handoff version mismatch: this is only unstructured text".to_string(),
+        )),
+        None
+    );
 }
 
 // ---- Old-daemon shutdown hardening (handoff pid authentication) ----

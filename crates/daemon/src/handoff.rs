@@ -5,10 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use kanna_daemon::{
-    protocol::{self, Command, Event, SessionStatus},
+    protocol::{self, Command, Event},
     recovery::RecoveryManager,
 };
-use serde::Serialize;
 use tokio::io::BufReader;
 use tokio::sync::{broadcast, Mutex};
 
@@ -19,10 +18,40 @@ use crate::socket::{read_command, write_event};
 use crate::util::error_event;
 use crate::{fd_transfer, pty};
 
-/// Current handoff protocol version. Both sides must agree.
-const HANDOFF_VERSION: u32 = 2;
-const HANDOFF_COMPAT_VERSION: u32 = 1;
 const HANDOFF_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The guarantees selected for this transfer. The mode is resolved at the
+/// version boundary and carried explicitly so a legacy response can never be
+/// mistaken for a transactional snapshot later in adoption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandoffMode {
+    TransactionalV3,
+    LegacyV2,
+}
+
+impl HandoffMode {
+    fn version(self) -> u32 {
+        match self {
+            Self::TransactionalV3 => protocol::HANDOFF_PROTOCOL_VERSION,
+            Self::LegacyV2 => protocol::LEGACY_HANDOFF_PROTOCOL_VERSION,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::TransactionalV3 => "transactional-v3",
+            Self::LegacyV2 => "legacy-v2",
+        }
+    }
+}
+
+pub(crate) fn handoff_mode_for_version(version: u32) -> Option<HandoffMode> {
+    match version {
+        protocol::HANDOFF_PROTOCOL_VERSION => Some(HandoffMode::TransactionalV3),
+        protocol::LEGACY_HANDOFF_PROTOCOL_VERSION => Some(HandoffMode::LegacyV2),
+        _ => None,
+    }
+}
 
 /// The daemon this process is replacing, pinned to a verifiable identity.
 /// `pid` comes from the pid file but is only trusted for signaling when
@@ -71,6 +100,7 @@ impl HandoffResult {
 #[derive(Debug)]
 pub(crate) enum HandoffRequestError {
     ResponseTimeout,
+    VersionMismatch(String),
     OldDaemonRefused(String),
     TransferFailed {
         message: String,
@@ -85,6 +115,12 @@ impl fmt::Display for HandoffRequestError {
             HandoffRequestError::ResponseTimeout => {
                 write!(f, "timeout reading handoff response")
             }
+            HandoffRequestError::VersionMismatch(message) => {
+                write!(
+                    f,
+                    "old daemon reported a handoff version mismatch: {message}"
+                )
+            }
             HandoffRequestError::OldDaemonRefused(message) => {
                 write!(f, "old daemon refused: {}", message)
             }
@@ -94,108 +130,25 @@ impl fmt::Display for HandoffRequestError {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct HandoffSessionV1 {
-    pub(crate) session_id: String,
-    pub(crate) pid: u32,
-    pub(crate) cwd: String,
-    pub(crate) snapshot: protocol::TerminalSnapshot,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-pub(crate) enum HandoffEventV1 {
-    HandoffReady { sessions: Vec<HandoffSessionV1> },
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct HandoffSessionV1Wire {
-    session_id: String,
-    pid: u32,
-    cwd: String,
-    snapshot: protocol::TerminalSnapshot,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(tag = "type")]
-enum HandoffEventCompat {
-    HandoffReady { sessions: Vec<HandoffSessionV1Wire> },
-    Error { message: String },
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct HandoffSessionLegacyWire {
-    session_id: String,
-    pid: u32,
-    cwd: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(tag = "type")]
-enum HandoffEventLegacy {
-    HandoffReady {
-        sessions: Vec<HandoffSessionLegacyWire>,
-    },
-    Error {
-        message: String,
-    },
-}
-
 fn handoff_loss_message(reason: impl Into<String>) -> String {
     format!("session lost during daemon handoff: {}", reason.into())
 }
 
-pub(crate) fn parse_handoff_response(line: &str) -> Result<Vec<protocol::HandoffSession>, String> {
-    if let Ok(event) = serde_json::from_str::<Event>(line) {
-        return match event {
-            Event::HandoffReady { sessions } => Ok(sessions),
-            Event::Error { message, .. } => Err(message),
-            other => Err(format!("unexpected response: {:?}", other)),
-        };
-    }
-
-    match serde_json::from_str::<HandoffEventCompat>(line) {
-        Ok(HandoffEventCompat::HandoffReady { sessions }) => Ok(sessions
-            .into_iter()
-            .map(|session| protocol::HandoffSession {
-                rows: session.snapshot.rows,
-                cols: session.snapshot.cols,
-                snapshot: Some(session.snapshot),
-                session_id: session.session_id,
-                pid: session.pid,
-                child_start: None,
-                cwd: session.cwd,
-                agent_provider: None,
-                status: SessionStatus::Idle,
-                kind: protocol::SessionKind::Pty,
-                provider_session_id: None,
-                agent_fd_count: 0,
-                agent_spawn: None,
-            })
-            .collect()),
-        Ok(HandoffEventCompat::Error { message }) => Err(message),
-        Err(compat_error) => match serde_json::from_str::<HandoffEventLegacy>(line) {
-            Ok(HandoffEventLegacy::HandoffReady { sessions }) => Ok(sessions
-                .into_iter()
-                .map(|session| protocol::HandoffSession {
-                    session_id: session.session_id,
-                    pid: session.pid,
-                    child_start: None,
-                    cwd: session.cwd,
-                    rows: 0,
-                    cols: 0,
-                    snapshot: None,
-                    agent_provider: None,
-                    status: SessionStatus::Idle,
-                    kind: protocol::SessionKind::Pty,
-                    provider_session_id: None,
-                    agent_fd_count: 0,
-                    agent_spawn: None,
-                })
-                .collect()),
-            Ok(HandoffEventLegacy::Error { message }) => Err(message),
-            Err(_) => Err(format!("invalid response: {}", compat_error)),
-        },
+pub(crate) fn parse_handoff_response(
+    line: &str,
+) -> Result<Vec<protocol::HandoffSession>, HandoffRequestError> {
+    match serde_json::from_str::<Event>(line)
+        .map_err(|error| HandoffRequestError::Other(format!("invalid handoff response: {error}")))?
+    {
+        Event::HandoffReady { sessions } => Ok(sessions),
+        Event::Error {
+            code: Some(protocol::ErrorCode::HandoffVersionMismatch),
+            message,
+        } => Err(HandoffRequestError::VersionMismatch(message)),
+        Event::Error { message, .. } => Err(HandoffRequestError::OldDaemonRefused(message)),
+        other => Err(HandoffRequestError::Other(format!(
+            "unexpected handoff response: {other:?}"
+        ))),
     }
 }
 
@@ -223,7 +176,7 @@ type HandoffTransfer = (
 
 async fn request_handoff(
     socket_path: &PathBuf,
-    version: u32,
+    mode: HandoffMode,
     expected_pid: libc::pid_t,
     expected_start: Option<crate::proc_info::StartTime>,
 ) -> Result<HandoffTransfer, HandoffRequestError> {
@@ -285,7 +238,7 @@ async fn request_handoff(
     let mut reader = tokio::io::BufReader::new(read_half);
     let mut writer = write_half;
 
-    let cmd = serde_json::json!({ "type": "Handoff", "version": version });
+    let cmd = serde_json::json!({ "type": "Handoff", "version": mode.version() });
     let mut json = serde_json::to_string(&cmd).map_err(|e| {
         HandoffRequestError::Other(format!("failed to serialize handoff command: {}", e))
     })?;
@@ -297,7 +250,11 @@ async fn request_handoff(
     writer.flush().await.map_err(|e| {
         HandoffRequestError::Other(format!("failed to flush handoff command: {}", e))
     })?;
-    log::info!("[handoff] sent Handoff command (version={})", version);
+    log::info!(
+        "[handoff] sent Handoff command (mode={}, version={})",
+        mode.label(),
+        mode.version()
+    );
 
     let mut line = String::new();
     use tokio::io::AsyncBufReadExt;
@@ -309,8 +266,7 @@ async fn request_handoff(
         })?;
 
     log::info!("[handoff] received response: {}", line.trim());
-    let session_infos =
-        parse_handoff_response(line.trim()).map_err(HandoffRequestError::OldDaemonRefused)?;
+    let session_infos = parse_handoff_response(line.trim())?;
 
     if let Err(message) = validate_handoff_fd_counts(&session_infos) {
         // The fd stream is positional: one out-of-protocol count would
@@ -323,7 +279,8 @@ async fn request_handoff(
 
     let expected_fds = expected_handoff_fd_count(&session_infos);
     if expected_fds == 0 {
-        send_handoff_ack(&mut writer, version).await?;
+        maybe_delay_handoff_ack().await;
+        send_handoff_ack(&mut writer, mode.version()).await?;
         return Ok((session_infos, vec![], peer_pid));
     }
 
@@ -347,8 +304,27 @@ async fn request_handoff(
         }
         return Err(error);
     }
-    send_handoff_ack(&mut writer, version).await?;
+    maybe_delay_handoff_ack().await;
+    send_handoff_ack(&mut writer, mode.version()).await?;
     Ok((session_infos, fds, peer_pid))
+}
+
+/// Fault-injection hook for the cross-version lifecycle regression. Holding
+/// the adopter immediately before ACK creates a deterministic window after
+/// the legacy sender has transferred its snapshot and descriptors but before
+/// that sender commits the handoff. Normal daemon processes never set this.
+async fn maybe_delay_handoff_ack() {
+    if let Some(delay_ms) = std::env::var("KANNA_TEST_HANDOFF_ACK_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&value| value > 0)
+    {
+        log::warn!(
+            "[handoff] TEST HOOK: delaying adoption acknowledgement by {}ms",
+            delay_ms
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
 }
 
 async fn send_handoff_ack(
@@ -366,13 +342,6 @@ async fn send_handoff_ack(
     .await;
     match write_result {
         Ok(()) => Ok(()),
-        Err(error) if version == HANDOFF_COMPAT_VERSION => {
-            log::info!(
-                "[handoff] compat peer closed before adoption ack; continuing for legacy daemon: {}",
-                error
-            );
-            Ok(())
-        }
         Err(error) => Err(HandoffRequestError::Other(format!(
             "failed to send handoff ack: {error}"
         ))),
@@ -409,14 +378,13 @@ fn expected_handoff_fd_count(session_infos: &[protocol::HandoffSession]) -> usiz
         .sum()
 }
 
-pub(crate) fn should_try_compat_handoff_after_error(error: &HandoffRequestError) -> bool {
+pub(crate) fn legacy_fallback_after_error(error: &HandoffRequestError) -> Option<HandoffMode> {
     match error {
-        HandoffRequestError::OldDaemonRefused(message) => {
-            message.contains("handoff version mismatch")
-        }
+        HandoffRequestError::VersionMismatch(_) => Some(HandoffMode::LegacyV2),
         HandoffRequestError::ResponseTimeout
+        | HandoffRequestError::OldDaemonRefused(_)
         | HandoffRequestError::TransferFailed { .. }
-        | HandoffRequestError::Other(_) => false,
+        | HandoffRequestError::Other(_) => None,
     }
 }
 
@@ -512,9 +480,10 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
     let unauthenticated_old_daemon = resolve_old_daemon(None);
     let old_pid = pid_file_pid;
 
-    let (session_infos, fds, used_version, old_daemon) = match request_handoff(
+    let initial_mode = HandoffMode::TransactionalV3;
+    let (session_infos, fds, used_mode, old_daemon) = match request_handoff(
         socket_path,
-        HANDOFF_VERSION,
+        initial_mode,
         pid_file_pid,
         pinned_start,
     )
@@ -523,15 +492,20 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         Ok((session_infos, fds, peer_pid)) => (
             session_infos,
             fds,
-            HANDOFF_VERSION,
+            initial_mode,
             resolve_old_daemon(peer_pid),
         ),
         Err(error) => {
-            log::info!("[handoff] version {} failed: {}", HANDOFF_VERSION, error);
-            if !should_try_compat_handoff_after_error(&error) {
+            log::info!(
+                "[handoff] mode {} (version {}) failed: {}",
+                initial_mode.label(),
+                initial_mode.version(),
+                error
+            );
+            let Some(legacy_mode) = legacy_fallback_after_error(&error) else {
                 log::info!(
-                    "[handoff] not attempting compatible fallback after ambiguous version {} failure",
-                    HANDOFF_VERSION
+                    "[handoff] not attempting legacy fallback after ambiguous {} failure",
+                    initial_mode.label()
                 );
                 return HandoffResult {
                     adopted: vec![],
@@ -542,40 +516,38 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                         "old daemon pid {old_pid} is alive but handoff failed ambiguously: {error}"
                     )),
                 };
-            }
-            match request_handoff(
-                socket_path,
-                HANDOFF_COMPAT_VERSION,
-                pid_file_pid,
-                pinned_start,
-            )
-            .await
-            {
+            };
+            log::warn!(
+                "[handoff] selected legacy-v2 mode; stable sessions will transfer, \
+                 but concurrent Spawn/Kill is outside a provable snapshot boundary"
+            );
+            match request_handoff(socket_path, legacy_mode, pid_file_pid, pinned_start).await {
                 Ok((session_infos, fds, peer_pid)) => {
                     log::info!(
-                        "[handoff] fell back to compatible handoff version {}",
-                        HANDOFF_COMPAT_VERSION
+                        "[handoff] legacy fallback accepted (mode={}, version={})",
+                        legacy_mode.label(),
+                        legacy_mode.version()
                     );
                     (
                         session_infos,
                         fds,
-                        HANDOFF_COMPAT_VERSION,
+                        legacy_mode,
                         resolve_old_daemon(peer_pid),
                     )
                 }
-                Err(compat_error) => {
+                Err(legacy_error) => {
                     log::info!(
-                        "[handoff] compatible handoff version {} also failed: {}",
-                        HANDOFF_COMPAT_VERSION,
-                        compat_error
+                        "[handoff] legacy mode {} also failed: {}",
+                        legacy_mode.label(),
+                        legacy_error
                     );
                     return HandoffResult {
                         adopted: vec![],
                         adopted_agents: vec![],
-                        lost: lost_sessions_from_handoff_error(&compat_error),
+                        lost: lost_sessions_from_handoff_error(&legacy_error),
                         old_daemon: Some(unauthenticated_old_daemon),
                         abort_start: Some(format!(
-                            "old daemon pid {old_pid} is alive but compatible handoff failed: {compat_error}"
+                            "old daemon pid {old_pid} is alive but legacy handoff failed: {legacy_error}"
                         )),
                     };
                 }
@@ -603,9 +575,10 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
     }
 
     log::info!(
-        "[handoff] received {} fds using handoff version {}: {:?}",
+        "[handoff] received {} fds using mode {} (version {}): {:?}",
         fds.len(),
-        used_version,
+        used_mode.label(),
+        used_mode.version(),
         fds
     );
 
@@ -719,23 +692,30 @@ pub(crate) async fn handle_handoff(
     agent_sessions: kanna_daemon::agent::AgentSessions,
 ) -> bool {
     log::info!(
-        "[handoff] received Handoff request (version={}, our_version={})",
+        "[handoff] received Handoff request (version={}, current_version={})",
         version,
-        HANDOFF_VERSION
+        protocol::HANDOFF_PROTOCOL_VERSION
     );
 
-    if version != HANDOFF_VERSION && version != HANDOFF_COMPAT_VERSION {
+    let Some(mode) = handoff_mode_for_version(version) else {
         log::info!("[handoff] version mismatch, rejecting");
         let evt = error_event(
             Some(protocol::ErrorCode::HandoffVersionMismatch),
             format!(
                 "handoff version mismatch: expected {} or {}, got {}",
-                HANDOFF_VERSION, HANDOFF_COMPAT_VERSION, version
+                protocol::HANDOFF_PROTOCOL_VERSION,
+                protocol::LEGACY_HANDOFF_PROTOCOL_VERSION,
+                version
             ),
         );
         let _ = write_event(&mut *writer.lock().await, &evt).await;
         return false;
-    }
+    };
+    log::info!(
+        "[handoff] accepted mode {} (version={})",
+        mode.label(),
+        mode.version()
+    );
 
     // Snapshot and clone fds without removing ownership. The old daemon keeps
     // serving sessions unless the adopting daemon explicitly ACKs success.
@@ -850,95 +830,86 @@ pub(crate) async fn handle_handoff(
             }
         }
     }
-    // Collect agent sessions (v2 payloads only — v1 daemons cannot adopt
-    // them; their children keep running detached with journals on disk).
+    // Collect agent sessions for both v3 and the retained full-v2 payload.
     // Duplicated agent pipe fds owned by this function: they stay valid
     // through sendmsg and the adoption acknowledgement even if a child exits
     // and its record closes the originals in between (a closed-and-reused
     // raw fd number must never be transferred). Dropped — and closed — when
     // this function returns on any path.
     let mut agent_fd_guards: Vec<std::os::fd::OwnedFd> = Vec::new();
-    let mut handoff_seal: Option<crate::agent_runtime::AgentHandoffSealGuard> = None;
-    if version == HANDOFF_VERSION {
-        // Seal the agent registry before snapshotting it: an in-flight
-        // (re)spawn installer that lands after this point cleans up its
-        // child instead of installing into a daemon that is about to exit
-        // (the child resumes via its journal on the adopting daemon).
-        // The seal is lifted again only if this handoff fails and the
-        // daemon keeps serving.
-        handoff_seal = Some(crate::agent_runtime::AgentHandoffSealGuard::arm());
-        // Give in-flight spawns a bounded window to resolve so the snapshot
-        // sees their final state instead of a spawning placeholder with no
-        // transferable fds.
-        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let still_spawning = agent_sessions
-                .lock()
-                .await
-                .values()
-                .any(|record| record.spawning);
-            if !still_spawning || std::time::Instant::now() >= settle_deadline {
-                if still_spawning {
-                    log::warn!(
-                        "[handoff] agent spawns still in flight at snapshot; transferring them as exited"
-                    );
-                }
-                break;
+    // The current sender provides its hardened guarantees even when a
+    // deployed v2 adopter asks for the legacy wire epoch.
+    let mut handoff_seal = Some(crate::agent_runtime::AgentHandoffSealGuard::arm());
+    // Seal the agent registry before snapshotting it: an in-flight
+    // (re)spawn installer that lands after this point cleans up its
+    // child instead of installing into a daemon that is about to exit
+    // (the child resumes via its journal on the adopting daemon).
+    // The seal is lifted again only if this handoff fails and the
+    // daemon keeps serving.
+    let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let still_spawning = agent_sessions
+            .lock()
+            .await
+            .values()
+            .any(|record| record.spawning);
+        if !still_spawning || std::time::Instant::now() >= settle_deadline {
+            if still_spawning {
+                log::warn!(
+                    "[handoff] agent spawns still in flight at snapshot; transferring them as exited"
+                );
             }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            break;
         }
-
-        let agent_records = agent_sessions.lock().await;
-        for (id, record) in agent_records.iter() {
-            let (agent_fd_count, session_fds) = match (record.exited, record.handoff_fds) {
-                (false, Some(bundle)) => match bundle.duplicate_owned() {
-                    Ok(owned) => {
-                        use std::os::unix::io::AsRawFd;
-                        let raw: Vec<std::os::fd::RawFd> =
-                            owned.iter().map(|fd| fd.as_raw_fd()).collect();
-                        agent_fd_guards.extend(owned);
-                        (raw.len() as u8, raw)
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            "[handoff] failed to duplicate pipe bundle for agent session {}: {}; transferring as exited",
-                            id,
-                            error
-                        );
-                        (0, Vec::new())
-                    }
-                },
-                _ => (0, Vec::new()),
-            };
-            log::info!(
-                "[handoff] transferring agent session {} (pid={}, fds={:?})",
-                id,
-                record.pid,
-                session_fds
-            );
-            infos.push(protocol::HandoffSession {
-                session_id: id.clone(),
-                pid: record.pid,
-                child_start: record.child_start,
-                cwd: record.params.cwd.clone(),
-                rows: 0,
-                cols: 0,
-                snapshot: None,
-                agent_provider: Some(record.provider),
-                status: record.status,
-                kind: protocol::SessionKind::Agent,
-                provider_session_id: record.provider_session_id.clone(),
-                agent_fd_count,
-                agent_spawn: Some(record.params.clone()),
-            });
-            fds.extend(session_fds);
-        }
-    } else if !agent_sessions.lock().await.is_empty() {
-        log::warn!(
-            "[handoff] peer requested v{} handoff; agent sessions are not transferable and stay orphaned",
-            version
-        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+
+    let agent_records = agent_sessions.lock().await;
+    for (id, record) in agent_records.iter() {
+        let (agent_fd_count, session_fds) = match (record.exited, record.handoff_fds) {
+            (false, Some(bundle)) => match bundle.duplicate_owned() {
+                Ok(owned) => {
+                    use std::os::unix::io::AsRawFd;
+                    let raw: Vec<std::os::fd::RawFd> =
+                        owned.iter().map(|fd| fd.as_raw_fd()).collect();
+                    agent_fd_guards.extend(owned);
+                    (raw.len() as u8, raw)
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[handoff] failed to duplicate pipe bundle for agent session {}: {}; transferring as exited",
+                        id,
+                        error
+                    );
+                    (0, Vec::new())
+                }
+            },
+            _ => (0, Vec::new()),
+        };
+        log::info!(
+            "[handoff] transferring agent session {} (pid={}, fds={:?})",
+            id,
+            record.pid,
+            session_fds
+        );
+        infos.push(protocol::HandoffSession {
+            session_id: id.clone(),
+            pid: record.pid,
+            child_start: record.child_start,
+            cwd: record.params.cwd.clone(),
+            rows: 0,
+            cols: 0,
+            snapshot: None,
+            agent_provider: Some(record.provider),
+            status: record.status,
+            kind: protocol::SessionKind::Agent,
+            provider_session_id: record.provider_session_id.clone(),
+            agent_fd_count,
+            agent_spawn: Some(record.params.clone()),
+        });
+        fds.extend(session_fds);
+    }
+    drop(agent_records);
 
     log::info!(
         "[handoff] collected {} live sessions ({} dead)",
@@ -951,42 +922,11 @@ pub(crate) async fn handle_handoff(
         infos.len()
     );
 
-    if version == HANDOFF_COMPAT_VERSION {
-        let compat_sessions = infos
-            .into_iter()
-            .map(|session| HandoffSessionV1 {
-                session_id: session.session_id,
-                pid: session.pid,
-                cwd: session.cwd,
-                snapshot: session
-                    .snapshot
-                    .unwrap_or_else(|| blank_snapshot(session.rows, session.cols)),
-            })
-            .collect();
-        let evt = HandoffEventV1::HandoffReady {
-            sessions: compat_sessions,
-        };
-        match serde_json::to_string(&evt) {
-            Ok(mut compat_json) => {
-                compat_json.push('\n');
-                use tokio::io::AsyncWriteExt;
-                if let Err(error) = writer.lock().await.write_all(compat_json.as_bytes()).await {
-                    log::error!("[handoff] failed to write compat HandoffReady: {}", error);
-                }
-            }
-            Err(error) => {
-                log::error!(
-                    "[handoff] failed to serialize compat HandoffReady: {}",
-                    error
-                );
-            }
-        }
-    } else {
-        // Send HandoffReady with session metadata
-        let evt = Event::HandoffReady { sessions: infos };
-        if let Err(error) = write_event(&mut *writer.lock().await, &evt).await {
-            log::error!("[handoff] failed to write HandoffReady: {}", error);
-        }
+    // v2 deployed adopters understand this full payload and ignore optional
+    // metadata fields introduced by hardened senders.
+    let evt = Event::HandoffReady { sessions: infos };
+    if let Err(error) = write_event(&mut *writer.lock().await, &evt).await {
+        log::error!("[handoff] failed to write HandoffReady: {}", error);
     }
 
     // Flush the writer before sending fds

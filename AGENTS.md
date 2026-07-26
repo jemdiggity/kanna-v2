@@ -500,6 +500,8 @@ User makes PR → GitHub API → DB update → stage transition
 
 - Raw libc PTY (not portable-pty) — needed for `SCM_RIGHTS` fd handoff
 - Always spawned fresh on app start, handoff from old daemon preserves sessions
+- Handoff v3 is the transactional guarantee epoch. A new daemon requests v3 first and retries legacy v2 exactly once only after an explicit version mismatch; ambiguous failures are fail-closed.
+- Legacy v2 preserves stable PTYs and resumable/live agent state during the one-time protocol upgrade, but concurrent Spawn/Kill against a deployed v2 sender has unspecified ordering. Receiver peer, FD-shape, ancillary-data, and descriptor-provenance checks still apply.
 - App waits for new daemon's PID file before connecting (prevents stale connections)
 - One reader per session. New spawned sessions start the reader at Spawn; adopted handoff sessions start it on first AttachSnapshot.
 - **Headless terminal authority** — detached PTY output is interpreted into the per-session headless terminal. There is no pre-attach raw byte buffer.
@@ -519,6 +521,8 @@ User makes PR → GitHub API → DB update → stage transition
 5. **Sessions survive upgrades.** Child processes are unaware of daemon restarts.
 6. **One reader per session.** Single `stream_output` task; spawned sessions start it immediately, adopted sessions start it on first AttachSnapshot.
 7. **Headless terminal is authoritative while detached.** AttachSnapshot atomically snapshots that state and joins the live output stream.
+8. **Transactional guarantees require v3.** A v3 sender seals lifecycle mutation around its exact snapshot and retains owned descriptors until `HandoffAdopted`; legacy v2 is explicitly degraded and never mislabeled transactional.
+9. **Ambiguity is fail-closed.** Only an explicit pre-transfer v3 version mismatch permits the one legacy-v2 retry. A newcomer never publishes alongside a live incumbent after a timeout, disconnect, malformed response, partial FD transfer, or failed ACK.
 
 ### App startup sequence
 

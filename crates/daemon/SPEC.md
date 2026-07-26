@@ -25,16 +25,22 @@ Every daemon startup follows this sequence:
 1. Read PID file
 2. If old daemon alive:
    a. Connect to old daemon's socket
-   b. Send Handoff{version}
-   c. Receive HandoffReady{sessions} + master fds (SCM_RIGHTS)
-   d. Adopt sessions from transferred fds
-   e. Wait for old daemon to exit (SIGTERM/SIGKILL if stuck)
+   b. Request transactional handoff v3
+   c. Only after an explicit version mismatch, reconnect and request legacy v2
+   d. Receive HandoffReady{sessions} + session fds (SCM_RIGHTS)
+   e. Authenticate the peer and validate the descriptor transfer
+   f. Send HandoffAdopted{version} to commit the transfer
+   g. Wait for the old daemon to release its readers and exit
+   h. Adopt sessions from the transferred fds
 3. Write our PID file
 4. Bind socket (removes stale socket file first)
 5. Accept connections
 ```
 
-If handoff fails at any step, the new daemon kills the old one and starts fresh. Sessions from the old daemon are lost — this is acceptable as a fallback.
+An ambiguous failure never triggers a version fallback and never permits the
+new daemon to publish alongside a live incumbent. The newcomer exits instead.
+After an acknowledged transfer, only an authenticated, identity-pinned
+incumbent may be terminated if it fails to exit.
 
 ## Session Lifecycle
 
@@ -86,42 +92,94 @@ The daemon does **not** buffer raw scrollback. Reconnection uses the headless te
 
 ### Version
 
-Both sides must agree on `HANDOFF_VERSION` (currently `1`). Mismatched versions are rejected.
+Handoff versions identify guarantee epochs:
+
+- **v3 (`HANDOFF_PROTOCOL_VERSION`)** — transactional handoff. The sender
+  seals PTY and agent lifecycle mutation around an exact snapshot, keeps
+  descriptor copies alive through acknowledgement, and treats
+  `HandoffAdopted { version: 3 }` as the commit point.
+- **v2 (`LEGACY_HANDOFF_PROTOCOL_VERSION`)** — the deployed pre-transaction
+  protocol, retained only so existing live sessions survive the upgrade to
+  v3. Stable PTYs and agent state transfer, but Spawn/Kill operations racing
+  the old v2 snapshot have unspecified ordering.
+
+A current adopter requests v3 first. It makes exactly one v2 attempt only when
+the incumbent returns an explicit handoff-version-mismatch error before any
+transfer. Timeouts, disconnects, malformed responses, partial descriptor
+transfers, and all other ambiguous failures are fail-closed. Version 1 is not
+supported.
+
+A current sender accepts both versions. It still applies its hardened seal and
+descriptor ownership when a deployed v2 adopter requests v2.
 
 ### Sequence
 
 ```
 New daemon                              Old daemon
     │                                        │
-    ├──► {"type":"Handoff","version":1} ────►│
-    │                                        ├── lock SessionManager
-    │                                        ├── for each live session:
-    │                                        │     detach_for_handoff() → extract fd
-    │                                        ├── clear SessionWriters
+    ├──► {"type":"Handoff","version":3} ────►│
+    │                                        ├── seal PTY + agent registries
+    │                                        ├── snapshot exact incarnations
+    │                                        ├── duplicate owned session fds
     │◄── {"type":"HandoffReady",       ◄─────┤
     │      "sessions":[...]}                 │
-    │◄── [SCM_RIGHTS: master fds]      ◄─────┤
-    │                                        ├── close fd copies
-    │                                        ├── exit(0)
-    ├── for each (info, fd):                 ✗
-    │     PtySession::adopt(fd, pid, cwd)
-    │     insert into SessionManager
+    │◄── [SCM_RIGHTS: session fds]     ◄─────┤
+    ├── authenticate peer + transfer shape   │
+    ├──► {"type":"HandoffAdopted",      ────►│
+    │      "version":3}                      ├── stop old readers
+    │                                        ├── broadcast ShuttingDown
+    │                                        ├── close fd copies + exit
+    ├── wait for authenticated old daemon ───┤
+    ├── authenticate per-session provenance  ✗
+    ├── adopt PTYs + live/resumable agents
     ├── bind socket
     ├── ready
 ```
+
+Before the acknowledgement, the adopter pins the daemon process identity,
+checks Unix-socket peer credentials, validates every metadata-declared FD
+count, rejects truncated or extra ancillary data, and rechecks the pinned peer.
+During adoption, the transferred descriptor is the authority:
+
+- A PTY leader gets signal authority only when the claimed live process is on
+  the slave terminal derived from the transferred master. Otherwise the PTY
+  remains usable but non-signalable.
+- A live agent pipe bundle is accepted only when every stdout, stderr, and
+  optional stdin descriptor has the expected direction and is bound to the
+  claimed child. Otherwise the descriptors are closed and the logical agent
+  session remains resumable from its journal.
+
+The same receiver checks apply in legacy-v2 mode. They prevent forged
+descriptor authority, but they cannot reconstruct the lifecycle seal absent
+from a deployed v2 sender.
+
+### Cross-version verification
+
+The integration suite builds the daemon from the fixed shipped-v2 tag and
+exercises both binary pairings. In the v2-sender → current-adopter case, a
+test-only adopter delay opens a deterministic post-transfer/pre-ACK window;
+the harness requires a complete PTY Spawn/Kill and agent Spawn/Kill cycle to
+succeed against the deployed sender during that window, then verifies that
+stable PTY and agent sessions remain usable after adoption. The reverse
+current-sender → v2-adopter case verifies that the hardened sender's retained
+v2 wire path transfers live PTY and agent descriptors end to end.
 
 ### FD Transfer (SCM_RIGHTS)
 
 File descriptors are sent as ancillary data on the Unix socket using `sendmsg`/`recvmsg` with `SOL_SOCKET`/`SCM_RIGHTS`. The kernel maps fd numbers into the receiving process's fd table. One dummy byte is sent as the required payload.
 
-The fds are sent in the same order as the sessions in `HandoffReady`. The receiver zips them by index.
+The fds are sent in the same order as the sessions in `HandoffReady`. A PTY
+session contributes one master fd. An agent session contributes zero fds for
+an exited/resumable child or two/three fds for stdout, stderr, and optional
+stdin. Any other shape is rejected.
 
 ### Adopted Sessions
 
 Adopted sessions differ from spawned sessions:
 - The daemon did **not** fork the child process, so `waitpid()` won't work
-- Liveness is checked via `kill(pid, 0)` (returns 0 if alive)
 - The master fd was received via SCM_RIGHTS, wrapped in `OwnedFd`
+- Signal authority comes from descriptor provenance, never sender-provided pid
+  metadata alone
 - No `stream_output` task is running — it starts on first `AttachSnapshot`
 
 ## Protocol Reference

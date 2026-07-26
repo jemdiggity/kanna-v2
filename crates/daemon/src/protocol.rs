@@ -5,6 +5,12 @@ pub use kanna_agent_protocol::{
     AgentEvent as NeutralAgentEvent, AgentProvider, PermissionDecision,
 };
 
+/// Transactional lifecycle-fenced and provenance-authenticated handoff.
+pub const HANDOFF_PROTOCOL_VERSION: u32 = 3;
+
+/// Deployed pre-transaction handoff retained to preserve stable live sessions.
+pub const LEGACY_HANDOFF_PROTOCOL_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {

@@ -34,6 +34,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The daemon cross-version regression builds the fixed shipped-v2
+          # tag from local history; tests never fetch source at runtime.
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: 11.0.8
