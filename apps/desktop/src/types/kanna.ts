@@ -41,6 +41,7 @@ export interface PipelineItem {
   activity: "working" | "unread" | "idle";
   activity_revision?: number;
   blocker_revision?: number;
+  transition_revision?: string | null;
   activity_changed_at: string | null;
   unread_at: string | null;
   port_offset: number | null;

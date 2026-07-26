@@ -1,6 +1,6 @@
 use super::state::{db_write_error, AppState};
 use crate::daemon_client::DaemonClient;
-use crate::db::Db;
+use crate::db::{Db, ReplaceTaskBlockersError};
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -70,28 +70,22 @@ pub(super) fn apply_task_blockers(
         ));
     }
 
-    let task_id = resolve_existing_task_id(db, task_or_branch_id)?;
-    let resolved_blocker_ids = resolve_task_blocker_ids(db, blocker_task_ids)?;
-    for blocker_id in &resolved_blocker_ids {
-        if blocker_id == &task_id {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                "task cannot block itself".to_string(),
-            ));
-        }
-        if db
-            .task_dependency_has_path_to(blocker_id, &task_id)
-            .map_err(|e| db_write_error("db error", e))?
-        {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                "cannot add blocker because it would create a circular dependency".to_string(),
-            ));
-        }
-    }
+    db.replace_task_blockers_atomically(task_or_branch_id, blocker_task_ids)
+        .map_err(task_blocker_replacement_error)
+}
 
-    persist_resolved_task_blockers(db, &task_id, &resolved_blocker_ids)?;
-    Ok(task_id)
+fn task_blocker_replacement_error(
+    error: ReplaceTaskBlockersError,
+) -> (axum::http::StatusCode, String) {
+    let status = match error {
+        ReplaceTaskBlockersError::TaskNotFound(_)
+        | ReplaceTaskBlockersError::BlockerNotFound(_) => axum::http::StatusCode::NOT_FOUND,
+        ReplaceTaskBlockersError::SelfDependency | ReplaceTaskBlockersError::CircularDependency => {
+            axum::http::StatusCode::BAD_REQUEST
+        }
+        ReplaceTaskBlockersError::Database(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, error.to_string())
 }
 
 fn blocker_branches_for_task(
@@ -281,11 +275,11 @@ async fn create_integration_task_for_conflict(
             )
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             let integration_task_id = prepared.task_id().to_string();
-            db.replace_task_blockers(
+            db.replace_task_blockers_atomically(
                 &dependent_task_id,
                 std::slice::from_ref(&integration_task_id),
             )
-            .map_err(|e| db_write_error("db error", e))?;
+            .map_err(task_blocker_replacement_error)?;
             log::info!(
                 "inserted integration task {integration_task_id} for dependent {dependent_task_id} after blocker branch merge conflict on {}",
                 conflict.conflicting_branch
@@ -310,7 +304,7 @@ async fn create_integration_task_for_conflict(
             let restored = tokio::task::spawn_blocking(move || {
                 if let Ok(db) = Db::open(&restore_state.config.db_path) {
                     if let Err(restore_error) =
-                        db.replace_task_blockers(&restore_task_id, &previous_blockers)
+                        db.replace_task_blockers_atomically(&restore_task_id, &previous_blockers)
                     {
                         log::error!(
                             "failed to restore blockers for {restore_task_id} after integration spawn failure: {restore_error}"
@@ -457,8 +451,8 @@ pub(super) async fn unblock_task(
             })?;
             let task_id = resolve_existing_task_id(&db, &task_id)?;
             let blocker_branches = blocker_branches_for_task(&db, &task_id)?;
-            db.remove_all_task_blockers(&task_id)
-                .map_err(|e| db_write_error("db error", e))?;
+            db.replace_task_blockers_atomically(&task_id, &[])
+                .map_err(task_blocker_replacement_error)?;
             Ok((task_id, blocker_branches))
         })
         .await?

@@ -7,6 +7,7 @@ use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
+use serde::Deserialize;
 use std::sync::Arc;
 
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
@@ -15,6 +16,12 @@ fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AdvanceStageRequest {
+    expected_transition_revision: Option<String>,
 }
 
 pub(super) async fn run_merge_agent(
@@ -641,6 +648,7 @@ async fn close_task_after_final_stage(
 pub(super) async fn advance_stage(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
+    payload: Option<Json<AdvanceStageRequest>>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
@@ -650,6 +658,41 @@ pub(super) async fn advance_stage(
     let Some(stage_advance) = state.begin_requested_stage_advance(&task_id) else {
         return Ok(Json(response));
     };
+
+    if let Some(expected_transition_revision) =
+        payload.and_then(|Json(payload)| payload.expected_transition_revision)
+    {
+        let current_transition_revision = {
+            let state = Arc::clone(&state);
+            let task_id = task_id.clone();
+            super::blocking::run_handler_blocking("stage advance revision check", move || {
+                let db = Db::open(&state.config.db_path).map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {}", e),
+                    )
+                })?;
+                db.latest_stage_run(&task_id)
+                    .map(|run| run.map(|run| run.id))
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("db error: {}", e),
+                        )
+                    })
+            })
+            .await?
+        };
+        if current_transition_revision.as_deref() != Some(expected_transition_revision.as_str()) {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "stale stage advance for {task_id}: expected transition revision \
+                     {expected_transition_revision}"
+                ),
+            ));
+        }
+    }
 
     #[cfg(test)]
     if let Some(stage_advancer) = state.stage_advancer.clone() {

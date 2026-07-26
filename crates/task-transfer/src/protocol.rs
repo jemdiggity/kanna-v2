@@ -54,6 +54,7 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         task_id: String,
+        expected_transition_revision: String,
     },
     ReadPeerTaskFile {
         request_id: String,
@@ -355,6 +356,7 @@ pub enum PeerRequest {
         request_id: String,
         requester_peer_id: String,
         task_id: String,
+        expected_transition_revision: String,
     },
     ReadTaskFile {
         request_id: String,

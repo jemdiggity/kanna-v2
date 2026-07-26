@@ -51,6 +51,7 @@ function openItem(id: string) {
     activity: "working",
     activity_revision: 5,
     blocker_revision: 11,
+    transition_revision: "run-owner-5",
     branch: id,
     base_ref: "main",
     pr_number: null,
@@ -79,6 +80,7 @@ function remoteLanTaskSnapshot(
     stage: "in progress",
     activity: "working",
     activityRevision: 4,
+    transitionRevision: "run-peer-4",
     status: "active",
     repo: {
       cloudRepoId: "repo-1",
@@ -153,6 +155,7 @@ describe("desktop LAN task index publisher", () => {
     );
     expect(publishCall?.[1].snapshot.tasks[0].activityRevision).toBe(5);
     expect(publishCall?.[1].snapshot.tasks[0].blockerRevision).toBe(11);
+    expect(publishCall?.[1].snapshot.tasks[0].transitionRevision).toBe("run-owner-5");
   });
 
   it("omits resolved blockers from the published task snapshot", async () => {

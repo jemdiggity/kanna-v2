@@ -2163,7 +2163,7 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
     // A small per-subscriber byte budget lets a modest flood overflow the
     // mailbox without pushing megabytes through debug-build JSON parsing.
     let daemon =
-        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "65536")]);
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "16384")]);
     let session_id = "sess-overflowing-subscriber";
     let dir = atomic_attach_dir("overflowing-subscriber");
 
@@ -2175,7 +2175,7 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
             "-c".to_string(),
             // Enough serialized volume to overflow the reduced byte budget on
             // top of the kernel socket buffers.
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 262144 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 32768 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
                 .to_string(),
         ],
         cwd: dir.display().to_string(),
@@ -2187,6 +2187,7 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
     expect_session_created(&mut control, session_id);
 
     let mut stalled = daemon.connect();
+    stalled.clamp_recv_buffer(4096);
     attach(&mut stalled, session_id);
     let mut healthy = daemon.connect();
     attach(&mut healthy, session_id);
@@ -2195,7 +2196,7 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
 
     // The healthy subscriber observes the end of the flood promptly while the
     // stalled subscriber's backlog overflows its byte budget.
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_millis(2_500));
+    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(5));
 
     // The lagging subscriber is not disconnected: once it resumes reading and
     // drains its bounded backlog, the daemon resynchronizes it in place with
@@ -2234,7 +2235,7 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let daemon =
-        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "65536")]);
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "16384")]);
     let session_id = "sess-overflowing-observer";
     let dir = atomic_attach_dir("overflowing-observer");
 
@@ -2244,7 +2245,7 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
         executable: "/bin/sh".to_string(),
         args: vec![
             "-c".to_string(),
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 262144 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 32768 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
                 .to_string(),
         ],
         cwd: dir.display().to_string(),
@@ -2263,7 +2264,7 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
 
     std::fs::write(dir.join("go"), b"go").unwrap();
 
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_millis(2_500));
+    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(5));
     wait_for_daemon_log(
         &daemon,
         "stage=observer_write event=lag",

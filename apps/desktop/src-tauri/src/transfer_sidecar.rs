@@ -277,6 +277,7 @@ impl TransferSidecarClient {
         &self,
         peer_id: String,
         task_id: String,
+        expected_transition_revision: String,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("advance-stage");
         self.send_request(
@@ -285,6 +286,7 @@ impl TransferSidecarClient {
                 "request_id": request_id,
                 "target_peer_id": peer_id,
                 "task_id": task_id,
+                "expected_transition_revision": expected_transition_revision,
             }),
             &request_id,
         )

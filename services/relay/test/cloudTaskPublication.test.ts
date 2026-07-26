@@ -20,6 +20,7 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     activity: "idle",
     activityRevision: 4,
     blockerRevision: 6,
+    transitionRevision: "run-4",
     status: "active",
     repo: {
       cloudRepoId: "repo-1",
@@ -82,6 +83,7 @@ describe("cloud task publication validation", () => {
       activity: "idle",
       activityRevision: 4,
       blockerRevision: 6,
+      transitionRevision: "run-4",
       waitingPromptSnippet: "Ready for review",
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
@@ -218,6 +220,26 @@ describe("cloud task publication validation", () => {
       })]),
       "desktop-1",
     )).toThrow(new RegExp(`transfer\\.${field}`));
+  });
+
+  it("accepts legacy missing transition revisions but rejects malformed values", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ transitionRevision: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.transitionRevision).toBeNull();
+
+    expect(validateCloudTaskPublication(
+      publication([task({ transitionRevision: null })]),
+      "desktop-1",
+    ).tasks[0]?.transitionRevision).toBeNull();
+
+    for (const transitionRevision of ["", "r".repeat(129), 4]) {
+      expect(() => validateCloudTaskPublication(
+        publication([task({ transitionRevision })]),
+        "desktop-1",
+      )).toThrow(/transitionRevision/);
+    }
   });
 
   it("accepts legacy missing revisions but rejects malformed activity revisions", () => {

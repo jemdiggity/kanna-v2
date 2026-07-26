@@ -226,12 +226,21 @@ pub(super) async fn advance_owner_task_stage(
     context: &ListenerContext,
     requester_peer_id: &str,
     task_id: &str,
+    expected_transition_revision: &str,
 ) -> Result<(), RuntimeError> {
     ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
-    post_local_kanna_task_action(port, task_id, "advance-stage", &serde_json::json!({})).await
+    post_local_kanna_task_action(
+        port,
+        task_id,
+        "advance-stage",
+        &serde_json::json!({
+            "expectedTransitionRevision": expected_transition_revision,
+        }),
+    )
+    .await
 }
 
 pub(super) async fn read_owner_task_file(

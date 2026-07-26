@@ -283,6 +283,7 @@ describe("createDesktopRelayTerminalClient", () => {
     const advancePromise = client.advanceStage({
       desktopId: "desktop-owner",
       taskId: "task-1",
+      expectedTransitionRevision: "run-1",
     });
     const markReadPromise = client.markTaskRead({
       desktopId: "desktop-owner",
@@ -305,7 +306,11 @@ describe("createDesktopRelayTerminalClient", () => {
     const advanceRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/advance-stage");
     const markReadRequest = sent.find((entry) => entry.path === "/v1/tasks/task%2Fread/actions/mark-read");
     expect(closeRequest).toMatchObject({ type: "request", method: "POST", body: null });
-    expect(advanceRequest).toMatchObject({ type: "request", method: "POST", body: null });
+    expect(advanceRequest).toMatchObject({
+      type: "request",
+      method: "POST",
+      body: { expectedTransitionRevision: "run-1" },
+    });
     expect(markReadRequest).toMatchObject({
       type: "request",
       method: "POST",

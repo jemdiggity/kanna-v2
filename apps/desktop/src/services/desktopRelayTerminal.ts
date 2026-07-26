@@ -52,6 +52,10 @@ export interface MarkRemoteTaskReadOptions extends RemoteTerminalActionOptions {
   expectedActivityRevision: number;
 }
 
+export interface AdvanceRemoteTaskStageOptions extends RemoteTerminalActionOptions {
+  expectedTransitionRevision: string;
+}
+
 export interface SendRemoteTerminalInputOptions extends RemoteTerminalActionOptions {
   data: string;
 }
@@ -76,7 +80,7 @@ export interface DesktopRelayTerminalClient {
   sendInput(options: SendRemoteTerminalInputOptions): Promise<void>;
   resize(options: ResizeRemoteTerminalOptions): Promise<void>;
   closeTask(options: RemoteTerminalActionOptions): Promise<void>;
-  advanceStage(options: RemoteTerminalActionOptions): Promise<void>;
+  advanceStage(options: AdvanceRemoteTaskStageOptions): Promise<void>;
   readTaskFile(options: ReadRemoteTaskFileOptions): Promise<RemoteTaskFileContent>;
   markTaskRead(options: MarkRemoteTaskReadOptions): Promise<void>;
 }
@@ -206,7 +210,7 @@ export function createDesktopRelayTerminalClient({
       const response = await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/advance-stage`,
-        null,
+        { expectedTransitionRevision: options.expectedTransitionRevision },
       );
       assertSuccessfulTaskAction(response, "stage advance");
     },

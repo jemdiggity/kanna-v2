@@ -27,6 +27,7 @@ function remoteTaskSnapshot(overrides: Partial<DesktopCloudTaskSnapshot> = {}): 
     displayName: null,
     stage: "in progress",
     activity: "idle",
+    transitionRevision: "run-1",
     status: "active",
     repo: {
       cloudRepoId: "remote-repo-id",
@@ -104,6 +105,7 @@ describe("mapDesktopCloudTasks", () => {
         stage: "in progress",
         activity: "working",
         activityRevision: 9,
+        transitionRevision: "run-cloud-9",
         status: "active",
         repo: {
           cloudRepoId: "repo-1",
@@ -140,6 +142,7 @@ describe("mapDesktopCloudTasks", () => {
         agent_provider: "codex",
         agent_type: "agent",
         activity_revision: 9,
+        transition_revision: "run-cloud-9",
       },
     ]);
     expect(snapshot.terminalRefs["cloud:repo-1:task-1"]).toEqual({

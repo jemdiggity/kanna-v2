@@ -101,6 +101,7 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
       await invoke("advance_transfer_peer_task_stage", {
         peerId: options.desktopId,
         taskId: options.taskId,
+        expectedTransitionRevision: options.expectedTransitionRevision,
       });
     },
     async readTaskFile(options) {

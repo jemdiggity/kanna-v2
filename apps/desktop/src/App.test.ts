@@ -719,10 +719,12 @@ function emitDesktopCloudSnapshot(snapshot: DesktopCloudSnapshot): void {
 function buildRemoteBlockedWorkflowSnapshot({
   blocked,
   hasRunningPost = false,
+  transitionRevision = "run-blocked-1",
   updatedAt,
 }: {
   blocked: boolean;
   hasRunningPost?: boolean;
+  transitionRevision?: string;
   updatedAt: string;
 }): DesktopCloudSnapshot {
   const repoId = "cloud:repo-remote";
@@ -754,6 +756,7 @@ function buildRemoteBlockedWorkflowSnapshot({
     base_ref: "origin/main",
     agent_session_id: null,
     previous_stage: null,
+    transition_revision: transitionRevision,
     has_running_post: hasRunningPost ? 1 : 0,
     teardown_started_at: null,
     parent_task_id: null,
@@ -1601,6 +1604,7 @@ describe("App", () => {
         agent_provider: "codex",
         agent_type: "pty",
         previous_stage: null,
+        transition_revision: "run-owner-1",
         stage_result: null,
         teardown_started_at: null,
         last_output_preview: null,
@@ -3085,6 +3089,7 @@ describe("App", () => {
         agent_provider: "codex",
         agent_type: "pty",
         previous_stage: null,
+        transition_revision: "run-owner-1",
         stage_result: null,
         teardown_started_at: null,
         last_output_preview: null,
@@ -3150,12 +3155,17 @@ describe("App", () => {
     expect(relayAdvanceStageMock).toHaveBeenCalledWith({
       desktopId: "desktop-owner",
       taskId: "task-owner",
+      expectedTransitionRevision: "run-owner-1",
     });
     expect(relayCloseMock).not.toHaveBeenCalled();
 
     advanceDeferred.resolve();
     await waitForCondition(() => relayCloseMock.mock.calls.length === 1);
     expect(relayCloseMock).toHaveBeenCalled();
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+    expect(relayAdvanceStageMock).toHaveBeenCalledOnce();
 
     wrapper.unmount();
   });
@@ -3233,6 +3243,7 @@ describe("App", () => {
     expect(relayAdvanceStageMock).toHaveBeenCalledWith({
       desktopId: "desktop-owner",
       taskId: "task-blocked",
+      expectedTransitionRevision: "run-blocked-1",
     });
     expect(toastErrorMock).toHaveBeenCalledWith("task is blocked: task-blocked");
     expect(relayCloseMock).toHaveBeenCalledTimes(1);
@@ -3272,10 +3283,30 @@ describe("App", () => {
     expect(relayAdvanceStageMock).toHaveBeenCalledWith({
       desktopId: "desktop-owner",
       taskId: "task-blocked",
+      expectedTransitionRevision: "run-blocked-1",
     });
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(relayCloseMock).toHaveBeenCalledTimes(1);
     expect(store.advanceStage).not.toHaveBeenCalled();
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+    expect(relayAdvanceStageMock).toHaveBeenCalledTimes(1);
+
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-blocked-2",
+      updatedAt: "2026-07-25T01:03:00.000Z",
+    }));
+    await flushPromises();
+
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 2);
+    expect(relayAdvanceStageMock).toHaveBeenLastCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+      expectedTransitionRevision: "run-blocked-2",
+    });
 
     wrapper.unmount();
   });

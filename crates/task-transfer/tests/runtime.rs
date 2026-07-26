@@ -1601,7 +1601,7 @@ async fn trusted_peer_advance_stage_posts_to_owner_kanna_server() {
     pair_peers(&secondary, &owner, "peer-owner").await;
 
     secondary
-        .advance_peer_task_stage("peer-owner", "owner-task-1")
+        .advance_peer_task_stage("peer-owner", "owner-task-1", "run-1")
         .await
         .unwrap();
 
@@ -1610,7 +1610,7 @@ async fn trusted_peer_advance_stage_posts_to_owner_kanna_server() {
         request_line,
         "POST /v1/tasks/owner-task-1/actions/advance-stage HTTP/1.1\r\n"
     );
-    assert_eq!(body, "{}");
+    assert_eq!(body, r#"{"expectedTransitionRevision":"run-1"}"#);
     server.await.unwrap();
 }
 
@@ -1974,7 +1974,7 @@ async fn assert_task_id_rejected_before_kanna_connection(task_id: &str, expected
 
     pair_peers(&secondary, &owner, "peer-owner").await;
 
-    let action = secondary.advance_peer_task_stage("peer-owner", task_id);
+    let action = secondary.advance_peer_task_stage("peer-owner", task_id, "run-1");
     tokio::pin!(action);
     let error = tokio::select! {
         result = &mut action => result.unwrap_err(),

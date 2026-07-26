@@ -24,6 +24,7 @@ mod worktrees;
 
 #[allow(unused_imports)]
 pub use analytics::RepoAnalytics;
+pub use blockers::ReplaceTaskBlockersError;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
@@ -165,6 +166,7 @@ pub struct SnapshotPipelineItem {
     pub activity: String,
     pub activity_revision: i64,
     pub blocker_revision: i64,
+    pub transition_revision: Option<String>,
     pub activity_changed_at: Option<String>,
     pub unread_at: Option<String>,
     pub port_offset: Option<i64>,

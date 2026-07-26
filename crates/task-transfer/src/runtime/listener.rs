@@ -866,7 +866,15 @@ async fn handle_connection(
             request_id,
             requester_peer_id,
             task_id,
-        }) => match advance_owner_task_stage(&context, &requester_peer_id, &task_id).await {
+            expected_transition_revision,
+        }) => match advance_owner_task_stage(
+            &context,
+            &requester_peer_id,
+            &task_id,
+            &expected_transition_revision,
+        )
+        .await
+        {
             Ok(()) => PeerResponse::AdvanceTaskStage { request_id },
             Err(error) => PeerResponse::Error {
                 request_id,

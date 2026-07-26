@@ -21,6 +21,17 @@ pub(super) async fn wait_for_task_stage(
     );
 }
 
+async fn wait_for_stage_run(db: &Db, task_id: &str, expected_stage: &str) -> crate::db::StageRun {
+    for _ in 0..100 {
+        let runs = db.list_stage_runs_for_task(task_id).unwrap();
+        if let Some(run) = runs.into_iter().find(|run| run.stage == expected_stage) {
+            return run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("task {task_id} never recorded a run for stage {expected_stage}");
+}
+
 async fn recv_state_change_scope(
     rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
 ) -> kanna_agent_protocol::StateChangeScope {
@@ -3275,7 +3286,8 @@ async fn advance_stage_route_uses_stage_advancer() {
     let response = app
         .oneshot(
             Request::post("/v1/tasks/task-1/actions/advance-stage")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
@@ -3287,6 +3299,93 @@ async fn advance_stage_route_uses_stage_advancer() {
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
     assert_eq!(created.task_id, "task-2");
+}
+
+#[tokio::test]
+async fn stale_advance_transition_revision_is_rejected_after_owner_transition() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seeded = super::test_state_with_seed("desktop-advance-cas", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "advance me",
+            Some("Advance Me"),
+            "in progress",
+            "2026-07-26 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-1",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "succeeded",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    });
+    let config = seeded.config.clone();
+    let db_path = config.db_path.clone();
+    let app = super::router(Arc::new(AppState::with_stage_advancer(
+        config,
+        Arc::new({
+            let calls = Arc::clone(&calls);
+            move |task_id| {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Db::open(&db_path)
+                        .unwrap()
+                        .insert_stage_run(crate::db::NewStageRun {
+                            id: "run-2",
+                            task_id: &task_id,
+                            stage: "review",
+                            kind: "main",
+                            agent: None,
+                            agent_provider: Some("codex"),
+                            model: None,
+                            status: "running",
+                            result: None,
+                            feedback: None,
+                            session_id: Some("task-1"),
+                            provider_session_id: None,
+                            cwd: None,
+                            resumed_from_run_id: None,
+                        })
+                        .unwrap();
+                }
+                Ok(TaskActionResponse {
+                    task_id,
+                    follow_task: None,
+                })
+            }
+        }),
+    )));
+    let request = || {
+        Request::post("/v1/tasks/task-1/actions/advance-stage")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "expectedTransitionRevision": "run-1",
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(request()).await.unwrap();
+    let replay = app.oneshot(request()).await.unwrap();
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(replay.status(), StatusCode::CONFLICT);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4492,6 +4591,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
     assert_eq!(task.stage.as_deref(), Some("pr"));
     assert!(task.closed_at.is_none());
 
+    let next_stage_run = wait_for_stage_run(&db, "task-1", "pr").await;
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
     let post_run = runs.iter().find(|run| run.id == "run-post").unwrap();
     assert_eq!(post_run.status, "succeeded", "late verdict wins");
@@ -4499,7 +4599,6 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         post_run.feedback.as_deref(),
         Some("cleaned up and committed")
     );
-    let next_stage_run = runs.iter().find(|run| run.stage == "pr").unwrap();
     assert_eq!(next_stage_run.status, "running");
 
     if created_sidecar {

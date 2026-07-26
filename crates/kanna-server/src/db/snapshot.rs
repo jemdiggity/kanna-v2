@@ -77,6 +77,13 @@ impl Db {
                     ) AS has_running_post,
                     pipeline_item.activity_revision,
                     pipeline_item.blocker_revision,
+                    (
+                      SELECT stage_run.id
+                      FROM stage_run
+                      WHERE stage_run.task_id = pipeline_item.id
+                      ORDER BY datetime(stage_run.started_at) DESC, stage_run.id DESC
+                      LIMIT 1
+                    ) AS transition_revision,
                     COALESCE(pipeline_item.cloud_task_id, pipeline_item.id) AS cloud_task_id,
                     task_transfer.id,
                     task_transfer.direction,
@@ -149,14 +156,15 @@ impl Db {
                 has_running_post: row.get(32)?,
                 activity_revision: row.get(33)?,
                 blocker_revision: row.get(34)?,
-                cloud_task_id: row.get(35)?,
-                transfer_id: row.get(36)?,
-                transfer_direction: row.get(37)?,
-                transfer_status: row.get(38)?,
-                transfer_source_peer_id: row.get(39)?,
-                transfer_target_peer_id: row.get(40)?,
-                transfer_source_desktop_id: row.get(41)?,
-                transfer_target_desktop_id: row.get(42)?,
+                transition_revision: row.get(35)?,
+                cloud_task_id: row.get(36)?,
+                transfer_id: row.get(37)?,
+                transfer_direction: row.get(38)?,
+                transfer_status: row.get(39)?,
+                transfer_source_peer_id: row.get(40)?,
+                transfer_target_peer_id: row.get(41)?,
+                transfer_source_desktop_id: row.get(42)?,
+                transfer_target_desktop_id: row.get(43)?,
             })
         })?;
         rows.collect()

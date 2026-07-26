@@ -1,7 +1,7 @@
 use super::NewStageRun;
 use super::{
     add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
-    NewTaskTransferProvenance, CURRENT_SCHEMA_MIGRATIONS,
+    NewTaskTransferProvenance, ReplaceTaskBlockersError, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -1709,6 +1709,185 @@ fn blocker_revision_advances_without_touching_dependent_updated_at() {
         .expect("dependent snapshot item");
     assert_eq!(dependent.blocker_revision, 6);
 
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn concurrent_blocker_replacements_cannot_both_create_inverse_edges() {
+    let path = Db::test_db_path("concurrent-blocker-cycle");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    for id in ["task-a", "task-b"] {
+        db.insert_test_pipeline_item(
+            id,
+            "repo-1",
+            id,
+            Some(id),
+            "in progress",
+            "2026-07-26T00:00:00Z",
+        )
+        .expect("task");
+    }
+    drop(db);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let spawn_replace = |task_id: &'static str, blocker_id: &'static str| {
+        let path = path.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open concurrent db");
+            barrier.wait();
+            db.replace_task_blockers_atomically(task_id, &[blocker_id.to_string()])
+        })
+    };
+    let first = spawn_replace("task-a", "task-b");
+    let second = spawn_replace("task-b", "task-a");
+    barrier.wait();
+    let results = [first.join().unwrap(), second.join().unwrap()];
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(ReplaceTaskBlockersError::CircularDependency)))
+            .count(),
+        1
+    );
+
+    let db = Db::open(&path).expect("reopen db");
+    let a_blockers = db.list_task_blocker_ids("task-a").unwrap();
+    let b_blockers = db.list_task_blocker_ids("task-b").unwrap();
+    assert!(
+        (a_blockers == ["task-b"] && b_blockers.is_empty())
+            || (b_blockers == ["task-a"] && a_blockers.is_empty())
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn concurrent_blocker_replacements_publish_one_complete_set() {
+    let path = Db::test_db_path("concurrent-blocker-set");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    for id in ["task", "blocker-a", "blocker-b", "blocker-c", "blocker-d"] {
+        db.insert_test_pipeline_item(
+            id,
+            "repo-1",
+            id,
+            Some(id),
+            "in progress",
+            "2026-07-26T00:00:00Z",
+        )
+        .expect("task");
+    }
+    drop(db);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let spawn_replace = |blockers: Vec<String>| {
+        let path = path.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open concurrent db");
+            barrier.wait();
+            db.replace_task_blockers_atomically("task", &blockers)
+        })
+    };
+    let first = spawn_replace(vec!["blocker-a".into(), "blocker-b".into()]);
+    let second = spawn_replace(vec!["blocker-c".into(), "blocker-d".into()]);
+    barrier.wait();
+    first.join().unwrap().expect("first replacement");
+    second.join().unwrap().expect("second replacement");
+
+    let blockers = Db::open(&path)
+        .unwrap()
+        .list_task_blocker_ids("task")
+        .unwrap();
+    assert!(
+        blockers == ["blocker-a", "blocker-b"] || blockers == ["blocker-c", "blocker-d"],
+        "concurrent replacements interleaved into {blockers:?}"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn snapshot_never_observes_partial_blocker_replacement() {
+    let path = Db::test_db_path("snapshot-atomic-blockers");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    for id in ["task", "blocker-old", "blocker-new-a", "blocker-new-b"] {
+        db.insert_test_pipeline_item(
+            id,
+            "repo-1",
+            id,
+            Some(id),
+            "in progress",
+            "2026-07-26T00:00:00Z",
+        )
+        .expect("task");
+    }
+    db.insert_task_blocker("task", "blocker-old")
+        .expect("old blocker");
+    let old_snapshot = db.ui_snapshot().unwrap();
+    let old_revision = old_snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task")
+        .unwrap()
+        .blocker_revision;
+    drop(db);
+
+    let (deleted_tx, deleted_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        Db::open(&writer_path)
+            .unwrap()
+            .replace_task_blockers_atomically_with_hook(
+                "task",
+                &["blocker-new-a".into(), "blocker-new-b".into()],
+                || {
+                    deleted_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                },
+            )
+    });
+    deleted_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("replacement never reached fault boundary");
+
+    let during = Db::open(&path).unwrap().ui_snapshot().unwrap();
+    let during_blockers: Vec<_> = during
+        .task_blockers
+        .iter()
+        .filter(|edge| edge.blocked_item_id == "task")
+        .map(|edge| edge.blocker_item_id.as_str())
+        .collect();
+    let during_revision = during.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task")
+        .unwrap()
+        .blocker_revision;
+    assert_eq!(during_blockers, ["blocker-old"]);
+    assert_eq!(during_revision, old_revision);
+
+    resume_tx.send(()).unwrap();
+    writer.join().unwrap().expect("replacement commit");
+    let after = Db::open(&path).unwrap().ui_snapshot().unwrap();
+    let after_blockers: Vec<_> = after
+        .task_blockers
+        .iter()
+        .filter(|edge| edge.blocked_item_id == "task")
+        .map(|edge| edge.blocker_item_id.as_str())
+        .collect();
+    let after_revision = after.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task")
+        .unwrap()
+        .blocker_revision;
+    assert_eq!(after_blockers, ["blocker-new-a", "blocker-new-b"]);
+    assert!(after_revision > old_revision);
     let _ = std::fs::remove_file(path);
 }
 

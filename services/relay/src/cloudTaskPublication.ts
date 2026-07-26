@@ -188,6 +188,14 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     task.blockerRevision,
     `${path}.blockerRevision`,
   );
+  const transitionRevision = optionalNullableString(
+    task.transitionRevision,
+    `${path}.transitionRevision`,
+    128,
+  );
+  if (transitionRevision !== null && transitionRevision.length === 0) {
+    throw new Error(`${path}.transitionRevision must be null or a non-empty string`);
+  }
 
   return {
     ...(cloudTaskId === undefined ? {} : { cloudTaskId }),
@@ -206,6 +214,7 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     activity: requiredString(task.activity, `${path}.activity`, 32),
     ...(activityRevision === undefined ? {} : { activityRevision }),
     ...(blockerRevision === undefined ? {} : { blockerRevision }),
+    transitionRevision,
     status,
     hasRunningPost: optionalBoolean(task.hasRunningPost, `${path}.hasRunningPost`),
     repo: {

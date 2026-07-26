@@ -432,6 +432,7 @@ impl TransferRuntime {
         &self,
         target_peer_id: &str,
         task_id: &str,
+        expected_transition_revision: &str,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
@@ -443,6 +444,7 @@ impl TransferRuntime {
                     request_id: request_id.clone(),
                     requester_peer_id: self.config.peer_id.clone(),
                     task_id: task_id.to_owned(),
+                    expected_transition_revision: expected_transition_revision.to_owned(),
                 },
             )
             .await?;

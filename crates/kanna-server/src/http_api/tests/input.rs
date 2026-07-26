@@ -20,7 +20,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str) 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
+    let unique_prefix = format!(
         "kanna-signal-agent-found-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -28,11 +28,27 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str) 
             .unwrap()
             .as_nanos()
     );
-    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
-    std::fs::create_dir_all(&daemon_dir).unwrap();
-    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path).unwrap();
+    let (unique, daemon_dir, socket_path, listener) = (0..100)
+        .find_map(|attempt| {
+            let unique = format!("{unique_prefix}-{attempt}");
+            let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+            std::fs::create_dir_all(&daemon_dir).unwrap();
+            let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+            match UnixListener::bind(&socket_path) {
+                Ok(listener) => Some((unique, daemon_dir, socket_path, listener)),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::AlreadyExists
+                    ) =>
+                {
+                    let _ = std::fs::remove_dir_all(daemon_dir);
+                    None
+                }
+                Err(error) => panic!("failed to bind test daemon socket: {error}"),
+            }
+        })
+        .expect("failed to allocate a collision-free test daemon socket");
 
     let daemon_server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();

@@ -287,6 +287,7 @@ fn remote_task_advance_messages_use_expected_wire_names() {
         request_id: "req-advance-control".into(),
         target_peer_id: "peer-owner".into(),
         task_id: "task-owner".into(),
+        expected_transition_revision: "run-1".into(),
     };
     assert_eq!(
         serde_json::to_value(&control_request).unwrap(),
@@ -295,6 +296,7 @@ fn remote_task_advance_messages_use_expected_wire_names() {
             "request_id": "req-advance-control",
             "target_peer_id": "peer-owner",
             "task_id": "task-owner",
+            "expected_transition_revision": "run-1",
         })
     );
     assert_roundtrip(control_request);
@@ -307,6 +309,7 @@ fn remote_task_advance_messages_use_expected_wire_names() {
         request_id: "req-advance-peer".into(),
         requester_peer_id: "peer-secondary".into(),
         task_id: "task-owner".into(),
+        expected_transition_revision: "run-1".into(),
     };
     assert_eq!(
         serde_json::to_value(&peer_request).unwrap(),
@@ -315,6 +318,7 @@ fn remote_task_advance_messages_use_expected_wire_names() {
             "request_id": "req-advance-peer",
             "requester_peer_id": "peer-secondary",
             "task_id": "task-owner",
+            "expected_transition_revision": "run-1",
         })
     );
     assert_roundtrip(peer_request);

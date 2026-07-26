@@ -18,7 +18,11 @@ describe("createDesktopLanTerminalClient", () => {
     await client.sendInput({ desktopId: "peer-primary", taskId: "task-1", data: "hello\n" });
     await client.resize({ desktopId: "peer-primary", taskId: "task-1", cols: 100, rows: 32 });
     await client.closeTask({ desktopId: "peer-primary", taskId: "task-1" });
-    await client.advanceStage({ desktopId: "peer-primary", taskId: "task-1" });
+    await client.advanceStage({
+      desktopId: "peer-primary",
+      taskId: "task-1",
+      expectedTransitionRevision: "run-1",
+    });
     await client.markTaskRead({
       desktopId: "peer-primary",
       taskId: "task-1",
@@ -43,6 +47,7 @@ describe("createDesktopLanTerminalClient", () => {
     expect(invoke).toHaveBeenCalledWith("advance_transfer_peer_task_stage", {
       peerId: "peer-primary",
       taskId: "task-1",
+      expectedTransitionRevision: "run-1",
     });
     expect(invoke).toHaveBeenCalledWith("mark_transfer_peer_task_read", {
       peerId: "peer-primary",

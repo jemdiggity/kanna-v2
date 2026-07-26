@@ -13,7 +13,8 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::client::{SessionSizes, TerminalEmulatorClients};
 use crate::fanout::{
-    existing_session_fanout, EnqueueReport, EventLine, SessionFanout, SessionFanouts,
+    existing_session_fanout, session_fanout, EnqueueReport, EventLine, SessionFanout,
+    SessionFanouts,
 };
 use crate::session::{
     MirrorResult, PendingInput, SessionHandle, SessionManager, StreamControl,
@@ -128,6 +129,7 @@ pub(crate) async fn stream_output(
     let mut pending_offset = 0usize;
     let mut status_interval =
         tokio::time::interval(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS));
+    let session_fanout = session_fanout(&fanouts, &session_id).await;
     log::info!("[stream] start session={}", session_id);
 
     loop {
@@ -290,6 +292,15 @@ pub(crate) async fn stream_output(
                     }
                     Err(_would_block) => {}
                 }
+            }
+
+            _ = session_fanout.recovery_notify.notified() => {
+                if stream_control.stop_requested() || session.is_retired() {
+                    log::info!("[stream] stopped retired reader session={}", session_id);
+                    stream_control.mark_stopped();
+                    return;
+                }
+                resync_drained_subscribers(&session_id, &session, &session_fanout).await;
             }
 
             _ = status_interval.tick() => {
@@ -599,6 +610,7 @@ async fn resync_drained_subscribers(
                 session_id,
                 error
             );
+            fanout.recovery_notify.notify_one();
             return;
         }
     };

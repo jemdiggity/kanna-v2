@@ -95,7 +95,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   let lanRefreshInFlight: Promise<void> | null = null;
   let desktopCloudWorkspaceDisposed = false;
   const activeMarkReadClients = new Set<ActiveMarkReadClient>();
-  const remoteStageAdvancesInFlight = new Set<string>();
+  const remoteStageAdvancesPending = new Map<string, string>();
   const associatedCloudUsers = new Set<string>();
   let lastCloudBackendErrorToastAt: number | null = null;
   let currentDesktopId: string | null = null;
@@ -641,15 +641,24 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       return;
     }
     if (workspaceTask.item.has_running_post) return;
+    const expectedTransitionRevision = workspaceTask.item.transition_revision;
+    if (
+      typeof expectedTransitionRevision !== "string"
+      || expectedTransitionRevision.trim().length === 0
+    ) {
+      toast.error("Remote task snapshot is missing its transition revision.");
+      return;
+    }
 
     const requestKey = JSON.stringify([
       remoteRef.ownerDesktopId,
       remoteRef.ownerLocalTaskId,
     ]);
-    if (remoteStageAdvancesInFlight.has(requestKey)) return;
-    remoteStageAdvancesInFlight.add(requestKey);
+    if (remoteStageAdvancesPending.get(requestKey) === expectedTransitionRevision) return;
+    remoteStageAdvancesPending.set(requestKey, expectedTransitionRevision);
 
     let client: DesktopRelayTerminalClient | null = null;
+    let accepted = false;
     try {
       client = workspaceTask.terminal.kind === "lan"
         ? await createConfiguredDesktopLanTerminalClient()
@@ -661,12 +670,19 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       await client.advanceStage({
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,
+        expectedTransitionRevision,
       });
+      accepted = true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       client?.close();
-      remoteStageAdvancesInFlight.delete(requestKey);
+      if (
+        !accepted
+        && remoteStageAdvancesPending.get(requestKey) === expectedTransitionRevision
+      ) {
+        remoteStageAdvancesPending.delete(requestKey);
+      }
     }
   }
 
