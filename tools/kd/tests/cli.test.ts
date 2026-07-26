@@ -74,7 +74,7 @@ describe("kd CLI", () => {
   it("bootstraps root kd and MCP launchers from a clean repo fixture", () => {
     const packageRoot = resolve(import.meta.dirname, "..");
     const repoRoot = resolve(packageRoot, "..", "..");
-    const tempRoot = mkdtempSync(join(tmpdir(), "kd-launcher-contract-"));
+    const tempRoot = mkdtempSync(join(tmpdir(), "kd launcher contract "));
     const fixtureRepoRoot = join(tempRoot, "repo");
     const home = join(tempRoot, "home");
     mkdirSync(home, { recursive: true });
