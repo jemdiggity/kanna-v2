@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync
@@ -258,6 +259,68 @@ describe("kd installation publication", () => {
 
     expect(resolved).toBe(join(cacheRoot, "dead/bin/kd.js"));
     expect(existsSync(lockRoot)).toBe(false);
+  });
+
+  it("recovers an ownerless lock after it remains unchanged for one poll", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const lockRoot = join(cacheRoot, ".ownerless.lock");
+    mkdirSync(lockRoot, { recursive: true });
+
+    const resolved = await ensureKdInstallation({
+      cacheRoot,
+      identity: "ownerless",
+      entrypoint: "kd",
+      runtime,
+      build: successfulFakeBuild,
+      waitTimeoutMs: 100,
+      pollIntervalMs: 1
+    });
+
+    expect(resolved).toBe(join(cacheRoot, "ownerless/bin/kd.js"));
+    expect(existsSync(lockRoot)).toBe(false);
+  });
+
+  it("recovers a malformed lock after it remains unchanged for one poll", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const lockRoot = join(cacheRoot, ".malformed.lock");
+    mkdirSync(lockRoot, { recursive: true });
+    writeFileSync(join(lockRoot, "owner.json"), "{not-json");
+
+    const resolved = await ensureKdInstallation({
+      cacheRoot,
+      identity: "malformed",
+      entrypoint: "kd",
+      runtime,
+      build: successfulFakeBuild,
+      waitTimeoutMs: 100,
+      pollIntervalMs: 1
+    });
+
+    expect(resolved).toBe(join(cacheRoot, "malformed/bin/kd.js"));
+    expect(existsSync(lockRoot)).toBe(false);
+  });
+
+  it("cleans the private candidate when owner publication fails", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+
+    await expect(
+      ensureKdInstallation({
+        cacheRoot,
+        identity: "publish-failure",
+        entrypoint: "kd",
+        runtime,
+        build: successfulFakeBuild,
+        writeLockOwner: () => {
+          throw new Error("synthetic owner write failure");
+        }
+      })
+    ).rejects.toThrow("synthetic owner write failure");
+
+    expect(
+      readdirSync(cacheRoot).filter((name) =>
+        name.startsWith(".publish-failure.lock")
+      )
+    ).toEqual([]);
   });
 
   it("never removes a lock whose recorded owner is alive", async () => {

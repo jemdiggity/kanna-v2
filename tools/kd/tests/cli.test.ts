@@ -1,10 +1,11 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readdirSync,
   readlinkSync,
   rmSync,
@@ -14,11 +15,65 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import pkg from "../package.json";
+// @ts-expect-error The checked-in prebuild resolver is intentionally plain ESM.
+import { validateKdInstallation } from "../bin/kd-cache.mjs";
 import { parseCliArgs, runCli } from "../src/cli";
 import { getTaskDefinition } from "../src/tasks/registry";
 
+interface SpawnResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
 function commandPath(command: string): string {
   return execFileSync("/bin/bash", ["-lc", `command -v ${command}`], { encoding: "utf8" }).trim();
+}
+
+function spawnResult(
+  command: string,
+  args: string[],
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs: number;
+  }
+): Promise<SpawnResult> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, options.timeoutMs);
+    child.once("close", (status) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(
+          new Error(
+            `${command} ${args.join(" ")} timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`
+          )
+        );
+        return;
+      }
+      resolvePromise({ status, stdout, stderr });
+    });
+  });
 }
 
 function cleanLauncherEnv(home: string): NodeJS.ProcessEnv {
@@ -33,8 +88,20 @@ function cleanLauncherEnv(home: string): NodeJS.ProcessEnv {
 
 function copyLauncherFixture(sourceRepoRoot: string, fixtureRepoRoot: string): void {
   mkdirSync(join(fixtureRepoRoot, "tools"), { recursive: true });
+  mkdirSync(join(fixtureRepoRoot, ".kanna"), { recursive: true });
+  mkdirSync(join(fixtureRepoRoot, "apps/desktop/src-tauri"), {
+    recursive: true
+  });
   cpSync(resolve(sourceRepoRoot, "package.json"), resolve(fixtureRepoRoot, "package.json"));
   cpSync(resolve(sourceRepoRoot, "pnpm-workspace.yaml"), resolve(fixtureRepoRoot, "pnpm-workspace.yaml"));
+  cpSync(
+    resolve(sourceRepoRoot, ".kanna/config.json"),
+    resolve(fixtureRepoRoot, ".kanna/config.json")
+  );
+  cpSync(
+    resolve(sourceRepoRoot, "apps/desktop/src-tauri/tauri.conf.json"),
+    resolve(fixtureRepoRoot, "apps/desktop/src-tauri/tauri.conf.json")
+  );
   if (existsSync(resolve(sourceRepoRoot, "pnpm-lock.yaml"))) {
     cpSync(resolve(sourceRepoRoot, "pnpm-lock.yaml"), resolve(fixtureRepoRoot, "pnpm-lock.yaml"));
   }
@@ -47,7 +114,158 @@ function copyLauncherFixture(sourceRepoRoot: string, fixtureRepoRoot: string): v
     recursive: true,
     filter: (source) => !source.includes("/node_modules") && !source.includes("/dist")
   });
+  const sourceKdModules = resolve(sourceRepoRoot, "tools/kd/node_modules");
+  const fixtureKdModules = resolve(fixtureRepoRoot, "tools/kd/node_modules");
+  mkdirSync(join(fixtureKdModules, "@modelcontextprotocol"), {
+    recursive: true
+  });
+  mkdirSync(join(fixtureKdModules, ".bin"), { recursive: true });
+  for (const dependency of ["smol-toml", "yaml", "zod", "tsup"]) {
+    symlinkSync(
+      realpathSync(join(sourceKdModules, dependency)),
+      join(fixtureKdModules, dependency),
+      "dir"
+    );
+  }
+  symlinkSync(
+    realpathSync(join(sourceKdModules, "@modelcontextprotocol/sdk")),
+    join(fixtureKdModules, "@modelcontextprotocol/sdk"),
+    "dir"
+  );
+  cpSync(
+    join(sourceKdModules, ".bin/tsup"),
+    join(fixtureKdModules, ".bin/tsup")
+  );
   symlinkSync("tools/kd/bin/kd", resolve(fixtureRepoRoot, "kd"));
+}
+
+function initializeGitFixture(repoRoot: string): void {
+  execFileSync("git", ["init", "-q"], { cwd: repoRoot });
+  execFileSync("git", ["add", "."], { cwd: repoRoot });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Kanna Test",
+      "-c",
+      "user.email=kanna-test@example.invalid",
+      "commit",
+      "-qm",
+      "fixture"
+    ],
+    { cwd: repoRoot }
+  );
+}
+
+function runMcpExchange(
+  cwd: string,
+  env: NodeJS.ProcessEnv
+): Promise<{
+  initialize: Record<string, unknown>;
+  toolsList: Record<string, unknown>;
+  stderr: string;
+}> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn("tools/kd/bin/kd-mcp", [], {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdoutBuffer = "";
+    let stderr = "";
+    let initialize: Record<string, unknown> | undefined;
+    let toolsList: Record<string, unknown> | undefined;
+    let settled = false;
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      reject(error);
+    };
+    const timer = setTimeout(() => {
+      fail(
+        new Error(
+          `kd-mcp exchange timed out\nstdout:\n${stdoutBuffer}\nstderr:\n${stderr}`
+        )
+      );
+    }, 30_000);
+
+    child.once("error", fail);
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (stdoutBuffer.includes("\n")) {
+        const newline = stdoutBuffer.indexOf("\n");
+        const line = stdoutBuffer.slice(0, newline);
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) continue;
+
+        let message: Record<string, unknown>;
+        try {
+          message = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          fail(new Error(`kd-mcp emitted non-JSON stdout: ${line}`));
+          return;
+        }
+
+        if (message.id === 1) {
+          initialize = message;
+          child.stdin.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              method: "notifications/initialized",
+              params: {}
+            })}\n`
+          );
+          child.stdin.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id: 2,
+              method: "tools/list",
+              params: {}
+            })}\n`
+          );
+        } else if (message.id === 2) {
+          toolsList = message;
+          child.stdin.end();
+          child.kill("SIGTERM");
+        }
+      }
+    });
+    child.once("close", () => {
+      if (settled) return;
+      clearTimeout(timer);
+      if (!initialize || !toolsList) {
+        fail(
+          new Error(
+            `kd-mcp exited before completing the exchange\nstdout:\n${stdoutBuffer}\nstderr:\n${stderr}`
+          )
+        );
+        return;
+      }
+      settled = true;
+      resolvePromise({ initialize, toolsList, stderr });
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "kd-launcher-test", version: "1.0.0" }
+        }
+      })}\n`
+    );
+  });
 }
 
 describe("kd CLI", () => {
@@ -71,60 +289,94 @@ describe("kd CLI", () => {
     expect(readlinkSync(rootWrapper)).toBe("tools/kd/bin/kd");
   });
 
-  it("bootstraps root kd and MCP launchers from a clean repo fixture", () => {
+  it("serializes concurrent cold launchers and serves MCP from the shared install", async () => {
     const packageRoot = resolve(import.meta.dirname, "..");
     const repoRoot = resolve(packageRoot, "..", "..");
     const tempRoot = mkdtempSync(join(tmpdir(), "kd launcher contract "));
-    const fixtureRepoRoot = join(tempRoot, "repo");
+    const fixtureRepoRoots = [
+      join(tempRoot, "repo one"),
+      join(tempRoot, "repo two")
+    ];
     const home = join(tempRoot, "home");
     mkdirSync(home, { recursive: true });
 
     try {
-      copyLauncherFixture(repoRoot, fixtureRepoRoot);
+      for (const fixtureRepoRoot of fixtureRepoRoots) {
+        copyLauncherFixture(repoRoot, fixtureRepoRoot);
+        initializeGitFixture(fixtureRepoRoot);
+      }
       const cacheRoot = join(tempRoot, "cache");
       const env = {
         ...cleanLauncherEnv(home),
         KANNA_KD_CACHE_ROOT: cacheRoot
       };
-      const kd = spawnSync("./kd", ["--help"], {
-        cwd: fixtureRepoRoot,
-        env,
-        encoding: "utf8",
-        timeout: 180_000
-      });
+      const launches = await Promise.all(
+        fixtureRepoRoots.map((fixtureRepoRoot) =>
+          spawnResult("./kd", ["env", "print"], {
+            cwd: fixtureRepoRoot,
+            env,
+            timeoutMs: 240_000
+          })
+        )
+      );
 
-      expect(kd.status).toBe(0);
-      expect(kd.stdout).toContain("Usage: kd <command>");
-      expect(kd.stderr).toContain("Installing kd ");
-      expect(existsSync(resolve(fixtureRepoRoot, "tools/kd/node_modules"))).toBe(true);
-      expect(existsSync(resolve(fixtureRepoRoot, "tools/kd/dist"))).toBe(false);
-
-      const second = spawnSync("./kd", ["--help"], {
-        cwd: fixtureRepoRoot,
-        env,
-        encoding: "utf8",
-        timeout: 30_000
-      });
-      expect(second.status).toBe(0);
-      expect(second.stderr).toBe("");
+      for (const [index, launch] of launches.entries()) {
+        const fixtureRepoRoot = fixtureRepoRoots[index];
+        expect(
+          launch.status,
+          `stdout:\n${launch.stdout}\nstderr:\n${launch.stderr}`
+        ).toBe(0);
+        expect(
+          (JSON.parse(launch.stdout) as { repoRoot: string }).repoRoot
+        ).toBe(realpathSync(fixtureRepoRoot));
+        expect(
+          existsSync(resolve(fixtureRepoRoot, "tools/kd/node_modules"))
+        ).toBe(true);
+        expect(existsSync(resolve(fixtureRepoRoot, "tools/kd/dist"))).toBe(
+          false
+        );
+      }
+      expect(
+        launches
+          .map((launch) => launch.stderr)
+          .join("")
+          .match(/Installing kd /g)
+      ).toHaveLength(1);
 
       const installs = readdirSync(cacheRoot).filter((name) => !name.startsWith("."));
       expect(installs).toHaveLength(1);
-      expect(existsSync(join(cacheRoot, installs[0], "bin/kd.js"))).toBe(true);
-      expect(existsSync(join(cacheRoot, installs[0], "bin/kd-mcp.js"))).toBe(true);
+      const runtime = {
+        nodeMajor: process.versions.node.split(".")[0],
+        platform: process.platform,
+        arch: process.arch
+      };
+      expect(
+        validateKdInstallation(
+          join(cacheRoot, installs[0]),
+          installs[0],
+          runtime
+        )
+      ).toBe(true);
+      expect(
+        readdirSync(cacheRoot).filter((name) => name.startsWith("."))
+      ).toEqual([]);
 
-      const mcp = spawnSync("tools/kd/bin/kd-mcp", [], {
-        cwd: fixtureRepoRoot,
-        env,
-        encoding: "utf8",
-        timeout: 2_000
-      });
-      const mcpError = mcp.error as NodeJS.ErrnoException | undefined;
-
-      expect(mcp.status === 0 || mcpError?.code === "ETIMEDOUT").toBe(true);
-      expect(mcp.stderr).not.toContain("Installing kd ");
-      expect(mcp.stderr).not.toContain("No such file or directory");
-      expect(mcp.stderr).not.toContain("Cannot find module");
+      const mcp = await runMcpExchange(fixtureRepoRoots[1], env);
+      expect(mcp.stderr).toBe("");
+      expect(
+        (
+          mcp.initialize.result as {
+            serverInfo: { name: string };
+          }
+        ).serverInfo.name
+      ).toBe("kd");
+      expect(
+        (
+          mcp.toolsList.result as {
+            tools: Array<{ name: string }>;
+          }
+        ).tools.map((tool) => tool.name)
+      ).toContain("dev_up");
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }

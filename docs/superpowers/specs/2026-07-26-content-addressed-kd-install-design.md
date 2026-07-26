@@ -150,8 +150,22 @@ cache.
 
 ## Concurrent installation
 
-A missing hash is coordinated with an atomic lock directory beside the final
-cache entry. The lock records the owner PID and start time.
+A missing hash is coordinated with an atomically published lock file beside
+the final cache entry. The resolver writes the complete owner record (PID,
+random token, and start time) to a process-private candidate file, then uses
+an exclusive hard link to publish it as `.<input-hash>.lock`. The public name
+is therefore either absent or backed by a fully populated owner record, and
+publication cannot replace another process's lock.
+
+Older resolver versions published a lock directory before writing its
+`owner.json`. For compatibility, the reader accepts both the current file and
+legacy directory formats. An ownerless or malformed legacy lock is
+quarantined only after two consecutive unchanged observations separated by a
+poll. Renaming the legacy directory aside prevents a delayed legacy writer
+from modifying the current file lock: its later `.<hash>.lock/owner.json`
+write fails against a file or absent parent instead. A malformed current lock
+file cannot be produced by the atomic publisher, so the same stable-observation
+recovery safely handles damage or interrupted older implementations.
 
 The lock owner:
 
@@ -162,15 +176,17 @@ The lock owner:
 5. removes its lock in a process-exit handler.
 
 Other launchers requesting the same hash wait for the owner and then validate
-the published entry. They do not start redundant builds. A waiter may recover
-a lock only when its recorded owner is no longer alive. It never removes a
-lock owned by a live process, and a bounded wait ends with an actionable error
-rather than waiting forever.
+the published entry. They do not start redundant builds. A waiter recovers a
+well-formed lock only when its recorded owner is no longer alive. It never
+removes a well-formed lock owned by a live process, and a bounded wait ends
+with an actionable error rather than waiting forever.
 
-Temporary directories are never executable cache hits. A failed build removes
-its own temporary directory and lock, leaving a later invocation free to
-retry. If another valid entry appears before publication, the builder
-discards its temporary output and uses the winner.
+Temporary directories and lock-candidate files are never executable cache
+hits. A failed owner-record write removes its private candidate without ever
+creating the public lock. A failed build removes its own temporary directory
+and token-matched public lock, leaving a later invocation free to retry. If
+another valid entry appears before publication, the builder discards its
+temporary output and uses the winner.
 
 An incomplete or malformed final entry is treated as corrupt. Under the same
 per-hash lock, the launcher moves it aside within the cache root, rebuilds,
@@ -238,10 +254,15 @@ They cover:
 - lockfile and build-config changes select a new hash;
 - concurrent cold launches result in one build and both callers succeed;
 - a failed build leaves no usable entry and the next invocation retries;
-- a dead owner lock is recovered while a live owner lock is preserved;
+- dead, ownerless, and malformed locks are recovered while a live owner lock
+  is preserved;
+- an owner-record publication failure leaves no public lock or private
+  candidate;
 - malformed manifests and missing entrypoints are rebuilt safely;
 - the cached bundle runs without adjacent `node_modules`;
-- the cached command observes the invoking worktree's repository context; and
+- the cached command observes the invoking worktree's repository context;
+- the cached MCP launcher completes `initialize` and `tools/list` with clean
+  JSON-RPC stdout; and
 - paths containing spaces are handled without shell interpolation.
 
 Existing `tools/kd` unit tests, type checking, and the repository setup

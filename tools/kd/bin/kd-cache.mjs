@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -239,11 +241,25 @@ function defaultIsProcessAlive(pid) {
   }
 }
 
+function lockOwnerPath(lockRoot) {
+  try {
+    const lockStat = lstatSync(lockRoot);
+    if (lockStat.isDirectory()) {
+      return join(lockRoot, "owner.json");
+    }
+    return lockStat.isFile() ? lockRoot : null;
+  } catch {
+    return null;
+  }
+}
+
 function readLockOwner(lockRoot) {
   try {
-    const owner = JSON.parse(
-      readFileSync(join(lockRoot, "owner.json"), "utf8")
-    );
+    const ownerPath = lockOwnerPath(lockRoot);
+    if (!ownerPath) {
+      return null;
+    }
+    const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
     if (
       !Number.isSafeInteger(owner.pid) ||
       owner.pid <= 0 ||
@@ -258,10 +274,56 @@ function readLockOwner(lockRoot) {
   }
 }
 
+function statFingerprint(path) {
+  try {
+    const value = lstatSync(path, { bigint: true });
+    return [
+      value.dev,
+      value.ino,
+      value.mode,
+      value.size,
+      value.mtimeNs,
+      value.ctimeNs
+    ].join(":");
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function lockFingerprint(lockRoot) {
+  const rootFingerprint = statFingerprint(lockRoot);
+  if (rootFingerprint === null) {
+    return null;
+  }
+  const ownerPath = lockOwnerPath(lockRoot);
+  return `${rootFingerprint}|${
+    ownerPath && ownerPath !== lockRoot
+      ? statFingerprint(ownerPath) ?? "owner-missing"
+      : "owner-is-lock"
+  }`;
+}
+
 function removeOwnedLock(lockRoot, token) {
   const owner = readLockOwner(lockRoot);
   if (owner?.token === token) {
     rmSync(lockRoot, { recursive: true, force: true });
+  }
+}
+
+function quarantineLock(lockRoot) {
+  const staleRoot = `${lockRoot}.stale-${randomUUID()}`;
+  try {
+    renameSync(lockRoot, staleRoot);
+    rmSync(staleRoot, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -270,40 +332,54 @@ async function acquireInstallationLock({
   identity,
   pid,
   isProcessAlive,
+  writeLockOwner,
   sleep,
   waitTimeoutMs,
   pollIntervalMs
 }) {
   const lockRoot = join(cacheRoot, `.${identity}.lock`);
   const startedAt = Date.now();
+  let invalidFingerprint;
 
   while (true) {
     const token = randomUUID();
+    const candidateRoot = `${lockRoot}.candidate-${token}`;
     try {
-      mkdirSync(lockRoot);
-      writeFileSync(
-        join(lockRoot, "owner.json"),
-        `${JSON.stringify({ pid, token, startedAt: Date.now() })}\n`
+      writeLockOwner(
+        candidateRoot,
+        `${JSON.stringify({ pid, token, startedAt: Date.now() })}\n`,
+        { flag: "wx", mode: 0o600 }
       );
+      linkSync(candidateRoot, lockRoot);
       return { lockRoot, token };
     } catch (error) {
       if (error?.code !== "EEXIST") {
         throw error;
       }
+    } finally {
+      rmSync(candidateRoot, { force: true });
     }
 
     const owner = readLockOwner(lockRoot);
-    if (owner && !isProcessAlive(owner.pid)) {
-      const staleRoot = `${lockRoot}.stale-${randomUUID()}`;
-      try {
-        renameSync(lockRoot, staleRoot);
-        rmSync(staleRoot, { recursive: true, force: true });
+    if (owner) {
+      invalidFingerprint = undefined;
+      if (!isProcessAlive(owner.pid) && quarantineLock(lockRoot)) {
         continue;
-      } catch (error) {
-        if (error?.code !== "ENOENT") {
-          throw error;
-        }
       }
+    } else {
+      const currentFingerprint = lockFingerprint(lockRoot);
+      if (currentFingerprint === null) {
+        invalidFingerprint = undefined;
+        continue;
+      }
+      if (
+        invalidFingerprint === currentFingerprint &&
+        quarantineLock(lockRoot)
+      ) {
+        invalidFingerprint = undefined;
+        continue;
+      }
+      invalidFingerprint = currentFingerprint;
     }
 
     if (Date.now() - startedAt >= waitTimeoutMs) {
@@ -323,6 +399,7 @@ export async function ensureKdInstallation({
   build,
   pid = process.pid,
   isProcessAlive = defaultIsProcessAlive,
+  writeLockOwner = writeFileSync,
   sleep = delay,
   waitTimeoutMs = 180_000,
   pollIntervalMs = 100
@@ -343,6 +420,7 @@ export async function ensureKdInstallation({
     identity,
     pid,
     isProcessAlive,
+    writeLockOwner,
     sleep,
     waitTimeoutMs,
     pollIntervalMs
