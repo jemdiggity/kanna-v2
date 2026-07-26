@@ -670,6 +670,49 @@ async fn settings_routes_get_and_put_setting_values() {
 }
 
 #[tokio::test]
+async fn cloud_transfer_identity_route_persists_canonical_json_setting() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |_| {});
+    let identity = serde_json::json!({
+        "peerId": "peer-a",
+        "displayName": "Studio Mac",
+        "publicKey": "base64-key",
+        "protocolVersion": 1,
+        "acceptingTransfers": true,
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/settings/cloud-transfer-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(identity.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let stored = app
+        .oneshot(
+            Request::get("/v1/settings/cloud_transfer_identity_v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(stored.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(payload["key"], "cloud_transfer_identity_v1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(payload["value"].as_str().unwrap()).unwrap(),
+        identity,
+    );
+}
+
+#[tokio::test]
 async fn window_workspace_mutations_do_not_resurrect_a_concurrently_removed_window() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.set_test_setting(

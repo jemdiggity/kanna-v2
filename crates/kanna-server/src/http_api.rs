@@ -14,7 +14,7 @@ mod repo_commands;
 mod repos;
 #[path = "http_api/router.rs"]
 mod routes;
-mod settings;
+pub(crate) mod settings;
 mod signal_agent;
 mod snapshot;
 mod state;

@@ -1,4 +1,5 @@
 use crate::db::{SnapshotPipelineItem, UiSnapshot};
+use crate::http_api::settings::{CloudTransferIdentity, CLOUD_TRANSFER_IDENTITY_SETTING};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
@@ -24,6 +25,17 @@ impl CloudTaskSnapshotEnvelope {
 #[serde(rename_all = "camelCase")]
 struct CloudDesktopSnapshot {
     display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transfer: Option<CloudDesktopTransferSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudDesktopTransferSnapshot {
+    peer_id: String,
+    public_key: String,
+    protocol_version: u16,
+    accepting_transfers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +99,17 @@ pub(crate) fn map_ui_snapshot(
     desktop_name: &str,
     snapshot: UiSnapshot,
 ) -> CloudTaskSnapshotEnvelope {
+    let desktop_transfer = snapshot
+        .settings
+        .get(CLOUD_TRANSFER_IDENTITY_SETTING)
+        .and_then(|encoded| serde_json::from_str::<CloudTransferIdentity>(encoded).ok())
+        .filter(valid_cloud_transfer_identity)
+        .map(|identity| CloudDesktopTransferSnapshot {
+            peer_id: identity.peer_id,
+            public_key: identity.public_key,
+            protocol_version: identity.protocol_version,
+            accepting_transfers: identity.accepting_transfers,
+        });
     let blockers = snapshot.task_blockers.into_iter().fold(
         HashMap::<String, Vec<String>>::new(),
         |mut by_task, blocker| {
@@ -122,9 +145,18 @@ pub(crate) fn map_ui_snapshot(
         schema_version: 1,
         desktop: CloudDesktopSnapshot {
             display_name: truncate(desktop_name, 256),
+            transfer: desktop_transfer,
         },
         tasks,
     }
+}
+
+fn valid_cloud_transfer_identity(identity: &CloudTransferIdentity) -> bool {
+    !identity.peer_id.trim().is_empty()
+        && identity.peer_id.chars().count() <= 256
+        && !identity.public_key.trim().is_empty()
+        && identity.public_key.chars().count() <= 4096
+        && identity.protocol_version > 0
 }
 
 fn map_task(
@@ -517,6 +549,35 @@ mod tests {
             serde_json::json!({"provider":"codex","type":"pty"})
         );
         assert_eq!(json["tasks"][0]["parentTaskId"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn snapshot_mapping_publishes_cloud_transfer_identity_setting() {
+        let mut source = ui_snapshot("idle");
+        source.settings.insert(
+            "cloud_transfer_identity_v1".into(),
+            serde_json::json!({
+                "peerId": "peer-a",
+                "displayName": "Studio Mac",
+                "publicKey": "base64-key",
+                "protocolVersion": 1,
+                "acceptingTransfers": true,
+            })
+            .to_string(),
+        );
+
+        let mapped = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let json = serde_json::to_value(mapped).unwrap();
+
+        assert_eq!(
+            json["desktop"]["transfer"],
+            serde_json::json!({
+                "peerId": "peer-a",
+                "publicKey": "base64-key",
+                "protocolVersion": 1,
+                "acceptingTransfers": true,
+            }),
+        );
     }
 
     #[test]

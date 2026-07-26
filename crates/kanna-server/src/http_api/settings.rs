@@ -6,6 +6,8 @@ use kanna_agent_protocol::StateChangeScope;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+pub(crate) const CLOUD_TRANSFER_IDENTITY_SETTING: &str = "cloud_transfer_identity_v1";
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SettingResponse {
@@ -17,6 +19,71 @@ pub(super) struct SettingResponse {
 #[serde(rename_all = "camelCase")]
 pub(super) struct PutSettingRequest {
     value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CloudTransferIdentity {
+    pub(crate) peer_id: String,
+    pub(crate) display_name: String,
+    pub(crate) public_key: String,
+    pub(crate) protocol_version: u16,
+    pub(crate) accepting_transfers: bool,
+}
+
+pub(super) async fn put_cloud_transfer_identity(
+    State(state): State<Arc<AppState>>,
+    Json(identity): Json<CloudTransferIdentity>,
+) -> Result<Json<SettingResponse>, (axum::http::StatusCode, String)> {
+    validate_cloud_transfer_identity(&identity)?;
+    let value = serde_json::to_string(&identity).map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to encode cloud transfer identity: {error}"),
+        )
+    })?;
+    let db = Db::open(&state.config.db_path).map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {error}"),
+        )
+    })?;
+    db.set_setting(CLOUD_TRANSFER_IDENTITY_SETTING, &value)
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {error}"),
+            )
+        })?;
+    state.publish_state_changed(StateChangeScope::Settings);
+    Ok(Json(SettingResponse {
+        key: CLOUD_TRANSFER_IDENTITY_SETTING.into(),
+        value,
+    }))
+}
+
+fn validate_cloud_transfer_identity(
+    identity: &CloudTransferIdentity,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    for (field, value, maximum) in [
+        ("peerId", identity.peer_id.as_str(), 256),
+        ("displayName", identity.display_name.as_str(), 256),
+        ("publicKey", identity.public_key.as_str(), 4096),
+    ] {
+        if value.trim().is_empty() || value.chars().count() > maximum {
+            return Err((
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{field} must be nonblank and at most {maximum} characters"),
+            ));
+        }
+    }
+    if identity.protocol_version == 0 {
+        return Err((
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "protocolVersion must be positive".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn get_setting(

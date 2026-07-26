@@ -345,6 +345,23 @@ export interface DesktopSettingResponse {
   value: string;
 }
 
+export interface DesktopCloudTransferIdentity {
+  peerId: string;
+  displayName: string;
+  publicKey: string;
+  protocolVersion: number;
+  acceptingTransfers: boolean;
+}
+
+export async function putDesktopCloudTransferIdentity(
+  identity: DesktopCloudTransferIdentity,
+): Promise<void> {
+  await requestJson<DesktopSettingResponse>("/v1/settings/cloud-transfer-identity", {
+    method: "PUT",
+    body: identity,
+  });
+}
+
 export interface DesktopWorkspaceWindowState {
   windowId: string;
   selectedRepoId: string | null;

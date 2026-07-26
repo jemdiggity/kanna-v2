@@ -15,7 +15,7 @@ use super::repos::{
     get_repo_kanna_definitions, get_repo_pipeline_definition, list_available_agent_providers,
     list_repo_tasks, list_repos, patch_repo, reorder_repos,
 };
-use super::settings::{delete_setting, get_setting, put_setting};
+use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse, TunneledHttpInvoke};
@@ -61,6 +61,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/backup", post(create_backup))
+        .route(
+            "/v1/settings/cloud-transfer-identity",
+            axum::routing::put(put_cloud_transfer_identity),
+        )
         .route(
             "/v1/settings/{key}",
             get(get_setting).put(put_setting).delete(delete_setting),

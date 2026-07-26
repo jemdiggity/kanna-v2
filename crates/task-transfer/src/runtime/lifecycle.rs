@@ -10,7 +10,7 @@ use super::utils::{
 };
 use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
-use crate::protocol::{DiscoveredPeer, PeerTaskSnapshot};
+use crate::protocol::{DiscoveredPeer, LocalTransferIdentity, PeerTaskSnapshot};
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
 use crate::registry::PeerRegistry;
 use serde_json::Value;
@@ -22,6 +22,16 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 
 impl TransferRuntime {
+    pub fn local_identity(&self) -> LocalTransferIdentity {
+        LocalTransferIdentity {
+            peer_id: self.config.peer_id.clone(),
+            display_name: self.config.display_name.clone(),
+            public_key: public_key_to_string(&self.identity.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        }
+    }
+
     pub async fn spawn(mut config: RuntimeConfig) -> Result<Self, RuntimeError> {
         let listener = TcpListener::bind((config.bind_host(), config.listen_port)).await?;
         config.listen_port = listener.local_addr()?.port();

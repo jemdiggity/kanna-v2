@@ -15,6 +15,7 @@ import {
   getDesktopSetting,
   mutateDesktopWindowWorkspace,
   markIncomingTransferSidecarCleanupCompleted,
+  putDesktopCloudTransferIdentity,
   setDesktopTaskCloudIdentity,
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
@@ -436,6 +437,34 @@ describe("desktopServerClient", () => {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ cloudTaskId: "task-source-stable" }),
+      },
+    );
+  });
+
+  it("stores the local transfer identity through the dedicated loopback endpoint", async () => {
+    const identity = {
+      peerId: "peer-a",
+      displayName: "Studio Mac",
+      publicKey: "base64-key",
+      protocolVersion: 1,
+      acceptingTransfers: true,
+    };
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ key: "cloud_transfer_identity_v1", value: identity }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(putDesktopCloudTransferIdentity(identity)).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/settings/cloud-transfer-identity",
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(identity),
       },
     );
   });

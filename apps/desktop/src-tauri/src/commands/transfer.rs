@@ -13,6 +13,26 @@ async fn ensure_client(
 }
 
 #[tauri::command]
+pub async fn get_transfer_identity(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::TransferServiceState>,
+) -> Result<Value, String> {
+    let mut guard = state.lock().await;
+    ensure_client(&app, &mut guard).await?;
+    let (result, dead) = {
+        let client = guard
+            .as_mut()
+            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
+        let result = client.get_local_identity().await;
+        (result, client.is_dead())
+    };
+    if dead {
+        *guard = None;
+    }
+    result
+}
+
+#[tauri::command]
 pub async fn list_transfer_peers(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,

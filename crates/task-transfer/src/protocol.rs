@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
+    GetLocalIdentity {
+        request_id: String,
+    },
     ListPeers {
         request_id: String,
     },
@@ -126,6 +129,14 @@ pub enum ControlRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlResponse {
+    GetLocalIdentity {
+        request_id: String,
+        peer_id: String,
+        display_name: String,
+        public_key: String,
+        protocol_version: u16,
+        accepting_transfers: bool,
+    },
     ListPeers {
         request_id: String,
         peers: Vec<DiscoveredPeer>,
@@ -227,6 +238,15 @@ pub enum ControlResponse {
         request_id: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalTransferIdentity {
+    pub peer_id: String,
+    pub display_name: String,
+    pub public_key: String,
+    pub protocol_version: u16,
+    pub accepting_transfers: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

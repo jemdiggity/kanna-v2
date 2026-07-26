@@ -13,6 +13,43 @@ where
 }
 
 #[test]
+fn get_local_identity_control_messages_roundtrip() {
+    let request = ControlRequest::GetLocalIdentity {
+        request_id: "identity-1".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        json!({
+            "type": "get_local_identity",
+            "request_id": "identity-1",
+        }),
+    );
+    assert_roundtrip(request);
+
+    let response = ControlResponse::GetLocalIdentity {
+        request_id: "identity-1".into(),
+        peer_id: "peer-a".into(),
+        display_name: "Studio Mac".into(),
+        public_key: "base64-key".into(),
+        protocol_version: 1,
+        accepting_transfers: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&response).unwrap(),
+        json!({
+            "type": "get_local_identity",
+            "request_id": "identity-1",
+            "peer_id": "peer-a",
+            "display_name": "Studio Mac",
+            "public_key": "base64-key",
+            "protocol_version": 1,
+            "accepting_transfers": true,
+        }),
+    );
+    assert_roundtrip(response);
+}
+
+#[test]
 fn control_messages_roundtrip_with_request_ids() {
     let message = ControlRequest::PrepareTransferPreflight {
         request_id: "req-1".into(),

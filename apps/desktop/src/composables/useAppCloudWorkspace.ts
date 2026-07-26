@@ -65,12 +65,14 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     items: [],
     terminalRefs: {},
     blockedByTaskIds: {},
+    transferMachines: [],
   });
   const lanSnapshot = ref<DesktopCloudSnapshot>({
     repos: [],
     items: [],
     terminalRefs: {},
     blockedByTaskIds: {},
+    transferMachines: [],
   });
   const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
   let unsubscribeDesktopAuth: (() => void) | null = null;
@@ -153,6 +155,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       ...cloudSnapshot.value.blockedByTaskIds,
       ...lanSnapshot.value.blockedByTaskIds,
     },
+    transferMachines: cloudSnapshot.value.transferMachines,
   }));
 
   const remoteTaskPins = computed(() => parseRemoteTaskPins(store.snapshotSettings));
@@ -274,6 +277,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           retainedTaskIds.has(taskId),
         ),
       ),
+      transferMachines: snapshot.transferMachines,
     };
   }
 
@@ -349,6 +353,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       items: snapshot.items,
       terminalRefs: snapshot.terminalRefs ?? {},
       blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
+      transferMachines: snapshot.transferMachines,
     };
   }
 
@@ -372,6 +377,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           items: snapshot.items,
           terminalRefs: snapshot.terminalRefs ?? {},
           blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
+          transferMachines: snapshot.transferMachines,
         };
       },
       {
@@ -403,6 +409,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       items: snapshot.items,
       terminalRefs: snapshot.terminalRefs ?? {},
       blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
+      transferMachines: snapshot.transferMachines,
     };
   }
 
@@ -438,7 +445,13 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         associatedCloudUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshotRevision += 1;
-        cloudSnapshot.value = { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} };
+        cloudSnapshot.value = {
+          repos: [],
+          items: [],
+          terminalRefs: {},
+          blockedByTaskIds: {},
+          transferMachines: [],
+        };
       }
     });
     void runDesktopAutoSignIn({

@@ -11,8 +11,16 @@ export type CloudTaskDocument = Record<string, unknown> & {
   ownerLocalTaskId: string;
 };
 
+export interface CloudTransferIdentity {
+  peerId: string;
+  publicKey: string;
+  protocolVersion: number;
+  acceptingTransfers: boolean;
+}
+
 export interface ValidatedCloudTaskPublication {
   displayName: string;
+  transfer: CloudTransferIdentity | null;
   tasks: CloudTaskDocument[];
 }
 
@@ -27,6 +35,7 @@ export interface CloudTaskPublicationStore {
     desktopId: string;
     generation: CloudTaskPublicationGeneration;
     displayName: string;
+    transfer: CloudTransferIdentity | null;
     tasks: CloudTaskDocument[];
   }): Promise<void>;
 }
@@ -66,6 +75,9 @@ export function validateCloudTaskPublication(
   }
   const desktop = requiredRecord(root.desktop, "task snapshot desktop");
   const displayName = requiredString(desktop.displayName, "desktop.displayName", 256);
+  const transfer = desktop.transfer === undefined || desktop.transfer === null
+    ? null
+    : validateCloudTransferIdentity(desktop.transfer);
   if (!Array.isArray(root.tasks)) {
     throw new Error("task snapshot tasks must be an array");
   }
@@ -83,7 +95,23 @@ export function validateCloudTaskPublication(
     identities.add(key);
     return task;
   });
-  return { displayName, tasks };
+  return { displayName, transfer, tasks };
+}
+
+function validateCloudTransferIdentity(value: unknown): CloudTransferIdentity {
+  const transfer = requiredRecord(value, "desktop.transfer");
+  return {
+    peerId: requiredNonblankString(transfer.peerId, "desktop.transfer.peerId", 256),
+    publicKey: requiredNonblankString(transfer.publicKey, "desktop.transfer.publicKey", 4096),
+    protocolVersion: requiredPositiveInteger(
+      transfer.protocolVersion,
+      "desktop.transfer.protocolVersion",
+    ),
+    acceptingTransfers: requiredBoolean(
+      transfer.acceptingTransfers,
+      "desktop.transfer.acceptingTransfers",
+    ),
+  };
 }
 
 function validateTask(value: unknown, index: number, desktopId: string): CloudTaskDocument {
@@ -257,6 +285,7 @@ export async function handleCloudTaskPublication(input: {
     desktopId: input.desktopId,
     generation: input.generation,
     displayName: publication.displayName,
+    transfer: publication.transfer,
     tasks: publication.tasks,
   });
 }
@@ -301,7 +330,7 @@ export function createFirestoreCloudTaskPublicationStore(
       });
     },
 
-    async reconcile({ userId, desktopId, generation, displayName, tasks }) {
+    async reconcile({ userId, desktopId, generation, displayName, transfer, tasks }) {
       validatePublicationGeneration(generation);
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopsRef = db.collection(`users/${userId}/desktops`);
@@ -318,6 +347,7 @@ export function createFirestoreCloudTaskPublicationStore(
         transaction.set(desktopRef, {
           desktopId,
           displayName,
+          transfer: transfer ?? FieldValue.delete(),
           publicationSequence: generation.sequence,
           updatedAt: FieldValue.serverTimestamp(),
         }, { merge: true });
@@ -515,4 +545,18 @@ function optionalNonNegativeInteger(value: unknown, field: string): number | und
     throw new Error(`${field} must be a non-negative integer when present`);
   }
   return value as number;
+}
+
+function requiredPositiveInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new Error(`${field} must be a positive integer`);
+  }
+  return value as number;
+}
+
+function requiredBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value;
 }

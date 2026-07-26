@@ -54,7 +54,13 @@ function item(overrides: Partial<PipelineItem> = {}): PipelineItem {
 }
 
 function emptySnapshot() {
-  return { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} };
+  return {
+    repos: [],
+    items: [],
+    terminalRefs: {},
+    blockedByTaskIds: {},
+    transferMachines: [],
+  };
 }
 
 describe("buildWorkspace", () => {

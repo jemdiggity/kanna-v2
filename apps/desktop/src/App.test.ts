@@ -101,7 +101,13 @@ const desktopCloudTaskSnapshotListeners = vi.hoisted(
 const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   vi.fn((_uid: string, onSnapshot: (snapshot: DesktopCloudSnapshot) => void) => {
     desktopCloudTaskSnapshotListeners.add(onSnapshot);
-    onSnapshot({ repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} });
+    onSnapshot({
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      blockedByTaskIds: {},
+      transferMachines: [],
+    });
     return () => desktopCloudTaskSnapshotListeners.delete(onSnapshot);
   }),
 );
@@ -119,7 +125,7 @@ const lanCloseMock = vi.hoisted(() => vi.fn());
 const relayTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
 const lanTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
 const lanTasksMock = vi.hoisted(() =>
-  vi.fn(async () => ({ repos: [], items: [], terminalRefs: {} })),
+  vi.fn(async () => ({ repos: [], items: [], terminalRefs: {}, transferMachines: [] })),
 );
 const openLatestTerminalFileLinkMock = vi.hoisted(() => vi.fn(async () => true));
 const dbSelectMock = vi.fn(async () => []);
@@ -427,6 +433,7 @@ vi.mock("./services/desktopCloudTaskIndex", () => ({
     items: tasks,
     terminalRefs: {},
     blockedByTaskIds: {},
+    transferMachines: [],
   })),
   subscribeDesktopCloudTasks: subscribeDesktopCloudTasksMock,
 }));
@@ -560,6 +567,7 @@ function remoteTaskSnapshot(
         transport,
       },
     },
+    transferMachines: [],
   };
 }
 
@@ -935,7 +943,12 @@ describe("App", () => {
       close: lanCloseMock,
     });
     lanTasksMock.mockReset();
-    lanTasksMock.mockResolvedValue({ repos: [], items: [], terminalRefs: {} });
+    lanTasksMock.mockResolvedValue({
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      transferMachines: [],
+    });
     openLatestTerminalFileLinkMock.mockReset();
     openLatestTerminalFileLinkMock.mockResolvedValue(true);
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
@@ -2139,7 +2152,12 @@ describe("App", () => {
     await wrapper.get('[data-testid="remote-task"]').trigger("click");
     await nextTick();
     const presentationSlotId = store.selectedItemId;
-    lanTasksMock.mockResolvedValue({ repos: [], items: [], terminalRefs: {} });
+    lanTasksMock.mockResolvedValue({
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      transferMachines: [],
+    });
 
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
@@ -4776,7 +4794,7 @@ describe("App", () => {
   it("registers transfer replay handling before LAN sync can spawn the sidecar", async () => {
     lanTasksMock.mockImplementationOnce(async () => {
       expect(listenHandlers.has("transfer-request")).toBe(true);
-      return { repos: [], items: [], terminalRefs: {} };
+      return { repos: [], items: [], terminalRefs: {}, transferMachines: [] };
     });
 
     const wrapper = await mountApp(SidebarWithRepoStub);

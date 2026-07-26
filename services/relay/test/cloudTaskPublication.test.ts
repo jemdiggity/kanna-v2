@@ -46,10 +46,21 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
-function publication(tasks: unknown[] = [task()]): Record<string, unknown> {
+function publication(
+  tasks: unknown[] = [task()],
+  desktop: Record<string, unknown> = {
+    displayName: "Studio Mac",
+    transfer: {
+      peerId: "peer-a",
+      publicKey: "base64-key",
+      protocolVersion: 1,
+      acceptingTransfers: true,
+    },
+  },
+): Record<string, unknown> {
   return {
     schemaVersion: 1,
-    desktop: { displayName: "Studio Mac" },
+    desktop,
     tasks,
   };
 }
@@ -57,6 +68,12 @@ function publication(tasks: unknown[] = [task()]): Record<string, unknown> {
 describe("cloud task publication validation", () => {
   it("accepts and normalizes the existing mobile cloud snapshot schema", () => {
     const parsed = validateCloudTaskPublication(publication(), "desktop-1");
+    expect(parsed.transfer).toEqual({
+      peerId: "peer-a",
+      publicKey: "base64-key",
+      protocolVersion: 1,
+      acceptingTransfers: true,
+    });
     expect(parsed.tasks[0]).toMatchObject({
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
@@ -67,6 +84,37 @@ describe("cloud task publication validation", () => {
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("accepts older publishers without desktop transfer metadata", () => {
+    const parsed = validateCloudTaskPublication(
+      publication([], { displayName: "Studio Mac" }),
+      "desktop-1",
+    );
+
+    expect(parsed.transfer).toBeNull();
+  });
+
+  it.each([
+    ["peerId", ""],
+    ["publicKey", "   "],
+    ["protocolVersion", 0],
+    ["protocolVersion", 1.5],
+    ["acceptingTransfers", "yes"],
+  ])("rejects invalid desktop transfer %s", (field, value) => {
+    expect(() => validateCloudTaskPublication(
+      publication([], {
+        displayName: "Studio Mac",
+        transfer: {
+          peerId: "peer-a",
+          publicKey: "base64-key",
+          protocolVersion: 1,
+          acceptingTransfers: true,
+          [field]: value,
+        },
+      }),
+      "desktop-1",
+    )).toThrow(new RegExp(`desktop\\.transfer\\.${field}`));
   });
 
   it("accepts exactly the four transfer states with authenticated desktop ids", () => {
@@ -291,6 +339,12 @@ describe("cloud task publication reconciliation", () => {
       desktopId: "desktop-1",
       generation: { session: 4, sequence: 2 },
       displayName: "Studio Mac",
+      transfer: {
+        peerId: "peer-a",
+        publicKey: "base64-key",
+        protocolVersion: 1,
+        acceptingTransfers: true,
+      },
       tasks: expect.arrayContaining([
         expect.objectContaining({ ownerDesktopId: "desktop-1", ownerLocalTaskId: "task-1" }),
       ]),

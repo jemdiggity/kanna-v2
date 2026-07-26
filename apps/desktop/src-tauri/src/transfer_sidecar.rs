@@ -66,6 +66,34 @@ impl TransferSidecarClient {
         self.dead.load(Ordering::Relaxed)
     }
 
+    pub async fn get_local_identity(&mut self) -> Result<Value, String> {
+        let request_id = self.next_request_id("identity");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "get_local_identity",
+                    "request_id": request_id,
+                }),
+                &request_id,
+            )
+            .await?;
+        Ok(json!({
+            "peerId": required_string(&response, &["peer_id", "peerId"])?,
+            "displayName": required_string(&response, &["display_name", "displayName"])?,
+            "publicKey": required_string(&response, &["public_key", "publicKey"])?,
+            "protocolVersion": response
+                .get("protocol_version")
+                .or_else(|| response.get("protocolVersion"))
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "transfer sidecar identity response missing protocol version".to_string())?,
+            "acceptingTransfers": response
+                .get("accepting_transfers")
+                .or_else(|| response.get("acceptingTransfers"))
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "transfer sidecar identity response missing accepting state".to_string())?,
+        }))
+    }
+
     pub async fn list_transfer_peers(&mut self) -> Result<Vec<Value>, String> {
         let request_id = self.next_request_id("list");
         let response = self

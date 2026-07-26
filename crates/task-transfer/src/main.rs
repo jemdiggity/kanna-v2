@@ -105,6 +105,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> ControlResponse {
     match request {
+        ControlRequest::GetLocalIdentity { request_id } => {
+            let identity = runtime.local_identity();
+            ControlResponse::GetLocalIdentity {
+                request_id,
+                peer_id: identity.peer_id,
+                display_name: identity.display_name,
+                public_key: identity.public_key,
+                protocol_version: identity.protocol_version,
+                accepting_transfers: identity.accepting_transfers,
+            }
+        }
         ControlRequest::ListPeers { request_id } => match runtime.list_peers().await {
             Ok(peers) => ControlResponse::ListPeers { request_id, peers },
             Err(error) => control_error(request_id, error),
