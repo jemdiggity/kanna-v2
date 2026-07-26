@@ -331,6 +331,7 @@ pub(super) async fn close_task(
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
     #[cfg(test)]
     if let Some(task_closer) = state.task_closer.clone() {
+        let _action_flight = begin_task_action(&state, &task_id)?;
         return task_closer(task_id)
             .map(|_| axum::http::StatusCode::NO_CONTENT)
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
@@ -662,6 +663,7 @@ pub(super) async fn advance_stage(
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     #[cfg(test)]
     if let Some(stage_advancer) = state.stage_advancer.clone() {
+        let _action_flight = begin_task_action(&state, &task_id)?;
         return stage_advancer(task_id)
             .map(Json)
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));

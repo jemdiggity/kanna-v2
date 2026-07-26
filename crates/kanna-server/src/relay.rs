@@ -314,6 +314,24 @@ pub(crate) async fn run_relay_loop(
                                     continue;
                                 }
 
+                                match dispatch_legacy_relay_task_action(
+                                    Arc::clone(&http_state),
+                                    Arc::clone(&sink),
+                                    Arc::clone(&invoke_permits),
+                                    id.clone(),
+                                    &command,
+                                    &args,
+                                )
+                                .await
+                                {
+                                    Ok(true) => continue,
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        log::error!("{error}");
+                                        break;
+                                    }
+                                }
+
                                 // Normal commands: short-lived daemon connection
                                 let daemon_result =
                                     daemon_client::DaemonClient::connect(&config.daemon_dir).await;
@@ -326,7 +344,6 @@ pub(crate) async fn run_relay_loop(
                                             &db,
                                             &mut daemon,
                                             &config,
-                                            &http_state.session_replacements(),
                                         )
                                         .await
                                         {
@@ -593,6 +610,99 @@ pub(crate) async fn dispatch_relay_http_invoke(
         }
     });
     Ok(())
+}
+
+/// Translate supported legacy task mutations onto the authenticated HTTP
+/// action surface. This gives old relay clients the same per-task flight,
+/// ownership validation, and detached execution as current clients while
+/// preserving the legacy response envelope.
+pub(crate) async fn dispatch_legacy_relay_task_action(
+    http_state: Arc<http_api::AppState>,
+    sink: Arc<Mutex<relay_client::WsSink>>,
+    invoke_permits: Arc<tokio::sync::Semaphore>,
+    id: relay_client::RelayId,
+    command: &str,
+    args: &serde_json::Value,
+) -> Result<bool, String> {
+    let request = match commands::legacy_task_action_request(command, args) {
+        Ok(Some(request)) => request,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            return send_relay_response_message(
+                &sink,
+                RelayMessage::Response {
+                    id,
+                    data: None,
+                    error: Some(error),
+                    status: None,
+                    body: None,
+                },
+            )
+            .await
+            .map(|_| true);
+        }
+    };
+    let permit = match Arc::clone(&invoke_permits).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return send_relay_response_message(
+                &sink,
+                RelayMessage::Response {
+                    id,
+                    data: None,
+                    error: Some("desktop is busy; too many concurrent requests".to_string()),
+                    status: None,
+                    body: None,
+                },
+            )
+            .await
+            .map(|_| true);
+        }
+    };
+    tokio::spawn(async move {
+        let _permit = permit;
+        let handle = tokio::runtime::Handle::current();
+        let dispatched = tokio::task::spawn_blocking(move || {
+            handle.block_on(http_api::dispatch_authenticated_http_invoke(
+                http_state,
+                request.method,
+                &request.path,
+                request.body,
+            ))
+        })
+        .await;
+        let response = match dispatched {
+            Ok(invoke_response) if (200..300).contains(&invoke_response.status) => {
+                RelayMessage::Response {
+                    id,
+                    data: Some(invoke_response.body.unwrap_or(serde_json::Value::Null)),
+                    error: None,
+                    status: None,
+                    body: None,
+                }
+            }
+            Ok(invoke_response) => RelayMessage::Response {
+                id,
+                data: None,
+                error: invoke_response
+                    .error
+                    .or_else(|| Some(format!("HTTP action failed: {}", invoke_response.status))),
+                status: None,
+                body: None,
+            },
+            Err(join_error) => RelayMessage::Response {
+                id,
+                data: None,
+                error: Some(format!("invoke worker failed: {join_error}")),
+                status: None,
+                body: None,
+            },
+        };
+        if let Err(error) = send_relay_response_message(&sink, response).await {
+            log::error!("{error}");
+        }
+    });
+    Ok(true)
 }
 
 async fn send_relay_response_message(
