@@ -458,7 +458,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Mutex;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{sleep, timeout, Duration, Instant};
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -479,6 +479,24 @@ mod tests {
 
     fn state() -> CloudTransferProxyState {
         Arc::new(Mutex::new(Default::default()))
+    }
+
+    async fn wait_for_endpoint_release(endpoint: &str) {
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        loop {
+            match TcpListener::bind(endpoint).await {
+                Ok(listener) => {
+                    drop(listener);
+                    return;
+                }
+                Err(_) if Instant::now() < deadline => {
+                    sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => {
+                    panic!("proxy endpoint {endpoint} was not released: {error}");
+                }
+            }
+        }
     }
 
     async fn next_json<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>) -> Value
@@ -792,7 +810,7 @@ mod tests {
         .await
         .expect("replacement proxy");
         assert_ne!(replaced.endpoint, first.endpoint);
-        assert!(TcpStream::connect(&first.endpoint).await.is_err());
+        wait_for_endpoint_release(&first.endpoint).await;
 
         clear_cloud_transfer_proxies_in_state(&state)
             .await
@@ -832,7 +850,7 @@ mod tests {
         .await
         .expect("replace dead proxy");
         assert_ne!(replacement.endpoint, first.endpoint);
-        assert!(TcpStream::connect(&first.endpoint).await.is_err());
+        wait_for_endpoint_release(&first.endpoint).await;
 
         clear_cloud_transfer_proxies_in_state(&state)
             .await
@@ -862,7 +880,7 @@ mod tests {
         remove_cloud_transfer_proxy_in_state(&state, "peer-b")
             .await
             .expect("remove peer b");
-        assert!(TcpStream::connect(&endpoint_b.endpoint).await.is_err());
+        wait_for_endpoint_release(&endpoint_b.endpoint).await;
         let mut byte = [0_u8; 1];
         assert_eq!(
             timeout(TEST_TIMEOUT, sidecar_b.read(&mut byte))
@@ -902,7 +920,7 @@ mod tests {
             .expect("clear proxies");
         assert!(state.lock().await.is_empty());
         for (endpoint, mut sidecar, mut relay) in active {
-            assert!(TcpStream::connect(&endpoint.endpoint).await.is_err());
+            wait_for_endpoint_release(&endpoint.endpoint).await;
             assert_eq!(
                 timeout(TEST_TIMEOUT, sidecar.read(&mut byte))
                     .await

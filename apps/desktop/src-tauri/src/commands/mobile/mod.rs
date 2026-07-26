@@ -1726,6 +1726,7 @@ mod tests {
         });
         unsafe {
             set_env_var("KANNA_MOBILE_SERVER_PORT", &port.to_string());
+            set_env_var("KANNA_TRANSFER_PORT", &port.to_string());
             set_env_var("KANNA_DB_PATH", &db_path.to_string_lossy());
             set_env_var("KANNA_DAEMON_DIR", &daemon_dir.to_string_lossy());
             set_env_var("KANNA_TEST_SIDECAR_DIR", &sidecar_dir.to_string_lossy());
@@ -1738,6 +1739,7 @@ mod tests {
     fn cleanup_process_test_env() {
         unsafe {
             unset_env_var("KANNA_MOBILE_SERVER_PORT");
+            unset_env_var("KANNA_TRANSFER_PORT");
             unset_env_var("KANNA_DB_PATH");
             unset_env_var("KANNA_DAEMON_DIR");
             unset_env_var("KANNA_TEST_SIDECAR_DIR");
@@ -2115,7 +2117,7 @@ mod tests {
         let pairing_store_path = config_path.with_file_name("pairings.json");
         let relay_url = relay_url();
         let config = format!(
-            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}desktop_id = \"{}\"\n{}desktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}desktop_id = \"{}\"\n{}desktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\ntransfer_port = {}\npairing_store_path = \"{}\"\n",
             escape_toml_string(&relay_url),
             escape_toml_string(&daemon_dir.to_string_lossy()),
             escape_toml_string(&db_path.to_string_lossy()),
@@ -2123,6 +2125,7 @@ mod tests {
             escape_toml_string(desktop_id),
             secret_line,
             build_metadata,
+            port,
             port,
             escape_toml_string(&pairing_store_path.to_string_lossy()),
         );
