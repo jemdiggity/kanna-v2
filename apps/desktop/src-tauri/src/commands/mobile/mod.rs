@@ -1159,6 +1159,73 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)]
+    async fn manager_replaces_unhealthy_current_server() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("replace-unhealthy-current");
+        let port = free_loopback_port();
+        let app_data_dir = root.join("app-data");
+        let db_path = root.join("kanna-test.db");
+        let daemon_dir = root.join("daemon");
+        configure_process_test_env(port, &db_path, &daemon_dir);
+        create_test_database(&db_path);
+        let manager = MobileServerManager::new(app_data_dir.clone());
+        let (expected_desktop_id, current_config_path, current_config) = {
+            let state = manager.inner.lock().await;
+            let expected_desktop_id =
+                desktop_id(&state.config_path).expect("desktop identity should be generated");
+            let current_config =
+                build_server_config(&state).expect("current server config should build");
+            (
+                expected_desktop_id,
+                state.config_path.clone(),
+                current_config,
+            )
+        };
+        std::fs::create_dir_all(current_config_path.parent().unwrap()).unwrap();
+        std::fs::write(&current_config_path, current_config)
+            .expect("current server config should be written");
+        let mut unhealthy_server = start_unhealthy_status_server(port, &expected_desktop_id).await;
+        let unhealthy_pid = unhealthy_server
+            .id()
+            .expect("unhealthy server should have pid");
+
+        manager
+            .start()
+            .await
+            .expect("manager should replace unhealthy current server");
+        tokio::time::timeout(Duration::from_secs(5), unhealthy_server.wait())
+            .await
+            .expect("unhealthy server should exit promptly")
+            .expect("unhealthy server should have been reaped");
+        assert!(
+            !process_is_running(unhealthy_pid),
+            "unhealthy kanna-server process should be stopped"
+        );
+
+        let status = manager
+            .snapshot()
+            .await
+            .expect("replacement server should report status");
+        assert_eq!(status.desktop_id, expected_desktop_id);
+        assert_eq!(status.version, current_server_version());
+        assert_eq!(status.environment, "development");
+        assert!(
+            status
+                .write_path_health
+                .as_ref()
+                .is_some_and(|health| health.healthy),
+            "replacement server should report a healthy write path: {status:?}"
+        );
+
+        stop_server_on_port(port)
+            .await
+            .expect("cleanup should stop server");
+        cleanup_process_test_env();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
     async fn manager_replaces_stale_legacy_short_id_server_after_identity_was_regenerated() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let root = unique_test_root("replace-stale-legacy-short-id");
@@ -2228,6 +2295,82 @@ mod tests {
         }
         let _ = child.kill().await;
         panic!("timed out waiting for kanna-server on {base_url}");
+    }
+
+    async fn start_unhealthy_status_server(port: u16, desktop_id: &str) -> Child {
+        let status = serde_json::json!({
+            "state": "running",
+            "desktopId": desktop_id,
+            "desktopName": "Unhealthy Kanna Test",
+            "version": current_server_version(),
+            "environment": "development",
+            "serverVersion": current_server_version(),
+            "lanHost": "127.0.0.1",
+            "lanPort": port,
+            "pairingCode": null,
+            "writePathHealth": {
+                "healthy": false,
+                "status": "degraded",
+                "activeWorkspaceCommands": 4,
+                "maxWorkspaceCommands": 4,
+                "longRunningWorkspaceCommands": 4,
+                "oldestWorkspaceCommandSeconds": 601
+            }
+        })
+        .to_string();
+        let script = r#"
+import socket
+import sys
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", int(sys.argv[1])))
+sock.listen(8)
+body = sys.argv[2].encode("utf-8")
+while True:
+    conn, _ = sock.accept()
+    with conn:
+        _ = conn.recv(4096)
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"content-type: application/json\r\n"
+            + f"content-length: {len(body)}\r\n".encode("ascii")
+            + b"connection: close\r\n\r\n"
+            + body
+        )
+        conn.sendall(response)
+"#;
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .arg(port.to_string())
+            .arg(status)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("unhealthy status server should spawn");
+        let base_url = server_base_url(port);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(status) = child
+                .try_wait()
+                .expect("unhealthy server status should be readable")
+            {
+                panic!("unhealthy status server exited early with {status}");
+            }
+            if reqwest::get(format!("{base_url}/v1/status"))
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                return child;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        panic!("timed out waiting for unhealthy status server on {base_url}");
     }
 
     async fn try_start_production_status_server(port: u16) -> Result<Child, String> {
