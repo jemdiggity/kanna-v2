@@ -12,7 +12,10 @@ interface ConnectionPair {
 interface PendingTunnel {
   client: WebSocket;
   desktopId: string;
+  service: TunnelService;
 }
+
+export type TunnelService = "ksp" | "task-transfer";
 
 interface RelayMessage {
   type?: unknown;
@@ -22,6 +25,7 @@ interface RelayMessage {
   args?: unknown;
   name?: unknown;
   payload?: unknown;
+  service?: unknown;
 }
 
 /** In-memory map of userId → client and desktop WebSocket connections. */
@@ -342,6 +346,7 @@ export function attachDesktopTunnel(
     type: "tunnel_ready",
     tunnelId,
     desktopId,
+    service: tunnel.service,
   });
   ws.send(ready);
   tunnel.client.send(ready);
@@ -368,6 +373,15 @@ export function routeMessage(
   if (from === "phone") {
     if (parsed?.type === "tunnel_request") {
       const id = parsed.id;
+      const service = parsed.service === undefined
+        ? "ksp"
+        : parsed.service === "ksp" || parsed.service === "task-transfer"
+          ? parsed.service
+          : null;
+      if (!service) {
+        sendErrorResponse(source, id, "Unsupported tunnel service");
+        return;
+      }
       const desktopId =
         typeof parsed.desktopId === "string" ? parsed.desktopId : undefined;
       const target = desktopId ? pair.desktops.get(desktopId) : undefined;
@@ -380,7 +394,7 @@ export function routeMessage(
       }
 
       const tunnelId = randomUUID();
-      pair.pendingTunnels.set(tunnelId, { client: source, desktopId });
+      pair.pendingTunnels.set(tunnelId, { client: source, desktopId, service });
       tunnelSockets.add(source);
       target.send(
         JSON.stringify({
@@ -388,6 +402,7 @@ export function routeMessage(
           id,
           desktopId,
           tunnelId,
+          service,
         })
       );
       return;

@@ -689,6 +689,7 @@ describe("StreamClient", () => {
       type: "tunnel_request",
       id: "tunnel-request-1",
       desktopId: "desktop-1",
+      service: "ksp",
     } as unknown as ClientFrame);
 
     socket.receive({
@@ -912,6 +913,7 @@ describe("StreamClient", () => {
       type: "tunnel_request",
       id: "tunnel-request-1",
       desktopId: "desktop-offline",
+      service: "ksp",
     });
 
     socket.onmessage?.({

@@ -875,6 +875,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -906,6 +907,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -953,6 +955,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1015,6 +1018,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1067,6 +1071,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1116,6 +1121,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1172,6 +1178,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1235,6 +1242,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1287,6 +1295,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1376,6 +1385,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1436,6 +1446,7 @@ mod tests {
             environment: "production".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1470,6 +1481,7 @@ mod tests {
             environment: "staging".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48121,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-staging-pairings.json".to_string(),
         };
 

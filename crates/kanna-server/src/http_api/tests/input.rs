@@ -76,6 +76,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str) 
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -228,6 +229,7 @@ async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -343,6 +345,7 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -570,6 +573,7 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();

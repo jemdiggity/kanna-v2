@@ -2867,6 +2867,7 @@ async fn task_file_route_maps_database_failure_to_internal_server_error() {
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: temp_dir
             .path()
             .join("pairings.json")
@@ -3459,6 +3460,7 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: PathBuf::from("/tmp/kanna-pairings-http-local.json")
             .to_string_lossy()
             .to_string(),

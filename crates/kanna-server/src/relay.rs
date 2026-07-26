@@ -5,7 +5,7 @@ use crate::{
     daemon_client, db, http_api, relay_client,
 };
 use futures_util::{SinkExt, StreamExt};
-use relay_client::{RelayId, RelayInvoke, RelayMessage};
+use relay_client::{RelayId, RelayInvoke, RelayMessage, TunnelService};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -404,12 +404,20 @@ pub(crate) async fn run_relay_loop(
                         RelayMessage::TunnelEstablish {
                             desktop_id,
                             tunnel_id,
+                            service,
                         } => {
                             if desktop_id != config.desktop_id {
                                 log::warn!(
                                     "Ignoring tunnel {} for unexpected desktop {}",
                                     tunnel_id,
                                     desktop_id
+                                );
+                                continue;
+                            }
+                            if service == TunnelService::TaskTransfer {
+                                log::info!(
+                                    "Received task-transfer relay tunnel {}; bridge dispatch is handled by the task-transfer tunnel service",
+                                    tunnel_id
                                 );
                                 continue;
                             }
@@ -1012,6 +1020,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
+            transfer_port: 4455,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))
                 .to_string_lossy()

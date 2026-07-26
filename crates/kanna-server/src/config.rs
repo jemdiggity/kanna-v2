@@ -19,6 +19,8 @@ pub struct Config {
     pub environment: String,
     pub lan_host: String,
     pub lan_port: u16,
+    #[allow(dead_code)] // Consumed by the task-transfer tunnel bridge added in the next plan task.
+    pub transfer_port: u16,
     pub pairing_store_path: String,
 }
 
@@ -39,6 +41,7 @@ struct RawConfig {
     environment: String,
     lan_host: Option<String>,
     lan_port: Option<u16>,
+    transfer_port: Option<u16>,
     pairing_store_path: Option<String>,
 }
 
@@ -143,6 +146,10 @@ fn load_from_path(
         Some(path) => normalize_db_path_with_candidates(Path::new(&path), &canonical, &legacy),
         None => canonical.to_string_lossy().to_string(),
     };
+    let transfer_port = raw.transfer_port.ok_or("missing field `transfer_port`")?;
+    if transfer_port == 0 {
+        return Err("transfer_port must be greater than zero".into());
+    }
 
     Ok(Config {
         relay_url: raw.relay_url,
@@ -164,6 +171,7 @@ fn load_from_path(
         environment: raw.environment,
         lan_host: raw.lan_host.unwrap_or_else(default_lan_host),
         lan_port: raw.lan_port.unwrap_or_else(default_lan_port),
+        transfer_port,
         pairing_store_path: raw
             .pairing_store_path
             .unwrap_or_else(|| default_pairing_store_path_for_root(data_root)),
@@ -222,6 +230,7 @@ mod tests {
                  device_token = \"device-token\"\n\
                  version = \"0.0.69-staging.1\"\n\
                  environment = \"staging\"\n\
+                 transfer_port = 4455\n\
                  db_path = \"{}\"\n\
                  desktop_id = \"desktop-1\"\n\
                  desktop_name = \"Studio Mac\"\n",
@@ -323,6 +332,7 @@ mod tests {
                  device_token = \"device-token\"\n\
                  version = \"test-version\"\n\
                  environment = \"development\"\n\
+                 transfer_port = 4455\n\
                  db_path = \"{}\"\n",
                 canonical.display()
             ),
@@ -371,6 +381,7 @@ mod tests {
              device_token = \"device-token\"\n\
              version = \"test-version\"\n\
              environment = \"development\"\n\
+             transfer_port = 4455\n\
              desktop_id = \"desktop-1\"\n\
              desktop_secret = \"desktop-secret\"\n",
         )
@@ -383,6 +394,65 @@ mod tests {
     }
 
     #[test]
+    fn load_from_path_requires_transfer_port() {
+        let root = unique_test_dir("missing-transfer-port");
+        let config_path = root.join("server.toml");
+        fs::write(
+            &config_path,
+            "relay_url = \"ws://127.0.0.1:18080\"\n\
+             device_token = \"device-token\"\n\
+             version = \"test-version\"\n\
+             environment = \"development\"\n",
+        )
+        .unwrap();
+
+        let error = load_from_path(&config_path, &root).unwrap_err();
+
+        assert!(error.to_string().contains("transfer_port"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_path_rejects_zero_transfer_port() {
+        let root = unique_test_dir("zero-transfer-port");
+        let config_path = root.join("server.toml");
+        fs::write(
+            &config_path,
+            "relay_url = \"ws://127.0.0.1:18080\"\n\
+             device_token = \"device-token\"\n\
+             version = \"test-version\"\n\
+             environment = \"development\"\n\
+             transfer_port = 0\n",
+        )
+        .unwrap();
+
+        let error = load_from_path(&config_path, &root).unwrap_err();
+
+        assert_eq!(error.to_string(), "transfer_port must be greater than zero");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_path_reads_loopback_transfer_port() {
+        let root = unique_test_dir("transfer-port");
+        let config_path = root.join("server.toml");
+        fs::write(
+            &config_path,
+            "relay_url = \"ws://127.0.0.1:18080\"\n\
+             device_token = \"device-token\"\n\
+             version = \"test-version\"\n\
+             environment = \"development\"\n\
+             transfer_port = 4455\n",
+        )
+        .unwrap();
+
+        let config = load_from_path(&config_path, &root).unwrap();
+
+        assert_eq!(config.transfer_port, 4455);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn load_from_path_reads_desktop_resolved_kanna_cli_path() {
         let root = unique_test_dir("kanna-cli-path");
         let config_path = root.join("server.toml");
@@ -392,6 +462,7 @@ mod tests {
              device_token = \"device-token\"\n\
              version = \"test-version\"\n\
              environment = \"development\"\n\
+             transfer_port = 4455\n\
              desktop_id = \"desktop-1\"\n\
              kanna_cli_path = \"/Applications/Kanna.app/Contents/MacOS/kanna-cli\"\n",
         )
@@ -415,6 +486,7 @@ mod tests {
              device_token = \"device-token\"\n\
              version = \"test-version\"\n\
              environment = \"development\"\n\
+             transfer_port = 4455\n\
              cloud_base_url = \"http://127.0.0.1:5001/kanna-local/us-central1\"\n\
              firebase_project_id = \"kanna-local\"\n\
              desktop_id = \"desktop-1\"\n",

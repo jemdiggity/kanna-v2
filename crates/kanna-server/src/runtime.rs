@@ -129,6 +129,7 @@ mod tests {
             environment: "development".into(),
             lan_host: "127.0.0.1".into(),
             lan_port,
+            transfer_port: 4455,
             pairing_store_path: pairing_store_path.clone(),
         };
         let database = db::Db::open_for_tests(&db_path).unwrap();

@@ -3922,6 +3922,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -4047,6 +4048,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
