@@ -15,29 +15,12 @@ done
 BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 ROOT_DIR="$(cd "$BIN_DIR/../../.." && pwd)"
 KD_DIR="$ROOT_DIR/tools/kd"
-DIST_ENTRY="$KD_DIR/dist/bin/kd.js"
+RESOLVER="$KD_DIR/bin/kd-resolver.mjs"
 
-if [[ ! -d "$KD_DIR/node_modules" ]]; then
-  echo "Bootstrapping tools/kd dependencies..." >&2
-  pnpm --dir "$KD_DIR" install >&2
-fi
-
-needs_build=false
-if [[ ! -f "$DIST_ENTRY" ]]; then
-  needs_build=true
-elif find \
-  "$KD_DIR/src" \
-  "$KD_DIR/bin" \
-  "$KD_DIR/package.json" \
-  "$KD_DIR/tsconfig.json" \
-  "$KD_DIR/tsup.config.ts" \
-  -type f -newer "$DIST_ENTRY" -print -quit | grep -q .; then
-  needs_build=true
-fi
-
-if [[ "$needs_build" == true ]]; then
-  echo "Building tools/kd..." >&2
-  pnpm --dir "$KD_DIR" build >&2
+DIST_ENTRY="$(node "$RESOLVER" kd)"
+if [[ -z "$DIST_ENTRY" ]]; then
+  echo "kd resolver returned an empty entrypoint" >&2
+  exit 1
 fi
 
 exec node "$DIST_ENTRY" "$@"

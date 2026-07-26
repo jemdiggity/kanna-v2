@@ -1,5 +1,15 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -71,7 +81,11 @@ describe("kd CLI", () => {
 
     try {
       copyLauncherFixture(repoRoot, fixtureRepoRoot);
-      const env = cleanLauncherEnv(home);
+      const cacheRoot = join(tempRoot, "cache");
+      const env = {
+        ...cleanLauncherEnv(home),
+        KANNA_KD_CACHE_ROOT: cacheRoot
+      };
       const kd = spawnSync("./kd", ["--help"], {
         cwd: fixtureRepoRoot,
         env,
@@ -81,8 +95,23 @@ describe("kd CLI", () => {
 
       expect(kd.status).toBe(0);
       expect(kd.stdout).toContain("Usage: kd <command>");
+      expect(kd.stderr).toContain("Installing kd ");
       expect(existsSync(resolve(fixtureRepoRoot, "tools/kd/node_modules"))).toBe(true);
-      expect(existsSync(resolve(fixtureRepoRoot, "tools/kd/dist/bin/kd.js"))).toBe(true);
+      expect(existsSync(resolve(fixtureRepoRoot, "tools/kd/dist"))).toBe(false);
+
+      const second = spawnSync("./kd", ["--help"], {
+        cwd: fixtureRepoRoot,
+        env,
+        encoding: "utf8",
+        timeout: 30_000
+      });
+      expect(second.status).toBe(0);
+      expect(second.stderr).toBe("");
+
+      const installs = readdirSync(cacheRoot).filter((name) => !name.startsWith("."));
+      expect(installs).toHaveLength(1);
+      expect(existsSync(join(cacheRoot, installs[0], "bin/kd.js"))).toBe(true);
+      expect(existsSync(join(cacheRoot, installs[0], "bin/kd-mcp.js"))).toBe(true);
 
       const mcp = spawnSync("tools/kd/bin/kd-mcp", [], {
         cwd: fixtureRepoRoot,
@@ -93,9 +122,9 @@ describe("kd CLI", () => {
       const mcpError = mcp.error as NodeJS.ErrnoException | undefined;
 
       expect(mcp.status === 0 || mcpError?.code === "ETIMEDOUT").toBe(true);
+      expect(mcp.stderr).not.toContain("Installing kd ");
       expect(mcp.stderr).not.toContain("No such file or directory");
       expect(mcp.stderr).not.toContain("Cannot find module");
-      expect(existsSync(resolve(fixtureRepoRoot, "tools/kd/dist/bin/kd-mcp.js"))).toBe(true);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
