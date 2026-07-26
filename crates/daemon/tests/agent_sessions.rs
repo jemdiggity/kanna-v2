@@ -244,6 +244,53 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"turn done
 echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"fake-sess-resume"}'
 "#;
 
+/// Closes its pipes after initialization but keeps the process alive. EOF
+/// handling must release stdin and reap it without holding the global agent
+/// session registry.
+const STDOUT_CLOSING_LINGERER: &str = r#"#!/bin/sh
+read -r first
+echo '{"type":"system","subtype":"init","session_id":"fake-sess-linger","model":"fake-model"}'
+exec 1>&-
+exec 0<&-
+sleep 300
+"#;
+
+#[test]
+fn lingering_child_after_stdout_eof_is_reaped_without_wedging_the_registry() {
+    let dir = temp_dir("linger");
+    let script = write_script(&dir, "lingering-agent.sh", STDOUT_CLOSING_LINGERER);
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut conn = daemon.connect();
+    conn.send(&Command::SpawnAgent {
+        session_id: "agent-linger".to_string(),
+        params: spawn_params(&dir, &script, "linger now"),
+    });
+    conn.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "lingering child was never reaped; registry likely wedged"
+        );
+        let mut list_conn = daemon.connect();
+        list_conn.send(&Command::List);
+        let event = list_conn.recv_until(|event| matches!(event, Event::SessionList { .. }));
+        let Event::SessionList { sessions, .. } = event else {
+            unreachable!()
+        };
+        let session = sessions
+            .iter()
+            .find(|info| info.session_id == "agent-linger")
+            .expect("agent session missing from List");
+        if matches!(session.state, SessionState::Exited(_)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 const COUNTED_ONE_SHOT_AGENT: &str = r#"#!/bin/sh
 printf '%s\n' "$$" >> "$SPAWN_LOG"
 read -r first
@@ -324,6 +371,12 @@ echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","
 while :; do :; done
 "#;
 
+const CODEX_ONE_SHOT_AGENT: &str = r#"#!/bin/sh
+echo '{"type":"thread.started","thread_id":"fake-thread-idle"}'
+echo '{"type":"turn.started"}'
+echo '{"type":"turn.completed","usage":{}}'
+"#;
+
 /// Fake persistent agent that emits an interim answer, then crashes before a
 /// successful turn-completed event can make that answer publishable.
 const CRASHING_AGENT: &str = r#"#!/bin/sh
@@ -372,6 +425,102 @@ fn is_turn_completed(event: &AgentEvent) -> bool {
 }
 
 // ---- Tests ----
+
+#[test]
+fn idle_per_turn_kill_emits_before_reused_session_successor_exit() {
+    for (label, provider, script_body) in [
+        ("codex", AgentProvider::Codex, CODEX_ONE_SHOT_AGENT),
+        (
+            "opencode",
+            AgentProvider::Opencode,
+            OPENCODE_DIR_REPORTER_AGENT,
+        ),
+    ] {
+        let dir = temp_dir(&format!("idle-kill-{label}"));
+        let script = write_script(&dir, &format!("{label}-one-shot.sh"), script_body);
+        let successor = write_script(&dir, "successor.sh", ONE_SHOT_AGENT);
+        let daemon = DaemonHandle::start_in(&dir);
+        let session_id = format!("agent-idle-{label}");
+
+        let mut subscriber = daemon.connect();
+        subscriber.send(&Command::Subscribe);
+        assert!(matches!(subscriber.recv(), Event::Ok));
+
+        let mut control = daemon.connect();
+        let mut params = spawn_params(&dir, &script, "finish one turn");
+        params.agent_provider = provider;
+        params.env.insert(
+            "KANNA_STAGE_RUN_ID".to_string(),
+            format!("run-{label}-source"),
+        );
+        control.send(&Command::SpawnAgent {
+            session_id: session_id.clone(),
+            params,
+        });
+        control.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+        subscriber.recv_until(|event| {
+            matches!(
+                event,
+                Event::StatusChanged {
+                    session_id: id,
+                    status: SessionStatus::Idle,
+                    ..
+                } if id == &session_id
+            )
+        });
+
+        control.send(&Command::Kill {
+            session_id: session_id.clone(),
+            expected_run_id: Some(format!("run-{label}-source")),
+        });
+        assert!(matches!(control.recv(), Event::Ok));
+        let killed = subscriber.recv_until(|event| {
+            matches!(
+                event,
+                Event::Exit {
+                    session_id: id,
+                    killed: true,
+                    ..
+                } if id == &session_id
+            )
+        });
+        assert!(matches!(
+            killed,
+            Event::Exit {
+                run_id: Some(ref run_id),
+                ..
+            } if run_id == &format!("run-{label}-source")
+        ));
+
+        let mut successor_params = spawn_params(&dir, &successor, "successor turn");
+        successor_params.env.insert(
+            "KANNA_STAGE_RUN_ID".to_string(),
+            format!("run-{label}-successor"),
+        );
+        control.send(&Command::SpawnAgent {
+            session_id: session_id.clone(),
+            params: successor_params,
+        });
+        control.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+        let successor_exit = subscriber.recv_until(|event| {
+            matches!(
+                event,
+                Event::Exit {
+                    session_id: id,
+                    killed: false,
+                    ..
+                } if id == &session_id
+            )
+        });
+        assert!(matches!(
+            successor_exit,
+            Event::Exit {
+                run_id: Some(ref run_id),
+                ..
+            } if run_id == &format!("run-{label}-successor")
+        ));
+    }
+}
 
 #[test]
 fn idle_status_broadcast_carries_latest_assistant_text() {

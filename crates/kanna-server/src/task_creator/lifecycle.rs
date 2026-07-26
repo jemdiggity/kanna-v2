@@ -5,7 +5,7 @@ use super::types::{
 };
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
-use crate::db::{Db, NewStageRun, ReplacedStageRunSource};
+use crate::db::{Db, NewStageRun, PendingStageActionTarget, ReplacedStageRunSource};
 use crate::http_api::{try_submit_task_input, TaskInputError};
 use crate::session_replacements::SessionReplacements;
 use kanna_daemon::protocol::{
@@ -14,6 +14,95 @@ use kanna_daemon::protocol::{
 
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
+}
+
+/// Resolve stage actions that were durably reserved when the server exited.
+/// This runs before HTTP services start, so no new action can replace the
+/// pending successor while recovery compares it with daemon ownership.
+pub(crate) async fn reconcile_pending_stage_actions_on_startup(
+    config: &crate::config::Config,
+) -> Result<(), String> {
+    let actions = Db::open(&config.db_path)
+        .map_err(|error| format!("startup action reconciliation db error: {error}"))?
+        .pending_stage_actions()
+        .map_err(|error| format!("startup action reconciliation query failed: {error}"))?;
+    if actions.is_empty() {
+        return Ok(());
+    }
+
+    let mut daemon = DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|error| format!("startup action reconciliation daemon error: {error}"))?;
+    let listed = daemon
+        .list()
+        .await
+        .map_err(|error| format!("startup action reconciliation list failed: {error}"))?;
+    if !listed.capabilities.immutable_run_ownership {
+        return Err(
+            "startup action reconciliation requires immutable daemon run ownership".to_string(),
+        );
+    }
+
+    for action in actions {
+        let successor_is_live = listed.sessions.iter().any(|session| {
+            session.session_id == action.session_id
+                && session.run_id.as_deref() == Some(action.successor_run_id.as_str())
+        });
+        let db = Db::open(&config.db_path)
+            .map_err(|error| format!("startup action reconciliation db error: {error}"))?;
+        if successor_is_live {
+            db.land_pending_stage_action(&action).map_err(|error| {
+                format!(
+                    "failed to land recovered successor {} for task {}: {}",
+                    action.successor_run_id, action.task_id, error
+                )
+            })?;
+            log::info!(
+                "landed recovered successor {} for task {}",
+                action.successor_run_id,
+                action.task_id
+            );
+        } else {
+            db.rollback_pending_stage_action(&action).map_err(|error| {
+                format!(
+                    "failed to restore source for pending successor {} on task {}: {}",
+                    action.successor_run_id, action.task_id, error
+                )
+            })?;
+            // Restore durable task ownership before touching the filesystem.
+            // If workspace cleanup is interrupted or fails, the normal
+            // orphan-worktree reconciliation can retry it without leaving
+            // the source run closed or blocking all new task actions.
+            if action.remove_worktree_on_rollback {
+                let path = action.target_worktree_path.as_deref().ok_or_else(|| {
+                    format!(
+                        "pending successor {} is missing rollback worktree path",
+                        action.successor_run_id
+                    )
+                })?;
+                let branch = action.target_worktree_branch.as_deref().ok_or_else(|| {
+                    format!(
+                        "pending successor {} is missing rollback branch",
+                        action.successor_run_id
+                    )
+                })?;
+                if let Err(error) = remove_prepared_worktree(path, branch) {
+                    log::warn!(
+                        "restored source for pending successor {} but could not remove \
+                         its unaccepted workspace; startup worktree reconciliation will retry: {}",
+                        action.successor_run_id,
+                        error
+                    );
+                }
+            }
+            log::info!(
+                "restored source after unaccepted successor {} for task {}",
+                action.successor_run_id,
+                action.task_id
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn rollback_prepared_task_for_api(
@@ -162,14 +251,66 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(
     match spawn_prepared_task_for_api(daemon, prepared.clone()).await {
         Ok(created) => {
             let record_db_path = db_path.to_string();
-            tokio::task::spawn_blocking(move || {
+            let task_id = prepared.created_task.task_id.clone();
+            let landing_run_id = run_id.clone();
+            let landing = tokio::task::spawn_blocking(move || {
                 let db = Db::open(&record_db_path).map_err(|e| format!("db error: {e}"))?;
-                db.start_stage_run(&run_id)
+                db.start_initial_stage_run_if_current(&task_id, &landing_run_id)
                     .map_err(|e| format!("db error: {e}"))
             })
             .await
-            .map_err(|join_error| format!("stage run start worker failed: {join_error}"))??;
-            Ok(created)
+            .map_err(|join_error| format!("stage run start worker failed: {join_error}"))?;
+            match landing {
+                Ok(()) => Ok(created),
+                Err(error) => {
+                    let kill_result = match daemon
+                        .send_command(&DaemonCommand::Kill {
+                            session_id: prepared.session_id.clone(),
+                            expected_run_id: Some(run_id.clone()),
+                        })
+                        .await
+                    {
+                        Ok(DaemonEvent::Ok)
+                        | Ok(DaemonEvent::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                            ..
+                        }) => Ok(()),
+                        Ok(DaemonEvent::Error { message, .. }) => {
+                            Err(format!("daemon error: {message}"))
+                        }
+                        Ok(other) => Err(format!("unexpected daemon response: {other:?}")),
+                        Err(kill_error) => Err(kill_error.to_string()),
+                    };
+                    let rollback_db_path = db_path.to_string();
+                    let rollback_run_id = run_id.clone();
+                    let rollback = tokio::task::spawn_blocking(move || {
+                        Db::open(&rollback_db_path)
+                            .and_then(|db| {
+                                db.delete_unstarted_stage_run_and_restore_provider_session_id(
+                                    &rollback_run_id,
+                                )
+                            })
+                            .map_err(|db_error| format!("db error: {db_error}"))
+                    })
+                    .await
+                    .map_err(|join_error| {
+                        format!("stage run rollback worker failed: {join_error}")
+                    })?;
+                    let mut message = format!(
+                        "task {} spawn could not land: {error}",
+                        prepared.created_task.task_id
+                    );
+                    if let Err(kill_error) = kill_result {
+                        message
+                            .push_str(&format!("; guarded session cleanup failed: {kill_error}"));
+                    }
+                    if let Err(rollback_error) = rollback {
+                        message
+                            .push_str(&format!("; pending run rollback failed: {rollback_error}"));
+                    }
+                    Err(message)
+                }
+            }
         }
         Err(error) => {
             let record_db_path = db_path.to_string();
@@ -251,9 +392,21 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             provider_session_id.clone(),
         );
     }
+    let worktree_id = format!("wt-{task_id}");
+    let (target_branch, target_worktree) = match &prepared.workspace {
+        PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => (
+            Some(workspace.branch.as_str()),
+            Some((
+                worktree_id.as_str(),
+                workspace.worktree_path.as_str(),
+                workspace.branch.as_str(),
+            )),
+        ),
+        PreparedRunWorkspace::Current => (None, None),
+    };
     let replaced_source = {
         let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-        match db.replace_current_run_with_pending(
+        match db.replace_current_run_with_pending_action(
             NewStageRun {
                 id: &run_id,
                 task_id: &task_id,
@@ -275,6 +428,16 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             prepared.source_completion_status,
             prepared.source_completion_result.as_deref(),
             prepared.source_completion_feedback.as_deref(),
+            PendingStageActionTarget {
+                session_id: &session_id,
+                stage: &prepared.next_stage,
+                branch: target_branch,
+                worktree: target_worktree,
+                remove_worktree_on_rollback: matches!(
+                    &prepared.workspace,
+                    PreparedRunWorkspace::Forked(_)
+                ),
+            },
         ) {
             Ok(source) => source,
             Err(error) => {
@@ -399,21 +562,17 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     }
 
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    let worktree_id = format!("wt-{task_id}");
-    let (branch, worktree) = match &prepared.workspace {
-        PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => (
-            Some(workspace.branch.as_str()),
-            Some((
-                worktree_id.as_str(),
-                workspace.worktree_path.as_str(),
-                workspace.branch.as_str(),
-            )),
-        ),
-        PreparedRunWorkspace::Current => (None, None),
-    };
-    if let Err(error) = db.land_stage_run(&task_id, &run_id, &prepared.next_stage, branch, worktree)
-    {
-        if let Err(kill_error) = kill_session_replacing(daemon, replacements, &session_id).await {
+    if let Err(error) = db.land_stage_run_if_reserved(
+        &task_id,
+        &run_id,
+        &prepared.next_stage,
+        target_branch,
+        target_worktree,
+        Some(&prepared.expected_source),
+    ) {
+        if let Err(kill_error) =
+            kill_session_replacing_if_owned(daemon, replacements, &session_id, Some(&run_id)).await
+        {
             log::warn!("failed to clean up unlanded stage session {session_id}: {kill_error}");
         }
         let message = format!("task {task_id} stage transition could not land: {error}");
@@ -673,7 +832,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         .insert("KANNA_STAGE_RUN_ID".to_string(), run_id.clone());
     let replaced_source = {
         let db = Db::open(db_path).map_err(|e| format!("db error: {e}"))?;
-        db.replace_current_run_with_pending(
+        db.replace_current_run_with_pending_action(
             NewStageRun {
                 id: &run_id,
                 task_id: &task_id,
@@ -695,6 +854,13 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             "cancelled",
             None,
             None,
+            PendingStageActionTarget {
+                session_id: &session_id,
+                stage: &stage,
+                branch: None,
+                worktree: None,
+                remove_worktree_on_rollback: false,
+            },
         )
         .map_err(|error| {
             if matches!(error, rusqlite::Error::QueryReturnedNoRows) {

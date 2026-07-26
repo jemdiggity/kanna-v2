@@ -55,7 +55,8 @@ pub(crate) use definitions::DEFAULT_REVISION_LIMIT;
 pub(crate) use environment::warm_login_shell_path;
 pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
-    rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
+    reconcile_pending_stage_actions_on_startup, rerun_prepared_stage_for_api,
+    rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
     spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_diagnostics,
     spawn_prepared_workspace_teardown_best_effort,
 };

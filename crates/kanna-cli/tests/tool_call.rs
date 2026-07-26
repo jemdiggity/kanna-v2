@@ -108,7 +108,7 @@ fn generic_complete_stage_tool_call_supports_old_override_catalog() {
             "call",
             "kanna_complete_stage",
             "--json",
-            r#"{"task_id":"task-current","status":"success","summary":"completed through old override"}"#,
+            r#"{"task_id":"task-current","status":"success","summary":"completed through old override","run_id":"caller-supplied-current-run"}"#,
             "--server-url",
             &format!("http://{address}"),
         ])

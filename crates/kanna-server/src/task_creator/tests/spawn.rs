@@ -205,6 +205,119 @@ async fn spawn_records_pending_stage_run_before_daemon_can_emit_events() {
 }
 
 #[tokio::test]
+async fn initial_spawn_closed_after_session_created_is_guarded_killed_and_rolled_back() {
+    let config = test_config("initial-spawn-close-race");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Agent task",
+        Some("Agent task"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server_db_path = config.db_path.clone();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        let (session_id, run_id) = match command {
+            kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => (
+                session_id,
+                params.env.get("KANNA_STAGE_RUN_ID").cloned().unwrap(),
+            ),
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        };
+        Db::open(&server_db_path)
+            .unwrap()
+            .close_pipeline_item("task-1")
+            .unwrap();
+        let created = kanna_daemon::protocol::Event::SessionCreated {
+            session_id: session_id.clone(),
+            run_id: Some(run_id.clone()),
+        };
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&created).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let kill: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(
+            kill,
+            kanna_daemon::protocol::Command::Kill {
+                session_id: ref killed_session,
+                expected_run_id: Some(ref killed_run),
+            } if killed_session == &session_id && killed_run == &run_id
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let prepared = PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: "task-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Agent task".to_string(),
+            prompt: "Do work".to_string(),
+            stage: "in progress".to_string(),
+            agent_type: "agent".to_string(),
+            worktree_path: "/tmp/worktree".to_string(),
+        },
+        branch: "task-1".to_string(),
+        session_id: "task-1".to_string(),
+        cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
+        env: HashMap::new(),
+        stage_agent: Some("implement".to_string()),
+        agent_provider: "claude".to_string(),
+        model: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        session: PreparedSessionSpawn::Agent {
+            agent_provider: DaemonAgentProvider::Claude,
+            prompt: "Do work".to_string(),
+            model: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            system_prompt: "Kanna context".to_string(),
+            mcp_config_path: None,
+            executable: None,
+            resume_session_id: None,
+        },
+    };
+    let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error =
+        spawn_prepared_task_for_api_recording_stage_run(&config.db_path, &mut client, prepared)
+            .await
+            .expect_err("closed task must reject initial run landing");
+    daemon.await.unwrap();
+
+    assert!(error.contains("spawn could not land"), "{error}");
+    assert!(db.list_stage_runs_for_task("task-1").unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn create_resume_rejects_old_daemon_before_recording_task_or_run() {
     let repo_root = init_git_repo("create-headless-resume-old-daemon");
     let config = test_config("create-headless-resume-old-daemon");

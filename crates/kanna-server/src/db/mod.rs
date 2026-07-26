@@ -27,7 +27,10 @@ pub use analytics::RepoAnalytics;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
-pub use stage_runs::{FinishedStageRun, ReplacedStageRunSource, TaskActionState};
+pub use stage_runs::{
+    FinishedStageRun, PendingStageAction, PendingStageActionTarget, ReplacedStageRunSource,
+    TaskActionState,
+};
 #[allow(unused_imports)]
 pub use transfers::{
     NewTaskTransfer, NewTaskTransferProvenance, PendingIncomingTransfer, TaskTransfer,
@@ -74,6 +77,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "033_create_task_intent",
     "034_pipeline_item_revision_rounds",
     "029_stage_run_ownership_version",
+    "030_pending_stage_action",
 ];
 
 #[derive(Debug, Serialize)]
@@ -687,6 +691,27 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           finished_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at);
+        CREATE TABLE IF NOT EXISTS pending_stage_action (
+          successor_run_id TEXT PRIMARY KEY REFERENCES stage_run(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL UNIQUE REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL,
+          target_stage TEXT NOT NULL,
+          target_branch TEXT,
+          target_worktree_id TEXT,
+          target_worktree_path TEXT,
+          target_worktree_branch TEXT,
+          remove_worktree_on_rollback INTEGER NOT NULL DEFAULT 0,
+          source_stage TEXT NOT NULL,
+          source_branch TEXT NOT NULL,
+          source_active_run_id TEXT,
+          source_process_run_id TEXT,
+          source_run_id TEXT,
+          source_status TEXT,
+          source_result TEXT,
+          source_feedback TEXT,
+          source_finished_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         "#,
     )
@@ -1298,6 +1323,34 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "INTEGER NOT NULL DEFAULT 0",
         );
         Ok(())
+    })?;
+
+    run_migration(conn, "030_pending_stage_action", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS pending_stage_action (
+              successor_run_id TEXT PRIMARY KEY REFERENCES stage_run(id) ON DELETE CASCADE,
+              task_id TEXT NOT NULL UNIQUE REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              session_id TEXT NOT NULL,
+              target_stage TEXT NOT NULL,
+              target_branch TEXT,
+              target_worktree_id TEXT,
+              target_worktree_path TEXT,
+              target_worktree_branch TEXT,
+              remove_worktree_on_rollback INTEGER NOT NULL DEFAULT 0,
+              source_stage TEXT NOT NULL,
+              source_branch TEXT NOT NULL,
+              source_active_run_id TEXT,
+              source_process_run_id TEXT,
+              source_run_id TEXT,
+              source_status TEXT,
+              source_result TEXT,
+              source_feedback TEXT,
+              source_finished_at TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            "#,
+        )
     })?;
 
     Ok(())

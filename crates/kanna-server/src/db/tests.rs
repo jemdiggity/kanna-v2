@@ -1,7 +1,7 @@
 use super::NewStageRun;
 use super::{
     add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
-    NewTaskTransferProvenance, CURRENT_SCHEMA_MIGRATIONS,
+    NewTaskTransferProvenance, PendingStageActionTarget, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "029_stage_run_ownership_version");
+    assert_eq!(latest_migration, "030_pending_stage_action");
 
     let stage_run_sql: String = db
         .conn
@@ -190,6 +190,16 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(transfer_columns.contains(&"target_desktop_id".to_string()));
     assert!(transfer_columns.contains(&"sidecar_cleanup_completed_at".to_string()));
     assert!(stage_run_sql.contains("run_ownership_version"));
+    let pending_action_table: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'pending_stage_action'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pending stage action schema");
+    assert_eq!(pending_action_table, 1);
 
     let _ = std::fs::remove_file(path);
 }
@@ -1843,6 +1853,171 @@ fn successor_run_reservation_is_single_winner_for_expected_task_state() {
             .unwrap()
             .status,
         "failed"
+    );
+}
+
+#[test]
+fn pending_stage_action_persists_source_snapshot_and_can_restore_it() {
+    let path = Db::test_db_path("pending-stage-action-restore");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Restore a crashed transition",
+        None,
+        "review",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-review",
+        task_id: "task-1",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: Some("old result"),
+        feedback: Some("old feedback"),
+        session_id: Some("task-1"),
+        provider_session_id: Some("provider-review"),
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let expected = db.task_action_state("task-1").unwrap();
+    db.replace_current_run_with_pending_action(
+        NewStageRun {
+            id: "run-revision",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1-2"),
+            resumed_from_run_id: Some("run-review"),
+        },
+        Some("auto"),
+        &expected,
+        "failed",
+        Some("new failure"),
+        Some("new feedback"),
+        PendingStageActionTarget {
+            session_id: "task-1",
+            stage: "in progress",
+            branch: Some("task-task-1-2"),
+            worktree: Some(("wt-task-1", "/tmp/task-1-2", "task-task-1-2")),
+            remove_worktree_on_rollback: true,
+        },
+    )
+    .unwrap();
+
+    let actions = db.pending_stage_actions().unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].source, expected);
+    assert_eq!(
+        actions[0]
+            .replaced_source
+            .as_ref()
+            .and_then(|source| source.result.as_deref()),
+        Some("old result")
+    );
+    db.rollback_pending_stage_action(&actions[0]).unwrap();
+
+    assert!(db.pending_stage_actions().unwrap().is_empty());
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert!(runs.iter().all(|run| run.id != "run-revision"));
+    let source = runs.iter().find(|run| run.id == "run-review").unwrap();
+    assert_eq!(source.status, "running");
+    assert_eq!(source.result.as_deref(), Some("old result"));
+    assert_eq!(source.feedback.as_deref(), Some("old feedback"));
+}
+
+#[test]
+fn pending_stage_action_can_land_reserved_successor_atomically() {
+    let path = Db::test_db_path("pending-stage-action-land");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Land a crashed transition",
+        None,
+        "review",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-review",
+        task_id: "task-1",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let expected = db.task_action_state("task-1").unwrap();
+    db.replace_current_run_with_pending_action(
+        NewStageRun {
+            id: "run-next",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1-2"),
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+        &expected,
+        "cancelled",
+        None,
+        None,
+        PendingStageActionTarget {
+            session_id: "task-1",
+            stage: "in progress",
+            branch: Some("task-task-1-2"),
+            worktree: Some(("wt-task-1", "/tmp/task-1-2", "task-task-1-2")),
+            remove_worktree_on_rollback: true,
+        },
+    )
+    .unwrap();
+    let action = db.pending_stage_actions().unwrap().pop().unwrap();
+    db.land_pending_stage_action(&action).unwrap();
+
+    assert!(db.pending_stage_actions().unwrap().is_empty());
+    let task = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(task.branch.as_deref(), Some("task-task-1-2"));
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "running"
+    );
+    assert_eq!(
+        db.get_task_worktree_path("task-1").unwrap().as_deref(),
+        Some("/tmp/task-1-2")
     );
 }
 

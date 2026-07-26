@@ -272,12 +272,22 @@ fn resolve_tool_request(
     args: &Value,
     stage_run_id: Option<&str>,
 ) -> Result<ResolvedRequest, String> {
-    let mut request = resolve_request(catalog, name, args)?;
+    let trusted_run_id = stage_run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut validated_args = args.clone();
+    if name == "kanna_complete_stage" && trusted_run_id.is_some() {
+        if let Some(args) = validated_args.as_object_mut() {
+            // A current agent can send the current catalog's run_id while a
+            // pre-upgrade override catalog is still active. Process ownership
+            // is authoritative, so validate the remaining caller arguments
+            // against that catalog and bind the trusted run afterward.
+            args.remove("run_id");
+        }
+    }
+    let mut request = resolve_request(catalog, name, &validated_args)?;
     if name == "kanna_complete_stage" {
-        if let Some(run_id) = stage_run_id
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(run_id) = trusted_run_id {
             let body = request
                 .body
                 .as_object_mut()
@@ -755,7 +765,8 @@ mod tests {
             &json!({
                 "task_id": "task-1",
                 "status": "success",
-                "summary": "completed through an old override"
+                "summary": "completed through an old override",
+                "run_id": "caller-supplied-current-run"
             }),
             Some("run-current"),
         )

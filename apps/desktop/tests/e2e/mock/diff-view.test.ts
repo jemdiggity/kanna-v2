@@ -1907,6 +1907,16 @@ describe("diff view", () => {
 
     const requestCall = await waitForRecordedStageAction(client, "request-revision");
     expect(requestCall?.url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`);
+    await client.waitForText(
+      ".toast.error .toast-message",
+      "mock revision landing failure",
+      5_000,
+    );
+    const sendButtonReenabled = await client.executeSync<boolean>(
+      `const button = document.querySelector(".summary-actions .primary");
+       return button instanceof HTMLButtonElement && !button.disabled;`
+    );
+    expect(sendButtonReenabled).toBe(true);
     await client.waitForElement(".summary-composer", 2_000);
     await waitForReviewCommentCount(client, 1);
     const retainedDraft = await client.executeSync<string>(

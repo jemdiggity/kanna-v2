@@ -146,6 +146,27 @@ impl Db {
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 finished_at TEXT
             );
+            CREATE TABLE pending_stage_action (
+                successor_run_id TEXT PRIMARY KEY REFERENCES stage_run(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL UNIQUE REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL,
+                target_stage TEXT NOT NULL,
+                target_branch TEXT,
+                target_worktree_id TEXT,
+                target_worktree_path TEXT,
+                target_worktree_branch TEXT,
+                remove_worktree_on_rollback INTEGER NOT NULL DEFAULT 0,
+                source_stage TEXT NOT NULL,
+                source_branch TEXT NOT NULL,
+                source_active_run_id TEXT,
+                source_process_run_id TEXT,
+                source_run_id TEXT,
+                source_status TEXT,
+                source_result TEXT,
+                source_feedback TEXT,
+                source_finished_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
 
             CREATE TABLE settings (

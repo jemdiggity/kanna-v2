@@ -54,12 +54,21 @@ pub(crate) fn resolve_tool_request(
     args: &Value,
     stage_run_id: Option<&str>,
 ) -> Result<ResolvedRequest, String> {
-    let mut request = resolve_request(catalog, name, args)?;
+    let trusted_run_id = stage_run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut validated_args = args.clone();
+    if name == "kanna_complete_stage" && trusted_run_id.is_some() {
+        if let Some(args) = validated_args.as_object_mut() {
+            // Validate caller data against the loaded catalog without letting
+            // an old override reject the current run_id parameter. The
+            // process-owned value is injected after resolution.
+            args.remove("run_id");
+        }
+    }
+    let mut request = resolve_request(catalog, name, &validated_args)?;
     if name == "kanna_complete_stage" {
-        if let Some(run_id) = stage_run_id
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(run_id) = trusted_run_id {
             let body = request
                 .body
                 .as_object_mut()

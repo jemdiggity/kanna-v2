@@ -1,5 +1,5 @@
 use super::{Db, NewStageRun, StageRun};
-use rusqlite::OptionalExtension;
+use rusqlite::{params, OptionalExtension};
 
 const CURRENT_RUN_OWNERSHIP_VERSION: i64 = 1;
 
@@ -32,6 +32,29 @@ pub struct ReplacedStageRunSource {
     pub result: Option<String>,
     pub feedback: Option<String>,
     pub finished_at: Option<String>,
+}
+
+pub struct PendingStageActionTarget<'a> {
+    pub session_id: &'a str,
+    pub stage: &'a str,
+    pub branch: Option<&'a str>,
+    pub worktree: Option<(&'a str, &'a str, &'a str)>,
+    pub remove_worktree_on_rollback: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingStageAction {
+    pub successor_run_id: String,
+    pub task_id: String,
+    pub session_id: String,
+    pub target_stage: String,
+    pub target_branch: Option<String>,
+    pub target_worktree_id: Option<String>,
+    pub target_worktree_path: Option<String>,
+    pub target_worktree_branch: Option<String>,
+    pub remove_worktree_on_rollback: bool,
+    pub source: TaskActionState,
+    pub replaced_source: Option<ReplacedStageRunSource>,
 }
 
 impl Db {
@@ -222,6 +245,7 @@ impl Db {
     /// the same SQLite write transaction, so concurrent/retried actions
     /// cannot both win.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn replace_current_run_with_pending(
         &self,
         run: NewStageRun<'_>,
@@ -230,6 +254,50 @@ impl Db {
         source_status: &str,
         source_result: Option<&str>,
         source_feedback: Option<&str>,
+    ) -> Result<Option<ReplacedStageRunSource>, rusqlite::Error> {
+        self.replace_current_run_with_pending_inner(
+            run,
+            completion_transition,
+            expected,
+            source_status,
+            source_result,
+            source_feedback,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_current_run_with_pending_action(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+        expected: &TaskActionState,
+        source_status: &str,
+        source_result: Option<&str>,
+        source_feedback: Option<&str>,
+        target: PendingStageActionTarget<'_>,
+    ) -> Result<Option<ReplacedStageRunSource>, rusqlite::Error> {
+        self.replace_current_run_with_pending_inner(
+            run,
+            completion_transition,
+            expected,
+            source_status,
+            source_result,
+            source_feedback,
+            Some(target),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replace_current_run_with_pending_inner(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+        expected: &TaskActionState,
+        source_status: &str,
+        source_result: Option<&str>,
+        source_feedback: Option<&str>,
+        target: Option<PendingStageActionTarget<'_>>,
     ) -> Result<Option<ReplacedStageRunSource>, rusqlite::Error> {
         let transaction = self.conn.unchecked_transaction()?;
         let current = transaction
@@ -343,8 +411,135 @@ impl Db {
                 CURRENT_RUN_OWNERSHIP_VERSION,
             ),
         )?;
+        if let Some(target) = target {
+            let (worktree_id, worktree_path, worktree_branch) = target
+                .worktree
+                .map(|(id, path, branch)| (Some(id), Some(path), Some(branch)))
+                .unwrap_or((None, None, None));
+            transaction.execute(
+                "INSERT INTO pending_stage_action
+                 (successor_run_id, task_id, session_id, target_stage, target_branch,
+                  target_worktree_id, target_worktree_path, target_worktree_branch,
+                  remove_worktree_on_rollback,
+                  source_stage, source_branch, source_active_run_id, source_process_run_id,
+                  source_run_id, source_status, source_result, source_feedback,
+                  source_finished_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                         ?13, ?14, ?15, ?16, ?17, ?18)",
+                params![
+                    run.id,
+                    run.task_id,
+                    target.session_id,
+                    target.stage,
+                    target.branch,
+                    worktree_id,
+                    worktree_path,
+                    worktree_branch,
+                    target.remove_worktree_on_rollback,
+                    expected.stage.as_str(),
+                    expected.branch.as_str(),
+                    expected.active_run_id.as_deref(),
+                    expected.process_run_id.as_deref(),
+                    replaced_source
+                        .as_ref()
+                        .map(|source| source.run_id.as_str()),
+                    replaced_source
+                        .as_ref()
+                        .map(|source| source.status.as_str()),
+                    replaced_source
+                        .as_ref()
+                        .and_then(|source| source.result.as_deref()),
+                    replaced_source
+                        .as_ref()
+                        .and_then(|source| source.feedback.as_deref()),
+                    replaced_source
+                        .as_ref()
+                        .and_then(|source| source.finished_at.as_deref()),
+                ],
+            )?;
+        }
         transaction.commit()?;
         Ok(replaced_source)
+    }
+
+    pub fn pending_stage_actions(&self) -> Result<Vec<PendingStageAction>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT successor_run_id, task_id, session_id, target_stage, target_branch,
+                    target_worktree_id, target_worktree_path, target_worktree_branch,
+                    remove_worktree_on_rollback,
+                    source_stage, source_branch, source_active_run_id, source_process_run_id,
+                    source_run_id, source_status, source_result, source_feedback,
+                    source_finished_at
+             FROM pending_stage_action
+             ORDER BY datetime(created_at), rowid",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let source_run_id = row.get::<_, Option<String>>(13)?;
+            let source_status = row.get::<_, Option<String>>(14)?;
+            Ok(PendingStageAction {
+                successor_run_id: row.get(0)?,
+                task_id: row.get(1)?,
+                session_id: row.get(2)?,
+                target_stage: row.get(3)?,
+                target_branch: row.get(4)?,
+                target_worktree_id: row.get(5)?,
+                target_worktree_path: row.get(6)?,
+                target_worktree_branch: row.get(7)?,
+                remove_worktree_on_rollback: row.get(8)?,
+                source: TaskActionState {
+                    stage: row.get(9)?,
+                    branch: row.get(10)?,
+                    active_run_id: row.get(11)?,
+                    process_run_id: row.get(12)?,
+                },
+                replaced_source: match (source_run_id, source_status) {
+                    (Some(run_id), Some(status)) => Some(ReplacedStageRunSource {
+                        run_id,
+                        status,
+                        result: row.get(15)?,
+                        feedback: row.get(16)?,
+                        finished_at: row.get(17)?,
+                    }),
+                    _ => None,
+                },
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn rollback_pending_stage_action(
+        &self,
+        action: &PendingStageAction,
+    ) -> Result<(), rusqlite::Error> {
+        self.rollback_pending_replacement_and_restore_source(
+            &action.task_id,
+            &action.successor_run_id,
+            &action.source,
+            action.replaced_source.as_ref(),
+        )
+    }
+
+    pub fn land_pending_stage_action(
+        &self,
+        action: &PendingStageAction,
+    ) -> Result<(), rusqlite::Error> {
+        let worktree = match (
+            action.target_worktree_id.as_deref(),
+            action.target_worktree_path.as_deref(),
+            action.target_worktree_branch.as_deref(),
+        ) {
+            (Some(id), Some(path), Some(branch)) => Some((id, path, branch)),
+            (None, None, None) => None,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        };
+        self.land_stage_run_if_reserved(
+            &action.task_id,
+            &action.successor_run_id,
+            &action.target_stage,
+            action.target_branch.as_deref(),
+            worktree,
+            Some(&action.source),
+        )
     }
 
     /// Undo a successor reservation only while it is still the task's latest
@@ -637,7 +832,8 @@ impl Db {
         result: Option<&str>,
         feedback: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
-        let rows_affected = self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        let rows_affected = transaction.execute(
             "UPDATE stage_run
              SET status = ?, result = ?, feedback = ?, finished_at = datetime('now')
              WHERE id = ?",
@@ -646,11 +842,16 @@ impl Db {
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        Ok(())
+        transaction.execute(
+            "DELETE FROM pending_stage_action WHERE successor_run_id = ?1",
+            [id],
+        )?;
+        transaction.commit()
     }
 
     pub fn start_stage_run(&self, id: &str) -> Result<(), rusqlite::Error> {
-        let changed = self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
             "UPDATE stage_run
              SET status = 'running'
              WHERE id = ?1 AND status = 'pending'",
@@ -659,7 +860,46 @@ impl Db {
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        Ok(())
+        transaction.execute(
+            "DELETE FROM pending_stage_action WHERE successor_run_id = ?1",
+            [id],
+        )?;
+        transaction.commit()
+    }
+
+    /// Land an initial or newly awakened dormant task only while its
+    /// reservation is still latest and the task remains open.
+    pub fn start_initial_stage_run_if_current(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE stage_run
+             SET status = 'running'
+             WHERE id = ?1
+               AND task_id = ?2
+               AND status = 'pending'
+               AND EXISTS (
+                 SELECT 1
+                 FROM pipeline_item task
+                 WHERE task.id = ?2
+                   AND task.closed_at IS NULL
+                   AND (
+                     SELECT id
+                     FROM stage_run
+                     WHERE task_id = task.id
+                     ORDER BY datetime(started_at) DESC, rowid DESC
+                     LIMIT 1
+                   ) = ?1
+               )",
+            (run_id, task_id),
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        transaction.commit()
     }
 
     /// Land a daemon-created stage session as one atomic ownership change.
@@ -769,6 +1009,10 @@ impl Db {
         if run_changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        transaction.execute(
+            "DELETE FROM pending_stage_action WHERE successor_run_id = ?1",
+            [run_id],
+        )?;
         transaction.commit()
     }
 

@@ -1312,6 +1312,157 @@ async fn stage_transition_rolls_back_fork_when_daemon_command_times_out() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+fn seed_pending_startup_action(config: &Config) {
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Recover transition",
+        None,
+        "review",
+        "2026-07-25 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-source",
+        task_id: "task-1",
+        stage: "review",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: Some("source result"),
+        feedback: Some("source feedback"),
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let expected = db.task_action_state("task-1").unwrap();
+    db.replace_current_run_with_pending_action(
+        crate::db::NewStageRun {
+            id: "run-successor",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1-2"),
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+        &expected,
+        "failed",
+        Some("replacement result"),
+        Some("replacement feedback"),
+        crate::db::PendingStageActionTarget {
+            session_id: "task-1",
+            stage: "in progress",
+            branch: Some("task-task-1-2"),
+            worktree: Some(("wt-task-1", "/tmp/task-1-2", "task-task-1-2")),
+            remove_worktree_on_rollback: false,
+        },
+    )
+    .unwrap();
+}
+
+async fn spawn_startup_list_daemon(
+    config: &Config,
+    successor_live: bool,
+) -> tokio::task::JoinHandle<()> {
+    std::fs::create_dir_all(&config.daemon_dir).unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::List
+        ));
+        let sessions = if successor_live {
+            vec![kanna_daemon::protocol::SessionInfo {
+                session_id: "task-1".to_string(),
+                pid: 42,
+                cwd: "/tmp/task-1-2".to_string(),
+                state: kanna_daemon::protocol::SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Busy,
+                kind: Default::default(),
+                run_id: Some("run-successor".to_string()),
+            }]
+        } else {
+            Vec::new()
+        };
+        let response = kanna_daemon::protocol::Event::SessionList {
+            sessions,
+            capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+        };
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    })
+}
+
+#[tokio::test]
+async fn startup_reconciliation_lands_daemon_owned_successor() {
+    let config = test_config("startup-reconcile-land");
+    seed_pending_startup_action(&config);
+    let daemon = spawn_startup_list_daemon(&config, true).await;
+
+    crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
+        .await
+        .unwrap();
+    daemon.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db.pending_stage_actions().unwrap().is_empty());
+    let task = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(task.branch.as_deref(), Some("task-task-1-2"));
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn startup_reconciliation_restores_source_when_successor_was_not_accepted() {
+    let config = test_config("startup-reconcile-restore");
+    seed_pending_startup_action(&config);
+    let daemon = spawn_startup_list_daemon(&config, false).await;
+
+    crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
+        .await
+        .unwrap();
+    daemon.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db.pending_stage_actions().unwrap().is_empty());
+    let task = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("review"));
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert!(runs.iter().all(|run| run.id != "run-successor"));
+    let source = runs.iter().find(|run| run.id == "run-source").unwrap();
+    assert_eq!(source.status, "running");
+    assert_eq!(source.result.as_deref(), Some("source result"));
+    assert_eq!(source.feedback.as_deref(), Some("source feedback"));
+}
+
 #[tokio::test]
 async fn prompt_only_stage_provider_overrides_source_task_provider_in_daemon_spawn() {
     let repo_root = init_git_repo("prompt-only-stage-provider");
