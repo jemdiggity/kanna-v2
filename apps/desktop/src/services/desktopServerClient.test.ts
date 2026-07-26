@@ -543,7 +543,7 @@ describe("desktopServerClient", () => {
     );
   });
 
-  it("lists completed incoming transfer cleanup candidates", async () => {
+  it("lists terminal incoming transfer cleanup candidates", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ transferIds: ["transfer-completed"] }), {
         status: 200,

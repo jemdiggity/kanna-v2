@@ -83,9 +83,7 @@ pub(super) async fn list_incoming_transfer_cleanup_candidates(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<IncomingTransferCleanupCandidatesResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
-    let transfer_ids = db
-        .list_completed_incoming_transfer_ids()
-        .map_err(db_error)?;
+    let transfer_ids = db.list_terminal_incoming_transfer_ids().map_err(db_error)?;
     Ok(Json(IncomingTransferCleanupCandidatesResponse {
         transfer_ids,
     }))

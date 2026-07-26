@@ -426,10 +426,19 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
         .list_pending_incoming_transfers()
         .expect("list after complete")
         .is_empty());
+    db.insert_test_task_transfer("transfer-rejected", "incoming", "rejected", Some("{}"))
+        .expect("insert rejected incoming transfer");
+    db.insert_test_task_transfer("transfer-failed", "incoming", "failed", Some("{}"))
+        .expect("insert failed incoming transfer");
+    db.insert_test_task_transfer("transfer-outgoing", "outgoing", "completed", Some("{}"))
+        .expect("insert completed outgoing transfer");
+    let mut cleanup_candidates = db
+        .list_terminal_incoming_transfer_ids()
+        .expect("list terminal incoming cleanup candidates");
+    cleanup_candidates.sort();
     assert_eq!(
-        db.list_completed_incoming_transfer_ids()
-            .expect("list completed incoming cleanup candidates"),
-        vec!["transfer-1"]
+        cleanup_candidates,
+        vec!["transfer-1", "transfer-failed", "transfer-rejected"]
     );
 
     let _ = std::fs::remove_file(path);

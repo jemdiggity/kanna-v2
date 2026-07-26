@@ -1869,6 +1869,60 @@ async fn over_capacity_restart_preserves_existing_committed_work_and_closes_admi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_terminal_cleanup_reopens_incoming_admission_live() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+            .with_max_incoming_reservations(1),
+    )
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    for index in 0..2 {
+        let source_task_id = format!("task-terminal-{index}");
+        let transfer = primary
+            .prepare_transfer_preflight("peer-secondary", &source_task_id)
+            .await
+            .unwrap();
+        primary
+            .prepare_transfer_commit(
+                &transfer.transfer_id,
+                json!({"task": {"source_task_id": source_task_id}}),
+            )
+            .await
+            .unwrap();
+        let _ = next_incoming_transfer_request(&secondary).await;
+        let capacity_error = primary
+            .prepare_transfer_preflight("peer-secondary", "task-blocked")
+            .await
+            .unwrap_err();
+        assert!(capacity_error
+            .to_string()
+            .contains("too many active incoming"));
+
+        secondary
+            .mark_import_ack_completed(&transfer.transfer_id)
+            .await
+            .unwrap();
+    }
+
+    let admitted = primary
+        .prepare_transfer_preflight("peer-secondary", "task-after-terminal-cleanup")
+        .await
+        .unwrap();
+    assert!(!admitted.transfer_id.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_import_commit_response_accepts_identical_retry_and_rejects_mismatch() {
     let temp = tempfile::tempdir().unwrap();
     let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(

@@ -4773,9 +4773,13 @@ describe("App", () => {
     expect(wrapper.text()).not.toContain("peer-source");
   });
 
-  it("cleans up completed incoming sidecar reservations on restart", async () => {
+  it("cleans up completed, rejected, and failed incoming sidecar reservations on restart", async () => {
     updateDesktopServerClientHandlersForTests({
-      fetchIncomingTransferCleanupCandidates: async () => ["transfer-completed"],
+      fetchIncomingTransferCleanupCandidates: async () => [
+        "transfer-completed",
+        "transfer-rejected",
+        "transfer-failed",
+      ],
     });
 
     const wrapper = await mountApp(SidebarWithRepoStub);
@@ -4783,6 +4787,12 @@ describe("App", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
       transferId: "transfer-completed",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-rejected",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-failed",
     });
     wrapper.unmount();
   });
@@ -4830,6 +4840,18 @@ describe("App", () => {
       expect.stringContaining("status = 'failed'"),
       [expect.stringContaining("missing source_peer_id"), "transfer-bad"],
     );
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-bad",
+    });
+    const cleanupCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "mark_incoming_transfer_ack_completed",
+    );
+    const failureWriteIndex = dbMock.execute.mock.calls.findIndex(
+      ([statement]) => String(statement).includes("status = 'failed'"),
+    );
+    expect(dbMock.execute.mock.invocationCallOrder[failureWriteIndex]).toBeLessThan(
+      invokeMock.mock.invocationCallOrder[cleanupCallIndex],
+    );
     expect(warnSpy).toHaveBeenCalledWith(
       "[App] disabled malformed pending incoming transfer:",
       expect.objectContaining({
@@ -4837,6 +4859,33 @@ describe("App", () => {
         reason: expect.stringContaining("missing source_peer_id"),
       }),
     );
+
+    warnSpy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("cleans every repeatedly failed malformed incoming reservation", async () => {
+    dbSelectMock.mockResolvedValue(
+      ["transfer-bad-1", "transfer-bad-2"].map((id) => ({
+        id,
+        source_peer_id: null,
+        source_task_id: "task-source",
+        payload_json: JSON.stringify(buildIncomingTransferEvent().payload.payload),
+      })),
+    );
+    dbMock.execute.mockResolvedValue({ rowsAffected: 1 });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    const cleanupCalls = invokeMock.mock.calls.filter(
+      ([command]) => command === "mark_incoming_transfer_ack_completed",
+    );
+    expect(cleanupCalls).toEqual([
+      ["mark_incoming_transfer_ack_completed", { transferId: "transfer-bad-1" }],
+      ["mark_incoming_transfer_ack_completed", { transferId: "transfer-bad-2" }],
+    ]);
 
     warnSpy.mockRestore();
     wrapper.unmount();
@@ -4869,6 +4918,9 @@ describe("App", () => {
         "transfer-stale",
       ],
     );
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-stale",
+    });
     warnSpy.mockRestore();
     wrapper.unmount();
   });

@@ -811,7 +811,10 @@ export function createTransferApi(
       throw new Error(`incoming transfer is not pending: ${transferId}`);
     }
 
-    await rejectDesktopTaskTransfer(transferId, "Rejected locally");
+    if (!await rejectDesktopTaskTransfer(transferId, "Rejected locally")) {
+      throw new Error(`failed to reject incoming transfer: ${transferId}`);
+    }
+    await invoke("mark_incoming_transfer_ack_completed", { transferId });
     await queries.reloadSnapshot();
   }
 

@@ -174,17 +174,21 @@ export function useAppTaskTransfer({
 
   async function importPendingIncomingTransfers() {
     void db;
+    async function cleanupTerminalIncomingTransfer(transferId: string): Promise<void> {
+      try {
+        await invoke("mark_incoming_transfer_ack_completed", { transferId });
+      } catch (error: unknown) {
+        console.warn("[App] failed to clean up terminal incoming transfer reservation:", {
+          transferId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
     try {
       const cleanupCandidates = await fetchIncomingTransferCleanupCandidates();
       for (const transferId of cleanupCandidates) {
-        try {
-          await invoke("mark_incoming_transfer_ack_completed", { transferId });
-        } catch (error: unknown) {
-          console.warn("[App] failed to clean up completed incoming transfer reservation:", {
-            transferId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        await cleanupTerminalIncomingTransfer(transferId);
       }
     } catch (error: unknown) {
       console.warn(
@@ -209,6 +213,7 @@ export function useAppTaskTransfer({
       if (invalidReason) {
         const reason = `pending incoming transfer is malformed: ${invalidReason}`;
         if (await failPendingIncomingTransfer(row.id, reason)) {
+          await cleanupTerminalIncomingTransfer(row.id);
           console.warn("[App] disabled malformed pending incoming transfer:", { transferId: row.id, reason });
         }
         continue;
@@ -224,6 +229,7 @@ export function useAppTaskTransfer({
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message : String(error);
         if (await failPendingIncomingTransfer(row.id, reason)) {
+          await cleanupTerminalIncomingTransfer(row.id);
           console.warn("[App] failed to auto-import pending incoming transfer; marked failed:", {
             transferId: row.id,
             reason,

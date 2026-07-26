@@ -232,11 +232,12 @@ impl Db {
         rows.collect()
     }
 
-    pub fn list_completed_incoming_transfer_ids(&self) -> Result<Vec<String>, rusqlite::Error> {
+    pub fn list_terminal_incoming_transfer_ids(&self) -> Result<Vec<String>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id
              FROM task_transfer
-             WHERE direction = 'incoming' AND status = 'completed'
+             WHERE direction = 'incoming'
+               AND status IN ('completed', 'rejected', 'failed')
              ORDER BY completed_at ASC, started_at ASC",
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;

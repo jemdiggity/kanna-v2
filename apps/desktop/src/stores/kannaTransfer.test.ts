@@ -2989,6 +2989,14 @@ describe("incoming transfer approval", () => {
     });
 
     await store.init(fakeDb);
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "mark_incoming_transfer_ack_completed") {
+        expect(args).toEqual({ transferId: "transfer-1" });
+        expect(fakeDb.tables.task_transfer[0]?.status).toBe("rejected");
+        return null;
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
     await store.rejectIncomingTransfer("transfer-1");
 
     expect(fakeDb.tables.task_transfer[0]).toMatchObject({
@@ -2996,6 +3004,46 @@ describe("incoming transfer approval", () => {
       status: "rejected",
       error: "Rejected locally",
     });
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-1",
+    });
+  });
+
+  it("cleans every repeatedly rejected incoming reservation", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({
+      transfers: ["transfer-1", "transfer-2"].map((id) => ({
+        id,
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(buildIncomingTransferPayload()),
+      })),
+    });
+    invokeMock.mockResolvedValue(null);
+
+    await store.init(fakeDb);
+    await store.rejectIncomingTransfer("transfer-1");
+    await store.rejectIncomingTransfer("transfer-2");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      1,
+      "mark_incoming_transfer_ack_completed",
+      { transferId: "transfer-1" },
+    );
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      2,
+      "mark_incoming_transfer_ack_completed",
+      { transferId: "transfer-2" },
+    );
   });
 
   it("does not finalize the source when an incoming transfer is rejected", async () => {

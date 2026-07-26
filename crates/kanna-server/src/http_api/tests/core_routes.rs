@@ -1293,6 +1293,47 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
 }
 
 #[tokio::test]
+async fn incoming_cleanup_candidates_include_completed_rejected_and_failed_rows() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        for (id, direction, status) in [
+            ("transfer-completed", "incoming", "completed"),
+            ("transfer-rejected", "incoming", "rejected"),
+            ("transfer-failed", "incoming", "failed"),
+            ("transfer-pending", "incoming", "pending"),
+            ("transfer-outgoing", "outgoing", "completed"),
+        ] {
+            db.insert_test_task_transfer(id, direction, status, Some("{}"))
+                .unwrap();
+        }
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/transfers/incoming/cleanup-candidates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    let mut ids = json["transferIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["transfer-completed", "transfer-failed", "transfer-rejected"]
+    );
+}
+
+#[tokio::test]
 async fn cloud_task_identity_route_sets_once_and_rejects_open_task_collision() {
     let app = super::test_router_with_seed("desktop-cloud-identity", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
