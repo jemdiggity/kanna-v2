@@ -22,6 +22,7 @@ pub enum ErrorCode {
     PtyCloneFailed,
     HeadlessTerminalInitFailed,
     WriteFailed,
+    AgentBusy,
     UnknownSignal,
     AgentSpawnFailed,
     NotAgentSession,

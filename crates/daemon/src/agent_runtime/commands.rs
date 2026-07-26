@@ -419,7 +419,6 @@ pub async fn handle_agent_input(
             .await;
             return;
         };
-
         // Every later phase (stdin write, journaling, status mutation) is
         // gated on the incarnation observed here, so a kill+recreate of the
         // same session id mid-flight can neither deliver this input to the
@@ -427,6 +426,22 @@ pub async fn handle_agent_input(
         let planned_incarnation = record.incarnation;
         let live_stdin =
             !record.exited && record.stdin.is_some() && record.turn_model == TurnModel::Persistent;
+        if !live_stdin && !record.exited {
+            // A per-turn provider cannot accept another prompt until the
+            // active child exits. Never wait here: this command's reply is
+            // awaited by KSP controls, so polling would head-of-line block
+            // permissions, interrupts, model changes, and other tasks.
+            drop(registry);
+            reply(
+                &writer,
+                &agent_error(
+                    protocol::ErrorCode::AgentBusy,
+                    "agent turn is still active; retry input after it completes",
+                ),
+            )
+            .await;
+            return;
+        }
         let plan = if live_stdin {
             let line = match record.adapter.lock() {
                 Ok(mut adapter) => adapter.encode_input(&text),

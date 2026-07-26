@@ -736,7 +736,7 @@ fn input_after_exit_resumes_via_respawn() {
 }
 
 #[test]
-fn input_arriving_while_eof_is_reaping_reaches_one_successor_and_is_journaled_once() {
+fn input_arriving_while_eof_is_reaping_returns_busy_then_retries_once() {
     let dir = temp_dir("input-during-reap");
     let script = write_script(
         &dir,
@@ -805,14 +805,14 @@ fn input_arriving_while_eof_is_reaping_reaches_one_successor_and_is_journaled_on
         std::thread::sleep(Duration::from_millis(10));
     }
     // Let input planning win the registry race while the per-turn child is
-    // still live. It must wait for exited=true rather than reserving a
-    // successor that cannot pass the install guard.
+    // still live. It must return busy rather than reserving a successor or
+    // polling until EOF bookkeeping finishes.
     std::fs::write(input_plan_barrier.join("release"), b"").unwrap();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(
         std::fs::read_to_string(&spawn_log).unwrap().lines().count(),
         1,
-        "input must not respawn before EOF publishes the old child as exited"
+        "busy input must not respawn before EOF publishes the old child as exited"
     );
 
     std::fs::write(exit_state_barrier.join("release"), b"").unwrap();
@@ -827,21 +827,41 @@ fn input_arriving_while_eof_is_reaping_reaches_one_successor_and_is_journaled_on
     assert_eq!(
         std::fs::read_to_string(&spawn_log).unwrap().lines().count(),
         1,
-        "input must wait for the exiting child to finish reaping"
+        "busy input must not respawn while the exiting child is reaping"
     );
     std::fs::write(reap_barrier.join("release"), b"").unwrap();
 
-    let mut saw_ok = false;
-    let mut saw_turn_completed = false;
-    while !saw_ok || !saw_turn_completed {
-        match conn.recv() {
-            Event::Ok => saw_ok = true,
-            Event::AgentEvent { event, .. } if is_turn_completed(&event) => {
-                saw_turn_completed = true;
+    assert!(matches!(
+        conn.recv_until(|event| matches!(event, Event::Error { .. })),
+        Event::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::AgentBusy),
+            ..
+        }
+    ));
+
+    let retry_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < retry_deadline,
+            "input never became resumable after child reaping"
+        );
+        let mut retry = daemon.connect();
+        retry.send(&Command::AgentInput {
+            session_id: "agent-reaping".to_string(),
+            text: "revision during reap".to_string(),
+        });
+        match retry.recv_until(|event| matches!(event, Event::Ok | Event::Error { .. })) {
+            Event::Ok => break,
+            Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::AgentBusy),
+                ..
+            } => {
+                std::thread::sleep(Duration::from_millis(10));
             }
-            _ => {}
+            other => panic!("unexpected retry response: {other:?}"),
         }
     }
+    conn.collect_agent_events_until(is_turn_completed);
 
     let journal = std::fs::read_to_string(daemon.journal_path("agent-reaping")).unwrap();
     let accepted_inputs = journal
@@ -1637,6 +1657,106 @@ fn opencode_headless_spawn_passes_task_cwd_as_project_dir() {
             .any(|e| matches!(e, AgentEvent::AssistantText { text, .. } if text == &expected)),
         "opencode should receive the task cwd through --dir; expected {expected}, got {events:?}"
     );
+}
+
+#[test]
+fn active_per_turn_input_is_busy_without_blocking_agent_controls_or_other_tasks() {
+    let dir = temp_dir("active-per-turn-controls");
+    let codex = write_script(&dir, "codex-sleeper.sh", CODEX_SLEEPER_AGENT);
+    let persistent = write_script(&dir, "persistent.sh", STEERABLE_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut owner = daemon.connect();
+    let mut codex_params = spawn_params(&dir, &codex, "do long work");
+    codex_params.agent_provider = AgentProvider::Codex;
+    owner.send(&Command::SpawnAgent {
+        session_id: "agent-busy-turn".to_string(),
+        params: codex_params,
+    });
+    owner.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+    owner.attach_and_collect_agent_events_until(
+        "agent-busy-turn",
+        0,
+        |event| matches!(event, AgentEvent::AssistantText { text, .. } if text == "interim answer"),
+    );
+
+    owner.send(&Command::SpawnAgent {
+        session_id: "agent-other-task".to_string(),
+        params: spawn_params(&dir, &persistent, "other task"),
+    });
+    owner.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    let mut input = daemon.connect();
+    input
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .unwrap();
+    input.send(&Command::AgentInput {
+        session_id: "agent-busy-turn".to_string(),
+        text: "do not queue behind this turn".to_string(),
+    });
+    assert!(matches!(
+        input.recv(),
+        Event::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::AgentBusy),
+            ..
+        }
+    ));
+
+    let mut permission = daemon.connect();
+    permission
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .unwrap();
+    permission.send(&Command::AgentPermission {
+        session_id: "agent-busy-turn".to_string(),
+        request_id: "not-pending".to_string(),
+        decision: PermissionDecision::Allow,
+    });
+    assert!(matches!(
+        permission.recv(),
+        Event::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::UnknownPermissionRequest),
+            ..
+        }
+    ));
+
+    let mut model = daemon.connect();
+    model
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .unwrap();
+    model.send(&Command::AgentSetModel {
+        session_id: "agent-busy-turn".to_string(),
+        model: "next-turn-model".to_string(),
+    });
+    assert!(matches!(model.recv(), Event::Ok));
+
+    let mut other_task = daemon.connect();
+    other_task
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .unwrap();
+    other_task.send(&Command::AgentSetModel {
+        session_id: "agent-other-task".to_string(),
+        model: "other-task-model".to_string(),
+    });
+    assert!(matches!(other_task.recv(), Event::Ok));
+
+    let mut interrupt = daemon.connect();
+    interrupt
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .unwrap();
+    interrupt.send(&Command::AgentInterrupt {
+        session_id: "agent-busy-turn".to_string(),
+    });
+    assert!(matches!(interrupt.recv(), Event::Ok));
 }
 
 #[test]

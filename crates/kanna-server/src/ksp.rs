@@ -15,7 +15,7 @@ use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -494,6 +494,8 @@ struct StreamConn {
 
 const TERMINAL_CONTROL_QUEUE_CAPACITY: usize = 256;
 const AGENT_COMMAND_QUEUE_CAPACITY: usize = 256;
+const MAX_AGENT_COMMAND_CONCURRENCY: usize = 16;
+const AGENT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_QUEUE_CAPACITY: usize = 32;
 const MAX_REQUEST_CONCURRENCY: usize = 4;
 
@@ -797,47 +799,102 @@ async fn run_terminal_control(
     }
 }
 
+async fn run_agent_command(
+    state: Arc<AppState>,
+    TaskAgentCommand { task_id, command }: TaskAgentCommand,
+    frame_tx: mpsc::Sender<ServerFrame>,
+) {
+    let session_id =
+        match resolve_task_session_id(state.config().db_path.clone(), task_id.clone()).await {
+            Ok(session_id) => session_id,
+            Err(message) => {
+                send_task_error(&frame_tx, &task_id, "no_session", message).await;
+                return;
+            }
+        };
+    let daemon_command = command.into_daemon_command(session_id);
+    let result = tokio::time::timeout(AGENT_COMMAND_TIMEOUT, async {
+        let mut client = DaemonClient::connect(&state.config().daemon_dir)
+            .await
+            .map_err(|error| format!("daemon error: {error}"))?;
+        client
+            .send_command(&daemon_command)
+            .await
+            .map_err(|error| format!("daemon error: {error}"))
+    })
+    .await;
+    match result {
+        Ok(Ok(DaemonEvent::Ok)) => {}
+        Ok(Ok(DaemonEvent::Error { message, .. })) => {
+            send_task_error(&frame_tx, &task_id, "daemon", message).await;
+        }
+        Ok(Ok(other)) => {
+            send_task_error(
+                &frame_tx,
+                &task_id,
+                "daemon",
+                format!("unexpected daemon reply: {other:?}"),
+            )
+            .await;
+        }
+        Ok(Err(message)) => {
+            send_task_error(&frame_tx, &task_id, "daemon", message).await;
+        }
+        Err(_) => {
+            send_task_error(
+                &frame_tx,
+                &task_id,
+                "daemon_timeout",
+                "agent command timed out".to_string(),
+            )
+            .await;
+        }
+    }
+}
+
 async fn run_agent_commands(
     state: Arc<AppState>,
     mut command_rx: mpsc::Receiver<TaskAgentCommand>,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
-    while let Some(TaskAgentCommand { task_id, command }) = command_rx.recv().await {
-        let session_id =
-            match resolve_task_session_id(state.config().db_path.clone(), task_id.clone()).await {
-                Ok(session_id) => session_id,
-                Err(message) => {
-                    send_task_error(&frame_tx, &task_id, "no_session", message).await;
-                    continue;
+    let permits = Arc::new(Semaphore::new(MAX_AGENT_COMMAND_CONCURRENCY));
+    let mut in_flight = tokio::task::JoinSet::new();
+
+    loop {
+        tokio::select! {
+            joined = in_flight.join_next(), if !in_flight.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    log::warn!("[ksp] agent command task failed: {error}");
                 }
-            };
-        let daemon_command = command.into_daemon_command(session_id);
-        let result = async {
-            let mut client = DaemonClient::connect(&state.config().daemon_dir)
-                .await
-                .map_err(|error| format!("daemon error: {error}"))?;
-            client
-                .send_command(&daemon_command)
-                .await
-                .map_err(|error| format!("daemon error: {error}"))
-        }
-        .await;
-        match result {
-            Ok(DaemonEvent::Ok) => {}
-            Ok(DaemonEvent::Error { message, .. }) => {
-                send_task_error(&frame_tx, &task_id, "daemon", message).await;
             }
-            Ok(other) => {
-                send_task_error(
-                    &frame_tx,
-                    &task_id,
-                    "daemon",
-                    format!("unexpected daemon reply: {other:?}"),
-                )
-                .await;
-            }
-            Err(message) => {
-                send_task_error(&frame_tx, &task_id, "daemon", message).await;
+            queued = command_rx.recv() => {
+                let Some(queued) = queued else {
+                    in_flight.abort_all();
+                    while in_flight.join_next().await.is_some() {}
+                    return;
+                };
+                let permit = match permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let frame_tx = frame_tx.clone();
+                        in_flight.spawn(async move {
+                            send_task_error(
+                                &frame_tx,
+                                &queued.task_id,
+                                "agent_busy",
+                                "too many agent commands are in progress".to_string(),
+                            )
+                            .await;
+                        });
+                        continue;
+                    }
+                };
+                let state = state.clone();
+                let frame_tx = frame_tx.clone();
+                in_flight.spawn(async move {
+                    let _permit = permit;
+                    run_agent_command(state, queued, frame_tx).await;
+                });
             }
         }
     }
@@ -3741,6 +3798,184 @@ mod tests {
         );
         daemon.await.expect("agent HOL daemon failed");
 
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_controls_and_other_tasks_bypass_a_long_running_per_turn_input() {
+        let unique = format!(
+            "ksp-agent-control-hol-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-agent-control-hol", "KSP Agent Control HOL");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One")
+            .expect("insert repo");
+        for (task_id, daemon_session_id) in [
+            ("task-busy-turn", "daemon-busy-turn"),
+            ("task-independent", "daemon-independent"),
+        ] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-1",
+                task_id,
+                None,
+                "in progress",
+                "2026-07-26T00:00:00Z",
+            )
+            .expect("insert task");
+            db.insert_test_terminal_session(
+                &format!("terminal-{task_id}"),
+                "repo-1",
+                task_id,
+                "agent",
+                daemon_session_id,
+            )
+            .expect("insert terminal session");
+        }
+        drop(db);
+
+        let socket_path = daemon_socket_path_for_dir(&config.daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind agent control daemon socket");
+        let (command_tx, mut command_rx) = mpsc::channel(8);
+        let release_input = Arc::new(tokio::sync::Notify::new());
+        let daemon_release = release_input.clone();
+        let daemon = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for _ in 0..5 {
+                let (stream, _) = listener.accept().await.expect("accept daemon connection");
+                let command_tx = command_tx.clone();
+                let release_input = daemon_release.clone();
+                handlers.spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let mut line = String::new();
+                    reader
+                        .read_line(&mut line)
+                        .await
+                        .expect("read daemon command");
+                    let command: DaemonCommand =
+                        serde_json::from_str(line.trim()).expect("parse daemon command");
+                    let hold_reply = matches!(command, DaemonCommand::AgentInput { .. });
+                    command_tx
+                        .send(command)
+                        .await
+                        .expect("publish daemon command");
+                    if hold_reply {
+                        release_input.notified().await;
+                    }
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .expect("write daemon response");
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentInput {
+                task_id: "task-busy-turn".into(),
+                text: "input while codex is running".into(),
+            },
+        )
+        .await;
+        assert_command(
+            command_rx.recv().await,
+            DaemonCommand::AgentInput {
+                session_id: "daemon-busy-turn".into(),
+                text: "input while codex is running".into(),
+            },
+        );
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentPermission {
+                task_id: "task-busy-turn".into(),
+                request_id: "permission-1".into(),
+                decision: PermissionDecision::Allow,
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentInterrupt {
+                task_id: "task-busy-turn".into(),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentSetModel {
+                task_id: "task-busy-turn".into(),
+                model: "next-model".into(),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentSetModel {
+                task_id: "task-independent".into(),
+                model: "independent-model".into(),
+            },
+        )
+        .await;
+
+        let mut responsive_commands = Vec::new();
+        for _ in 0..4 {
+            responsive_commands.push(
+                tokio::time::timeout(std::time::Duration::from_millis(500), command_rx.recv())
+                    .await
+                    .expect("agent control waited behind long-running input")
+                    .expect("daemon command channel closed"),
+            );
+        }
+        assert!(responsive_commands.iter().any(|command| matches!(
+            command,
+            DaemonCommand::AgentPermission {
+                session_id,
+                request_id,
+                ..
+            } if session_id == "daemon-busy-turn" && request_id == "permission-1"
+        )));
+        assert!(responsive_commands.iter().any(|command| matches!(
+            command,
+            DaemonCommand::AgentInterrupt { session_id } if session_id == "daemon-busy-turn"
+        )));
+        assert!(responsive_commands.iter().any(|command| matches!(
+            command,
+            DaemonCommand::AgentSetModel { session_id, model }
+                if session_id == "daemon-busy-turn" && model == "next-model"
+        )));
+        assert!(responsive_commands.iter().any(|command| matches!(
+            command,
+            DaemonCommand::AgentSetModel { session_id, model }
+                if session_id == "daemon-independent" && model == "independent-model"
+        )));
+
+        release_input.notify_waiters();
+        daemon.await.expect("agent control daemon failed");
         drop(socket);
         let _ = std::fs::remove_dir_all(&daemon_dir);
     }
