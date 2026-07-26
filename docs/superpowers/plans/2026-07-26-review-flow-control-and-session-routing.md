@@ -236,3 +236,232 @@ git diff --stat
 - [ ] **Step 5: Record the auto-stage result**
 
 Call `kanna_complete_stage` with status `success` and the verified summary, or status `failure` with the blocking evidence.
+
+---
+
+## Review Revision Tasks
+
+### Task 7: Route task input to the current run session
+
+**Files:**
+- Modify: `crates/kanna-server/src/http_api/task_input.rs`
+- Modify: `crates/kanna-server/src/http_api/tests/input.rs`
+
+**Interfaces:**
+- Consumes: a durable task/branch alias from `/v1/tasks/{id}/input`.
+- Produces: daemon `Input` commands addressed to the current run-scoped session.
+
+- [ ] **Step 1: Add the failing route regression**
+
+Seed a task with a running `stage_run` whose `session_id` is `run-input-current`.
+Run the real HTTP route against a Unix-socket fake daemon and assert both the
+message and synthesized Enter target `run-input-current`.
+
+- [ ] **Step 2: Verify RED**
+
+```bash
+cargo test --manifest-path crates/kanna-server/Cargo.toml send_task_input_route_resolves_running_stage_run_session -- --nocapture
+```
+
+Expected: FAIL because the route sends both inputs to the durable task ID.
+
+- [ ] **Step 3: Resolve before daemon I/O**
+
+Open the configured database, call
+`resolve_task_terminal_session_id(&task_id)`, return 404 when no durable task is
+found, and pass the resolved session to `submit_task_input`.
+
+- [ ] **Step 4: Verify GREEN**
+
+Run the command from Step 2 and the complete `http_api::tests::input` filter.
+
+### Task 8: Resolve and ownership-guard process closure
+
+**Files:**
+- Modify: `crates/kanna-server/src/db/mod.rs`
+- Modify: `crates/kanna-server/src/db/pipeline_items.rs`
+- Modify: `crates/kanna-server/src/db/tests.rs`
+- Modify: `crates/kanna-server/src/task_creator/mod.rs`
+- Modify: `crates/kanna-server/src/http_api/task_actions.rs`
+- Modify: `crates/kanna-server/src/http_api/tests/actions.rs`
+
+**Interfaces:**
+- Consumes: the latest current-format stage run, including succeeded main/post runs.
+- Produces: a daemon session ID plus the immutable run ID that owns its process.
+
+- [ ] **Step 1: Add failing resolver and route regressions**
+
+Cover a succeeded main run and a succeeded injected post. Assert a main resolves
+to `(session_id, main_run_id)` and a post resolves to
+`(session_id, resumed_from_run_id)`. At route level, assert explicit close and
+final-stage close issue `Kill { session_id: run-*, expected_run_id: Some(run-*) }`.
+
+- [ ] **Step 2: Verify RED**
+
+```bash
+cargo test --manifest-path crates/kanna-server/Cargo.toml resolves_task_process_session -- --nocapture
+cargo test --manifest-path crates/kanna-server/Cargo.toml close_route_kills_run_scoped -- --nocapture
+```
+
+Expected: resolver tests do not compile until the API exists, and route tests
+observe the durable task ID with no immutable owner.
+
+- [ ] **Step 3: Add the shared process-binding resolver**
+
+Define a database value carrying `session_id` and `expected_run_id`. Select the
+latest current-ownership run without filtering out succeeded runs; use the
+post's `resumed_from_run_id` as its process owner. Fall back to the terminal
+mapping with no immutable owner for legacy tasks.
+
+- [ ] **Step 4: Use ownership-aware kills in both close paths**
+
+Resolve the binding during close preparation. Call
+`kill_session_replacing_if_owned` for the process binding, and keep shell and
+teardown cleanup as separate ownershipless kills.
+
+- [ ] **Step 5: Verify GREEN**
+
+Run the commands from Step 2 and the complete action-route test filter.
+
+### Task 9: Preserve legacy terminal routing
+
+**Files:**
+- Modify: `crates/kanna-server/src/db/pipeline_items.rs`
+- Modify: `crates/kanna-server/src/db/tests.rs`
+
+**Interfaces:**
+- Consumes: migration-023-era running rows with provider UUID in `session_id`,
+  null `provider_session_id`, and `run_ownership_version = 0`.
+- Produces: the trusted `terminal_session.daemon_session_id`.
+
+- [ ] **Step 1: Add the old-format fixture**
+
+Insert the ownershipless row and a terminal mapping, then assert
+`resolve_task_terminal_session_id` returns the terminal mapping rather than the
+provider UUID.
+
+- [ ] **Step 2: Verify RED**
+
+```bash
+cargo test --manifest-path crates/kanna-server/Cargo.toml ownershipless_legacy_run_falls_back_to_terminal_session -- --nocapture
+```
+
+Expected: FAIL with the provider UUID.
+
+- [ ] **Step 3: Trust only current ownership-version stage runs**
+
+Add `run_ownership_version >= CURRENT_RUN_OWNERSHIP_VERSION` to stage-run
+terminal resolution while preserving current rows with null provider IDs.
+
+- [ ] **Step 4: Verify GREEN**
+
+Run the command from Step 2 and all terminal-session resolver tests.
+
+### Task 10: Preserve activity revision on successor reservation
+
+**Files:**
+- Modify: `crates/kanna-server/src/db/stage_runs.rs`
+- Modify: `crates/kanna-server/src/db/tests.rs`
+
+**Interfaces:**
+- Consumes: pipeline-item activity before successor reservation.
+- Produces: one revision increment when activity changes to `working`, zero for
+  an already-working item.
+
+- [ ] **Step 1: Extend the activity write regression**
+
+Exercise both `replace_current_run_with_pending` and
+`replace_current_run_with_pending_action`; assert each idle/unread-to-working
+transition increments the revision, and an already-working reservation does not
+invent another revision.
+
+- [ ] **Step 2: Verify RED**
+
+```bash
+cargo test --manifest-path crates/kanna-server/Cargo.toml every_server_activity_write_advances_the_activity_revision -- --nocapture
+```
+
+Expected: FAIL because reservation changes activity without changing revision.
+
+- [ ] **Step 3: Increment conditionally in the reservation transaction**
+
+Set:
+
+```sql
+activity_revision = activity_revision
+  + CASE WHEN activity = 'working' THEN 0 ELSE 1 END
+```
+
+in the same `UPDATE pipeline_item` that sets activity to `working`.
+
+- [ ] **Step 4: Verify GREEN**
+
+Run the command from Step 2 and the complete database test filter.
+
+### Task 11: Bound pending-action startup recovery
+
+**Files:**
+- Modify: `crates/kanna-server/src/task_creator/lifecycle.rs`
+- Modify: `crates/kanna-server/src/task_creator/tests/stage.rs`
+- Modify: `crates/kanna-server/src/main.rs`
+
+**Interfaces:**
+- Consumes: daemon subscription acknowledgement and session list during startup.
+- Produces: bounded success or an error that leaves pending durable state intact
+  for a later startup retry.
+
+- [ ] **Step 1: Add the stalled-daemon regression**
+
+Seed a pending action, accept both daemon connections, read the commands, and
+withhold all replies. Assert startup reconciliation returns a timeout error
+within the test deadline and the pending action remains.
+
+- [ ] **Step 2: Verify RED**
+
+```bash
+cargo test --manifest-path crates/kanna-server/Cargo.toml startup_reconciliation_times_out_when_daemon_stalls -- --nocapture
+```
+
+Expected: the outer test deadline fires because acknowledgement waits forever.
+
+- [ ] **Step 3: Deadline-bound acknowledgement and List**
+
+Wrap acknowledgement `read_event` and control `list` in
+`tokio::time::timeout`. Return phase-specific timeout errors. Keep the startup
+caller fail-closed so the process exits and its supervisor can retry with the
+unchanged pending action.
+
+- [ ] **Step 4: Verify GREEN**
+
+Run the command from Step 2 and all `startup_reconciliation` tests.
+
+### Task 12: Revision verification and completion
+
+**Files:**
+- Inspect every file changed by Tasks 7–11.
+
+- [ ] **Step 1: Format and inspect**
+
+```bash
+cargo fmt --all -- --check
+git diff --check
+git status --short
+```
+
+- [ ] **Step 2: Run the focused server suite**
+
+```bash
+cargo test --manifest-path crates/kanna-server/Cargo.toml
+```
+
+- [ ] **Step 3: Run canonical verification**
+
+```bash
+pnpm test
+./kd test rust
+```
+
+- [ ] **Step 4: Record the auto-stage result**
+
+Call `kanna_complete_stage` with the verified success summary, or failure with
+the blocking evidence.

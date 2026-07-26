@@ -174,3 +174,47 @@ Implementation proceeds test-first with regressions for:
 
 Focused daemon, Kanna server, desktop store, database migration, and task
 creator tests will run before the canonical repository checks.
+
+## Review Revision: Task-Facing Routing and Recovery Bounds
+
+The review pass exposed five remaining places where durable task identity and
+run-scoped process identity were still conflated.
+
+Task input will continue accepting a durable task ID or branch, but the HTTP
+route will resolve that alias through `Db::resolve_task_terminal_session_id`
+before writing to the daemon. Unknown task aliases fail before daemon I/O.
+
+Close paths need more information than input routing. The database will expose
+the latest process binding as a daemon session ID plus an optional immutable
+owner run ID. Current ownership-version rows may supply this binding even after
+the final main or injected post run has succeeded, because the provider process
+can remain alive at its prompt. For a post row, the immutable process owner is
+`resumed_from_run_id`; for a main row, it is the run's own ID. Both explicit
+close and final-stage close will kill this binding with
+`kill_session_replacing_if_owned`, then independently clean up the workspace
+shell and teardown sessions.
+
+Migration-023-era rows are not trusted as daemon ownership merely because they
+are marked running. Those rows can store the provider CLI UUID in
+`stage_run.session_id`, have a null `provider_session_id`, and retain ownership
+version zero after migration 030. Read-time routing will therefore use stage-run
+session IDs only for current ownership-version rows. Ownershipless rows fall
+back to the existing `terminal_session` mapping, avoiding a speculative
+database backfill.
+
+Successor reservation changes task activity to `working`. The same transaction
+will increment `activity_revision` only when the prior activity differs from
+`working`, preserving the compare-and-set contract used by mark-read clients
+without inventing revisions for no-op writes.
+
+Startup pending-action recovery remains fail-closed, but every daemon response
+needed before HTTP serving will be deadline-bounded. Subscription
+acknowledgement and `List` each receive an explicit response timeout. A timeout
+returns an error without landing or rolling back the pending action; the server
+startup path exits, leaving durable state intact for the next supervised
+startup attempt.
+
+The revision is verified with route-level fake-daemon tests for input and both
+close variants, a legacy database fixture, activity-revision coverage through
+both successor reservation APIs, and a connected daemon that accepts startup
+connections but never responds.
